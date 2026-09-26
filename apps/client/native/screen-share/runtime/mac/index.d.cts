@@ -31,3 +31,24 @@ export function createMacScreenProvider(options?: {
 export function loadMacCaptureRuntime(directory?: string): MacCaptureRuntime;
 /** Fails closed until an actual compatible macOS RTC/presentation backend exists. */
 export function loadMacRuntime(options?: { directory?: string }): never;
+export function validateMacTarget(value: unknown): MacCaptureTarget;
+export class MacVideoCapture {
+  constructor(options: {
+    target: MacCaptureTarget;
+    video: { width: number; height: number; fps: number; bitrateKbps: number; scaleMode?: 'fit' | 'stretch' };
+    mode: 'hardware' | 'software';
+    onPacket(frame: { frameId: number; timestampUs: number; durationUs: number; keyframe: boolean;
+      data: Buffer; codec: 'h264'; ntpTimeMs: -1 }): void | false;
+    onError(error: Error): void;
+    directory?: string;
+  });
+  start(options?: { signal?: AbortSignal }): Promise<{
+    codec: 'h264'; mode: 'hardware' | 'software'; firstAccessUnitObserved: true; hardwareSessionConfirmed: boolean;
+  }>;
+  setBitrate(bitrateKbps: number): Promise<{
+    bitrateKbps: number; settingsAccepted: true; hardwareApplicationConfirmed: false; fpsApplied: null;
+  }>;
+  requestKeyFrame(): Promise<{ mode: 'next-real-idr'; keyframeConfirmed: false; maximumWaitMs: 1500 }>;
+  resumePackets(): void;
+  close(): Promise<{ nativeClosed: true; hostExited: true; retiredWithErrors: boolean }>;
+}

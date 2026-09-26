@@ -24,6 +24,7 @@
 #include <thread>
 #include <vector>
 #include "videoEncoder.h"
+#include "videoCaptureHost.h"
 
 namespace {
 constexpr size_t kMaximumCommand = 65536;
@@ -34,6 +35,8 @@ std::mutex outputMutex;
 std::atomic<bool> closing{false};
 std::atomic<unsigned> operations{0};
 std::atomic<uint64_t> latestCommand{0};
+std::mutex captureMutex;
+std::shared_ptr<monky::screen::mac::VideoCaptureHost> captureHost;
 
 struct Failure : std::runtime_error {
   explicit Failure(const char* code) : std::runtime_error(code) {}
@@ -75,9 +78,9 @@ void Output(NSDictionary* message, NSData* image = nil) {
   WriteBytes(static_cast<const uint8_t*>(json.bytes), json.length);
   if (image.length) WriteBytes(static_cast<const uint8_t*>(image.bytes), image.length);
 }
-void Error(uint64_t request, const char* code, NSInteger status = 0) {
+void Error(uint64_t request, const char* code, NSInteger status = 0, bool retained = false) {
   Output(@{@"type": @"result", @"id": @(request),
-      @"error": @{@"code": @(code), @"nativeStatus": @(status), @"nativeOwnershipRetained": @NO}});
+      @"error": @{@"code": @(code), @"nativeStatus": @(status), @"nativeOwnershipRetained": @(retained)}});
 }
 NSString* ProcessStart(pid_t pid) {
   proc_bsdinfo info{};
@@ -151,6 +154,100 @@ void VerifyTarget(NSDictionary* target) {
 void Finish() {
   Require(operations > 0, "ERR_MAC_OWNERSHIP");
   --operations;
+}
+monky::screen::mac::EncoderOptions VideoOptions(NSDictionary* value) {
+  Exact(value, @[@"width", @"height", @"fps", @"bitrateKbps", @"mode", @"scaleMode"]);
+  monky::screen::mac::EncoderOptions result;
+  result.width = static_cast<int>(Number(value[@"width"], 4, 3840));
+  result.height = static_cast<int>(Number(value[@"height"], 2, 2160));
+  result.fps = static_cast<int>(Number(value[@"fps"], 1, 240));
+  result.bitrate_kbps = static_cast<int>(Number(value[@"bitrateKbps"], 50, 80000));
+  Require([value[@"mode"] isEqual:@"hardware"] || [value[@"mode"] isEqual:@"software"]);
+  Require([value[@"scaleMode"] isEqual:@"fit"] || [value[@"scaleMode"] isEqual:@"stretch"]);
+  result.hardware = [value[@"mode"] isEqual:@"hardware"];
+  return result;
+}
+std::shared_ptr<monky::screen::mac::VideoCaptureHost> CaptureOwner() {
+  std::lock_guard lock(captureMutex);
+  return captureHost;
+}
+void StartMedia(uint64_t request, SCShareableContent* content, NSDictionary* arguments) {
+  Exact(arguments, @[@"target", @"video"]);
+  NSDictionary* target = arguments[@"target"];
+  NSDictionary* video = arguments[@"video"];
+  const auto options = VideoOptions(video);
+  SCContentFilter* filter = Resolve(content, target);
+  std::shared_ptr<monky::screen::mac::VideoCaptureHost> owner;
+  {
+    std::lock_guard lock(captureMutex);
+    Require(!captureHost && !closing, "ERR_MAC_CAPTURE_STATE");
+    owner = std::make_shared<monky::screen::mac::VideoCaptureHost>(filter, options,
+      [video[@"scaleMode"] isEqual:@"fit"], [target] { VerifyTarget(target); },
+      [](const char* code, OSStatus status) {
+        Output(@{@"type": @"failure", @"code": @(code), @"nativeStatus": @(status)});
+      });
+    captureHost = owner;
+  }
+  std::thread([owner, request, target, video] {
+    @autoreleasepool {
+      try {
+        owner->Start().get();
+        Output(@{@"type": @"result", @"id": @(request),
+          @"value": @{@"source": target, @"video": video, @"captureStarted": @YES}});
+      } catch (const monky::screen::mac::VideoError& error) {
+        Error(request, error.code.c_str(), error.status, true);
+      } catch (...) { Error(request, "ERR_MAC_CAPTURE_START", 0, true); }
+      Finish();
+    }
+  }).detach();
+}
+void MediaCommand(uint64_t request, NSString* method, NSDictionary* arguments) {
+  std::thread([request, method, arguments] {
+    @autoreleasepool {
+      try {
+        if ([method isEqual:@"media.probe"]) {
+          Exact(arguments, @[@"video"]);
+          const auto options = VideoOptions(arguments[@"video"]);
+          monky::screen::mac::VideoEncoder encoder(options,
+            [](auto) { throw Failure("ERR_MAC_PROBE_CAPTURED"); },
+            [](const char*, OSStatus) { _exit(70); });
+          const auto hardware = encoder.Hardware();
+          encoder.Close();
+          Output(@{@"type": @"result", @"id": @(request), @"value": @{
+            @"sessionUsesHardware": @(hardware), @"hardwareExecutionObserved": [NSNull null],
+            @"captureStarted": @NO, @"nativeClosed": @YES}});
+        } else {
+          const auto owner = CaptureOwner();
+          Require(owner != nullptr, "ERR_MAC_CAPTURE_STATE");
+          if ([method isEqual:@"media.stop"]) {
+            Exact(arguments, @[]);
+            owner->Close().get();
+            Output(@{@"type": @"result", @"id": @(request), @"value": owner->Snapshot()});
+          } else if ([method isEqual:@"media.bitrate"]) {
+            Exact(arguments, @[@"bitrateKbps"]);
+            const auto bitrate = static_cast<int>(Number(arguments[@"bitrateKbps"], 50, 80000));
+            owner->SetBitrate(bitrate).get();
+            Output(@{@"type": @"result", @"id": @(request), @"value": @{
+              @"bitrateKbps": @(bitrate), @"settingsAccepted": @YES,
+              @"hardwareApplicationConfirmed": @NO, @"fpsApplied": [NSNull null]}});
+          } else if ([method isEqual:@"media.keyframe"]) {
+            Exact(arguments, @[]);
+            owner->RequestKeyframe().get();
+            Output(@{@"type": @"result", @"id": @(request), @"value": @{
+              @"mode": @"next-real-idr", @"keyframeConfirmed": @NO, @"maximumWaitMs": @1500}});
+          } else throw Failure("ERR_MAC_ARGUMENT");
+        }
+      } catch (const monky::screen::mac::VideoError& error) {
+        Error(request, error.code.c_str(), error.status);
+      } catch (const Failure& error) { Error(request, error.what()); }
+      catch (...) {
+        const auto owner = CaptureOwner();
+        const bool retained = owner && ![owner->Snapshot()[@"nativeClosed"] boolValue];
+        Error(request, "ERR_MAC_CAPTURE_COMMAND", 0, retained);
+      }
+      Finish();
+    }
+  }).detach();
 }
 void Snapshot(uint64_t request, SCShareableContent* content, NSDictionary* arguments) {
   Exact(arguments, @[@"target", @"width", @"height"]);
@@ -230,6 +327,9 @@ void Content(uint64_t request, NSString* method, NSDictionary* arguments) {
         } else if ([method isEqual:@"thumbnail"]) {
           Snapshot(request, content, arguments);
           screenshotPending = true;
+        } else if ([method isEqual:@"media.start"]) {
+          StartMedia(request, content, arguments);
+          screenshotPending = true;
         } else throw Failure("ERR_MAC_ARGUMENT");
       } catch (const Failure& failure) { Error(request, failure.what(), error.code); }
       catch (...) { Error(request, "ERR_MAC_NATIVE"); }
@@ -252,9 +352,18 @@ void Command(NSData* bytes) {
     Exact(arguments, @[]);
     closing = true;
     std::thread([request] {
+      bool retired_with_errors = false;
+      if (const auto owner = CaptureOwner()) {
+        try { owner->Close().get(); }
+        catch (...) {
+          if (![owner->Snapshot()[@"nativeClosed"] boolValue]) _exit(124);
+          retired_with_errors = true;
+        }
+      }
       for (int i = 0; i < 150 && operations; ++i) usleep(100000);
       if (operations) _exit(124);
-      Output(@{@"type": @"result", @"id": @(request), @"value": @{@"nativeClosed": @YES}});
+      Output(@{@"type": @"result", @"id": @(request), @"value": @{
+        @"nativeClosed": @YES, @"retiredWithErrors": @(retired_with_errors)}});
       _exit(0);
     }).detach();
     return;
@@ -274,9 +383,13 @@ void Command(NSData* bytes) {
     Output(@{@"type": @"result", @"id": @(request), @"value": @{@"granted": @(allowed)}});
     return;
   }
-  Require([method isEqual:@"list"] || [method isEqual:@"resolve"] || [method isEqual:@"thumbnail"]);
+  const bool media_command = [method isEqual:@"media.probe"] || [method isEqual:@"media.stop"] ||
+      [method isEqual:@"media.bitrate"] || [method isEqual:@"media.keyframe"];
+  Require([method isEqual:@"list"] || [method isEqual:@"resolve"] || [method isEqual:@"thumbnail"] ||
+      [method isEqual:@"media.start"] || media_command);
   Require(operations.load() < 16, "ERR_MAC_CREDITS");
   ++operations;
+  if (media_command) { MediaCommand(request, method, arguments); return; }
   dispatch_async(dispatch_get_main_queue(), ^{
     @autoreleasepool {
       try { Content(request, method, arguments); }

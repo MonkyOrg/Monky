@@ -6,9 +6,18 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace monky::screen::mac {
+struct VideoError : std::runtime_error {
+  std::string code;
+  OSStatus status;
+  VideoError(const char* operation, OSStatus value)
+      : std::runtime_error(std::string(operation) + " nativeStatus=" + std::to_string(value)),
+        code(operation), status(value) {}
+};
 struct EncodedFrame {
   std::vector<uint8_t> bytes;
   int64_t timestamp_us = 0, duration_us = 0;
@@ -31,6 +40,7 @@ class VideoEncoder {
   void RequestKeyframe();
   void Close();
   bool Hardware() const;
+  bool Writable() const;
  private:
   struct State;
   std::unique_ptr<State> state_;

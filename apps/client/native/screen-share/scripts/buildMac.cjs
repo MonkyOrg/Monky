@@ -18,6 +18,8 @@ function build({ arch = process.arch } = {}) {
       '-Wall', '-Wextra', '-Werror', '-mmacosx-version-min=14.0',
       '-arch', arch === 'x64' ? 'x86_64' : 'arm64', '-isysroot', sdk,
       path.join(source, 'host.mm'), path.join(source, 'videoEncoder.mm'), path.join(source, 'videoDecoder.mm'),
+      path.join(source, 'videoCapture.mm'),
+      path.join(source, 'videoCaptureHost.mm'),
       path.join(root, 'src', 'rtc', 'inputs', 'native_core', 'h264_bitstream.cc'),
       '-framework', 'Foundation', '-framework', 'AppKit', '-framework', 'ScreenCaptureKit',
       '-framework', 'CoreGraphics', '-framework', 'VideoToolbox', '-framework', 'CoreMedia',

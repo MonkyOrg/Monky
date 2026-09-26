@@ -6,6 +6,7 @@ const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { MacNativeHost, failure } = require('./host.cjs');
 const { validatePreviewImage } = require('../nativePreviewImage.cjs');
+const { validateMacTarget } = require('./target.cjs');
 
 const MINIMUM_MACOS = '14.0';
 const DEFAULT_DIRECTORY = path.resolve(__dirname, '..', '..', 'bin', `darwin-${process.arch}`);
@@ -33,20 +34,12 @@ function sourceIdentity(source) {
   assert.ok(source && typeof source === 'object' && typeof source.name === 'string' && source.name.length <= 512);
   assert.ok(integer(source.width) && integer(source.height));
   if (source.kind === 'monitor') {
-    assert.ok(integer(source.displayId, 1, 0xffffffff) &&
-      /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(source.displayUuid));
-    const bounds = source.bounds;
-    assert.ok(bounds && Number.isFinite(bounds.x) && Number.isFinite(bounds.y)
-      && integer(bounds.width, 1, 32768) && integer(bounds.height, 1, 32768));
-    assert.deepEqual(Object.keys(bounds).sort(), ['height', 'width', 'x', 'y']);
-    return { platform: 'darwin', kind: 'monitor', displayId: source.displayId, displayUuid: source.displayUuid,
-      bounds: Object.freeze({ ...bounds }) };
+    return validateMacTarget({ platform: 'darwin', kind: 'monitor', displayId: source.displayId,
+      displayUuid: source.displayUuid, bounds: source.bounds });
   }
   assert.equal(source.kind, 'window');
-  assert.ok(integer(source.windowId, 1, 0xffffffff) && integer(source.processId, 1, 0x7fffffff)
-    && /^[1-9]\d{0,19}$/.test(source.processStartTimeUs));
-  return { platform: 'darwin', kind: 'window', windowId: source.windowId,
-    expectedProcessId: source.processId, expectedProcessStartTimeUs: source.processStartTimeUs };
+  return validateMacTarget({ platform: 'darwin', kind: 'window', windowId: source.windowId,
+    expectedProcessId: source.processId, expectedProcessStartTimeUs: source.processStartTimeUs });
 }
 
 class MacScreenProvider {
@@ -149,4 +142,4 @@ function loadMacRuntime(options = {}) {
 }
 
 module.exports = { MINIMUM_MACOS, createMacScreenProvider, loadMacCaptureRuntime, loadMacRuntime,
-  MacScreenProvider, sourceIdentity };
+  MacScreenProvider, sourceIdentity, validateMacTarget, MacVideoCapture: require('./capture.cjs').MacVideoCapture };

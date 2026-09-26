@@ -15,13 +15,7 @@
 namespace monky::screen::mac {
 namespace {
 constexpr size_t kMaximumPacket = 4 * 1024 * 1024;
-struct EncoderError : std::runtime_error {
-  std::string code;
-  OSStatus status;
-  EncoderError(const char* operation, OSStatus value)
-      : std::runtime_error(std::string(operation) + " nativeStatus=" + std::to_string(value)),
-        code(operation), status(value) {}
-};
+using EncoderError = VideoError;
 void Check(OSStatus status, const char* operation) {
   if (status != noErr) throw EncoderError(operation, status);
 }
@@ -106,6 +100,7 @@ struct VideoEncoder::State {
   std::mutex output_mutex;
   std::unique_ptr<screen_video::H264Bitstream> bitstream;
   bool hardware = false, keyframe = true, closed = false;
+  uint32_t maximum_bitrate_bps = 0;
   int64_t last_timestamp = -1;
 
   void Report(const char* code, OSStatus status) noexcept {
@@ -160,6 +155,7 @@ VideoEncoder::VideoEncoder(EncoderOptions options, Output output, Failure failur
   self.options = options;
   const auto level = screen_video::RequiredH264Level(options.width, options.height, options.fps,
       options.bitrate_kbps * 1000);
+  self.maximum_bitrate_bps = screen_video::H264LevelMaxBitrate(level);
   self.bitstream = std::make_unique<screen_video::H264Bitstream>(options.width, options.height, level,
       screen_video::H264Profile::Main, screen_video::H264LevelPolicy::Exact);
   self.output = std::move(output);
@@ -215,6 +211,10 @@ VideoEncoder::~VideoEncoder() {
   }
 }
 bool VideoEncoder::Hardware() const { return state_->hardware; }
+bool VideoEncoder::Writable() const {
+  std::lock_guard lock(state_->pending_mutex);
+  return !state_->closed && !state_->failed.load() && state_->pending.size() < 8;
+}
 void VideoEncoder::Submit(CVPixelBufferRef buffer, CMTime timestamp, CMTime duration) {
   auto& self = *state_;
   Require(!self.closed && !self.failed.load(), "ERR_MAC_VIDEO_CLOSED");
@@ -247,7 +247,8 @@ void VideoEncoder::Submit(CVPixelBufferRef buffer, CMTime timestamp, CMTime dura
 void VideoEncoder::SetBitrate(int bitrate_kbps) {
   auto& self = *state_;
   Require(!self.closed && !self.failed.load() && bitrate_kbps >= 50 &&
-      bitrate_kbps <= 80000 && bitrate_kbps % 50 == 0, "ERR_MAC_VIDEO_BITRATE");
+      bitrate_kbps <= 80000 && bitrate_kbps % 50 == 0 &&
+      static_cast<uint32_t>(bitrate_kbps) * 1000 <= self.maximum_bitrate_bps, "ERR_MAC_VIDEO_BITRATE");
   self.Integer(kVTCompressionPropertyKey_AverageBitRate, bitrate_kbps * 1000);
   self.options.bitrate_kbps = bitrate_kbps;
 }
@@ -302,13 +303,15 @@ NSDictionary* VideoEncoderSmoke(bool hardware) {
       std::memset(CVPixelBufferGetBaseAddressOfPlane(buffer, plane), plane == 0 ? 80 : 128,
           CVPixelBufferGetBytesPerRowOfPlane(buffer, plane) * CVPixelBufferGetHeightOfPlane(buffer, plane));
     Check(CVPixelBufferUnlockBaseAddress(buffer, 0), "ERR_MAC_VIDEO_TEST_UNLOCK");
-    for (int frame = 0; frame < 3; ++frame)
+    for (int frame = 0; frame < 6; ++frame) {
+      if (frame == 3) { encoder->SetBitrate(500); encoder->RequestKeyframe(); }
       encoder->Submit(buffer, CMTimeMake(frame, 30), CMTimeMake(1, 30));
+    }
     encoder->Close();
   } catch (...) { CVPixelBufferRelease(buffer); throw; }
   CVPixelBufferRelease(buffer);
   Require(failure.empty(), failure.empty() ? "ERR_MAC_VIDEO_TEST_CALLBACK" : failure.c_str());
-  Require(frames.size() == 3 && frames.front().keyframe, "ERR_MAC_VIDEO_TEST_OUTPUT");
+  Require(frames.size() == 6 && frames.front().keyframe && frames[3].keyframe, "ERR_MAC_VIDEO_TEST_OUTPUT");
   size_t bytes = 0;
   for (size_t index = 0; index < frames.size(); ++index) {
     Require(!frames[index].bytes.empty() && frames[index].timestamp_us == static_cast<int64_t>(index) * 1000000 / 30,
@@ -321,6 +324,7 @@ NSDictionary* VideoEncoderSmoke(bool hardware) {
     @"softwareEnforced": @(!hardware),
     @"available": @YES, @"actualEncodedFrames": @(frames.size()), @"actualEncodedBytes": @(bytes),
     @"actualDecodedFrames": @(decoded), @"decodedPixelsVerified": @YES,
+    @"bitrateChangeAccepted": @YES, @"requestedIdrActuallyProduced": @YES,
     @"nativeCallbacksRetired": @YES, @"captureValidated": @NO, @"realtimeThroughputValidated": @NO,
     @"nativeStatus": @(failure_status)};
 }

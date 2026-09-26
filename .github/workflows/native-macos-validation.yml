@@ -37,7 +37,7 @@ jobs:
         run: node apps/client/native/screen-share/scripts/buildMac.cjs --arch=${{ matrix.arch }}
       - name: Verify bounded native source transport and cleanup
         run: |
-          node --test apps/client/native/screen-share/test/macScreenProvider.test.cjs
+          node --test apps/client/native/screen-share/test/macScreenProvider.test.cjs apps/client/native/screen-share/test/macVideoCapture.test.cjs
           node apps/client/native/screen-share/test/macNativeHostSmoke.cjs
       - name: Exercise actual VideoToolbox H264 encoding and callback retirement
         run: apps/client/native/screen-share/bin/darwin-${{ matrix.arch }}/monky-screen-mac --encoder-smoke
