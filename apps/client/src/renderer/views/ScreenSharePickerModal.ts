@@ -1,5 +1,7 @@
-import type { DesktopSource, NativeScreenCapabilities, NativeScreenCaptureKind } from '@monky/shared';
+import type { DesktopSource, NativeScreenCapabilities, NativeScreenCaptureKind, ScreenShareAudience } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
+import { getAvatarUrl } from '../utils/avatar';
+import { isHexColor } from '../utils/colors';
 import { appEvents } from '../core/EventBus';
 import { screenAudioService } from '../core/ScreenAudioService';
 import { captureScreenShareCall, notifyScreenShareState, stopLocalScreenShares } from '../core/screenShareControls';
@@ -42,6 +44,108 @@ export class ScreenSharePickerModal {
   private nativeCapabilities: NativeScreenCapabilities | null = null;
   private eventController: AbortController | null = null;
   private readonly gameGuide = new GameCaptureGuideModal();
+  private privateShare = false;
+  private audienceRendered = false;
+  private audienceOpen = false;
+  private audience: ScreenShareAudience = { userIds: [], roleIds: [] };
+  private pickerCall: ReturnType<typeof captureScreenShareCall> | null = null;
+
+  private audienceIsValid(): boolean {
+    return !this.privateShare || this.audience.userIds.length + this.audience.roleIds.length > 0;
+  }
+
+  private updateAudience(): void {
+    const modal = this.modalEl;
+    if (!modal) return;
+    const section = modal.querySelector<HTMLElement>('#share-audience');
+    if (section) section.hidden = !this.privateShare;
+    const privacy = modal.querySelector<HTMLInputElement>('#chk-private-share');
+    if (privacy) { privacy.checked = this.privateShare; privacy.disabled = this.isStarting; }
+    if (!this.privateShare || this.isStarting) this.audienceOpen = false;
+    const trigger = modal.querySelector<HTMLButtonElement>('#share-audience-toggle');
+    if (trigger) {
+      trigger.disabled = this.isStarting;
+      trigger.setAttribute('aria-expanded', String(this.audienceOpen));
+    }
+    const popup = modal.querySelector<HTMLElement>('#share-audience-popup');
+    if (popup) popup.hidden = !this.audienceOpen;
+    if (!this.privateShare) return;
+    if (!this.audienceRendered) {
+      const choices = modal.querySelector<HTMLElement>('.share-audience-options');
+      if (choices) choices.innerHTML = this.audienceOptions();
+      this.audienceRendered = true;
+    }
+    const search = modal.querySelector<HTMLInputElement>('#share-audience-search');
+    if (search) search.disabled = this.isStarting;
+    const normalize = (value: string) => value.normalize('NFD').replace(/\p{M}/gu, '').toLocaleLowerCase();
+    const query = normalize((search?.value ?? '').trim());
+    const candidates = modal.querySelectorAll<HTMLButtonElement>('[data-audience-id]');
+    const selectedOptions: HTMLButtonElement[] = [];
+    let visible = 0;
+    candidates.forEach(button => {
+      const kind = button.dataset.audienceKind === 'role' ? 'roleIds' : 'userIds';
+      const selected = this.audience[kind].includes(button.dataset.audienceId ?? '');
+      button.setAttribute('aria-selected', String(selected));
+      button.classList.toggle('selected', selected);
+      button.disabled = this.isStarting || (!selected && this.audience[kind].length >= (kind === 'userIds' ? 256 : 128));
+      button.hidden = !normalize(button.dataset.audienceName ?? '').includes(query);
+      if (selected) selectedOptions.push(button);
+      if (!button.hidden) visible++;
+    });
+    for (const group of modal.querySelectorAll<HTMLElement>('.share-audience-group')) {
+      group.hidden = ![...group.querySelectorAll<HTMLButtonElement>('[data-audience-id]')].some(button => !button.hidden);
+    }
+    const summary = modal.querySelector<HTMLElement>('#share-audience-summary');
+    if (summary) {
+      const content = selectedOptions.length
+        ? selectedOptions.slice(0, 2).map(button =>
+          `<span class="share-audience-chip">${button.querySelector('.share-audience-identity')?.innerHTML ?? ''}</span>`).join('')
+          + (selectedOptions.length > 2
+            ? `<span class="share-audience-more" aria-label="${escapeHtml(t('screenShare.privateMore', { count: selectedOptions.length - 2 }))}">+${selectedOptions.length - 2}</span>` : '')
+        : `<span class="share-audience-placeholder">${escapeHtml(t('screenShare.privateChoose'))}</span>`;
+      if (summary.innerHTML !== content) summary.innerHTML = content;
+    }
+    const empty = modal.querySelector<HTMLElement>('#share-audience-no-results');
+    if (empty) empty.hidden = visible > 0;
+    const status = modal.querySelector<HTMLElement>('#share-audience-status');
+    if (status) status.textContent = this.audienceIsValid()
+      ? t('screenShare.privateSelected', { count: this.audience.userIds.length + this.audience.roleIds.length })
+      : t('screenShare.privateEmpty');
+  }
+
+  private setAudienceOpen(open: boolean): void {
+    if (this.isStarting || !this.privateShare) return;
+    this.audienceOpen = open;
+    this.updateAudience();
+    if (open) this.modalEl?.querySelector<HTMLInputElement>('#share-audience-search')?.focus();
+  }
+
+  private audienceOptions(): string {
+    const serverStore = this.pickerCall?.serverStore;
+    const options = (kind: 'role' | 'user', values: { id: string; name: string; color?: string | null; avatarUrl?: string | null }[]) => [...values]
+      .sort((a, b) => a.name.localeCompare(b.name)).map(value => `
+        <button type="button" class="share-audience-option" data-audience-kind="${kind}"
+          data-audience-id="${escapeHtml(value.id)}" data-audience-name="${escapeHtml(value.name)}"
+          role="option" aria-selected="false" tabindex="-1">
+          <span class="share-audience-identity">
+            ${kind === 'role'
+              ? `<span class="share-audience-role" style="--role-color: ${isHexColor(value.color) ? value.color : 'var(--text-muted)'}" aria-hidden="true"></span>`
+              : `<img class="share-audience-avatar" src="${escapeHtml(getAvatarUrl(value.avatarUrl))}" alt="" data-fallback="avatar" loading="lazy" decoding="async">`}
+            <span class="share-audience-name">${escapeHtml(value.name)}</span>
+          </span>
+          <span class="material-symbols-outlined md-18 share-audience-check" aria-hidden="true">check</span>
+        </button>`).join('');
+    const members = [...(serverStore?.knownMembers.values() ?? [])]
+      .filter(user => user.id !== serverStore?.currentUser?.id && !user.isBot)
+      .map(user => ({ id: user.id, name: user.nickname, avatarUrl: user.avatarUrl }));
+    return `<div class="share-audience-group" role="group" aria-labelledby="share-audience-roles">
+        <h4 id="share-audience-roles">${escapeHtml(t('screenShare.privateRoles'))}</h4>
+        ${options('role', serverStore?.roles ?? [])}
+      </div><div class="share-audience-group" role="group" aria-labelledby="share-audience-users">
+        <h4 id="share-audience-users">${escapeHtml(t('screenShare.privateUsers'))}</h4>
+        ${options('user', members)}
+      </div>`;
+  }
 
   private hasScreenAudio(): boolean {
     return voiceStore.screenAudioShareId !== null || screenAudioService.getIsCapturing();
@@ -111,6 +215,7 @@ export class ScreenSharePickerModal {
   }
 
   private updateCaptureInfo(): void {
+    this.updateAudience();
     const source = this.selectedSource();
     if (!source && this.sourceState.status === 'ready') this.selectedSourceId = null;
     const refreshing = this.sourceState.status === 'loading';
@@ -156,7 +261,7 @@ export class ScreenSharePickerModal {
     info.dataset.backend = native ? (this.selectionProbePending ? 'probe-pending' : 'native') : 'unavailable';
     this.modalEl?.querySelectorAll<HTMLButtonElement>('#btn-share, #btn-share-add')
       .forEach(button => {
-        button.disabled = this.isStarting || !source || !native;
+        button.disabled = this.isStarting || !source || !native || !this.audienceIsValid();
         if (button.id === 'btn-share-add' && audio && this.hasScreenAudio()) {
           button.disabled = true;
           button.title = t('screenShare.audioAlreadySharing');
@@ -262,8 +367,14 @@ export class ScreenSharePickerModal {
 
   public async open(): Promise<void> {
     this.close();
+    this.pickerCall = captureScreenShareCall();
 
     const alreadySharing = voiceStore.isScreenSharing;
+    this.audienceRendered = false;
+    this.audienceOpen = false;
+    const retained = videoService.getNativeScreenCaptures().find(capture => capture.source.audience)?.source.audience;
+    this.privateShare = retained !== undefined;
+    this.audience = { userIds: [...(retained?.userIds ?? [])], roleIds: [...(retained?.roleIds ?? [])] };
     const audioAlreadyCaptured = this.hasScreenAudio() && !this.canReplaceScreenAudio();
     const shareAudio = !audioAlreadyCaptured && !screenAudioService.getIsTestTone();
     this.shareAudioByTab = { screen: shareAudio, window: shareAudio };
@@ -343,6 +454,39 @@ export class ScreenSharePickerModal {
         </div>
         <p id="share-capture-info" class="share-game-tip" role="status" hidden></p>
         <p id="share-audio-warning" class="share-game-tip" role="status" hidden></p>
+        <div class="share-aspect-option">
+          <div>
+            <label id="share-private-label" for="chk-private-share">${escapeHtml(t('screenShare.privateLabel'))}</label>
+            <label class="toggle-switch">
+              <input id="chk-private-share" type="checkbox" role="switch" aria-labelledby="share-private-label"
+                aria-describedby="share-private-description" aria-controls="share-audience">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <p id="share-private-description" class="audio-device-status">${escapeHtml(t('screenShare.privateDescription'))}</p>
+        </div>
+        <section id="share-audience" class="share-audience" aria-labelledby="share-private-label" hidden>
+          <label class="share-audience-label" for="share-audience-toggle">${escapeHtml(t('screenShare.privateAudience'))}</label>
+          <div class="share-audience-picker">
+            <button type="button" id="share-audience-toggle" class="share-audience-trigger" aria-haspopup="listbox"
+              aria-expanded="false" aria-controls="share-audience-options" aria-describedby="share-audience-status">
+              <span id="share-audience-summary"></span>
+              <span class="material-symbols-outlined md-20 share-audience-chevron" aria-hidden="true">expand_more</span>
+            </button>
+            <div id="share-audience-popup" class="share-audience-popup" hidden>
+              <div class="share-audience-search">
+                <span class="material-symbols-outlined md-18" aria-hidden="true">search</span>
+                <input id="share-audience-search" type="search" autocomplete="off"
+                  aria-label="${escapeHtml(t('screenShare.privateSearch'))}"
+                  placeholder="${escapeHtml(t('screenShare.privateSearch'))}" aria-controls="share-audience-options">
+              </div>
+              <div id="share-audience-options" class="share-audience-options" role="listbox"
+                aria-multiselectable="true" aria-label="${escapeHtml(t('screenShare.privateAudience'))}"></div>
+              <p id="share-audience-no-results" role="status" hidden>${escapeHtml(t('screenShare.privateNoResults'))}</p>
+            </div>
+          </div>
+          <p id="share-audience-status" class="audio-device-status" role="status" aria-live="polite"></p>
+        </section>
 
         <div class="modal-footer">
           <div id="share-audio-label" style="display: flex; align-items: center; gap: 8px; margin-right: auto; font-size: 0.85rem; color: var(--text-secondary); ${audioAlreadyCaptured ? 'opacity: 0.5;' : ''}">
@@ -568,6 +712,60 @@ export class ScreenSharePickerModal {
     this.eventController?.abort();
     this.eventController = new AbortController();
     const options = { signal: this.eventController.signal };
+    modal.querySelector<HTMLInputElement>('#chk-private-share')?.addEventListener('change', event => {
+      if (!this.isStarting && event.currentTarget instanceof HTMLInputElement) {
+        this.privateShare = event.currentTarget.checked;
+        this.updateCaptureInfo();
+      }
+    }, options);
+    modal.querySelector('#share-audience-search')?.addEventListener('input', () => this.updateAudience(), options);
+    modal.querySelector('#share-audience-toggle')?.addEventListener('click', () => this.setAudienceOpen(!this.audienceOpen), options);
+    const closeAudienceOutside = (event: Event) => {
+      if (this.audienceOpen && event.target instanceof Element
+          && !modal.querySelector('.share-audience-picker')?.contains(event.target)) this.setAudienceOpen(false);
+    };
+    modal.addEventListener('pointerdown', closeAudienceOutside, options);
+    modal.addEventListener('focusin', closeAudienceOutside, options);
+    modal.querySelector('#share-audience')?.addEventListener('click', event => {
+      const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-audience-id]') : null;
+      if (!button || button.disabled || this.isStarting) return;
+      const id = button.dataset.audienceId;
+      if (!id) return;
+      const kind = button.dataset.audienceKind === 'role' ? 'roleIds' : 'userIds';
+      const values = this.audience[kind];
+      this.audience[kind] = values.includes(id) ? values.filter(value => value !== id) : [...values, id];
+      this.updateCaptureInfo();
+    }, options);
+    modal.querySelector<HTMLElement>('#share-audience')?.addEventListener('keydown', event => {
+      if (this.isStarting || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.key === 'Escape' && this.audienceOpen) {
+        event.preventDefault();
+        this.setAudienceOpen(false);
+        modal.querySelector<HTMLButtonElement>('#share-audience-toggle')?.focus();
+        return;
+      }
+      if (!this.audienceOpen) {
+        if (event.target === modal.querySelector('#share-audience-toggle')
+            && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+          event.preventDefault();
+          this.setAudienceOpen(true);
+        }
+        return;
+      }
+      const buttons = [...modal.querySelectorAll<HTMLButtonElement>('[data-audience-id]')]
+        .filter(button => !button.hidden && !button.disabled);
+      if (!buttons.length) return;
+      const index = buttons.findIndex(button => button === event.target);
+      let next: HTMLButtonElement | undefined;
+      if (event.key === 'ArrowDown') next = buttons[(index + 1) % buttons.length];
+      else if (event.key === 'ArrowUp') next = index < 0 ? buttons[buttons.length - 1] : buttons[(index - 1 + buttons.length) % buttons.length];
+      else if (index >= 0 && event.key === 'Home') next = buttons[0];
+      else if (index >= 0 && event.key === 'End') next = buttons[buttons.length - 1];
+      if (!next) return;
+      event.preventDefault();
+      next.focus();
+      next.scrollIntoView({ block: 'nearest' });
+    }, options);
     modal.querySelector('#modal-close')?.addEventListener('click', () => this.close(), options);
     modal.querySelector('#btn-cancel')?.addEventListener('click', () => this.close(), options);
     modal.addEventListener('mousedown', event => { if (event.target === modal) this.close(); }, options);
@@ -655,6 +853,11 @@ export class ScreenSharePickerModal {
    */
   private async startSharing(mode: 'add' | 'replace'): Promise<void> {
     if (this.isStarting || !this.modalEl || this.gameGuide.isOpen()) return;
+    if (!this.audienceIsValid()) {
+      this.updateCaptureInfo();
+      this.setAudienceOpen(true);
+      return;
+    }
     if (mode === 'add' && !voiceStore.canAddScreenShare()) {
       await showAlert({
         title: t('screenShare.limitTitle'),
@@ -671,7 +874,7 @@ export class ScreenSharePickerModal {
     const captureKind = this.captureKind(tab);
     const shareAudio = modal.querySelector<HTMLInputElement>('#chk-share-audio')?.checked ?? false;
     const preserveAspectRatio = modal.querySelector<HTMLInputElement>('#chk-preserve-aspect-ratio')?.checked ?? true;
-    const call = captureScreenShareCall();
+    const call = this.pickerCall ?? captureScreenShareCall();
     let stream: MediaStream | null = null;
     let published = false;
     let retiringPrevious = false;
@@ -734,7 +937,7 @@ export class ScreenSharePickerModal {
           previousAudioId ? {
             ...(videoService.getNativeScreenCapture(previousAudioId) ? { shareId: previousAudioId } : {}),
             retirePrevious,
-          } : undefined);
+          } : undefined, this.privateShare ? { userIds: [...this.audience.userIds], roleIds: [...this.audience.roleIds] } : undefined);
       } else stream = await videoService.startScreenShare(sourceId);
       assertCurrent();
       if (!native) webRtcManager.assertScreenShareSupported();
@@ -811,6 +1014,7 @@ export class ScreenSharePickerModal {
     this.eventController = null;
     this.sourceState = { status: 'loading' };
     this.nativeCapabilities = null;
+    this.pickerCall = null;
     const wasOpen = this.modalEl !== null;
     if (this.modalEl) {
       if (this.isStarting) videoService.cancelPendingScreenShare();

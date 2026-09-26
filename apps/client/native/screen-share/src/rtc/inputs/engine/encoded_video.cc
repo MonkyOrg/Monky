@@ -118,8 +118,9 @@ EncodedConfiguration ParseConfiguration(const Json& options) {
         options.at(key) >= minimum && options.at(key) <= maximum, "Invalid encoded video configuration");
     return options.at(key).get<std::uint32_t>();
   };
-  EncodedConfiguration value{integer("width", 2, 3840), integer("height", 2, 2160), integer("fps", 1, 120)};
+  EncodedConfiguration value{integer("width", 2, 3840), integer("height", 2, 2160), integer("fps", 1, 240)};
   Require(value.width % 2 == 0 && value.height % 2 == 0, "H264 NV12 dimensions must be even");
+  Require((value.width < 3840 && value.height < 2160) || value.fps <= 120, "4K exceeds the 120 FPS capture budget");
   return value;
 }
 
@@ -1081,7 +1082,7 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
     check(rejected, "Invalid encoded contract was accepted");
   };
   for (const auto video : {EncodedConfiguration{3840, 2160, 120}, {3840, 2160, 60},
-                           {1920, 1080, 120}, {1920, 1080, 60},
+                           {1920, 1080, 240}, {1920, 1080, 120}, {1920, 1080, 60},
                            {1280, 720, 60}, {854, 480, 30}}) {
     const auto parsed = ParseConfiguration({{"width", video.width}, {"height", video.height}, {"fps", video.fps}});
     check(parsed.width == video.width && parsed.height == video.height && parsed.fps == video.fps,
@@ -1096,7 +1097,7 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
   for (const auto invalid : {Json{{"width", 3844}, {"height", 2160}, {"fps", 120}},
                             Json{{"width", 3840}, {"height", 2162}, {"fps", 120}},
                             Json{{"width", 3840}, {"height", 2160}, {"fps", 121}},
-                            Json{{"width", 1920}, {"height", 1080}, {"fps", 121}},
+                            Json{{"width", 1920}, {"height", 1080}, {"fps", 241}},
                             Json{{"width", 0}, {"height", 1080}, {"fps", 120}},
                             Json{{"width", 1919}, {"height", 1080}, {"fps", 120}},
                             Json{{"width", 1920}, {"height", 1079}, {"fps", 120}},

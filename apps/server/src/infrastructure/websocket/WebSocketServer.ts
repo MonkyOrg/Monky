@@ -88,6 +88,7 @@ import {
   VoiceUserJoinedPayload,
   VoiceUserLeftPayload,
   VoiceRosterParticipant,
+  VoiceParticipantState,
   WebRtcSignalPayload,
   RtcDiagnosticsReportPayload,
   SfuGetRouterRtpCapabilitiesPayload,
@@ -183,6 +184,7 @@ const BOT_LOCAL_ALLOWED_MESSAGES = new Set<MessageType>([
   MessageType.BOT_LOCAL_TASK_EVENT,
   MessageType.BOT_LOCAL_MEDIA_SIGNAL,
 ]);
+const MAX_RETIRED_SFU_PRODUCERS = 256;
 
 interface ClientSession {
   protocol?: ProtocolAgreement;
@@ -195,6 +197,8 @@ interface ClientSession {
    * tell a returning device from a second one.
    */
   sessionId?: string;
+  knownProducerIds?: Set<string>;
+  retiredProducerIds?: Set<string>;
   isAlive: boolean;
   ip: string;
   /** True when this session was replaced by a newer connection of the same device. */
@@ -288,6 +292,32 @@ export class WebSocketServer {
     monitorService?: ServerMonitorService,
     private readonly serverVersion: string | null = null,
   ) {
+    this.signalingService.configureScreenAccess(
+      () => this.permissionService.getScreenRoleAccessVersion(),
+      request => {
+        const { action: _action, quality: _quality, backend: _backend, ...identity } = request;
+        const publisher = this.findSessionById(request.publisherSessionId);
+        const viewer = this.findSessionById(request.fromSessionId);
+        if (publisher) this.send(publisher.ws, {
+          type: MessageType.NATIVE_SCREEN_SIGNAL, payload: { ...identity, action: 'stop' },
+        });
+        if (viewer) this.send(viewer.ws, {
+          type: MessageType.NATIVE_SCREEN_SIGNAL, payload: {
+            action: 'closed', fromSessionId: request.publisherSessionId, targetSessionId: request.fromSessionId,
+            publisherSessionId: request.publisherSessionId, channelId: request.channelId,
+            shareId: request.shareId, sourceInstanceId: request.sourceInstanceId, subscriptionId: request.subscriptionId,
+            reason: 'source-unavailable',
+          },
+        });
+      },
+    );
+    this.permissionService.setRoleMutationListener(revocation => {
+      if (revocation) this.signalingService.invalidateScreenRoles(
+        revocation, this.permissionService.getScreenRoleAccessVersion(),
+      );
+      this.reconcileScreenAccess();
+      void this.refreshScreenRoles().catch(error => Logger.error('WEBRTC', 'Screen audience refresh failed.', error));
+    });
     this.sfuManager.setHealthListener((sessionId, channelId, connectionHealth) => {
       const current = this.signalingService.getVoiceState(sessionId);
       if (!current || current.channelId !== channelId || current.connectionHealth === connectionHealth) return;
@@ -3213,6 +3243,7 @@ export class WebSocketServer {
       botVoicePermissions: current?.botVoicePermissions,
     });
     if (updated) {
+      this.reconcileScreenAccess();
       if (session.isBot && !isReceivingBotVoice(updated)) {
         this.closeBotVoiceReception(session, updated.channelId);
       }
@@ -3311,6 +3342,24 @@ export class WebSocketServer {
       && !this.signalingService.getVoiceState(payload.targetSessionId)?.screenShareIds?.includes(payload.streamId)) {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Transmissão não está disponível.', requestId);
       return;
+    }
+    if (payload.signalType === 'screen-watch' || payload.signalType === 'screen-video-meta' || payload.signalType === 'screen-audio-meta') {
+      const publisherId = payload.signalType === 'screen-watch' ? payload.targetSessionId : session.sessionId;
+      const viewerId = payload.signalType === 'screen-watch' ? session.sessionId : payload.targetSessionId;
+      const publisher = this.signalingService.getVoiceState(publisherId);
+      // Legacy audio has its own MediaStream ID, separate from the advertised video shares.
+      const canRoute = payload.signalType === 'screen-audio-meta'
+        ? !publisher?.nativeScreenShares?.some(source => source.audience)
+          && !!publisher?.screenShareIds?.some(shareId =>
+            !publisher.nativeScreenShares?.some(source => source.shareId === shareId)
+            && this.signalingService.canWatchScreen(publisherId, viewerId, shareId))
+        : this.signalingService.canWatchScreen(publisherId, viewerId, payload.streamId);
+      // Native sources use isolated, authorized subscriptions, never the legacy call peer.
+      if (!payload.streamId || publisher?.nativeScreenShares?.some(source => source.shareId === payload.streamId)
+        || !canRoute) {
+        this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Transmissão não está disponível.', requestId);
+        return;
+      }
     }
 
     const targetSocket = this.sessionSockets.get(payload.targetSessionId);
@@ -3581,7 +3630,8 @@ export class WebSocketServer {
     const nativeScreen = 'nativeScreen' in appData.data ? appData.data.nativeScreen : undefined;
     const shareId = 'shareId' in appData.data ? appData.data.shareId : undefined;
     const sourceIsCurrent = () => {
-      if (!nativeScreen) return true;
+      if (!nativeScreen) return !this.signalingService.getVoiceState(sessionId)?.nativeScreenShares
+        ?.some(source => source.shareId === shareId);
       const source = this.signalingService.getVoiceState(sessionId)
         ?.nativeScreenShares?.find(value => value.shareId === shareId && value.instanceId === nativeScreen.sourceInstanceId);
       return !!source && (payload.kind !== 'audio' || source.audio)
@@ -3672,6 +3722,19 @@ export class WebSocketServer {
       }
     }
     if (!this.requireSfuVoiceSession(session, payload.channelId, requestId)) return;
+    if (!this.canReceiveProducer(session, payload.channelId, payload.producerId)) {
+      const advertised = session.knownProducerIds?.has(payload.producerId)
+        || session.retiredProducerIds?.has(payload.producerId);
+      const exists = this.sfuManager.getProducersInChannel(payload.channelId)
+        .some(producer => producer.producerId === payload.producerId);
+      if (advertised && !exists) {
+        this.send(session.ws, {
+          type: MessageType.SFU_PRODUCER_CLOSED, requestId,
+          payload: { channelId: payload.channelId, producerId: payload.producerId } satisfies SfuProducerClosedPayload,
+        });
+      } else this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Transmissão não está disponível.', requestId);
+      return;
+    }
     try {
       console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) consuming producer ${payload.producerId}`);
       const consumed = await this.sfuManager.consume(
@@ -3683,6 +3746,7 @@ export class WebSocketServer {
       );
       if (!this.isCurrentSession(session) ||
           this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId ||
+          !this.canReceiveProducer(session, payload.channelId, payload.producerId) ||
           (session.isBot && (!this.isCurrentBotVoiceReceiver(session, payload.channelId) ||
             session.botVoiceTransports?.get(payload.transportId)?.direction !== 'recv' ||
             !this.isBotMicrophoneSource(consumed.producerSessionId, payload.channelId)))) {
@@ -3871,8 +3935,18 @@ export class WebSocketServer {
       }
     }
     let updated: boolean;
+    const producerId = this.sfuManager.getConsumerProducerId(session.sessionId, payload.channelId, payload.consumerId);
+    if (producerId && !this.canReceiveProducer(session, payload.channelId, producerId)) {
+      this.sfuManager.closeConsumer(session.sessionId, payload.channelId, payload.consumerId);
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Transmissão não está disponível.', requestId);
+      return;
+    }
     try {
       updated = await this.sfuManager.setConsumerPaused(session.sessionId, payload.channelId, payload.consumerId, payload.paused);
+      if (producerId && !this.canReceiveProducer(session, payload.channelId, producerId)) {
+        this.sfuManager.closeConsumer(session.sessionId, payload.channelId, payload.consumerId);
+        updated = false;
+      }
     } catch (error) {
       console.error('[SFU Server:WS] Consumer pause/resume failed:', error);
       this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, 'Não foi possível alterar o consumo de mídia.', requestId);
@@ -3976,6 +4050,7 @@ export class WebSocketServer {
   private async broadcastRolesState(requestId?: string): Promise<void> {
     this.botSettingsPermissionVersion++;
     const state = await this.roleService.getRoleState();
+    await this.refreshScreenRoles();
     const payload: RolesListPayload = {
       roles: state.roles,
       userRoles: state.userRoles,
@@ -3991,6 +4066,144 @@ export class WebSocketServer {
     // once — create, update, delete, assign and unassign all end up in this
     // method (#384).
     await this.reconcileChannelVisibility();
+  }
+
+  private async refreshScreenRoles(): Promise<void> {
+    if (this.closing) return;
+    const version = this.permissionService.getScreenRoleAccessVersion();
+    const readVersion = this.permissionService.getRoleAccessVersion();
+    if (readVersion === null) return;
+    const state = await this.roleService.getRoleState();
+    if (this.closing || this.permissionService.getScreenRoleAccessVersion() !== version
+      || this.permissionService.getRoleAccessVersion() !== readVersion) return;
+    this.signalingService.setScreenRoles(state.roles, state.userRoles, version);
+    this.reconcileScreenAccess();
+    for (const voiceState of Object.values(this.signalingService.getAllVoiceStates())) {
+      if (!voiceState.nativeScreenShares?.length) continue;
+      await this.broadcastToChannel(voiceState.channelId, {
+        type: MessageType.VOICE_STATE_CHANGED, payload: { voiceState },
+      }, undefined, () => this.signalingService.getVoiceState(voiceState.sessionId) === voiceState);
+    }
+    for (const session of this.sessions.values()) {
+      const channelId = session.sessionId && this.signalingService.getVoiceState(session.sessionId)?.channelId;
+      if (!channelId) continue;
+      for (const producer of this.sfuManager.getProducersInChannel(channelId)) {
+        if (producer.appData.mediaType !== 'screen_video' && producer.appData.mediaType !== 'screen_audio') continue;
+        if (!session.knownProducerIds?.has(producer.producerId)
+          && producer.producerSessionId !== session.sessionId
+          && this.canReceiveProducer(session, channelId, producer.producerId)) {
+          this.send(session.ws, { type: MessageType.SFU_NEW_PRODUCER, payload: { channelId, ...producer } });
+        }
+      }
+    }
+  }
+
+  private canReceiveProducer(session: ClientSession, channelId: string, producerId: string): boolean {
+    const producer = this.sfuManager.getProducersInChannel(channelId).find(value => value.producerId === producerId);
+    if (!producer || !session.sessionId) return false;
+    const appData = producer.appData;
+    if (appData.mediaType !== 'screen_video' && appData.mediaType !== 'screen_audio') return true;
+    if (session.isBot) return false;
+    const publisher = this.signalingService.getVoiceState(producer.producerSessionId);
+    const parsed = sfuMediaAppDataSchema.safeParse(appData);
+    if (!publisher || !parsed.success || !('shareId' in parsed.data)) return false;
+    const native = 'nativeScreen' in parsed.data ? parsed.data.nativeScreen : undefined;
+    const shareId = parsed.data.shareId;
+    const source = publisher.nativeScreenShares?.find(value => value.shareId === shareId);
+    if (native) return this.signalingService.canWatchScreen(
+      publisher.sessionId, session.sessionId, parsed.data.shareId, native.sourceInstanceId,
+    ) && (appData.mediaType !== 'screen_audio' || source?.audio === true);
+    // A native source can never be fetched through the unrestricted legacy call transport.
+    if (source || (appData.mediaType === 'screen_audio' && publisher.nativeScreenShares?.some(value => value.audience))) return false;
+    return publisher.channelId === this.signalingService.getVoiceState(session.sessionId)?.channelId;
+  }
+
+  private reconcileScreenAccess(): void {
+    this.signalingService.reconcileScreenSubscriptions();
+    this.sfuManager.revokeConsumers((sessionId, channelId, producerId) => {
+      const session = this.findSessionById(sessionId);
+      return !!session && this.canReceiveProducer(session, channelId, producerId);
+    });
+    for (const session of this.sessions.values()) {
+      const channelId = session.sessionId && this.signalingService.getVoiceState(session.sessionId)?.channelId;
+      if (!channelId) continue;
+      for (const producerId of session.knownProducerIds ?? []) {
+        if (this.sfuManager.ownsProducer(session.sessionId!, channelId, producerId)) continue;
+        if (!this.canReceiveProducer(session, channelId, producerId)) this.send(session.ws, {
+          type: MessageType.SFU_PRODUCER_CLOSED, payload: { channelId, producerId },
+        });
+      }
+    }
+  }
+
+  /** Every outbound path, including auth, bots and broadcasts, uses this projection. */
+  private projectScreenMessage(session: ClientSession, message: ProtocolMessage): ProtocolMessage | null {
+    const state = (value: VoiceParticipantState) => this.signalingService.projectVoiceState(value, session.user?.id);
+    const roster = (values: VoiceRosterParticipant[]) => values.map(value => ({ ...value, voiceState: state(value.voiceState) }));
+    const remember = (id: string) => {
+      session.retiredProducerIds?.delete(id);
+      (session.knownProducerIds ??= new Set()).add(id);
+    };
+    switch (message.type) {
+      case MessageType.AUTH_SUCCESS: {
+        const payload: AuthSuccessPayload = message.payload;
+        return { ...message, payload: { ...payload, server: { ...payload.server,
+          voiceStates: Object.fromEntries(Object.entries(payload.server.voiceStates ?? {}).map(([id, value]) => [id, state(value)])),
+        } } };
+      }
+      case MessageType.VOICE_USER_JOINED: {
+        const payload: VoiceUserJoinedPayload = message.payload;
+        return { ...message, payload: { ...payload, voiceState: state(payload.voiceState),
+          ...(payload.participants ? { participants: roster(payload.participants) } : {}),
+        } };
+      }
+      case MessageType.VOICE_STATE_CHANGED: {
+        const payload: VoiceStateChangedPayload = message.payload;
+        return { ...message, payload: { ...payload, voiceState: state(payload.voiceState) } };
+      }
+      case MessageType.SFU_NEW_PRODUCER: {
+        const payload: SfuNewProducerPayload = message.payload;
+        if (!this.canReceiveProducer(session, payload.channelId, payload.producerId)) return null;
+        remember(payload.producerId);
+        break;
+      }
+      case MessageType.SFU_PRODUCERS_LIST: {
+        const payload: SfuProducersListPayload = message.payload;
+        const producers = payload.producers.filter(value => this.canReceiveProducer(session, payload.channelId, value.producerId));
+        producers.forEach(value => remember(value.producerId));
+        return { ...message, payload: { ...payload, producers,
+          ...(payload.participants ? { participants: roster(payload.participants) } : {}),
+        } };
+      }
+      case MessageType.SFU_PRODUCED: {
+        const payload: SfuProducedPayload = message.payload;
+        remember(payload.id);
+        break;
+      }
+      case MessageType.SFU_CONSUMED: {
+        const payload: SfuConsumedPayload = message.payload;
+        if (!this.canReceiveProducer(session, payload.channelId, payload.producerId)) return null;
+        remember(payload.producerId);
+        break;
+      }
+      case MessageType.SFU_PRODUCER_CLOSED: {
+        const payload: SfuProducerClosedPayload = message.payload;
+        const advertised = session.knownProducerIds?.delete(payload.producerId);
+        if (!advertised && !message.requestId) return null;
+        // A revocation also sends CLOSED, but must not grant a later liveness oracle.
+        if (advertised && !this.sfuManager.getProducersInChannel(payload.channelId)
+          .some(producer => producer.producerId === payload.producerId)) {
+          const retired = session.retiredProducerIds ??= new Set();
+          retired.add(payload.producerId);
+          if (retired.size > MAX_RETIRED_SFU_PRODUCERS) {
+            const oldest = retired.values().next().value;
+            if (oldest !== undefined) retired.delete(oldest);
+          }
+        }
+        break;
+      }
+    }
+    return message;
   }
 
   private async handleRoleCreate(session: ClientSession, payload: RoleCreatePayload, requestId?: string): Promise<void> {
@@ -4479,7 +4692,8 @@ export class WebSocketServer {
   public send(ws: WebSocket, message: ProtocolMessage): void {
     const session = this.sessions.get(ws);
     if (ws.readyState === WebSocket.OPEN && (!session || this.canDeliverBotEvent(session, message))) {
-      ws.send(JSON.stringify(message));
+      const projected = session?.user ? this.projectScreenMessage(session, message) : message;
+      if (projected) ws.send(JSON.stringify(projected));
     }
   }
 
@@ -4499,11 +4713,10 @@ export class WebSocketServer {
   }
 
   public broadcast(message: ProtocolMessage, ignoreWs?: WebSocket): void {
-    const raw = JSON.stringify(message);
     for (const [ws, session] of this.sessions.entries()) {
       if (ws !== ignoreWs && ws.readyState === WebSocket.OPEN && session.user && !session.replaced &&
           this.canDeliverBotEvent(session, message)) {
-        ws.send(raw);
+        this.send(ws, message);
       }
     }
   }
@@ -4527,12 +4740,11 @@ export class WebSocketServer {
 
     const allowedUserIds = await this.resolveChannelAudience(channel);
     if (canSend && !canSend()) return;
-    const raw = JSON.stringify(message);
     for (const [ws, session] of this.sessions.entries()) {
       if (ws !== ignoreWs && ws.readyState === WebSocket.OPEN && session.user && !session.replaced &&
           this.canDeliverBotEvent(session, message) &&
           (allowedUserIds.has(session.user.id) || (voiceChannelId && this.hasBotVoiceGrant(session, voiceChannelId)))) {
-        ws.send(raw);
+        this.send(ws, message);
       }
     }
   }
@@ -4821,6 +5033,8 @@ export class WebSocketServer {
       this.botLocalExecution.close();
       this.serverMonitor?.close();
       this.signalingService.setVoiceMembershipListener(undefined);
+      this.signalingService.configureScreenAccess(() => null, undefined);
+      this.permissionService.setRoleMutationListener(undefined);
       for (const session of this.sessions.values()) {
         session.botVoiceJoinAttempt = undefined;
         session.botVoiceGrant = undefined;

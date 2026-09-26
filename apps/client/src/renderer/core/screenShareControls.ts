@@ -4,9 +4,11 @@ import { networkClient, type NetworkClient } from './NetworkClient';
 import { sessionManager } from './SessionManager';
 import { videoService } from './VideoService';
 import { webRtcManager } from './WebRtcManager';
+import type { ServerStore } from '../stores/serverStore';
 
 interface ScreenShareCall {
   readonly client: NetworkClient | null;
+  readonly serverStore: ServerStore | null;
   readonly isCurrent: () => boolean;
 }
 
@@ -22,6 +24,7 @@ export function captureScreenShareCall(): ScreenShareCall {
   return {
     // Never fall back to the visible server when the call's session disappeared.
     client: session?.client ?? (sessionKey ? null : networkClient),
+    serverStore: session?.serverStore ?? null,
     isCurrent: () => channelId !== null && voiceStore.currentVoiceChannelId === channelId
       && voiceStore.voiceSessionKey === sessionKey
       && (sessionKey ? !!session && sessionManager.get(sessionKey) === session : sessionManager.getActive() === session)
@@ -29,7 +32,7 @@ export function captureScreenShareCall(): ScreenShareCall {
   };
 }
 
-export function notifyScreenShareState(call: ScreenShareCall): void {
+export function notifyScreenShareState(call: Pick<ScreenShareCall, 'client' | 'isCurrent'>): void {
   if (!call.isCurrent() || !call.client) return;
   const screenShareIds = [...voiceStore.screenShareIds];
   call.client.send(MessageType.VOICE_STATE_UPDATE, webRtcManager.getLocalScreenState());

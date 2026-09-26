@@ -103,4 +103,10 @@ ${create}`);
   return source;
 }
 
-module.exports = { bindGameSource, bindMonitorSource };
+function configureWinrtSource(source) {
+  const anchor = '\tconst winrt::Windows::Graphics::Capture::GraphicsCaptureSession session = frame_pool.CreateCaptureSession(item);';
+  assert.equal(source.split(anchor).length, 3, 'Pinned WGC initialization/device-recovery anchors changed.');
+  return '#include "wgcCadence.h"\n' + source.replaceAll(anchor, anchor + '\n\tMonkyConfigureWgcCadence(session);');
+}
+
+module.exports = { bindGameSource, bindMonitorSource, configureWinrtSource };

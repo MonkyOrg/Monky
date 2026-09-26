@@ -30,7 +30,49 @@ open and displays an inline warning. Preview stays off and its switch is disable
 until you choose an image. This also applies to chroma key with an image
 replacement; unprocessed video is never published as a fallback.
 
-Whoever broadcasts shows a **LIVE** badge. Click the card to spotlight it or use fullscreen.
+People allowed to watch see a **LIVE** badge. Click the card to spotlight it or use fullscreen.
+
+### Adjusting FPS for the encoder
+
+In **Quality** settings, every resolution, FPS, bitrate, preset, codec, or
+encoding-method change validates the combination before reapplying a stream.
+**Manual** mode keeps your selected codec and encoding method.
+If the profile is unsupported, the app tests lower frame rates and
+adjusts FPS only after confirming a compatible combination on this computer —
+for example, from 4K120 to 4K60. A notice explains the adjustment; resolution,
+bitrate, camera, and audio remain unchanged.
+
+Existing camera and audio numeric limits still apply; checking screen encoding
+does not require starting the webcam. The app does not invent encoder bitrate
+limits. Temporary verification failures do not lower FPS. If no option is
+compatible, the profile change is not applied: adjust quality or choose another
+encoder. During a stream, adjustments follow the
+same validation as manual quality changes; if the change is blocked, the
+previous profile is kept.
+
+### Private screen sharing
+
+In the screen or window picker, enable **Private screen share** and open
+**Who can watch**. The dropdown supports searching and selecting multiple
+**Users** or **Roles**, with user avatars, role colors, and a scrollable list.
+Selections are summarized in the field; reopen the list to deselect someone.
+Selecting a user **or** one of their
+roles grants access; both are not required. Select at least one: an empty
+selection blocks starting and never makes the stream public. New streams are
+public by default.
+
+Everyone else sees no stream, LIVE badge, or screen audio indicator.
+Administrators do not get automatic access either. The server checks the
+audience before allowing video or audio; knowing a stream identifier does not
+grant access. Channel permissions and membership in the same voice call still
+apply.
+
+The selection stays with the stream across source replacements, reconnects,
+and quality changes, and identifies the person rather than a single device.
+Removing or deleting a role immediately revokes subscriptions that depend on
+it, without stopping microphones or other authorized streams. Granting a role
+makes the stream visible. Choose the audience before starting; to define a
+different one, stop the stream and start again.
 
 ## Chat
 

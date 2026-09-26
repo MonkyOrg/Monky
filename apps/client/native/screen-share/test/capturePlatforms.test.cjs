@@ -246,3 +246,20 @@ test('source specializations preserve pinned vendors and bind before stock Game 
   assert.ok(files.files.some(file => file.path === 'obs-plugins\\64bit\\obs-nvenc.dll'));
   assert.ok(files.dependencies.some(file => file.path === 'include\\ffnvcodec\\nvEncodeAPI.h'));
 });
+
+test('WGC cadence specialization covers creation and device recovery without changing pinned sources', () => {
+  const { configureWinrtSource } = require('../scripts/captureSourceBindings.cjs');
+  const filename = path.join(__dirname, '..', 'src', 'vendor', 'obs', 'libobs-winrt', 'winrt-capture.cpp');
+  const manifest = require('../src/vendor/obs/sources.json');
+  const pin = manifest.files.find(value => value.path === 'libobs-winrt\\winrt-capture.cpp');
+  assert.deepEqual(fingerprint(filename), { bytes: pin.bytes, sha256: pin.sha256 });
+  const original = fs.readFileSync(filename, 'utf8');
+  const specialized = configureWinrtSource(original);
+  assert.equal(fs.readFileSync(filename, 'utf8'), original);
+  assert.equal(specialized.match(/MonkyConfigureWgcCadence\(session\);/gu).length, 2);
+  assert.throws(() => configureWinrtSource(original.replace('frame_pool.CreateCaptureSession(item)', 'changed()')));
+  const cadence = fs.readFileSync(path.join(__dirname, '..', 'src', 'capture', 'wgcCadence.h'), 'utf8');
+  assert.match(cadence, /IsPropertyPresent/u);
+  assert.match(cadence, /video\.fps_den \/ video\.fps_num \/ 2/u);
+  assert.match(cadence, /session\.MinUpdateInterval/u);
+});

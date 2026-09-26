@@ -13,7 +13,7 @@ function bounded(value, minimum = 0, maximum = Number.MAX_SAFE_INTEGER) {
 }
 
 function parseHeader(bytes, fps) {
-  base.integer(fps, 1, 120);
+  base.integer(fps, 1, 240);
   assert.equal(bytes.length, HEADER_BYTES);
   assert.equal(bytes.readUInt32LE(0), MAGIC, 'Live pipe magic changed.');
   const kind = bytes.readUInt32LE(4), payloadBytes = bytes.readUInt32LE(12);
@@ -44,7 +44,7 @@ function parseHeader(bytes, fps) {
 class LiveFrames {
   constructor(onFrame, fps) {
     assert.equal(typeof onFrame, 'function');
-    base.integer(fps, 1, 120);
+    base.integer(fps, 1, 240);
     this.fps = fps;
     this.onFrame = onFrame; this.pending = Buffer.alloc(0); this.sequence = 0; this.packets = 0;
   }

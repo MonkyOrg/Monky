@@ -492,6 +492,7 @@ test('real missing-producer consume path replies before the delayed close broadc
   server['sfuManager'] = sfu;
   server['signalingService'] = signaling();
   await server['signalingService'].joinVoiceChannel('self', 'self', 'room');
+  await server['signalingService'].joinVoiceChannel('peer', 'peer', 'room');
   const transport = { id: 'recv', closed: false, close() {} } as MediasoupTypes.WebRtcTransport;
   sfu['transports'].set('recv', { transport, sessionId: 'self', channelId: 'room', direction: 'recv', purpose: 'call' });
   sfu['producers'].set('producer', {
@@ -507,6 +508,11 @@ test('real missing-producer consume path replies before the delayed close broadc
   const sent: Parameters<WebSocketServer['send']>[1][] = [];
   const broadcasts: Parameters<WebSocketServer['send']>[1][] = [];
   server['send'] = (_ws, message) => { sent.push(message); };
+  assert.ok(server['projectScreenMessage'](session, {
+    type: MessageType.SFU_NEW_PRODUCER,
+    payload: { channelId: 'room', producerId: 'producer', producerSessionId: 'peer',
+      kind: 'video', appData: { mediaType: 'camera' } },
+  }), 'the consumer request must follow a producer advertised to this client');
   let releaseBroadcast = () => {};
   const pendingPermission = new Promise<void>((resolve) => { releaseBroadcast = resolve; });
   server['broadcastToChannel'] = async (_channelId, message) => {
@@ -667,7 +673,15 @@ test('SFU allocations completing after a human reconnect are reaped without touc
           channelId: 'room', transportId: 'old-transport', kind: 'audio', rtpParameters: {}, appData: { mediaType: 'mic' },
         }, 'old-request');
       } else {
+        await service.joinVoiceChannel('peer', 'peer', 'room');
+        sfu['producers'].set('peer-producer', {
+          producer: resource('peer-producer') as MediasoupTypes.Producer,
+          transportId: 'peer-transport', sessionId: 'peer', channelId: 'room',
+          kind: 'audio', appData: { mediaType: 'mic' },
+        });
+        let consumeStarted = false;
         sfu.consume = async () => {
+          consumeStarted = true;
           await gate;
           register(abandoned);
           return {
@@ -678,6 +692,7 @@ test('SFU allocations completing after a human reconnect are reaped without touc
         pending = server['handleSfuConsume'](session, {
           channelId: 'room', transportId: 'old-transport', producerId: 'peer-producer', rtpCapabilities: {},
         }, 'old-request');
+        assert.equal(consumeStarted, true, 'the authorized producer must reach allocation before the reconnect race');
       }
       const replacementSession = { ...session, ws: makeSocket() };
       session.replaced = true;

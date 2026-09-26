@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import './test-screen-privacy';
 import WebSocket from 'ws';
 import type { types as SfuTypes } from 'mediasoup';
 import { MessageType, ProtocolErrorCode, nativeScreenSignalSchema,
@@ -553,6 +554,321 @@ async function signalingFixture() {
   service.updateVoiceState('publisher', { screenShareIds: ['one', 'two'] });
   return { ...f, server, service, sent, clients };
 }
+
+async function privateScreenFixture() {
+  const f = await signalingFixture();
+  let version: number | null = 1;
+  const revoked: string[] = [];
+  f.service.configureScreenAccess(() => version, request => { revoked.push(request.subscriptionId); });
+  f.service.setScreenRoles([{ id: 'viewers' }], [{ userId: 'viewer-a', roleIds: ['viewers'] }], 1);
+  const source = {
+    shareId: 'one', instanceId: crypto.randomUUID(), audio: true,
+    video: { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 12000 },
+    audience: { userIds: [], roleIds: ['viewers'] },
+  };
+  f.service.updateVoiceState('publisher', { nativeScreenShares: [source], isSharingScreenAudio: true });
+  for (const id of ['video-one', 'system-audio']) {
+    f.manager['producers'].get(id)!.appData = {
+      mediaType: id === 'video-one' ? 'screen_video' : 'screen_audio', shareId: 'one',
+      nativeScreen: { sourceInstanceId: source.instanceId, pipelineId: crypto.randomUUID(), video: source.video },
+    };
+  }
+  const recv = f.addReceiver('viewer-a', 'screen');
+  const otherRecv = f.addReceiver('viewer-b', 'screen');
+  return { ...f, source, revoked, recv, otherRecv, version: (value: number | null) => { version = value; } };
+}
+
+test('legacy screen audio metadata uses its own stream ID but requires an advertised legacy share', async () => {
+  const f = await signalingFixture();
+  const [viewer, , publisher] = f.clients;
+  const metadata = {
+    fromSessionId: 'publisher', targetSessionId: 'viewer-a', signalType: 'screen-audio-meta',
+    streamId: 'separate-audio-stream', subscriptionId: 'publisher-epoch',
+  };
+  f.server['handleRtcSignal'](publisher, metadata);
+  assert.deepEqual(f.sent.at(-1), {
+    socket: viewer.ws, type: MessageType.RTC_SIGNAL, requestId: undefined, payload: metadata,
+  });
+  f.service.updateVoiceState('publisher', { screenShareIds: [] });
+  f.server['handleRtcSignal'](publisher, metadata);
+  assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
+  assert.equal(f.sent.at(-1)?.socket, publisher.ws);
+  f.manager.close();
+});
+
+test('private sources cannot announce shared legacy audio, even to authorized viewers or beside a public share', async () => {
+  const f = await privateScreenFixture();
+  const [viewer, outsider, publisher] = f.clients;
+  for (const target of [viewer, outsider]) {
+    for (const streamId of ['one', 'separate-audio-stream']) {
+      f.server['handleRtcSignal'](publisher, {
+        fromSessionId: 'publisher', targetSessionId: target.sessionId, signalType: 'screen-audio-meta',
+        streamId, subscriptionId: 'publisher-epoch',
+      });
+      assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
+      assert.equal(f.sent.at(-1)?.socket, publisher.ws);
+    }
+    f.server['handleRtcSignal'](publisher, {
+      fromSessionId: 'publisher', targetSessionId: target.sessionId, signalType: 'screen-video-meta',
+      streamId: 'two', subscriptionId: 'publisher-epoch',
+    });
+    assert.equal(f.sent.at(-1)?.type, MessageType.RTC_SIGNAL, 'public legacy video remains visible');
+    assert.equal(f.sent.at(-1)?.socket, target.ws);
+  }
+  f.manager.close();
+});
+
+test('private SFU projection hides producers and close events; guessed native/legacy video and audio are denied', async () => {
+  const f = await privateScreenFixture();
+  const [viewer, outsider] = f.clients;
+  const hiddenVoice = f.service.projectVoiceState(f.service.getVoiceState('publisher')!, 'viewer-b');
+  assert.deepEqual(hiddenVoice.screenShareIds, ['two']);
+  assert.equal(hiddenVoice.isSharingScreenAudio, false, 'an unrelated public screen cannot reveal private native audio');
+  const producers = f.manager.getProducersInChannel('room').map(producer => ({ channelId: 'room', ...producer }));
+  const list = { type: MessageType.SFU_PRODUCERS_LIST, payload: { channelId: 'room', producers } };
+  const visible = f.server['projectScreenMessage'](viewer, list)!;
+  const hidden = f.server['projectScreenMessage'](outsider, list)!;
+  assert.equal(JSON.stringify(visible).includes('video-one'), true);
+  assert.equal(JSON.stringify(hidden).includes('video-one'), false);
+  assert.equal(JSON.stringify(hidden).includes('system-audio'), false);
+  assert.equal(JSON.stringify(hidden).includes('video-two'), true, 'public shares remain visible');
+  assert.equal(JSON.stringify(hidden).includes('mic'), true);
+  const privateProducer = producers.find(producer => producer.producerId === 'video-one')!;
+  assert.equal(f.server['projectScreenMessage'](outsider, { type: MessageType.SFU_NEW_PRODUCER, payload: privateProducer }), null);
+  assert.equal(f.server['projectScreenMessage'](outsider, {
+    type: MessageType.SFU_PRODUCER_CLOSED, payload: { channelId: 'room', producerId: 'video-one' },
+  }), null);
+  for (const producerId of ['video-one', 'system-audio']) {
+    await f.server['handleSfuConsume'](outsider, {
+      channelId: 'room', producerId, transportId: f.otherRecv, rtpCapabilities: {},
+    }, 'guess');
+    assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
+  }
+  assert.equal(f.created.length, 0, 'guessed IDs never allocate consumers');
+  f.manager['producers'].get('video-one')!.appData = { mediaType: 'screen_video', shareId: 'one' };
+  assert.equal(f.server['canReceiveProducer'](viewer, 'room', 'video-one'), false, 'private native shares cannot use legacy producers');
+  f.manager.close();
+});
+
+test('users OR roles grant access; replacement metadata cannot downgrade a private source or turn withdrawal public', async () => {
+  const f = await privateScreenFixture();
+  const publisher = f.service.getVoiceState('publisher')!;
+  const audience = { userIds: ['viewer-b'], roleIds: ['viewers'] };
+  assert.equal(f.service.canSeeScreenSource(publisher, { ...f.source, audience }, 'viewer-a'), true);
+  assert.equal(f.service.canSeeScreenSource(publisher, { ...f.source, audience }, 'viewer-b'), true);
+  assert.equal(f.service.canSeeScreenSource(publisher, { ...f.source, audience }, 'administrator'), false);
+  f.version(null);
+  assert.equal(f.service.canSeeScreenSource(publisher, { ...f.source, audience }, 'viewer-a'), false);
+  assert.equal(f.service.canSeeScreenSource(publisher, { ...f.source, audience }, 'viewer-b'), true);
+  const { audience: _audience, ...replacement } = f.source;
+  const updated = f.service.updateVoiceState('publisher', {
+    nativeScreenShares: [{ ...replacement, instanceId: crypto.randomUUID(), video: { ...replacement.video, fps: 120 } }],
+  })!;
+  assert.deepEqual(updated.nativeScreenShares?.[0].audience, f.source.audience);
+  const withdrawn = f.service.updateVoiceState('publisher', { nativeScreenShares: [] })!;
+  assert.deepEqual(withdrawn.screenShareIds, ['two']);
+  assert.equal(f.service.projectVoiceState(withdrawn, 'viewer-b').isSharingScreenAudio, false);
+  assert.equal(f.service.canWatchScreen('publisher', 'viewer-b', 'one'), false);
+  f.manager.close();
+});
+
+test('private SFU close delivery uses prior advertisements after the producer and source have disappeared', async () => {
+  const f = await privateScreenFixture();
+  const [viewer, outsider, publisher] = f.clients;
+  const producer = f.manager.getProducersInChannel('room').find(value => value.producerId === 'video-one')!;
+  const announcement = { type: MessageType.SFU_NEW_PRODUCER, payload: { channelId: 'room', ...producer } };
+  assert.ok(f.server['projectScreenMessage'](viewer, announcement));
+  assert.equal(f.server['projectScreenMessage'](outsider, announcement), null);
+  f.server['projectScreenMessage'](publisher, {
+    type: MessageType.SFU_PRODUCED, payload: { channelId: 'room', id: producer.producerId },
+  });
+  f.manager.closeProducer(producer.producerId);
+  f.service.updateVoiceState('publisher', { screenShareIds: ['two'], nativeScreenShares: [] });
+  assert.equal(f.manager.getProducersInChannel('room').some(value => value.producerId === producer.producerId), false);
+  const consume = { channelId: 'room', producerId: producer.producerId, transportId: f.recv, rtpCapabilities: {} };
+  await f.server['handleSfuConsume'](viewer, consume, 'before-close-broadcast');
+  assert.equal(f.sent.at(-1)?.type, MessageType.SFU_PRODUCER_CLOSED);
+  assert.equal(f.sent.at(-1)?.requestId, 'before-close-broadcast');
+  const closed = { type: MessageType.SFU_PRODUCER_CLOSED, payload: { channelId: 'room', producerId: producer.producerId } };
+  assert.equal(f.server['projectScreenMessage'](viewer, closed), closed);
+  assert.equal(f.server['projectScreenMessage'](publisher, closed), closed);
+  assert.equal(f.server['projectScreenMessage'](outsider, closed), null);
+  assert.equal(f.server['projectScreenMessage'](viewer, closed), null, 'the retired advertisement cannot leak duplicate close events');
+  await f.server['handleSfuConsume'](viewer, consume, 'after-close-broadcast');
+  assert.equal(f.sent.at(-1)?.type, MessageType.SFU_PRODUCER_CLOSED);
+  assert.equal(f.sent.at(-1)?.requestId, 'after-close-broadcast');
+  await f.server['handleSfuConsume'](outsider, { ...consume, transportId: f.otherRecv }, 'guess');
+  assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
+  const hidden = f.sent.at(-1)?.payload;
+  await f.server['handleSfuConsume'](outsider, { ...consume, producerId: 'never-advertised', transportId: f.otherRecv }, 'guess');
+  assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
+  assert.deepEqual(f.sent.at(-1)?.payload, hidden, 'unknown private and nonexistent IDs are indistinguishable');
+  assert.equal(f.created.length, 0, 'terminal consume replies never allocate a consumer');
+  f.manager.close();
+});
+
+test('revoked private advertisements cannot reveal whether a hidden producer subsequently ends', async () => {
+  const f = await privateScreenFixture();
+  const [viewer] = f.clients;
+  const producer = f.manager.getProducersInChannel('room').find(value => value.producerId === 'video-one')!;
+  assert.ok(f.server['projectScreenMessage'](viewer, {
+    type: MessageType.SFU_NEW_PRODUCER, payload: { channelId: 'room', ...producer },
+  }));
+  f.version(null);
+  assert.ok(f.server['projectScreenMessage'](viewer, {
+    type: MessageType.SFU_PRODUCER_CLOSED, payload: { channelId: 'room', producerId: producer.producerId },
+  }));
+  assert.equal(viewer.retiredProducerIds?.has(producer.producerId) ?? false, false);
+  const consume = { channelId: 'room', producerId: producer.producerId, transportId: f.recv, rtpCapabilities: {} };
+  await f.server['handleSfuConsume'](viewer, consume, 'revoked-watch');
+  assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
+  const live = f.sent.at(-1)?.payload;
+  f.manager.closeProducer(producer.producerId);
+  await f.server['handleSfuConsume'](viewer, consume, 'revoked-watch');
+  assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
+  assert.deepEqual(f.sent.at(-1)?.payload, live);
+  assert.equal(f.created.length, 0);
+  f.manager.close();
+});
+
+test('terminal producer history is bounded and unadvertised close events cannot populate it', async () => {
+  const f = await privateScreenFixture();
+  const [viewer] = f.clients;
+  const closed = (producerId: string) => ({
+    type: MessageType.SFU_PRODUCER_CLOSED, payload: { channelId: 'room', producerId },
+  });
+  assert.equal(f.server['projectScreenMessage'](viewer, closed('unknown-private')), null);
+  assert.equal(Object.hasOwn(viewer, 'retiredProducerIds'), false);
+  viewer.knownProducerIds = new Set(Array.from({ length: 300 }, (_, index) => `retired-${index}`));
+  for (const producerId of [...viewer.knownProducerIds])
+    assert.ok(f.server['projectScreenMessage'](viewer, closed(producerId)));
+  assert.equal(viewer.knownProducerIds.size, 0);
+  assert.equal(viewer.retiredProducerIds?.size, 256);
+  assert.equal(viewer.retiredProducerIds?.has('retired-0'), false);
+  assert.equal(viewer.retiredProducerIds?.has('retired-299'), true);
+  await f.server['handleSfuConsume'](viewer, {
+    channelId: 'room', producerId: 'retired-299', transportId: f.recv, rtpCapabilities: {},
+  }, 'recent');
+  assert.equal(f.sent.at(-1)?.type, MessageType.SFU_PRODUCER_CLOSED);
+  await f.server['handleSfuConsume'](viewer, {
+    channelId: 'room', producerId: 'retired-0', transportId: f.recv, rtpCapabilities: {},
+  }, 'evicted');
+  assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
+  assert.equal(f.created.length, 0);
+  f.manager.close();
+});
+
+test('role mutation invalidates screen authorization before the database/broadcast resumes and selectively closes SFU media', async () => {
+  const f = await privateScreenFixture();
+  const viewer = f.clients[0];
+  const consume = async (producerId: string, transportId = f.recv) => {
+    await f.server['handleSfuConsume'](viewer, { channelId: 'room', producerId, transportId, rtpCapabilities: {} }, producerId);
+    assert.equal(f.sent.at(-1)?.type, MessageType.SFU_CONSUMED);
+    return f.created.at(-1)!;
+  };
+  const video = await consume('video-one');
+  const audio = await consume('system-audio');
+  const mic = await consume('mic', 'recv-viewer-a');
+  const publicScreen = await consume('video-two', 'recv-viewer-a');
+  const watch = nativeScreenSignalSchema.parse({
+    action: 'watch', fromSessionId: 'viewer-a', targetSessionId: 'publisher', publisherSessionId: 'publisher',
+    channelId: 'room', shareId: 'one', sourceInstanceId: f.source.instanceId,
+    subscriptionId: crypto.randomUUID(), quality: 'source', backend: 'native',
+  });
+  assert.equal(f.service.authorizeNativeScreenSignal(watch).success, true);
+  f.version(null);
+  f.server['reconcileScreenAccess']();
+  assert.equal(video.closed, true);
+  assert.equal(audio.closed, true);
+  assert.equal(mic.closed, false);
+  assert.equal(publicScreen.closed, false);
+  assert.deepEqual(f.revoked, [watch.subscriptionId]);
+  assert.equal(f.service.authorizeNativeScreenSignal(watch).success, false);
+  f.version(2);
+  assert.equal(f.service.authorizeNativeScreenSignal(watch).success, false, 'old role snapshots stay closed after the write commits');
+  f.service.setScreenRoles([], [{ userId: 'viewer-a', roleIds: ['viewers'] }], 2);
+  assert.equal(f.service.authorizeNativeScreenSignal(watch).success, false, 'deleted role IDs cannot authorize a stale assignment');
+  f.service.setScreenRoles([{ id: 'viewers' }], [{ userId: 'viewer-a', roleIds: ['viewers'] }], 2);
+  assert.equal(f.service.authorizeNativeScreenSignal(watch).success, true);
+  f.manager.close();
+});
+
+test('private SFU consume and resume recheck access after asynchronous worker responses', async () => {
+  const f = await privateScreenFixture();
+  const viewer = f.clients[0];
+  const pending = gate();
+  f.delayCreate(() => pending.promise);
+  const work = f.server['handleSfuConsume'](viewer, {
+    channelId: 'room', producerId: 'video-one', transportId: f.recv, rtpCapabilities: {},
+  }, 'racing-consume');
+  while (!f.created.length) await Promise.resolve();
+  f.version(null);
+  f.server['reconcileScreenAccess']();
+  pending.release();
+  await work;
+  assert.equal(f.created[0].closed, true);
+  assert.equal(f.created[0].resumes, 0);
+  assert.equal(f.sent.some(message => message.type === MessageType.SFU_CONSUMED), false);
+  f.version(1);
+  f.delayCreate(async () => {});
+  const consumer = await f.manager.consume('viewer-a', 'room', f.recv, 'video-one', {});
+  const resumeGate = gate(), resumed = gate();
+  f.delayResume(async () => { resumed.release(); await resumeGate.promise; });
+  const resume = f.server['handleSfuConsumerSetPaused'](viewer, {
+    channelId: 'room', consumerId: consumer.id, paused: false,
+  }, 'racing-resume');
+  await resumed.promise;
+  f.version(null);
+  f.server['reconcileScreenAccess']();
+  resumeGate.release();
+  await resume;
+  assert.equal(f.created[1].closed, true);
+  assert.equal(f.created[1].resumes, 0);
+  assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
+  f.manager.close();
+});
+
+test('a scoped role revocation preserves another private stream and another authorized viewer', async () => {
+  const f = await privateScreenFixture();
+  const otherSource = {
+    ...f.source, shareId: 'two', instanceId: crypto.randomUUID(), audio: false,
+    audience: { userIds: [], roleIds: ['other-role'] },
+  };
+  f.service.setScreenRoles([{ id: 'viewers' }, { id: 'other-role' }], [
+    { userId: 'viewer-a', roleIds: ['viewers', 'other-role'] }, { userId: 'viewer-b', roleIds: ['viewers'] },
+  ], 1);
+  f.service.updateVoiceState('publisher', { nativeScreenShares: [f.source, otherSource] });
+  f.manager['producers'].get('video-two')!.appData = {
+    mediaType: 'screen_video', shareId: 'two',
+    nativeScreen: { sourceInstanceId: otherSource.instanceId, pipelineId: crypto.randomUUID(), video: otherSource.video },
+  };
+  const withdrawn = await f.manager.consume('viewer-a', 'room', f.recv, 'video-one', {});
+  const retained = await f.manager.consume('viewer-a', 'room', f.recv, 'video-two', {});
+  const otherViewer = await f.manager.consume('viewer-b', 'room', f.otherRecv, 'video-one', {});
+  f.version(2);
+  f.service.invalidateScreenRoles({ userId: 'viewer-a', roleId: 'viewers' }, 2);
+  f.server['reconcileScreenAccess']();
+  assert.equal(f.manager['consumers'].has(withdrawn.id), false);
+  assert.equal(f.manager['consumers'].has(retained.id), true);
+  assert.equal(f.manager['consumers'].has(otherViewer.id), true);
+  assert.equal(f.service.canWatchScreen('publisher', 'viewer-a', 'one'), false);
+  assert.equal(f.service.canWatchScreen('publisher', 'viewer-a', 'two'), true);
+  assert.equal(f.service.canWatchScreen('publisher', 'viewer-b', 'one'), true);
+  f.manager.close();
+});
+
+test('source withdrawal closes native SFU consumers without closing the voice receiver', async () => {
+  const f = await privateScreenFixture();
+  const native = await f.manager.consume('viewer-a', 'room', f.recv, 'video-one', {});
+  const mic = await f.consume('mic');
+  f.service.updateVoiceState('publisher', { screenShareIds: ['two'], nativeScreenShares: [] });
+  f.server['reconcileScreenAccess']();
+  assert.equal(f.manager['consumers'].has(native.id), false);
+  assert.equal(f.manager['consumers'].has(mic.id), true);
+  assert.equal(f.manager['transports'].has('recv-viewer-a'), true);
+  assert.equal(f.server['canReceiveProducer'](f.clients[0], 'room', 'video-one'), false);
+  f.manager.close();
+});
 
 test('native SFU transport creation validates and routes purpose while omitted purpose preserves the browser call', async () => {
   const f = await signalingFixture();

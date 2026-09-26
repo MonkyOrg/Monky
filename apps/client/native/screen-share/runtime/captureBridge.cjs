@@ -14,6 +14,9 @@ class CaptureBridge extends ObsHostBridge {
     assert.equal(path.basename(runDirectory), `monky-screen-capture-${runId}`);
     const video = Object.freeze(protocol.normalizedVideo(options.video));
     const encoder = protocol.validateEncoder(options.encoder ?? 'auto');
+    const bitrateCeilingKbps = options.bitrateCeilingKbps ?? 80000;
+    assert.ok(Number.isSafeInteger(bitrateCeilingKbps) && bitrateCeilingKbps >= video.bitrateKbps
+      && bitrateCeilingKbps <= 80000 && bitrateCeilingKbps % 50 === 0, 'Invalid capture bitrate ceiling.');
     assert.equal(typeof onPacket, 'function'); assert.equal(typeof onNotice, 'function');
     let owner;
     super({
@@ -27,6 +30,7 @@ class CaptureBridge extends ObsHostBridge {
         `--width=${video.width}`,
         `--height=${video.height}`, `--fps=${video.fps}`, `--bitrate=${video.bitrateKbps}`,
         `--scale-mode=${video.scaleMode}`,
+        ...(encoder === 'obs_nvenc_av1_tex' ? [`--bitrate-ceiling=${bitrateCeilingKbps}`] : []),
       ],
       validateRetirement: bridge => {
         const terminal = bridge.stopped ?? bridge.failure;
@@ -45,6 +49,7 @@ class CaptureBridge extends ObsHostBridge {
       },
     });
     owner = this; this.onPacket = onPacket; this.onNotice = onNotice;
+    this.bitrateCeilingKbps = bitrateCeilingKbps;
     this.isSourcePaused = options.isSourcePaused ?? null;
     assert.ok(this.isSourcePaused === null || typeof this.isSourcePaused === 'function');
     this.liveSequence = 0; this.liveRequests = new Map(); this.liveEof = false;
@@ -166,7 +171,10 @@ class CaptureBridge extends ObsHostBridge {
       });
     });
   }
-  setBitrate(bitrateKbps) { return this.feedback('bitrate', bitrateKbps); }
+  setBitrate(bitrateKbps) {
+    assert.ok(bitrateKbps <= this.bitrateCeilingKbps, 'Live bitrate exceeds the capture ceiling.');
+    return this.feedback('bitrate', bitrateKbps);
+  }
   requestKeyFrame() { return this.feedback('idr', 0); }
 
   // Preparation proves the pinned probe/texture configuration, not successful
@@ -271,6 +279,7 @@ async function probeCaptureCapabilities(options, signal, dependencies = {}) {
       '--probe=encoder', `--encoder=${encoder}`, `--width=${video.width}`, `--height=${video.height}`,
       `--fps=${video.fps}`, `--bitrate=${video.bitrateKbps}`,
       `--scale-mode=${video.scaleMode}`,
+      ...(encoder === 'obs_nvenc_av1_tex' ? [`--bitrate-ceiling=${video.bitrateKbps}`] : []),
     ],
     validateRetirement: validateProbeRetirement,
   }, { ...dependencies, deadlines: { stop: 20000, ...dependencies.deadlines } });

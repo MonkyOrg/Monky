@@ -85,36 +85,37 @@ void RunCaptureClockChecks(Check check) {
               mapped.sample_uncertainty_us == Policy::kRtcQuantizationUs + 101,
           "Paired midpoint or QPC/RTC sampling uncertainty was lost");
   }
-  {
-    // Capture is nominal 120 fps, while delivery latency varies by 6 ms.
+  for (const auto fps : {120, 240}) {
+    // Delivery latency varies by 6 ms at both supported high frame rates.
     // Nothing in production mapping receives fps, duration, or frame IDs.
     Policy policy;
     CaptureClockSourceState source;
     constexpr std::array<std::int64_t, 4> delays{10000, 16000, 12000, 14000};
     std::int64_t previous_capture = 0, previous_output = 0;
-    for (std::int64_t frame = 0; frame < 120; ++frame) {
-      const auto capture = 1000000000 + (frame * 1000000 + 60) / 120;
+    for (std::int64_t frame = 0; frame < fps; ++frame) {
+      const auto capture = 1000000000 + (frame * 1000000 + fps / 2) / fps;
       const auto delay = delays[static_cast<std::size_t>(frame) % delays.size()];
       const auto now = capture + delay;
       const auto mapped = policy.Map(pair(now, now - 900000000), capture, source);
       preserved(mapped, delay);
       check(mapped.timestamp_us == capture - 900000000,
-            "120-fps mapping followed delivery jitter instead of capture time");
+            "High-FPS mapping followed delivery jitter instead of capture time");
       if (frame != 0) {
         check(mapped.timestamp_us - previous_output == capture - previous_capture,
-              "120-fps capture cadence was synthesized or flattened");
+              "High-FPS capture cadence was synthesized or flattened");
       }
       previous_capture = capture;
       previous_output = mapped.timestamp_us;
     }
   }
+  for (const auto fps : {120, 240})
   for (const auto drift_ppm : std::array<std::int64_t, 2>{-1000, 1000}) {
     Policy policy;
     CaptureClockSourceState source;
     std::int64_t previous = -1;
     unsigned accepted = 0;
     for (std::int64_t frame = 0; frame < 600; ++frame) {
-      const auto elapsed = frame * 1000000 / 120;
+      const auto elapsed = frame * 1000000 / fps;
       const auto qpc = 100000000 + elapsed;
       // Model the coarse desktop timer, including repeated RTC-now readings.
       const auto rtc = (10000000 + elapsed + elapsed * drift_ppm / 1000000) / 15625 * 15625;
@@ -131,10 +132,11 @@ void RunCaptureClockChecks(Check check) {
       previous = mapped.timestamp_us;
       ++accepted;
     }
-    check(accepted >= 570, "Coarse RTC calibration unnecessarily flattened 120-fps capture");
+    check(accepted >= 570, "Coarse RTC calibration unnecessarily flattened high-FPS capture");
     check(policy.Snapshot().calibration_samples < 60,
           "Calibration was repeatedly clamped against coarse RTC ticks");
   }
+  for (const auto fps : {120, 240})
   for (const auto age : std::array<std::int64_t, 4>{0, 1000, 2000, 8000}) {
     for (const auto phase : std::array<std::int64_t, 3>{0, 5000, 14000}) {
       Policy policy;
@@ -142,7 +144,7 @@ void RunCaptureClockChecks(Check check) {
       unsigned accepted = 0;
       std::int64_t previous = -1;
       for (std::int64_t frame = 0; frame < 600; ++frame) {
-        const auto elapsed = frame * 1000000 / 120;
+        const auto elapsed = frame * 1000000 / fps;
         const auto qpc = 100000000 + elapsed;
         const auto rtc = (10000000 + phase + elapsed) / 15625 * 15625;
         const auto mapped = policy.Map(pair(qpc, rtc), qpc - age, source);
@@ -153,7 +155,7 @@ void RunCaptureClockChecks(Check check) {
         previous = mapped.timestamp_us;
         ++accepted;
       }
-      check(accepted >= 570, "Timer quantization discarded valid low-latency 120-fps capture");
+      check(accepted >= 570, "Timer quantization discarded valid low-latency high-FPS capture");
     }
   }
   {

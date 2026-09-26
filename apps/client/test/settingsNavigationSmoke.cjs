@@ -6,7 +6,8 @@ const clientRoot = path.resolve(__dirname, '..');
 const releaseNotesOnly = process.argv.includes('--release-notes');
 const qualitySettingsOnly = process.argv.includes('--quality-settings');
 const screenStageOnly = process.argv.includes('--screen-stage');
-if ([releaseNotesOnly, qualitySettingsOnly, screenStageOnly].filter(Boolean).length > 1)
+const screenAudienceOnly = process.argv.includes('--screen-audience');
+if ([releaseNotesOnly, qualitySettingsOnly, screenStageOnly, screenAudienceOnly].filter(Boolean).length > 1)
   throw new Error('Choose one targeted UI smoke.');
 
 if (!process.versions.electron) {
@@ -21,7 +22,7 @@ if (!process.versions.electron) {
 } else {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_SETTINGS_NAV_PROFILE);
-  if (qualitySettingsOnly || screenStageOnly) app.disableHardwareAcceleration();
+  if (qualitySettingsOnly || screenStageOnly || screenAudienceOnly) app.disableHardwareAcceleration();
   // Hosted Windows sessions can disable Chromium's scroll animator independently of matchMedia.
   app.commandLine.appendSwitch('enable-smooth-scrolling');
   app.on('window-all-closed', () => {});
@@ -66,11 +67,24 @@ if (!process.versions.electron) {
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     timeout = setTimeout(() => { console.error('Settings navigation smoke timed out'); void finish(1); }, 90_000);
     await window.loadURL(`http://127.0.0.1:${address.port}/__settings_navigation__`);
-    if (!qualitySettingsOnly && !screenStageOnly) {
+    if (!qualitySettingsOnly && !screenStageOnly && !screenAudienceOnly) {
       window.focus();
       window.webContents.focus();
     }
     const evaluate = code => window.webContents.executeJavaScript(code, true);
+    if (screenAudienceOnly) {
+      const { runScreenAudienceSmoke } = require('./screenAudienceSmoke.cjs');
+      let checks = 0;
+      for (const [width, height] of [[1100, 850], [640, 440]]) {
+        window.setContentSize(width, height);
+        checks += await evaluate(`(${runScreenAudienceSmoke.toString()})()`);
+        fs.writeFileSync(path.join(clientRoot, 'dist-test', `screen-audience-${width}.png`),
+          (await window.webContents.capturePage()).toPNG());
+      }
+      console.log(`Screen audience: ${checks} checks passed, 500 members/20 roles, software rendering only, no capture`);
+      await finish(0);
+      return;
+    }
     if (screenStageOnly) {
       const { runScreenStageSmoke } = require('./screenStageSmoke.cjs');
       const { appEventHandlerSource } = require('./fixtures/screenSharingUiModel.cjs');

@@ -73,7 +73,8 @@ function nativeErrorDiagnostics(error: Error): NativeErrorDiagnostic[] {
   if (amf) {
     const [requiredLevel, width, height, fps, maximumLevel] = amf.slice(1).map(Number);
     if (requiredLevel < 10 || requiredLevel > 62 || maximumLevel < 10 || maximumLevel > 62
-      || width < 2 || width > 3840 || height < 2 || height > 2160 || fps < 1 || fps > 120) return [];
+      || width < 2 || width > 3840 || height < 2 || height > 2160 || fps < 1
+      || fps > (width === 3840 || height === 2160 ? 120 : 240)) return [];
     return [{ kind: 'amf-h264-level', requiredLevel, maximumLevel, width, height, fps }];
   }
   const color = /^External H264 must retain the admitted BT\.709 limited-range mode: fullRange=(absent|[01]), primaries=(absent|\d{1,3}), transfer=(absent|\d{1,3}), matrix=(absent|\d{1,3})(?=$|[;\s])/.exec(message);

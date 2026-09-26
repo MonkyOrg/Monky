@@ -25,6 +25,10 @@
 #include "rtc_receive_diagnostics_checks.h"
 #include "rtc_receive_sdk_checks.h"
 #include "adapter_policy_probe.h"
+#ifdef GetObject
+#undef GetObject
+#endif
+#include "sdp\MediaSection.hpp"
 
 #include <cstddef>
 #include <cstdio>
@@ -229,6 +233,25 @@ int main() {
         Check(options == Json{{"videoGoogleStartBitrate", start},
                               {"videoGoogleMaxBitrate", maximum / 1000}},
               "SFU startup must follow its source ceiling without a forced minimum or the300kbps default");
+        for (const auto* mime : {"video/H264", "video/AV1"}) {
+          Json offered{{"codecs", Json::array({{
+              {"mimeType", mime}, {"payloadType", 100}, {"clockRate", 90000},
+              {"parameters", Json::object()}, {"rtcpFeedback", Json::array()}}})},
+              {"headerExtensions", Json::array()}};
+          auto answered = offered;
+          mediasoupclient::Sdp::AnswerMediaSection section(
+              {{"usernameFragment", "test"}, {"password", "test-only-ice-password"}},
+              Json::array(), {{"role", "auto"}}, Json::object(),
+              {{"mid", "0"}, {"type", "video"}, {"protocol", "UDP/TLS/RTP/SAVPF"}},
+              offered, answered, &options);
+          const auto fmtp = section.GetObject().at("fmtp");
+          Check(fmtp.size() == 1, "Every screen codec must serialize its SFU startup budget");
+          const auto config = fmtp.at(0).at("config").get<std::string>();
+          Check(config.find("x-google-start-bitrate=" + std::to_string(start)) != std::string::npos &&
+              config.find("x-google-max-bitrate=" + std::to_string(maximum / 1000)) != std::string::npos &&
+              config.find("x-google-min-bitrate") == std::string::npos,
+              "Actual SFU SDP must retain startup/ceiling options without imposing a bitrate floor");
+        }
       }
       Reject([] { (void)rtc::peer_detail::SfuVideoCodecOptions({}); }, MONKY_ENGINE_INVALID);
       for (const auto invalid : {-1, 0, 63999}) {

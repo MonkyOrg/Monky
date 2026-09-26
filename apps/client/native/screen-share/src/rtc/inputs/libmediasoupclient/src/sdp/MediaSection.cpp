@@ -252,7 +252,7 @@ namespace mediasoupclient
 								codecParameters["ptime"] = opusPtime;
 							}
 						}
-						else if (mimeType == "video/vp8" || mimeType == "video/vp9" || mimeType == "video/h264" || mimeType == "video/h265")
+						else if (mimeType == "video/vp8" || mimeType == "video/vp9" || mimeType == "video/h264" || mimeType == "video/h265" || mimeType == "video/av1")
 						{
 							auto videoGoogleStartBitrateIt = codecOptions->find("videoGoogleStartBitrate");
 							if (videoGoogleStartBitrateIt != codecOptions->end())

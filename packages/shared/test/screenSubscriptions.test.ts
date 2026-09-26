@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import './screenPrivacy.test.js';
 import { rtcSignalSchema, screenWatchSignalSchema, sfuConsumeSchema, sfuConsumerClosedSchema,
   sfuConsumerSetPausedSchema, sfuMediaAppDataSchema, sfuCreateWebRtcTransportSchema,
   sfuCloseWebRtcTransportSchema, sfuProducerClosedSchema, sfuProducerSetPausedSchema,

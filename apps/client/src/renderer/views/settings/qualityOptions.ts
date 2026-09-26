@@ -78,7 +78,7 @@ export const ASPECT_RATIO_GROUPS: AspectRatioGroup[] = [
 ];
 
 /** From the least to the most demanding, all of them realistic for WebRTC. */
-export const FPS_OPTIONS = [5, 10, 15, 20, 24, 30, 48, 60, 90, 120];
+export const FPS_OPTIONS = [5, 10, 15, 20, 24, 30, 48, 60, 90, 120, 144, 165, 240];
 
 /** Opus does the work here, so the range mirrors what Opus is usually run at. */
 export const AUDIO_BITRATE_OPTIONS = [16, 24, 32, 48, 64, 96, 128, 192, 256, 320];

@@ -63,7 +63,7 @@ inline void ValidateVideoConfiguration(const VideoConfiguration& video) {
   // obs_reset_video aligns output width to four pixels; reject implicit resizing.
   Require(video.width >= 4 && video.width <= 3840 && video.width % 4 == 0 &&
       video.height >= 2 && video.height <= 2160 && video.height % 2 == 0 &&
-      video.fps > 0 && video.fps <= 120 &&
+      video.fps > 0 && video.fps <= (video.width == 3840 || video.height == 2160 ? 120u : 240u) &&
       video.bitrateKbps >= 50 && video.bitrateKbps <= kMaximumBitrateKbps && video.bitrateKbps % 50 == 0,
       "Unsupported native capture resolution, framerate or bitrate", "ERR_SCREEN_CAPTURE_VIDEO");
 }
@@ -94,6 +94,26 @@ inline std::uint32_t RequiredCaptureH264Level(const VideoConfiguration& video) {
         columns * columns <= 8ull * limit.frameMacroblocks && rows * rows <= 8ull * limit.frameMacroblocks &&
         video.bitrateKbps <= limit.bitrateKbps) return limit.level;
   throw ContractError("ERR_SCREEN_CAPTURE_H264", "Selected rendition exceeds H264 Main Level 6");
+}
+
+inline std::uint32_t RequiredCaptureAv1Level(const VideoConfiguration& video, std::uint32_t ceilingKbps) {
+  ValidateVideoConfiguration(video);
+  Require(ceilingKbps >= video.bitrateKbps && ceilingKbps <= kMaximumBitrateKbps && ceilingKbps % 50 == 0,
+          "Invalid capture bitrate ceiling", "ERR_SCREEN_CAPTURE_VIDEO");
+  struct Limit { std::uint32_t index, pixels, width, height; std::uint64_t rate; std::uint32_t bitrateKbps; };
+  // AV1 Annex A, Main Tier. Budget the whole adaptive range, not the startup bitrate.
+  constexpr Limit limits[] = {
+    {0, 147456, 2048, 1152, 4423680, 1500}, {1, 278784, 2816, 1584, 8363520, 3000},
+    {4, 665856, 4352, 2448, 19975680, 6000}, {5, 1065024, 5504, 3096, 31950720, 10000},
+    {8, 2359296, 6144, 3456, 70778880, 12000}, {9, 2359296, 6144, 3456, 141557760, 20000},
+    {12, 8912896, 8192, 4352, 267386880, 30000}, {13, 8912896, 8192, 4352, 534773760, 40000},
+    {14, 8912896, 8192, 4352, 1069547520, 60000}, {17, 35651584, 16384, 8704, 2139095040, 100000},
+  };
+  const std::uint64_t pixels = std::uint64_t{video.width} * video.height;
+  for (const auto& limit : limits)
+    if (pixels <= limit.pixels && video.width <= limit.width && video.height <= limit.height &&
+        pixels * video.fps <= limit.rate && ceilingKbps <= limit.bitrateKbps) return limit.index;
+  throw ContractError("ERR_SCREEN_CAPTURE_AV1", "Selected rendition exceeds AV1 Main Tier level bounds");
 }
 
 inline bool ExactVideoConfiguration(const abi::VideoInfo& video, const VideoConfiguration& expected,
@@ -218,10 +238,12 @@ inline const char* EncoderRateControl(EncoderKind kind) {
 }
 // OBS supplies the output colour description; AMF's input primaries otherwise default to undefined.
 inline const char* EncoderExtraOptions(EncoderKind kind) { return kind == EncoderKind::Nvenc ? "" : "InColorPrimaries=1"; }
-inline std::string EncoderProfileOptions(EncoderKind kind, const VideoConfiguration& video) {
+inline std::string EncoderProfileOptions(EncoderKind kind, const VideoConfiguration& video,
+                                        std::uint32_t ceilingKbps = kMaximumBitrateKbps) {
   if (kind == EncoderKind::AmfAv1)
     return "Av1EncodingLatencyMode=3 Av1InputColorProfile=1 Av1InputColorTransferChar=1 Av1InputColorPrimaries=1";
-  if (kind == EncoderKind::NvencAv1) return "";
+  if (kind == EncoderKind::NvencAv1)
+    return "level=" + std::to_string(RequiredCaptureAv1Level(video, ceilingKbps)) + " tier=0";
   if (kind == EncoderKind::Nvenc) return EncoderExtraOptions(kind);
   // Pinned texture-amf.cpp applies ProfileLevel after its size-only level guess,
   // and reads the property back before Init. Preserve the independent colour fix.
@@ -263,6 +285,7 @@ struct Arguments {
   CaptureKind kind = CaptureKind::Window;
   EncoderKind encoder = EncoderKind::Auto;
   bool encoderProbe = false;
+  std::uint32_t bitrateCeilingKbps = kMaximumBitrateKbps;
   MonitorIdentity monitor;
   Method method = Method::Wgc;
   VideoConfiguration video;
@@ -288,7 +311,7 @@ inline void ValidatePathEvidence(const PathEvidence& value) {
 }
 
 inline Arguments ParseArguments(std::span<const std::wstring_view> input) {
-  Require(input.size() >= 9 && input.size() <= 16, "Expected capture identity and explicit video configuration",
+  Require(input.size() >= 9 && input.size() <= 17, "Expected capture identity and explicit video configuration",
           "ERR_SCREEN_CAPTURE_ARGUMENT");
   Arguments value;
   unsigned seen = 0;
@@ -315,7 +338,7 @@ inline Arguments ParseArguments(std::span<const std::wstring_view> input) {
       } else if (name == L"--height") {
         bit = 64; value.video.height = static_cast<std::uint32_t>(Decimal(text, 2160));
       } else if (name == L"--fps") {
-        bit = 128; value.video.fps = static_cast<std::uint32_t>(Decimal(text, 120));
+        bit = 128; value.video.fps = static_cast<std::uint32_t>(Decimal(text, 240));
       } else if (name == L"--bitrate") {
         bit = 256; value.video.bitrateKbps = static_cast<std::uint32_t>(Decimal(text, kMaximumBitrateKbps));
       } else if (name == L"--kind") {
@@ -358,13 +381,18 @@ inline Arguments ParseArguments(std::span<const std::wstring_view> input) {
         bit = 524288;
         Require(text == L"stretch" || text == L"fit", "Unsupported capture scaling mode", "ERR_SCREEN_CAPTURE_VIDEO");
         value.video.scaleMode = text == L"fit" ? ScaleMode::Fit : ScaleMode::Stretch;
+      } else if (name == L"--bitrate-ceiling") {
+        bit = 1048576;
+        value.bitrateCeilingKbps = static_cast<std::uint32_t>(Decimal(text, kMaximumBitrateKbps));
       } else throw ContractError("ERR_SCREEN_CAPTURE_ARGUMENT", "Unknown native host option");
     }
     Require((seen & bit) == 0, "Duplicate native host option", "ERR_SCREEN_CAPTURE_ARGUMENT");
     seen |= bit;
   }
   ValidateVideoConfiguration(value.video);
-  const auto targetOptions = seen & ~524288u;
+  Require(value.bitrateCeilingKbps >= value.video.bitrateKbps && value.bitrateCeilingKbps % 50 == 0,
+          "Invalid capture bitrate ceiling", "ERR_SCREEN_CAPTURE_VIDEO");
+  const auto targetOptions = seen & ~(524288u | 1048576u);
   if (value.encoderProbe) {
     Require(targetOptions == ((511u & ~24u) | 2048u | 262144u),
             "Encoder probing must not select a window, monitor or game", "ERR_SCREEN_CAPTURE_ARGUMENT");

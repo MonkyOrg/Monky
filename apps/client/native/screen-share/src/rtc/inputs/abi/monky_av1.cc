@@ -34,7 +34,8 @@ void* MonkyAv1Create(const MonkyAv1Config* requested, char* error, size_t capaci
   try {
     if (!requested || requested->width < 4 || requested->width > 3840 || requested->width % 4 ||
         requested->height < 2 || requested->height > 2160 || requested->height % 2 ||
-        !requested->fps || requested->fps > 120 || requested->bitrate_kbps < 50 ||
+        !requested->fps || requested->fps > (requested->width == 3840 || requested->height == 2160 ? 120u : 240u) ||
+        requested->bitrate_kbps < 50 ||
         requested->bitrate_kbps > 80000 || !requested->threads || requested->threads > 16)
       throw std::runtime_error("Invalid real-time AV1 configuration");
     auto encoder = std::make_unique<Encoder>();

@@ -412,6 +412,7 @@ export class WebRtcManager {
     captureKind: NativeScreenCaptureKind = 'window',
     preserveAspectRatio = true,
     audioReplacement?: { shareId?: string; retirePrevious: () => Promise<void> },
+    audience?: NativeScreenSource['audience'],
   ): Promise<MediaStream> {
     if (this.voiceReconnectSuspended) throw new Error(t('screenCodec.reconnecting'));
     const profile = videoService.getProfile();
@@ -425,7 +426,7 @@ export class WebRtcManager {
     const stream = new MediaStream();
     try {
       const source = await this.nativeScreens.addSource({
-        shareId: stream.id, desktopSourceId, captureKind, preserveAspectRatio, video, audio, thumbnail,
+        shareId: stream.id, desktopSourceId, captureKind, preserveAspectRatio, video, audio, thumbnail, audience,
         audioBitrateKbps: profile.audioBitrateKbps,
         ...(audioReplacement?.shareId ? { replacesAudioShareId: audioReplacement.shareId } : {}),
       });

@@ -237,6 +237,12 @@ int main() {
       model.video = {3840, 2160, 120, 80000}; model.caps[3].value = 52;
     }, {"NV_ENC_CAPS_LEVEL_MAX", "value=52", "required=60"}, {}, true);
     Run("1080p120 retains Level5.1 hardware admission", [](Model& model) { model.caps[3].value = 51; });
+    Run("1080p240 Level5.2 device admission", [](Model& model) {
+      model.video = {1920, 1080, 240, 80000}; model.caps[3].value = 52;
+    });
+    Run("1080p240 refuses Level5.1-only hardware", [](Model& model) {
+      model.video = {1920, 1080, 240, 80000}; model.caps[3].value = 51;
+    }, {"NV_ENC_CAPS_LEVEL_MAX", "value=51", "required=52"}, {}, true);
     Run("missing H264 is not a failed cap call", [](Model& model) { model.codecs.values.pop_back(); },
         {"nvEncGetEncodeGUIDs", "H264=0", "status=0"}, [](const Model& model) {
       Check(model.profiles.countCalls == 0 && model.formats.countCalls == 0 && model.queriedCaps.empty(),

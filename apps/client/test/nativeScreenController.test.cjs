@@ -259,6 +259,8 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
   };
 }
 
+require('./nativeScreenPrivacyCases.cjs')({ fixture, input, profile });
+
 for (const mode of ['p2p', 'sfu']) {
   test(`${mode}: native unavailability never starts Chromium; explicit selection allows retry`, async t => {
     const f = fixture(t, { allowBrowser: true, capabilities: {
@@ -520,11 +522,13 @@ test('native profile alignment is explicit and unsupported ceilings are not sile
   assert.deepEqual(f.nativeScreenProfile(profile(3840, 2160, 60)), {
     width: 3840, height: 2160, fps: 60, maxBitrateKbps: 6000,
   });
-  assert.equal(f.nativeScreenProfile(profile(3840, 2160, 120)), null);
-  assert.equal(f.nativeScreenProfile(profile(3840, 1080, 61)), null);
-  assert.equal(f.nativeScreenProfile(profile(1920, 2160, 61)), null);
+  assert.equal(f.nativeScreenProfile(profile(3840, 2160, 120)).fps, 120);
+  assert.equal(f.nativeScreenProfile(profile(1920, 1080, 240)).fps, 240);
+  assert.equal(f.nativeScreenProfile(profile(3840, 2160, 121)), null);
+  assert.equal(f.nativeScreenProfile(profile(3840, 1080, 121)), null);
+  assert.equal(f.nativeScreenProfile(profile(1920, 2160, 121)), null);
   assert.equal(f.nativeScreenProfile(profile(3844, 2160)), null);
-  assert.equal(f.nativeScreenProfile(profile(1920, 1080, 121)), null);
+  assert.equal(f.nativeScreenProfile(profile(1920, 1080, 241)), null);
 });
 
 test('preview preference is synchronized on join and changes without creating a remote Watch', async t => {
@@ -609,6 +613,25 @@ test('capture badge updates are presentation/source scoped for local preview and
   f.emit(remote);
   assert.equal(f.controller.getCaptureMode('publisher', f.remote.shareId), null);
 });
+
+for (const reason of ['capture-failed', 'source-unavailable', 'unsupported', 'capacity-exceeded']) {
+  test(`remote ${reason} survives closure; retry starts a fresh presentation`, async t => {
+    const f = fixture(t);
+    f.watching(true);
+    await f.controller.sync();
+    const watch = f.commands.findLast(command => command.action === 'watch');
+    const scope = { type: 'state', publisherSessionId: 'publisher', shareId: f.remote.shareId,
+      sourceInstanceId: f.remote.instanceId, presentationId: watch.presentationId };
+    f.emit({ ...scope, state: 'unavailable', reason });
+    f.emit({ ...scope, state: 'closed' });
+    f.emit({ ...scope, state: 'closed' });
+    assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).reason, reason);
+    await f.controller.retry('publisher', f.remote.shareId);
+    assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
+    f.emit({ ...scope, state: 'closed' });
+    assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
+  });
+}
 
 test('active local Game Capture errors preserve the typed code, public reason and raw diagnostics without fallback', async t => {
   const f = fixture(t);
@@ -776,10 +799,12 @@ test('active native settings reject incompatible codecs and profiles before chan
   assert.equal(f.controller.settingsIssue(profile(), 'vp8'), 'codec');
   assert.equal(f.controller.settingsIssue(profile(), 'auto'), null);
   assert.equal(f.controller.settingsIssue(profile(), 'h264'), null);
-  assert.equal(f.controller.settingsIssue(profile(3840, 2160, 120), 'h264'), 'profile');
+  assert.equal(f.controller.settingsIssue(profile(3840, 2160, 120), 'h264'), null);
+  assert.equal(f.controller.settingsIssue(profile(3840, 2160, 121), 'h264'), 'profile');
   assert.equal(f.controller.settingsIssue({ ...profile(3840, 2160, 60), screenBitrateKbps: 80000 }, 'h264'), null);
   assert.equal(f.controller.settingsIssue({ ...profile(), screenBitrateKbps: 80050 }, 'h264'), 'profile');
-  assert.equal(f.controller.settingsIssue(profile(1920, 1080, 144), 'h264'), 'profile');
+  assert.equal(f.controller.settingsIssue(profile(1920, 1080, 240), 'h264'), null);
+  assert.equal(f.controller.settingsIssue(profile(1920, 1080, 241), 'h264'), 'profile');
   assert.equal(f.controller.settingsIssue({ ...profile(), screenBitrateKbps: 1501 }, 'h264'), 'profile');
   assert.equal(f.controller.settingsIssue({ ...profile(), audioBitrateKbps: 512 }, 'h264'), 'profile');
   assert.equal(f.commands.length, before, 'Validation cannot mutate a running source.');

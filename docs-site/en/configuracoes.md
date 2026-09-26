@@ -87,24 +87,38 @@ Signaling, connection control, voice and camera can still use the network.
 
 ### Native sharing and viewer quality
 
-The picker shows the capture methods and H.264 encoder available in this
-device's native backend. Unavailable options are disabled with a reason;
-the GPU brand does not guarantee support. There is no automatic switch to
+The picker shows available capture methods. The encoder and codec are selected
+under **Quality & sharing**. Availability is confirmed for the combination of
+codec, resolution, FPS, and bitrate; the GPU brand does not guarantee support. There is no automatic switch to
 Chromium or another source. The automatic **Game Capture** to **Normal**
 attempt, when needed, uses only the same window and displays a notice.
 
-For up to **3840×2160**, **120 FPS** and **80000 kbps**, select **Custom** under
-**Quality & sharing**; existing presets remain unchanged. **4K is capped at
-60 FPS**: reaching 3840 px wide or 2160 px high automatically limits the FPS
+For up to **3840×2160**, **240 FPS** and **80000 kbps**, select **Custom** under
+**Quality & sharing**; existing presets remain unchanged. **4K screen sharing is capped at
+120 FPS**: reaching 3840 px wide or 2160 px high automatically limits the FPS
 field and dropdown. Typed values obey the same ceilings; values above them
 are adjusted with a visible notice.
-Limits still depend on the encoder: **4K/60** requires H.264 Level 5.2.
-Unsupported profiles are rejected rather than silently reducing
-FPS; during a quality change, preflight keeps the old source while checking the
-new configuration. Leave bandwidth for your game and every outgoing profile.
+These profiles are available for H.264 and AV1, subject to encoder and receiver support.
+**1080p/240 and 4K/60** require H.264 Level 5.2; **4K/120** requires Level 6.0.
+Camera keeps its 120 FPS ceiling, or 60 FPS at 4K.
+It uses Chromium capture and the modes offered by the webcam, a different
+path from native screen capture.
+
+Every quality change — preset, resolution, FPS, bitrate, codec, or
+Hardware/Software — validates the combination before applying it. When needed,
+the app finds a lower FPS confirmed by the encoder, preserving resolution,
+bitrate, and explicit codec and mode choices in **Manual**, and shows a toast
+explaining what changed and why. For example, hardware H.264 at 4K120 can be
+adjusted to 4K60 when that is the GPU's compatible profile. Manual does not
+silently switch to Software or another codec. **Automatic** retains its codec
+and mode negotiation. It does not invent driver bitrate limits. Without a
+confirmed combination, it leaves the quality profile and stream unchanged
+and displays a friendly notice.
+During a stream, preflight keeps the old source while checking the new
+configuration. Leave bandwidth for your game and every outgoing profile.
 In the picker, **Keep aspect ratio** fits the image into the selected dimensions, adding
 borders when needed without distortion. Off retains the current stretch-to-fill
-behavior. The switch starts off for each new screen share and is not a global
+behavior. The switch starts on for each new screen share and is not a global
 preference.
 
 A new screen share's preview enters focus as soon as its tile is available.
@@ -514,7 +528,8 @@ The **Custom** profile offers dropdowns with the most common values — aspect
 ratio (16:9, 16:10, 4:3 and 21:9), resolution (from the lowest up to 4K), FPS
 and bitrate. Every dropdown keeps a **Custom...** entry that reveals the plain
 number box for values outside the list, within the same ceilings: 3840×2160,
-80000 kbps for video and 120 FPS (60 FPS at 3840 px wide or 2160 px high).
+80000 kbps for video and 240 FPS for screen sharing (120 FPS at 3840 px wide or 2160 px high).
+Camera ceilings remain 120 FPS, or 60 FPS at 4K.
 Audio retains its own 510 kbps ceiling. Changing the aspect ratio keeps the
 resolution closest to the one you were already using.
 

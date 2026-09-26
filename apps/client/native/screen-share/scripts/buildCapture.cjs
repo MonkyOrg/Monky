@@ -12,7 +12,7 @@ const source = path.join(root, 'src', 'capture');
 const inputs = require(path.join(vendor, 'sources.json'));
 const runtimeInputs = require(path.join(vendor, 'runtime-inputs.json'));
 const additionalInputs = require(path.join(source, 'runtime-additions.json'));
-const { bindGameSource, bindMonitorSource } = require('./captureSourceBindings.cjs');
+const { bindGameSource, bindMonitorSource, configureWinrtSource } = require('./captureSourceBindings.cjs');
 const quote = value => {
   assert.ok(typeof value === 'string' && !/["%!\r\n]/u.test(value), 'Unsupported build argument.');
   return `"${value.replace(/\\$/u, '\\\\')}"`;
@@ -149,6 +149,21 @@ function build(config) {
       'obs_module_load', 'obs_module_unload', 'obs_module_ver'])
       assert.ok(new RegExp(`\\b${name}\\b`, 'u').test(moduleExports), `Missing capture module export: ${name}`);
 
+    const winrtModule = path.join(buildDirectory, 'libobs-winrt.dll');
+    const winrtSource = path.join(generated, 'winrt-capture-cadence.cpp');
+    write(winrtSource, configureWinrtSource(fs.readFileSync(path.join(vendor, 'libobs-winrt', 'winrt-capture.cpp'), 'utf8')));
+    const winrtHeaders = path.join(generated, 'winrt-build.h');
+    write(winrtHeaders, ['d3d11.h', 'DispatcherQueue.h', 'dwmapi.h', 'obs-module.h', 'util/windows/ComPtr.hpp',
+      'Windows.Graphics.Capture.Interop.h', 'windows.graphics.directx.direct3d11.interop.h',
+      'winrt/Windows.Foundation.Metadata.h', 'winrt/Windows.Graphics.Capture.h', 'winrt/Windows.System.h']
+      .map(header => `#include <${header}>`).join('\n') + '\n');
+    compile('winrt-cadence', ['/nologo', '/LD', '/std:c++20', '/EHsc', '/bigobj', '/O2', '/MD', '/W3', '/WX', '/utf-8',
+      '/Brepro', '/DNOMINMAX', '/DUNICODE', '/D_UNICODE', '/D_WIN32_WINNT=0x0A00', '/DWINVER=0x0A00',
+      `/FI${quote(winrtHeaders)}`, ...includes.map(value => `/I${quote(value)}`), quote(winrtSource),
+      quote(path.join(vendor, 'libobs-winrt', 'winrt-dispatch.cpp')),
+      `/Fo${quote(objects + path.sep)}`, `/Fe${quote(winrtModule)}`, '/link', '/INCREMENTAL:NO', '/OPT:REF', '/OPT:ICF', '/WX',
+      ...importLibraries.map(quote), 'windowsapp.lib', 'dwmapi.lib', 'd3d11.lib', 'CoreMessaging.lib', 'user32.lib']);
+
     const dlls = new Map(runtimeInputs.files.filter(file => file.path.startsWith('bin\\64bit\\'))
       .map(file => [path.win32.basename(file.path).toLowerCase(), file.path]));
     const inspected = new Set(), systemDependencies = new Set(), selectedCrt = new Map();
@@ -182,13 +197,16 @@ function build(config) {
       select(relative); inspect(stockPath(relative));
     }
     inspect(module);
+    inspect(winrtModule);
     for (const file of stockFiles) {
       if (file.path.startsWith('data\\libobs\\') ||
         /^data\\obs-plugins\\(?:win-capture|obs-ffmpeg|obs-nvenc|obs-x264)\\locale\\en-US\.ini$/u.test(file.path) ||
         /^data\\obs-plugins\\win-capture\\(?:compatibility|package)\.json$/u.test(file.path) ||
         file.path.startsWith('data\\obs-plugins\\win-capture\\schema\\')) select(file.path);
     }
+    selected.set('bin\\64bit\\libobs-winrt.dll', { path: 'bin\\64bit\\libobs-winrt.dll', ...fingerprint(winrtModule) });
     const runtime = [...selected.values()].sort((a, b) => a.path.localeCompare(b.path));
+    const runtimeSource = relative => relative === 'bin\\64bit\\libobs-winrt.dll' ? winrtModule : stockPath(relative);
     assert.ok(runtime.every(file => !/Qt6|obs-vulkan|obs64\.exe/iu.test(file.path)),
       'GUI and global Vulkan installer files do not belong in the explicit capture runtime.');
     const modulePin = fingerprint(module);
@@ -257,10 +275,10 @@ function build(config) {
     }
     contracts.crossLanguageEncoderProbeMessages = encoderProbe.messages.length;
     for (const file of inputs.files) verify(path.join(vendor, file.path), file);
-    for (const file of runtime) verify(stockPath(file.path), file);
+    for (const file of runtime) verify(runtimeSource(file.path), file);
     for (const file of sourceFiles) verify(path.join(source, file.path), file);
     const bin = config.output ?? path.join(root, 'bin', 'win32-x64');
-    for (const file of runtime) write(path.join(bin, 'obs', ...file.path.split('\\')), fs.readFileSync(stockPath(file.path)));
+    for (const file of runtime) write(path.join(bin, 'obs', ...file.path.split('\\')), fs.readFileSync(runtimeSource(file.path)));
     for (const probe of ['obs-amf-test.exe', 'obs-nvenc-test.exe'])
       write(path.join(bin, probe), fs.readFileSync(path.join(stock, 'bin', '64bit', probe)));
     write(path.join(bin, 'monky-screen-capture.exe'), fs.readFileSync(executable));
@@ -288,6 +306,7 @@ function build(config) {
         gameCaptureStartup: 'explicit-game-target-only', compatibilityUpdater: false,
         globalVulkanHook: false, hardwareQualified: false, scaleModes: ['stretch', 'fit'],
         captureDataStorage: 'pinned-profile-cache',
+        wgcCadence: 'requested-half-frame-interval-when-supported',
       },
     };
     write(path.join(bin, 'capture-build.json'), JSON.stringify(report, null, 2) + '\n');

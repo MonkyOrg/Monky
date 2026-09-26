@@ -44,7 +44,7 @@ export type NativeScreenCaptureStatus = z.infer<typeof nativeScreenCaptureStatus
 export const NATIVE_SCREEN_GAME_STARTUP_TIMEOUT_MS = 75000;
 
 export const NATIVE_SCREEN_VIDEO_LIMITS = Object.freeze({
-  width: 3840, height: 2160, fps: 120, maxBitrateKbps: 80000,
+  width: 3840, height: 2160, fps: 240, maxBitrateKbps: 80000,
 });
 
 export const nativeScreenVideoProfileSchema = z.object({
@@ -53,7 +53,9 @@ export const nativeScreenVideoProfileSchema = z.object({
   height: z.number().int().min(2).max(NATIVE_SCREEN_VIDEO_LIMITS.height).multipleOf(2),
   fps: z.number().int().min(1).max(NATIVE_SCREEN_VIDEO_LIMITS.fps),
   maxBitrateKbps: z.number().int().min(150).max(NATIVE_SCREEN_VIDEO_LIMITS.maxBitrateKbps).multipleOf(50),
-}).strict();
+}).strict().refine(video => (video.width < NATIVE_SCREEN_VIDEO_LIMITS.width
+  && video.height < NATIVE_SCREEN_VIDEO_LIMITS.height) || video.fps <= 120,
+  '4K screen profiles support at most 120 FPS.');
 export type NativeScreenVideoProfile = z.infer<typeof nativeScreenVideoProfileSchema>;
 
 export function getScreenH264ProfileLevelId(profile: Readonly<NativeScreenVideoProfile>): '4d0033' | '4d0034' | '4d003c' {
@@ -92,6 +94,13 @@ export const nativeScreenRenditionSchema = z.object({
 }).strict();
 export type NativeScreenRendition = z.infer<typeof nativeScreenRenditionSchema>;
 
+export const screenShareAudienceSchema = z.object({
+  userIds: z.array(reference(128)).max(256),
+  roleIds: z.array(reference(128)).max(128),
+}).strict().refine(value => value.userIds.length + value.roleIds.length > 0,
+  'A private screen share requires at least one user or role.');
+export type ScreenShareAudience = z.infer<typeof screenShareAudienceSchema>;
+
 export const nativeScreenSourceSchema = z.object({
   shareId: screenShareIdSchema,
   instanceId: z.string().uuid(),
@@ -99,6 +108,8 @@ export const nativeScreenSourceSchema = z.object({
   audio: z.boolean(),
   /** Absent on legacy descriptors: H.264. Codec is independent of rendition geometry. */
   codec: screenCodecSchema.optional(),
+  /** Omitted means public. Only the publisher receives the full access list. */
+  audience: screenShareAudienceSchema.optional(),
 }).strict();
 export type NativeScreenSource = z.infer<typeof nativeScreenSourceSchema>;
 export const nativeScreenSourcesSchema = z.array(nativeScreenSourceSchema).max(2)

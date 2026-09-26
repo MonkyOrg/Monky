@@ -3,6 +3,8 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { fixture, deferred, flush, MONITOR_SOURCE_ID } = require('./fixtures/screenSharingUiModel.cjs');
+require('./privateScreenSharingUi.test.cjs');
+require('./screenEncodingAdjustment.test.cjs');
 
 const key = (element, value, modifiers = {}) => {
   const event = new Event('keydown', { bubbles: true, cancelable: true });
@@ -374,7 +376,7 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(reopened.querySelector('#checkbox-screen-preview-focus').checked, false);
   });
 
-  test(`4K and 80 Mbps are camera/screen choices without raising preset defaults (${language})`, t => {
+  test(`4K and 80 Mbps are camera/screen choices without raising preset defaults (${language})`, async t => {
     const f = fixture(language);
     t.after(() => f.close());
     const presetBefore = f.settingsStore.qualityPreset;
@@ -394,6 +396,7 @@ for (const language of ['pt-BR', 'en']) {
     change(resolution);
     screenRate.value = '80000';
     change(screenRate);
+    await flush();
     assert.equal(f.settingsStore.customProfile.screenWidth, 3840);
     assert.equal(f.settingsStore.customProfile.screenHeight, 2160);
     assert.equal(f.settingsStore.customProfile.screenBitrateKbps, 80000);
@@ -1405,7 +1408,7 @@ test('unavailable profile and application-wide Mac audio confirmation stay fail-
   await f.picker.open();
   f.document.querySelector('.source-item').click();
   f.settingsStore.qualityPreset = 'CUSTOM';
-  f.settingsStore.customProfile.screenFps = 144;
+  f.settingsStore.customProfile.screenFps = 241;
   await f.picker.startSharing('replace');
   assert.equal(nativeStarts(f).length, 0);
   f.settingsStore.qualityPreset = 'NORMAL';
@@ -1747,7 +1750,8 @@ for (const language of ['en', 'pt-BR']) {
     assert.equal(control(f, 'select-video-codec').value, 'h264');
     assert.equal(f.settingsStore.preferredVideoCodec, 'auto');
     assert.equal(f.saves, 0);
-    assert.match(status.textContent, /Unsupported test adapter\/profile/);
+    assert.doesNotMatch(status.textContent, /Unsupported test adapter\/profile/);
+    assert.equal(status.textContent, f.i18n.t('settings.screenEncodingHardwareUnavailable'));
     assert.equal(status.getAttribute('aria-busy'), 'false');
     hardware.click();
     await flush();
@@ -1788,7 +1792,7 @@ test('encoder runtime errors remain visible and closing discovery prevents late 
   await flush();
   assert.equal(f.settingsStore.screenEncodingMode, 'hardware');
   assert.equal(f.saves, 0);
-  assert.match(control(f, 'screen-encoding-status').textContent, /Driver verification failed/);
+  assert.equal(control(f, 'screen-encoding-status').textContent, f.i18n.t('settings.screenEncodingProbeFailed'));
   const gate = deferred();
   f.controls.encoding = () => gate.promise;
   control(f, 'screen-encoding-manual').click();
@@ -1866,9 +1870,9 @@ test('Manual unsupported combination stays selected and unavailable; Automatic r
   f.mountQuality();
   await flush();
   assert.equal(control(f, 'screen-encoding-hardware').getAttribute('aria-pressed'), 'true');
-  assert.equal(control(f, 'screen-encoding-hardware').disabled, true);
+  assert.equal(control(f, 'screen-encoding-hardware').disabled, false, 'Manual choices can request a verified lower-FPS profile.');
   assert.equal(control(f, 'select-video-codec').value, 'av1');
-  assert.match(control(f, 'screen-encoding-status').textContent, /Manual AV1 unsupported/);
+  assert.doesNotMatch(control(f, 'screen-encoding-status').textContent, /Manual AV1 unsupported/);
   assert.equal(f.saves, 0);
   f.controls.encoding = async () => ({ selection: { mode: 'software', codec: 'h264', encoder: 'obs_x264' },
     hardware: { available: false, reason: 'Hardware unsupported' }, fallback: true });

@@ -24,6 +24,7 @@ const commands = [
   ['node', 'apps/client/test/settingsNavigationSmoke.cjs', '--release-notes'],
   ['node', 'apps/client/test/settingsNavigationSmoke.cjs', '--quality-settings'],
   ['node', 'apps/client/test/settingsNavigationSmoke.cjs', '--screen-stage'],
+  ['node', 'apps/client/test/settingsNavigationSmoke.cjs', '--screen-audience'],
   ['npm', 'run', 'test:settings:ui', '--workspace=apps/client'],
   ['npm', 'run', 'test:camera', '--workspace=apps/client'],
   ['node', 'apps/client/test/footerControlsSmoke.cjs'],

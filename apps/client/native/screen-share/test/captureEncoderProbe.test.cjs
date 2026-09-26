@@ -81,7 +81,9 @@ function fixture(settings = {}) {
       assert.equal(executable, options.host.executable);
       assert.deepEqual(spawnOptions.stdio, ['pipe', 'pipe', 'pipe']);
       assert.equal(spawnOptions.windowsHide, true);
-      assert.equal(args.length, 10); assert.ok(args.includes('--probe=encoder'));
+      assert.equal(args.length, encoder === 'obs_nvenc_av1_tex' ? 11 : 10);
+      assert.ok(args.includes('--probe=encoder'));
+      if (encoder === 'obs_nvenc_av1_tex') assert.ok(args.includes(`--bitrate-ceiling=${selectedVideo.bitrateKbps}`));
       assert.ok(args.includes(`--scale-mode=${settings.scaleMode ?? 'stretch'}`));
       assert.equal(args.some(value => /^--(?:hwnd|pid|kind|process-created|monitor-)/u.test(value)), false);
       settings.checkArguments?.(args);
@@ -284,7 +286,18 @@ test('capture waits for the first encoded packet before requesting lazy NVENC pa
 test('AMF declares input primaries and verifies the exact fixed option without relaxing H264 colour admission', () => {
   const host = fs.readFileSync(path.join(__dirname, '..', 'src', 'capture', 'host.cpp'), 'utf8');
   assert.match(host, /const auto options = EncoderProfileOptions\(capability_\.encoder, arguments_\.video\);[\s\S]*obs_data_set_string\(encoderSettings_, "ffmpeg_opts", options\.c_str\(\)\)/u);
-  assert.match(host, /obs_data_get_string\(settings\.value, nvenc \? "opts" : "ffmpeg_opts"\), 512\) ==\s*EncoderProfileOptions\(capability_\.encoder, arguments_\.video\)/u);
+  assert.match(host, /obs_data_get_string\(settings\.value, nvenc \? "opts" : "ffmpeg_opts"\), 512\) ==\s*EncoderProfileOptions\(capability_\.encoder, arguments_\.video, arguments_\.bitrateCeilingKbps\)/u);
+});
+
+test('NVENC AV1 applies and retains fixed level/tier options across live bitrate updates', () => {
+  const host = fs.readFileSync(path.join(__dirname, '..', 'src', 'capture', 'host.cpp'), 'utf8');
+  assert.match(host, /const auto options = EncoderProfileOptions\(capability_\.encoder, arguments_\.video, arguments_\.bitrateCeilingKbps\);\s*api\(\)\.obs_data_set_string\(encoderSettings_, "opts", options\.c_str\(\)\)/u);
+  const feedback = host.slice(host.indexOf('  void PollLiveFeedback() {'), host.indexOf('  void EncoderSettings() {'));
+  assert.match(feedback, /feedback\.bitrateKbps <= arguments_\.bitrateCeilingKbps/u);
+  assert.match(feedback, /obs_encoder_update\(encoder_, encoderSettings_\)/u);
+  assert.doesNotMatch(feedback, /"opts"|NV_ENC_LEVEL_AV1_AUTOSELECT/u);
+  const admission = fs.readFileSync(path.join(__dirname, '..', 'src', 'rtc', 'inputs', 'native_core', 'av1_sequence.h'), 'utf8');
+  assert.match(admission, /sequence\.operating_points\[0\]\.tier \|\|/u, 'High Tier must not bypass Main Tier negotiation');
 });
 
 test('AMF cleanup failures override unsupported codes while retaining the primary diagnostic', () => {
