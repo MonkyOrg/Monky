@@ -606,7 +606,7 @@ class Encoder final : public webrtc::VideoEncoder {
               (!rates.bitrate.GetBitrate(spatial, temporal) && !rates.target_bitrate.GetBitrate(spatial, temporal)),
               "Encoded video supports only L1T1 rate feedback");
       const auto requested = rates.bitrate.get_sum_bps();
-      if (!requested || rates.framerate_fps == 0) needs_idr_ = true;
+      if (!requested || rates.framerate_fps == 0) { needs_idr_ = true; requested_idr_ = false; }
       state_->Rates(session_, requested, rates.framerate_fps, maximum_bitrate_);
     } catch (const std::exception& error) { state_->Fail("ERR_RTC_ENCODED_RATES", error.what()); }
   }
@@ -625,7 +625,7 @@ class Encoder final : public webrtc::VideoEncoder {
         if (state_->stopping.load() || !state_->enabled.load() || token->generation != state_->generation ||
             !state_->rates.at(session_)) {
           ++token->refused;
-          needs_idr_ = true;
+          needs_idr_ = true; requested_idr_ = false;
           return WEBRTC_VIDEO_CODEC_OK;
         }
       }
@@ -633,17 +633,18 @@ class Encoder final : public webrtc::VideoEncoder {
           (*types)[0] == webrtc::VideoFrameType::kVideoFrameDelta)), "Unsupported encoded frame/layer request");
       const auto now = QpcNowUs();
       if (Expired(token->metadata.timestamp_us, now)) {
-        ++token->refused; needs_idr_ = true;
+        ++token->refused; needs_idr_ = true; requested_idr_ = false;
         state_->Recover(token->generation, token->metadata.frame_id, "codec-expired");
         return WEBRTC_VIDEO_CODEC_OK;
       }
       Capacity(0, 0, token->bytes.size(), token->metadata.timestamp_us, now);
-      if (types && (*types)[0] == webrtc::VideoFrameType::kVideoFrameKey) needs_idr_ = true;
+      const bool requested = types && (*types)[0] == webrtc::VideoFrameType::kVideoFrameKey;
+      if ((needs_idr_ || requested) && !token->metadata.keyframe && !requested_idr_) {
+        requested_idr_ = true; idr_at_ = Clock::now();
+        state_->Keyframe(session_);
+      }
+      // PLI asks for a new independent picture; it does not break a valid local chain.
       if (needs_idr_ && !token->metadata.keyframe) {
-        if (!requested_idr_) {
-          requested_idr_ = true; idr_at_ = Clock::now();
-          state_->Keyframe(session_);
-        }
         Require(Clock::now() - idr_at_ <= std::chrono::milliseconds(1500),
             "No real IDR arrived within the1500ms recovery bound", MONKY_ENGINE_TIMEOUT);
         ++token->refused;
@@ -687,7 +688,8 @@ class Encoder final : public webrtc::VideoEncoder {
       if (invoked && accepted) {
         ++token->accepted;
         state_->Forwarded(*token);
-        needs_idr_ = false; requested_idr_ = false;
+        needs_idr_ = false;
+        if (token->metadata.keyframe) requested_idr_ = false;
       } else {
         ++token->refused;
         state_->Fail("ERR_RTC_ENCODED_SEND", "RTC rejected the already-encoded access unit");
@@ -1344,6 +1346,60 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
                         std::numeric_limits<double>::infinity(),
                         static_cast<double>((std::numeric_limits<std::uint32_t>::max)()) + 1})
     verify_rate_estimate(fps, false);
+  {
+    struct Callback final : webrtc::EncodedImageCallback {
+      std::vector<webrtc::VideoFrameType> frames;
+      Result OnEncodedImage(const webrtc::EncodedImage& image, const webrtc::CodecSpecificInfo*) override {
+        frames.push_back(image.FrameType());
+        return Result(Result::OK);
+      }
+    } callback;
+    std::size_t requests = 0;
+    auto live = std::make_shared<State>(1, "cpu-pli-continuity", true,
+        [&](std::string_view type, Json data) {
+          if (type == "source.encodedFeedback" && data.at("kind") == "keyframe") ++requests;
+          return true;
+        });
+    Encoder encoder(live, MinimumEncodedLevel(live->video));
+    webrtc::VideoCodec codec;
+    codec.codecType = webrtc::kVideoCodecH264;
+    codec.width = 1920; codec.height = 1080; codec.maxFramerate = 120;
+    codec.startBitrate = 5000; codec.maxBitrate = 20000; codec.minBitrate = 64;
+    codec.active = true; codec.mode = webrtc::VideoCodecMode::kScreensharing;
+    codec.H264()->numberOfTemporalLayers = 1; codec.spatialLayers[0].numberOfTemporalLayers = 1;
+    check(encoder.InitEncode(&codec, 4, 1200) == WEBRTC_VIDEO_CODEC_OK, "Cannot initialize the PLI continuity check");
+    check(encoder.RegisterEncodeCompleteCallback(&callback) == WEBRTC_VIDEO_CODEC_OK,
+        "Cannot register the PLI continuity callback");
+    std::uint64_t next_frame = 0;
+    const auto encode = [&](bool independent, bool request) {
+      auto token = std::make_shared<Token>();
+      token->owner = live; token->generation = live->generation;
+      token->level = MinimumEncodedLevel(live->video);
+      token->metadata.frame_id = ++next_frame; token->metadata.keyframe = independent;
+      token->metadata.timestamp_us = QpcNowUs(); token->metadata.duration_us = 8333;
+      token->bytes = {1, 2, 3};
+      auto buffer = webrtc::make_ref_counted<NativeBuffer>(token);
+      const auto frame = webrtc::VideoFrame::Builder().set_video_frame_buffer(buffer)
+          .set_timestamp_us(token->metadata.timestamp_us).build();
+      const std::vector<webrtc::VideoFrameType> types{
+          request ? webrtc::VideoFrameType::kVideoFrameKey : webrtc::VideoFrameType::kVideoFrameDelta};
+      check(encoder.Encode(frame, &types) == WEBRTC_VIDEO_CODEC_OK, "The PLI continuity encoder failed");
+    };
+    encode(false, false);
+    check(callback.frames.empty() && requests == 1, "A new encoder must still wait for a real independent frame");
+    encode(true, true);
+    encode(false, true);
+    encode(false, true);
+    check(callback.frames.size() == 3 && requests == 2 &&
+        callback.frames.back() == webrtc::VideoFrameType::kVideoFrameDelta,
+        "A PLI must preserve an established chain and coalesce requests until a real keyframe");
+    encode(true, true);
+    encode(false, true);
+    check(callback.frames.size() == 5 && requests == 3 && !live->failed.load(),
+        "Only a real keyframe may settle the receiver request");
+    check(encoder.Release() == WEBRTC_VIDEO_CODEC_OK && live->buffers.empty(),
+        "PLI continuity checks must retire their actual native buffers");
+  }
   std::vector<Json> events;
   auto state = std::make_shared<State>(1, "cpu-encoded", true,
       [&](std::string_view type, Json data) { data["type"] = type; events.push_back(std::move(data)); return true; });

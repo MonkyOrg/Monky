@@ -1,9 +1,10 @@
 'use strict';
 
 const { isPresentationId } = require('./presentationRoute.cjs');
+const { registerTextureTransferReceiver } = require('./textureTransfer.cjs');
 
-function registerTextureReceiver(sharedTexture, { getSink, onError }) {
-  sharedTexture.setSharedTextureReceiver(async ({ importedSharedTexture }, metadata) => {
+function registerTextureReceiver(sharedTexture, { getSink, onError }, ipcRenderer = require('electron').ipcRenderer) {
+  return registerTextureTransferReceiver(sharedTexture, ipcRenderer, async ({ importedSharedTexture }, metadata) => {
     let frame;
     try {
       const minimumTimestamp = metadata?.presentationId === undefined ? 0 : -1;
@@ -22,7 +23,7 @@ function registerTextureReceiver(sharedTexture, { getSink, onError }) {
       frame?.close();
       importedSharedTexture.release();
     }
-  });
+  }, onError);
 }
 
 module.exports = { registerTextureReceiver };

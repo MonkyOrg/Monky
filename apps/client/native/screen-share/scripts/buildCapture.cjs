@@ -241,6 +241,11 @@ function build(config) {
     inspect(executable);
     const contracts = JSON.parse(execute(tests, [], { env, capture: true }));
     assert.ok(contracts.deviceFree && contracts.checks >= 60 && contracts.headerBytes === 96);
+    execute(process.execPath, ['--test', '--test-name-pattern=^native live pipe ',
+      path.join(root, 'test', 'captureRuntime.test.cjs')], {
+      env: { ...env, MONKY_CAPTURE_CONTRACT_EXE: tests }, capture: true,
+    });
+    contracts.delayedParentPipe = true;
     const nvencProbe = JSON.parse(execute(nvencTests, [], { env, capture: true }));
     assert.equal(nvencProbe.deviceFree, true); assert.equal(nvencProbe.modeledApi, true);
     assert.equal(nvencProbe.sdkMajor, 12); assert.equal(nvencProbe.sdkMinor, 2);

@@ -112,7 +112,8 @@ test('unsupported and unavailable remain explicit without native discovery', asy
 test('reject invalid options before acquiring any device-free worker', () => {
   for (const options of [{ sampleRate: 48000 }, { channels: 2 }, { includeWindowId: 0 },
     { includeWindowId: -1 }, { includeWindowId: NaN }, { includeWindowId: 1.5 },
-    { includeWindowId: Number.MAX_SAFE_INTEGER + 1 }, { excludePid: 2 ** 32 }, { excludePid: '1' }]) {
+    { includeWindowId: Number.MAX_SAFE_INTEGER + 1 }, { excludePid: 2 ** 32 }, { excludePid: '1' },
+    { overflowMode: 'ignore' }, { overflowMode: true }, { overflowMode: null }]) {
     assert.throws(() => binding.createPacketCapture(options, () => {}), { code: 'ERR_AUDIO_OPTIONS' });
   }
   assert.equal(binding.activeWorkers(), 0);
@@ -284,6 +285,103 @@ test('a full native queue waits for admission instead of terminating a recoverab
   assert.equal(closed.overflowCount, 0);
   assert.equal(closed.queuedPackets, 0);
   assert.deepEqual(events.filter(type => type !== 'packet'), ['ready', 'closed']);
+  assertOwnedCleanup(binding.trace(), 96);
+});
+
+test('live capture drops only unadmitted packets and resumes in a native epoch after prolonged pressure', async () => {
+  binding.configure(15);
+  const packets = [], discontinuities = [], pending = [];
+  const session = binding.createPacketCapture({ overflowMode: 'discontinue' }, event => {
+    if (event.type === 'discontinuity') { discontinuities.push(event); return; }
+    if (event.type !== 'packet') return;
+    packets.push(event);
+    if (event.sequence < 32) return new Promise(resolve => pending.push(resolve));
+  });
+  const until = async predicate => {
+    const deadline = performance.now() + 3000;
+    while (!predicate()) {
+      assert.ok(performance.now() < deadline, JSON.stringify(session.getStats()));
+      await wait(1);
+    }
+  };
+  try {
+    await session.ready;
+    binding.releaseGate();
+    for (let index = 0; index < 31; index++) binding.refill(false);
+    await until(() => packets.length === 32);
+    binding.refill(false);
+    await wait(650);
+    assert.equal(session.getStats().error, null);
+    assert.equal(session.getStats().queuedPackets, 32);
+    assert.equal(session.getStats().droppedPackets, 1);
+    assert.equal(session.getStats().droppedFrames, 441);
+    assert.equal(packets.length, 32, 'Previously admitted packets must not be revoked or replaced.');
+    for (const resolve of pending) resolve();
+    await until(() => session.getStats().queuedPackets === 0);
+    binding.refill(false);
+    await until(() => packets.length === 33);
+    const resumed = packets.at(-1);
+    assert.equal(resumed.sequence, 33);
+    assert.equal(resumed.frameIndex, 33 * 441);
+    assert.equal(resumed.qpcTimestampUs, 8000000 + 33 * 10000);
+    assert.equal(resumed.devicePosition, 33 * 441);
+    assert.equal(resumed.flags.raw, 0, 'A delivery gap must not fabricate WASAPI flags.');
+    assert.equal(resumed.pcm.readFloatLE(0), .25);
+    assert.notEqual(resumed.epoch, packets[31].epoch);
+    assert.deepEqual(discontinuities, [{
+      type: 'discontinuity', sessionId: resumed.sessionId, epoch: resumed.epoch,
+      reason: 'admission-backpressure', droppedPackets: 1, droppedFrames: 441,
+    }]);
+    binding.refill(false);
+    await until(() => packets.length === 34);
+    assert.equal(packets.at(-1).epoch, resumed.epoch);
+    assert.equal(discontinuities.length, 1);
+  } finally {
+    for (const resolve of pending) resolve();
+    binding.releaseGate();
+    await session.stop();
+  }
+  assert.equal(session.getStats().overflowCount, 0);
+  assert.equal(session.getStats().queuedPackets, 0);
+  assertOwnedCleanup(binding.trace(), session.getStats().capturedPackets);
+});
+
+test('live PCM capture survives a 1200ms JS dispatch stall with bounded credits and original packet identities', async () => {
+  binding.configure(14);
+  const packets = [], gaps = [];
+  let finish;
+  const delivered = new Promise(resolve => { finish = resolve; });
+  const session = binding.createPacketCapture({ overflowMode: 'discontinue' }, event => {
+    if (event.type === 'discontinuity') gaps.push(event);
+    if (event.type !== 'packet') return;
+    packets.push(event);
+    if (event.sequence === 95) finish();
+  });
+  try {
+    await session.ready;
+    binding.releaseGate();
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1200);
+    await Promise.race([delivered, session.closed, wait(3000)]);
+    assert.equal(packets.at(-1)?.sequence, 95);
+    const stats = session.getStats();
+    assert.equal(stats.state, 'capturing');
+    assert.equal(stats.error, null);
+    assert.equal(stats.overflowCount, 0);
+    assert.ok(stats.droppedPackets >= 1);
+    assert.equal(stats.droppedPackets + packets.length, 96);
+    assert.equal(gaps.reduce((sum, gap) => sum + gap.droppedPackets, 0), stats.droppedPackets);
+    for (let index = 0; index < packets.length; index++) {
+      const packet = packets[index], previous = packets[index - 1];
+      assert.equal(packet.frameIndex, packet.sequence * 441);
+      assert.equal(packet.qpcTimestampUs, 8000000 + packet.sequence * 10000);
+      assert.equal(packet.flags.raw, 0);
+      if (previous && packet.sequence !== previous.sequence + 1)
+        assert.notEqual(packet.epoch, previous.epoch);
+    }
+  } finally {
+    binding.releaseGate();
+    await session.stop();
+  }
   assertOwnedCleanup(binding.trace(), 96);
 });
 

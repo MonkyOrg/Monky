@@ -9,12 +9,23 @@ const { within } = require('../runtime/nativeDeadline.cjs');
 const directory = process.argv.find(value => value.startsWith('--artifacts='))?.slice('--artifacts='.length);
 const mode = process.argv.find(value => value.startsWith('--mode='))?.slice('--mode='.length) ?? 'p2p';
 const soakMs = Number(process.argv.find(value => value.startsWith('--soak-ms='))?.slice('--soak-ms='.length) ?? 0);
+const mainStallMs = Number(process.argv.find(value => value.startsWith('--main-stall-ms='))?.slice('--main-stall-ms='.length) ?? 0);
+const encoder = process.argv.find(value => value.startsWith('--encoder='))?.slice('--encoder='.length) ?? 'auto';
+assert.ok(['auto', 'h264_texture_amf', 'obs_nvenc_h264_tex', 'av1_texture_amf', 'obs_nvenc_av1_tex'].includes(encoder));
+const codec = encoder.includes('av1') ? 'av1' : 'h264';
+const selectedProfile = process.argv.find(value => value.startsWith('--profile='))?.slice('--profile='.length) ?? '1080p120';
+assert.ok(['1080p120', '720p30'].includes(selectedProfile));
+const silentSource = process.argv.includes('--silent-source');
+const audioAddon = process.argv.find(value => value.startsWith('--audio-addon='))?.slice('--audio-addon='.length);
+assert.ok(!audioAddon || (path.isAbsolute(audioAddon) && path.extname(audioAddon) === '.node'));
 const simulateDisconnect = process.argv.includes('--disconnect');
 const simulateRtcFault = process.argv.includes('--rtc-fault');
 assert.ok(directory && path.isAbsolute(directory) && ['p2p', 'sfu'].includes(mode));
-assert.ok(Number.isSafeInteger(soakMs) && soakMs >= 0 && soakMs <= 90000);
+assert.ok(Number.isSafeInteger(soakMs) && soakMs >= 0 && soakMs <= 1200000);
+assert.ok(Number.isSafeInteger(mainStallMs) && mainStallMs >= 0 && mainStallMs <= 3000);
 assert.ok(!simulateDisconnect || mode === 'sfu');
 assert.ok(!simulateRtcFault || !simulateDisconnect);
+assert.ok(!mainStallMs || (!simulateDisconnect && !simulateRtcFault));
 
 if (!process.versions.electron) {
   const { spawn } = require('node:child_process');
@@ -34,7 +45,7 @@ if (!process.versions.electron) {
     console.error('Owned native A/V smoke exceeded its deadline.');
     process.exitCode = 1; sourceRetiring = true;
     test?.kill('SIGKILL'); source.kill('SIGKILL');
-  }, 180000);
+  }, 180000 + soakMs);
   const run = async () => {
     const ready = await within(new Promise((resolve, reject) => {
       source.once('error', reject);
@@ -63,13 +74,14 @@ if (!process.versions.electron) {
 }
 
 const { app, BrowserWindow, screen, sharedTexture, MessageChannelMain } = require('electron');
+const { getScreenShareProfile } = require('@monky/shared');
 let placement;
 try {
   placement = require('../../../test/fixtures/testDisplay.cjs').installTestDisplay({ app, screen, BrowserWindow });
 }
 catch (error) { console.error('[TestDisplay] A/V launch rejected:', error); app.exit(1); return; }
 const { loadRuntime, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription, NativePcmCaptureHub } = require('../index.cjs');
-const captureModule = require('@monky/screen-audio');
+const captureModule = audioAddon ? require(audioAddon) : require('@monky/screen-audio');
 const { createSfuFixture } = require('./sfuFixture.cjs');
 const { assertNativeScreenEndpointLocallyClosed } = require('../runtime/nativeEndpoint.cjs');
 const target = {
@@ -86,11 +98,26 @@ app.setName('MonkyNativeAvSmoke');
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.on('window-all-closed', () => {});
 const errors = [], windows = new Map(), subscriptions = new Map(), receivers = new Map(), senders = [], deliveries = new Set();
-const report = { mode, personalCapture: false, recordedMedia: false, phases: [] };
+const report = { mode, encoder, codec, selectedProfile, silentSource, audioAddon: audioAddon ?? null,
+  personalCapture: false, recordedMedia: false, phases: [] };
+const eventLoopDelay = require('node:perf_hooks').monitorEventLoopDelay({ resolution: 20 });
+eventLoopDelay.enable();
 let publisher, hub, sfu, expectingSourceLoss = false;
-const expectedSourceLoss = error => error.code === 'ERR_SCREEN_CAPTURE_SOURCE_LOST' || error.name === 'AbortError'
+// Destruction may invalidate the stock finder before the next HWND liveness check.
+// Both refusals are expected only for an acknowledged, explicitly destroyed source.
+const sourceLossCodes = new Set(['ERR_SCREEN_CAPTURE_SOURCE_LOST', 'ERR_SCREEN_CAPTURE_SOURCE_AMBIGUOUS']);
+const expectedSourceLoss = error => sourceLossCodes.has(error.code) || error.name === 'AbortError'
   || (error instanceof AggregateError && error.errors.length > 0 && error.errors.every(expectedSourceLoss));
-const fatal = error => { errors.push(error); console.error(error); };
+const fatal = error => {
+  report.firstMediaFailure ??= {
+    phase: report.phases.at(-1), code: error.code, message: error.message,
+    eventLoopMaxMs: eventLoopDelay.max / 1e6,
+    audio: hub?.getStats(), publishers: senders.map(endpoint => ({
+      flow: endpoint.flow?.snapshot(), pcm: endpoint.pcm?.getStats(),
+    })),
+  };
+  errors.push(error); console.error(error);
+};
 const failure = error => {
   if (report.expectingRtcFault) {
     (report.expectedRtcErrors ??= []).push({ code: error.code ?? null, message: error.message });
@@ -117,7 +144,7 @@ process.on('message', value => {
   const request = sourceRequests.get(value.id);
   if (!request) return;
   sourceRequests.delete(value.id);
-  if (value.ok) request.resolve(); else request.reject(new Error(value.error));
+  if (value.ok) request.resolve(value); else request.reject(new Error(value.error));
 });
 function sourceCommand(command) {
   const id = randomUUID();
@@ -140,6 +167,16 @@ function deliver(work) {
   deliveries.add(work);
   void work.then(() => deliveries.delete(work), error => { deliveries.delete(work); failure(error); });
 }
+function observeFixtureFailures(endpoint) {
+  if (mode !== 'sfu') return;
+  const reportError = endpoint.broker.report.bind(endpoint.broker);
+  endpoint.broker.report = error => {
+    // Only this owned fixture records the original adapter error before privacy sanitization.
+    const original = report.originalAdapterErrors ??= [];
+    if (original.length < 16) original.push({ role: endpoint.role, message: error?.message, stack: error?.stack });
+    reportError(error);
+  };
+}
 function audioOptions(window, publish = false) {
   return {
     sinkId: '', muted: false, volume: 1,
@@ -161,6 +198,10 @@ async function createWindow(id) {
   return window;
 }
 const sample = id => windows.get(id).webContents.executeJavaScript('nativeCaptureSmoke.sample()');
+const receivedAudio = id => {
+  const signal = receivers.get(id).audioOutput.owner.getStats().pcmSignal;
+  return signal?.frames > 4800 && (silentSource ? signal.nonzeroFrames === 0 : signal.nonzeroFrames > 4800);
+};
 async function signalWindow(id, milliseconds = 700) {
   const endpoint = receivers.get(id);
   const before = endpoint.audioOutput.owner.getStats().pcmSignal;
@@ -172,7 +213,7 @@ async function signalWindow(id, milliseconds = 700) {
     leftRms: Math.sqrt((after.leftSquareSum - before.leftSquareSum) / frames),
     rightRms: Math.sqrt((after.rightSquareSum - before.rightSquareSum) / frames) };
 }
-async function observeCapturedStereo() {
+async function observeCapturedStereo(reportKey = 'originalCapture') {
   const original = { frames: 0, channels: null, format: null, crossProduct: 0 };
   const observer = hub.subscribe({ includeWindowId: target.hwnd, expectedProcessId: target.expectedProcessId }, event => {
     if (event.type !== 'packet') return;
@@ -193,14 +234,19 @@ async function observeCapturedStereo() {
   finally { await observer.detach(); }
   assert.ok(original.frames > 4800 && original.channels.length >= 2);
   original.correlation = original.crossProduct / Math.sqrt(original.channels[0].squareSum * original.channels[1].squareSum);
-  report.originalCapture = original;
+  report[reportKey] = original;
+  assert.ok(original.channels[0].squareSum > 0 && original.channels[1].squareSum > 0,
+    'The owned source capture is silent; downstream volume cannot be measured.');
   assert.ok(original.correlation < -.9, 'The owned test source did not deliver anti-phase stereo before RTC.');
 }
 async function run() {
   phase('starting');
   const runtime = loadRuntime(), channelId = randomUUID();
-  const source = { shareId: 'owned-av', instanceId: randomUUID(), audio: true,
-    video: { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 } };
+  const source = { shareId: 'owned-av', instanceId: randomUUID(), audio: true, codec,
+    video: selectedProfile === '720p30'
+      ? { width: 1280, height: 720, fps: 30, maxBitrateKbps: 2000 }
+      : { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 } };
+  const lowerQuality = selectedProfile === '720p30' ? '480p30' : '720p60';
   const ownerWindow = await createWindow('publisher');
   const invalid = captureModule.createPacketCapture({
     includeWindowId: target.hwnd, expectedProcessId: process.pid,
@@ -225,7 +271,7 @@ async function run() {
         for (const producer of sfu.producers().reverse()) deliver(recipient.addRemoteProducer(producer));
     });
   };
-  const common = { runtime, textures: sharedTexture, mode, publisherSessionId: 'publisher', channelId,
+  const common = { runtime, textures: sharedTexture, mode, publisherSessionId: 'publisher', channelId, captureEncoder: encoder,
     onDiagnostic: error => console.warn('A/V diagnostic:', error.message) };
   publisher = new NativeScreenPublisher({
     sessionId: 'publisher', channelId, mode, source, iceServers: [], send, onError: failure, onState() {},
@@ -234,6 +280,7 @@ async function run() {
         ...common, ...options, role: 'publish', sessionId: 'publisher', target, captureDirectory: directory,
         audio: audioOptions(ownerWindow, true), rpc: sfu?.rpc('publisher'),
       });
+      observeFixtureFailures(endpoint);
       senders.push(endpoint); return endpoint;
     },
   });
@@ -251,6 +298,7 @@ async function run() {
           destination: { frame: window.webContents.mainFrame, presentationId },
           audio: audioOptions(window), rpc: sfu?.rpc(id),
         });
+        observeFixtureFailures(endpoint);
         receivers.set(id, endpoint); return endpoint;
       },
     });
@@ -263,18 +311,20 @@ async function run() {
   report.silent = { input: senders[0].pcm.getStats(), output: receivers.get('viewer-a').audioOutput.owner.getStats() };
   assert.equal(report.silent.output.ready, true);
   assert.equal(report.silent.output.pcmSignal?.nonzeroFrames ?? 0, 0, 'Silent owned application introduced unrelated audio.');
-  phase('capturing-real-stereo');
-  await sourceCommand('tone-start');
-  await waitFor(() => receivers.get('viewer-a').audioOutput.owner.getStats().pcmSignal?.nonzeroFrames > 4800,
+  phase(silentSource ? 'capturing-real-silence' : 'capturing-real-stereo');
+  if (!silentSource) {
+    await sourceCommand('tone-start');
+    await observeCapturedStereo();
+  }
+  await waitFor(() => receivedAudio('viewer-a'),
     'The captured application tone did not pass through native Opus and the receiver mixer.');
-  await observeCapturedStereo();
   await start('viewer-b', 'source');
-  await start('viewer-c', '720p60');
+  await start('viewer-c', lowerQuality);
   assert.equal(senders.length, 2);
   assert.equal(hub.getStats().captureStarts, 1, 'Each quality opened a redundant WASAPI capture.');
   assert.equal(hub.getStats().subscriptions, 2);
   for (const id of ['viewer-a', 'viewer-b', 'viewer-c']) {
-    await waitFor(() => receivers.get(id).audioOutput.owner.getStats().pcmSignal?.nonzeroFrames > 4800,
+    await waitFor(() => receivedAudio(id),
       `${id} did not receive the original shared PCM capture.`);
   }
   phase('measuring-av');
@@ -290,20 +340,25 @@ async function run() {
       nativeOutput: receivers.get(id).audioOutput.owner.getStats() };
   });
   for (const [index, value] of report.viewers.entries()) {
-    assert.ok(value.fps >= (index === 2 ? 60 : 120) * .85, `${value.id} A/V cadence was ${value.fps.toFixed(2)} FPS.`);
+    const expected = getScreenShareProfile(source.video, index === 2 ? lowerQuality : 'source', codec).fps;
+    assert.ok(value.fps >= expected * .85, `${value.id} A/V cadence was ${value.fps.toFixed(2)} FPS (expected ${expected}).`);
     assert.deepEqual(value.errors, []);
     assert.equal(value.audio.sessions.length, 1);
     const output = value.audio.sessions[0];
     assert.equal(output.ready, true);
     assert.ok(output.sink.playout?.renderedFrames > 4800, 'Native audio did not reach actual AudioWorklet playout.');
     const nativeOutput = value.nativeOutput;
-    assert.ok(nativeOutput.pcmSignal.leftRms > .0001 && nativeOutput.pcmSignal.rightRms > .0001);
-    assert.ok(nativeOutput.pcmSignal.normalizedCrossCorrelation < -.9, 'Captured anti-phase stereo was not preserved.');
+    if (silentSource) assert.equal(nativeOutput.pcmSignal.nonzeroFrames, 0);
+    else {
+      assert.ok(nativeOutput.pcmSignal.leftRms > .0001 && nativeOutput.pcmSignal.rightRms > .0001);
+      assert.ok(nativeOutput.pcmSignal.normalizedCrossCorrelation < -.9, 'Captured anti-phase stereo was not preserved.');
+    }
   }
   if (soakMs) {
     phase('sustaining-concurrent-av');
     const until = performance.now() + soakMs;
     report.soak = [];
+    report.scheduling = [];
     while (performance.now() < until) {
       if (errors.length) throw new AggregateError(errors, 'Sustained A/V output failed.');
       await delay(1000);
@@ -312,36 +367,87 @@ async function run() {
         return { id, sampledAtMs: value.sampledAtMs, presentedFrames: value.playback?.counters.presentedFrames,
           audio: value.audio.sessions.map(output => ({ ready: output.ready, playout: output.sink.playout, errors: output.errors })) };
       })));
+      report.scheduling.push({ at: performance.now(), maxDelayMs: eventLoopDelay.max / 1e6,
+        p99DelayMs: eventLoopDelay.percentile(99) / 1e6 });
+      eventLoopDelay.reset();
+      if (report.soak.length % 5 === 0)
+        fs.writeFileSync(path.join(directory, 'progress.json'), JSON.stringify(report, null, 2) + '\n');
     }
   }
-  phase('muting-and-volume');
-  const endpoint = receivers.get('viewer-a');
-  const normal = await signalWindow('viewer-a');
-  await endpoint.setAudioPreferences({ muted: false, volume: .5 });
-  await delay(500);
-  const half = await signalWindow('viewer-a');
-  assert.ok(half.leftRms / normal.leftRms > .4 && half.leftRms / normal.leftRms < .6,
-    'The real received PCM did not follow its selected volume.');
-  await endpoint.setAudioPreferences({ muted: true, volume: .5 });
-  await delay(500);
-  const muted = await signalWindow('viewer-a');
-  assert.equal(muted.nonzeroFrames, 0, 'Muted screen audio still entered the native output.');
-  const other = await signalWindow('viewer-b', 300);
-  report.audioControls = { normal, half, muted, other };
-  fs.writeFileSync(path.join(directory, 'progress.json'), JSON.stringify(report, null, 2) + '\n');
-  assert.ok(other.nonzeroFrames > 4800, 'Muting one viewer also muted another.');
-  await endpoint.setAudioPreferences({ muted: false, volume: 1 });
-  await delay(500);
-  const resumed = await signalWindow('viewer-a');
-  assert.ok(resumed.nonzeroFrames > 4800);
-  report.audioControls = { normal, half, muted, other, resumed };
+  if (mainStallMs) {
+    phase('delaying-main-dispatch');
+    const viewers = ['viewer-a', 'viewer-b', 'viewer-c'];
+    const before = await Promise.all(viewers.map(sample));
+    const beforeAudio = viewers.map(id => receivers.get(id).audioOutput.owner.getStats().pcmSignal.frames);
+    report.mainStall = { requestedMs: mainStallMs, audioBefore: hub.getStats(),
+      trigger: 'in-flight-texture-transfer',
+      presentationBefore: Object.fromEntries(viewers.map(id => [id, receivers.get(id).presentation.getStats()])) };
+    const presentation = receivers.get('viewer-a').presentation;
+    const originalChannelFactory = presentation.createTextureChannel;
+    try {
+      await within(new Promise(resolve => {
+        presentation.createTextureChannel = () => {
+          presentation.createTextureChannel = originalChannelFactory;
+          const channel = new MessageChannelMain();
+          queueMicrotask(() => {
+            const started = performance.now();
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, mainStallMs);
+            report.mainStall.actualMs = performance.now() - started;
+            resolve();
+          });
+          return channel;
+        };
+      }), 12000, 'No real texture transfer reached the Main stall injection.');
+    } finally { presentation.createTextureChannel = originalChannelFactory; }
+    for (const [index, id] of viewers.entries()) {
+      const fps = getScreenShareProfile(source.video, index === 2 ? lowerQuality : 'source', codec).fps;
+      await waitFor(async () => (await sample(id)).playback.counters.presentedFrames
+        >= before[index].playback.counters.presentedFrames + fps, `${id} video did not resume after Main dispatch returned.`);
+      await waitFor(() => receivers.get(id).audioOutput.owner.getStats().pcmSignal.frames >= beforeAudio[index] + 4800,
+        `${id} actual PCM stopped advancing after Main dispatch returned.`);
+    }
+    report.mainStall.audioAfter = hub.getStats();
+    assert.equal(report.mainStall.audioAfter.capture.overflowMode, 'discontinue');
+    if (mainStallMs >= 1200) assert.ok(report.mainStall.audioAfter.capture.droppedPackets
+      > report.mainStall.audioBefore.capture.droppedPackets, 'The injected stall did not exercise native PCM recovery.');
+  }
+  if (!silentSource) {
+    phase('muting-and-volume');
+    const endpoint = receivers.get('viewer-a');
+    await observeCapturedStereo('captureBeforeVolume');
+    const normal = await signalWindow('viewer-a');
+    await endpoint.setAudioPreferences({ muted: false, volume: .5 });
+    await delay(500);
+    const half = await signalWindow('viewer-a');
+    report.audioControls = { normal, half };
+    fs.writeFileSync(path.join(directory, 'progress.json'), JSON.stringify(report, null, 2) + '\n');
+    assert.ok(half.leftRms / normal.leftRms > .4 && half.leftRms / normal.leftRms < .6,
+      'The real received PCM did not follow its selected volume.');
+    await endpoint.setAudioPreferences({ muted: true, volume: .5 });
+    await delay(500);
+    const muted = await signalWindow('viewer-a');
+    assert.equal(muted.nonzeroFrames, 0, 'Muted screen audio still entered the native output.');
+    const other = await signalWindow('viewer-b', 300);
+    report.audioControls = { normal, half, muted, other };
+    fs.writeFileSync(path.join(directory, 'progress.json'), JSON.stringify(report, null, 2) + '\n');
+    assert.ok(other.nonzeroFrames > 4800, 'Muting one viewer also muted another.');
+    await endpoint.setAudioPreferences({ muted: false, volume: 1 });
+    await delay(500);
+    const resumed = await signalWindow('viewer-a');
+    assert.ok(resumed.nonzeroFrames > 4800);
+    report.audioControls = { normal, half, muted, other, resumed };
+  } else {
+    report.audioControls = { tested: false, reason: 'explicit-silent-source' };
+  }
   phase('retiring-demand');
   await subscriptions.get('viewer-a').close();
   await subscriptions.get('viewer-b').close();
   await waitFor(() => senders[0].snapshot().closed, 'The first rendition retained its native resources.');
   assert.equal(hub.getStats().subscriptions, 1);
   assert.equal(hub.getStats().captureClosed, false);
-  assert.ok((await signalWindow('viewer-c')).nonzeroFrames > 4800);
+  const remainingSignal = await signalWindow('viewer-c');
+  assert.ok(remainingSignal.frames > 4800);
+  assert.ok(silentSource ? remainingSignal.nonzeroFrames === 0 : remainingSignal.nonzeroFrames > 4800);
   await subscriptions.get('viewer-c').close();
   await waitFor(() => publisher.snapshot().pipelines.length === 0, 'The final viewer retained a native pipeline.');
   await hub.waitUntilIdle();
@@ -351,14 +457,14 @@ async function run() {
   phase('restarting-watch');
   await start('viewer-d', '480p30');
   assert.equal(hub.getStats().captureStarts, 2);
-  await waitFor(() => receivers.get('viewer-d').audioOutput.owner.getStats().pcmSignal?.nonzeroFrames > 4800,
+  await waitFor(() => receivedAudio('viewer-d'),
     'A fresh Watch failed to resume the actual captured audio.');
   let finalViewer = 'viewer-d';
   if (simulateRtcFault) {
     phase('terminating-live-av-receiver');
     const endpoint = receivers.get(finalViewer), pid = endpoint.engine.child.pid;
     assert.notEqual(pid, process.pid);
-    assert.ok(endpoint.audioOutput.owner.getStats().pcmSignal.nonzeroFrames > 4800);
+    assert.ok(receivedAudio(finalViewer));
     report.expectingRtcFault = true;
     endpoint.engine.child.kill();
     await endpoint.engine.exitState.promise;
@@ -378,7 +484,7 @@ async function run() {
     finalViewer = 'viewer-e';
     await start(finalViewer, '480p30');
     assert.notEqual(receivers.get(finalViewer).engine.child.pid, pid);
-    await waitFor(() => receivers.get(finalViewer).audioOutput.owner.getStats().pcmSignal?.nonzeroFrames > 4800,
+    await waitFor(() => receivedAudio(finalViewer),
       'A replacement media child did not resume actual captured PCM.');
     report.rtcFault.recovered = true;
   }
@@ -390,11 +496,13 @@ async function run() {
   }
   phase('source-loss');
   expectingSourceLoss = true;
-  await sourceCommand('close-source');
+  const closure = await sourceCommand('close-source');
+  assert.equal(closure.sourceDestroyed, true, 'The source owner did not prove destruction of its own window.');
+  report.sourceClosure = { sourceDestroyed: true };
   await waitFor(() => subscriptions.get(finalViewer).closed && publisher.snapshot().pipelines.length === 0,
     'Source loss did not retire its active A/V subscription.');
   report.sourceLoss = senders.at(-1).snapshot();
-  assert.ok(report.sourceLoss.errors.some(error => error.code === 'ERR_SCREEN_CAPTURE_SOURCE_LOST'));
+  assert.ok(report.sourceLoss.errors.some(error => sourceLossCodes.has(error.code)));
 }
 
 app.whenReady().then(async () => {
@@ -431,6 +539,7 @@ app.whenReady().then(async () => {
       try { sfu.assertRetired(); } catch (error) { fatal(error); }
     }
     report.hub = hub?.getStats();
+    eventLoopDelay.disable();
     report.errors = errors.map(error => error.stack ?? String(error));
     for (const window of windows.values()) if (!window.isDestroyed()) window.destroy();
     fs.writeFileSync(path.join(directory, 'report.json'), JSON.stringify(report, null, 2) + '\n', { flag: 'wx' });

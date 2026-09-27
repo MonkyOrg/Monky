@@ -87,8 +87,7 @@ class LiveFrames {
           assert.ok(Number.isInteger(value.peakBytes) && value.peakBytes >= HEADER_BYTES && value.peakBytes <= 8 * 1024 * 1024);
           if (Object.hasOwn(value, 'backpressureWaits')) {
             assert.ok(Number.isSafeInteger(value.backpressureWaits) && value.backpressureWaits >= 0);
-            assert.ok(Number.isSafeInteger(value.maxBackpressureMs) && value.maxBackpressureMs >= 0
-              && value.maxBackpressureMs <= 500);
+            assert.ok(Number.isSafeInteger(value.maxBackpressureMs) && value.maxBackpressureMs >= 0);
           }
           this.closed = value;
         }

@@ -65,6 +65,9 @@ struct State {
   const std::string sessionId;
   std::atomic<bool> stop{false};
   std::atomic<uint64_t> packets{0}, frames{0}, delivered{0}, overflows{0};
+  std::atomic<uint64_t> droppedPackets{0}, droppedFrames{0};
+  bool discontinueOnOverflow = false;
+  uint64_t pendingDroppedPackets = 0, pendingDroppedFrames = 0;
   PacketBudget budget;
   // JS-thread-only admission receipts. They do not own native RTC processing.
   std::vector<std::shared_ptr<DeliveryCredit>> deliveryCredits;
@@ -188,6 +191,9 @@ napi_value Snapshot(State& state) {
   Set(env, value, "deliveredPackets", Number(env, state.delivered.load()));
   Set(env, value, "queuedPackets", Number(env, state.budget.queued()));
   Set(env, value, "overflowCount", Number(env, state.overflows.load()));
+  Set(env, value, "overflowMode", String(env, state.discontinueOnOverflow ? "discontinue" : "fail"));
+  Set(env, value, "droppedPackets", Number(env, state.droppedPackets.load()));
+  Set(env, value, "droppedFrames", Number(env, state.droppedFrames.load()));
   Set(env, value, "maxQueuedPackets", Number(env, kMaxQueuedPackets));
   Set(env, value, "maxPacketBytes", Number(env, kMaxPacketBytes));
   Set(env, value, "error", state.errorCode.empty() ? Null(env) : ErrorValue(env, state.errorCode, state.errorMessage));
@@ -292,6 +298,7 @@ struct Event {
   Format format;
   Timing timing;
   uint32_t frames = 0;
+  uint64_t droppedPackets = 0, droppedFrames = 0;
   std::vector<float> pcm;
 };
 
@@ -312,6 +319,16 @@ void Deliver(napi_env env, napi_value callback, void*, void* data) noexcept {
     return;
   }
   try {
+    if (event->droppedPackets) {
+      auto gap = Object(env);
+      Set(env, gap, "type", String(env, "discontinuity"));
+      Set(env, gap, "sessionId", String(env, state.sessionId));
+      Set(env, gap, "epoch", String(env, state.sessionId + ":" + std::to_string(event->timing.epoch)));
+      Set(env, gap, "reason", String(env, "admission-backpressure"));
+      Set(env, gap, "droppedPackets", Number(env, event->droppedPackets));
+      Set(env, gap, "droppedFrames", Number(env, event->droppedFrames));
+      Call(state, callback, gap);
+    }
     auto value = Object(env);
     Set(env, value, "type", String(env, event->ready ? "ready" : "packet"));
     Set(env, value, "sessionId", String(env, state.sessionId));
@@ -368,7 +385,9 @@ void Deliver(napi_env env, napi_value callback, void*, void* data) noexcept {
   if (!event->ready && !admissionPending) state.budget.Release();
 }
 
-bool Queue(State& state, std::unique_ptr<Event> event) {
+enum class QueueResult { queued, discarded, stopped };
+
+QueueResult Queue(State& state, std::unique_ptr<Event> event) {
   const bool packet = !event->ready;
 #ifdef MONKY_PACKET_CAPTURE_TEST
   packet_capture_test::BeforeQueue(packet);
@@ -376,10 +395,22 @@ bool Queue(State& state, std::unique_ptr<Event> event) {
   // A refilled TSFN can dispatch more than its capacity in one turn. Wait for
   // actual admission outside tsfnMutex so Stop/cleanup can always revoke it.
   if (packet && !state.budget.Acquire() && !state.budget.WaitForSlot(state.stop)) {
-    if (state.stop.load()) return false;
+    if (state.stop.load()) return QueueResult::stopped;
+    if (state.discontinueOnOverflow) {
+      // No delivery credit or downstream processing identity exists for this packet.
+      state.droppedPackets.fetch_add(1);
+      state.droppedFrames.fetch_add(event->frames);
+      ++state.pendingDroppedPackets;
+      state.pendingDroppedFrames += event->frames;
+      return QueueResult::discarded;
+    }
     state.overflows.fetch_add(1);
     throw Failure("ERR_AUDIO_OVERFLOW",
         "Bounded PCM delivery queue overflowed; capture admission timed out");
+  }
+  if (packet) {
+    event->droppedPackets = state.pendingDroppedPackets;
+    event->droppedFrames = state.pendingDroppedFrames;
   }
   napi_status result = napi_ok;
   bool revoked = false;
@@ -405,12 +436,13 @@ bool Queue(State& state, std::unique_ptr<Event> event) {
 #ifdef MONKY_PACKET_CAPTURE_TEST
       packet_capture_test::Observe("revokedEvents");
 #endif
-      return false;
+      return QueueResult::stopped;
     }
     throw Failure("ERR_AUDIO_DELIVERY", "Cannot enqueue capture event");
   }
+  if (packet) state.pendingDroppedPackets = state.pendingDroppedFrames = 0;
   event.release();
-  return true;
+  return QueueResult::queued;
 }
 
 void Execute(Shared shared) noexcept {
@@ -435,7 +467,7 @@ void Execute(Shared shared) noexcept {
         auto event = std::make_unique<Event>(shared);
         event->ready = true;
         event->format = format;
-        return Queue(state, std::move(event));
+        return Queue(state, std::move(event)) == QueueResult::queued;
       };
       sink.packet = [&](const uint8_t* data, uint32_t frames, uint32_t flags,
                         std::optional<uint64_t> position, uint64_t qpc) {
@@ -447,7 +479,9 @@ void Execute(Shared shared) noexcept {
         event->pcm = Convert(format, data, flags & kSilent ? 0 : bytes, frames, flags);
         state.packets.fetch_add(1);
         state.frames.fetch_add(frames);
-        return Queue(state, std::move(event)) && !state.stop.load();
+        const auto queued = Queue(state, std::move(event));
+        if (queued == QueueResult::discarded) timeline.DiscontinueDelivery();
+        return queued != QueueResult::stopped && !state.stop.load();
       };
       RunWasapiCapture(target, state.stop, sink);
     }
@@ -571,7 +605,18 @@ Napi::Value CreatePacketCapture(const Napi::CallbackInfo& info) {
     const uint32_t expectedPid = static_cast<uint32_t>(Option(env, options, "expectedProcessId", UINT32_MAX));
     if (expectedPid && !windowId)
       throw Failure("ERR_AUDIO_OPTIONS", "expectedProcessId requires an explicit included window");
+    bool discontinueOnOverflow = false;
+    if (options.Has("overflowMode") && !options.Get("overflowMode").IsUndefined()) {
+      const auto mode = options.Get("overflowMode");
+      if (!mode.IsString())
+        throw Failure("ERR_AUDIO_OPTIONS", "overflowMode must be fail or discontinue");
+      const auto text = mode.As<Napi::String>().Utf8Value();
+      if (text != "fail" && text != "discontinue")
+        throw Failure("ERR_AUDIO_OPTIONS", "overflowMode must be fail or discontinue");
+      discontinueOnOverflow = text == "discontinue";
+    }
     state = std::make_shared<State>(env);
+    state->discontinueOnOverflow = discontinueOnOverflow;
     state->excludedPid = excludedPid;
     state->windowId = windowId;
     state->expectedPid = expectedPid;

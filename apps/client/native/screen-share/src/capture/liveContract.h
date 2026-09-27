@@ -8,7 +8,9 @@ namespace monky::screen_capture::live {
 
 constexpr std::uint32_t kMagic = 0x31484c4d, kHeaderBytes = 96;
 constexpr std::size_t kQueueFrames = 16, kQueueBytes = 8 * 1024 * 1024;
-constexpr std::uint64_t kQueueAgeMs = 500, kFeedbackCommands = kMaxSafeInteger;
+// These are owned delivery copies, not a guarantee that media is fresh.
+// RTC independently rejects stale AUs using their original timestamps.
+constexpr std::uint64_t kQueueAgeMs = kMainStallTimeoutMs, kFeedbackCommands = kMaxSafeInteger;
 enum class Kind : std::uint32_t { Packet = 1, Notice = 2, Closed = 3 };
 
 struct Header {
@@ -94,7 +96,7 @@ inline void CheckBudget(std::size_t frames, std::size_t bytes, std::size_t next,
   Require(frames < kQueueFrames && next <= kQueueBytes && bytes <= kQueueBytes - next,
       "Live compressed output exceeded its native copy budget", "ERR_SCREEN_CAPTURE_QUEUE");
   Require(nowMs >= oldestMs && nowMs - oldestMs <= kQueueAgeMs,
-      "Live compressed output exceeded its500ms age limit", "ERR_SCREEN_CAPTURE_BACKPRESSURE");
+      "Live compressed output exceeded its native owner stall deadline", "ERR_SCREEN_CAPTURE_BACKPRESSURE");
 }
 
 }  // namespace monky::screen_capture::live

@@ -4,13 +4,14 @@ const assert = require('node:assert/strict');
 const capabilities = () => ({ fixture: 'owned-rtc-process' });
 function createEngine(options, emit) {
   if (options.stallExit) process.exit = () => {};
-  let copied = 0;
+  let copied = 0, closing = false;
   const started = Number(process.hrtime.bigint() / 1000n);
   const timers = new Set();
   return {
     ready: Promise.resolve(),
     request(id, operation, target, data) {
       if (operation === 'hang') return new Promise(() => {});
+      if (operation === 'resource.close' && options.holdRetirementRequests) return new Promise(() => {});
       if (operation === 'crash') { process.abort(); return; }
       if (operation === 'exit') { process.exit(37); return; }
       if (operation === 'reject') throw Object.assign(new Error('Fixture rejection'), { code: 'ERR_FIXTURE', status: 6 });
@@ -40,15 +41,19 @@ function createEngine(options, emit) {
         frameIndex: packet.frameIndex, frames: packet.frames, ok: true });
     },
     audioClockProbe() { throw new Error('No synthetic clock observations are permitted.'); },
-    snapshot: () => ({ fixture: true, copied, pid: process.pid, ...(options.hangNative ? {
+    snapshot: () => {
+      if (closing && options.rejectSnapshotDuringClose) throw new Error('Fixture native snapshot is unavailable during close.');
+      return { fixture: true, copied, pid: process.pid, ...(options.hangNative ? {
       mf: { decoders: [{ sessionId: 1, diagnostics: {
         clock: 'process-steady-clock', observedAtSteadyUs: Number(process.hrtime.bigint() / 1000n),
         operations: { 'core-pump': { inProgress: 1, lastStartSteadyUs: started } },
       } }] },
-    } : {}) }),
+      } : {}) };
+    },
     close() {
+      closing = true;
       for (const timer of timers) clearTimeout(timer);
-      return Promise.resolve({ fixture: true, closed: true });
+      return new Promise(resolve => setTimeout(() => resolve({ fixture: true, closed: true }), options.closeDelayMs ?? 0));
     },
   };
 }

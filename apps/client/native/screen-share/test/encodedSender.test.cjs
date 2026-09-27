@@ -64,6 +64,40 @@ test('a minimized source discards paused AUs and resumes only on an unchanged re
   assert.deepEqual(m.errors, []);
 });
 
+test('a receiver PLI requests a keyframe without discarding the publisher existing valid chain', async () => {
+  const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
+  m.flow.packet(m.frame(1, true));
+  m.flow.feedback({ target: 7, data: { sourceId: 7, sequence: 1, kind: 'keyframe',
+    mode: 'next-real-idr', maximumWaitMs: 1500, keyframeConfirmed: false } });
+  assert.equal(m.flow.needsIdr, false, 'A receiver request is not loss of the locally encoded chain.');
+  m.tick(3700);
+  const delta = m.frame(2);
+  m.flow.packet(delta);
+  assert.deepEqual(m.submitted[1], delta);
+  m.flow.packet(m.frame(3, true));
+  assert.equal(m.submitted.length, 3);
+  assert.equal(m.calls.filter(call => call.idr).length, 1);
+  await m.flow.close(); assert.deepEqual(m.errors, []);
+});
+
+test('a receiver PLI cannot clear or extend an actual dependency-recovery deadline', async () => {
+  const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
+  m.flow.packet(m.frame(1, true));
+  m.flow.feedback({ target: 7, data: { sourceId: 7, sequence: 1, kind: 'recovery',
+    reason: 'rtc-unconsumed', frameId: 1, generation: 2,
+    mode: 'next-real-idr', maximumWaitMs: 1500, keyframeConfirmed: false } });
+  m.tick(3000);
+  m.flow.feedback({ target: 7, data: { sourceId: 7, sequence: 2, kind: 'keyframe',
+    mode: 'next-real-idr', maximumWaitMs: 1500, keyframeConfirmed: false } });
+  assert.equal(m.flow.needsIdr, true);
+  assert.equal(m.flow.waitingSince, 2000);
+  m.flow.packet(m.frame(2));
+  assert.equal(m.submitted.length, 1);
+  m.tick(3501);
+  assert.throws(() => m.flow.packet(m.frame(3)), /No real IDR/);
+  await m.flow.close(); assert.deepEqual(m.errors, []);
+});
+
 test('real feedback reserves headroom and rounds down to AMF steps without claiming hardware application', async () => {
   const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
   m.feedback(1, 1234567);
@@ -108,9 +142,9 @@ test('invalid RTC arrival estimates fail explicitly without changing encoder set
   }
 });
 
-test('below admitted latency-mode minimum pauses instead of exceeding feedback; missing IDR fails explicitly', async () => {
+test('an explicit RTC pause suspends admission; missing IDR after resume still fails explicitly', async () => {
   const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
-  m.feedback(1, 149999); m.flow.packet(m.frame(1, true)); assert.equal(m.submitted.length, 0);
+  m.feedback(1, 49999, true); m.flow.packet(m.frame(1, true)); assert.equal(m.submitted.length, 0);
   m.feedback(2, 20000000); m.flow.packet(m.frame(2));
   m.tick(3501); assert.throws(() => m.flow.packet(m.frame(3)), /No real IDR/);
   await m.flow.close();
@@ -176,7 +210,8 @@ for (const [direction, allocation, selected] of [['increase', 1500000, 1350], ['
     const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
     m.feedback(1, 1000000); await m.flow.rateWork; m.flow.packet(m.frame(1, true));
     m.tick(3100);
-    m.flow.feedback({ target: 7, data: { sourceId: 7, sequence: 2, kind: 'keyframe',
+    m.flow.feedback({ target: 7, data: { sourceId: 7, sequence: 2, kind: 'recovery',
+      reason: 'rtc-unconsumed', frameId: 1, generation: 2,
       mode: 'next-real-idr', maximumWaitMs: 1500, keyframeConfirmed: false } });
     const waitingSince = m.flow.waitingSince;
     m.tick(3500); m.feedback(3, allocation); await m.flow.rateWork;
@@ -257,17 +292,43 @@ test('feedback during an update uses the pending setting and promptly applies th
   await m.flow.close(); assert.deepEqual(m.errors, []);
 });
 
-test('headroom never selects below the verified AMF minimum or overrides a sub-minimum allocation', async () => {
+test('hardware configuration stays representable without starving a positive RTC allocation', async () => {
   const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
-  m.feedback(1, 150000); await m.flow.rateWork;
-  assert.equal(m.flow.currentKbps, 150); assert.equal(m.flow.paused, false);
+  m.feedback(1, 50000); await m.flow.rateWork;
+  assert.equal(m.flow.currentKbps, 50); assert.equal(m.flow.paused, false);
   m.flow.packet(m.frame(1, true));
-  m.feedback(2, 149999);
-  assert.equal(m.flow.paused, true); assert.equal(m.flow.snapshot().feedback.hostSelectedKbps, null);
-  m.flow.packet(m.frame(2, true)); assert.equal(m.submitted.length, 1);
-  m.feedback(3, 150000); m.flow.packet(m.frame(3, true));
-  assert.equal(m.submitted.length, 2);
-  assert.deepEqual(m.calls.filter(call => 'bitrate' in call).map(call => call.bitrate), [150]);
+  m.feedback(2, 46433);
+  assert.equal(m.flow.paused, false); assert.equal(m.flow.snapshot().feedback.bitrateBps, 46433);
+  assert.equal(m.flow.snapshot().feedback.hostSelectedKbps, 50);
+  m.flow.packet(m.frame(2)); assert.equal(m.submitted.length, 2);
+  m.feedback(3, 50000); m.flow.packet(m.frame(3, true));
+  assert.equal(m.submitted.length, 3);
+  assert.deepEqual(m.calls.filter(call => 'bitrate' in call).map(call => call.bitrate), [50]);
+  await m.flow.close(); assert.deepEqual(m.errors, []);
+});
+
+test('a zero RTC allocation pauses even without an explicit pause flag', async () => {
+  const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
+  m.feedback(1, 0);
+  assert.equal(m.flow.paused, true);
+  m.flow.packet(m.frame(1, true));
+  assert.equal(m.submitted.length, 0);
+  assert.equal(m.flow.snapshot().feedback.hostSelectedKbps, null);
+  await m.flow.close(); assert.deepEqual(m.errors, []);
+});
+
+test('a positive allocation below startup bitrate continues real media so congestion feedback can recover', async () => {
+  const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
+  for (const [index, [allocation, setting]] of [[143088, 100], [50000, 50], [900000, 800]].entries()) {
+    m.tick(2000 + index * 1500);
+    m.feedback(index + 1, allocation);
+    await m.flow.rateWork;
+    assert.equal(m.flow.currentKbps, setting);
+    assert.ok(setting * 1000 <= allocation);
+    assert.equal(m.flow.paused, false);
+    m.flow.packet(m.frame(index + 1, index === 0));
+    assert.equal(m.submitted.length, index + 1);
+  }
   await m.flow.close(); assert.deepEqual(m.errors, []);
 });
 

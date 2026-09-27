@@ -216,7 +216,7 @@ class Output {
       const auto remaining = kQueueAgeMs - (began - oldestMs_);
       Require(wake_.wait_for(lock, std::chrono::milliseconds(remaining),
           [&] { return failed_ || stopping_ || room(); }),
-          "Live copy credit did not return within its500ms age bound", "ERR_SCREEN_CAPTURE_BACKPRESSURE");
+          "Live copy credit did not return within the native owner stall deadline", "ERR_SCREEN_CAPTURE_BACKPRESSURE");
       maxBackpressureMs_ = (std::max)(maxBackpressureMs_, GetTickCount64() - began);
     }
     const auto now = GetTickCount64();

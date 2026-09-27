@@ -113,6 +113,18 @@ O envio de tela usa AUs comprimidos, não empréstimos de textura. Para o
 autoriza reutilizar a textura do produtor: a API retém esse guard e rejeita
 o comprovante de fechamento, em vez de inventar aposentadoria de GPU.
 
+A entrega de texturas usa a API pública `sharedTexture.subtle` do Electron com
+um MessagePort privado e tipado por lease nativo, em vez do timeout fixo de um
+segundo de `sendSharedTexture`. O renderer devolve seu token real de criação e,
+separadamente, um comprovante do callback nativo de liberação na GPU. Só então
+o Main libera seu wrapper importado e aguarda `allReferencesReleased` e o ACK de
+retirada do RTC. A aquisição conserva o prazo existente do endpoint; timeout,
+comprovante inválido ou port fechado reportam erro, mas não autorizam reutilizar
+a textura. Comprovantes reais atrasados ainda podem concluir a limpeza.
+`delivered` conta aquisições; transferências pendentes incluem a retirada na GPU.
+Não há alteração de internals ou timers globais do Electron, e o pool nativo
+de decodificação continua limitando a quantidade de ports/texturas.
+
 IPC tem limites de quantidade/bytes e confirmações correlacionadas. A entrada
 de vídeo aguarda o ACK real da cópia nativa mantendo um único AU na pipe
 limitada de captura; não inventa `copied:true`. PCM conserva seus créditos,
@@ -121,6 +133,22 @@ Probes/calibração executam no filho usando o relógio RTC original; timestamps
 QPC/renderer e limites de incerteza permanecem inalterados. Capabilities
 síncronas descrevem o build verificado, conferido novamente no filho antes
 de `ready`; snapshots síncronos são cache, diagnósticos solicitam observação nova.
+
+Chamadas comuns têm 128 créditos/32 MiB. A retirada usa uma reserva independente
+de 64 créditos/64 KiB para `releaseFrame`, `close`, `resource.close` e
+`audio.stopOutput`, dentro do teto existente de 192 chamadas do host. Saturar
+operações comuns não pode impedir a liberação de uma textura já possuída.
+Os créditos retornam somente com a conclusão real ou saída do processo.
+
+As cópias comprimidas do pipe de captura continuam limitadas a 16 itens/8 MiB,
+incluindo o item em escrita. A espera agora usa o prazo existente de 15 segundos
+do proprietário nativo, em vez de confundir entrega local com frescor de mídia.
+O RTC mantém sua rejeição de AUs com mais de 500 ms e a recuperação por IDR real:
+esperar uma cópia não autoriza apresentar um quadro atrasado. Timestamps,
+sequência, confirmações de feedback e provas de encerramento não são alterados;
+os prazos de retirada também não aumentaram. `maxBackpressureMs` registra a
+espera observada, não um teto de latência. O build nativo exige a regressão de
+pipe com leitura do pai atrasada por 1200 ms, sem GPU.
 
 `nativeRtcProcess.test.cjs` verifica abort real, timeout, rejeição de operações,
 créditos e recuperação. `nativeCaptureSmoke.cjs --rtc-fault=receive` (ou
@@ -265,6 +293,12 @@ registrada uma vez por host. Outros metadados, fluxos de terceiros e a validaç�
 de cor do RTC não recebem essa exceção. A publicação física no 5600G ainda
 precisa ser confirmada.
 
+Um PLI do receptor solicita um novo quadro-chave, mas não invalida a sequência
+codificada que continua válida no transmissor. Os quadros dependentes seguem
+para os espectadores já ativos, e pedidos repetidos são agrupados até chegar
+um quadro-chave real. Bootstrap e perda efetiva de dependências continuam
+exigindo um quadro independente, com os mesmos limites de recuperação.
+
 Na recepção, uma observação de relógio que expira durante o transporte IPC é
 indisponível, não uma falha do áudio inteiro. O código estruturado
 `ERR_RTC_AUDIO_CLOCK_OBSERVATION` retira a medição e permite recalibrar no mesmo
@@ -295,6 +329,11 @@ No SFU, o SDP de H.264 e AV1 preserva a estimativa inicial de até 5 Mbps e o
 teto do perfil. O adaptador inclui AV1 ao serializar essas opções, evitando o
 início involuntário em 300 kbps e o acúmulo de pacotes no pacer. Nenhum bitrate
 mínimo é imposto; a estimativa continua podendo cair com congestionamento.
+O mínimo configurável do encoder (50 kbps) não pausa uma alocação positiva
+do RTC: os quadros reais continuam chegando ao pacer, que controla o envio
+pela rede. Somente alocação zero ou pausa explícita do RTC suspende a admissão.
+Sondagens periódicas em períodos de pouco envio ajudam a detectar a recuperação
+da rede; não elevam a estimativa inicial a um piso obrigatório.
 
 Isso não torna todo encoder compatível com 4K120. No AMF instalado na RX 9070 XT
 do ensaio, `MaxLevel=52` e `ProfileLevel=60` é rejeitado; 4K60/80 Mbps inicializa
@@ -374,6 +413,16 @@ a primeira possui o áudio. Se a captura de áudio não
 estiver disponível, é preciso desativá-la explicitamente para enviar só vídeo;
 não há troca silenciosa de escopo. Suporte do módulo e testes sem dispositivos
 não substituem a validação do áudio físico no Windows de destino.
+
+O compartilhamento usa `overflowMode: 'discontinue'` na captura PCM. A fila
+continua limitada a 32 créditos, com espera de admissão de 500 ms. Se o prazo
+expirar, somente o pacote ainda sem crédito é descartado; o próximo pacote
+admitido inicia uma nova época nativa e registra a perda. Índices adquiridos,
+PCM, QPC e flags WASAPI permanecem originais. A ponte aguarda os comprovantes
+de processamento anteriores antes de ativar a nova época; nenhum crédito em
+trânsito é revogado. Falhas de dispositivo continuam explícitas e fatais.
+O timer de diagnóstico RTC é suspenso antes de iniciar o fechamento nativo,
+para não consultar estado já desmontado enquanto os recursos ainda encerram.
 
 Na reprodução, `currentFrame` é uma observação do relógio do grafo, não do
 alto-falante. O Chromium 152.0.7977.130 [avança o grafo antes de atualizar o
@@ -709,6 +758,39 @@ Use `--quality=480p30`, `720p60` ou `1080p60` para um único perfil,
 para validar captura e prévia WebCodecs sem admissão de rede.
 Software também usa captura libobs/D3D11; não exige um encoder na GPU.
 Os ensaios verificam pixels, cadência e encerramento dos recursos.
+
+Para investigar interrupções, `nativeCaptureSmoke.cjs` aceita
+`--mode=sfu --quality=source --profile=480p15` e
+`--congestion=moderate` (500/250 kbps) ou `--congestion=severe` (150/50 kbps),
+restaurando depois o teto do perfil no transporte exclusivo do ensaio.
+Como alternativa, `--main-stall-ms=1700` atrasa o Main após um PLI real.
+O relatório preserva o primeiro erro e os contadores anteriores à limpeza.
+Esses modos injetam condições adversas e podem reprovar; não desativam os
+guards de produção nem confirmam, sozinhos, a causa de uma ocorrência externa.
+
+`nativeAvSmoke.cjs` aceita seleção explícita de encoder H.264/AV1 AMD ou NVIDIA,
+`--profile=720p30` (o padrão continua 1080p120),
+`--main-stall-ms=1200` e `--soak-ms=900000` para um ensaio de 15 minutos
+(limite de 20 minutos). O ensaio prolongado registra atraso do event loop e
+frames apresentados, atualizando `progress.json` a cada cinco amostras.
+Somente a janela sintética própria fornece áudio/vídeo; não há gravação de mídia.
+
+`--silent-source` não inicia o tom e exige PCM real silencioso com contadores
+avançando; é adequado para continuidade/pressão sem alterar o mixer. Esse modo
+declara explicitamente que não mediu ganho nem estéreo audível. O ensaio normal
+confere primeiro o sinal original, para não atribuir ao controle de volume uma
+fonte já mutada. `--audio-addon=<caminho_absoluto.node>` permite testar um
+candidato compilado separadamente, somente nesse fixture, sem substituir uma
+DLL em uso. Após o atraso do Main, o ensaio exige retomada de vídeo e PCM nos
+três receptores e, para atrasos a partir de 1200 ms, uma perda PCM diagnosticada.
+O atraso começa logo após enviar uma transferência real de textura, antes de
+o Main processar seu comprovante, sem depender de uma coincidência de timing.
+`textureTransfer.test.cjs` verifica a ordem GPU-renderer/Main/RTC, comprovantes
+atrasados, tokens inválidos e limpeza do documento sem depender de hardware.
+Na etapa de perda da fonte, o processo dono deve confirmar a destruição da sua
+janela. Somente nesse cenário o fixture aceita tanto fonte perdida quanto
+ambiguidade observada durante a destruição; os guards de identidade de produção
+e a exigência de encerramento completo continuam inalterados.
 
 `--quality=source --profile=1080p240` e
 `--quality=source --profile=4k120` exercitam os novos perfis sem reduzir a

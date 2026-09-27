@@ -48,6 +48,15 @@ class NativePcmCaptureHub {
   }
 
   #event(owner, event) {
+    if (event?.type === 'discontinuity') {
+      assert.equal(event.sessionId, owner.readyEvent?.sessionId);
+      assert.equal(event.reason, 'admission-backpressure');
+      assert.ok(typeof event.epoch === 'string' && event.epoch.startsWith(`${event.sessionId}:`));
+      for (const key of ['droppedPackets', 'droppedFrames'])
+        assert.ok(Number.isSafeInteger(event[key]) && event[key] > 0);
+      console.warn('[NativePcmCapture] Capture delivery resumed after backpressure:', event);
+      return;
+    }
     if (event?.type === 'ready') {
       assert.equal(owner.readyEvent, null, 'The native PCM capture emitted duplicate readiness.');
       owner.readyEvent = event;
@@ -76,7 +85,7 @@ class NativePcmCaptureHub {
     const owner = { handle: null, members: new Set(), readyEvent: null, stopping: null, retired: false };
     this.#current = owner;
     try {
-      owner.handle = this.#module.createPacketCapture({ ...this.#selection }, event => {
+      owner.handle = this.#module.createPacketCapture({ ...this.#selection, overflowMode: 'discontinue' }, event => {
         try {
           return this.#event(owner, event)?.catch(error => {
             this.#report(error);

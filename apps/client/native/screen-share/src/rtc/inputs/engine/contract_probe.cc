@@ -212,6 +212,13 @@ int main() {
           {"maxBitrateBps", 20000000u}, {"minBitrateBps", 5000000u}});
       }, MONKY_ENGINE_UNSUPPORTED);
     });
+    group("peerScreenCongestionRecovery", [] {
+      for (const auto& data : {Json::object(), Json{{"iceServers", Json::array()}}}) {
+        const auto config = rtc::peer_detail::Configuration(data);
+        Check(config.media_config.video.periodic_alr_bandwidth_probing,
+              "A paused screen encoder must retain periodic network probing without a forced bitrate floor");
+      }
+    });
     group("peerVideoPlayout", [] {
       for (const auto delay : {0u, 200u, 1000u})
         Check(rtc::peer_detail::VideoPlayoutDelayMs({{"minimumDelayMs", delay}}) == delay,

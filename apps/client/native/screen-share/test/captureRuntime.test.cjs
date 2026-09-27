@@ -2,12 +2,64 @@
 
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const fs = require('node:fs');
+const { spawn } = require('node:child_process');
+const { setTimeout: delay } = require('node:timers/promises');
 const { EventEmitter } = require('node:events');
 const { PassThrough, Writable } = require('node:stream');
 const test = require('node:test');
 const protocol = require('../runtime/captureProtocol.cjs');
 const { CaptureBridge } = require('../runtime/captureBridge.cjs');
 const { HEADER_BYTES, MAGIC, LiveFrames, parseHeader } = require('../runtime/capturePackets.cjs');
+const pipeProbe = process.env.MONKY_CAPTURE_CONTRACT_EXE
+  ?? path.join(__dirname, '..', 'build', 'capture-production', 'capture-contract-test.exe');
+
+test('native live pipe preserves its bounded copies while parent dispatch is delayed for 1200ms', {
+  skip: process.platform !== 'win32' || (!process.env.MONKY_CAPTURE_CONTRACT_EXE && !fs.existsSync(pipeProbe)),
+  timeout: 15000,
+}, async t => {
+  const child = spawn(pipeProbe, ['--pipe-probe'], { stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe'], windowsHide: true });
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+  });
+  let stdout = '', stderr = '', failure;
+  const exited = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code, signal) => resolve({ code, signal }));
+  });
+  void exited.catch(() => {});
+  child.stdout.on('data', bytes => { stdout += bytes; });
+  child.stderr.on('data', bytes => { stderr += bytes; });
+  let packets = 0;
+  const frames = new LiveFrames(message => {
+    if (message.type !== 'packet') return;
+    packets++;
+    assert.equal(message.frame.frameId, packets);
+    assert.equal(message.frame.data.length, 32768);
+    assert.equal(message.frame.pts, String(packets - 1));
+  }, 120);
+  try {
+    child.stdio[4].on('error', error => { failure ??= error; });
+    child.stdio[4].write('1 bitrate 1000\n');
+    await delay(1200);
+    child.stdio[3].on('data', bytes => {
+      try { frames.push(bytes); }
+      catch (error) { failure ??= error; child.kill(); }
+    });
+    const result = await exited;
+    assert.equal(result.code, 0, stderr);
+    if (failure) throw failure;
+    frames.end();
+    assert.equal(packets, 80);
+    assert.equal(JSON.parse(stdout).syntheticPackets, 80);
+    assert.ok(frames.closed.maxBackpressureMs >= 500);
+    assert.ok(frames.closed.peakFrames <= 16);
+    assert.ok(frames.closed.peakBytes <= 8 * 1024 * 1024);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await exited;
+  }
+});
 
 const profiles = [
   { width: 1920, height: 1080, fps: 120, bitrateKbps: 5000 },

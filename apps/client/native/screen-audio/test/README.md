@@ -18,10 +18,15 @@ Admission means the original packet was copied into the native RTC input, **not*
 that native processing retired. The bridge still owns the processing identity
 until a matching receipt or proven complete engine closure. The 32 capture slots
 and eight RTC processing slots are unchanged. A full capture budget waits up to
-500 ms outside the TSFN mutex; sustained overload still reports
-`ERR_AUDIO_OVERFLOW`. Stop/Worker teardown wake the producer and cancel delivery
-waits without waiting for downstream RTC closure. Original PCM, sample indices,
-QPC, flags and capture epochs are never rewritten.
+500 ms outside the TSFN mutex. The default `overflowMode: 'fail'` still reports
+`ERR_AUDIO_OVERFLOW` on sustained overload. Screen sharing explicitly selects
+`overflowMode: 'discontinue'`: after the same wait, only the packet without a
+delivery credit is discarded. The next admitted packet belongs to a new native
+epoch and is preceded by an explicit `discontinuity` diagnostic with dropped
+packet/frame counts. Existing packets and processing receipts are never revoked.
+Stop/Worker teardown wake the producer and cancel delivery waits without waiting
+for downstream RTC closure. Original PCM, acquired sample/packet indices, QPC
+and WASAPI flags are never rewritten. Device errors remain terminal.
 
 ## Build and run on Windows x64
 

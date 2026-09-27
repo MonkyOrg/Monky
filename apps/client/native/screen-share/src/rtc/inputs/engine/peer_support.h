@@ -179,6 +179,8 @@ inline webrtc::PeerConnectionInterface::RTCConfiguration Configuration(const Jso
   config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
   config.bundle_policy = webrtc::PeerConnectionInterface::kBundlePolicyMaxBundle;
   config.rtcp_mux_policy = webrtc::PeerConnectionInterface::kRtcpMuxPolicyRequire;
+  // A paused hardware source still needs real network probes to discover recovery.
+  config.media_config.video.periodic_alr_bandwidth_probing = true;
   if (!data.contains("iceServers")) return config;
   const auto& servers = data.at("iceServers");
   if (!servers.is_array() || servers.size() > 16) Invalid("Too many ICE servers");

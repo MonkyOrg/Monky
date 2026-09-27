@@ -259,6 +259,39 @@ export const nativeScreenPreviewInfoSchema = callScope.extend({
   shareId: screenShareIdSchema, sourceInstanceId: uuid, presentationId: uuid,
 }).strict();
 export type NativeScreenPreviewInfo = z.infer<typeof nativeScreenPreviewInfoSchema>;
+const textureBase64 = z.string().min(4).max(16384)
+  .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/);
+const textureDimension = z.number().int().positive().max(16384).multipleOf(2);
+export function isNativeScreenPresentationId(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
+}
+export const nativeScreenTexturePortInfoSchema = z.object({
+  metadata: z.object({
+    frameId: z.number().int().positive().safe(),
+    timestampUs: z.number().int().min(-1).safe(),
+    presentationId: z.string().refine(isNativeScreenPresentationId),
+  }).strict(),
+  transfer: z.object({
+    pixelFormat: z.literal('nv12'),
+    codedSize: z.object({ width: textureDimension, height: textureDimension }).strict(),
+    visibleRect: z.object({
+      x: z.number().int().nonnegative().max(16384).multipleOf(2),
+      y: z.number().int().nonnegative().max(16384).multipleOf(2),
+      width: textureDimension, height: textureDimension,
+    }).strict(),
+    timestamp: z.number().int().min(-1).safe(),
+    transfer: textureBase64,
+    syncToken: textureBase64.refine(value => value.length <= 128),
+  }).strict(),
+}).strict().refine(({ metadata, transfer }) => metadata.timestampUs === transfer.timestamp
+  && transfer.visibleRect.x + transfer.visibleRect.width <= transfer.codedSize.width
+  && transfer.visibleRect.y + transfer.visibleRect.height <= transfer.codedSize.height);
+export type NativeScreenTexturePortInfo = z.infer<typeof nativeScreenTexturePortInfoSchema>;
+export const nativeScreenTextureReceiptSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('imported'), syncToken: textureBase64.refine(value => value.length <= 128) }).strict(),
+  z.object({ kind: z.literal('retired') }).strict(),
+  z.object({ kind: z.literal('error'), message: z.string().min(1).max(512) }).strict(),
+]);
 export const nativeScreenPreviewPacketSchema = z.object({
   type: z.literal('packet'), sequence: z.number().int().positive().safe(),
   pipelineId: uuid, video: nativeScreenVideoProfileSchema,

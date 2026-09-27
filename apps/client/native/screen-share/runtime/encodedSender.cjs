@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const { assertNativeRtcEngineClosed } = require('./nativeRtcCommands.cjs');
 const STARTUP_BITRATE_KBPS = 150;
+const MINIMUM_CAPTURE_BITRATE_KBPS = 50;
 const RECOVERY_REASONS = new Set(['rtc-unconsumed', 'input-expired', 'publication-expired', 'codec-expired', 'clock-sample-uncertain']);
 
 class LiveSenderFlow {
@@ -62,8 +63,9 @@ class LiveSenderFlow {
         assert.ok(Number.isSafeInteger(data.frameId) && data.frameId > 0);
         assert.ok(Number.isSafeInteger(data.generation) && data.generation > 0);
         this.counts.nativeRecoveryRequests++; this.lastRecovery = { ...data };
+        this.needsIdr = true; this.waitingSince ??= this.now();
       }
-      this.needsIdr = true; this.waitingSince ??= this.now();
+      // A receiver PLI does not invalidate the publisher's existing picture chain.
       this.requestIdr();
       return;
     }
@@ -83,14 +85,16 @@ class LiveSenderFlow {
       return;
     }
     const selected = Math.floor(data.bitrateBps / 50000) * 50;
-    const paused = data.paused || selected < STARTUP_BITRATE_KBPS;
+    // Keep real media reaching RTC's pacer while it has a positive allocation.
+    // The encoder's property minimum must not become a network pause/floor.
+    const paused = data.paused || data.bitrateBps === 0;
     if (paused !== this.paused) { this.needsIdr = true; this.waitingSince = null; }
     this.paused = paused;
     if (!paused) {
       // Stock AMF Flush/ReInit is costly. Keep 10% headroom and require a
       // 10% increase; an exceeded allocation always wins.
       const reference = this.applyingKbps ?? this.currentKbps;
-      const target = Math.max(STARTUP_BITRATE_KBPS, Math.floor(data.bitrateBps * 90 / 5000000) * 50);
+      const target = Math.max(MINIMUM_CAPTURE_BITRATE_KBPS, Math.floor(data.bitrateBps * 90 / 5000000) * 50);
       this.desiredKbps = reference > selected || target * 10 >= reference * 11 ? target : reference;
       this.scheduleRate();
     }

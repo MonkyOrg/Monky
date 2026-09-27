@@ -39,13 +39,19 @@ const mode = process.argv.find(value => value.startsWith('--mode='))?.slice('--m
 const encoder = process.argv.find(value => value.startsWith('--encoder='))?.slice('--encoder='.length) ?? 'auto';
 const selectedQuality = process.argv.find(value => value.startsWith('--quality='))?.slice('--quality='.length);
 const selectedProfile = process.argv.find(value => value.startsWith('--profile='))?.slice('--profile='.length) ?? '1080p120';
+const congestion = process.argv.find(value => value.startsWith('--congestion='))?.slice('--congestion='.length);
+const mainStallMs = Number(process.argv.find(value => value.startsWith('--main-stall-ms='))?.slice('--main-stall-ms='.length) ?? 0);
+assert.ok(congestion === undefined || ['moderate', 'severe'].includes(congestion));
+assert.ok(Number.isSafeInteger(mainStallMs) && mainStallMs >= 0 && mainStallMs <= 3000);
 const auditFfmpeg = process.argv.find(value => value.startsWith('--cadence-ffmpeg='))?.slice('--cadence-ffmpeg='.length);
 assert.ok(!auditFfmpeg || (path.isAbsolute(auditFfmpeg) && fs.existsSync(auditFfmpeg) && selectedQuality === 'source'),
   'Unique-frame qualification requires an existing absolute FFmpeg executable and source quality.');
-assert.ok(['1080p120', '1080p240', '4k120'].includes(selectedProfile));
+assert.ok(['480p15', '1080p120', '1080p240', '4k120'].includes(selectedProfile));
 assert.ok(selectedProfile === '1080p120' || selectedQuality === 'source',
   'High-FPS qualification requires the explicit source quality.');
-const sourceVideo = selectedProfile === '4k120'
+const sourceVideo = selectedProfile === '480p15'
+  ? { width: 848, height: 480, fps: 15, maxBitrateKbps: 900 }
+  : selectedProfile === '4k120'
   ? { width: 3840, height: 2160, fps: 120, maxBitrateKbps: 80000 }
   : { width: 1920, height: 1080, fps: selectedProfile === '1080p240' ? 240 : 120, maxBitrateKbps: 20000 };
 assert.ok(['auto', 'obs_x264', 'monky_aom_av1', 'av1_texture_amf', 'obs_nvenc_av1_tex',
@@ -56,6 +62,8 @@ const previewOnly = process.argv.includes('--preview-only');
 const rtcFault = process.argv.find(value => value.startsWith('--rtc-fault='))?.slice('--rtc-fault='.length);
 assert.ok(rtcFault === undefined || ['publish', 'receive'].includes(rtcFault));
 assert.ok(!rtcFault || (selectedQuality && !previewOnly && !auditFfmpeg));
+assert.ok(!congestion || (mode === 'sfu' && selectedQuality === 'source' && !previewOnly && !rtcFault && !auditFfmpeg));
+assert.ok(!mainStallMs || (mode === 'sfu' && selectedQuality === 'source' && !previewOnly && !rtcFault && !auditFfmpeg && !congestion));
 assert.ok(['p2p', 'sfu'].includes(mode));
 assert.ok(directory && path.isAbsolute(directory), 'An explicit isolated smoke-artifact directory is required.');
 assert.equal(fs.existsSync(directory), false, 'Never reuse a smoke profile or capture owner.');
@@ -304,6 +312,10 @@ async function runProfile(runtime, quality, sourceLoss = false, fault = null) {
   report.profiles.push(result);
   const phase = name => { result.phase = name; progress(); console.log(`Capture smoke ${video.width}x${video.height}@${video.fps}: ${name}`); };
   const mediaError = error => {
+    result.firstMediaFailure ??= {
+      phase: result.phase, code: error.code, message: error.message,
+      flow: sender?.flow?.snapshot(), host: sender?.host?.liveFrames?.packets,
+    };
     if (result.expectingRtcFault) {
       (result.expectedRtcErrors ??= []).push({ code: error.code, message: error.message });
       return;
@@ -405,6 +417,39 @@ async function runProfile(runtime, quality, sourceLoss = false, fault = null) {
     }
     result.activeRtp = { sender: await videoRtp(sender, 'outbound-rtp'), receiver: await videoRtp(receiver, 'inbound-rtp') };
     assert.ok(result.activeRtp.sender.bytes > 0 && result.activeRtp.receiver.bytes > 0);
+    if (congestion) {
+      result.congestion = [];
+      const limits = congestion === 'severe' ? [150000, 50000] : [500000, 250000];
+      for (const bitrate of [...limits, video.maxBitrateKbps * 1000]) {
+        phase(`congestion-${bitrate}`);
+        await sfu.limitPublisherBitrate('smoke-sender', bitrate);
+        for (let interval = 0; interval < 40; interval++) {
+          await delay(250);
+          result.congestion.push({ bitrate, at: performance.now(), flow: sender.flow.snapshot() });
+          if (failures.length) throw new AggregateError(failures, 'Native capture failed during controlled SFU congestion.');
+        }
+      }
+      phase('recovering-congestion');
+      const first = await sample();
+      await waitFor(async () => (await sample()).playback.counters.presentedFrames
+        >= first.playback.counters.presentedFrames + video.fps, 'Video did not resume after restoring the SFU bitrate.', 15000);
+      assert.ok(result.congestion.some(value => value.flow.feedback?.bitrateBps < video.maxBitrateKbps * 1000),
+        'The SFU bitrate limit never reached the real native congestion controller.');
+    }
+    if (mainStallMs) {
+      phase('requesting-real-pli');
+      const requests = sender.flow.snapshot().keyframeRequests;
+      await sfu.requestViewerKeyframe('smoke-receiver');
+      await waitFor(() => sender.flow.snapshot().keyframeRequests > requests, 'The real PLI did not request a new keyframe.');
+      phase('delaying-main-dispatch');
+      const before = await sample();
+      result.mainStall = { requestedMs: mainStallMs, flowBefore: sender.flow.snapshot() };
+      const started = performance.now();
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, mainStallMs);
+      result.mainStall.actualMs = performance.now() - started;
+      await waitFor(async () => (await sample()).playback.counters.presentedFrames
+        >= before.playback.counters.presentedFrames + video.fps, 'Video did not resume after Main dispatch returned.', 15000);
+    }
     if (fault) {
       phase('terminating-owned-rtc-host');
       await waitFor(() => receiver.presentation.leases.size > 0, 'No real Chromium texture lease was available for the fault test.');
