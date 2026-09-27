@@ -94,9 +94,11 @@ process.on('message', message => {
         duplicate?.destroy();
         duplicate = null;
         window.destroy();
+        assert.equal(window.isDestroyed(), true);
       }
     }
-    process.send({ type: 'result', id: message.id, ok: true });
+    process.send({ type: 'result', id: message.id, ok: true,
+      ...(message.command === 'close-source' ? { sourceDestroyed: window.isDestroyed() } : {}) });
   };
   void run().catch(error => process.send({ type: 'result', id: message.id, ok: false, error: error.stack ?? String(error) }));
 });

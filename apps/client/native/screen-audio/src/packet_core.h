@@ -146,6 +146,7 @@ struct Timing {
 
 class Timeline {
  public:
+  void DiscontinueDelivery() { deliveryGap_ = true; }
   Timing Next(uint32_t frames, uint32_t flags, std::optional<uint64_t> devicePosition,
               uint64_t qpc100ns, uint32_t sampleRate) {
     if (!frames || !sampleRate || sampleRate > 384000 ||
@@ -166,7 +167,7 @@ class Timeline {
       const auto tolerance = (2000000ULL + sampleRate - 1) / sampleRate + 1;
       qpcGap = elapsed > expected + tolerance || elapsed + tolerance < expected;
     }
-    if (seen_ && ((flags & kDiscontinuity) || valid != valid_ ||
+    if (seen_ && (deliveryGap_ || (flags & kDiscontinuity) || valid != valid_ ||
         devicePosition.has_value() != expectedPosition_.has_value() ||
         (devicePosition && devicePosition != expectedPosition_) ||
         (valid && valid_ && qpc100ns < lastQpc_) || qpcGap)) {
@@ -176,6 +177,7 @@ class Timeline {
     Timing timing{sequence_++, epoch_, frameIndex_, devicePosition,
                   valid ? std::optional(qpc100ns / 10) : std::nullopt, flags};
     frameIndex_ += frames;
+    deliveryGap_ = false;
     seen_ = true;
     valid_ = valid;
     expectedPosition_ = devicePosition ? std::optional(*devicePosition + frames) : std::nullopt;
@@ -189,7 +191,7 @@ class Timeline {
   uint64_t sequence_ = 0, epoch_ = 0, frameIndex_ = 0, lastQpc_ = 0;
   std::optional<uint64_t> expectedPosition_;
   uint32_t lastFrames_ = 0;
-  bool seen_ = false, valid_ = false;
+  bool seen_ = false, valid_ = false, deliveryGap_ = false;
 };
 
 // Data slots cover both queued callbacks and asynchronous consumer admission.

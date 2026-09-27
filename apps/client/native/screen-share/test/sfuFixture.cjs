@@ -90,6 +90,19 @@ async function createSfuFixture(channelId) {
       };
     },
     disconnectRpc() { connected = false; },
+    async limitPublisherBitrate(sessionId, bitrate) {
+      assert.ok(Number.isSafeInteger(bitrate) && bitrate >= 50000 && bitrate <= 80000000);
+      const transports = [...manager.transports.values()].filter(record =>
+        record.sessionId === sessionId && record.channelId === channelId && record.direction === 'send');
+      assert.equal(transports.length, 1, 'Congestion must target exactly one owned publisher transport.');
+      await transports[0].transport.setMaxIncomingBitrate(bitrate);
+    },
+    async requestViewerKeyframe(sessionId) {
+      const consumers = [...manager.consumers.values()].filter(record =>
+        record.sessionId === sessionId && record.channelId === channelId && record.consumer.kind === 'video');
+      assert.equal(consumers.length, 1, 'PLI must target exactly one owned video consumer.');
+      await consumers[0].consumer.requestKeyFrame();
+    },
     producers: () => manager.getProducersInChannel(channelId).map(producer => ({ channelId, ...producer })),
     onProducer(listener) {
       assert.equal(typeof listener, 'function');

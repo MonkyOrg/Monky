@@ -482,8 +482,8 @@ for (const selected of targets) {
     };
     Object.setPrototypeOf(endpoint, NativeScreenEndpoint.prototype);
     await endpoint.startAudioSource();
-    assert.deepEqual(selections, [selected.kind === 'monitor' ? { excludePid: process.pid }
-      : { includeWindowId: selected.hwnd, expectedProcessId: selected.expectedProcessId }]);
+    assert.deepEqual(selections, [selected.kind === 'monitor' ? { excludePid: process.pid, overflowMode: 'discontinue' }
+      : { includeWindowId: selected.hwnd, expectedProcessId: selected.expectedProcessId, overflowMode: 'discontinue' }]);
     assert.equal(publications[0].syncGroup, endpoint.source.instanceId);
     assert.equal(endpoint.pcm.getStats().submitted, 0);
     assert.equal(endpoint.pcm.getStats().enabled, false);

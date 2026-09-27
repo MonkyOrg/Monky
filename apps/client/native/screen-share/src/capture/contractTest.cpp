@@ -284,7 +284,8 @@ int main(int argc, char** argv) {
     CheckBudget(15, kQueueBytes - 1, 1, 1000, 1500); check(true);
     rejects([&] { CheckBudget(16, 0, 1, 1000, 1000); });
     rejects([&] { CheckBudget(0, kQueueBytes, 1, 1000, 1000); });
-    rejects([&] { CheckBudget(1, 0, 1, 1000, 1501); });
+    CheckBudget(1, 0, 1, 1000, 2500); check(true);
+    rejects([&] { CheckBudget(1, 0, 1, 1000, 1000 + kMainStallTimeoutMs + 1); });
     rejects([&] { CheckBudget(1, 0, 1, 1000, 999); });
     PacketClock clock;
     abi::EncoderPacket packet{};

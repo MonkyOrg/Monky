@@ -15,7 +15,7 @@ function fixture({ stopGate, closedGate } = {}) {
   const selection = { includeWindowId: 101 };
   const captureModule = {
     createPacketCapture(options, onEvent) {
-      assert.deepEqual(options, selection);
+      assert.deepEqual(options, { ...selection, overflowMode: 'discontinue' });
       const ready = deferred(), closed = deferred();
       const capture = {
         sessionId: `capture-${captures.length + 1}`, stopping: false, closed: false, stops: 0, onEvent,
@@ -141,6 +141,32 @@ test('packet delivery waits for every subscriber admission, not just callback in
   b.resolve();
   await admission;
   assert.equal(admitted, true);
+  await f.hub.close();
+  assert.deepEqual(f.errors, []);
+});
+
+test('an explicit capture delivery gap is reported without detaching subscribers or acknowledging pending processing', async t => {
+  const f = fixture(), pending = deferred(), events = [];
+  const warning = t.mock.method(console, 'warn', () => {});
+  const subscription = f.hub.subscribe(f.selection, event => {
+    events.push(event);
+    if (event.type === 'packet') return pending.promise;
+  });
+  await subscription.ready;
+  let admitted = false;
+  const admission = f.captures[0].onEvent({ type: 'packet', sequence: 1 }).then(() => { admitted = true; });
+  const gap = { type: 'discontinuity', sessionId: f.captures[0].sessionId,
+    epoch: `${f.captures[0].sessionId}:1`, reason: 'admission-backpressure', droppedPackets: 2, droppedFrames: 960 };
+  f.captures[0].onEvent(gap);
+  await tick();
+  assert.equal(admitted, false);
+  assert.equal(warning.mock.calls.length, 1);
+  assert.equal(warning.mock.calls[0].arguments[1], gap);
+  assert.equal(f.captures[0].stops, 0);
+  assert.equal(events.some(event => event.type === 'discontinuity'), false);
+  pending.resolve();
+  await admission;
+  await subscription.detach();
   await f.hub.close();
   assert.deepEqual(f.errors, []);
 });

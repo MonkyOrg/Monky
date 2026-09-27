@@ -2,7 +2,7 @@
 
 // This is the only production JavaScript entry point allowed to load the RTC addon.
 const assert = require('node:assert/strict');
-const { encode, decode, errorRecord, METHODS } = require('./wire.cjs');
+const { encode, decode, errorRecord, METHODS, MAX_ORDINARY_CALLS, MAX_RETIREMENT_CALLS } = require('./wire.cjs');
 const parent = process.parentPort;
 const send = value => {
   const bytes = encode(value);
@@ -55,7 +55,8 @@ async function receive(bytes) {
   }
   assert.equal(message.type, 'call');
   assert.ok(engine && Number.isSafeInteger(message.id) && message.id > 0 && !pending.has(message.id));
-  assert.ok(METHODS.has(message.method) && Array.isArray(message.args) && pending.size < 192);
+  assert.ok(METHODS.has(message.method) && Array.isArray(message.args)
+    && pending.size < MAX_ORDINARY_CALLS + MAX_RETIREMENT_CALLS);
   pending.add(message.id);
   let inputLease = null, inputRetired = false;
   try {
@@ -66,11 +67,12 @@ async function receive(bytes) {
       inputLeases.set(message.id, inputLease);
       message.args[1].handle = inputLease.handle;
     }
+    // Native state may already be gone while asynchronous close is still draining.
+    if (message.method === 'close') clearInterval(timer);
     const result = await engine[message.method](...message.args);
     inputRetired = true;
     if (message.method === 'close') {
       closed = true;
-      clearInterval(timer);
       for (const lease of inputLeases.values()) lease.close();
       inputLeases.clear();
     }

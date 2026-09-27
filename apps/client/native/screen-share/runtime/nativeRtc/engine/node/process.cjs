@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { fork } = require('node:child_process');
-const { encode, decode, fromError } = require('./wire.cjs');
+const { encode, decode, fromError, MAX_ORDINARY_CALLS, MAX_RETIREMENT_CALLS } = require('./wire.cjs');
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -41,6 +41,8 @@ class ProcessEngine {
     this.inputFrames = new Map();
     this.nextId = 0;
     this.bytesPending = 0;
+    this.retirementPending = 0;
+    this.retirementBytes = 0;
     this.encodedPending = 0;
     this.audioPending = 0;
     this.lastSnapshot = null;
@@ -140,6 +142,10 @@ class ProcessEngine {
     this.pending.delete(id);
     clearTimeout(record.timer);
     this.bytesPending -= record.bytes;
+    if (record.retirementOperation) {
+      this.retirementPending--;
+      this.retirementBytes -= record.bytes;
+    }
     if (record.method === 'submitEncodedFrame') this.encodedPending--;
     if (record.method === 'submitAudioPacket') this.audioPending--;
   }
@@ -218,12 +224,23 @@ class ProcessEngine {
         code: 'ERR_RTC_INPUT_DUPLICATE', status: 8, nativeOwnershipRetained: true,
         sourceId: args[0], frameId: args[1]?.frameId,
       });
-    if (this.pending.size >= 128 || this.bytesPending + bytes.length > 32 * 1024 * 1024
+    const retirement = method === 'releaseFrame' || method === 'close'
+      || (method === 'request' && ['resource.close', 'audio.stopOutput'].includes(args[1]));
+    // Releasing an existing owner must not compete with the work that filled the queue.
+    const full = retirement
+      ? this.retirementPending >= MAX_RETIREMENT_CALLS || this.retirementBytes + bytes.length > 64 * 1024
+      : this.pending.size - this.retirementPending >= MAX_ORDINARY_CALLS
+        || this.bytesPending - this.retirementBytes + bytes.length > 32 * 1024 * 1024;
+    if (full
       || (method === 'submitEncodedFrame' && this.encodedPending >= 16)
       || (method === 'submitAudioPacket' && this.audioPending >= 8)
       || (inputKey && this.inputFrames.size >= 16)) throw queueFull();
     const id = ++this.nextId, record = { ...deferred(), method, bytes: bytes.length };
-    record.retirementOperation = method === 'request' && ['resource.close', 'audio.stopOutput'].includes(args[1]);
+    record.retirementOperation = retirement;
+    if (retirement) {
+      this.retirementPending++;
+      this.retirementBytes += bytes.length;
+    }
     if (method === 'submitAudioPacket') {
       const packet = args[1];
       record.identity = { sourceId: args[0], epoch: packet.epoch, sequence: packet.sequence,
@@ -287,6 +304,7 @@ class ProcessEngine {
     return { ...structuredClone(this.lastSnapshot), process: {
       isolated: true, pid: this.pid ?? this.child.pid, exited: this.hostExited === true, cached: true,
       pendingCalls: this.pending.size, pendingBytes: this.bytesPending, externalTextureLeases: this.leases.size,
+      retirementCalls: this.retirementPending, retirementBytes: this.retirementBytes,
       unprovenInputGpuLeases: this.inputFrames.size,
     } };
   }

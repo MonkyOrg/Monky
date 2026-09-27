@@ -1505,7 +1505,7 @@ test('same-call game/window to monitor swaps retire PCM, reset selectors and rej
     const subscription = endpoint.options.audio.captureHub.subscribe(selection, event => packets.push(event));
     await subscription.ready;
     const capture = nativeCaptures.at(-1);
-    assert.deepEqual(capture.selection, selection);
+    assert.deepEqual(capture.selection, { ...selection, overflowMode: 'discontinue' });
     const packet = { type: 'packet', sequence: 1, pcm: Buffer.from([1, 2, 3, 4]) };
     capture.onEvent(packet);
     assert.equal(packets.at(-1), packet, 'The production hub forwards the modeled packet payload unchanged');

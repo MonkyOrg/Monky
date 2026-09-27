@@ -938,6 +938,18 @@ export class SfuManager {
     return record?.sessionId === sessionId && record.channelId === channelId ? record.producerId : undefined;
   }
 
+  public getScreenViewers(publisherSessionId: string, channelId: string, shareId: string): string[] {
+    const viewers = new Set<string>();
+    for (const record of this.consumers.values()) {
+      if (record.channelId !== channelId || record.consumer.closed || record.consumer.paused) continue;
+      const source = this.producers.get(record.producerId);
+      if (source && !source.producer.closed && source.channelId === channelId && source.sessionId === publisherSessionId
+        && source.kind === 'video' && source.appData.mediaType === 'screen_video' && source.appData.shareId === shareId)
+        viewers.add(record.sessionId);
+    }
+    return [...viewers];
+  }
+
   public revokeConsumers(canReceive: (sessionId: string, channelId: string, producerId: string) => boolean): void {
     for (const [id, record] of this.consumers) {
       if (!canReceive(record.sessionId, record.channelId, record.producerId)) this.discardPendingConsumer(id);

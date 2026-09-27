@@ -9,7 +9,7 @@ import { PROTOCOL_VERSION } from './constants.js';
 // Protocol 29 adds private screen audiences and 1080p240/4K120 profile bounds.
 export const MIN_CLIENT_PROTOCOL = 29;
 export const MIN_BOT_PROTOCOL = 24;
-export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo'] as const;
+export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];
 export const protocolOfferSchema = z.object({
   minimumVersion: z.number().int().positive(),
@@ -19,7 +19,7 @@ export interface ProtocolOffer { minimumVersion: number; features: string[] }
 export interface ProtocolAgreement extends ProtocolOffer { version: number }
 export function createProtocolOffer(kind: 'client' | 'bot'): ProtocolOffer {
   return { minimumVersion: kind === 'bot' ? MIN_BOT_PROTOCOL : MIN_CLIENT_PROTOCOL,
-    features: PROTOCOL_FEATURES.filter(feature => kind !== 'bot' || (feature !== 'chat-blocks' && feature !== 'chat-delivery' && feature !== 'message-delete-undo')) };
+    features: PROTOCOL_FEATURES.filter(feature => kind !== 'bot' || (feature !== 'chat-blocks' && feature !== 'chat-delivery' && feature !== 'message-delete-undo' && feature !== 'screen-viewers')) };
 }
 export function negotiateProtocol(version: unknown, offer: unknown, kind: 'client' | 'bot'): ProtocolAgreement | null {
   const minimumVersion = kind === 'bot' ? MIN_BOT_PROTOCOL : MIN_CLIENT_PROTOCOL;

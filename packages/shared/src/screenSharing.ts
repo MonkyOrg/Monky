@@ -112,6 +112,14 @@ export const nativeScreenSourceSchema = z.object({
   audience: screenShareAudienceSchema.optional(),
 }).strict();
 export type NativeScreenSource = z.infer<typeof nativeScreenSourceSchema>;
+export const screenViewersRequestSchema = z.object({
+  channelId: reference(128), publisherSessionId: reference(128),
+  shareId: screenShareIdSchema, sourceInstanceId: z.string().uuid().nullable(),
+}).strict();
+export const screenViewersResultSchema = screenViewersRequestSchema.extend({
+  viewerSessionIds: z.array(reference(128)).max(1024),
+}).strict();
+export type ScreenViewersResult = z.infer<typeof screenViewersResultSchema>;
 export const nativeScreenSourcesSchema = z.array(nativeScreenSourceSchema).max(2)
   .refine(sources => new Set(sources.map(source => source.shareId)).size === sources.length
     && new Set(sources.map(source => source.instanceId)).size === sources.length);

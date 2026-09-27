@@ -44,6 +44,8 @@ export interface PacketCaptureOptions {
   includeWindowId?: number;
   /** When a window was resolved by Main, reject reuse by another process. */
   expectedProcessId?: number;
+  /** Defaults to fail. Live consumers may discard unadmitted packets and resume in a new native epoch. */
+  overflowMode?: 'fail' | 'discontinue';
 }
 
 export function isPacketCaptureSupported(): boolean;
@@ -70,6 +72,9 @@ export interface PacketCaptureSnapshot {
   /** Queued callbacks plus packets awaiting asynchronous consumer admission. */
   queuedPackets: number;
   overflowCount: number;
+  overflowMode: 'fail' | 'discontinue';
+  droppedPackets: number;
+  droppedFrames: number;
   maxQueuedPackets: number;
   maxPacketBytes: number;
   error: PacketCaptureError | null;
@@ -101,6 +106,8 @@ export interface AudioCapturePacket {
 export type PacketCaptureEvent =
   | { type: 'ready'; sessionId: string; format: PacketCaptureFormat }
   | AudioCapturePacket
+  | { type: 'discontinuity'; sessionId: string; epoch: string; reason: 'admission-backpressure';
+      droppedPackets: number; droppedFrames: number }
   | { type: 'error'; error: PacketCaptureError }
   | { type: 'closed'; snapshot: PacketCaptureSnapshot };
 
@@ -124,7 +131,11 @@ export interface PacketCaptureSession {
  * rejected acknowledgement fails with ERR_AUDIO_CALLBACK. Only packet events
  * use these acknowledgements; ready/error/closed delivery remains independent.
  * A full budget waits up to 500 ms, cancellable by Stop/cleanup, before failing
- * with ERR_AUDIO_OVERFLOW. Invalid options throw; startup/runtime failures emit
+ * with ERR_AUDIO_OVERFLOW in fail mode. Discontinue mode discards only packets
+ * without a delivery credit; the next admitted packet starts a new native
+ * epoch preceded by a discontinuity event. Indices, PCM, flags and QPC remain
+ * original; existing admission/processing receipts are never revoked.
+ * Invalid options throw; startup/runtime failures emit
  * error then closed (startup also rejects ready). Call stop() or await closed.
  */
 export function createPacketCapture(

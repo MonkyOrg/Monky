@@ -2,6 +2,7 @@
 
 const { boundedCleanup } = require('./frameSink.cjs');
 const { isPresentationId } = require('./presentationRoute.cjs');
+const { sendTexture } = require('./textureTransfer.cjs');
 
 const positiveId = value => Number.isSafeInteger(value) && value > 0;
 const coordinate = value => Number.isSafeInteger(value) && value >= 0;
@@ -36,18 +37,20 @@ function decodedTextureInfo(event) {
 }
 
 class NativePresentationBridge {
-  constructor(engine, textures, onError, { drainTimeoutMs = 5000 } = {}) {
+  constructor(engine, textures, onError, { drainTimeoutMs = 5000, createTextureChannel } = {}) {
     if (typeof engine?.releaseFrame !== 'function' || typeof engine.request !== 'function'
       || typeof engine.submitFrame !== 'function'
       || typeof textures?.importSharedTexture !== 'function' || typeof textures?.sendSharedTexture !== 'function'
       || typeof onError !== 'function' || !Number.isInteger(drainTimeoutMs)
-      || drainTimeoutMs < 1 || drainTimeoutMs > 60000) {
+      || drainTimeoutMs < 1 || drainTimeoutMs > 60000
+      || (createTextureChannel !== undefined && typeof createTextureChannel !== 'function')) {
       throw new Error('Native presentation requires an engine, shared-texture API and error observer.');
     }
     this.engine = engine;
     this.textures = textures;
     this.onError = onError;
     this.drainTimeoutMs = drainTimeoutMs;
+    this.createTextureChannel = createTextureChannel;
     this.accepting = true;
     this.leases = new Map();
     this.transfers = new Set();
@@ -123,10 +126,10 @@ class NativePresentationBridge {
         throw new Error('Native texture import did not return an owned wrapper; ownership is retained.');
       }
       this.imported++;
-      await this.textures.sendSharedTexture({
-        frame: destination.frame, importedSharedTexture: lease.imported,
-      }, { frameId, timestampUs: event.data.timestampUs, presentationId: destination.presentationId });
-      this.delivered++;
+      await sendTexture(lease.imported, destination.frame,
+        { frameId, timestampUs: event.data.timestampUs, presentationId: destination.presentationId },
+        error => this.report(error), { timeoutMs: this.drainTimeoutMs, createChannel: this.createTextureChannel,
+          onAcquired: () => { this.delivered++; } });
     } catch (error) {
       failure = error;
     } finally {

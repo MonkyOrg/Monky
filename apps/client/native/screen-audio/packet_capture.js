@@ -7,6 +7,9 @@ function createPacketCaptureFactory(binding, platform) {
     if (!options || typeof options !== 'object' || Array.isArray(options) || typeof onEvent !== 'function') {
       throw new TypeError('Expected (options, onEvent)');
     }
+    if (options.overflowMode !== undefined && !['fail', 'discontinue'].includes(options.overflowMode)) {
+      throw new TypeError('overflowMode must be fail or discontinue');
+    }
     if (platform === 'win32' && binding && typeof binding.createPacketCapture === 'function') {
       return binding.createPacketCapture(options, onEvent);
     }
@@ -18,6 +21,7 @@ function createPacketCaptureFactory(binding, platform) {
     const snapshot = Object.freeze({
       sessionId: null, state: 'failed', format: null, capturedPackets: 0,
       capturedFrames: 0, deliveredPackets: 0, queuedPackets: 0, overflowCount: 0,
+      overflowMode: options.overflowMode ?? 'fail', droppedPackets: 0, droppedFrames: 0,
       maxQueuedPackets: 32, maxPacketBytes: 1048576, error,
     });
     const ready = Promise.reject(error);

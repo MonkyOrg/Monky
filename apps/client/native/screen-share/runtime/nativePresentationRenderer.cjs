@@ -5,22 +5,22 @@ const { NativeVideoPresentationSink } = require('./presentationSink.cjs');
 const { registerTextureReceiver } = require('./textureReceiver.cjs');
 const { EncodedPreviewRenderer } = require('./encodedPreviewRenderer.cjs');
 
-function createNativeScreenPresentation(textures, document, onError, ipcRenderer = null) {
+function createNativeScreenPresentation(textures, document, onError, ipcRenderer = require('electron').ipcRenderer) {
   if (typeof document?.getElementById !== 'function' || typeof document.querySelectorAll !== 'function'
-    || typeof textures?.setSharedTextureReceiver !== 'function' || typeof onError !== 'function')
+    || typeof textures?.subtle?.finishTransferSharedTexture !== 'function' || typeof onError !== 'function')
     throw new Error('Native presentation needs its owned document, texture receiver and error observer.');
   const presentations = new Map();
   const report = (presentationId, error) => {
     try { onError(presentationId, error instanceof Error ? error : new Error(String(error))); }
     catch (observerError) { console.error('Native presentation error observer failed:', observerError); }
   };
-  registerTextureReceiver(textures, {
+  const detachTextures = registerTextureReceiver(textures, {
     getSink: metadata => {
       const entry = presentations.get(metadata.presentationId);
       return entry && !entry.preview ? entry.sink : null;
     },
     onError: error => report(null, error),
-  });
+  }, ipcRenderer);
   const stop = async input => {
     const id = nativeScreenPresentationSchema.shape.presentationId.parse(input);
     const entry = presentations.get(id);
@@ -96,6 +96,7 @@ function createNativeScreenPresentation(textures, document, onError, ipcRenderer
       const results = await Promise.allSettled([...presentations.keys()].map(stop));
       const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
       if (errors.length) throw new AggregateError(errors, 'Native document presentations did not retire.');
+      await detachTextures();
     },
   });
 }

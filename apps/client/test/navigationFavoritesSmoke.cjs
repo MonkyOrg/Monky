@@ -1116,8 +1116,14 @@ async function setupNavigationFavoritesSmoke() {
       surface().style.visibility = 'hidden';
       await until(() => controller.animations.size === 0, `${mode}: hidden panels release their motion`);
       clean();
+      await until(() => stars().length === 0, `${mode}: hidden panel conceals every favorite control`);
       surface().style.visibility = '';
-      await tick();
+      for (const animation of surface().getAnimations({ subtree: true })) {
+        if (animation instanceof CSSTransition && animation.transitionProperty === 'visibility')
+          animation.effect.updateTiming({ delay: 120 });
+      }
+      // Rows transition inherited visibility; offscreen frames need not arrive within 30 ms.
+      await until(() => stars().length === all.length, `${mode}: restored panel exposes every favorite control`);
       toggle(zulu);
       await finish();
       scroller.style.maxHeight = '80px';

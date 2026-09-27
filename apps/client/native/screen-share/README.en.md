@@ -94,6 +94,18 @@ owned until Chromium's `allReferencesReleased` (or proof it was never imported).
 Child death proves process exit, **not GPU/fence completion**; it does not
 retire external references, clear ownership guards on timeout or reuse an old
 endpoint.
+
+Texture delivery uses Electron's documented `sharedTexture.subtle` transfer API
+over one private, typed MessagePort per native lease, not the convenience
+`sendSharedTexture` API's fixed one-second timeout. The renderer returns its real
+creation sync token and, separately, a receipt from the native GPU-release
+callback. Only then can Main release its imported wrapper and await
+`allReferencesReleased` plus the RTC retirement ACK. Acquisition still has the
+endpoint's existing deadline; a timeout, malformed receipt or closed port reports
+an error but never authorizes GPU reuse. Late real receipts can finish cleanup.
+`delivered` counts acquisition; pending transfers include GPU retirement.
+No Electron internals or global timers are patched, and the native decoded-pool
+limits continue to bound outstanding ports/textures.
 A responsive JS host does not hide a stuck native worker: decoder operations
 observed in progress for eight seconds on the existing native diagnostic clock
 also terminate only that child, retaining the Main-owned duplicates.
@@ -124,6 +136,21 @@ the original RTC clock; QPC/renderer timestamps and uncertainty limits are not
 modified. Synchronous capabilities describe the verified build and are checked
 against the real child DLL before `ready`. Synchronous snapshots are cached;
 diagnostics request a fresh native observation.
+
+Ordinary calls have 128 credits/32 MiB. Retirement has a separate reserve of
+64 credits/64 KiB for `releaseFrame`, `close`, `resource.close` and
+`audio.stopOutput`, within the host's existing 192-call ceiling. Ordinary
+saturation must not prevent release of an already-owned texture. Credits return
+only on actual completion or process exit.
+
+Compressed capture-pipe copies remain bounded to 16 items/8 MiB, including the
+item being written. Admission now uses the native owner's existing 15-second
+deadline instead of confusing local delivery with media freshness. RTC still
+rejects AUs older than 500 ms and recovers through a real IDR: waiting for a copy
+does not authorize presenting stale media. Timestamps, sequence, feedback ACKs
+and closure proofs are unchanged; retirement deadlines have not increased.
+`maxBackpressureMs` reports the observed wait, not a latency ceiling. The native
+build requires the device-free pipe regression with parent reads delayed 1200 ms.
 
 `nativeRtcProcess.test.cjs` covers a real abort, timeout, pending-operation
 rejection, credits and recovery. `nativeCaptureSmoke.cjs --rtc-fault=receive`
@@ -254,6 +281,12 @@ timestamps. It records the correction once per host. Other metadata, third-party
 streams and RTC colour validation do not receive this exception. Physical
 publication on the 5600G still needs confirmation.
 
+A receiver PLI requests a new keyframe without invalidating the publisher's
+still-valid encoded chain. Dependent frames continue to existing viewers, and
+repeated requests are coalesced until a real keyframe arrives. Bootstrap and
+actual dependency loss still require an independent frame under the same
+recovery bounds.
+
 On reception, a clock observation that expires during IPC transport is
 unavailable, not a failure of the entire audio output. The structured
 `ERR_RTC_AUDIO_CLOCK_OBSERVATION` code withdraws the measurement and permits
@@ -284,6 +317,11 @@ For SFU, both H.264 and AV1 SDP retain the initial estimate of up to 5 Mbps and
 the profile ceiling. The adapter includes AV1 when serializing those options,
 avoiding an unintended 300 kbps start and accumulated packets in the pacer.
 No bitrate minimum is imposed; congestion control can still lower the estimate.
+The encoder's minimum configurable rate (50 kbps) does not pause a positive RTC
+allocation: real frames keep reaching the pacer, which controls network egress.
+Only a zero allocation or an explicit RTC pause suspends admission. Periodic
+application-limited probes help detect network recovery without turning the
+startup estimate into a mandatory bandwidth floor.
 
 This does not make every encoder 4K120-capable. The AMF installed on the tested
 RX 9070 XT reports `MaxLevel=52` and rejects `ProfileLevel=60`; 4K60/80 Mbps
@@ -363,6 +401,15 @@ share remains blocked while the first owns audio. When audio capture is unavaila
 disable it to send video only; there is no silent change of scope. Module
 support and device-free tests do not replace physical audio validation on
 the target Windows machine.
+
+Screen sharing selects `overflowMode: 'discontinue'` for PCM capture. The queue
+remains bounded to 32 credits with a 500 ms admission wait. If that wait expires,
+only the packet without a credit is discarded; the next admitted packet starts
+a new native epoch and reports the loss. Acquired indices, PCM, QPC and WASAPI
+flags remain original. The bridge waits for previous processing receipts before
+activating the new epoch; in-flight credits are never revoked. Device failures
+remain explicit and terminal. The RTC diagnostic timer stops before native
+close begins, so it cannot inspect dismantled state while resources still drain.
 
 For playout, `currentFrame` observes the graph clock, not the speaker clock.
 Chromium 152.0.7977.130 [advances the graph before updating the
@@ -514,7 +561,8 @@ build `screen-audio`**. It does not use experimental directories or execute
 they are not silently reset or replaced.
 
 Archive downloads allow up to three attempts for transient network/server
-failures, with backoff and partial-file cleanup. Every completed attempt must
+failures, including aborted Windows connections (`ECONNABORTED`), with backoff
+and partial-file cleanup. Every completed attempt must
 validate its pinned SHA-256 and any declared size. Integrity, certificate, unsafe-redirect
 or permanent HTTP failures stop preparation without retrying or replacing
 the cache.
@@ -678,6 +726,39 @@ Use `--quality=480p30`, `720p60` or `1080p60` for a single profile,
 to validate capture and WebCodecs preview without network admission.
 Software still uses libobs/D3D11 capture but does not require a GPU encoder.
 Scenarios verify pixels, cadence and resource retirement.
+
+For interruption diagnosis, `nativeCaptureSmoke.cjs` accepts
+`--mode=sfu --quality=source --profile=480p15` and
+`--congestion=moderate` (500/250 kbps) or `--congestion=severe` (150/50 kbps),
+then restores the profile ceiling on the smoke's own transport.
+Alternatively, `--main-stall-ms=1700` delays Main after a real PLI.
+The report preserves the first failure and counters before cleanup.
+These modes inject adverse conditions and may fail; they neither disable
+production guards nor independently establish the cause of an external incident.
+
+`nativeAvSmoke.cjs` accepts explicit AMD/NVIDIA H.264/AV1 encoder selection,
+`--profile=720p30` (the default remains 1080p120),
+`--main-stall-ms=1200` and `--soak-ms=900000` for a 15-minute run
+(20-minute maximum). The extended run records event-loop delay and presented
+frames, updating `progress.json` every five samples.
+Only its owned synthetic window supplies audio/video; no media is recorded.
+
+`--silent-source` does not start the tone and requires real silent PCM with
+advancing counters, allowing continuity/backpressure checks without changing
+the mixer. It explicitly reports audible gain/stereo as untested. The normal
+run first checks the original signal, so an already-muted source is not blamed
+on volume control. `--audio-addon=<absolute_path.node>` selects a separately
+built candidate in this fixture only, without replacing an in-use DLL. After a
+Main stall, video and PCM must resume on all three receivers; stalls of at least
+1200 ms must also produce a diagnosed PCM loss.
+The stall starts immediately after posting a real texture transfer, before its
+receipt can be dispatched in Main, rather than depending on accidental timing.
+`textureTransfer.test.cjs` verifies GPU-before-Main-before-RTC retirement, late
+receipts, invalid tokens and document cleanup independently of hardware.
+During source loss, the owner process must confirm destruction of its window.
+Only in that scenario does the fixture accept either source loss or ambiguity
+observed during destruction; production identity guards and full-retirement
+requirements remain unchanged.
 
 `--quality=source --profile=1080p240` and
 `--quality=source --profile=4k120` exercise the new profiles without reducing

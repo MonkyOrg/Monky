@@ -239,7 +239,7 @@ test('presentation retirement aborts a blocked preview writer and releases alias
   const owner = { id: randomUUID(), nodeName: 'VIDEO', srcObject: null, async play() {}, pause() {} };
   const alias = { srcObject: null, paused: false, pause() { this.paused = true; } };
   const other = { srcObject: new MediaStream([]), pause() { assert.fail('An unrelated player was paused.'); } };
-  const controller = createNativeScreenPresentation({ setSharedTextureReceiver() {} }, {
+  const controller = createNativeScreenPresentation({ subtle: { finishTransferSharedTexture() {} } }, {
     getElementById: id => id === owner.id ? owner : null, querySelectorAll: () => [owner, alias, other],
   }, (_id, error) => errors.push(error), ipc);
   t.after(() => controller.close());
@@ -314,7 +314,7 @@ function presentationFixture(t, { blocked = false, writeFailure = null } = {}) {
     });
   }
   const owner = { id: randomUUID(), nodeName: 'VIDEO', srcObject: null, async play() {}, pause() {} };
-  const controller = createNativeScreenPresentation({ setSharedTextureReceiver() {} }, {
+  const controller = createNativeScreenPresentation({ subtle: { finishTransferSharedTexture() {} } }, {
     getElementById: () => owner, querySelectorAll: () => [owner],
   }, (_id, error) => errors.push(error), ipc);
   t.after(async () => { resolveAbort(); await controller.close(); });

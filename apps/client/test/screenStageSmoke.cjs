@@ -62,6 +62,7 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
   replace(rtc, 'getNativeScreenWatchState', (sessionId, shareId) =>
     sessionId === remote.sessionId && shareId === remoteSource.shareId ? watchState : null);
   replace(rtc, 'getAverageP2pPing', async () => 0);
+  replace(rtc, 'getScreenViewers', async () => []);
   replace(rtc, 'setRemoteScreenWatching', (sessionId, shareId, watching) => {
     if (!watching) modes.delete(modeKey(sessionId, shareId));
     voice.setScreenWatching(sessionId, shareId, watching);
@@ -134,6 +135,14 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
         mode: element.dataset.captureMode, badge: bounds.toJSON(), card: parent.toJSON() })}`);
       check(element.scrollWidth <= element.clientWidth + 1, 'Localized mode text must fit without truncation');
     }
+    for (const hint of document.querySelectorAll('.stage-focused-main .stage-focus-hint-badge')) {
+      const viewers = hint.parentElement.querySelector('.stage-viewers');
+      if (!viewers) continue;
+      const hintBounds = hint.getBoundingClientRect(), viewerBounds = viewers.getBoundingClientRect();
+      check(hintBounds.bottom <= viewerBounds.top || hintBounds.top >= viewerBounds.bottom
+        || hintBounds.right <= viewerBounds.left || hintBounds.left >= viewerBounds.right,
+      'The focus hint and viewer badge must not overlap');
+    }
   };
   const start = () => {
     const stream = new MediaStream();
@@ -177,6 +186,7 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       document.body.innerHTML = '<div id="screen-stage-fixture" style="height:100vh;width:100vw;display:flex;flex-direction:column;min-height:0"></div>';
       server.setServerDetails({
         id: 'stage-ui-server', name: 'UI fixture', createdAt: 1, maxUsers: 10, voiceStates: {},
+        protocol: { version: 30, minimumVersion: 29, features: ['screen-viewers'] },
         channels: [channel, { ...channel, id: 'other-channel' }], members: [local, remote], knownMembers: [local, remote],
         roles: [], userRoles: [], myPermissions: 2147483647, ownerId: local.id,
       }, local);
@@ -192,6 +202,9 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       verifyBadge(remote.sessionId, remoteSource.shareId, null);
       verifyBadge(remote.sessionId, 'remote-browser', 'normal');
       check(!root.querySelector('[data-kind="camera"] .stage-capture-mode-badge'), 'Camera tiles must not inherit a screen capture mode');
+      check(card(remote.sessionId, remoteSource.shareId).querySelector('.stage-viewers'),
+        'Allowed non-watchers can see a remote screen audience');
+      check(!root.querySelector('[data-kind="camera"] .stage-viewers'), 'Cameras do not acquire screen viewer badges');
       check(!modeCalls.some(([, id]) => id === 'remote-browser'), 'A legacy/browser share must not invent a native confirmation');
 
       const first = start();
@@ -203,6 +216,8 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       check(card(remote.sessionId, remoteSource.shareId).classList.contains('stage-mini-card'), 'Remote status must also render in the mini strip');
       checkBadgeLayout();
       const focusedCard = card(local.sessionId, first.id);
+      check(focusedCard.querySelector('.stage-viewers') && root.querySelector('.stage-mini-card .stage-viewers'),
+        'Viewer lists are present on local, focused and mini screen cards');
       const focusedVideo = video(local.sessionId, first.id);
       const mountedVideos = [...root.querySelectorAll('video')].map(element => ({ element, stream: element.srcObject }));
       const previews = root.querySelector('#stage-participants-area');

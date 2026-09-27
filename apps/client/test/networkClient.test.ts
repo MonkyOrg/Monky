@@ -107,7 +107,7 @@ for (const serverProtocolVersion of [24, 25, 26, 27, 28]) {
     const socket = f.lastSocket();
     socket.open();
     const request = socket.sent[0];
-    assert.equal(request.payload.protocolVersion, 29);
+    assert.equal(request.payload.protocolVersion, 30);
     assert.equal(request.payload.protocolVersion, PROTOCOL_VERSION);
     assert.equal(request.payload.protocolOffer.minimumVersion, 29);
     socket.receive({ type: MessageType.SERVER_ERROR, requestId: request.requestId,
@@ -118,6 +118,23 @@ for (const serverProtocolVersion of [24, 25, 26, 27, 28]) {
     assert.equal(f.sockets.length, 1);
   });
 }
+
+test('viewer-list protocol can reconnect to a compatible protocol 29 server', async context => {
+  const f = fixture(context);
+  const pending = f.connect();
+  const socket = f.lastSocket();
+  socket.open();
+  const initial = socket.sent[0];
+  socket.receive({ type: MessageType.SERVER_ERROR, requestId: initial.requestId,
+    payload: { code: 'PROTOCOL_VERSION_UNSUPPORTED', serverProtocolVersion: 29 } });
+  await setImmediate();
+  const retries = socket.sent.filter(message => message.type === MessageType.AUTH_CONNECT);
+  assert.equal(retries.length, 2);
+  assert.equal(retries[1].payload.protocolVersion, 29);
+  socket.receive({ type: MessageType.AUTH_SUCCESS, requestId: retries[1].requestId, payload: {} });
+  await pending;
+  assert.equal(f.client.getStatus(), 'CONNECTED');
+});
 
 test('a current client never retries below the security floor', async context => {
   const f = fixture(context);

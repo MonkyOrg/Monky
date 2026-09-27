@@ -144,11 +144,75 @@ test('PCM IPC capacity rejects before admission with correlated non-ownership, n
   assert.equal(engine.audioPending, 0);
 });
 
+test('a saturated ordinary IPC queue cannot prevent retirement of an already-owned texture', async () => {
+  const { engine } = fixture({ operationTimeoutMs: 2000 });
+  await engine.ready;
+  let closed = 0, released;
+  engine.leases.set(91, {
+    handle: { close: () => { closed++; } }, proof: null,
+    released: { promise: new Promise(resolve => { released = resolve; }), resolve: () => released() },
+  });
+  const requests = Array.from({ length: 128 }, (_, index) => engine.request(index + 1, 'hang', 0, {}));
+  const settled = Promise.allSettled(requests);
+  try {
+    assert.throws(() => engine.request(129, 'hang', 0, {}), { status: 3 });
+    const receipt = await engine.releaseFrame(91, 'unused');
+    assert.deepEqual(receipt, { frameId: 91, ok: true });
+    assert.equal(engine.hostExited, undefined);
+    assert.equal(engine.leases.size, 0);
+    assert.equal(closed, 1);
+  } finally {
+    engine.child.kill();
+    await engine.exitState.promise;
+    await settled;
+    if (engine.leases.has(91)) await engine.releaseFrame(91, 'unused');
+    await engine.close();
+  }
+});
+
+test('retirement IPC credits are separately bounded and returned only by real completion or host exit', async () => {
+  const { engine } = fixture({ operationTimeoutMs: 2000, holdRetirementRequests: true });
+  await engine.ready;
+  const ordinary = Array.from({ length: 128 }, (_, index) => engine.request(index + 1, 'hang', 0, {}));
+  const retirement = Array.from({ length: 64 }, (_, index) => engine.request(index + 129, 'resource.close', index + 1, {}));
+  const settled = Promise.allSettled([...ordinary, ...retirement]);
+  try {
+    assert.equal(engine.pending.size, 192);
+    assert.equal(engine.retirementPending, 64);
+    assert.throws(() => engine.request(193, 'resource.close', 65, {}), { status: 3 });
+    assert.throws(() => engine.request(194, 'echo', 0, {}), { status: 3 });
+    assert.equal(engine.retirementPending, 64);
+    assert.ok(engine.retirementBytes > 0 && engine.retirementBytes < 64 * 1024);
+  } finally {
+    engine.child.kill();
+    await settled;
+    await engine.close();
+  }
+  assert.equal(engine.retirementPending, 0);
+  assert.equal(engine.retirementBytes, 0);
+  assert.equal(engine.bytesPending, 0);
+});
+
 test('closing before readiness still initializes and reaps only its owned RTC process', async () => {
   const { engine, events } = fixture();
   await engine.close();
   assert.equal(engine.hostExited, true);
   assert.equal(events.some(event => event.type === 'error'), false);
+});
+
+test('periodic snapshots cannot access native state while an acknowledged close is still draining', async () => {
+  const { engine, events } = fixture({
+    operationTimeoutMs: 2000, rejectSnapshotDuringClose: true, closeDelayMs: 650,
+  });
+  try {
+    await engine.ready;
+    const result = await engine.close();
+    assert.equal(result.closed, true);
+    assert.equal(result.process.exited, true);
+    assert.equal(events.some(event => event.type === 'error'), false);
+  } finally {
+    if (!engine.hostExited) { engine.child.kill(); await engine.exitState.promise; }
+  }
 });
 
 test('deserialized native PCM retains samples in a dedicated renderer-valid buffer', async () => {
