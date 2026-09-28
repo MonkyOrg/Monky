@@ -7,7 +7,7 @@ import type {
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
 import { renderAudioMuteIndicators } from './AudioStateIcon';
-import { arrangeOverlayCards, fitOverlayCards, OVERLAY_RESIZE_HINTS, overlayResizeHint } from '../utils/overlayLayout';
+import { arrangeOverlayCards, fitOverlayCards } from '../utils/overlayLayout';
 import { getOverlayCardSize, overlayCardAspect } from '@monky/shared';
 
 type OverlayTile = {
@@ -30,7 +30,6 @@ export class OverlayStageView {
   private leavingTimers = new Map<string, number>();
   private isHovered = false;
   private isResizing = false;
-  private pointer: { x: number; y: number } | undefined;
   private layoutObserver: ResizeObserver | null = null;
   private cardSize: OverlayCardSize | null = null;
   private layoutRequestKey = '';
@@ -87,9 +86,8 @@ export class OverlayStageView {
 
     if (window.api?.onOverlayHoverChanged) {
       this.unbindListeners.push(
-        window.api.onOverlayHoverChanged((hovered, point) => {
+        window.api.onOverlayHoverChanged((hovered) => {
           this.isHovered = hovered;
-          this.pointer = point;
           this.applyHoverState();
         })
       );
@@ -231,8 +229,7 @@ export class OverlayStageView {
       rootEl.classList.toggle('minimalist-mode', isMinimalist);
     }
 
-    // The DOM may have just been rebuilt, so re-apply the hover flag and the
-    // corner the resize hint belongs in (#543).
+    // The DOM may have just been rebuilt, so re-apply the native hover state.
     this.applyHoverState();
 
     // Atualiza nome do canal
@@ -274,7 +271,6 @@ export class OverlayStageView {
           <span>${this.currentState?.config.hideInactiveParticipants
             ? t('overlay.noActiveVideo') : isAlone ? t('overlay.aloneInChannel') : t('overlay.waitingChannel')}</span>
         </div>
-        ${this.renderResizeHint()}
       </div>
     `;
     this.attachControls();
@@ -299,7 +295,6 @@ export class OverlayStageView {
             </div>
           </div>
           <div class="overlay-cards-container"></div>
-          ${this.renderResizeHint()}
         </div>
       `;
       this.attachControls();
@@ -539,13 +534,6 @@ export class OverlayStageView {
       root.classList.toggle('is-hovered', this.isHovered || this.isResizing);
       root.classList.toggle('is-resizing', this.isResizing);
     }
-    const bounds = root?.getBoundingClientRect();
-    const direction = this.isHovered && this.pointer && bounds
-      ? overlayResizeHint(bounds.width, bounds.height, { x: this.pointer.x - bounds.left, y: this.pointer.y - bounds.top })
-      : undefined;
-    for (const hint of this.container.querySelectorAll<HTMLElement>('.overlay-resize-hint')) {
-      hint.classList.toggle('near-pointer', hint.dataset.direction === direction);
-    }
   }
 
   private acceptCardConfig(config: OverlayConfig): void {
@@ -608,20 +596,6 @@ export class OverlayStageView {
     }).catch((error: unknown) => {
       console.error('[OverlayStage] Could not preserve overlay card dimensions:', error);
     });
-  }
-
-  /** Visual hints only: the native window border still handles resizing. */
-  private renderResizeHint(): string {
-    return OVERLAY_RESIZE_HINTS.map(({ direction, x, y, rotation }) => {
-      // The diagonal of the rounded frame is 2px inward from its square corner.
-      const inset = x !== 0.5 && y !== 0.5 ? 2 : 0;
-      return `
-      <div class="overlay-resize-hint" data-direction="${direction}" style="left:calc(${x * 100}% - ${x * (16 + inset * 2)}px + ${inset}px);top:calc(${y * 100}% - ${y * (16 + inset * 2)}px + ${inset}px)" aria-hidden="true">
-        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path transform="rotate(${rotation} 8 8)" d="M8 2V14 M5 5L8 2L11 5 M5 11L8 14L11 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-        </svg>
-      </div>
-    `; }).join('');
   }
 
   private attachControls(): void {

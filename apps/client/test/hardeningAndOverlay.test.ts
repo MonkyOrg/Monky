@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { stabilizePersonMask } from '../src/renderer/utils/cameraEffects';
 import { registerServerInviteProtocol } from '../src/main/serverInvites';
-import { arrangeOverlayCards, fitOverlayCards, OVERLAY_RESIZE_HINTS, overlayResizeHint } from '../src/renderer/utils/overlayLayout';
+import { arrangeOverlayCards, fitOverlayCards } from '../src/renderer/utils/overlayLayout';
 
 test('only an installed app repairs a missing invitation association', () => {
   let registered = 0;
@@ -48,28 +48,6 @@ test('initial fit and subsequent arrangement use the same grid; unconstrained re
         }
       }
     }
-  }
-});
-
-test('overlay resize hints follow corners and the middle half of each edge', () => {
-  for (const [width, height] of [[340, 240], [160, 120], [800, 600]]) {
-    for (const hint of OVERLAY_RESIZE_HINTS) {
-      assert.equal(overlayResizeHint(width, height, { x: hint.x * width, y: hint.y * height }), hint.direction);
-    }
-    assert.equal(overlayResizeHint(width, height, { x: width / 2, y: height / 2 }), undefined);
-    assert.equal(overlayResizeHint(width, height, { x: -1, y: height / 2 }), undefined);
-    assert.equal(overlayResizeHint(width, height, { x: width / 2, y: height + 1 }), undefined);
-  }
-  for (const x of [90, 170, 250]) {
-    assert.equal(overlayResizeHint(340, 240, { x, y: 200 }), 's', 'the whole central zone reveals the bottom handle before reaching its pixel');
-    assert.equal(overlayResizeHint(340, 240, { x, y: 40 }), 'n');
-  }
-  for (const y of [65, 120, 175]) {
-    assert.equal(overlayResizeHint(340, 240, { x: 40, y }), 'w');
-    assert.equal(overlayResizeHint(340, 240, { x: 300, y }), 'e');
-  }
-  for (const [x, y, direction] of [[5, 5, 'nw'], [335, 5, 'ne'], [5, 235, 'sw'], [335, 235, 'se']] as const) {
-    assert.equal(overlayResizeHint(340, 240, { x, y }), direction, 'corners never activate a middle handle');
   }
 });
 

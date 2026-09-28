@@ -362,10 +362,9 @@ de iluminação e enquadramento, nem garante recorte idêntico ao de outros apps
 **Manter proporção dos cards** preserva 16:9 ao redimensionar o overlay ou mudar
 o número de participantes. Desligue o switch para o layout livre anterior.
 Arraste também pela área livre e pelos cards, não só pelo cabeçalho; botões
-continuam clicáveis. Os oito indicadores de redimensionamento aparecem apenas
-perto do ponteiro, nos cantos e no meio das bordas. Apenas um fica ativo por vez:
-cantos mostram sua própria diagonal e bordas mostram a direção horizontal ou
-vertical correspondente, sem sobrepor o indicador do canto.
+continuam clicáveis. Ao passar o mouse, uma linha fina destaca o limite real
+da janela. Para redimensionar, use os cantos ou as bordas: o cursor nativo
+indica a direção, sem ícones adicionais sobre o overlay.
 
 ### Seletor de cores
 

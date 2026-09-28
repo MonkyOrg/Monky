@@ -63,45 +63,23 @@ async function runOverlayWindowSmoke() {
         .every(property => border()[property] === '1px'), 'All four sides must be exactly one CSS pixel.');
       check(border().borderTopStyle === 'solid' && border().borderTopColor !== 'rgba(0, 0, 0, 0)',
         'The thin frame must have a visible stroke.');
-      check(['top', 'right', 'bottom', 'left'].every(property => border()[property] === '8px')
-        && Number.parseFloat(border().width) === innerWidth - 16 && Number.parseFloat(border().height) === innerHeight - 16,
-      'The frame reserves a gutter so the complete resize indicators are centered on its edges.');
-      for (const hint of root().querySelectorAll('.overlay-resize-hint')) {
-        const rect = hint.getBoundingClientRect();
-        const center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-        const direction = hint.dataset.direction;
-        const corner = direction.length === 2;
-        const radius = parseFloat(border().borderTopLeftRadius);
-        const inset = corner ? 8 + radius - (radius - 0.5) / Math.sqrt(2) : 8;
-        check((!direction.includes('n') || Math.abs(center.y - inset) < 0.2)
-          && (!direction.includes('s') || Math.abs(center.y - (innerHeight - inset)) < 0.2)
-          && (!direction.includes('w') || Math.abs(center.x - inset) < 0.2)
-          && (!direction.includes('e') || Math.abs(center.x - (innerWidth - inset)) < 0.2),
-        `${direction}: the resize indicator center must align with the frame.`);
-        const path = hint.querySelector('path');
-        const painted = path.getBoundingClientRect();
-        check(Math.abs(painted.x + painted.width / 2 - center.x) < 0.01
-          && Math.abs(painted.y + painted.height / 2 - center.y) < 0.01,
-        `${direction}: the painted symbol, not just its box, is centered on the frame.`);
-        if (corner) {
-          const matrix = path.getCTM();
-          check(Math.abs(Math.abs(matrix.b) - Math.abs(matrix.a)) < 0.001
-            && (matrix.a * matrix.b > 0) === (direction === 'ne' || direction === 'sw'),
-          `${direction}: the double arrow points along the native resize diagonal.`);
-        }
-        check(rect.x >= 0 && rect.y >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight,
-          'No part of a resize indicator is clipped by the native window.');
-      }
+      const bounds = root().getBoundingClientRect();
+      check(bounds.left === 0 && bounds.top === 0 && bounds.right === innerWidth && bounds.bottom === innerHeight,
+        'The overlay root covers the native window without an offset.');
+      check(['top', 'right', 'bottom', 'left'].every(property => border()[property] === '0px')
+        && Number.parseFloat(border().width) === innerWidth && Number.parseFloat(border().height) === innerHeight,
+      'The hover frame sits on the actual native resize boundary, without an inset gutter.');
+      check(!root().querySelector('.overlay-resize-hint, svg'),
+        'Resizing relies on the native cursor, with no extra resize icons.');
       check(border().position === 'absolute' && border().pointerEvents === 'none',
         'The frame must not take up layout space or intercept pointer input.');
       check(geometry() === before, 'Hover must not resize or reposition the overlay content.');
-      check(!root().querySelector('.near-pointer'), 'Hovering the center does not reveal any resize arrow.');
       const drag = root().querySelector('.overlay-cards-container, .overlay-empty-state');
       check(getComputedStyle(drag).getPropertyValue('-webkit-app-region') === 'drag',
         'Dragging the existing content region is preserved.');
       const close = root().querySelector('#btn-overlay-close');
-      const bounds = close.getBoundingClientRect();
-      check(close.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)),
+      const closeBounds = close.getBoundingClientRect();
+      check(close.contains(document.elementFromPoint(closeBounds.x + closeBounds.width / 2, closeBounds.y + closeBounds.height / 2)),
         'The hover frame never covers the close control.');
       const previousCloses = closes;
       close.click();
@@ -112,15 +90,13 @@ async function runOverlayWindowSmoke() {
         ['se', width - 1, height - 1], ['s', width / 2, height - 1], ['sw', 1, height - 1], ['w', 1, height / 2],
       ]) {
         hover(true, x, y);
-        const hints = [...root().querySelectorAll('.near-pointer')];
-        check(hints.length === 1 && hints[0].dataset.direction === direction && border().opacity === '1',
-          `${mode}/${direction}: only the nearby resize indicator appears, alongside the frame.`);
+        check(!root().querySelector('.overlay-resize-hint, svg') && border().opacity === '1',
+          `${mode}/${direction}: the border stays visible without drawing a second resize cursor.`);
       }
       callbacks.get('config')({ ...config, minimalistMode: mode === 'minimalist', cardOpacity: 0.5, cardSize: savedCardSize });
       check(border().opacity === '1', 'Re-rendering while hovered preserves the visible frame.');
       hover(false, -1, -1);
-      check(border().opacity === '0' && !root().querySelector('.near-pointer'),
-        'Leaving hides both the frame and every proximity indicator.');
+      check(border().opacity === '0', 'Leaving hides the hover frame.');
     }
     const stableSize = { width: 148, height: 83.25 };
     callbacks.get('config')({ ...config, cardSize: stableSize });
