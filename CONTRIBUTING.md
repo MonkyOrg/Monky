@@ -402,6 +402,12 @@ a exportação e a extração rejeitam caminhos ambíguos no Windows.
 Comparar a árvore, e não apenas o SHA do commit, permite o squash sem aceitar
 código diferente do testado.
 
+O artefato Windows inclui os arquivos gerados `LICENSE` e
+`THIRD_PARTY_NOTICES` na raiz do módulo `screen-share`, além de `licenses/`,
+binários e fontes correspondentes. Todos são obrigatórios e têm hashes
+verificados: um checkout limpo da release não pode depender de avisos legais
+que sobraram da compilação no runner do CI.
+
 A release ainda instala dependências, aplica a versão final, gera os instaladores
 e tarballs, testa o SDK empacotado e assina/publica os arquivos. As fontes nativas
 correspondentes também vêm do CI: só seus metadados de versão/commit são atualizados

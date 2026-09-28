@@ -117,7 +117,7 @@ function copyPackage(source: string, destination: string, pkg: Record<string, un
     if (fs.existsSync(path.join(source, file))) copyRuntimePath(source, file, destination);
   }
   if (knownWorkspace) {
-    for (const name of ['LICENSE', 'LICENSE-MIT']) {
+    for (const name of ['LICENSE']) {
       if (fs.existsSync(path.join(destination, name))) continue;
       const repositoryLicense = path.resolve(source, '..', '..', name);
       if (fs.existsSync(repositoryLicense) && fs.statSync(repositoryLicense).isFile()) {

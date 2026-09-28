@@ -52,7 +52,7 @@ function generateNotices() {
     'Monky native screen sharing - third-party notices',
     '',
     'Monky is free software under GNU GPL version 3 or, at your option, any later version.',
-    'See LICENSE. The historical Monky MIT notice is preserved in LICENSE-MIT.',
+    'See LICENSE.',
     'Third-party copyrights and licenses are not replaced by the Monky license.',
     '',
     'OBS Studio 32.1.1 (GPL-2.0-or-later), its Windows capture module and runtime are included.',

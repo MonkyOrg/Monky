@@ -211,6 +211,5 @@ Se você gosta do Monky e quer apoiar o desenvolvimento contínuo, pague um caf�
 [GNU GPL versão 3 ou posterior](LICENSE) — software livre, sem garantia.
 Você pode usar, modificar e redistribuir o Monky sob esses termos; ao distribuir
 binários, disponibilize também o código-fonte correspondente e os avisos de licença.
-Copyright (c) 2026 Monky Contributors. O aviso [MIT original](LICENSE-MIT) permanece
-preservado para o código anteriormente publicado sob essa licença. Dependências
-de terceiros mantêm seus próprios avisos e licenças.
+Copyright (c) 2026 Monky Contributors. Dependências de terceiros mantêm seus
+próprios avisos e licenças.

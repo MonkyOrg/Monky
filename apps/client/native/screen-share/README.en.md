@@ -646,8 +646,7 @@ CI/release runs before claiming a speedup.
 
 ## License and Corresponding Source
 
-Monky is **GPL-3.0-or-later**. `LICENSE-MIT` preserves the project's historical
-notice. Dependencies retain their own rights and licenses; see
+Monky is **GPL-3.0-or-later**. Dependencies retain their own rights and licenses; see
 `THIRD_PARTY_NOTICES` and `licenses`. WebRTC notices are derived from the GN
 graph actually compiled. The distributed FFmpeg build uses GPL version 3 or
 later. H.264 patent rights are separate from software copyright licenses.
