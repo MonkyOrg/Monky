@@ -355,9 +355,9 @@ still apply; this does not guarantee an identical cutout to other apps.
 **Preserve card aspect ratio** keeps cards at 16:9 as the overlay is resized
 or participants change. Turn the switch off for the previous free layout.
 Drag from empty areas and cards, not only the header; buttons remain clickable.
-Eight resize hints appear only near the pointer, at corners and edge midpoints.
-Only one is active at a time: corners show their own diagonal, and edges show
-the corresponding horizontal or vertical direction without overlapping a corner.
+A thin line highlights the actual window boundary on hover. Resize from the
+corners or edges: the native cursor indicates the direction, without additional
+icons over the overlay.
 
 ### Color picker
 

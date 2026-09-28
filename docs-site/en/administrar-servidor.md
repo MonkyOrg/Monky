@@ -68,6 +68,11 @@ When off, it also blocks administrators. This does not replace
 
 ## Roles and permissions
 
+The **Members** tab lists everyone registered on the server, including offline
+people, just like the role editor. Disconnecting does not remove a person
+from the list; roles and access remain manageable according to your permissions.
+Bots are managed separately in the **Bots** tab.
+
 Open **Roles → Create role**, enter a name and choose a color. Use the
 editor's **Permissions** and **Members** tabs to review access. A role can
 be automatically assigned to new members when that option is enabled.

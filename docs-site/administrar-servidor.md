@@ -69,6 +69,11 @@ Isso não substitui a [aprovação de capacidades de cada bot](/bots#preferencia
 
 ## Cargos e permissões
 
+A aba **Membros** lista todas as pessoas cadastradas no servidor, inclusive
+as offline, assim como o editor de cargos. Desconectar não remove ninguém
+da lista; cargos e acessos continuam administráveis conforme suas permissões.
+Bots são administrados separadamente na aba **Bots**.
+
 Abra **Cargos → Criar cargo**, dê um nome e escolha a cor. Use as abas do
 editor para revisar **Permissões** e **Membros**. Um cargo pode ser atribuído
 automaticamente a novos membros quando essa opção estiver habilitada.

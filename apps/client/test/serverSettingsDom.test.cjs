@@ -25,6 +25,7 @@ if (!process.versions.electron) {
 } else {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_SERVER_SETTINGS_PROFILE);
+  app.on('window-all-closed', () => {});
   let vite;
   let browser;
   let timeout;
@@ -138,7 +139,8 @@ async function runRegression(language) {
     turnAvailability: { supported: false, reason: 'not-installed', autoInstallable: true },
     allowSoundboard: true, allowEveryoneMention: true, allowMessageEdit: true, showRoleBadgesToEveryone: true,
     messageDeleteUndoSeconds: 60, protocol: { version: 27, minimumVersion: 27, features: ['message-delete-undo'] },
-    channels: [], members: [member('admin'), member('bob')], knownMembers: [member('admin'), member('bob')],
+    channels: [], members: [member('admin'), member('bob')],
+    knownMembers: [member('admin'), member('bob'), { ...member('carol'), status: 'DISCONNECTED' }, { ...member('helper'), isBot: true }],
     voiceStates: {}, roles: [role], userRoles: [], ownerId: 'admin', myPermissions: 0xFFFFFFFF,
     attachmentStorage: { usedBytes: 0, maxFileBytes: 25 * 1024 * 1024, maxTotalBytes: 100 * 1024 * 1024 },
   }, member('admin'));
@@ -176,6 +178,8 @@ async function runRegression(language) {
       if (payload.maxAttachmentStorageBytes !== undefined) s.attachmentStorage.maxTotalBytes = payload.maxAttachmentStorageBytes;
       result = { ...s };
       appEvents.emit('server.updated');
+    } else if (type === 'MEMBER_KICK') {
+      store.removeMemberCompletely(payload.targetUserId);
     } else if (type === 'ROLE_UPDATE') {
       const { roleId, ...patch } = payload;
       store.updateRoles(store.roles.map((entry) => entry.id === roleId ? { ...entry, ...patch } : entry), store.userRoles);
@@ -225,6 +229,47 @@ async function runRegression(language) {
   const mainBackdrop = () => document.querySelector('.server-settings-modal-card')?.closest('.modal-backdrop');
   modal.open();
   await flush();
+  tab('members');
+  const memberIds = () => [...document.querySelectorAll('#tab-panel-members .member-actions-trigger')].map(button => button.dataset.userId);
+  const memberRow = id => field(`#tab-panel-members .member-actions-trigger[data-user-id="${id}"]`)?.closest('tr');
+  check(memberIds().join() === 'admin,bob,carol', 'Members settings list every human member once, including persisted offline members, in alphabetical order');
+  check(memberRow('carol').querySelector('.member-badge-offline')?.textContent === t('roles.offlineBadge'),
+    'Offline members use the existing localized badge');
+  check(!memberRow('bob').querySelector('.member-badge-offline'), 'Online members are not labelled offline');
+  check(memberRow('admin').querySelector('[data-member-action="kick"]').disabled, 'The owner remains protected');
+  field('.member-actions-trigger[data-user-id="carol"]').click();
+  field('[data-member-action="toggle-role"][data-user-id="carol"][data-role-id="editors"]').click();
+  await flush();
+  check(pendingRequest('ROLE_ASSIGN').payload.userId === 'carol', 'Offline members can be assigned roles from their action menu');
+  acknowledge('ROLE_ASSIGN');
+  await flush();
+  check(memberRow('carol').querySelector('.member-role-tag')?.textContent === 'Editors', 'Offline role changes refresh without reopening settings');
+  field('[data-member-action="toggle-role"][data-user-id="carol"][data-role-id="editors"]').click();
+  await flush();
+  acknowledge('ROLE_UNASSIGN');
+  await flush();
+  check(!memberRow('carol').querySelector('.member-role-tag'), 'Offline role removal refreshes the member row');
+  store.addMember({ ...member('carol'), nickname: 'Carol connected' });
+  await flush();
+  check(memberIds().length === 3 && memberRow('carol').textContent.includes('Carol connected')
+    && !memberRow('carol').querySelector('.member-badge-offline'), 'Reconnecting updates the member without duplicating the persisted entry');
+  store.removeMember('carol');
+  await flush();
+  check(memberIds().length === 3 && memberRow('carol').querySelector('.member-badge-offline'),
+    'Disconnecting keeps the member listed and changes its presence even if the cached summary was online');
+  store.addMember({ ...member('carol'), invisible: true });
+  await flush();
+  check(memberRow('carol').querySelector('.member-badge-offline'), 'Invisible presence remains masked as offline in settings');
+  store.removeMember('carol');
+  await flush();
+  field('[data-member-action="kick"][data-user-id="carol"]').click();
+  await flush();
+  check(pendingRequest('MEMBER_KICK').payload.targetUserId === 'carol', 'Offline membership can still be removed');
+  acknowledge('MEMBER_KICK');
+  await flush();
+  check(memberIds().join() === 'admin,bob', 'An expelled offline member disappears immediately');
+  store.removeMemberCompletely('helper');
+  tab('general');
   check(field('#server-settings-version').textContent === '44.7.9-beta',
     'Server settings display the remote runtime version rather than the desktop version');
   field('#server-settings-version').click();
@@ -235,10 +280,11 @@ async function runRegression(language) {
   check(field('[data-settings-section="server-profile"]').contains(field('#input-server-name')) &&
     field('#server-voice-mode-cards').children.length === 2, 'Profile and selectable-card markup retain their expected layout boundaries');
   const original = mainBackdrop();
+  const requestsBeforeTyping = requests.length;
   field('#input-server-name').focus();
   field('#input-server-name').value = 'First rename';
   field('#input-server-name').dispatchEvent(new Event('input', { bubbles: true }));
-  check(requests.length === 0, 'Typing does not persist until editing finishes');
+  check(requests.length === requestsBeforeTyping, 'Typing does not persist until editing finishes');
   check(modal.close() === false && locked(), 'Public close commits the focused edit before checking the lock');
   await flush();
   check(Object.keys(pendingRequest('SERVER_UPDATE_SETTINGS').payload).join() === 'name', 'Rename sends only its own field');

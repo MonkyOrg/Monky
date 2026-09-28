@@ -1573,35 +1573,17 @@ async function installFixture() {
         overlayRoot.style.width = '350px';
         overlayRoot.style.height = '240px';
         await settle();
-        check(overlayRoot.querySelectorAll('.overlay-resize-hint').length === 8, 'All resize directions have a proximity hint');
-        overlay.isHovered = true; overlay.pointer = { x: 175, y: 120 }; overlay.applyHoverState();
-        check([...overlayRoot.querySelectorAll('.overlay-resize-hint')].every(hint => !hint.classList.contains('near-pointer')), 'Resize hints do not clutter the center');
+        check(!overlayRoot.querySelector('.overlay-resize-hint, svg'), 'Native resizing has no duplicate arrow icons');
+        overlay.isHovered = true;
+        overlay.applyHoverState();
         const root = overlayRoot.querySelector('.overlay-stage-root');
-        const bounds = root.getBoundingClientRect();
-        const showHint = (x, y) => {
-          overlay.pointer = { x: bounds.left + x, y: bounds.top + y };
-          overlay.applyHoverState();
-          return [...root.querySelectorAll('.overlay-resize-hint.near-pointer')].map(hint => hint.dataset.direction).join(',');
-        };
-        for (const [direction, x, y] of [
-          ['nw', 1, 1], ['ne', bounds.width - 1, 1],
-          ['sw', 1, bounds.height - 1], ['se', bounds.width - 1, bounds.height - 1],
-        ]) {
-          check(showHint(x, y) === direction, `Only the ${direction} corner lights up near that corner`);
-          const hint = root.querySelector(`[data-direction="${direction}"]`);
-          const matrix = hint.querySelector('path').getCTM();
-          check(Math.abs(Math.abs(matrix.b) - Math.abs(matrix.a)) < 0.001
-            && (matrix.a * matrix.b > 0) === (direction === 'ne' || direction === 'sw'),
-          `${direction} double arrow follows its native resize diagonal`);
-          check(getComputedStyle(hint).pointerEvents === 'none', 'Resize indicators never intercept native window resizing');
-        }
-        check(showHint(bounds.width * 0.35, bounds.height - 40) === 's', 'Bottom-center hint appears while approaching its central region');
-        check(showHint(bounds.width * 0.65, 40) === 'n', 'Top-center hint appears across its central region');
-        check(showHint(40, bounds.height * 0.35) === 'w', 'Left-center hint appears before reaching the edge');
-        check(showHint(bounds.width - 40, bounds.height * 0.65) === 'e', 'Right-center hint appears before reaching the edge');
+        const border = getComputedStyle(root, '::after');
+        check(border.opacity === '1' && ['top', 'right', 'bottom', 'left'].every(side => border[side] === '0px'),
+          'The hover frame aligns with the overlay boundary');
+        check(border.pointerEvents === 'none', 'The frame does not intercept native resizing');
         overlay.isHovered = false;
         overlay.applyHoverState();
-        check(!root.querySelector('.near-pointer'), 'Leaving the overlay clears the active resize hint');
+        check(getComputedStyle(root, '::after').opacity === '0', 'Leaving the overlay hides the frame');
       } finally { overlay.destroy(); overlayRoot.remove(); document.body.classList.remove('overlay-window-mode'); }
       return checks;
     },
