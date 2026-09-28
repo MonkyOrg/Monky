@@ -237,6 +237,73 @@ test('one private port connects selected output, native configuration, clock cal
   assert.deepEqual(f.errors, []);
 });
 
+test('hot output selection retains the exact native epoch, context, worklet and packet credits', async t => {
+  const f = fixture(t, { withOwner: true });
+  await f.owner.start('chosen-output');
+  const context = f.contexts[0], node = f.nodes[0], portId = f.receiver.getStats().sessions[0].portId;
+  context.setSinkId = async function(id) {
+    this.sinkId = id;
+    this.listeners.get('sinkchange')();
+  };
+  f.grant(); await until(() => f.credits.length === 1);
+  await f.owner.setSinkId('headphones');
+  assert.equal(f.owner.getStats().sinkId, 'headphones');
+  assert.equal(f.owner.getStats().activeEpoch, 1);
+  assert.equal(f.owner.receiveEpoch(f.commands.engine), 1);
+  assert.equal(f.contextCount(), 1);
+  assert.equal(f.nodes[0], node);
+  assert.equal(f.contexts[0], context);
+  assert.equal(f.receiver.getStats().sessions[0].portId, portId);
+  assert.equal(f.calls.filter(call => call === 'configure').length, 1);
+  assert.equal(f.calls.some(call => call.startsWith('native-stop')), false);
+  assert.ok(f.feedback.some(value => value.available === false));
+  assert.deepEqual(f.errors, []);
+});
+
+test('default-device sinkchange withdraws physical timing without retiring the stream output', async t => {
+  const f = fixture(t, { withOwner: true });
+  await f.owner.start('chosen-output');
+  for (let index = 0; index < 3; index++) f.contexts[0].listeners.get('sinkchange')();
+  await until(() => f.feedback.length === 3);
+  assert.ok(f.feedback.every(value => value.available === false && value.epoch === 1));
+  assert.equal(f.owner.getStats().ready, true);
+  assert.equal(f.contexts[0].state, 'running');
+  assert.deepEqual(f.errors, []);
+});
+
+test('a rejected hot selection is returned to its caller without stopping output or poisoning the port', async t => {
+  const f = fixture(t, { withOwner: true });
+  await f.owner.start('chosen-output');
+  f.contexts[0].setSinkId = async function(id) {
+    if (id === 'missing') throw new Error('Selected device is unavailable');
+    this.sinkId = id;
+  };
+  await assert.rejects(f.owner.setSinkId('missing'), /Selected device is unavailable/);
+  assert.equal(f.owner.getStats().sinkId, 'chosen-output');
+  assert.equal(f.owner.getStats().ready, true);
+  await f.owner.setSinkId('working');
+  assert.equal(f.owner.getStats().sinkId, 'working');
+  assert.equal(f.contextCount(), 1);
+  assert.deepEqual(f.errors, []);
+});
+
+test('Stop drains an in-flight output selection without starting another context or accepting a late change', async t => {
+  const f = fixture(t, { withOwner: true }), gate = deferred();
+  await f.owner.start('chosen-output');
+  let entered = false;
+  f.contexts[0].setSinkId = async function(id) { entered = true; await gate.promise; this.sinkId = id; };
+  const changed = f.owner.setSinkId('headphones');
+  const rejected = assert.rejects(changed, error => error.name === 'AbortError' || /cancelled/.test(error.message));
+  await until(() => entered);
+  const stopped = f.owner.stop();
+  await until(() => f.receiver.getStats().sessions[0]?.sink.ready === false);
+  gate.resolve();
+  await Promise.all([stopped, rejected]);
+  assert.equal(f.contexts[0].state, 'closed');
+  assert.equal(f.contextCount(), 1);
+  assert.equal(f.owner.getStats().stopped, true);
+});
+
 for (const method of ['probe', 'calibrate']) test(`real output retirement cancels its pending ${method} without a terminal audio error`, async t => {
   const f = fixture(t), gate = deferred();
   await f.main.start(config(1));

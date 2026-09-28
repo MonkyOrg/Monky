@@ -232,6 +232,52 @@ const sfuReceipt = (consumerId = 40, serverConsumerId = 'consumer-a') => ({
   consumerId, serverConsumerId, kind: 'audio', syncGroup: 'source-group', mid: String(consumerId), trackId: serverConsumerId,
 });
 
+for (const outcome of ['pending', 'expired']) {
+  test(`clock recalibration ${outcome} preserves the current SFU and P2P receive ownership`, async t => {
+    const f = fixture();
+    t.after(() => f.owner.stop());
+    await f.owner.start('selected');
+    const chosen = selection(), p2pContext = f.context(chosen), context = sfuContext(f);
+    const p2pProof = await f.adapter.prepareReceive(p2pContext);
+    f.adapter.bindReceiver({ ...chosen, receiverEpoch: 8 }, receipt(20), p2pProof);
+    const proof = await f.adapter.prepareSfuReceive(context);
+    f.adapter.bindSfuConsumer(sfuReceipt(), proof, context);
+    f.owner.probe({ epoch: 1, probeId: 2 });
+    f.engine.asynchronousNative = true;
+    let resolveCalibration;
+    const expired = Object.assign(new Error('Clock calibration is stale or uncertain'), {
+      code: 'ERR_RTC_AUDIO_CLOCK_OBSERVATION', status: 8,
+    });
+    f.engine.calibrateAudioClock = () => outcome === 'pending'
+      ? new Promise(resolve => { resolveCalibration = resolve; }) : Promise.reject(expired);
+    const refresh = f.owner.calibrate({ epoch: 1, probeId: 2, rendererBeforeUs: 1000, rendererAfterUs: 1001 });
+    if (outcome === 'expired') await assert.rejects(refresh, error => error === expired);
+    try {
+      assert.equal(f.owner.getStats().calibrationId, null, 'No current clock measurement may be invented.');
+      assert.equal(nativeAudioOutputReceiveEpoch(f.owner, f.engine), 1, 'The selected output has not been replaced.');
+      assert.equal(f.adapter.expectedOutputEpoch(p2pProof, p2pContext), 1);
+      assert.equal(f.adapter.expectedSfuOutputEpoch(proof, context), 1);
+      f.adapter.onSfuConsumerVolume(40, { consumerId: 40, volume: 0.03 }, proof, context);
+      for (const enabled of [false, true, false]) {
+        f.adapter.onSfuConsumerEnabled(40, { enabled }, proof, context);
+      }
+      const stats = f.adapter.getStats();
+      assert.equal(stats.receivers, 1);
+      assert.equal(stats.sfuConsumers, 1);
+      assert.equal(f.calls.filter(call => call.operation === 'audio.stopOutput').length, 0);
+      assert.deepEqual(f.errors, []);
+    } finally {
+      if (resolveCalibration) {
+        resolveCalibration({ epoch: 1, calibrationId: 2, offsetUs: 0, uncertaintyUs: 1 });
+        await refresh;
+      }
+    }
+    await f.owner.stop();
+    assert.equal(nativeAudioOutputReceiveEpoch(f.owner, f.engine), null);
+    assert.throws(() => f.adapter.expectedSfuOutputEpoch(proof, context), /replaced/u);
+  });
+}
+
 test('SFU requires the same genuine output owner and never starts an unselected or uncalibrated output', async () => {
   const f = fixture(), uncalibrated = fixture({ calibrated: false });
   assert.equal(isNativeAudioReceiveAdapterForEngine(f.adapter, f.engine, 'call', 'channel'), true);

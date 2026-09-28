@@ -25,7 +25,7 @@ class NativeAudioPortRenderer {
     this.suppressedFeedback = 0;
     this.port = new NativeAudioPort({
       port, protocol, scope: { portId: info.portId, epoch: info.output.epoch }, side: 'renderer',
-      onRequest: () => this.stop(),
+      onRequest: (method, data) => method === 'setSinkId' ? this.sink.setSinkId(data.sinkId) : this.stop(),
       onEvent: (name, data) => {
         if (name === 'error') this.fail(Object.assign(new Error(data.message), { code: data.code }), false);
         else this.sink.acceptPacket(data);

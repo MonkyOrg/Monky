@@ -148,7 +148,8 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
     const stream = new MediaStream();
     streams.set(stream.id, stream);
     captures.set(stream.id, {
-      desktopSourceId: `native-window:${stream.id}`, thumbnail: '',
+      desktopSourceId: `native-window:${stream.id}`,
+      thumbnail: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><path fill="magenta" d="M0 0h4v4H0z"/></svg>'),
       source: { shareId: stream.id, instanceId: crypto.randomUUID(), video: profile, audio: false },
     });
     appEvents.emit('local.screen_started', { shareId: stream.id, stream });
@@ -262,6 +263,23 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       const localVideo = video(local.sessionId, first.id);
       const localBadge = badge(local.sessionId, first.id);
       const localStream = localVideo.srcObject;
+      const placeholder = card(local.sessionId, first.id).querySelector('.stage-native-thumbnail');
+      const thumbnail = placeholder.querySelector('img');
+      for (const state of ['paused', 'waiting', 'paused', 'playing']) {
+        previewStates.set(first.id, state);
+        appEvents.emit('native_screen.updated');
+        check(video(local.sessionId, first.id) === localVideo && localVideo.srcObject === localStream,
+          'Changing the paused preview background must not replace its video or stream');
+        check(placeholder.hidden === (state === 'playing'), 'Resuming preview must reveal the live video');
+        check((getComputedStyle(thumbnail).display === 'none') === (state === 'paused'),
+          'Only paused previews must hide the frozen thumbnail');
+        if (state === 'paused') {
+          check(getComputedStyle(placeholder).backgroundColor === 'rgb(0, 0, 0)',
+            'Paused preview must have a fully opaque black background');
+          check(placeholder.querySelector('span').textContent === language.t('stage.nativePreviewPaused'),
+            'The pause message must remain visible in the selected language');
+        }
+      }
       modes.set(modeKey(local.sessionId, first.id), 'game');
       previewStates.set(first.id, 'playing');
       for (let i = 0; i < 5; i++) appEvents.emit('native_screen.updated');
@@ -285,6 +303,22 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       verifyBadge(remote.sessionId, remoteSource.shareId, 'game');
       const remoteVideo = video(remote.sessionId, remoteSource.shareId);
       const remoteStream = remoteVideo.srcObject;
+      const remoteCard = card(remote.sessionId, remoteSource.shareId);
+      fullscreen = remoteCard;
+      for (const muted of [true, false, true, false]) {
+        const state = participants.get(remote.sessionId).voiceState;
+        participants.updateVoiceState({ ...state, isMuted: muted, isDeafened: muted, isSpeaking: !muted });
+        appEvents.emit('participants.updated');
+        voice.setMuted(muted);
+        stage.renderParticipants();
+        check(video(remote.sessionId, remoteSource.shareId) === remoteVideo && remoteVideo.srcObject === remoteStream,
+          'Microphone/deafen metadata must not recreate or reattach a playing screen video');
+        check(card(remote.sessionId, remoteSource.shareId) === remoteCard && remoteCard.isConnected
+          && document.fullscreenElement === remoteCard, 'Audio metadata must preserve the fullscreen card');
+        check(remoteCard.querySelector('.stage-badges-overlay').textContent.includes('mic_off') === muted,
+          'Remote mute indicators must update without replacing the video');
+      }
+      fullscreen = null;
       for (const receiver of ['native', 'chromium']) {
         watchState = { state: 'unavailable', reason: 'connection-failed', receiver };
         appEvents.emit('native_screen.updated');
@@ -315,6 +349,17 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       overlay.classList.add('is-hidden');
       card(remote.sessionId, remoteSource.shareId).querySelector('.stage-stopwatch-btn').click();
       verifyBadge(remote.sessionId, remoteSource.shareId, null);
+
+      const camera = document.querySelector(`[data-tile-key="${remote.sessionId}:camera"] video`);
+      const cameraStream = new MediaStream();
+      participants.get(remote.sessionId).remoteStream = cameraStream;
+      stage.renderParticipants();
+      check(document.querySelector(`[data-tile-key="${remote.sessionId}:camera"] video`).srcObject === cameraStream
+        && camera.srcObject === null, 'A real camera stream replacement must still retire the previous attachment');
+      participants.get(remote.sessionId).remoteStream = undefined;
+      stage.renderParticipants();
+      check(document.querySelector(`[data-tile-key="${remote.sessionId}:camera"] video`).srcObject === null,
+        'Removing a camera stream must not retain its obsolete media');
 
       notifyExports.notify({ shareId: '<img src=x onerror=bad()>' });
       const toast = document.querySelector('.chat-copy-toast');

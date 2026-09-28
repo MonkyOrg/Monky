@@ -47,6 +47,20 @@ test('unknown, suspended or stale clocks stay explicitly unavailable rather than
   assert.equal(f.clock.sample(f.context).reason, 'stale-output-clock');
 });
 
+test('changing output withdraws old anchors without resetting the accepted cursor or inventing an epoch', () => {
+  const f = fixture();
+  f.clock.update(feedback());
+  const before = f.clock.sample(f.context);
+  assert.equal(before.available, true);
+  f.clock.invalidate('output-device-changed');
+  assert.equal(f.clock.sample(f.context).available, false);
+  f.at(1110);
+  f.clock.update(feedback({ contextFrame: 48480, firstPlayoutFrame: 24480 }));
+  f.context.getOutputTimestamp = () => ({ contextTime: .97, performanceTime: 1110 });
+  assert.equal(f.clock.sample(f.context).reason, 'regressing-output-clock');
+  assert.equal(f.clock.getStats().lastAccepted.estimatedPlayoutFrame, before.estimatedPlayoutFrame);
+  assert.equal(f.clock.epoch, 1);
+});
 test('a regressing physical startup estimate is unavailable, never clamped or promoted to a new clock epoch', () => {
   const f = fixture();
   f.at(214.3);

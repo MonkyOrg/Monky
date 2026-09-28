@@ -61,6 +61,7 @@ function fixture({ readiness, mode = 'p2p', closeGate } = {}) {
         },
         async closePeer(id) { this.peers.delete(id); },
         async receiveControl(id, control) { this.controls.push({ id, control }); },
+        refreshSourceState() { this.sourceStateRefreshes = (this.sourceStateRefreshes ?? 0) + 1; },
         snapshot() { return { closed: this.closed, demand: this.demand }; },
       };
       endpoints.push(endpoint);
@@ -77,6 +78,19 @@ function fixture({ readiness, mode = 'p2p', closeGate } = {}) {
   };
   return { publisher, endpoints, sent, errors, previews, watch, stop, source };
 }
+
+test('source visibility reaches every current rendition without replacing its spectators or capture owner', async () => {
+  const f = fixture();
+  await f.publisher.receive(f.watch('first'));
+  await f.publisher.receive(f.watch('second', '480p30'));
+  f.publisher.refreshSourceState();
+  assert.deepEqual(f.endpoints.map(endpoint => endpoint.sourceStateRefreshes), [1, 1]);
+  assert.deepEqual(f.endpoints.map(endpoint => endpoint.closed), [false, false]);
+  assert.equal(f.publisher.snapshot().viewers, 2);
+  await f.publisher.close();
+  f.publisher.refreshSourceState();
+  assert.deepEqual(f.endpoints.map(endpoint => endpoint.sourceStateRefreshes), [1, 1]);
+});
 
 test('local preview uses an existing watched rendition and returns to local-only capture after the last viewer', async () => {
   const f = fixture(), first = f.watch('first'), second = f.watch('second', '480p30');

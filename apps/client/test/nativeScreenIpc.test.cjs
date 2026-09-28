@@ -300,6 +300,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
     async addRemoteProducer() {}
     async removeRemoteProducer() {}
     async setAudioPreferences(preferences) { this.preferences = preferences; }
+    refreshSourceState() { this.paused = this.options.isSourcePaused?.() ?? false; return Promise.resolve(); }
     async diagnostics() {
       return { pipelineId: this.options.pipelineId,
         profile: shared.getScreenShareProfile(this.options.source.video, this.options.quality, this.options.source.codec),
@@ -1146,6 +1147,27 @@ test('minimized and hidden windows retain their identity but a reused process do
   await new Promise(resolve => setTimeout(resolve, 350));
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
   assert.equal(f.endpoints.length + f.captures.length, 0);
+});
+
+test('source visibility resets the preview decoder and updates the same active pipeline without another capture packet', async t => {
+  const f = fixture(t);
+  await f.join();
+  const { source } = await f.addSource();
+  await f.command({ action: 'preview-start', shareId: source.shareId, sourceInstanceId: source.instanceId,
+    presentationId: randomUUID() });
+  assert.equal(f.endpoints.length, 1);
+  const endpoint = f.endpoints[0];
+  f.pauseWindow(true);
+  await new Promise(resolve => setTimeout(resolve, 350));
+  assert.equal(endpoint.paused, true);
+  assert.equal(endpoint.closed, false);
+  assert.equal(f.sent.filter(event => event.type === 'preview-state').at(-1).state, 'paused');
+  f.pauseWindow(false);
+  await new Promise(resolve => setTimeout(resolve, 350));
+  assert.equal(endpoint.paused, false);
+  assert.equal(f.sent.filter(event => event.type === 'preview-state').at(-1).state, 'waiting');
+  assert.equal(f.endpoints.length, 1);
+  assert.deepEqual(f.errors, []);
 });
 
 test('native diagnostics are source-instance scoped and do not start capture when nobody is watching', async t => {
@@ -2013,17 +2035,18 @@ test('mute and volume changed before Accepted are applied before the receiver ca
   await f.join(); await f.participants();
   const watched = await f.watch();
   await f.command({ action: 'watch-audio', publisherSessionId: 'publisher', shareId: f.source.shareId,
-    presentationId: watched.presentationId, muted: true, volume: .35 });
+    presentationId: watched.presentationId, muted: true, volume: .35, sinkId: 'pending-output' });
   assert.equal(f.endpoints.length, 0);
   await f.accepted(f.sent.find(value => value.type === 'signal' && value.signal.action === 'watch').signal);
   assert.equal(f.endpoints.length, 1);
   assert.deepEqual({
     sinkId: f.endpoints[0].options.audio.sinkId, muted: f.endpoints[0].options.audio.muted,
     volume: f.endpoints[0].options.audio.volume,
-  }, { sinkId: 'selected-output', muted: true, volume: .35 });
+  }, { sinkId: 'pending-output', muted: true, volume: .35 });
   await f.command({ action: 'watch-audio', publisherSessionId: 'publisher', shareId: f.source.shareId,
-    presentationId: watched.presentationId, muted: false, volume: 1.5 });
-  assert.deepEqual(f.endpoints[0].preferences, { muted: false, volume: 1.5 });
+    presentationId: watched.presentationId, muted: false, volume: 1.5, sinkId: 'active-output' });
+  assert.deepEqual(f.endpoints[0].preferences, { muted: false, volume: 1.5, sinkId: 'active-output' });
+  assert.equal(f.endpoints.length, 1);
 });
 
 test('overlapping Watches reserve identity immediately and an old Stop cannot cancel a replacement', async t => {

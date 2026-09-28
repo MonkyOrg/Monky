@@ -119,6 +119,7 @@ export const nativeScreenCommandSchema = z.discriminatedUnion('action', [
   callScope.extend({
     action: z.literal('watch-audio'), publisherSessionId: reference, shareId: screenShareIdSchema, presentationId: uuid,
     muted: z.boolean(), volume: z.number().finite().min(0).max(2),
+    sinkId: nativeScreenAudioPreferencesSchema.shape.sinkId.optional(),
   }).strict(),
   callScope.extend({
     action: z.literal('stop'), publisherSessionId: reference, shareId: screenShareIdSchema, presentationId: uuid,

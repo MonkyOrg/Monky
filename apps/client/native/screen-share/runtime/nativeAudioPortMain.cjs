@@ -190,6 +190,19 @@ class NativeAudioPortMain {
     return record.port.enqueue('pcm', packet);
   }
 
+  async setSinkId(epoch, sinkId) {
+    const record = this.current;
+    this.assertFrame();
+    if (!record || record.config.epoch !== epoch || !record.readyObserved || record.stopping || record.failure)
+      throw abortError();
+    const result = await record.port.request('setSinkId', { epoch, sinkId });
+    this.assertFrame();
+    if (this.current !== record || record.stopping || record.failure) throw abortError();
+    if (result.sinkId !== sinkId) throw new Error('Native audio acknowledged another output device.');
+    record.config = Object.freeze({ ...record.config, sinkId });
+    return result;
+  }
+
   stop(epoch) {
     if (!positive(epoch)) return Promise.reject(new Error('Native audio Renderer stop has no valid epoch.'));
     // Only one epoch can exist at a time, and lower epochs can never be admitted again.

@@ -92,6 +92,150 @@ test('a lower-quality rendition of a Main6 source starts its own Main5.1 factory
   }
 });
 
+for (const mode of ['p2p', 'sfu']) {
+  test(`${mode}: minimizing without capture packets gates native recovery and resumes only after the actual ACK`, async t => {
+    const f = fixture({ role: 'publish', mode });
+    t.after(async () => { f.finish({ closed: true }); await f.endpoint.close(); });
+    await f.endpoint.ready;
+    let paused = false, acknowledge, recovering = true;
+    const gates = [], submitted = [], idrs = [];
+    f.endpoint.isSourcePaused = () => paused;
+    f.endpoint.sourceAttached = true;
+    f.endpoint.sourceEnabled = true;
+    f.endpoint.flow.setDemand(true);
+    f.endpoint.flow.setConnected(true);
+    f.endpoint.flow.bind({
+      async setBitrate() { assert.fail('Visibility must not change bitrate.'); },
+      async requestKeyFrame() { idrs.push(true); return { mode: 'next-real-idr', keyframeConfirmed: false }; },
+    });
+    f.engine.request = async (_id, operation, target, data) => {
+      assert.equal(operation, 'source.setEnabled');
+      assert.equal(target, 1);
+      gates.push(data.enabled);
+      await new Promise(resolve => { acknowledge = resolve; });
+      recovering = false;
+      return { enabled: data.enabled };
+    };
+    f.engine.submitEncodedFrame = (sourceId, frame) => {
+      assert.equal(recovering, false, 'An expired recovery must not survive a real visibility pause.');
+      submitted.push(frame);
+      return { copied: true, sourceId, frameId: frame.frameId, networkDeliveryConfirmed: false };
+    };
+    const frame = id => ({ frameId: id, keyframe: true, data: Buffer.from([1]),
+      timestampUs: id * 1000000, durationUs: 16667, ntpTimeMs: -1,
+      pts: String(id), dts: String(id), timebaseNumerator: 1, timebaseDenominator: 60 });
+    paused = true;
+    const pause = f.endpoint.refreshSourceState();
+    assert.equal(f.endpoint.refreshSourceState(), pause, 'One native gate owns concurrent visibility observations.');
+    assert.deepEqual(gates, [false], 'Disabling cannot wait for another capture packet.');
+    f.endpoint.flow.packet(frame(1));
+    assert.equal(submitted.length, 0);
+    acknowledge(); await pause;
+    assert.equal(f.endpoint.flow.capturePaused, true);
+    assert.deepEqual(idrs, []);
+    paused = false;
+    const resume = f.endpoint.refreshSourceState();
+    f.endpoint.flow.packet(frame(2));
+    assert.equal(submitted.length, 0, 'Restoration cannot submit before native reactivation.');
+    acknowledge(); await resume;
+    assert.deepEqual(gates, [false, true]);
+    assert.equal(idrs.length, 1);
+    assert.equal(f.endpoint.flow.capturePaused, false);
+    const actual = frame(3);
+    f.endpoint.flow.packet(actual);
+    assert.equal(submitted[0].data, actual.data);
+    assert.equal(submitted[0].timestampUs, actual.timestampUs);
+    f.endpoint.flow.released({ target: 1, data: { sourceId: 1, frameId: 3,
+      nativeCopyRetired: true, networkDeliveryConfirmed: false } });
+    assert.equal(f.closeCalls(), 0);
+    assert.deepEqual(f.errors, []);
+  });
+}
+
+test('Stop during a visibility ACK never resumes native admission or requests a replacement keyframe', async t => {
+  const f = fixture({ role: 'publish', mode: 'sfu' });
+  t.after(async () => { f.finish({ closed: true }); await f.endpoint.close(); });
+  await f.endpoint.ready;
+  f.endpoint.sourceAttached = true;
+  let acknowledge;
+  f.engine.request = async (_id, operation, _target, data) => {
+    assert.equal(operation, 'source.setEnabled');
+    await new Promise(resolve => { acknowledge = resolve; });
+    return { enabled: data.enabled };
+  };
+  f.endpoint.flow.requestIdr = () => assert.fail('Stop cannot request new capture feedback.');
+  const gate = f.endpoint.refreshSourceState();
+  f.endpoint.stopRequested = true;
+  acknowledge(); await gate;
+  assert.equal(f.endpoint.flow.capturePaused, true);
+  assert.equal(f.endpoint.demandWork.size, 0);
+});
+
+test('visibility changes during a native ACK apply the latest state before readmitting any frames', async t => {
+  const f = fixture({ role: 'publish' });
+  t.after(async () => { f.finish({ closed: true }); await f.endpoint.close(); });
+  await f.endpoint.ready;
+  let paused = true, acknowledge;
+  const gates = [];
+  f.endpoint.sourceAttached = true;
+  f.endpoint.sourceEnabled = true;
+  f.endpoint.isSourcePaused = () => paused;
+  f.engine.request = async (_id, operation, _target, data) => {
+    assert.equal(operation, 'source.setEnabled');
+    gates.push(data.enabled);
+    await new Promise(resolve => { acknowledge = resolve; });
+    return { enabled: data.enabled };
+  };
+  const work = f.endpoint.refreshSourceState();
+  paused = false;
+  assert.equal(f.endpoint.refreshSourceState(), work);
+  acknowledge();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(gates, [false, true]);
+  assert.equal(f.endpoint.flow.capturePaused, true);
+  paused = true;
+  f.endpoint.refreshSourceState();
+  acknowledge();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(gates, [false, true, false]);
+  acknowledge(); await work;
+  assert.equal(f.endpoint.flow.capturePaused, true);
+  assert.equal(f.endpoint.sourceEnabled, false);
+  assert.deepEqual(f.errors, []);
+});
+
+test('failed native visibility acknowledgement stays paused and reports the original error', async t => {
+  const f = fixture({ role: 'publish' });
+  t.after(async () => { f.finish({ closed: true }); await f.endpoint.close(); });
+  await f.endpoint.ready;
+  f.endpoint.sourceAttached = true;
+  const failure = new Error('Native visibility control failed');
+  f.engine.request = async () => { throw failure; };
+  await assert.rejects(f.endpoint.refreshSourceState(), error => error === failure);
+  assert.equal(f.endpoint.flow.capturePaused, true);
+  assert.equal(f.endpoint.sourceEnabled, false);
+  assert.equal(f.errors[0], failure);
+});
+
+test('P2P source admission enables native input even though its transport has no SFU producer receipt', async t => {
+  const f = fixture({ role: 'publish' });
+  t.after(async () => { f.finish({ closed: true }); await f.endpoint.close(); });
+  await f.endpoint.ready;
+  const requests = [];
+  f.endpoint.transport.addSource = async () => undefined;
+  f.endpoint.refreshCapture = () => {};
+  f.engine.request = async (_id, operation, _target, data) => {
+    requests.push({ operation, ...data });
+    return { enabled: data.enabled };
+  };
+  await f.endpoint.setDemand(1, false);
+  assert.equal(f.endpoint.publication, undefined);
+  assert.equal(f.endpoint.sourceAttached, true);
+  assert.equal(f.endpoint.sourceEnabled, true);
+  assert.deepEqual(requests, [{ operation: 'source.setEnabled', enabled: true }]);
+  assert.deepEqual(f.errors, []);
+});
+
 test('SFU admission timeout retains its endpoint and retry waits for real closure', async t => {
   const f = fixture({ role: 'publish', mode: 'sfu' });
   await f.endpoint.ready;

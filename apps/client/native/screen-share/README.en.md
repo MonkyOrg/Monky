@@ -293,6 +293,31 @@ unavailable, not a failure of the entire audio output. The structured
 recalibration under the same epoch, preserving the 200 ms and uncertainty
 bounds. `rejectedClockObservations` and `lastClockRejection` retain diagnostics.
 Impossible values, unconfirmed PCM and real regressions remain errors.
+Pending or expired recalibration does not change a previously calibrated
+output's identity: volume/mute controls and SFU/P2P reception retain their
+bindings. Initial calibration is still mandatory, and stopping or replacing the
+output invalidates old bindings; expired measurements never become valid feedback.
+
+Output selection uses `AudioContext.setSinkId()` on the existing context/worklet,
+through private epoch-validated IPC. It retains the presentation, transport,
+PCM and output epoch; only physical clock measurement is withdrawn until a valid,
+non-regressing anchor is available. Selections are serialized; a rejection is
+reported to the selector and restores the previous selection without closing
+video. Stopping the output drains pending selections before closing the context.
+Mute, deafen and volume do not recreate reception. On the stage, participant
+indicator-only updates also preserve video elements and fullscreen.
+
+Minimizing or hiding the window also pauses native encoded input, not just
+JavaScript packet admission. The source monitor applies this pause even when
+exclusive fullscreen stops producing frames. On restoration, the same session
+waits for native acknowledgement and a real keyframe before sending again,
+without counting minimized time as a recovery failure or widening its bounds.
+Closing or replacing the window still requires explicit selection.
+The `nativeScreenAppSmoke.cjs --sfu --screen-codec=av1 --native-1080p60
+--window-lifecycle --windowed --sample-seconds=8 --artifacts=<new absolute directory>`
+regression exercises minimize/restore, preview and audio using a synthetic window.
+`--windowed` keeps the viewer inside the QA display's work area; it neither
+qualifies a real exclusive-fullscreen game nor disables placement protection.
 
 Quality changes preflight while the original source remains active. Only after
 admission do they retire the old instance and publish its replacement with the
@@ -382,7 +407,9 @@ or viewer's actual pipeline, not merely the requested method. Signaling this
 state requires both client and server to support protocol 26.
 
 **Pause preview when Monky is not focused**, enabled by default, controls
-only local preview; losing focus does not interrupt viewers. Turning it off
+only local preview; losing focus does not interrupt viewers. While paused, the
+preview shows a black background and the pause message, without the frozen
+thumbnail. Returning focus restores the live image. Turning the option off
 allows preview to remain active on another monitor. When the last viewer
 leaves, remote publication is retired; if preview still has demand, a local
 pipeline can continue/restart. Without viewers or preview demand, capture

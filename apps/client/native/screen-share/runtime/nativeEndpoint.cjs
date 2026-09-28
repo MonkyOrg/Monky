@@ -83,6 +83,9 @@ class NativeScreenEndpoint {
     this.onPreview = options.onPreview ?? null;
     this.pending = new Set();
     this.demandWork = new Set();
+    this.sourceEnabled = false;
+    this.sourceAttached = false;
+    this.sourceGateWork = null;
     this.connections = new Map();
     this.peerReadiness = new Map();
     this.pendingControlBytes = 0;
@@ -294,6 +297,40 @@ class NativeScreenEndpoint {
     }
   }
 
+  refreshSourceState() {
+    if (!this.flow || this.stopRequested || this.closing) return Promise.resolve();
+    const paused = this.isSourcePaused();
+    const enabled = this.sourceAttached && !paused;
+    this.flow.setCapturePaused(paused || !!this.sourceGateWork || (enabled && !this.sourceEnabled));
+    if (this.sourceGateWork) return this.sourceGateWork;
+    if (enabled === this.sourceEnabled) return Promise.resolve();
+    // A hidden source must pause the native recovery clock as well as JS admission,
+    // including when exclusive fullscreen stops producing packets altogether.
+    const work = (async () => {
+      while (!this.stopRequested && !this.closing) {
+        const enabled = this.sourceAttached && !this.isSourcePaused();
+        if (enabled !== this.sourceEnabled) {
+          const result = await this.commands.request('source.setEnabled', this.sourceId, { enabled });
+          assert.equal(result.enabled, enabled);
+          this.sourceEnabled = enabled;
+          if (this.stopRequested || this.closing) return;
+          if (enabled) await this.flow.requestIdr();
+        }
+        if (enabled !== (this.sourceAttached && !this.isSourcePaused())) continue;
+        this.flow.setCapturePaused(this.isSourcePaused());
+        return;
+      }
+    })();
+    this.sourceGateWork = work;
+    this.demandWork.add(work);
+    const clear = () => {
+      this.demandWork.delete(work);
+      if (this.sourceGateWork === work) this.sourceGateWork = null;
+    };
+    void work.then(clear, clear);
+    return this.track(work);
+  }
+
   async setDemand(count, preview = this.previewDemand) {
     assert.equal(this.role, 'publish');
     assert.ok(Number.isSafeInteger(count) && count >= 0 && count <= 64);
@@ -325,7 +362,8 @@ class NativeScreenEndpoint {
       this.publicationWork = this.track((async () => {
         this.publication = await this.transport.addSource(this.sourceDescription, this.abort.signal);
         this.assertDemandCurrent();
-        await this.commands.request('source.setEnabled', this.sourceId, { enabled: true });
+        this.sourceAttached = true;
+        await this.refreshSourceState();
       })());
     }
     await this.publicationWork;
@@ -419,7 +457,7 @@ class NativeScreenEndpoint {
           this.captureMode = mode;
           this.observe({ type: 'capture-mode', capture: { mode, ready: true } });
         }
-        this.flow.setCapturePaused(this.isSourcePaused());
+        this.refreshSourceState();
         const result = this.flow.packet(frame);
         if (!this.stopRequested && this.previewDemand && result !== false && !this.isSourcePaused()) {
           try { this.onPreview?.(frame); }
@@ -541,13 +579,15 @@ class NativeScreenEndpoint {
     } else await this.broker.setConsumerEnabled(consumed.consumerId, true);
   }
 
-  async setAudioPreferences({ muted, volume }) {
+  async setAudioPreferences({ muted, volume, sinkId }) {
     assert.equal(this.role, 'receive');
     assert.equal(typeof muted, 'boolean');
     assert.ok(Number.isFinite(volume) && volume >= 0 && volume <= 2);
     this.audioMuted = muted; this.audioVolume = volume;
     if (!this.audio || this.closing) return;
     await this.ready;
+    this.abort.signal.throwIfAborted();
+    if (sinkId !== undefined) await this.audioOutput.owner.setSinkId(sinkId);
     this.abort.signal.throwIfAborted();
     if (this.mode === 'p2p' && this.broker.getPeer(this.publisherSessionId)) {
       await this.broker.setAudioVolume(this.publisherSessionId, this.source.shareId, volume);

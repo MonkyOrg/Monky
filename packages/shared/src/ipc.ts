@@ -628,6 +628,10 @@ export interface NativeScreenAudioError {
 }
 
 export interface NativeScreenAudioRpc {
+  setSinkId: {
+    request: { epoch: number; sinkId: string };
+    result: { epoch: number; sinkId: string };
+  };
   configure: {
     request: NativeScreenAudioOutputConfig;
     result: Omit<NativeScreenAudioOutputConfig, 'sinkId'>;

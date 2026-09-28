@@ -35,6 +35,7 @@ const overlayEnabled = process.argv.includes('--overlay');
 const sessionNavigation = process.argv.includes('--session-navigation');
 const serverLoss = process.argv.includes('--server-loss');
 const windowLifecycle = process.argv.includes('--window-lifecycle');
+const windowed = process.argv.includes('--windowed');
 const idleSourceClose = process.argv.includes('--idle-source-close');
 const admissionRecovery = process.argv.includes('--admission-recovery');
 assert.ok(!(process.argv.includes('--preserve-aspect-ratio') && process.argv.includes('--stretch')),
@@ -103,7 +104,7 @@ assert.ok(!sourceReplacement || (browserReceiver && mode === 'sfu' && audioEnabl
 assert.ok(!unsupportedBrowserCodec || (browserReceiver && mode === 'p2p'), 'The unsupported-codec case requires a browser P2P receiver.');
 assert.ok(!incompatibleViewer || (!browserReceiver && mode === 'p2p'), 'Mixed compatibility requires a native primary P2P receiver.');
 const debugSymbols = process.argv.find(value => value.startsWith('--debug-symbols='))?.slice('--debug-symbols='.length);
-const report = { mode, screenCodec, fourK, fourK60, fourK120, fullHd60, nativeFullHd60, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, admissionRecovery, preserveAspectRatio, gameFallback, publisherStop, sourceResize, sourceReplacement, sourceQualityChanges, clockFeedbackStall, cadenceDiagnostics, cadenceFollowup, chromiumReceiveLog, closeAppActive, sampleSeconds, warmupSeconds,
+const report = { mode, screenCodec, fourK, fourK60, fourK120, fullHd60, nativeFullHd60, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, windowed, admissionRecovery, preserveAspectRatio, gameFallback, publisherStop, sourceResize, sourceReplacement, sourceQualityChanges, clockFeedbackStall, cadenceDiagnostics, cadenceFollowup, chromiumReceiveLog, closeAppActive, sampleSeconds, warmupSeconds,
   normalMain: true, normalPreload: true, ownedSyntheticSource: true,
   qaFocusHooks: 'owned parent IPC only; normal Main and preload checks unchanged',
   receiverSelection: browserReceiver ? 'explicit Chromium preference (not a macOS hardware test)' : 'native',
@@ -765,15 +766,16 @@ async function viewerSystemEvidence(viewer) {
 async function previewPixels(client, state, name) {
   // Telemetry text must not count as proof that the standby message was painted.
   const telemetryEnabled = await client.cdp.evaluate('nativeAppSmoke.setTelemetryEnabled(false)');
-  let sample, png;
+  let sample, png, backgroundPng;
   try {
     sample = await client.cdp.evaluate(`nativeAppSmoke.previewClip(${JSON.stringify(state)})`);
     png = await client.cdp.capture(sample.clip);
+    if (sample.backgroundClip) backgroundPng = await client.cdp.capture(sample.backgroundClip);
   } finally {
     await client.cdp.evaluate(`nativeAppSmoke.setTelemetryEnabled(${JSON.stringify(telemetryEnabled)})`);
   }
   await fs.writeFile(path.join(artifacts, `${name}.png`), Buffer.from(png, 'base64'), { flag: 'wx' });
-  const pixels = await client.cdp.evaluate(`(async data => {
+  const readPixels = data => client.cdp.evaluate(`(async data => {
     const bytes = Uint8Array.from(atob(data), value => value.charCodeAt(0));
     const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
     try {
@@ -789,7 +791,16 @@ async function previewPixels(client, state, name) {
       const count = pixels.length / 4;
       return { width: bitmap.width, height: bitmap.height, bright, red: red / count, green: green / count, blue: blue / count };
     } finally { bitmap.close(); }
-  })(${JSON.stringify(png)})`);
+  })(${JSON.stringify(data)})`);
+  const pixels = await readPixels(png);
+  if (state === 'paused') {
+    assert.ok(backgroundPng, 'Paused preview must include an actual background pixel sample.');
+    const background = await readPixels(backgroundPng);
+    assert.deepEqual([background.red, background.green, background.blue], [0, 0, 0],
+      'Paused preview must paint black rather than a frozen or blurred image.');
+    await fs.writeFile(path.join(artifacts, `${name}-background.png`), Buffer.from(backgroundPng, 'base64'), { flag: 'wx' });
+    pixels.background = background;
+  }
   if (state === 'waiting' || state === 'paused') {
     assert.equal(sample.placeholderVisible, true, 'The empty video covers the standby preview message.');
     assert.ok(pixels.bright >= 20, `The standby preview message is painted black or covered: ${JSON.stringify(pixels)}`);
@@ -801,12 +812,15 @@ async function previewPixels(client, state, name) {
 async function setupRenderer({ port, password, nickname, browserReceiver, audioEnabled, preserveAspectRatio, gameFallback, sourceQualityChanges, fourK, fourK60, fullHd60, screenCodec }) {
   const [{ openServerSession, joinCallOnSession, leaveCurrentCall }, { sessionManager }, { webRtcManager },
     { videoService }, { voiceStore }, { settingsStore }, { stopLocalScreenShares },
-    { screenAudioService }, { setLanguage, t }, { appEvents }, { QUALITY_PRESETS }, { overlayBridgeService }] = await Promise.all([
+    { screenAudioService }, { setLanguage, t }, { appEvents }, { QUALITY_PRESETS }, { overlayBridgeService },
+    { applyAudioDevice, applyAudioOutputPreferences }, { audioProcessor }] = await Promise.all([
     import('/core/serverConnection.ts'), import('/core/SessionManager.ts'), import('/core/WebRtcManager.ts'),
     import('/core/VideoService.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
     import('/core/screenShareControls.ts'), import('/core/ScreenAudioService.ts'), import('/i18n/index.ts'),
     import('/core/EventBus.ts'), import('/@fs/' + globalThis.monkyAppSharedPath),
     import('/core/OverlayBridgeService.ts'),
+    import('/core/applyAudioDevice.ts'),
+    import('/core/AudioProcessor.ts'),
   ]);
   setLanguage('en');
   settingsStore.qualityPreset = 'CUSTOM';
@@ -871,6 +885,8 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
     .find(value => value.user.sessionId !== auth.currentUser.sessionId && value.voiceState.nativeScreenShares?.length);
   const watchedVideo = () => [...document.querySelectorAll('video.stage-video-element')]
     .find(video => video.srcObject instanceof MediaStream && video.srcObject.getVideoTracks().length);
+  const videoIdentities = new WeakMap();
+  let nextVideoIdentity = 1;
   const ownedWindowSource = (sources, hwnd) => {
     if (!Array.isArray(sources) || !Number.isSafeInteger(hwnd) || hwnd <= 0)
       throw new Error('An owned child HWND and real DesktopSources are required.');
@@ -1131,15 +1147,42 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       if (!(button instanceof HTMLButtonElement)) throw new Error('The real deafen control is missing.');
       button.click();
     },
+    microphone() {
+      const button = document.querySelector('#stage-btn-mic');
+      if (!(button instanceof HTMLButtonElement)) throw new Error('The real microphone control is missing.');
+      button.click();
+      return voiceStore.isMuted;
+    },
+    async outputDevices() {
+      return (await navigator.mediaDevices.enumerateDevices())
+        .filter(device => device.kind === 'audiooutput').map(device => device.deviceId);
+    },
+    async output(sinkId) {
+      const next = { selectedSpeakerId: sinkId, advancedAudioOutputs: false,
+        audioOutputDevices: { ...settingsStore.audioOutputDevices } };
+      await applyAudioOutputPreferences(next);
+      Object.assign(settingsStore, next);
+      settingsStore.save();
+    },
+    inputDevice() {
+      return audioProcessor.getRawMicrophoneStream()?.getAudioTracks()[0]?.getSettings().deviceId;
+    },
+    async input(deviceId) {
+      await applyAudioDevice('input', deviceId);
+      settingsStore.selectedMicrophoneId = deviceId;
+      settingsStore.save();
+    },
     snapshot() {
       const remote = sharing(), video = watchedVideo();
+      if (video && !videoIdentities.has(video)) videoIdentities.set(video, nextVideoIdentity++);
       return {
         self: auth.currentUser.sessionId, channelId: voiceStore.currentVoiceChannelId,
         watchActions, localSources: videoService.getNativeScreenCaptures().map(capture => capture.source),
         sources: remote?.voiceState.nativeScreenShares ?? [],
         watches: voiceStore.getScreenWatchers(), watchButton: !!document.querySelector('.stage-watch-btn'),
         video: video ? { width: video.videoWidth, height: video.videoHeight, readyState: video.readyState,
-          frames: video.getVideoPlaybackQuality().totalVideoFrames, at: performance.now() } : null,
+          frames: video.getVideoPlaybackQuality().totalVideoFrames, at: performance.now(),
+          element: videoIdentities.get(video), stream: video.srcObject.id, track: video.srcObject.getVideoTracks()[0].id } : null,
         errors: [...nativeErrors],
         nativeErrorEvents: [...nativeErrorEvents],
         sourceStoppingToasts: [...sourceStoppingToasts],
@@ -1237,12 +1280,17 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       const card = capture && [...document.querySelectorAll('[data-kind="screen"]')]
         .find(element => element.dataset.tileKey?.endsWith(':screen:' + capture.source.shareId));
       if (!card || card.dataset.previewState !== state) throw new Error('The local preview is not in its expected state.');
-      let area, placeholderVisible = null;
+      let area, placeholderVisible = null, backgroundClip = null;
       if (state === 'waiting' || state === 'paused') {
         const placeholder = card.querySelector('.stage-native-thumbnail');
         if (placeholder.hidden) throw new Error('The standby message is hidden.');
         area = placeholder.querySelector('span').getBoundingClientRect();
         placeholderVisible = placeholder.contains(document.elementFromPoint(area.x + area.width / 2, area.y + area.height / 2));
+        if (state === 'paused') {
+          const bounds = placeholder.getBoundingClientRect();
+          backgroundClip = { x: Math.ceil(bounds.x + Math.min(8, bounds.width * .02)),
+            y: Math.floor(bounds.y + bounds.height / 2), width: 4, height: 4 };
+        }
       } else {
         const video = card.querySelector('video.stage-video-element');
         if (!video?.videoWidth || !video.videoHeight) throw new Error('The local preview has no decoded image.');
@@ -1253,10 +1301,12 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
           y: bounds.y + (bounds.height - height) / 2 + height * .5 - 2, width: 4, height: 4 };
       }
       const clip = { x: Math.ceil(area.x), y: Math.ceil(area.y), width: Math.floor(area.width), height: Math.floor(area.height) };
-      if (clip.x < 0 || clip.y < 0 || clip.width < 1 || clip.height < 1
-        || clip.x + clip.width > innerWidth || clip.y + clip.height > innerHeight)
-        throw new Error('Preview sample lies outside the owned viewport.');
-      return { clip, placeholderVisible };
+      for (const sample of backgroundClip ? [clip, backgroundClip] : [clip]) {
+        if (sample.x < 0 || sample.y < 0 || sample.width < 1 || sample.height < 1
+          || sample.x + sample.width > innerWidth || sample.y + sample.height > innerHeight)
+          throw new Error('Preview sample lies outside the owned viewport.');
+      }
+      return { clip, placeholderVisible, backgroundClip };
     },
     async diagnostics() {
       const local = videoService.getNativeScreenCaptures()[0], remote = sharing();
@@ -2154,6 +2204,9 @@ async function run() {
       await sourceCommand('restore-source');
       await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).video?.frames >= before.video.frames + 20,
         'The original subscription did not resume after restoring the window.');
+      await waitForLocalPreview();
+      assert.equal((await publisher.cdp.evaluate('nativeAppSmoke.stats()')).publishers[0].pipelines[0].pipelineId, pipelineId,
+        'Restoring source visibility replaced the original publication.');
     }
     report.windowLifecyclePreserved = true;
   }
@@ -2413,6 +2466,60 @@ async function run() {
     const resumed = await signal();
     assert.ok(resumed.nonzeroFrames > 4800);
     report.audioControls = { normal, half, muted, deafened, resumed };
+
+    phase('preserving-video-through-microphone-and-output-changes');
+    const identity = (publisherStats, receiverStats) => ({
+      pipelineId: publisherStats.publishers[0].pipelines[0].pipelineId,
+      capturePid: publisherStats.publishers[0].pipelines[0].endpoint.capturePid,
+      ...(browserReceiver ? {} : {
+        subscriptionId: receiverStats.subscriptions[0].subscriptionId,
+        presentationId: receiverStats.subscriptions[0].presentationId,
+        receivePipelineId: receiverStats.subscriptions[0].endpoint.pipelineId,
+        audioEpoch: receiverStats.subscriptions[0].endpoint.audioOutput.activeEpoch,
+      }),
+    });
+    const original = identity(await publisher.cdp.evaluate('nativeAppSmoke.stats()'),
+      await viewer.cdp.evaluate('nativeAppSmoke.stats()'));
+    const continuous = async action => {
+      const before = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+      await action();
+      await until(async () => {
+        const after = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+        assert.deepEqual(after.errors, []);
+        assert.deepEqual(after.presentations, before.presentations, 'An audio control replaced the screen presentation.');
+        assert.ok(after.video, 'An audio control removed the video.');
+        for (const key of ['element', 'stream', 'track'])
+          assert.equal(after.video[key], before.video[key], `An audio control replaced the video ${key}.`);
+        return after.video.frames >= before.video.frames + 20;
+      }, 'Video did not continue during the audio control.');
+      assert.deepEqual(identity(await publisher.cdp.evaluate('nativeAppSmoke.stats()'),
+        await viewer.cdp.evaluate('nativeAppSmoke.stats()')), original,
+      'An audio control recreated capture, transport, presentation or the audio graph.');
+    };
+    for (const client of [publisher, viewer]) {
+      for (let index = 0; index < 4; index++)
+        await continuous(() => client.cdp.evaluate('nativeAppSmoke.microphone()'));
+    }
+    for (let index = 0; index < 4; index++)
+      await continuous(() => viewer.cdp.evaluate('nativeAppSmoke.deafen()'));
+    for (const client of [publisher, viewer]) {
+      const input = await client.cdp.evaluate('nativeAppSmoke.inputDevice()');
+      assert.ok(input, 'Microphone selection requires an active real input device.');
+      for (const deviceId of [input, '', input, ''])
+        await continuous(() => client.cdp.evaluate(`nativeAppSmoke.input(${JSON.stringify(deviceId)})`));
+    }
+    const outputs = await viewer.cdp.evaluate('nativeAppSmoke.outputDevices()');
+    const selected = outputs.find(device => device && !['default', 'communications'].includes(device));
+    assert.ok(selected, 'Real output selection needs an enumerated Chromium output device.');
+    for (const sinkId of [selected, '', selected, '']) {
+      await continuous(() => viewer.cdp.evaluate(`nativeAppSmoke.output(${JSON.stringify(sinkId)})`));
+      if (!browserReceiver) {
+        assert.equal((await viewer.cdp.evaluate('nativeAppSmoke.stats()')).subscriptions[0].endpoint.audioOutput.sinkId, sinkId);
+      }
+    }
+    const finalSignal = await signal();
+    assert.ok(finalSignal.nonzeroFrames > 4800, 'The selected output did not resume real PCM after device changes.');
+    report.audioControlsPreservedVideo = { ...original, microphoneToggles: 8, deafenToggles: 4, inputChanges: 8, outputChanges: 4 };
   }
 
   const overlaySnapshot = `(() => {
@@ -2457,9 +2564,11 @@ async function run() {
     }
   }
 
-  phase('entering-fullscreen');
-  await viewer.cdp.evaluate('nativeAppSmoke.fullscreen()');
-  await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).fullscreen, 'Normal fullscreen did not open.');
+  if (!windowed) {
+    phase('entering-fullscreen');
+    await viewer.cdp.evaluate('nativeAppSmoke.fullscreen()');
+    await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).fullscreen, 'Normal fullscreen did not open.');
+  }
   phase('changing-real-quality');
   const reducedProfile = protocolContracts.getScreenShareProfile(report.published.source.video, '480p30', report.published.source.codec);
   await viewer.cdp.evaluate('nativeAppSmoke.quality("480p30")');
@@ -2492,7 +2601,7 @@ async function run() {
     assert.equal(report.reducedPublisher.publishers[0].pipelines[0].endpoint.profile.fps, 30);
   } else assert.equal(report.reduced.subscriptions[0].endpoint.profile.fps, 30);
   assert.ok(report.reducedFps >= 25 && report.reducedFps <= 35, 'Quality did not change actual presentation cadence.');
-  assert.equal(reducedAfter.fullscreen, true, 'A quality change destroyed the fullscreen card.');
+  assert.equal(reducedAfter.fullscreen, !windowed, 'A quality change changed the requested presentation mode.');
   report.reducedSenderTelemetry = await observedTelemetry(publisher, reducedProfile.width, reducedProfile.height);
   report.reducedReceiverTelemetry = await observedTelemetry(viewer, reducedProfile.width, reducedProfile.height);
   report.reducedScaledPixels = await viewer.cdp.evaluate('nativeAppSmoke.pixels()');

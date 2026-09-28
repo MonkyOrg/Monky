@@ -57,6 +57,8 @@ function errorData(value: unknown): boolean {
 function rpcData(value: unknown, method: unknown, epoch: number, result: boolean): boolean {
   if (!epochRecord(value, epoch)) return false;
   switch (method) {
+    case 'setSinkId':
+      return keys(value, ['epoch', 'sinkId']) && text(value.sinkId, 512, true);
     case 'configure':
       return result
         ? keys(value, ['epoch', 'sampleRate', 'channels']) && value.sampleRate === 48000 && value.channels === 2
@@ -135,13 +137,17 @@ export function isNativeScreenAudioPortMessage(
     || !isRecord(value) || value.portId !== scope.portId || value.epoch !== scope.epoch) return false;
   if (value.type === 'request') {
     return keys(value, ['type', 'portId', 'epoch', 'id', 'method', 'data'])
-      && positive(value.id) && (sender === 'main' ? value.method === 'stop' : value.method !== 'stop')
+      && positive(value.id) && (sender === 'main'
+        ? value.method === 'stop' || value.method === 'setSinkId'
+        : value.method !== 'stop' && value.method !== 'setSinkId')
       && rpcData(value.data, value.method, scope.epoch, false);
   }
   if (value.type === 'response') {
     if (!positive(value.id) || typeof value.method !== 'string'
-      || !['configure', 'probe', 'calibrate', 'stop'].includes(value.method)
-      || (sender === 'renderer' ? value.method !== 'stop' : value.method === 'stop')) return false;
+      || !['configure', 'probe', 'calibrate', 'stop', 'setSinkId'].includes(value.method)
+      || (sender === 'renderer'
+        ? value.method !== 'stop' && value.method !== 'setSinkId'
+        : value.method === 'stop' || value.method === 'setSinkId')) return false;
     return value.ok === true
       ? keys(value, ['type', 'portId', 'epoch', 'id', 'method', 'ok', 'data'])
         && rpcData(value.data, value.method, scope.epoch, true)

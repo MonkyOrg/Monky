@@ -49,7 +49,8 @@ interface Presentation {
   readonly publisherSessionId: string;
   readonly source: NativeScreenSource;
   readonly quality: ScreenShareQuality;
-  readonly sinkId: string;
+  sinkId: string;
+  audioWork?: Promise<void>;
   readonly presentationId: string;
   readonly video: HTMLVideoElement;
   stream: MediaStream | null;
@@ -126,6 +127,7 @@ export class NativeScreenController {
   private retiring = new Set<Call>();
   private availability: Promise<NativeScreenCapabilities> | null = null;
   private sinkId = resolveAudioOutput(settingsStore, 'screen');
+  private outputWork: Promise<void> = Promise.resolve();
   private shutdownRequested = false;
 
   constructor(
@@ -690,8 +692,7 @@ export class NativeScreenController {
       && participant.voiceState.nativeScreenShares?.some(source => source.shareId === entry.source.shareId
         && source.instanceId === entry.source.instanceId) === true
       && voiceStore.isWatchingScreen(entry.publisherSessionId, entry.source.shareId)
-      && voiceStore.getScreenQuality(entry.publisherSessionId, entry.source.shareId) === entry.quality
-      && this.sinkId === entry.sinkId;
+      && voiceStore.getScreenQuality(entry.publisherSessionId, entry.source.shareId) === entry.quality;
   }
 
   private async syncWatch(call: Call, key: string): Promise<void> {
@@ -704,7 +705,7 @@ export class NativeScreenController {
     const quality = voiceStore.getScreenQuality(publisherSessionId, shareId);
     const assertWanted = (entry?: Presentation): void => {
       this.current(call);
-      if (entry?.stopping || (entry && this.sinkId !== entry.sinkId)
+      if (entry?.stopping
         || !voiceStore.isWatchingScreen(publisherSessionId, shareId)
         || voiceStore.getScreenQuality(publisherSessionId, shareId) !== quality
         || call.context.participants.get(publisherSessionId)?.voiceState?.nativeScreenShares
@@ -760,6 +761,7 @@ export class NativeScreenController {
       call.context.participants.setRemoteScreenStream(publisherSessionId, shareId, entry.stream, { notify: false });
       this.changed();
       entry.requested = true;
+      entry.sinkId = this.sinkId;
       const result = await call.api.nativeScreenCommand({
         action: 'watch', callId: call.config.callId, publisherSessionId, shareId, quality,
         presentationId: entry.presentationId, audio: this.audioPreferences(call, entry),
@@ -840,19 +842,29 @@ export class NativeScreenController {
     };
   }
 
-  private async applyAudio(call: Call, entry: Presentation): Promise<void> {
-    const { muted, volume } = this.audioPreferences(call, entry);
-    if (!entry.requested || entry.state.state === 'unavailable') return;
-    if (entry.browser) {
-      if (entry.audioTrack) {
-        this.mediaRouter.setScreenAudioMuted(entry.publisherSessionId, muted);
-        this.mediaRouter.setScreenAudioVolume(entry.publisherSessionId, volume * 100);
+  private applyAudio(call: Call, entry: Presentation, sinkId?: string): Promise<void> {
+    const execute = async (): Promise<void> => {
+      if (!entry.requested || entry.stopping || entry.state.state === 'unavailable') return;
+      this.current(call);
+      const { muted, volume } = this.audioPreferences(call, entry);
+      if (entry.browser) {
+        if (entry.audioTrack) {
+          this.mediaRouter.setScreenAudioMuted(entry.publisherSessionId, muted);
+          this.mediaRouter.setScreenAudioVolume(entry.publisherSessionId, volume * 100);
+        }
+        await entry.browser.setMuted(muted);
+      } else {
+        await this.ok(call, { action: 'watch-audio', callId: call.config.callId, publisherSessionId: entry.publisherSessionId,
+          shareId: entry.source.shareId, presentationId: entry.presentationId, muted, volume,
+          ...(sinkId !== undefined ? { sinkId } : {}) });
       }
-      await entry.browser.setMuted(muted);
-      return;
-    }
-    await this.ok(call, { action: 'watch-audio', callId: call.config.callId, publisherSessionId: entry.publisherSessionId,
-      shareId: entry.source.shareId, presentationId: entry.presentationId, muted, volume });
+      if (sinkId !== undefined && !entry.stopping) entry.sinkId = sinkId;
+    };
+    const work = (entry.audioWork ?? Promise.resolve()).then(execute, execute);
+    entry.audioWork = work;
+    const clear = (): void => { if (entry.audioWork === work) entry.audioWork = undefined; };
+    void work.then(clear, clear);
+    return work;
   }
 
   public async updateAudio(): Promise<void> {
@@ -861,10 +873,26 @@ export class NativeScreenController {
     await Promise.all([...call.presentations.values()].filter(entry => !entry.stopping).map(entry => this.applyAudio(call, entry)));
   }
 
-  public async setOutputDeviceId(sinkId: string): Promise<void> {
-    if (this.sinkId === sinkId) return;
-    this.sinkId = sinkId;
-    await this.sync();
+  public setOutputDeviceId(sinkId: string): Promise<void> {
+    const execute = async (): Promise<void> => {
+      if (this.sinkId === sinkId) return;
+      const previous = this.sinkId;
+      this.sinkId = sinkId;
+      const call = this.call;
+      if (!call || call.stopping || !call.context.isCurrent()) return;
+      const apply = (deviceId: string) => Promise.allSettled([...call.presentations.values()]
+        .filter(entry => !entry.stopping).map(entry => this.applyAudio(call, entry, deviceId)));
+      const changed = await apply(sinkId);
+      const failures = changed.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
+      if (!failures.length) return;
+      this.sinkId = previous;
+      const restored = await apply(previous);
+      failures.push(...restored.flatMap(result => result.status === 'rejected' ? [result.reason] : []));
+      throw new AggregateError(failures, 'Screen audio output selection failed; the video subscription was retained.');
+    };
+    const work = this.outputWork.then(execute, execute);
+    this.outputWork = work;
+    return work;
   }
 
   public getWatchState(sessionId: string, shareId: string): NativeScreenWatchState | null {
