@@ -405,6 +405,8 @@ credentials or signed installers. Release reuses only artifacts from a successfu
 run of the merged PR: it verifies provenance, run attempt, the ZIP and per-file
 SHA-256 digests, lockfile, platform and complete Git tree. Comparing trees rather
 than just commit SHAs supports squash merges without accepting untested code.
+Extensionless renderer assets, including licenses, use names without a trailing
+dot; export and extraction reject ambiguous Windows paths.
 
 Release still installs dependencies, applies the final version, creates installers
 and tarballs, tests the packaged SDK, and signs/publishes the files. Corresponding

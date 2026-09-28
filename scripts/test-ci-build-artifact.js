@@ -92,6 +92,45 @@ test('desktop artifacts include all client outputs and Windows native binaries, 
   }
 });
 
+test('Vite emits portable extensionless license assets that survive desktop artifact export and ZIP extraction', async t => {
+  const { build, loadConfigFromFile } = await import('vite');
+  const f = await fixture(t, 'mac');
+  const renderer = path.join(f.directory, 'renderer');
+  await fs.mkdir(renderer);
+  for (const name of ['LICENSE', 'RVM-LICENSE', 'model.json']) {
+    await fs.writeFile(path.join(renderer, name), JSON.stringify({ name }));
+  }
+  await fs.writeFile(path.join(renderer, 'entry.js'),
+    "import license from './LICENSE?url'; import rvm from './RVM-LICENSE?url'; import model from './model.json?url'; console.log(license, rvm, model);");
+  const loaded = await loadConfigFromFile({ command: 'build', mode: 'production' },
+    path.join(scripts, '..', 'apps', 'client', 'vite.config.ts'));
+  assert.ok(loaded);
+  const result = await build({
+    ...loaded.config, configFile: false, root: renderer, logLevel: 'silent',
+    build: { ...loaded.config.build, outDir: path.join(f.root, 'apps', 'client', 'dist'), assetsInlineLimit: 0,
+      rollupOptions: { ...loaded.config.build.rollupOptions, input: path.join(renderer, 'entry.js') } },
+  });
+  assert.ok(!Array.isArray(result) && 'output' in result);
+  const names = result.output.map(entry => entry.fileName);
+  for (const name of names) safePath(name);
+  assert.ok(names.some(name => /^assets\/LICENSE-[\w-]+$/.test(name)));
+  assert.ok(names.some(name => /^assets\/RVM-LICENSE-[\w-]+$/.test(name)));
+  assert.ok(names.some(name => /^assets\/model-[\w-]+\.json$/.test(name)));
+  const bundle = result.output.find(entry => entry.type === 'chunk' && entry.isEntry);
+  assert.ok(bundle);
+  for (const asset of result.output.filter(entry => entry.type === 'asset')) {
+    const relative = path.posix.relative(path.posix.dirname(bundle.fileName), asset.fileName);
+    assert.ok(bundle.code.includes(relative), `Missing bundled asset reference: ${asset.fileName}`);
+  }
+  const staged = path.join(f.directory, 'portable-desktop');
+  await collectBuild(f.root, staged, 'mac', f.environment);
+  const zip = path.join(f.directory, 'desktop.zip'), extracted = path.join(f.directory, 'extracted');
+  executePython('-c', 'import pathlib,sys,zipfile\nroot=pathlib.Path(sys.argv[1])\nwith zipfile.ZipFile(sys.argv[2],"w") as z:\n for p in root.rglob("*"):\n  if p.is_file(): z.write(p,p.relative_to(root).as_posix())',
+    staged, zip);
+  executePython(path.join(scripts, 'ci-build-archive.py'), zip, extracted);
+  await validateBuild(extracted, f.root, 'mac', f.environment);
+});
+
 test('build restoration rejects changed lockfiles, foreign runs, platforms, architectures and tool environments', async t => {
   const f = await fixture(t);
   for (const [key, value] of [['runId', 7], ['runAttempt', 2], ['repository', 'other/repo'], ['platform', 'win32'],

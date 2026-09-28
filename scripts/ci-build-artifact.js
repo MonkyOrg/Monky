@@ -29,10 +29,10 @@ export async function hashFile(filename) {
 
 export function safePath(relative) {
   assert.equal(typeof relative, 'string');
-  assert.ok(relative.length > 0 && !/[\\:\x00-\x1f]/.test(relative), 'Unsafe artifact path.');
+  assert.ok(relative.length > 0 && !/[\\:\x00-\x1f]/.test(relative), `Unsafe artifact path: ${JSON.stringify(relative)}`);
   assert.ok(relative.split('/').every(part => part && part !== '.' && part !== '..'
     && !/[. ]$/.test(part) && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)),
-  'Unsafe artifact path.');
+  `Unsafe artifact path: ${JSON.stringify(relative)}`);
   return relative;
 }
 

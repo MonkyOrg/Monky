@@ -397,6 +397,8 @@ sete dias builds separados de Windows, macOS e CLI/SDK, sem `node_modules`,
 credenciais ou instaladores assinados. A release reutiliza somente artefatos de
 uma execução aprovada do PR integrado: confere a origem, a tentativa da execução,
 o SHA-256 do ZIP e de cada arquivo, o lockfile, a plataforma e a árvore Git completa.
+Assets do renderer sem extensão usam nomes sem ponto final, inclusive as licenças;
+a exportação e a extração rejeitam caminhos ambíguos no Windows.
 Comparar a árvore, e não apenas o SHA do commit, permite o squash sem aceitar
 código diferente do testado.
 

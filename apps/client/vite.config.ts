@@ -17,6 +17,12 @@ export default defineConfig({
     emptyOutDir: true,
     target: 'esnext',
     chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      output: {
+        // Extensionless licenses must not acquire a trailing dot on Windows.
+        assetFileNames: 'assets/[name]-[hash][extname]',
+      },
+    },
   },
   server: {
     port: 5173,
