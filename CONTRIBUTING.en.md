@@ -375,6 +375,12 @@ One known limitation: **macOS signing configuration cannot be validated by CI**,
 because `Build check (mac)` runs `--dir`, which skips signing entirely. Only the
 release exercises that path.
 
+Required checks on `main` require the PR to be up to date with its base.
+When another PR merges first, the previous result is no longer sufficient to
+allow merging: update the branch and wait for the new CI. This does not erase
+the green history or update your branch automatically. Another reviewer's approval
+is still required; an administrator merge is an exception, not the normal flow.
+
 ### Describe how to test it
 
 In the PR (or the issue), include two sections:
@@ -393,9 +399,30 @@ build**, not from your environment. Without the steps, validation stalls.
 
 ### After the merge
 
-Pushing to `main` triggers the **Release** workflow automatically, which builds
-and publishes the new version with the Windows and macOS artifacts. Validation
-only starts **after the release is published** — never merely after the merge.
+Pushing to `main` triggers the **Release** workflow automatically. CI retains
+separate Windows, macOS and CLI/SDK builds for seven days, without `node_modules`,
+credentials or signed installers. Release reuses only artifacts from a successful
+run of the merged PR: it verifies provenance, run attempt, the ZIP and per-file
+SHA-256 digests, lockfile, platform and complete Git tree. Comparing trees rather
+than just commit SHAs supports squash merges without accepting untested code.
+Extensionless renderer assets, including licenses, use names without a trailing
+dot; export and extraction reject ambiguous Windows paths.
+
+Release still installs dependencies, applies the final version, creates installers
+and tarballs, tests the packaged SDK, and signs/publishes the files. Corresponding
+native sources also come from CI: only their version/commit metadata is updated
+before repacking and verification, without recompiling the runtime.
+
+Missing or expired artifacts use the original build with a warning in the workflow
+summary; promotions of betas predating the optimization are also supported.
+API, integrity, environment or source mismatches stop the release, without silent
+fallbacks. A new beta without a merged PR or successful CI is not published.
+Rerunning only failed jobs may leave artifacts from different run attempts; this
+triggers an explicit rebuild, or rerun the entire CI before merging to retain reuse.
+
+User validation only starts **after the release is published**, never merely after
+the merge. The optimization reduces duplicate release work; PRs still run all
+tests and may need another run after updating their base.
 
 > 🤖 If you are an AI agent working in this repository, the complete and
 > mandatory flow is in [`AGENTS.md`](AGENTS.md).

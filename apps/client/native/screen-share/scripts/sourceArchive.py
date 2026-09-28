@@ -1,6 +1,9 @@
 import argparse
+import copy
+import io
 import json
 from pathlib import Path, PurePosixPath
+import sys
 import tarfile
 
 
@@ -65,5 +68,37 @@ def main():
     print(json.dumps({"sourceArchiveVerified": True, "members": count}), flush=True)
 
 
+def rebind(archive, previous_file, metadata_file, output):
+    previous = json.loads(Path(previous_file).read_text(encoding="utf-8"))
+    previous.pop("archive")
+    metadata = json.loads(Path(metadata_file).read_text(encoding="utf-8"))
+    if (not previous.get("sourceTree") or previous["sourceTree"] != metadata.get("sourceTree")
+            or not previous.get("publicationReady") or not metadata.get("publicationReady")):
+        raise ValueError("Rebinding requires the same clean source tree.")
+    seen = set()
+    replaced = False
+    with tarfile.open(archive, "r|xz") as source, tarfile.open(output, "w:xz", format=tarfile.PAX_FORMAT, preset=3) as target:
+        for member in source:
+            name = safe_member(member.name)
+            if name in seen or not (member.isfile() or member.isdir()) or member.uname or member.gname:
+                raise ValueError("Unsafe or duplicate corresponding-source archive member.")
+            seen.add(name)
+            contents = source.extractfile(member) if member.isfile() else None
+            if name == "SOURCE-MANIFEST.json":
+                if not member.isfile() or member.size > 1_000_000 or json.load(contents) != previous:
+                    raise ValueError("Embedded source provenance disagrees with the verified CI manifest.")
+                data = (json.dumps(metadata, indent=2) + "\n").encode("utf-8")
+                member = copy.copy(member)
+                member.size = len(data)
+                contents = io.BytesIO(data)
+                replaced = True
+            target.addfile(member, contents)
+    if not replaced:
+        raise ValueError("Missing embedded corresponding-source manifest.")
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 6 and sys.argv[1] == "rebind":
+        rebind(*sys.argv[2:])
+    else:
+        main()

@@ -346,8 +346,19 @@ async function runQualitySettingsSmoke() {
       const link = root.querySelector('[data-section-target="video-telemetry"]');
       check(section.dataset.settingsLabel === language.t('settings.telemetrySection') &&
         link.textContent === language.t('settings.telemetrySection'), 'Telemetry navigation must use the selected language.');
+      // A pending layout refresh can rebuild navigation during the click itself.
+      const pendingSection = document.createElement('section');
+      pendingSection.dataset.settingsSection = 'pending-quality-section';
+      pendingSection.dataset.settingsLabel = 'Pending quality section';
+      quality.append(pendingSection);
       link.click();
-      check(link.getAttribute('aria-current') === 'location', 'The telemetry shortcut must select its real section.');
+      const currentLink = root.querySelector('[data-section-target="video-telemetry"]');
+      check(!link.isConnected && currentLink?.isConnected,
+        'The fixture must exercise navigation replacement during a pending section refresh.');
+      check(currentLink.getAttribute('aria-current') === 'location'
+        && currentLink.getAttribute('aria-controls') === section.id,
+      'The telemetry shortcut must select its real section.');
+      pendingSection.remove();
       const toggle = quality.querySelector('#checkbox-screen-telemetry');
       check(!!toggle.closest('.toggle-switch'), 'Telemetry must retain the switch component.');
       const preview = quality.querySelector('#checkbox-screen-preview-focus');
@@ -360,7 +371,8 @@ async function runQualitySettingsSmoke() {
         previewLink?.textContent === language.t('settings.screenPreviewSection'),
       'Preview section navigation must use the selected language.');
       previewLink.click();
-      check(previewLink.getAttribute('aria-current') === 'location', 'The preview shortcut must select its real section.');
+      check(root.querySelector('[data-section-target="screen-preview"]')?.getAttribute('aria-current') === 'location',
+        'The preview shortcut must select its real section.');
       const preset = quality.querySelector('#select-preset');
       const previousHelp = quality.querySelector('[data-bitrate-help]');
       preset.value = 'NORMAL';

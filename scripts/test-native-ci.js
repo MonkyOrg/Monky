@@ -172,13 +172,14 @@ test('both build lanes and release retain the qualified Windows toolchain and no
   assert.match(step(packaging, 'Package ${{ matrix.platform }} (dir, no publish)').run, /--dir --publish never/u);
 });
 
-test('native caches contain only pinned OBS downloads and cannot restore PR output into release', () => {
+test('native caches remain download-only; output reuse goes through verified artifacts, never cache hits', () => {
   for (const [job, namespace] of [[ci.jobs.package, 'ci'], [release.jobs.build, 'release']]) {
     const cache = step(job, 'Cache verified native screen archives (Windows)');
     assert.equal(cache.uses, 'actions/cache@v4');
     assert.equal(cache.with.path, '.native-screen\\downloads');
     assert.equal(cache.with['restore-keys'], undefined);
-    assert.match(cache.if, /^runner\.os == 'Windows'/u);
+    assert.match(cache.if, /runner\.os == 'Windows'/u);
+    if (namespace === 'release') assert.match(cache.if, /needs\.version\.outputs\.reuse_build != 'true'/u);
     assert.ok(cache.with.key.startsWith(`native-screen-archives-v1-${namespace}-windows-x64-`));
     for (const input of ['scripts/fetchObs.cjs', 'scripts/buildTools.cjs', 'src/vendor/obs/sources.json',
       'src/vendor/obs/runtime-inputs.json', 'src/capture/runtime-additions.json']) {
@@ -199,10 +200,67 @@ test('release still generates corresponding sources from the clean version commi
   assert.match(prepare.run, /if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/u);
   assert.match(prepare.run, /npm run pack:native-sources -- --version=\$\{\{ needs\.version\.outputs\.version \}\}/u);
   assert.ok(build.steps.indexOf(prepare) < build.steps.indexOf(step(build, 'Set build version')));
+  const rebind = step(build, 'Bind approved corresponding sources to release (Windows)');
+  assert.equal(rebind.if, "needs.version.outputs.reuse_build == 'true' && runner.os == 'Windows'");
+  assert.match(rebind.run, /pack:native-sources -- --from-ci --version=/);
+  assert.ok(build.steps.indexOf(rebind) < build.steps.indexOf(step(build, 'Set build version')));
   assert.equal(step(release.jobs.version, 'Calculate Semantic Version').env.RELEASE_CHANNEL, 'beta');
   const verification = step(release.jobs.release, 'Verify corresponding sources before publishing binaries');
   assert.match(verification.run, /node scripts\/check-native-source-release\.js/u);
   assert.match(step(build, 'Upload build artifacts').with.path, /release\/monky-native-sources-\*\.tar\.xz/u);
+});
+
+test('CI uploads only inventoried build outputs after testing, namespaced by immutable run attempt', () => {
+  assert.deepEqual(ci.permissions, { contents: 'read' });
+  assert.equal(step(ci.jobs['bot-tests'], 'Setup Python 3.11 (artifact regression tests)').with['python-version'], '3.11');
+  for (const [job, variant, exportName, uploadName, tested] of [
+    [ci.jobs['bot-tests'], 'cli', 'Export verified CLI build', 'Upload reusable CLI build', 'Exercise an isolated SDK installation'],
+    [ci.jobs.package, '${{ matrix.platform }}', 'Export verified desktop build', 'Upload reusable desktop build',
+      'Exercise shortcut capture and worker recovery'],
+  ]) {
+    const collect = step(job, exportName), upload = step(job, uploadName);
+    assert.ok(job.steps.indexOf(collect) > job.steps.indexOf(step(job, tested)));
+    assert.ok(job.steps.indexOf(upload) > job.steps.indexOf(collect));
+    assert.equal(collect.run, `node scripts/ci-build-artifact.js collect ${variant} "\${{ runner.temp }}/ci-build-${variant}"`);
+    assert.equal(upload.uses, 'actions/upload-artifact@v4');
+    assert.equal(upload.with.name, `ci-build-${variant}-\${{ github.run_attempt }}`);
+    assert.equal(upload.with.path, `\${{ runner.temp }}/ci-build-${variant}`);
+    assert.equal(upload.with['if-no-files-found'], 'error');
+    assert.equal(upload.with['compression-level'], 0);
+    assert.equal(upload.with['retention-days'], 7);
+    assert.equal(upload.with['include-hidden-files'], true);
+  }
+  assert.equal(step(ci.jobs.package, 'Package reusable corresponding sources (Windows)').run,
+    'npm run pack:native-sources -- --version=0.0.0-ci');
+});
+
+test('release reuses approved artifacts but always versions, packages, signs and verifies final distributables', () => {
+  assert.equal(release.permissions.actions, 'read');
+  assert.equal(release.jobs.version.outputs.reuse_build, '${{ steps.ci.outputs.reuse }}');
+  const selection = step(release.jobs.version, 'Select approved CI build');
+  assert.match(selection.run, /git rev-parse "\$\{CHECKOUT_REF\}\^\{commit\}"/);
+  assert.equal(selection.env.GH_TOKEN, '${{ github.token }}');
+  for (const name of ['Build workspaces', 'Cache verified native screen archives (Windows)',
+    'Build native screen runtime and corresponding sources (Windows)']) {
+    assert.match(step(release.jobs.build, name).if, /^needs\.version\.outputs\.reuse_build != 'true'/);
+  }
+  for (const name of ['Build shared and server', 'Build bot-sdk', 'Prepare the SFU worker for SDK voice tests', 'Test bot-sdk interactions']) {
+    assert.match(step(release.jobs.cli, name).if, /^needs\.version\.outputs\.reuse_build != 'true'/);
+  }
+  for (const [job, name] of [[release.jobs.build, 'Restore approved desktop build'], [release.jobs.cli, 'Restore approved CLI build']]) {
+    const restore = step(job, name);
+    assert.equal(restore.if, "needs.version.outputs.reuse_build == 'true'");
+    assert.match(restore.run, /ci-build-artifact.js restore/);
+    assert.equal(restore.env.GH_TOKEN, '${{ github.token }}');
+    assert.ok(job.steps.indexOf(restore) > job.steps.indexOf(step(job, 'Install dependencies')));
+    assert.ok(job.steps.some(candidate => candidate.uses === 'actions/setup-python@v5'));
+  }
+  for (const name of ['Set build version', 'Build ${{ matrix.platform }} distributables', 'Upload build artifacts']) {
+    assert.equal(step(release.jobs.build, name).if, undefined);
+  }
+  assert.match(step(release.jobs.build, 'Build ${{ matrix.platform }} distributables').run, /electron-builder/);
+  assert.match(step(release.jobs.release, 'Verify corresponding sources before publishing binaries').run, /check-native-source-release/);
+  assert.ok(step(release.jobs.release, 'Sign checksums with Cosign (keyless)'));
 });
 
 test('the extracted DOM lane preserves every existing test command and its ordering', () => {
