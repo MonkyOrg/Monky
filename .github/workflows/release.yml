@@ -39,6 +39,7 @@ concurrency:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   version:
@@ -51,6 +52,9 @@ jobs:
       channel: ${{ steps.bump.outputs.channel }}
       prerelease: ${{ steps.bump.outputs.prerelease }}
       checkout_ref: ${{ steps.ref.outputs.checkout_ref }}
+      reuse_build: ${{ steps.ci.outputs.reuse }}
+      ci_run_id: ${{ steps.ci.outputs.run_id }}
+      ci_artifacts: ${{ steps.ci.outputs.artifacts }}
     steps:
       - name: Require merged-main release flow
         env:
@@ -92,6 +96,19 @@ jobs:
           else
             echo "checkout_ref=${{ github.sha }}" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Select approved CI build
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKOUT_REF: ${{ steps.ref.outputs.checkout_ref }}
+          PROMOTE_TAG: ${{ github.event.inputs.promote_tag }}
+        shell: bash
+        run: |
+          commit=$(git rev-parse "${CHECKOUT_REF}^{commit}")
+          args=("$commit")
+          if [ -n "$PROMOTE_TAG" ]; then args+=(--promotion); fi
+          node scripts/ci-build-artifact.js select "${args[@]}"
 
   build:
     name: Build (${{ matrix.platform }})
@@ -142,23 +159,30 @@ jobs:
           "NODE_GYP_PATH=$NodeGyp" >> $env:GITHUB_ENV
 
       - name: Build workspaces
+        if: needs.version.outputs.reuse_build != 'true'
         run: npm run build
+
+      - name: Restore approved desktop build
+        if: needs.version.outputs.reuse_build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci-build-artifact.js restore ${{ matrix.platform }} "${{ needs.version.outputs.ci_run_id }}" "${{ fromJSON(needs.version.outputs.ci_artifacts)[matrix.platform] }}"
 
       - name: Verify macOS DMG packaging dependencies
         if: runner.os == 'macOS'
         run: node -e "require('dmg-builder/out/dmgLicense.js')"
 
-      # Separate from PR-produced caches; each used archive is rehashed against
-      # its immutable pin by fetchObs before extraction. No native outputs.
+      # Legacy/expired artifacts use the original build. Caches remain download-only;
+      # compiled outputs arrive exclusively through the verified CI artifact path.
       - name: Cache verified native screen archives (Windows)
-        if: runner.os == 'Windows' && hashFiles('apps/client/native/screen-share/scripts/prepare.cjs') != ''
+        if: needs.version.outputs.reuse_build != 'true' && runner.os == 'Windows' && hashFiles('apps/client/native/screen-share/scripts/prepare.cjs') != ''
         uses: actions/cache@v4
         with:
           path: .native-screen\downloads
           key: native-screen-archives-v1-release-windows-x64-${{ hashFiles('apps/client/native/screen-share/scripts/fetchObs.cjs', 'apps/client/native/screen-share/scripts/buildTools.cjs', 'apps/client/native/screen-share/src/vendor/obs/sources.json', 'apps/client/native/screen-share/src/vendor/obs/runtime-inputs.json', 'apps/client/native/screen-share/src/capture/runtime-additions.json') }}
 
       - name: Build native screen runtime and corresponding sources (Windows)
-        if: runner.os == 'Windows' && hashFiles('apps/client/native/screen-share/scripts/prepare.cjs') != ''
+        if: needs.version.outputs.reuse_build != 'true' && runner.os == 'Windows' && hashFiles('apps/client/native/screen-share/scripts/prepare.cjs') != ''
         shell: pwsh
         run: |
           $env:PYTHON = (Get-Command python).Source
@@ -167,6 +191,10 @@ jobs:
           npm run prepare:native-screen -- --python="$env:PYTHON" --git="$Git" --jobs=4
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run pack:native-sources -- --version=${{ needs.version.outputs.version }}
+
+      - name: Bind approved corresponding sources to release (Windows)
+        if: needs.version.outputs.reuse_build == 'true' && runner.os == 'Windows'
+        run: npm run pack:native-sources -- --from-ci --version=${{ needs.version.outputs.version }}
 
       - name: Set build version
         shell: bash
@@ -244,6 +272,11 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Setup Python 3.11 (artifact extraction)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       # The tarball only needs shared + server, so the Electron/native download
       # triggered by the Client's install scripts is skipped here.
       - name: Install dependencies
@@ -252,19 +285,27 @@ jobs:
           npm run postinstall
 
       - name: Build shared and server
+        if: needs.version.outputs.reuse_build != 'true'
         run: |
           npm run build --workspace=packages/shared
           npm run build --workspace=apps/server
 
       - name: Build bot-sdk
+        if: needs.version.outputs.reuse_build != 'true'
         run: npm run build --workspace=packages/bot-sdk
 
+      - name: Restore approved CLI build
+        if: needs.version.outputs.reuse_build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci-build-artifact.js restore cli "${{ needs.version.outputs.ci_run_id }}" "${{ fromJSON(needs.version.outputs.ci_artifacts).cli }}"
+
       - name: Prepare the SFU worker for SDK voice tests
-        if: hashFiles('packages/bot-sdk/test/voice-transport.test.js') != ''
+        if: needs.version.outputs.reuse_build != 'true' && hashFiles('packages/bot-sdk/test/voice-transport.test.js') != ''
         run: npm rebuild mediasoup
 
       - name: Test bot-sdk interactions
-        if: hashFiles('packages/bot-sdk/test/client.test.cjs') != ''
+        if: needs.version.outputs.reuse_build != 'true' && hashFiles('packages/bot-sdk/test/client.test.cjs') != ''
         run: npm run test --workspace=packages/bot-sdk
 
       - name: Pack CLI

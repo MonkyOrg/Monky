@@ -100,10 +100,11 @@ async function packSources(config) {
   const partial = archive + '.' + crypto.randomUUID() + '.partial';
   try {
     const sourceCommit = execute('git', ['--no-pager', '-C', repository, 'rev-parse', 'HEAD'], { capture: true });
+    const sourceTree = execute('git', ['--no-pager', '-C', repository, 'rev-parse', 'HEAD^{tree}'], { capture: true });
     const publicationReady = execute('git', ['--no-pager', '-C', repository, 'status', '--porcelain',
       '--untracked-files=normal'], { capture: true }) === '';
     const snapshot = {
-      schemaVersion: 1, version: config.version, sourceCommit, publicationReady,
+      schemaVersion: 1, version: config.version, sourceCommit, sourceTree, publicationReady,
       monkySource: `https://github.com/MonkyOrg/Monky/tree/${sourceCommit}`,
       webrtcRevision: legal.webrtcRevision, obsRevision: legal.obsRevision, recipesRevision: obs.recipesRevision,
       repositories: rtc.repositories.map(({ directory, url, commit }) => ({ directory, url, commit })),
@@ -140,6 +141,49 @@ async function packSources(config) {
   }
 }
 
-module.exports = { archiveEntryAllowed, sourceEntries, options, packSources, fileHash };
-if (require.main === module) packSources(options(process.argv.slice(2)))
-  .catch(error => { console.error(error); process.exitCode = 1; });
+async function rebindSources(config, sourceRoot = repository) {
+  const input = path.join(sourceRoot, 'release', 'monky-native-sources-0.0.0-ci');
+  const previous = JSON.parse(fs.readFileSync(`${input}.json`, 'utf8'));
+  const sourceCommit = execute('git', ['-C', sourceRoot, 'rev-parse', 'HEAD'], { capture: true });
+  const sourceTree = execute('git', ['-C', sourceRoot, 'rev-parse', 'HEAD^{tree}'], { capture: true });
+  assert.equal(previous.schemaVersion, 1);
+  assert.equal(previous.version, '0.0.0-ci');
+  assert.equal(previous.publicationReady, true, 'CI sources were not publication-ready.');
+  assert.equal(previous.sourceTree, sourceTree, 'Cannot rebind sources from a different source tree.');
+  assert.equal(execute('git', ['-C', sourceRoot, 'status', '--porcelain', '--untracked-files=normal'], { capture: true }), '',
+    'Source rebinding requires the clean merged checkout.');
+  assert.equal(await fileHash(`${input}.tar.xz`), previous.archive.sha256, 'CI source archive checksum mismatch.');
+  const { archive: oldArchive, ...snapshot } = previous;
+  const metadata = { ...snapshot, version: config.version, sourceCommit, sourceTree,
+    builtFromCommit: previous.sourceCommit, monkySource: `https://github.com/MonkyOrg/Monky/tree/${sourceCommit}` };
+  const archive = path.join(config.output, `monky-native-sources-${config.version}.tar.xz`);
+  const manifest = path.join(config.output, `monky-native-sources-${config.version}.json`);
+  assert.ok(!fs.existsSync(archive) && !fs.existsSync(manifest), 'Source package already exists.');
+  fs.mkdirSync(config.output, { recursive: true });
+  const pending = manifest + '.partial';
+  const partial = archive + '.partial';
+  try {
+    write(pending, JSON.stringify(metadata, null, 2) + '\n');
+    execute(process.env.PYTHON ?? 'python', [path.join(__dirname, 'sourceArchive.py'), 'rebind',
+      `${input}.tar.xz`, `${input}.json`, pending, partial]);
+    const bytes = fs.statSync(partial).size;
+    assert.ok(bytes > 1_000_000 && bytes < 2_000_000_000, 'Invalid rebound source archive size.');
+    const sha256 = await fileHash(partial);
+    fs.renameSync(partial, archive);
+    write(manifest, JSON.stringify({ ...metadata, archive: { name: path.basename(archive), bytes, sha256 } }, null, 2) + '\n');
+    fs.unlinkSync(`${input}.tar.xz`);
+    fs.unlinkSync(`${input}.json`);
+    console.log(`Rebound verified CI corresponding sources to ${config.version}, commit ${sourceCommit}; no native compilation.`);
+    return { archive, manifest };
+  } finally {
+    for (const file of [pending, partial]) if (fs.existsSync(file)) fs.unlinkSync(file);
+  }
+}
+
+module.exports = { archiveEntryAllowed, sourceEntries, options, packSources, rebindSources, fileHash };
+if (require.main === module) {
+  const args = process.argv.slice(2);
+  const fromCi = args[0] === '--from-ci';
+  (fromCi ? rebindSources : packSources)(options(fromCi ? args.slice(1) : args))
+    .catch(error => { console.error(error); process.exitCode = 1; });
+}

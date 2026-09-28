@@ -372,6 +372,12 @@ Um limite conhecido: **configuração de assinatura do macOS não é validável 
 CI**, porque o `Build check (mac)` roda `--dir`, que pula a assinatura por
 completo. Só a release exercita esse caminho.
 
+Os checks obrigatórios da `main` exigem que o PR esteja atualizado com a base.
+Quando outro PR entra primeiro, o resultado anterior não basta para liberar o
+merge: atualize a branch e aguarde o novo CI. Isso não apaga o histórico verde
+nem atualiza sua branch automaticamente. A aprovação de outro revisor continua
+obrigatória; um merge administrativo é uma exceção, não o fluxo normal.
+
 ### Descreva como testar
 
 No PR (ou na issue), inclua duas seções em PT-BR:
@@ -386,9 +392,31 @@ publicado**, não do seu ambiente. Sem o passo a passo, a validação trava.
 
 ### Depois do merge
 
-O push na `main` dispara o workflow **Release** automaticamente, que builda e
-publica a nova versão com os artefatos de Windows e macOS. A validação só
-começa **depois que a release estiver publicada** — nunca só após o merge.
+O push na `main` dispara o workflow **Release** automaticamente. O CI guarda por
+sete dias builds separados de Windows, macOS e CLI/SDK, sem `node_modules`,
+credenciais ou instaladores assinados. A release reutiliza somente artefatos de
+uma execução aprovada do PR integrado: confere a origem, a tentativa da execução,
+o SHA-256 do ZIP e de cada arquivo, o lockfile, a plataforma e a árvore Git completa.
+Comparar a árvore, e não apenas o SHA do commit, permite o squash sem aceitar
+código diferente do testado.
+
+A release ainda instala dependências, aplica a versão final, gera os instaladores
+e tarballs, testa o SDK empacotado e assina/publica os arquivos. As fontes nativas
+correspondentes também vêm do CI: só seus metadados de versão/commit são atualizados
+e o arquivo é reempacotado e verificado, sem recompilar o runtime.
+
+Artefatos ausentes ou expirados usam o build original com aviso no resumo do
+workflow; promoções de betas anteriores à otimização também são suportadas.
+Falhas de API, integridade, ambiente ou divergência de código interrompem a release,
+sem fallback silencioso. Uma nova beta sem PR integrado ou sem CI aprovado não
+é publicada. Reexecutar apenas jobs que falharam pode deixar artefatos de tentativas
+diferentes; nesse caso há recompilação explícita, ou reexecute o CI inteiro antes
+do merge para manter o reaproveitamento.
+
+A validação do usuário só começa **depois que a release estiver publicada** —
+nunca só após o merge. A otimização reduz trabalho duplicado na release; o PR
+continua executando todos os testes e pode precisar de nova execução ao atualizar
+a base.
 
 > 🤖 Se você é um agente de IA trabalhando neste repositório, o fluxo completo e
 > obrigatório está em [`AGENTS.md`](AGENTS.md).
