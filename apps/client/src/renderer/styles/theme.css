@@ -6039,6 +6039,14 @@ input:focus, textarea:focus, select:focus {
   opacity: 0.4;
 }
 
+[data-preview-state="paused"] .stage-native-thumbnail {
+  background: #000000;
+}
+
+[data-preview-state="paused"] .stage-native-thumbnail img {
+  display: none;
+}
+
 .stage-native-thumbnail span {
   position: relative;
   max-width: 85%;

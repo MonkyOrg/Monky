@@ -104,8 +104,31 @@ class NativeAudioOutputOwner {
   receiveEpoch(engine) {
     if (engine !== this.#engine) throw new Error('Native audio output belongs to a different engine.');
     const record = this.#current;
-    return record?.ready && record.nativeConfigured && positive(record.calibrationId)
+    // Refreshing clock measurements does not replace a previously calibrated output.
+    return record?.ready && record.nativeConfigured && positive(record.lastCalibrationId)
       && !record.stopping && !this.#engineCloseRequested ? record.epoch : null;
+  }
+
+  setSinkId(sinkId) {
+    if (typeof sinkId !== 'string' || sinkId.length > 512 || sinkId.includes('\0'))
+      return Promise.reject(new Error('Invalid native audio output device.'));
+    const record = this.#current;
+    if (!record?.ready || record.stopping || this.#engineCloseRequested) return Promise.reject(aborted());
+    const execute = async () => {
+      this.#assertLive(record);
+      if (record.config.sinkId === sinkId) return;
+      const result = await requirePromise(this.#renderer.setSinkId(record.epoch, sinkId),
+        'Output selection must await its real Renderer acknowledgement.');
+      this.#assertLive(record);
+      if (result?.epoch !== record.epoch || result.sinkId !== sinkId)
+        throw new Error('Renderer acknowledged another output selection.');
+      record.config = Object.freeze({ ...record.config, sinkId });
+    };
+    const work = (record.sinkWork ?? Promise.resolve()).then(execute, execute);
+    record.sinkWork = work;
+    const clear = () => { if (record.sinkWork === work) record.sinkWork = null; };
+    void work.then(clear, clear);
+    return work;
   }
 
   async start(sinkId, signal) {

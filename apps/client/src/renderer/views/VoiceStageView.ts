@@ -117,6 +117,7 @@ export class VoiceStageView {
   // it when the broadcast state actually changes, preventing the pulse dot from
   // flickering on frequent voice.state_updated events (#70).
   private broadcastBannerSignature: string | null = null;
+  private participantStructure: string | null = null;
   private cameraToggleEpoch = 0;
   private cameraTogglePending = false;
   private botScreens = new Map<string, BotScreenView>();
@@ -315,6 +316,7 @@ export class VoiceStageView {
   }
 
   public render(): void {
+    this.participantStructure = null;
     this.releaseStageVideos(this.container);
     if (this.focusError) this.focusError.textContent = t('stage.fullscreenExitError');
     this.stopPingMonitor();
@@ -784,6 +786,7 @@ export class VoiceStageView {
 
     const participants = participantManager.getInVoiceChannel(this.currentChannelId);
     if (participants.length === 0) {
+      this.participantStructure = null;
       this.unbindTelemetryControls();
       this.releaseStageVideos(area);
       area.innerHTML = `
@@ -800,21 +803,20 @@ export class VoiceStageView {
     // (#26, #253); focus, speaking and DOM keys are keyed per tile.
     const tiles = this.buildStageTiles(participants, currentSessionId);
     if (this.focusStartedScreens(tiles)) return;
-    this.unbindTelemetryControls();
-    this.releaseStageVideos(area);
 
     // Drop focus entries whose tile disappeared (share ended, peer left).
     this.focusedTileKeys = this.focusedTileKeys.filter((key) =>
       tiles.some((tile) => tile.key === key)
     );
 
+    let markup: string;
     if (this.focusedTileKeys.length > 0) {
       const focusedTiles = this.focusedTileKeys
         .map((key) => tiles.find((tile) => tile.key === key)!)
         .filter(Boolean);
       const otherTiles = tiles.filter((tile) => !this.focusedTileKeys.includes(tile.key));
 
-      area.innerHTML = `
+      markup = `
         <div class="stage-focused-layout">
           <div class="stage-focused-stack ${focusedTiles.length > 1 ? 'stage-focused-stack--split' : ''}">
             ${focusedTiles.map((focusedTile) => `
@@ -842,7 +844,7 @@ export class VoiceStageView {
         </div>
       `;
     } else {
-      area.innerHTML = `
+      markup = `
         <div class="stage-grid" id="stage-grid">
           ${tiles.map((tile) => {
             return `
@@ -854,6 +856,42 @@ export class VoiceStageView {
         </div>
       `;
     }
+
+    const template = document.createElement('template');
+    template.innerHTML = markup;
+    const badges = new Map<string, string>();
+    for (const badge of template.content.querySelectorAll<HTMLElement>('.stage-badges-overlay')) {
+      const key = badge.closest<HTMLElement>('[data-tile-key]')?.dataset.tileKey;
+      if (key) badges.set(key, badge.innerHTML);
+      badge.innerHTML = '';
+    }
+    for (const telemetry of template.content.querySelectorAll('.telemetry-overlay')) telemetry.textContent = '';
+    for (const card of template.content.querySelectorAll('[data-tile-key]')) {
+      card.className = [...card.classList].filter(name => name !== 'speaking').join(' ');
+    }
+    const structure = template.innerHTML;
+    // Voice metadata must not detach a playing video or exit its fullscreen card.
+    const sameMedia = tiles.every(tile => {
+      if (tile.kind === 'voice' || tile.kind === 'miniapp') return true;
+      const video = area.querySelector<HTMLVideoElement>(`[data-video-tile-key="${CSS.escape(tile.key)}"]`);
+      const stream = tile.kind === 'screen' && sidOf(tile.p) !== currentSessionId
+        && !this.isWatchingScreen(sidOf(tile.p), tile.shareId!) ? null : this.getTileStream(tile, currentSessionId);
+      return video?.srcObject === stream;
+    });
+    if (this.participantStructure === structure && sameMedia) {
+      for (const badge of area.querySelectorAll<HTMLElement>('.stage-badges-overlay')) {
+        const key = badge.closest<HTMLElement>('[data-tile-key]')?.dataset.tileKey;
+        const content = key ? badges.get(key) : undefined;
+        if (content !== undefined && badge.innerHTML !== content) badge.innerHTML = content;
+      }
+      this.updateSpeakingClasses();
+      this.refreshParticipantMedia(tiles, currentSessionId);
+      return;
+    }
+    this.participantStructure = structure;
+    this.unbindTelemetryControls();
+    this.releaseStageVideos(area);
+    area.innerHTML = markup;
 
     // Attach click listeners to cards for focus toggle & right-click for volume adjustment
     const allCards = area.querySelectorAll('[data-session-id]');
@@ -1052,6 +1090,10 @@ export class VoiceStageView {
       slider.addEventListener('lostpointercapture', endDrag);
     });
 
+    this.refreshParticipantMedia(tiles, currentSessionId);
+  }
+
+  private refreshParticipantMedia(tiles: StageTile[], currentSessionId: string | undefined): void {
     // Attach media streams to the per-tile video elements cleanly. Camera rides
     // remoteStream / cameraStream; each screen share rides its own stream keyed
     // by share id so every tile shows independent video (#26, #253).
@@ -1059,9 +1101,7 @@ export class VoiceStageView {
       if (tile.kind === 'voice' || tile.kind === 'miniapp') return;
       const isLocal = sidOf(tile.p) === currentSessionId;
       if (!isLocal && tile.kind === 'screen' && !this.isWatchingScreen(sidOf(tile.p), tile.shareId!)) return;
-      const stream = isLocal
-        ? (tile.kind === 'screen' ? videoService.getScreenStream(tile.shareId!) : videoService.getCameraState().stream)
-        : (tile.kind === 'screen' ? this.getRemoteScreenStream(tile) : tile.p.remoteStream);
+      const stream = this.getTileStream(tile, currentSessionId);
       if (!stream) return;
       const suffix = tile.kind === 'screen' ? `screen-${tile.shareId}` : tile.kind;
       const ids = [`video-${sidOf(tile.p)}-${suffix}`, `video-mini-${sidOf(tile.p)}-${suffix}`];
@@ -1080,6 +1120,12 @@ export class VoiceStageView {
     this.syncTelemetryMonitor();
     this.syncBotScreenLayout();
     this.refreshNativeScreenState();
+  }
+
+  private getTileStream(tile: ParticipantStageTile, currentSessionId: string | undefined): MediaStream | null {
+    return (sidOf(tile.p) === currentSessionId
+      ? (tile.kind === 'screen' ? videoService.getScreenStream(tile.shareId!) : videoService.getCameraState().stream)
+      : (tile.kind === 'screen' ? this.getRemoteScreenStream(tile) : tile.p.remoteStream)) ?? null;
   }
 
   private renderScreenQuality(source: NativeScreenSource, sessionId: string): string {

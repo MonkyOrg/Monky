@@ -43,18 +43,65 @@ class NativePcmAudioSink {
     this.nextPlayoutFrame = null;
     this.stats = { acceptedFrames: 0, stalePackets: 0, outputSamples: 0 };
     this.playout = null;
+    this.sinkWork = null;
+    this.switchingSink = false;
     this.lastUnderrun = null;
     this.errors = [];
     this.onStateChange = () => {
-      if (!this.stopping && (this.ready || this.preparingOutput) && this.context?.state !== 'running') {
+      if (!this.stopping && !this.switchingSink && (this.ready || this.preparingOutput) && this.context?.state !== 'running') {
         this.fail(new Error('Native audio output stopped; a new playout epoch is required before resuming.'));
       }
     };
     this.onSinkChange = () => {
       if (!this.stopping && (this.ready || this.preparingOutput)) {
-        this.fail(new Error('Native audio output changed; recreate its clock and playout epoch.'));
+        this.invalidateOutputClock();
       }
     };
+  }
+
+  invalidateOutputClock() {
+    this.clock.invalidate('output-device-changed');
+    this.notify(this.onFeedback, { available: false, epoch: this.epoch, reason: 'output-device-changed' });
+  }
+
+  setSinkId(sinkId) {
+    if (typeof sinkId !== 'string' || sinkId.length > 512 || sinkId.includes('\0'))
+      return Promise.reject(new Error('Invalid native audio output device.'));
+    const execute = async () => {
+      this.assertStarting();
+      if (!this.ready) throw new Error('Native audio output is not ready to change devices.');
+      if (this.sinkId === sinkId) return { epoch: this.epoch, sinkId };
+      this.switchingSink = true;
+      this.invalidateOutputClock();
+      try {
+        await this.context.setSinkId(sinkId);
+        this.assertStarting();
+        if (this.context.sinkId !== sinkId) throw new Error('Native audio did not select the requested output device.');
+        if (this.context.state !== 'running') await this.context.resume();
+        this.assertStarting();
+        if (this.context.state !== 'running') throw new Error('Native audio output did not resume after changing devices.');
+        this.sinkId = sinkId;
+        return { epoch: this.epoch, sinkId };
+      } catch (error) {
+        if (!this.stopping && this.context.sinkId !== this.sinkId) {
+          try {
+            await this.context.setSinkId(this.sinkId);
+            if (this.context.sinkId !== this.sinkId) throw new Error('Native audio could not restore its original output.');
+          } catch (rollbackError) {
+            throw new AggregateError([error, rollbackError], 'Native audio output selection and restoration failed.');
+          }
+        }
+        throw error;
+      } finally {
+        this.switchingSink = false;
+        if (!this.stopping) this.invalidateOutputClock();
+      }
+    };
+    const work = (this.sinkWork ?? Promise.resolve()).then(execute, execute);
+    this.sinkWork = work;
+    const clear = () => { if (this.sinkWork === work) this.sinkWork = null; };
+    void work.then(clear, clear);
+    return work;
   }
 
   notify(callback, value) {
@@ -150,7 +197,8 @@ class NativePcmAudioSink {
       if (!this.clock.update(message)) return;
       this.observePlayout(message);
       this.stats.outputSamples++;
-      this.notify(this.onFeedback, this.clock.sample(this.context));
+      this.notify(this.onFeedback, this.switchingSink
+        ? { available: false, epoch: this.epoch, reason: 'output-device-changing' } : this.clock.sample(this.context));
     } else {
       throw new Error('Unknown native PCM worklet feedback.');
     }
@@ -229,6 +277,11 @@ class NativePcmAudioSink {
 
   async cleanup() {
     const failures = [];
+    if (this.sinkWork) {
+      try { await boundedCleanup(Promise.allSettled([this.sinkWork]),
+        'Native output device change did not retire.', this.timeoutMs); }
+      catch (error) { failures.push(error); }
+    }
     if (this.node && !this.portClosed) {
       this.node.port.onmessage = null;
       this.node.onprocessorerror = null;

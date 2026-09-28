@@ -729,10 +729,13 @@ class NativeScreenSharingService {
         const intent = call.watchVersions.get(subscriptionKey);
         if (!intent || intent.presentationId !== command.presentationId) throw cancelled();
         this.log('watch-audio', { ...this.context(call, command.shareId), muted: command.muted, volume: command.volume });
-        intent.audio = { ...intent.audio, muted: command.muted, volume: command.volume };
+        const preferences = { muted: command.muted, volume: command.volume,
+          ...(command.sinkId !== undefined ? { sinkId: command.sinkId } : {}) };
         const entry = call.subscriptions.get(subscriptionKey);
         if (entry?.subscription.presentationId === command.presentationId)
-          await entry.subscription.setAudioPreferences({ muted: command.muted, volume: command.volume });
+          await entry.subscription.setAudioPreferences(preferences);
+        if (call.watchVersions.get(subscriptionKey) !== intent) throw cancelled();
+        intent.audio = { ...intent.audio, ...preferences };
         break;
       }
       case 'stop': {
@@ -949,7 +952,7 @@ class NativeScreenSharingService {
             publisherSessionId: call.config.sessionId, shareId: source.shareId, sourceInstanceId: source.instanceId });
         },
         onPreview: packet => {
-          const enabled = this.previewAllowed(call, entry);
+          const enabled = !paused && this.previewAllowed(call, entry);
           if (packet && enabled && entry.preview) {
             if (packet.captureMode && packet.captureMode !== entry.previewMode) {
               entry.previewMode = packet.captureMode;
@@ -1000,8 +1003,16 @@ class NativeScreenSharingService {
         source, publisher, captureHub, monitor: null, preview: null, previewMode: null };
       call.sources.set(source.shareId, entry);
       // An announcement owns its exact target even without a capture pipeline.
+      let observedPaused = paused;
       entry.monitor = setInterval(() => {
-        try { sourceState(); }
+        try {
+          sourceState();
+          if (observedPaused !== paused) {
+            observedPaused = paused;
+            entry.preview?.reset(paused || !this.previewAllowed(call, entry) ? 'paused' : 'waiting');
+          }
+          publisher.refreshSourceState();
+        }
         catch (error) {
           if (entry.monitor) clearInterval(entry.monitor);
           entry.monitor = null;

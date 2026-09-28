@@ -61,6 +61,12 @@ class NativeAudioOutputClock {
     return true;
   }
 
+  invalidate(reason) {
+    this.latest = null;
+    this.lastUnavailableReason = reason;
+    // Keep the accepted cursor: a new device's latency must not move playout backwards.
+  }
+
   sample(context) {
     const unavailable = reason => {
       this.lastUnavailableReason = reason;

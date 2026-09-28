@@ -1048,17 +1048,89 @@ test('Stop during attachment waits for its owner and never starts a late subscri
   assert.equal(f.elements.size, 0);
 });
 
-test('quality and output-device changes replace the actual receiver and retain current audio preferences', async t => {
+test('quality changes replace the receiver, but output-device changes retain it and current audio preferences', async t => {
   const f = fixture(t);
   f.watching(true); await f.controller.sync();
   f.quality('480p30'); await f.controller.sync();
   f.audio({ muted: true, volume: 80 });
   await f.controller.setOutputDeviceId('another-output');
   const watches = f.commands.filter(command => command.action === 'watch');
-  assert.deepEqual(watches.map(command => command.quality), ['source', '480p30', '480p30']);
-  assert.equal(new Set(watches.map(command => command.presentationId)).size, 3);
-  assert.deepEqual(watches[2].audio, { sinkId: 'another-output', muted: true, volume: 0.8 });
-  assert.equal(f.retired.length, 2);
+  assert.deepEqual(watches.map(command => command.quality), ['source', '480p30']);
+  assert.equal(new Set(watches.map(command => command.presentationId)).size, 2);
+  const changed = f.commands.findLast(command => command.action === 'watch-audio');
+  assert.equal(changed.presentationId, watches[1].presentationId);
+  assert.equal(changed.sinkId, 'another-output');
+  assert.equal(changed.muted, true);
+  assert.equal(changed.volume, 0.8);
+  assert.equal(f.retired.length, 1);
+});
+
+test('mute, deafen, volume and output selection preserve one Watch, video owner and playing state', async t => {
+  const f = fixture(t);
+  f.watching(true); await f.controller.sync();
+  const owner = [...f.elements.values()][0];
+  for (const device of ['headphones', 'speakers', 'default']) {
+    f.audio({ muted: true, deafened: false, volume: 3 });
+    await f.controller.updateAudio();
+    f.audio({ muted: false, deafened: true });
+    await f.controller.setOutputDeviceId(device);
+    f.audio({ deafened: false, volume: 100 });
+    await f.controller.sync();
+    assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
+    assert.equal([...f.elements.values()][0], owner);
+  }
+  assert.equal(f.commands.filter(command => command.action === 'watch').length, 1);
+  assert.equal(f.stopped.length + f.retired.length, 0);
+});
+
+test('rejected output selection preserves video and allows selecting another device without rewatching', async t => {
+  const f = fixture(t);
+  f.watching(true); await f.controller.sync();
+  f.hook(async command => {
+    if (command.action === 'watch-audio' && command.sinkId === 'missing-output') throw new Error('Output unavailable');
+  });
+  await assert.rejects(f.controller.setOutputDeviceId('missing-output'), AggregateError);
+  assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
+  await f.controller.setOutputDeviceId('working-output');
+  await f.controller.sync();
+  assert.equal(f.commands.filter(command => command.action === 'watch').length, 1);
+  assert.equal(f.commands.findLast(command => command.sinkId).sinkId, 'working-output');
+  assert.equal(f.retired.length, 0);
+});
+
+test('output selection during presentation attachment keeps the pending video and uses the latest output', async t => {
+  const f = fixture(t), gate = deferred();
+  f.attachHook(() => gate.promise);
+  f.watching(true);
+  const watching = f.controller.sync();
+  await tick();
+  await f.controller.setOutputDeviceId('new-output');
+  gate.resolve(); await watching;
+  const watches = f.commands.filter(command => command.action === 'watch');
+  assert.equal(watches.length, 1);
+  assert.equal(watches[0].audio.sinkId, 'new-output');
+  assert.equal(f.retired.length, 0);
+});
+
+test('a device rejection overlapping the Watch acknowledgement cannot fail or retire the video', async t => {
+  const f = fixture(t), watchingGate = deferred(), outputGate = deferred();
+  f.hook(async command => {
+    if (command.action === 'watch') await watchingGate.promise;
+    if (command.action === 'watch-audio' && command.sinkId === 'missing-output') await outputGate.promise;
+  });
+  f.watching(true);
+  const watching = f.controller.sync();
+  await tick();
+  const changing = assert.rejects(f.controller.setOutputDeviceId('missing-output'), AggregateError);
+  await tick();
+  watchingGate.resolve();
+  await tick();
+  outputGate.reject(new Error('Output unavailable'));
+  await Promise.all([watching, changing]);
+  assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
+  assert.equal(f.commands.filter(command => command.action === 'watch').length, 1);
+  assert.equal(f.commands.filter(command => command.sinkId === 'missing-output').length, 1);
+  assert.equal(f.stopped.length + f.retired.length, 0);
 });
 
 test('same-call source replacements renew watched presentations and preserve output, mute and volume', async t => {

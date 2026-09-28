@@ -133,6 +133,13 @@ class NativeScreenPublisher {
     return this.updatePreview();
   }
 
+  refreshSourceState() {
+    if (this.closed) return;
+    for (const pipeline of this.pipelines.values()) {
+      if (!pipeline.closing) pipeline.endpoint?.refreshSourceState();
+    }
+  }
+
   updatePreview() {
     if (this.previewWork) return this.previewWork.then(() => this.updatePreview());
     const work = this.track(this.reconcilePreview());

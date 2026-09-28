@@ -76,6 +76,18 @@ test('clock probes carry native observations but calibration requests carry only
   }
 });
 
+test('only Main selects a sink within the same live graph and only Renderer acknowledges it', () => {
+  const selection = { epoch: 1, sinkId: 'headphones' };
+  assert.equal(isNativeScreenAudioPortMessage(request('setSinkId', selection), scope, 'main'), true);
+  assert.equal(isNativeScreenAudioPortMessage(request('setSinkId', selection), scope, 'renderer'), false);
+  assert.equal(isNativeScreenAudioPortMessage(response('setSinkId', selection), scope, 'renderer'), true);
+  assert.equal(isNativeScreenAudioPortMessage(response('setSinkId', selection), scope, 'main'), false);
+  for (const invalid of [{ ...selection, epoch: 2 }, { ...selection, sinkId: '\0' },
+    { ...selection, sinkId: 'a'.repeat(513) }, { ...selection, fallback: true }]) {
+    assert.equal(isNativeScreenAudioPortMessage(request('setSinkId', invalid), scope, 'main'), false);
+  }
+});
+
 test('calibration bounds reject fabricated, reversed and excessively uncertain native clocks', () => {
   const calibration = { epoch: 1, calibrationId: 4, offsetUs: -0.5, uncertaintyUs: 20 };
   assert.equal(isNativeScreenAudioPortMessage(response('calibrate', calibration), scope, 'main'), true);

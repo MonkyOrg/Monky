@@ -305,6 +305,31 @@ indisponível, não uma falha do áudio inteiro. O código estruturado
 epoch, mantendo os limites de 200 ms e de incerteza. Contadores
 `rejectedClockObservations` e `lastClockRejection` preservam o diagnóstico.
 Valores impossíveis, PCM não confirmado e regressões reais continuam erros.
+Uma recalibração pendente ou expirada não muda a identidade da saída já
+calibrada: controles de volume/mute e recepções SFU/P2P conservam seus vínculos.
+A primeira calibração continua obrigatória, e parar ou substituir a saída
+invalida os vínculos antigos; medições vencidas não viram feedback válido.
+
+A troca da saída usa `AudioContext.setSinkId()` no contexto/worklet existente,
+via IPC privado validado por epoch. Ela conserva a apresentação, o transporte,
+o PCM e o epoch de saída; apenas a medição do relógio físico fica indisponível
+até existir uma nova âncora válida e não regressiva. Seleções são serializadas;
+uma rejeição é reportada ao seletor e restaura a seleção anterior sem encerrar
+o vídeo. Parar a saída aguarda seleções em andamento antes de fechar o contexto.
+Mute, deafen e volume não recriam a recepção. No palco, mudanças apenas nos
+indicadores dos participantes também preservam os elementos de vídeo e fullscreen.
+
+Minimizar ou ocultar a janela pausa também a entrada codificada nativa, não só
+o envio de pacotes em JavaScript. O monitor da fonte aplica essa pausa mesmo
+quando tela cheia exclusiva deixa de produzir quadros. Ao restaurar, a mesma
+sessão aguarda a confirmação nativa e um quadro-chave real antes de reenviar,
+sem contabilizar o tempo minimizado como falha de recuperação nem ampliar seus
+limites. Fechar ou substituir a janela continua exigindo seleção explícita.
+A regressão `nativeScreenAppSmoke.cjs --sfu --screen-codec=av1 --native-1080p60
+--window-lifecycle --windowed --sample-seconds=8 --artifacts=<diretório absoluto novo>`
+exercita minimizar/restaurar, prévia e áudio com uma janela sintética. `--windowed`
+mantém o espectador na área útil do monitor de QA; não é uma validação de jogo
+real em tela cheia exclusiva nem desativa a proteção de posicionamento.
 
 Alterações de qualidade fazem preflight com a fonte anterior ainda ativa.
 Somente após admissão encerram a instância antiga e publicam a substituta com
@@ -394,6 +419,8 @@ solicitada. A sinalização desse estado exige cliente e servidor compatíveis c
 
 A opção **Pausar prévia quando o Monky estiver fora de foco**, ativa por padrão,
 controla somente a prévia local; perder foco não interrompe espectadores.
+Enquanto pausada, a prévia mostra fundo preto e o aviso de pausa, sem exibir
+a miniatura congelada. Ao voltar ao foco, a imagem ao vivo reaparece.
 Desativá-la permite manter a prévia em outro monitor. Ao sair o último
 espectador, a publicação remota é encerrada; se a prévia ainda tiver demanda,
 um pipeline local pode continuar/recomeçar. Sem espectadores e sem demanda de

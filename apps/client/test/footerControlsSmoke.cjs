@@ -906,14 +906,30 @@ async function setupStageSmoke() {
     check(stage.telemetrySnapshots.size === 0 && stage.telemetryHistory.size === 0,
       'A delayed read cannot repopulate diagnostics after they are disabled');
     check(getComputedStyle(copyButton).display === 'none', 'Disabled diagnostic buttons remain hidden despite their flex styling');
+    const retainedVideo = button('video.stage-video-element');
     stage.renderParticipants();
+    check(button('.stage-diagnostics-btn') === copyButton && button('video.stage-video-element') === retainedVideo,
+      'Metadata-only participant updates retain the diagnostic button and video');
+    settings.screenShareTelemetryEnabled = true;
+    stage.applyTelemetryOverlayState();
+    stage.collectTelemetrySnapshot = async () => structuredClone(fakeSnapshot);
+    await stage.refreshTelemetry();
+    const retainedCopies = copyCount;
+    copyButton.click();
+    await delay();
+    check(copyCount === retainedCopies + 1, 'A retained diagnostic button keeps exactly one working copy listener');
+
+    stage.setFocusedTiles([diagnosticTile.key]);
+    check(!copyButton.isConnected && !retainedVideo.isConnected,
+      'A real focus-layout change must replace the previous diagnostic button and video');
     document.body.append(copyButton);
     const copiedBefore = copyCount;
     copyButton.click();
     await delay();
     check(copyCount === copiedBefore && !document.querySelector('.dialog-card'),
-      'Re-render removes diagnostic click listeners even if the old button stays connected');
+      'Layout replacement removes diagnostic click listeners even if the old button stays connected');
     copyButton.remove();
+    stage.setFocusedTiles(focusedBeforeCopy);
   } finally {
     navigator.clipboard.writeText = originalClipboard;
     stage.collectTelemetrySnapshot = originalCollect;
@@ -1067,6 +1083,10 @@ async function setupStageSmoke() {
         enter(oldButton);
         const oldHover = animations(oldButton)[0];
         stage.renderParticipants();
+        check(button('.stage-focused-main') === oldCard && animations(oldButton)[0] === oldHover
+          && animations(oldButton).length === 1,
+        'Metadata-only updates preserve participant cards and their single active animation');
+        stage.setFocusedTiles([]);
         await delay();
         check(oldHover.playState === 'idle' && !oldButton.querySelector('.control-motion-decoration'),
           'Replacing participant cards cancels their animations');
@@ -1076,6 +1096,8 @@ async function setupStageSmoke() {
         await delay();
         check(animations(oldButton).length === 0, 'Removed card listeners and observers stay detached on connected DOM');
         oldCard.remove();
+        stage.setFocusedTiles([oldCard.dataset.tileKey]);
+        await delay();
         enter(button('.stage-volume-btn'));
         check(animations(button('.stage-volume-btn')).length === 1, 'Replacement cards bind exactly once');
       }

@@ -223,6 +223,7 @@ export class NativeScreenEndpoint {
   constructor(options: NativeScreenEndpointOptions);
   readonly ready: Promise<void>;
   setDemand(count: number, preview?: boolean): Promise<void>;
+  refreshSourceState(): Promise<void>;
   connectPeer(remoteSessionId: string, configuration: {
     connectionId: string; generation: number;
     iceServers: readonly { urls: string[]; username?: string; credential?: string }[];
@@ -230,7 +231,7 @@ export class NativeScreenEndpoint {
   receiveControl(remoteSessionId: string, control: NativeScreenP2pControl): Promise<unknown>;
   closePeer(remoteSessionId: string): Promise<void>;
   stopWatching(): Promise<void>;
-  setAudioPreferences(preferences: Pick<NativeScreenAudioPreferences, 'muted' | 'volume'>): Promise<void>;
+  setAudioPreferences(preferences: Pick<NativeScreenAudioPreferences, 'muted' | 'volume'> & { sinkId?: string }): Promise<void>;
   addRemoteProducer(value: unknown): Promise<void>;
   removeRemoteProducer(producerId: string): Promise<void>;
   stats(): Promise<NativeScreenEndpointSnapshot & { capture: unknown; rtc: unknown }>;
@@ -269,6 +270,7 @@ export interface NativeScreenPublisherSnapshot {
 export class NativeScreenPublisher {
   constructor(options: NativeScreenPublisherOptions);
   setPreviewEnabled(enabled: boolean): Promise<void>;
+  refreshSourceState(): void;
   receive(signal: import('@monky/shared').NativeScreenSignalPayload): Promise<void>;
   setParticipants(sessionIds: readonly string[]): Promise<void>;
   close(reason?: import('@monky/shared').NativeScreenFailure): Promise<void>;
@@ -305,7 +307,7 @@ export class NativeScreenSubscription {
   receive(signal: import('@monky/shared').NativeScreenSignalPayload): Promise<void>;
   addRemoteProducer(value: import('@monky/shared').NativeScreenProducer): Promise<void>;
   removeRemoteProducer(producerId: string): Promise<void>;
-  setAudioPreferences(preferences: Pick<NativeScreenAudioPreferences, 'muted' | 'volume'>): Promise<void>;
+  setAudioPreferences(preferences: Pick<NativeScreenAudioPreferences, 'muted' | 'volume'> & { sinkId?: string }): Promise<void>;
   close(notify?: boolean): Promise<void>;
   /** Local native owners only; does not assert that an unreachable SFU acknowledged cleanup. */
   assertLocallyClosed(): void;
