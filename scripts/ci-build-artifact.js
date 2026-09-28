@@ -14,6 +14,8 @@ export const roots = {
   mac: [...commonRoots, 'apps/client/dist', 'apps/client/dist-electron'],
   win: [...commonRoots, 'apps/client/dist', 'apps/client/dist-electron',
     'apps/client/native/screen-share/bin/win32-x64', 'apps/client/native/screen-share/licenses',
+    'apps/client/native/screen-share/LICENSE',
+    'apps/client/native/screen-share/THIRD_PARTY_NOTICES',
     `${sourcePackage}.json`, `${sourcePackage}.tar.xz`],
 };
 const platforms = { cli: 'linux', mac: 'darwin', win: 'win32' };

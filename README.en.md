@@ -205,6 +205,5 @@ If you love Monky and want to support ongoing development, buy us a coffee! Ever
 [GNU GPL version 3 or later](LICENSE) — free software, without warranty.
 You may use, modify and redistribute Monky under these terms; when distributing
 binaries, also provide the corresponding source code and license notices.
-Copyright (c) 2026 Monky Contributors. The [original MIT notice](LICENSE-MIT)
-is preserved for code previously published under that license. Third-party
-dependencies retain their own notices and licenses.
+Copyright (c) 2026 Monky Contributors. Third-party dependencies retain their
+own notices and licenses.

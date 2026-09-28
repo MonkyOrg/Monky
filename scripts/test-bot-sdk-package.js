@@ -33,7 +33,6 @@ try {
         const packageRoot = path.dirname(sdkRequire.resolve(packageName + '/package.json'));
         assert.equal(sdkRequire(packageName + '/package.json').license, 'GPL-3.0-or-later');
         assert.ok(fs.readFileSync(path.join(packageRoot, 'LICENSE'), 'utf8').includes('GNU GENERAL PUBLIC LICENSE'));
-        assert.ok(fs.readFileSync(path.join(packageRoot, 'LICENSE-MIT'), 'utf8').includes('MIT License'));
       }
       const bot = new BotClient({ publicKey: 'a'.repeat(64), requestedCapabilities: ['commands'], autoReconnect: false });
       for (const method of [

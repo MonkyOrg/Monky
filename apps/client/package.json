@@ -123,10 +123,6 @@
       {
         "from": "../../LICENSE",
         "to": "LICENSE"
-      },
-      {
-        "from": "../../LICENSE-MIT",
-        "to": "LICENSE-MIT"
       }
     ],
     "win": {

@@ -7,8 +7,7 @@ const license = 'GPL-3.0-or-later';
 const root = path.resolve(__dirname, '..');
 
 function copyMonkyLicenses(destination) {
-  for (const name of ['LICENSE', 'LICENSE-MIT'])
-    fs.copyFileSync(path.join(root, name), path.join(destination, name));
+  fs.copyFileSync(path.join(root, 'LICENSE'), path.join(destination, 'LICENSE'));
 }
 
 module.exports = { license, copyMonkyLicenses };

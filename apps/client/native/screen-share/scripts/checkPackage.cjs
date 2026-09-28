@@ -45,8 +45,7 @@ function verifyLegalFiles(directory) {
   const libraries = JSON.parse(fs.readFileSync(path.join(directory, 'licenses', 'webrtc', 'libraries.json'), 'utf8'));
   for (const name of ['libaom', 'dav1d'])
     assert.ok(libraries.includes(name), `Missing compiled AV1 dependency notices: ${name}`);
-  for (const name of ['LICENSE', 'LICENSE-MIT'])
-    assert.deepEqual(fs.readFileSync(path.join(directory, name)), fs.readFileSync(path.join(root, name)));
+  assert.deepEqual(fs.readFileSync(path.join(directory, 'LICENSE')), fs.readFileSync(path.join(root, 'LICENSE')));
   const notice = fs.readFileSync(path.join(directory, 'THIRD_PARTY_NOTICES'), 'utf8');
   assert.ok(notice.includes('Corresponding Source:') && notice.includes('Microsoft Visual C++'));
   assert.ok(fs.statSync(path.join(directory, 'README.md')).isFile());
@@ -58,9 +57,8 @@ async function afterPack(context) {
   const contents = platform === 'darwin'
     ? path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, 'Contents')
     : context.appOutDir;
-  for (const name of ['LICENSE', 'LICENSE-MIT'])
-    assert.deepEqual(fs.readFileSync(path.join(contents, name)),
-      fs.readFileSync(path.resolve(root, '..', '..', '..', '..', name)), `Missing packaged Monky notice: ${name}`);
+  assert.deepEqual(fs.readFileSync(path.join(contents, 'LICENSE')),
+    fs.readFileSync(path.resolve(root, '..', '..', '..', '..', 'LICENSE')), 'Missing packaged Monky GPL notice.');
   const modules = path.join(contents, platform === 'darwin' ? 'Resources' : 'resources',
     'app', 'node_modules', '@monky');
   assert.ok(!fs.existsSync(path.join(modules, 'server', 'data')), 'Server user data must never be packaged.');

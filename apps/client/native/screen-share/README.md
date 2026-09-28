@@ -662,8 +662,7 @@ meça as execuções reais de CI/release antes de afirmar ganho de tempo.
 
 ## Licença e fontes correspondentes
 
-O Monky é **GPL-3.0-or-later**. `LICENSE-MIT` preserva o aviso histórico do
-projeto. Dependências mantêm seus próprios direitos e licenças; consulte
+O Monky é **GPL-3.0-or-later**. Dependências mantêm seus próprios direitos e licenças; consulte
 `THIRD_PARTY_NOTICES` e `licenses`. Os avisos WebRTC são derivados do grafo GN
 realmente compilado. O FFmpeg distribuído usa GPL versão 3 ou posterior.
 Direitos de patentes H.264 são uma questão separada da licença de software.

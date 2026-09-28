@@ -19,6 +19,8 @@ const run = { id: 42, run_attempt: 1, event: 'pull_request', path: '.github/work
   status: 'completed', conclusion: 'success', repository: { full_name: repository }, head_sha: head };
 const python = process.env.PYTHON ?? 'python';
 const executePython = (...args) => execFileSync(python, ['-I', ...args], { encoding: 'utf8' });
+const nativeLegalFiles = ['LICENSE', 'THIRD_PARTY_NOTICES']
+  .map(name => `apps/client/native/screen-share/${name}`);
 
 async function fixture(t, variant = 'cli') {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'monky-ci-artifact-'));
@@ -35,7 +37,8 @@ async function fixture(t, variant = 'cli') {
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
     'commit', '--quiet', '-m', 'Fixture source');
   for (const relative of roots[variant]) {
-    const filename = /\.(json|tar\.xz)$/.test(relative) ? path.join(root, relative) : path.join(root, relative, 'index.js');
+    const filename = /\.(json|tar\.xz)$/.test(relative) || nativeLegalFiles.includes(relative)
+      ? path.join(root, relative) : path.join(root, relative, 'index.js');
     await fs.mkdir(path.dirname(filename), { recursive: true });
     await fs.writeFile(filename, `module.exports = ${JSON.stringify(relative)};\n`);
   }
@@ -82,6 +85,7 @@ test('desktop artifacts include all client outputs and Windows native binaries, 
     if (variant === 'win') {
       assert.ok(paths.some(name => name.startsWith('apps/client/native/screen-share/bin/win32-x64/')));
       assert.ok(paths.some(name => name.startsWith('apps/client/native/screen-share/licenses/')));
+      for (const relative of nativeLegalFiles) assert.ok(paths.includes(relative), `Missing native legal file: ${relative}`);
       assert.ok(paths.includes('release/monky-native-sources-0.0.0-ci.tar.xz'));
       assert.ok(paths.includes('release/monky-native-sources-0.0.0-ci.json'));
       const filename = path.join(f.staged, 'build-manifest.json');
@@ -90,6 +94,25 @@ test('desktop artifacts include all client outputs and Windows native binaries, 
       await assert.rejects(validateBuild(f.staged, f.root, variant, f.environment), /Missing build output/);
     }
   }
+});
+
+test('Windows export and validation require every generated root notice, not only the third-party license directory', async t => {
+  const f = await fixture(t, 'win');
+  const manifestFile = path.join(f.staged, 'build-manifest.json');
+  for (const relative of nativeLegalFiles) {
+    const filename = path.join(f.root, relative), bytes = await fs.readFile(filename);
+    await fs.unlink(filename);
+    await assert.rejects(collectBuild(f.root, path.join(f.directory, `missing-${path.basename(relative)}`),
+      'win', f.environment), { code: 'ENOENT' });
+    await fs.writeFile(filename, bytes);
+    await fs.writeFile(manifestFile, JSON.stringify({ ...f.manifest,
+      files: f.manifest.files.filter(entry => entry.path !== relative) }));
+    await assert.rejects(validateBuild(f.staged, f.root, 'win', f.environment), /Missing build output/);
+  }
+  await fs.writeFile(manifestFile, JSON.stringify(f.manifest));
+  const file = path.join(f.staged, nativeLegalFiles[0]), bytes = await fs.readFile(file);
+  await fs.writeFile(file, Buffer.alloc(bytes.length, 1));
+  await assert.rejects(validateBuild(f.staged, f.root, 'win', f.environment), /checksum mismatch/);
 });
 
 test('Vite emits portable extensionless license assets that survive desktop artifact export and ZIP extraction', async t => {
@@ -219,17 +242,22 @@ test('GitHub archive download rejects cross-run, rerun, failed CI and corrupted 
   await downloadBuild(api(run, artifact), 100, 42, 'cli', path.join(f.directory, 'good.zip'));
 });
 
-test('a real immutable ZIP is verified, safely extracted and restores all compiled outputs without compiling', async t => {
-  const f = await fixture(t);
+for (const variant of ['cli', 'mac', 'win']) test(`${variant}: an immutable ZIP restores all outputs into a clean checkout without compiling`, async t => {
+  const f = await fixture(t, variant);
+  const expected = new Map(await Promise.all(f.manifest.files.map(async entry =>
+    [entry.path, await fs.readFile(path.join(f.root, entry.path))])));
   const zip = path.join(f.directory, 'build.zip');
   executePython('-c', 'import pathlib,sys,zipfile\nroot=pathlib.Path(sys.argv[1])\nwith zipfile.ZipFile(sys.argv[2],"w") as z:\n for p in root.rglob("*"):\n  if p.is_file(): z.write(p,p.relative_to(root).as_posix())',
     f.staged, zip);
   const bytes = await fs.readFile(zip), digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
-  for (const relative of roots.cli) await fs.rm(path.join(f.root, relative), { recursive: true });
+  for (const relative of roots[variant]) {
+    await fs.rm(path.join(f.root, relative), { recursive: true });
+    await assert.rejects(fs.stat(path.join(f.root, relative)), { code: 'ENOENT' });
+  }
   const selectedRun = { ...run, head_sha: f.manifest.sourceCommit };
   const api = async endpoint => {
     if (endpoint === 'actions/runs/42') return selectedRun;
-    if (endpoint === 'actions/artifacts/100') return { name: 'ci-build-cli-1', expired: false, digest,
+    if (endpoint === 'actions/artifacts/100') return { name: `ci-build-${variant}-1`, expired: false, digest,
       workflow_run: { id: 42, head_sha: selectedRun.head_sha } };
     if (endpoint.endsWith('/zip')) return new Response(bytes);
     if (endpoint.startsWith('git/commits/')) return {
@@ -237,10 +265,15 @@ test('a real immutable ZIP is verified, safely extracted and restores all compil
     };
     throw new Error(endpoint);
   };
-  await restoreBuild(f.root, 'cli', 42, 100, { api, context, tempParent: f.directory });
-  for (const relative of roots.cli) assert.equal(await fs.readFile(path.join(f.root, relative, 'index.js'), 'utf8'),
-    `module.exports = ${JSON.stringify(relative)};\n`);
-  await assert.rejects(restoreBuild(f.root, 'cli', 42, 100, { api, context, tempParent: f.directory }), /overlay existing/);
+  await restoreBuild(f.root, variant, 42, 100, { api, context: f.environment, tempParent: f.directory });
+  for (const [relative, bytes] of expected) assert.deepEqual(await fs.readFile(path.join(f.root, relative)), bytes, relative);
+  if (variant === 'win') {
+    for (const relative of nativeLegalFiles) {
+      assert.ok(expected.has(relative));
+      assert.ok((await fs.stat(path.join(f.root, relative))).isFile(), relative);
+    }
+  }
+  await assert.rejects(restoreBuild(f.root, variant, 42, 100, { api, context: f.environment, tempParent: f.directory }), /overlay existing/);
 });
 
 test('ZIP extraction refuses traversal, aliases, reserved devices and duplicate paths before extraction', async t => {

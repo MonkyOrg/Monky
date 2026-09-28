@@ -10,7 +10,7 @@ import { createRequire } from 'node:module';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-test('first-party workspace manifests use GPL and retain the original MIT notice', () => {
+test('first-party workspace manifests and the project license use GPL', () => {
   assert.equal(license, 'GPL-3.0-or-later');
   for (const relative of [
     'package.json', 'apps/client/package.json', 'apps/server/package.json',
@@ -23,21 +23,18 @@ test('first-party workspace manifests use GPL and retain the original MIT notice
   const gpl = fs.readFileSync(path.join(root, 'LICENSE'), 'utf8');
   assert.ok(gpl.includes('GNU GENERAL PUBLIC LICENSE') && gpl.includes('17. Interpretation of Sections 15 and 16.'));
   assert.ok(gpl.length > 30_000);
-  const original = fs.readFileSync(path.join(root, 'LICENSE-MIT'), 'utf8');
-  assert.ok(original.includes('MIT License') && original.includes('Copyright') &&
-    original.includes('The above copyright notice and this permission notice'));
 });
 
-test('packaging copies both notices without changing any legal text', t => {
+test('first-party packaging copies only the GPL license without changing its text', t => {
   const destination = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-legal-'));
   t.after(() => fs.rmSync(destination, { recursive: true, force: true }));
   copyMonkyLicenses(destination);
-  for (const name of ['LICENSE', 'LICENSE-MIT'])
-    assert.deepEqual(fs.readFileSync(path.join(destination, name)), fs.readFileSync(path.join(root, name)));
+  assert.deepEqual(fs.readdirSync(destination), ['LICENSE']);
+  assert.deepEqual(fs.readFileSync(path.join(destination, 'LICENSE')), fs.readFileSync(path.join(root, 'LICENSE')));
 });
 
-test('standalone CLI and bundled shared metadata declare GPL rather than inheriting historical MIT', () => {
-  const shared = { name: '@monky/shared', version: '1.0.0', main: 'dist/index.js', types: 'dist/index.d.ts', license: 'MIT' };
+test('standalone CLI and bundled shared metadata declare GPL rather than inheriting unrelated metadata', () => {
+  const shared = { name: '@monky/shared', version: '1.0.0', main: 'dist/index.js', types: 'dist/index.d.ts', license: 'UNLICENSED' };
   const server = { name: '@monky/server', version: '1.0.0', main: 'dist/index.js', bin: { monky: 'dist/cli/index.js' } };
   assert.equal(buildSharedPackageJson(shared).license, license);
   assert.equal(buildCliPackageJson(server, shared, '9.0.0').license, license);

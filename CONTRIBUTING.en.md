@@ -408,6 +408,12 @@ than just commit SHAs supports squash merges without accepting untested code.
 Extensionless renderer assets, including licenses, use names without a trailing
 dot; export and extraction reject ambiguous Windows paths.
 
+The Windows artifact includes generated `LICENSE` and
+`THIRD_PARTY_NOTICES` files at the `screen-share` module root, in addition to
+`licenses/`, binaries and corresponding sources. All are mandatory and
+hash-verified: a clean release checkout must not depend on legal notices
+left over from compilation on the CI runner.
+
 Release still installs dependencies, applies the final version, creates installers
 and tarballs, tests the packaged SDK, and signs/publishes the files. Corresponding
 native sources also come from CI: only their version/commit metadata is updated
