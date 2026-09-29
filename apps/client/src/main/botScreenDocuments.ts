@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ipcMain, protocol, type Session, type WebContents } from 'electron';
-import { BOT_SCREEN_DOCUMENT_IPC, BOT_SCREEN_LIMITS } from '@monky/shared';
+import { BOT_SCREEN_DOCUMENT_IPC, BOT_SCREEN_LIMITS, botScreenDocumentConsentSchema } from '@monky/shared';
 
 const scheme = 'monky-miniapp';
 const documents = new Map<string, { owner: WebContents; session: Session; html: string }>();
@@ -40,9 +40,12 @@ export function installBotScreenDocuments(session: Session): void {
 
 export function bindBotScreenDocuments(isOwner: (contents: WebContents) => boolean): () => void {
   ipcMain.handle(BOT_SCREEN_DOCUMENT_IPC.create, (event, ...args: unknown[]): string => {
-    if (!isOwner(event.sender) || event.senderFrame !== event.sender.mainFrame || args.length !== 1 ||
+    if (!isOwner(event.sender) || event.senderFrame !== event.sender.mainFrame || args.length !== 2 ||
         typeof args[0] !== 'string' || !args[0] || Buffer.byteLength(args[0]) > maxDocumentBytes) {
       throw new Error('Invalid miniapp document request.');
+    }
+    if (!botScreenDocumentConsentSchema.safeParse(args[1]).success) {
+      throw new Error('Current, instance-bound miniapp consent is required.');
     }
     const owner = event.sender;
     if ([...documents.values()].filter(entry => entry.owner === owner).length >= 2) {

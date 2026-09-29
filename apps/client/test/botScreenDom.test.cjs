@@ -25,7 +25,7 @@ if (!process.versions.electron) {
 } else {
   const assert = require('node:assert/strict');
   const { app, BrowserWindow, ipcMain } = require('electron');
-  const { SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, Permission } = require('@monky/shared');
+  const { BOT_SCREEN_PERMISSION_POLICY_VERSION, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, Permission } = require('@monky/shared');
   const { bindBotScreenIsolation, installBotScreenRequestGuard } = require('../dist-electron/main/botScreenIsolation.js');
   const { bindBotScreenDocuments, registerBotScreenScheme } = require('../dist-electron/main/botScreenDocuments.js');
   registerBotScreenScheme();
@@ -77,6 +77,17 @@ if (!process.versions.electron) {
     }
   };
   const frames = (window) => window.webContents.mainFrame.frames.filter((frame) => frame.url.startsWith('monky-miniapp:'));
+  const approveMiniapp = async window => {
+    await waitFor(async () => await run(window, '!!document.querySelector(".dialog-card [data-action=confirm]")'), 'individual miniapp permission review');
+    await run(window, 'document.querySelector(".dialog-card [data-action=confirm]").focus()');
+    await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+      type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r',
+    });
+    await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+      type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13,
+    });
+    await waitFor(async () => await run(window, '!document.querySelector(".dialog-card")'), 'trusted permission confirmation');
+  };
   const gameFrame = async (window, id = 'game') => {
     let initializedFrame;
     await waitFor(async () => {
@@ -147,15 +158,19 @@ if (!process.versions.electron) {
       installBotScreenRequestGuard(window.webContents.session);
       window.webContents.setWindowOpenHandler(() => { popups++; return { action: 'deny' }; });
       await window.loadURL(url);
-      const temporaryDocument = await run(window, 'window.api.createBotScreenDocument("<p>document lifecycle</p>")');
+      const consent = JSON.stringify({ policyVersion: BOT_SCREEN_PERMISSION_POLICY_VERSION,
+        serverKey: 'fixture', botId: 'bot', screenId: 'lifecycle', instanceId: 'lifecycle-instance' });
+      const temporaryDocument = await run(window, `window.api.createBotScreenDocument("<p>document lifecycle</p>", ${consent})`);
       assert.match(temporaryDocument, /^monky-miniapp:\/\/[a-f0-9-]+\/index.html$/);
       const requested = await window.webContents.session.fetch(temporaryDocument);
       assert.equal(requested.status, 200);
       assert.equal(requested.headers.get('cache-control'), 'no-store');
       await run(window, `window.api.removeBotScreenDocument(${JSON.stringify(temporaryDocument)})`);
       assert.equal((await window.webContents.session.fetch(temporaryDocument)).status, 404);
-      assert.equal(await run(window, 'window.api.createBotScreenDocument("").then(()=>false,()=>true)'), true);
-      assert.equal(await run(window, 'window.api.createBotScreenDocument("x".repeat(1024*1024)).then(()=>false,()=>true)'), true);
+      assert.equal(await run(window, `window.api.createBotScreenDocument("", ${consent}).then(()=>false,()=>true)`), true);
+      assert.equal(await run(window, `window.api.createBotScreenDocument("x".repeat(1024*1024), ${consent}).then(()=>false,()=>true)`), true);
+      assert.equal(await run(window, 'window.api.createBotScreenDocument("<p>no consent</p>").then(()=>false,()=>true)'), true);
+      assert.equal(await run(window, `window.api.createBotScreenDocument("<p>old consent</p>", {...${consent},policyVersion:0}).then(()=>false,()=>true)`), true);
       window.webContents.debugger.attach('1.3');
       await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
       const setupError = await run(window, `(${setupVoiceStage.toString()})(${JSON.stringify(id)},${JSON.stringify(locale)},${Permission.ADMINISTRATOR}).then(() => null, error => ({ message: String(error), stack: error.stack }))`);
@@ -186,12 +201,49 @@ if (!process.versions.electron) {
     await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=fullscreen]").click()');
     await waitFor(async () => await run(aliceWindow, '!document.fullscreenElement'), 'closed tile fullscreen exit');
     await run(aliceWindow, 'window.savedGameInvitation = document.querySelector("[data-watch-bot-screen=game]"); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=open]").click()');
+    await waitFor(async () => await run(aliceWindow, '!!document.querySelector(".dialog-card")'), 'review before any execution');
+    await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=open]").click()');
+    assert.equal(await run(aliceWindow, 'document.querySelectorAll(".dialog-card").length'), 1, 'Repeated opening does not stack permission prompts');
+    aliceWindow.setContentSize(800, 600);
+    await waitFor(async () => await run(aliceWindow, 'innerHeight === 600'), 'small review viewport');
+    assert.equal(await run(aliceWindow, `(() => {
+      const message = document.querySelector(".dialog-message");
+      const card = document.querySelector(".dialog-card").getBoundingClientRect();
+      const confirm = document.querySelector(".dialog-card [data-action=confirm]").getBoundingClientRect();
+      return card.top >= 0 && card.bottom <= innerHeight && confirm.bottom <= innerHeight &&
+        message.scrollHeight > message.clientHeight && message.scrollTop === 0;
+    })()`), true, 'Long permission text scrolls without hiding its beginning or the deny/allow controls');
+    const beforeConsent = leaks;
+    assert.equal(frames(aliceWindow).length, 0, 'Opening a tile is not consent to execute the bot app');
+    assert.equal(await run(aliceWindow, 'document.activeElement?.dataset.action'), 'cancel', 'Deny has initial keyboard focus');
+    assert.equal(await run(aliceWindow, 'document.querySelector(".dialog-message").textContent.includes("rede local")'), true, 'The review discloses local-network access too');
+    assert.equal(await run(aliceWindow, 'document.querySelector(".dialog-card [data-action=confirm]").textContent'), 'Continuar e abrir');
+    assert.equal(await run(aliceWindow, 'document.querySelector(".dialog-card [data-action=cancel]").textContent'), 'Cancelar');
+    assert.equal(await run(aliceWindow, 'document.querySelector(".dialog-message").textContent.includes("não concede novas permissões ao bot")'), true, 'The participant notice does not replace administrator authorization');
+    assert.equal(await run(aliceWindow, 'document.querySelectorAll(".dialog-card input").length'), 0, 'The viewer never selects or grants bot capabilities');
+    await run(aliceWindow, 'document.querySelector(".dialog-card [data-action=confirm]").click()');
+    assert.equal(frames(aliceWindow).length, 0, 'A synthetic click cannot authorize execution');
+    await run(aliceWindow, 'document.querySelector(".dialog-card [data-action=cancel]").click()');
+    await waitFor(async () => await run(aliceWindow, '!document.querySelector(".dialog-card")'), 'denied review closes');
+    assert.equal(frames(aliceWindow).length, 0);
+    assert.equal(leaks, beforeConsent, 'Denied miniapps cannot issue HTTP requests');
+    assert.equal(await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] .bot-error").textContent.includes("não foi executado")'), true);
+    aliceWindow.setContentSize(1280, 1000);
+    await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=fullscreen]").click()');
+    await waitFor(async () => await run(aliceWindow, '!!document.fullscreenElement'), 'fullscreen before review');
+    await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=open]").click()');
+    await waitFor(async () => await run(aliceWindow, '!!document.querySelector(".dialog-card") && !document.fullscreenElement'), 'review remains visible outside fullscreen');
+    await approveMiniapp(aliceWindow);
     await waitFor(() => frames(aliceWindow).length === 1, 'ordinary tile opt-in');
     assert.equal(await run(aliceWindow, '!!document.querySelector("#stage-participants-area .stage-focused-main[data-bot-screen-slot=game]") && !document.querySelector(".stage-focused-main[data-kind=screen]")'), true, 'Opening a stage tile focuses the miniapp just like its invitation');
     await run(aliceWindow, 'window.savedGameInvitation.click(); window.savedGameInvitation.click(); delete window.savedGameInvitation');
     await run(spectatorWindow, 'document.querySelector("[data-watch-bot-screen=game]").click()');
+    assert.equal(frames(spectatorWindow).length, 0, 'The creator opening a view does not skip another participant notice');
+    assert.equal(await run(spectatorWindow, 'document.querySelector(".dialog-card [data-action=confirm]").textContent'), 'Continue and open');
+    await approveMiniapp(spectatorWindow);
     for (const window of windows) await waitFor(() => frames(window).length === 1, 'opted-in stage frame');
     await run(spectatorWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=close]").click(); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=focus]").click(); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=open]").click()');
+    await approveMiniapp(spectatorWindow);
     await waitFor(() => frames(spectatorWindow).length === 1, 'spectator reopens using the stage tile');
     assert.equal(await run(spectatorWindow, '!!document.querySelector(".stage-focused-main[data-bot-screen-slot=game]")'), true, 'Spectator tile opt-in also enters focus automatically');
     let alice = await gameFrame(aliceWindow);
@@ -252,6 +304,7 @@ if (!process.versions.electron) {
     assert.deepEqual(await spectator.executeJavaScript('window.lastState.players'), ['alice', 'bob']);
 
     await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=second]").click()');
+    await approveMiniapp(aliceWindow);
     await waitFor(() => frames(aliceWindow).length === 2, 'second app opt-in without opening other apps');
     assert.equal(await run(aliceWindow, 'document.querySelectorAll("#stage-participants-area .stage-focused-main").length === 1 && !!document.querySelector("#stage-participants-area .stage-focused-main[data-bot-screen-slot=second]")'), true, 'Choosing another invitation focuses only that miniapp');
     await run(aliceWindow, 'document.querySelector("#stage-participants-area [data-kind=screen] .stage-stopwatch-btn").click()');
@@ -344,8 +397,18 @@ if (!process.versions.electron) {
     await run(aliceWindow, 'window.screenFixture.setLanguage("en")');
     await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=fullscreen]").click()');
     await waitFor(async () => await run(aliceWindow, 'document.fullscreenElement?.dataset.botScreenId === "game"'), 'fullscreen before local leave');
+    const beforeWorker = leaks;
+    await alice.executeJavaScript(`(() => {
+      const source = ${JSON.stringify(`setInterval(() => { void fetch(${JSON.stringify(leak + '?revocation')}); }, 40);`)};
+      window.permissionWorker = new Worker(URL.createObjectURL(new Blob([source], { type: 'text/javascript' })));
+    })()`);
+    await waitFor(() => leaks >= beforeWorker + 2, 'authorized worker can actually access the network');
     await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=close]").click()');
     await waitFor(() => frames(aliceWindow).length === 0, 'leave the game view without leaving its player seat');
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const afterRevoke = leaks;
+    await new Promise(resolve => setTimeout(resolve, 250));
+    assert.equal(leaks, afterRevoke, 'Revoking consent stops the real worker and its network activity');
     assert.equal(await run(aliceWindow, '!!document.querySelector("[data-watch-bot-screen=game], [data-watch-bot-screen=second]")'), false, 'Both explicit exits stay quiet while their persistent cards remain');
     assert.equal(await run(aliceWindow, 'document.fullscreenElement?.dataset.botScreenId === "game" && !document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=fullscreen]").hidden'), true, 'Leaving only the view retains an operable fullscreen layout');
     await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=fullscreen]").click()');
@@ -353,6 +416,7 @@ if (!process.versions.electron) {
     assert.equal(await run(aliceWindow, '!!document.querySelector("#stage-participants-area .stage-focused-main[data-bot-screen-slot=game]")'), true, 'Leaving a view does not change its focus');
     assert.deepEqual(await run(aliceWindow, 'window.screenFixture.snapshot().state.players'), ['alice', 'bob']);
     await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=open]").click()');
+    await approveMiniapp(aliceWindow);
     await waitFor(() => frames(aliceWindow).length === 1, 'reopen from the persistent stage CTA');
     alice = await gameFrame(aliceWindow);
     await waitFor(async () => await alice.executeJavaScript('window.lastState?.count === 1'), 'reopen restores shared state');
@@ -402,6 +466,7 @@ if (!process.versions.electron) {
     assert.equal(await run(aliceWindow, 'window.screenFixture.backgroundNotificationsSafe()'), true);
     assert.equal(await run(aliceWindow, 'document.querySelector("#screenshare-notice-slot").textContent.includes("WRONG SERVER")'), false);
     await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=game]").click()');
+    await approveMiniapp(aliceWindow);
     await waitFor(() => frames(aliceWindow).length === 1, 'opening background call activates its own server');
     alice = await gameFrame(aliceWindow);
     assert.equal(await alice.executeJavaScript('monkyScreen.viewer.id'), 'alice');
@@ -417,6 +482,7 @@ if (!process.versions.electron) {
     await waitFor(async () => await run(aliceWindow, 'document.querySelectorAll("[data-watch-bot-screen]").length === 4'), 'return reloads room invitations');
     assert.equal(frames(aliceWindow).length, 0, 'return still requires consent');
     await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=game]").click()');
+    await approveMiniapp(aliceWindow);
     await waitFor(() => frames(aliceWindow).length === 1, 'reopen');
     await run(aliceWindow, 'window.screenFixture.join("other")');
     await waitFor(() => frames(aliceWindow).length === 0, 'move tears down old room');
@@ -428,11 +494,15 @@ if (!process.versions.electron) {
     await waitFor(async () => await run(aliceWindow, '!!document.querySelector("[data-watch-bot-screen=game]")'), 'voice after second-device rejection');
     await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=game]").click(); window.screenFixture.disconnect()');
     await waitFor(() => frames(aliceWindow).length === 0, 'disconnect destroys local view');
+    assert.equal(await run(aliceWindow, '!!document.querySelector(".dialog-card")'), false, 'Disconnect cancels a pending consent dialog');
     await run(aliceWindow, 'window.screenFixture.reconnect()');
     await waitFor(async () => await run(aliceWindow, 'document.querySelectorAll("[data-watch-bot-screen]").length === 4'), 'reconnected list');
     assert.equal(frames(aliceWindow).length, 0);
     const endedSnapshot = await run(aliceWindow, 'window.screenFixture.snapshot()');
-    await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=game]").click(); window.screenFixture.delayReload(); window.screenFixture.delayEnd(); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=end]").click(); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=end]").click()');
+    await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=game]").click()');
+    await approveMiniapp(aliceWindow);
+    await waitFor(() => frames(aliceWindow).length === 1, 'authorized frame before END');
+    await run(aliceWindow, 'window.screenFixture.delayReload(); window.screenFixture.delayEnd(); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=end]").click(); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=end]").click()');
     await waitFor(async () => await run(aliceWindow, 'window.screenFixture.endPending()'), 'pending explicit end');
     assert.equal(await run(aliceWindow, 'document.querySelector("[data-bot-screen-action=end]").disabled'), true);
     assert.equal(await run(aliceWindow, 'window.screenFixture.sent.filter(entry => entry.type === "BOT_SCREEN_END").length'), 1, 'Duplicate End clicks are coalesced');
@@ -459,12 +529,16 @@ if (!process.versions.electron) {
     await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(replacement)})`);
     assert.equal(frames(aliceWindow).length, 0, 'A replacement with the same logical ID needs fresh opt-in');
     await run(aliceWindow, 'window.retiredMiniappInvitation = document.querySelector("[data-watch-bot-screen=game]")');
+    await run(aliceWindow, 'window.retiredMiniappInvitation.click()');
+    await waitFor(async () => await run(aliceWindow, '!!document.querySelector(".dialog-card")'), 'pending review for an instance being replaced');
     const currentReplacement = { ...replacement, instanceId: 'current-instance', createdAt: replacement.createdAt + 1 };
     await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(currentReplacement)})`);
+    assert.equal(await run(aliceWindow, '!!document.querySelector(".dialog-card")'), false, 'Replacing the instance cancels its pending review');
     assert.equal(await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=game]") !== window.retiredMiniappInvitation'), true, 'Replacing an instance retires its invitation even when the title is unchanged');
     await run(aliceWindow, 'window.retiredMiniappInvitation.click(); delete window.retiredMiniappInvitation');
     assert.equal(await run(aliceWindow, 'document.querySelectorAll("[data-bot-screen-id=game] iframe").length'), 0, 'A stale invitation cannot opt into the new instance');
     await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=game]").click()');
+    await approveMiniapp(aliceWindow);
     await waitFor(() => frames(aliceWindow).length === 1, 'open new instance');
     const replacementFrame = await gameFrame(aliceWindow);
     await run(aliceWindow, `window.screenFixture.remove(${JSON.stringify(ended)})`);
@@ -482,6 +556,7 @@ if (!process.versions.electron) {
     await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(noticeScreen)})`);
     await waitFor(async () => await run(aliceWindow, '!!document.querySelector("[data-watch-bot-screen=toast-check]")'), 'viewer notice fixture invitation');
     await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=toast-check]").click()');
+    await approveMiniapp(aliceWindow);
     await waitFor(() => frames(aliceWindow).length === 1, 'viewer notice fixture opened');
     const noticeEnd = { id: noticeScreen.id, instanceId: noticeScreen.instanceId, channelId: 'voice',
       reason: 'ended', endedByUserId: 'alice' };
@@ -496,6 +571,7 @@ if (!process.versions.electron) {
       await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(screen)})`);
       if (mode !== 'invitation-only') {
         await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=toast-check]").click()');
+        await approveMiniapp(aliceWindow);
         await waitFor(() => frames(aliceWindow).length === 1, 'non-notifying removal fixture opened');
       }
       if (mode === 'local-leave') {
