@@ -1,5 +1,6 @@
 #pragma once
 #include "videoEncoder.h"
+#include <optional>
 #include <span>
 
 namespace monky::screen::mac {

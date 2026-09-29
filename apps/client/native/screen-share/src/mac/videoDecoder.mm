@@ -15,6 +15,12 @@ void Check(OSStatus status, const char* code) {
   if (status != noErr) throw std::runtime_error(std::string(code) + " nativeStatus=" + std::to_string(status));
 }
 void Require(bool valid, const char* code) { if (!valid) throw std::runtime_error(code); }
+std::optional<bool> DecoderHardwareObservation(OSStatus status, std::optional<bool> observed) {
+  if (status == kVTPropertyNotSupportedErr) return std::nullopt;
+  Check(status, "ERR_MAC_DECODE_HARDWARE_PROPERTY");
+  Require(observed.has_value(), "ERR_MAC_DECODE_HARDWARE_PROPERTY");
+  return observed;
+}
 std::vector<std::span<const uint8_t>> Nals(const std::vector<uint8_t>& bytes) {
   std::vector<std::span<const uint8_t>> result;
   const auto prefix = [&](size_t at) -> size_t {
@@ -98,11 +104,12 @@ struct VideoDecoder::State {
     CFTypeRef observed = nullptr;
     const auto status = VTSessionCopyProperty(session,
         kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder, kCFAllocatorDefault, &observed);
-    const bool valid = observed && CFGetTypeID(observed) == CFBooleanGetTypeID();
-    if (valid) hardware.store(CFBooleanGetValue(static_cast<CFBooleanRef>(observed)) ? 1 : 0);
+    std::optional<bool> observation;
+    if (observed && CFGetTypeID(observed) == CFBooleanGetTypeID())
+      observation = CFBooleanGetValue(static_cast<CFBooleanRef>(observed)) != 0;
     if (observed) CFRelease(observed);
-    Check(status, "ERR_MAC_DECODE_HARDWARE_PROPERTY");
-    Require(valid, "ERR_MAC_DECODE_HARDWARE_PROPERTY");
+    const auto confirmed = DecoderHardwareObservation(status, observation);
+    hardware.store(confirmed ? (*confirmed ? 1 : 0) : -1);
   }
 };
 VideoDecoder::VideoDecoder(int width, int height, Output output, VideoEncoder::Failure failure)

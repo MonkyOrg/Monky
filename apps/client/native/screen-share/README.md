@@ -57,6 +57,11 @@ ausência de hardware compatível. Não troca AV1 por H.264 silenciosamente.
 O hook de Captura de jogo continua exclusivo do Windows. O receptor Mac usa
 VideoToolbox para H.264 e dav1d por software para AV1, com apresentação IOSurface/SharedTexture.
 
+A observação de uso de hardware do decoder é opcional. Se o VideoToolbox retornar
+`kVTPropertyNotSupportedErr` para essa propriedade, a decodificação nativa continua
+e `hardwareExecutionObserved` permanece `null`, sem inferir execução por software.
+Outros erros e respostas inválidas continuam sendo reportados.
+
 Enumeração, miniaturas e capturas compartilham um helper, com ownership separado
 por sessão. O probe de seleção comprova a liberação da sua própria sessão; não
 exige encerrar o helper enquanto o seletor ou outra captura ainda o utiliza.

@@ -55,6 +55,11 @@ is available. AV1 is never silently replaced by H.264.
 The Game Capture hook remains Windows-only. The Mac receiver uses VideoToolbox
 for H.264 and software dav1d for AV1, with IOSurface/SharedTexture presentation.
 
+Decoder hardware-use observation is optional. If VideoToolbox returns
+`kVTPropertyNotSupportedErr` for this property, native decoding continues and
+`hardwareExecutionObserved` remains `null`, without inferring software execution.
+Other errors and invalid responses are still reported.
+
 Enumeration, thumbnails and captures share one helper, with separate session
 ownership. Selection probes prove retirement of their own session; they do not
 require the helper to exit while the picker or another capture still uses it.
