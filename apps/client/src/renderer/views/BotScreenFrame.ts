@@ -1,4 +1,4 @@
-import { BOT_SCREEN_LIMITS, botScreenActionSchema, type BotScreen, type BotScreenAction, type BotScreenJson } from '@monky/shared';
+import { BOT_SCREEN_LIMITS, botScreenActionSchema, botScreenDocumentConsentSchema, type BotScreen, type BotScreenAction, type BotScreenDocumentConsent, type BotScreenJson } from '@monky/shared';
 import type { SupportedLanguage } from '../i18n';
 
 export interface BotScreenViewer { id: string; nickname: string; locale: SupportedLanguage }
@@ -111,8 +111,15 @@ export class BotScreenFrame {
   private locale: SupportedLanguage;
   private documentUrl: string | null = null;
 
-  constructor(screen: BotScreen, viewer: BotScreenViewer, private onAction: (action: BotScreenAction) => void,
+  constructor(screen: BotScreen, viewer: BotScreenViewer, private consent: BotScreenDocumentConsent,
+    private onAction: (action: BotScreenAction) => void,
     private onError: (error: unknown) => void) {
+    if (!botScreenDocumentConsentSchema.safeParse(consent).success || consent.screenId !== screen.id ||
+        consent.instanceId !== screen.instanceId || consent.botId !== screen.botId) {
+      this.channel.port1.close();
+      this.channel.port2.close();
+      throw new Error('Miniapp consent does not match this instance.');
+    }
     if (BotScreenFrame.active.size >= 2) {
       this.channel.port1.close();
       this.channel.port2.close();
@@ -136,7 +143,7 @@ export class BotScreenFrame {
   }
 
   private async loadDocument(html: string): Promise<void> {
-    const url = await window.api.createBotScreenDocument(html);
+    const url = await window.api.createBotScreenDocument(html, this.consent);
     if (this.destroyed) {
       await window.api.removeBotScreenDocument(url);
       return;

@@ -21,6 +21,7 @@ interface ConfirmOptions {
   checkboxHint?: string;
   signal?: AbortSignal;
   requireUserGesture?: boolean;
+  focusCancel?: boolean;
 }
 
 interface DialogTextInput {
@@ -56,6 +57,7 @@ function buildDialog(params: {
   focusInput?: number;
   signal?: AbortSignal;
   requireUserGesture?: boolean;
+  focusCancel?: boolean;
   onResolve: (confirmed: boolean, checked: boolean, value: string, values: string[]) => void;
 }): void {
   const fields = params.textInputs ?? (params.textInput ? [params.textInput] : []);
@@ -192,7 +194,8 @@ function buildDialog(params: {
   document.body.appendChild(backdrop);
   if (params.signal?.aborted) { settle(false); return; }
   validateInput();
-  if (input) { input.focus(); input.select(); }
+  if (params.focusCancel && params.showCancel) backdrop.querySelector<HTMLElement>('[data-action="cancel"]')?.focus();
+  else if (input) { input.focus(); input.select(); }
   else confirmButton?.focus();
 }
 
@@ -217,6 +220,7 @@ export function showConfirm(options: ConfirmOptions): Promise<boolean> {
   return new Promise((resolve) => {
     buildDialog({
       title: options.title ?? t('dialog.confirmTitle'),
+      focusCancel: options.focusCancel,
       message: options.message,
       variant: options.variant ?? 'warning',
       showCancel: true,
@@ -250,6 +254,7 @@ export function showConfirmWithOption(
       checkboxHint: options.checkboxHint,
       signal: options.signal,
       requireUserGesture: options.requireUserGesture,
+      focusCancel: options.focusCancel,
       onResolve: (confirmed, checked) => resolve({ confirmed, checked }),
     });
   });
@@ -272,6 +277,7 @@ export function showConfirmWithText(
       textInput: options.textInput,
       signal: options.signal,
       requireUserGesture: options.requireUserGesture,
+      focusCancel: options.focusCancel,
       onResolve: (confirmed, checked, value) => resolve({ confirmed, checked, value }),
     });
   });

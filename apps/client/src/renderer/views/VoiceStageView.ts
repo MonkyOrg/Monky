@@ -156,10 +156,11 @@ export class VoiceStageView {
     this.refreshBotScreens();
     const view = this.botScreens.get(id);
     if (!view) return;
-    const open = () => {
+    const open = async () => {
       if (this.botScreens.get(id) !== view) return;
       try {
-        view.open();
+        await view.open();
+        if (this.botScreens.get(id) !== view) return;
         if (view.isWatching) this.botVoiceContext?.session.botScreenStore.setInvitationDismissed(id, false);
         this.positionBotScreens();
         appEvents.emit('stage.bot_screens_changed');

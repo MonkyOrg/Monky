@@ -65,6 +65,16 @@ export const BOT_SCREEN_DOCUMENT_IPC = {
   remove: 'bot-screen-document:remove',
 } as const satisfies Record<string, keyof IpcInvokeChannels>;
 
+export const BOT_SCREEN_PERMISSION_POLICY_VERSION = 1;
+export const botScreenDocumentConsentSchema = z.object({
+  policyVersion: z.literal(BOT_SCREEN_PERMISSION_POLICY_VERSION),
+  serverKey: z.string().min(1).max(1024),
+  botId: z.string().min(1).max(128),
+  screenId: z.string().min(1).max(128),
+  instanceId: z.string().min(1).max(128),
+}).strict();
+export type BotScreenDocumentConsent = z.infer<typeof botScreenDocumentConsentSchema>;
+
 export type CrashRecoveryActionResult =
   | { ok: true; copied?: boolean }
   | { ok: false; reason: 'unavailable' | 'open-failed' | 'copy-failed' | 'restart-failed'; copied?: boolean };
@@ -738,7 +748,7 @@ export const NATIVE_SCREEN_EVENT = 'native-screen:event' satisfies keyof IpcEven
  * Mapeamento de Canais Bidirecionais (Invoke / Handle)
  */
 export interface IpcInvokeChannels {
-  'bot-screen-document:create': { args: [html: string]; returnType: string };
+  'bot-screen-document:create': { args: [html: string, consent: BotScreenDocumentConsent]; returnType: string };
   'bot-screen-document:remove': { args: [url: string]; returnType: void };
   'editor:command': { args: [command: EditorCommand]; returnType: { success: boolean } };
   'native-screen:invoke': { args: [command: NativeScreenCommand]; returnType: NativeScreenCommandResult };

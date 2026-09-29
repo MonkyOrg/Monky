@@ -100,6 +100,34 @@ erase shared state, or automatically release a player seat.
 
 ## Miniapp web capabilities
 
+The server administrator authorizes the bot's `miniapps` capability during
+permission review. Participants opening a view only receive an information notice
+with **Continue and open** or **Cancel**; they do not select capabilities or grant
+new bot permissions. The notice describes networking (including the local
+network), web storage, audio/video, manually selected files, downloads,
+fullscreen, pointer capture and bridge-provided data. Selecting a file allows
+the app to read it and potentially send it over the network.
+
+Cancelling creates no document and executes none of its code. Leaving, losing access,
+changing rooms/servers or disconnecting closes the view and revokes bridge actions;
+opening again shows the notice. Confirming an opening cannot bypass permissions
+denied by the administrator or confirm for other participants. Local tool execution
+retains its own confirmations on the executing computer.
+
+The operator hosting MonkyBot separately consents to execution on their
+machine/VPS. This consent grants no capabilities on Monky servers and does not
+create an operating-system sandbox.
+
+External pages inside the miniapp can register Service
+Workers that keep running after the view closes. Clearing the
+`monky-miniapp://…` origin does not clear other origins' storage or workers.
+Closing the view therefore does not completely revoke web resources. The notice
+discloses this behavior without promising isolation of all external resources.
+
+The notice adds no artificial network restrictions: `connect-src` does not cover
+WebRTC. Cancelling does not execute the miniapp. Camera, microphone and other unsupported capabilities
+remain blocked even after confirmation.
+
 Each document has a random `monky-miniapp://…` origin, separate from Monky and other views. It is not a `srcdoc` sharing the host application's origin. Apps can use external scripts/styles, `fetch`, WebSocket, WebRTC, WebAssembly, Workers, canvas/WebGL, audio/video, forms, web storage, file selection, and downloads. Fullscreen and pointer lock follow browser interaction rules. Camera, microphone, display capture, clipboard, and devices are not automatically authorized; miniapps do not inherit the client's permissions.
 
 External resources follow CORS and browser rules. Configure the service to accept the miniapp's origin and use HTTPS/WSS in production. A new view gets a new origin: do not use its local storage to persist a game. Large resources and real-time traffic can go directly to the app's service, without going through `state` or `sendAction`. The Monky envelope limit therefore does not cap the size of an engine, media, or files loaded by the application.

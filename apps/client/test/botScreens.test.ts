@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { BOT_SCREEN_LIMITS, MessageType, ProtocolErrorCode, type BotScreen, type BotScreenRemoved, type SlashCommand, type VoiceParticipantState } from '@monky/shared';
+import { BOT_SCREEN_LIMITS, BOT_SCREEN_PERMISSION_POLICY_VERSION, botScreenDocumentConsentSchema, MessageType, ProtocolErrorCode, type BotScreen, type BotScreenDocumentConsent, type BotScreenRemoved, type SlashCommand, type VoiceParticipantState } from '@monky/shared';
 import { EventBus, appEvents } from '../src/renderer/core/EventBus';
 import { sessionManager, type ServerSession } from '../src/renderer/core/SessionManager';
 import { bindBotScreenEvents } from '../src/renderer/core/botScreenEvents';
 import { BotScreenStore, type VoiceBotScreensUpdated } from '../src/renderer/stores/botScreenStore';
 import { isForegroundEvent, routeSessionEvent } from '../src/renderer/core/sessionRouting';
-import { botScreenDocument } from '../src/renderer/views/BotScreenFrame';
+import { BotScreenFrame, botScreenDocument } from '../src/renderer/views/BotScreenFrame';
 import { voiceStore } from '../src/renderer/stores/voiceStore';
 import { commandVoiceError, commandVoiceContextKey, getBotVoiceContext } from '../src/renderer/utils/botVoice';
 
@@ -16,6 +16,22 @@ const snapshot = (id = 'game', revision = 0): BotScreen => ({
 });
 const removal = (id = 'game', channelId = 'voice', instanceId = `${id}-instance`): BotScreenRemoved => ({
   id, instanceId, channelId, reason: 'ended', endedByUserId: 'alice',
+});
+
+test('miniapp consent requires the current policy and exact bot/screen instance before any document creation', () => {
+  const consent: BotScreenDocumentConsent = {
+    policyVersion: BOT_SCREEN_PERMISSION_POLICY_VERSION, serverKey: 'server',
+    botId: 'bot', screenId: 'game', instanceId: 'game-instance',
+  };
+  assert.deepEqual(botScreenDocumentConsentSchema.parse(consent), consent);
+  for (const invalid of [
+    undefined, null, {}, { ...consent, policyVersion: 0 },
+    { ...consent, serverKey: '' }, { ...consent, instanceId: '' }, { ...consent, allowEverything: true },
+  ]) assert.equal(botScreenDocumentConsentSchema.safeParse(invalid).success, false);
+  for (const field of ['botId', 'screenId', 'instanceId'] as const) {
+    assert.throws(() => new BotScreenFrame(snapshot(), { id: 'alice', nickname: 'Alice', locale: 'en' },
+      { ...consent, [field]: 'another-instance' }, () => {}, () => {}), /consent does not match/);
+  }
 });
 
 test('screen stores preserve revisions, bind channel ownership and have a finite cache', () => {

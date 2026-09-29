@@ -7869,6 +7869,14 @@ button[data-loading="1"]::after {
 
 .dialog-card {
   max-width: 440px;
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+
+.dialog-card > .modal-header,
+.dialog-card > .modal-footer {
+  flex-shrink: 0;
 }
 
 .dialog-message {
@@ -7877,6 +7885,8 @@ button[data-loading="1"]::after {
   color: var(--text-secondary);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .dialog-text-field {
