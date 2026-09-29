@@ -212,6 +212,8 @@ for (const fragment of repositoryFragments) buildClientNotes([fragment]);
 const workflow = readFileSync(fileURLToPath(new URL('../.github/workflows/release.yml', import.meta.url)), 'utf8');
 assert.ok(workflow.includes("if ! grep -q '^### Changelog$'"), 'promoção de beta antiga preserva o cabeçalho técnico');
 const generator = fileURLToPath(new URL('./generate-changelog.js', import.meta.url));
+const gateTests = spawnSync(process.execPath, ['--test', fileURLToPath(new URL('./test-client-release-notes.js', import.meta.url))], { stdio: 'inherit' });
+assert.equal(gateTests.status, 0, 'client release-note gate regressions pass');
 const emptyRange = spawnSync(process.execPath, [generator, '--prev', 'HEAD'], { encoding: 'utf8' });
 assert.equal(emptyRange.status, 0, emptyRange.stderr);
 assert.ok(emptyRange.stdout.includes('"novidades":[]') && emptyRange.stdout.includes('Nenhuma alteração registrada'),

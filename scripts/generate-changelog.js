@@ -212,19 +212,19 @@ function readGit(args) {
 /**
  * Only fragments added since the previous release belong to this release.
  * Promotion uses the previous stable tag, so it includes all intervening betas.
- * Read from HEAD, not the working tree, to match the binaries being released.
+ * Read from the selected commit (HEAD by default), never the working tree.
  */
-export function getClientNotesInRange(prevTag, git = readGit) {
+export function getClientNotesInRange(prevTag, git = readGit, head = 'HEAD') {
   const args = prevTag
-    ? ['diff', '--no-renames', '--name-only', '-z', '--diff-filter=A', prevTag, 'HEAD', '--', 'release-notes']
-    : ['ls-tree', '-r', '--name-only', '-z', 'HEAD', '--', 'release-notes'];
+    ? ['diff', '--no-renames', '--name-only', '-z', '--diff-filter=A', prevTag, head, '--', 'release-notes']
+    : ['ls-tree', '-r', '--name-only', '-z', head, '--', 'release-notes'];
   const files = git(args).split('\0')
     .filter((file) => /^release-notes\/[^/]+\.json$/.test(file))
     .sort();
   return files.map((file) => {
     let fragment;
     try {
-      fragment = JSON.parse(git(['show', `HEAD:${file}`]));
+      fragment = JSON.parse(git(['show', `${head}:${file}`]));
     } catch (error) {
       throw new Error(`Could not read ${file}: ${error instanceof Error ? error.message : String(error)}`);
     }
