@@ -16,7 +16,7 @@ e `miniapps`; ele não precisa de `publish_voice`.
 
 Uma tela é um miniapp HTML/CSS/JavaScript apresentado **no palco de voz**. Quem está na sala recebe um convite no mesmo canto dos avisos de compartilhamento de tela e escolhe se quer visualizar. Não há card de miniapp no chat nem abertura automática. Diferentemente dos formulários privados de `ctx.prompt()`, ele aceita vários participantes e continua ativo depois que o handler do comando termina. O `/jogo-da-velha` do MonkyBot demonstra dois jogadores e espectadores; as regras continuam no bot, não no JavaScript de quem está vendo a tela.
 
-O cartão permanece no palco junto de câmeras e compartilhamentos, mesmo com a visualização fechada. **Abrir miniapp** inicia a visualização local; **Sair do miniapp** a encerra e devolve o cartão ao estado fechado, sem encerrar o miniapp para os demais. Focar ou voltar à grade só altera o layout: não recarrega a tela nem muda quem ocupa as vagas de jogador. Abrir uma tela para assistir não equivale a entrar na partida.
+O cartão permanece no palco junto de câmeras e compartilhamentos, mesmo com a visualização fechada. **Abrir miniapp** inicia a visualização local e coloca o miniapp em foco no palco, assim como abrir pelo convite, para qualquer participante. **Sair do miniapp** a encerra e devolve o cartão ao estado fechado, sem encerrar o miniapp para os demais. Focar ou voltar à grade só altera o layout: não recarrega a tela nem muda quem ocupa as vagas de jogador. Abrir uma tela para assistir não equivale a entrar na partida.
 
 **Encerrar miniapp** é outra ação: remove a instância, o cartão e os convites
 para todos e fecha as visualizações abertas. Só aparece para quem invocou o
@@ -96,6 +96,19 @@ miniapps ativos ao entrar na sala; sair, mudar de sala ou desconectar fecha a
 visualização local e revoga ações. **Sair do miniapp** não envia END, não apaga
 o estado compartilhado e não libera automaticamente uma vaga de jogador.
 
-**Estado compartilhado, sem segredos:** os participantes autorizados que estão naquela sala de voz recebem o HTML e o estado JSON. O servidor também verifica a presença na sala para listar e interagir; estar em outro canal ou em voz em outro dispositivo não autoriza esta conexão. Interações exigem `USE_BOT_COMMANDS`. Não inclua tokens, caminhos locais ou informações secretas de um jogador. A tela não recebe Node.js, preload, IPC, acesso ao DOM do cliente ou autorização para rede, navegação, popups e downloads. Inclua os recursos visuais no documento em vez de depender de CDNs ou requisições externas.
+**Estado compartilhado, sem segredos:** os participantes autorizados que estão naquela sala de voz recebem o HTML e o estado JSON. O servidor também verifica a presença na sala para listar e interagir; estar em outro canal ou em voz em outro dispositivo não autoriza esta conexão. Interações exigem `USE_BOT_COMMANDS`. Não inclua tokens, caminhos locais ou informações secretas de um jogador. A tela não recebe Node.js, preload, IPC nem acesso ao DOM do cliente.
 
-Os limites são 128 KiB de HTML, 64 KiB de estado e 8 KiB por ação; JSON aceita até 12 níveis e 8.192 nós. Há até quatro miniapps por sala de voz, 16 por bot e 64 por servidor, com limites de frequência e deduplicação de ações. Eles vivem em memória e são removidos ao reiniciar/desconectar o bot, perder a autorização de acesso à sala ou receber um encerramento autorizado. Sair da sala, inclusive deixá-la vazia, não apaga automaticamente o estado. A expiração do jogo é responsabilidade do bot. Se persistir partidas, persista também seu encerramento: reiniciar o bot não deve recuperar uma partida explicitamente encerrada.
+## Recursos web do miniapp
+
+O documento tem uma origem própria e aleatória `monky-miniapp://…`, separada do Monky e de outras visualizações. Não é um `srcdoc` com a origem do aplicativo hospedeiro. É possível usar scripts e estilos externos, `fetch`, WebSocket, WebRTC, WebAssembly, Workers, canvas/WebGL, áudio/vídeo, formulários, armazenamento web, seleção de arquivos e downloads. Fullscreen e pointer lock seguem as regras de interação do navegador. Câmera, microfone, captura de tela, clipboard e dispositivos continuam sem autorização automática; o miniapp não herda as permissões do cliente.
+
+Os recursos externos seguem CORS e as regras do navegador. Configure o serviço para aceitar a origem do miniapp e use HTTPS/WSS em produção. A origem é nova a cada abertura: não use o armazenamento local como persistência da partida. Recursos grandes e tráfego em tempo real podem ir diretamente ao serviço do app; não precisam passar por `state` ou `sendAction`. Desse modo, o limite do envelope do Monky não limita o tamanho de uma engine, mídia ou arquivo carregado pela aplicação.
+
+Ao navegar o próprio frame, a página de destino permanece isolada, mas não
+herda o bridge autenticado `monkyScreen`; para mantê-lo, use navegação interna
+no documento ou um iframe filho. Popups e navegação da janela do Monky continuam
+bloqueados. O armazenamento da origem é descartado ao fechar a visualização.
+
+Autentique conexões externas a partir de uma ação recebida pelo bot, sem confiar em um `userId` enviado pelo browser e sem publicar tokens no estado compartilhado. Encerre conexões, Workers, áudio e timers ao sair da visualização. Se o app utiliza um serviço externo, verifique sua disponibilidade e mostre um erro claro antes de iniciar a atividade.
+
+Os limites do envelope de controle são 128 KiB de HTML inicial, 64 KiB de estado e 8 KiB por ação; JSON aceita até 12 níveis e 8.192 nós. Há até quatro miniapps por sala de voz, 16 por bot e 64 por servidor, com limites de frequência e deduplicação de ações. Eles vivem em memória e são removidos ao reiniciar/desconectar o bot, perder a autorização de acesso à sala ou receber um encerramento autorizado. Sair da sala, inclusive deixá-la vazia, não apaga automaticamente o estado. A expiração do jogo é responsabilidade do bot. Se persistir partidas, persista também seu encerramento: reiniciar o bot não deve recuperar uma partida explicitamente encerrada.

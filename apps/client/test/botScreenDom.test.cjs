@@ -27,6 +27,8 @@ if (!process.versions.electron) {
   const { app, BrowserWindow, ipcMain } = require('electron');
   const { SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, Permission } = require('@monky/shared');
   const { bindBotScreenIsolation, installBotScreenRequestGuard } = require('../dist-electron/main/botScreenIsolation.js');
+  const { bindBotScreenDocuments, registerBotScreenScheme } = require('../dist-electron/main/botScreenDocuments.js');
+  registerBotScreenScheme();
   app.setPath('userData', process.env.MONKY_SCREEN_PROFILE);
   let vite;
   let timeout;
@@ -36,6 +38,8 @@ if (!process.versions.electron) {
   const nativeErrors = [];
   const owns = event => windows.some(window => !window.isDestroyed()
     && window.webContents === event.sender && event.senderFrame === event.sender.mainFrame);
+  const unbindDocuments = bindBotScreenDocuments(contents => windows.some(window =>
+    !window.isDestroyed() && window.webContents === contents));
   ipcMain.handle(SHORTCUT_IPC.setPttConfig, event => owns(event));
   ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, event => {
     assert.ok(owns(event));
@@ -55,6 +59,7 @@ if (!process.versions.electron) {
       }
     }
     if (vite) await vite.close();
+    unbindDocuments();
     app.exit(code);
   };
   const waitFor = async (check, description) => {
@@ -71,7 +76,7 @@ if (!process.versions.electron) {
       throw error;
     }
   };
-  const frames = (window) => window.webContents.mainFrame.frames.filter((frame) => frame.url.startsWith('about:srcdoc'));
+  const frames = (window) => window.webContents.mainFrame.frames.filter((frame) => frame.url.startsWith('monky-miniapp:'));
   const gameFrame = async (window, id = 'game') => {
     let initializedFrame;
     await waitFor(async () => {
@@ -99,7 +104,17 @@ if (!process.versions.electron) {
         name: 'voice-screen-fixture',
         configureServer(server) {
           server.middlewares.use((request, response, next) => {
-            if (request.url.startsWith('/__leak')) { leaks++; response.end('blocked'); return; }
+            if (request.url === '/__destination') {
+              response.setHeader('Content-Type', 'text/html');
+              response.end('<!doctype html><script>window.receivedBridge=false;addEventListener("message",event=>{if(event.ports.length)window.receivedBridge=true;});</script><p>Independent web page</p>');
+              return;
+            }
+            if (request.url.startsWith('/__leak')) {
+              leaks++;
+              response.setHeader('Access-Control-Allow-Origin', '*');
+              response.end('web resource');
+              return;
+            }
             if (request.url !== '/__screens__') return next();
             response.setHeader('Content-Type', 'text/html');
             response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/footerControls.css"></head><body><div id="app"></div></body></html>');
@@ -132,6 +147,15 @@ if (!process.versions.electron) {
       installBotScreenRequestGuard(window.webContents.session);
       window.webContents.setWindowOpenHandler(() => { popups++; return { action: 'deny' }; });
       await window.loadURL(url);
+      const temporaryDocument = await run(window, 'window.api.createBotScreenDocument("<p>document lifecycle</p>")');
+      assert.match(temporaryDocument, /^monky-miniapp:\/\/[a-f0-9-]+\/index.html$/);
+      const requested = await window.webContents.session.fetch(temporaryDocument);
+      assert.equal(requested.status, 200);
+      assert.equal(requested.headers.get('cache-control'), 'no-store');
+      await run(window, `window.api.removeBotScreenDocument(${JSON.stringify(temporaryDocument)})`);
+      assert.equal((await window.webContents.session.fetch(temporaryDocument)).status, 404);
+      assert.equal(await run(window, 'window.api.createBotScreenDocument("").then(()=>false,()=>true)'), true);
+      assert.equal(await run(window, 'window.api.createBotScreenDocument("x".repeat(1024*1024)).then(()=>false,()=>true)'), true);
       window.webContents.debugger.attach('1.3');
       await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
       const setupError = await run(window, `(${setupVoiceStage.toString()})(${JSON.stringify(id)},${JSON.stringify(locale)},${Permission.ADMINISTRATOR}).then(() => null, error => ({ message: String(error), stack: error.stack }))`);
@@ -163,10 +187,13 @@ if (!process.versions.electron) {
     await waitFor(async () => await run(aliceWindow, '!document.fullscreenElement'), 'closed tile fullscreen exit');
     await run(aliceWindow, 'window.savedGameInvitation = document.querySelector("[data-watch-bot-screen=game]"); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=open]").click()');
     await waitFor(() => frames(aliceWindow).length === 1, 'ordinary tile opt-in');
-    assert.equal(await run(aliceWindow, '!!document.querySelector("#stage-participants-area .stage-focused-main[data-kind=screen]")'), true, 'Ordinary Open does not replace screen focus');
+    assert.equal(await run(aliceWindow, '!!document.querySelector("#stage-participants-area .stage-focused-main[data-bot-screen-slot=game]") && !document.querySelector(".stage-focused-main[data-kind=screen]")'), true, 'Opening a stage tile focuses the miniapp just like its invitation');
     await run(aliceWindow, 'window.savedGameInvitation.click(); window.savedGameInvitation.click(); delete window.savedGameInvitation');
     await run(spectatorWindow, 'document.querySelector("[data-watch-bot-screen=game]").click()');
     for (const window of windows) await waitFor(() => frames(window).length === 1, 'opted-in stage frame');
+    await run(spectatorWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=close]").click(); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=focus]").click(); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=open]").click()');
+    await waitFor(() => frames(spectatorWindow).length === 1, 'spectator reopens using the stage tile');
+    assert.equal(await run(spectatorWindow, '!!document.querySelector(".stage-focused-main[data-bot-screen-slot=game]")'), true, 'Spectator tile opt-in also enters focus automatically');
     let alice = await gameFrame(aliceWindow);
     let spectator = await gameFrame(spectatorWindow);
     assert.equal(await run(spectatorWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=end]").hidden'), true, 'Ordinary viewers cannot end the shared miniapp');
@@ -185,7 +212,7 @@ if (!process.versions.electron) {
     const safety = await alice.executeJavaScript(`(async () => {
       let parentBlocked = false, storageBlocked = false, nestedBlocked = false, fetchBlocked = false;
       try { void parent.document.body; } catch { parentBlocked = true; }
-      try { localStorage.setItem('credential', 'bad'); } catch { storageBlocked = true; }
+      try { localStorage.setItem('miniapp-test', 'own origin'); } catch { storageBlocked = true; }
       const child = document.createElement('iframe'); document.body.append(child);
       try { void child.contentWindow.RTCPeerConnection; } catch { nestedBlocked = true; } child.remove();
       try { await fetch(${JSON.stringify(leak)}); } catch { fetchBlocked = true; }
@@ -194,9 +221,25 @@ if (!process.versions.electron) {
         transport: typeof WebTransport, viewer: monkyScreen.viewer.id };
     })()`);
     assert.deepEqual(safety, {
-      parentBlocked: true, storageBlocked: true, nestedBlocked: true, fetchBlocked: true,
-      api: 'undefined', node: 'undefined', process: 'undefined', rtc: 'undefined', transport: 'undefined', viewer: 'alice',
+      parentBlocked: true, storageBlocked: false, nestedBlocked: false, fetchBlocked: false,
+      api: 'undefined', node: 'undefined', process: 'undefined', rtc: 'function', transport: 'function', viewer: 'alice',
     });
+    assert.equal(await spectator.executeJavaScript('localStorage.getItem("miniapp-test")'), null,
+      'Another miniapp document never shares application storage');
+    assert.deepEqual(await alice.executeJavaScript(`(async () => {
+      const bytes = new Uint8Array([0,97,115,109,1,0,0,0]);
+      const wasm = await WebAssembly.instantiate(bytes);
+      const source = URL.createObjectURL(new Blob(['onmessage = event => postMessage(event.data + 1)'], {type: 'text/javascript'}));
+      const worker = new Worker(source);
+      try {
+        const result = await new Promise((resolve, reject) => {
+          worker.onmessage = event => resolve(event.data);
+          worker.onerror = reject;
+          worker.postMessage(41);
+        });
+        return {wasm: wasm.instance instanceof WebAssembly.Instance, worker: result};
+      } finally { worker.terminate(); URL.revokeObjectURL(source); }
+    })()`), { wasm: true, worker: 42 });
     assert.equal(await run(aliceWindow, 'typeof window.api'), 'object');
     await alice.executeJavaScript('monkyScreen.sendAction("move", {cell: 1})');
     await waitFor(async () => await alice.executeJavaScript('document.querySelector("#state").textContent === "1"'), 'player action');
@@ -315,19 +358,35 @@ if (!process.versions.electron) {
     await waitFor(async () => await alice.executeJavaScript('window.lastState?.count === 1'), 'reopen restores shared state');
     assert.deepEqual(await alice.executeJavaScript('window.lastState.players'), ['alice', 'bob'], 'Opening or closing a view never changes player/spectator roles');
 
-    await alice.executeJavaScript(`window.name = ""; location.href = ${JSON.stringify(leak + '?navigation')}`);
+    const requestsBefore = leaks;
+    await alice.executeJavaScript('window.name = ""; location.href = "file:///not-a-monky-resource"');
     await spectator.executeJavaScript(`(() => {
       const image = new Image(); image.src = ${JSON.stringify(leak + '?image')}; document.body.append(image);
-      const form = document.createElement('form'); form.action = ${JSON.stringify(leak + '?form')}; document.body.append(form); form.submit();
       window.open(${JSON.stringify(leak + '?popup')});
       try { top.location = ${JSON.stringify(leak + '?top')}; } catch {}
-      const meta = document.createElement('meta'); meta.httpEquiv = 'refresh'; meta.content = '0;url=' + ${JSON.stringify(leak + '?refresh')}; document.head.append(meta);
-      const link = document.createElement('a'); link.href = ${JSON.stringify(leak + '?download')}; link.download = 'leak.html'; document.body.append(link); link.click();
     })()`);
     await new Promise((resolve) => setTimeout(resolve, 150));
-    assert.ok(alice.url.startsWith('about:srcdoc'));
+    assert.ok(alice.url.startsWith('monky-miniapp:'));
     assert.equal(aliceWindow.webContents.getURL(), url);
-    assert.equal(leaks, 0); assert.equal(popups, 0);
+    assert.equal(leaks, requestsBefore + 1, 'Web assets are allowed, application navigation is not');
+    assert.equal(popups, 0);
+
+    await alice.executeJavaScript(`location.href = ${JSON.stringify(url)}`);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.ok(alice.url.startsWith('monky-miniapp:'), 'A miniapp cannot navigate into the privileged development origin');
+    const destination = `http://localhost:${http.address().port}/__destination`;
+    await alice.executeJavaScript(`location.href = ${JSON.stringify(destination)}`);
+    let navigated;
+    await waitFor(() => {
+      navigated = aliceWindow.webContents.mainFrame.frames.find(frame => frame.url === destination);
+      return !!navigated;
+    }, 'ordinary cross-origin web navigation');
+    await waitFor(async () => await navigated.executeJavaScript('document.readyState === "complete"'), 'destination loaded');
+    assert.equal(await navigated.executeJavaScript(`(() => {
+      let parentBlocked = false; try { void parent.document; } catch { parentBlocked = true; }
+      return parentBlocked && !window.receivedBridge && !window.monkyScreen && !window.api && !window.require;
+    })()`), true, 'The navigated page remains visible without receiving the privileged bridge');
+    assert.equal(await run(aliceWindow, '!!document.querySelector("[data-bot-screen-id=game] iframe")'), true);
 
     await run(aliceWindow, 'document.querySelector(".voice-stage-container").requestFullscreen()');
     await waitFor(async () => await run(aliceWindow, '!!document.fullscreenElement'), 'fullscreen before a delayed focus exit');
