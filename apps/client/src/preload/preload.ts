@@ -4,7 +4,7 @@ import {
   createNativeScreenPresentation, registerNativeAudioPortReceiver, type NativeScreenPresentationController,
 } from '@monky/screen-share';
 import * as nativeAudioProtocol from '@monky/shared';
-import { SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, DESKTOP_SOURCES_IPC, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
+import { BOT_SCREEN_DOCUMENT_IPC, SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, DESKTOP_SOURCES_IPC, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
 import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenEventSchema } from '@monky/shared';
 import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
 import type {
@@ -83,6 +83,8 @@ import type {
 export type { LinkPreviewData, OverlayBounds, OverlayConfig, OverlayMode, OverlayLayout, OverlayPosition, OverlayParticipantState, OverlaySyncState } from '@monky/shared';
 
 export interface ElectronApi {
+  createBotScreenDocument: (html: string) => Promise<string>;
+  removeBotScreenDocument: (url: string) => Promise<void>;
   nativeScreenCommand: (command: NativeScreenCommand) => Promise<NativeScreenCommandResult>;
   nativeScreenReply: (reply: NativeScreenReply) => Promise<void>;
   onNativeScreenEvent: (callback: (event: NativeScreenEvent) => void) => () => void;
@@ -322,6 +324,8 @@ const api: ElectronApi = {
   saveBackupFile: (contents, suggestedName) => ipcRenderer.invoke('backup:save-file', contents, suggestedName),
   openBackupFile: () => ipcRenderer.invoke('backup:open-file'),
   takeServerInvite: () => ipcRenderer.invoke(SERVER_INVITE_IPC.take),
+  createBotScreenDocument: html => ipcRenderer.invoke(BOT_SCREEN_DOCUMENT_IPC.create, html),
+  removeBotScreenDocument: url => ipcRenderer.invoke(BOT_SCREEN_DOCUMENT_IPC.remove, url),
   onServerInviteAvailable: (callback) => {
     const listener = () => callback();
     ipcRenderer.on(SERVER_INVITE_AVAILABLE, listener);

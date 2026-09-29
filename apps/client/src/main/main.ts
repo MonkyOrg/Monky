@@ -20,6 +20,7 @@ import { bindRendererDiagnostics } from './rendererDiagnostics';
 import { OverlayManager } from './overlayManager';
 import { HOME_MIN_HEIGHT, HOME_MIN_WIDTH } from './windowSizing';
 import { bindBotScreenIsolation, installBotScreenRequestGuard, isBotScreenFrame, isBotScreenUrl } from './botScreenIsolation';
+import { bindBotScreenDocuments, registerBotScreenScheme } from './botScreenDocuments';
 import { resolveDevelopmentProfile } from './developmentProfile';
 import { bindDevelopmentQa, configureDevelopmentQaMedia, loadDevelopmentQa } from './developmentQa';
 import { CrashRecovery } from './crashRecovery';
@@ -28,6 +29,8 @@ import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, SERVER_I
 import { ServerInviteInbox, registerServerInviteProtocol } from './serverInvites';
 
 import fs from 'fs';
+
+registerBotScreenScheme();
 
 const developmentQa = loadDevelopmentQa({
   packaged: app.isPackaged,
@@ -80,6 +83,8 @@ if (process.platform === 'win32' && process.env.MONKY_DISABLE_WGC !== '1') {
 }
 
 let mainWindow: BrowserWindow | null = null;
+const unbindBotScreenDocuments = bindBotScreenDocuments(contents => mainWindow?.webContents === contents);
+app.once('will-quit', unbindBotScreenDocuments);
 const serverInviteInbox = new ServerInviteInbox();
 let overlayManager: OverlayManager | null = null;
 let trayManager: TrayManager | null = null;
@@ -567,11 +572,18 @@ if (!gotTheLock) {
     // Allow media/DRM permissions required by embedded players.
     installBotScreenRequestGuard(session.defaultSession);
     session.defaultSession.setPermissionCheckHandler((_contents, permission, origin, details) => {
+      if (isBotScreenUrl(details.requestingUrl ?? '')) {
+        return ['fullscreen', 'pointerLock', 'mediaKeySystem'].includes(permission);
+      }
       const allowed = ['media', 'mediaKeySystem', 'fullscreen', 'clipboard-read', 'clipboard-sanitized-write'];
       return allowed.includes(permission) &&
         !(isBotScreenUrl(details.requestingUrl ?? '') || (!details.isMainFrame && (!origin || origin === 'null')));
     });
     session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+      if (isBotScreenUrl(details.requestingUrl)) {
+        callback(['fullscreen', 'pointerLock', 'mediaKeySystem'].includes(permission));
+        return;
+      }
       const allowed = ['media', 'mediaKeySystem', 'fullscreen', 'clipboard-read', 'clipboard-sanitized-write'];
       callback(!isBotScreenUrl(details.requestingUrl) && allowed.includes(permission));
     });
