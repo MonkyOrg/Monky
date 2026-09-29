@@ -20,11 +20,17 @@ async function availablePort() {
   return port;
 }
 
-async function createSfuFixture(channelId) {
+async function createSfuFixture(channelId, listenIp) {
+  if (listenIp !== undefined) {
+    const interfaces = Object.values(require('node:os').networkInterfaces()).flat().filter(Boolean);
+    assert.ok(interfaces.some(value => value.family === 'IPv4' && value.address === listenIp),
+      'An explicit SFU fixture address must belong to a local IPv4 adapter.');
+  }
   const port = await availablePort();
   // Native ICE uses real adapters; announcing LAN addresses from sockets bound
   // only to loopback makes those candidates unreachable.
-  const manager = new SfuManager({ listenIp: '0.0.0.0', announcedIp: '127.0.0.1', rtcMinPort: port, rtcMaxPort: port + 63 });
+  const manager = new SfuManager({ listenIp: listenIp ?? '0.0.0.0', announcedIp: listenIp ?? '127.0.0.1',
+    rtcMinPort: port, rtcMaxPort: port + 63 });
   assert.equal(await manager.init(), true, manager.getLastError());
   const worker = manager.worker;
   const producerListeners = new Set();

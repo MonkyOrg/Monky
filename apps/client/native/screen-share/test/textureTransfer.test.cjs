@@ -5,8 +5,11 @@ const { EventEmitter } = require('node:events');
 const { randomUUID } = require('node:crypto');
 const { setTimeout: delay } = require('node:timers/promises');
 const test = require('node:test');
-const { NATIVE_SCREEN_TEXTURE_IPC, nativeScreenTexturePortInfoSchema } = require('@monky/shared');
-const { sendTexture, registerTextureTransferReceiver } = require('../runtime/textureTransfer.cjs');
+const {
+  NATIVE_SCREEN_TEXTURE_IPC, nativeScreenTexturePortInfoSchema, nativeScreenTextureChannelInfoSchema,
+  nativeScreenTextureMessageSchema, nativeScreenTextureReceiptSchema,
+} = require('@monky/shared');
+const { TextureTransferSender, sendTexture, registerTextureTransferReceiver } = require('../runtime/textureTransfer.cjs');
 const { NativePresentationBridge } = require('../runtime/nativePresentationBridge.cjs');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
@@ -14,6 +17,8 @@ class Port extends EventEmitter {
   held = false;
   queued = [];
   start() {}
+  addEventListener(name, listener) { this.on(name, listener); }
+  removeEventListener(name, listener) { this.removeListener(name, listener); }
   postMessage(data) {
     queueMicrotask(() => {
       if (this.peer.held) this.peer.queued.push(data);
@@ -33,7 +38,8 @@ function fixture({ failToken = false } = {}) {
   const transfer = { pixelFormat: 'nv12', codedSize: { width: 1280, height: 720 },
     visibleRect: { x: 0, y: 0, width: 1280, height: 720 }, timestamp: metadata.timestampUs,
     syncToken: Buffer.alloc(24).toString('base64'), transfer: Buffer.alloc(96).toString('base64') };
-  let finishDrawing, gpuRelease, releaseCalls = 0, gpuFinished = false;
+  let finishDrawing, releaseCalls = 0, gpuFinished = false;
+  const gpuReleases = [];
   const drawing = new Promise(resolve => { finishDrawing = resolve; });
   const source = { startTransferSharedTexture: () => transfer, setReleaseSyncToken: token => syncTokens.push(token) };
   const imported = { subtle: source };
@@ -52,15 +58,130 @@ function fixture({ failToken = false } = {}) {
         return { syncToken: transfer.syncToken };
       },
         getVideoFrame: () => ({ close() {} }),
-        release(callback) { releaseCalls++; gpuRelease = callback; } };
+        release(callback) { releaseCalls++; gpuReleases.push(callback); } };
     },
   } }, ipc, async () => drawing, error => errors.push(error));
   const destination = { isDestroyed: () => false,
     postMessage(channel, value, ports) { ipc.emit(channel, { ports }, value); } };
   return { ipc, errors, syncTokens, metadata, transfer, source, imported, channels, createChannel, destination,
     detach, finishDrawing, get releaseCalls() { return releaseCalls; }, get gpuFinished() { return gpuFinished; },
-    finishGpu() { assert.equal(typeof gpuRelease, 'function'); gpuFinished = true; gpuRelease(); } };
+    finishGpu(index = gpuReleases.length - 1) {
+      const callback = gpuReleases[index];
+      assert.equal(typeof callback, 'function');
+      gpuReleases[index] = null;
+      gpuFinished = true;
+      callback();
+    } };
 }
+
+test('hundreds of video frames reuse one channel without accumulating native port wrappers', async () => {
+  const f = fixture(), sender = new TextureTransferSender(error => f.errors.push(error), { createChannel: f.createChannel });
+  f.finishDrawing();
+  for (let frameId = 1; frameId <= 512; frameId++) {
+    const work = sender.send(f.imported, f.destination, { ...f.metadata, frameId });
+    await tick();
+    f.finishGpu();
+    await work;
+  }
+  assert.equal(f.channels.length, 1);
+  assert.equal(f.releaseCalls, 512);
+  assert.equal(f.syncTokens.length, 512);
+  await sender.close();
+  await f.detach();
+  assert.equal(f.channels[0].port1.listenerCount('message'), 0);
+  assert.equal(f.channels[0].port2.listenerCount('message'), 0);
+  assert.equal(sender.channels.size, 0);
+  assert.throws(() => sender.send(f.imported, f.destination, f.metadata), /sender is closing/);
+  assert.deepEqual(f.errors, []);
+});
+
+test('concurrent texture receipts retire only their exact sequence, including out-of-order GPU completion', async () => {
+  const f = fixture(), sender = new TextureTransferSender(error => f.errors.push(error), { createChannel: f.createChannel });
+  const done = new Set();
+  f.finishDrawing();
+  const work = Array.from({ length: 16 }, (_, index) => sender.send(f.imported, f.destination,
+    { ...f.metadata, frameId: index + 1 }).then(() => done.add(index)));
+  assert.throws(() => sender.send(f.imported, f.destination, { ...f.metadata, frameId: 17 }), /credit exhausted/);
+  await tick();
+  assert.equal(f.channels.length, 1);
+  assert.equal(f.releaseCalls, 16);
+  assert.equal(done.size, 0);
+  for (let index = 15; index >= 0; index--) {
+    f.finishGpu(index);
+    await tick();
+    assert.deepEqual([...done], Array.from({ length: 16 - index }, (_, offset) => 15 - offset));
+  }
+  await Promise.all(work);
+  await sender.close();
+  await f.detach();
+  assert.deepEqual(f.errors, []);
+});
+
+test('unknown and stale receipt sequences never authorize another frame retirement', async () => {
+  const f = fixture(), sender = new TextureTransferSender(error => f.errors.push(error), { createChannel: f.createChannel });
+  f.finishDrawing();
+  let done = false;
+  const first = sender.send(f.imported, f.destination, f.metadata).then(() => { done = true; });
+  await tick();
+  f.channels[0].port1.emit('message', { data: { kind: 'retired', sequence: 2 } });
+  await tick();
+  assert.equal(done, false);
+  f.finishGpu();
+  await first;
+  done = false;
+  const second = sender.send(f.imported, f.destination, { ...f.metadata, frameId: 2 }).then(() => { done = true; });
+  await tick();
+  f.channels[0].port1.emit('message', { data: { kind: 'retired', sequence: 1 } });
+  await tick();
+  assert.equal(done, false);
+  f.finishGpu();
+  await second;
+  await sender.close();
+  await f.detach();
+  assert.equal(f.errors.length, 2);
+  assert.ok(f.errors.every(error => /receipt sequence/.test(error.message)));
+});
+
+test('destination changes drain the old channel without releasing in-flight GPU readers', async () => {
+  const f = fixture(), sender = new TextureTransferSender(error => f.errors.push(error), { createChannel: f.createChannel });
+  f.finishDrawing();
+  const first = sender.send(f.imported, f.destination, f.metadata);
+  const second = sender.send(f.imported, { ...f.destination }, { ...f.metadata, frameId: 2 });
+  await tick();
+  assert.equal(f.channels.length, 2);
+  f.finishGpu(1);
+  await second;
+  let closed = false;
+  const closing = sender.close().then(() => { closed = true; });
+  await tick();
+  assert.equal(closed, false);
+  f.finishGpu(0);
+  await Promise.all([first, closing]);
+  await f.detach();
+  assert.equal(sender.channels.size, 0);
+  assert.deepEqual(f.errors, []);
+});
+
+test('document drain still receives frames already queued on the channel before their GPU retirement', async () => {
+  const f = fixture(), sender = new TextureTransferSender(error => f.errors.push(error), { createChannel: f.createChannel });
+  const post = f.destination.postMessage;
+  f.destination.postMessage = (...args) => { f.channels[0].port2.held = true; post(...args); };
+  f.finishDrawing();
+  const work = sender.send(f.imported, f.destination, f.metadata);
+  await tick();
+  let detached = false;
+  const closing = f.detach().then(() => { detached = true; });
+  await tick();
+  assert.equal(f.releaseCalls, 0);
+  assert.equal(detached, false);
+  f.channels[0].port2.resume();
+  await tick();
+  assert.equal(f.releaseCalls, 1);
+  f.finishGpu();
+  await Promise.all([work, closing]);
+  await sender.close();
+  assert.deepEqual(f.errors, []);
+});
 
 test('texture transfer waits for the renderer GPU receipt, not just import or VideoFrame close', async () => {
   const f = fixture();
@@ -130,11 +251,12 @@ test('invalid sync token sizes are rejected before calling Electron native code'
   const work = sendTexture(f.imported, f.destination, f.metadata, error => f.errors.push(error),
     { createChannel: f.createChannel });
   const port = f.channels[0].port1;
-  port.emit('message', { data: { kind: 'imported', syncToken: Buffer.alloc(4).toString('base64') } });
+  port.emit('message', { data: { kind: 'imported', sequence: 1, syncToken: Buffer.alloc(4).toString('base64') } });
   assert.equal(f.syncTokens.length, 0);
   assert.equal(f.errors.length, 1);
-  port.emit('message', { data: { kind: 'imported', syncToken: f.transfer.syncToken } });
-  port.emit('message', { data: { kind: 'retired' } });
+  port.emit('message', { data: { kind: 'imported', sequence: 1, syncToken: f.transfer.syncToken } });
+  port.emit('message', { data: { kind: 'retired', sequence: 1 } });
+  port.emit('message', { data: { kind: 'closed' } });
   await work;
   await f.detach();
 });
@@ -221,4 +343,21 @@ test('texture wire schemas reject malformed geometry, opaque data, timestamps an
     { ...valid, transfer: { ...f.transfer, visibleRect: { ...f.transfer.visibleRect, x: 1280 } } },
     { ...valid, transfer: { ...f.transfer, codedSize: { width: 1279, height: 720 } } },
   ]) assert.equal(nativeScreenTexturePortInfoSchema.safeParse(value).success, false);
+});
+
+test('reusable channel contracts require identity, exact message shapes and safe receipt sequences', () => {
+  const f = fixture(), info = { metadata: f.metadata, transfer: f.transfer };
+  assert.equal(nativeScreenTextureChannelInfoSchema.safeParse({ channelId: randomUUID() }).success, true);
+  assert.equal(nativeScreenTextureChannelInfoSchema.safeParse(info).success, false);
+  assert.equal(nativeScreenTextureChannelInfoSchema.safeParse({ channelId: 'unknown' }).success, false);
+  for (const sequence of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '1', undefined]) {
+    assert.equal(nativeScreenTextureMessageSchema.safeParse({ kind: 'frame', sequence, info }).success, false);
+    assert.equal(nativeScreenTextureReceiptSchema.safeParse({ kind: 'retired', sequence }).success, false);
+  }
+  assert.equal(nativeScreenTextureMessageSchema.safeParse({ kind: 'frame', sequence: 1, info }).success, true);
+  assert.equal(nativeScreenTextureMessageSchema.safeParse({ kind: 'close', sequence: 1 }).success, false);
+  assert.equal(nativeScreenTextureReceiptSchema.safeParse({ kind: 'closed', sequence: 1 }).success, false);
+  assert.equal(nativeScreenTextureReceiptSchema.safeParse({ kind: 'drain', extra: true }).success, false);
+  assert.equal(nativeScreenTextureReceiptSchema.safeParse({ kind: 'imported', sequence: 1,
+    syncToken: f.transfer.syncToken }).success, true);
 });

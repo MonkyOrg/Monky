@@ -8,7 +8,10 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { within } = require('../runtime/nativeDeadline.cjs');
 const directory = process.argv.find(value => value.startsWith('--artifacts='))?.slice('--artifacts='.length);
 const mode = process.argv.find(value => value.startsWith('--mode='))?.slice('--mode='.length) ?? 'p2p';
+const sfuListenIp = process.argv.find(value => value.startsWith('--sfu-listen-ip='))?.slice('--sfu-listen-ip='.length);
 const soakMs = Number(process.argv.find(value => value.startsWith('--soak-ms='))?.slice('--soak-ms='.length) ?? 0);
+const singleReceiverSoakMs = Number(process.argv.find(value => value.startsWith('--single-receiver-soak-ms='))?.slice('--single-receiver-soak-ms='.length) ?? 0);
+const requireAudioContinuity = process.argv.includes('--require-audio-continuity');
 const mainStallMs = Number(process.argv.find(value => value.startsWith('--main-stall-ms='))?.slice('--main-stall-ms='.length) ?? 0);
 const encoder = process.argv.find(value => value.startsWith('--encoder='))?.slice('--encoder='.length)
   ?? (process.platform === 'darwin' ? 'apple_vt_h264' : 'auto');
@@ -23,7 +26,14 @@ assert.ok(!audioAddon || (path.isAbsolute(audioAddon) && path.extname(audioAddon
 const simulateDisconnect = process.argv.includes('--disconnect');
 const simulateRtcFault = process.argv.includes('--rtc-fault');
 assert.ok(directory && path.isAbsolute(directory) && ['p2p', 'sfu'].includes(mode));
+assert.ok(sfuListenIp === undefined || (mode === 'sfu' && require('node:net').isIPv4(sfuListenIp)),
+  'An explicit local SFU address requires SFU mode and an IPv4 address.');
 assert.ok(Number.isSafeInteger(soakMs) && soakMs >= 0 && soakMs <= 1200000);
+assert.ok(Number.isSafeInteger(singleReceiverSoakMs) && singleReceiverSoakMs >= 0 && singleReceiverSoakMs <= 1200000);
+assert.ok(!singleReceiverSoakMs || (!soakMs && !mainStallMs && !simulateDisconnect && !simulateRtcFault && !silentSource),
+  'Single-receiver audio continuity requires its real synthetic tone without competing lifecycle scenarios.');
+assert.ok(!requireAudioContinuity || singleReceiverSoakMs >= 30000,
+  'Strict audio continuity needs at least 30 seconds of the single-receiver scenario.');
 assert.ok(Number.isSafeInteger(mainStallMs) && mainStallMs >= 0 && mainStallMs <= 3000);
 assert.ok(!simulateDisconnect || mode === 'sfu');
 assert.ok(!simulateRtcFault || !simulateDisconnect);
@@ -49,7 +59,7 @@ if (!process.versions.electron) {
     console.error('Owned native A/V smoke exceeded its deadline.');
     process.exitCode = 1; sourceRetiring = true;
     test?.kill('SIGKILL'); source.kill('SIGKILL');
-  }, 180000 + soakMs);
+  }, 180000 + soakMs + singleReceiverSoakMs);
   const run = async () => {
     const ready = await within(new Promise((resolve, reject) => {
       source.once('error', reject);
@@ -194,6 +204,7 @@ function audioOptions(window, publish = false) {
 async function createWindow(id) {
   const options = { width: 640, height: 400, show: false,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false,
+      additionalArguments: singleReceiverSoakMs ? ['--native-audio-continuity-diagnostics'] : [],
       preload: path.join(__dirname, 'nativeCaptureSmoke.preload.cjs') } };
   const window = placement ? placement.createWindow(options) : new BrowserWindow(options);
   windows.set(id, window);
@@ -273,7 +284,7 @@ async function run() {
   await invalid.closed;
   report.changedWindowOwnerRejected = true;
   hub = new NativePcmCaptureHub(captureModule, audioSelection(), failure);
-  sfu = mode === 'sfu' ? await createSfuFixture(channelId) : null;
+  sfu = mode === 'sfu' ? await createSfuFixture(channelId, sfuListenIp) : null;
   sfu?.onProducer(producer => {
     for (const subscription of subscriptions.values()) deliver(subscription.addRemoteProducer(producer));
   });
@@ -335,6 +346,85 @@ async function run() {
   }
   await waitFor(() => receivedAudio('viewer-a'),
     'The captured application tone did not pass through native Opus and the receiver mixer.');
+  if (singleReceiverSoakMs) {
+    phase('single-receiver-audio-continuity');
+    const start = performance.now();
+    const nativeEvents = [], engine = receivers.get('viewer-a').engine;
+    const record = value => {
+      nativeEvents.push({ at: performance.now(), ...value });
+      if (nativeEvents.length > 512) nativeEvents.shift();
+    };
+    const call = engine.call.bind(engine), emit = engine.emit.bind(engine);
+    engine.call = (method, args) => {
+      if (method !== 'grantAudioCredits') return call(method, args);
+      const grantedAt = performance.now(), grantSequence = args[0].grantSequence;
+      record({ type: 'grant', grantSequence, frames: args[0].frames });
+      return call(method, args).then(result => {
+        record({ type: 'granted', grantSequence, durationMs: performance.now() - grantedAt });
+        return result;
+      });
+    };
+    engine.emit = event => {
+      if (event.type === 'audio.playout') record({ type: 'pcm', sequence: event.data.sequence });
+      return emit(event);
+    };
+    report.audioContinuity = { startedAt: new Date().toISOString(), durationMs: singleReceiverSoakMs,
+      timeOrigin: performance.timeOrigin, sampleCount: 0, samples: [] };
+    let nextProgress = 0;
+    while (performance.now() - start < singleReceiverSoakMs) {
+      if (errors.length) throw new AggregateError(errors, 'Single-receiver audio continuity failed.');
+      const value = await sample('viewer-a');
+      assert.equal(value.audio.sessions.length, 1);
+      assert.equal(value.audio.sessions[0].ready, true);
+      assert.deepEqual(value.audio.sessions[0].errors, []);
+      const observation = {
+        at: new Date().toISOString(), elapsedMs: performance.now() - start,
+        audio: value.audio.sessions[0],
+        audioScheduling: value.audioScheduling,
+        nativeEvents: nativeEvents.splice(0),
+        nativeOutput: receivers.get('viewer-a').audioOutput.owner.getStats(),
+        capture: hub.getStats(),
+        mainScheduling: { maxDelayMs: eventLoopDelay.max / 1e6, p99DelayMs: eventLoopDelay.percentile(99) / 1e6 },
+        presentedFrames: value.playback?.counters.presentedFrames,
+      };
+      // Keep the full timeline on disk, not as growing live objects beside real-time media.
+      if (report.audioContinuity.samples.length < 2) report.audioContinuity.samples.push(observation);
+      else report.audioContinuity.samples[1] = observation;
+      report.audioContinuity.sampleCount++;
+      eventLoopDelay.reset();
+      fs.appendFileSync(path.join(directory, 'audio-samples.jsonl'), JSON.stringify(observation) + '\n');
+      if (report.audioContinuity.sampleCount % 5 === 0) {
+        const progress = { ...report, audioContinuity: { ...report.audioContinuity, samples: [observation] } };
+        fs.writeFileSync(path.join(directory, 'progress.json'), JSON.stringify(progress, null, 2) + '\n');
+      }
+      if (performance.now() - start >= nextProgress) {
+        console.log('AUDIO_CONTINUITY', JSON.stringify({ elapsedMs: performance.now() - start,
+          durationMs: singleReceiverSoakMs, playout: value.audio.sessions[0].sink.playout }));
+        nextProgress += 30000;
+      }
+      await delay(Math.min(1000, Math.max(0, singleReceiverSoakMs - (performance.now() - start))));
+    }
+    report.audioContinuity.finishedAt = new Date().toISOString();
+    if (requireAudioContinuity) {
+      const first = report.audioContinuity.samples[0], last = report.audioContinuity.samples.at(-1);
+      const before = first.audio.sink.playout, after = last.audio.sink.playout;
+      assert.ok(last.elapsedMs - first.elapsedMs >= singleReceiverSoakMs * .95);
+      assert.ok(after.renderedFrames - before.renderedFrames >= (last.elapsedMs - first.elapsedMs) * 48 * .95,
+        'Actual AudioWorklet output did not keep up with elapsed playback time.');
+      const videoFps = (last.presentedFrames - first.presentedFrames) * 1000 / (last.elapsedMs - first.elapsedMs);
+      assert.ok(videoFps >= source.video.fps * .85, `Continuous A/V presentation slowed to ${videoFps.toFixed(2)} FPS.`);
+      for (const counter of ['underruns', 'silenceFrames', 'discardedFrames'])
+        assert.equal(after[counter], before[counter], `Continuous audio increased ${counter}.`);
+      const signalBefore = first.nativeOutput.pcmSignal, signalAfter = last.nativeOutput.pcmSignal;
+      assert.ok(signalAfter.nonzeroFrames - signalBefore.nonzeroFrames
+        >= (signalAfter.frames - signalBefore.frames) * .99, 'The native mixer introduced gaps in the real source tone.');
+      assert.ok(signalAfter.normalizedCrossCorrelation < -.9, 'The real received stereo source was not preserved.');
+      assert.equal(last.capture.capture.droppedPackets, first.capture.capture.droppedPackets);
+      report.audioContinuity.videoFps = videoFps;
+      report.audioContinuity.verified = true;
+    }
+    return;
+  }
   await start('viewer-b', 'source');
   await start('viewer-c', lowerQuality);
   assert.equal(senders.length, 2);
