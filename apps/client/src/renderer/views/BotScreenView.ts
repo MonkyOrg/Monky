@@ -1,9 +1,10 @@
-import { MessageType, Permission, botScreenSchema, botScreenRemovedSchema, type BotScreen, type BotScreenAction } from '@monky/shared';
+import { BOT_SCREEN_PERMISSION_POLICY_VERSION, MessageType, Permission, botScreenSchema, botScreenRemovedSchema, type BotScreen, type BotScreenAction } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
 import { getLanguage, t, type TranslationKey } from '../i18n';
 import { botRequestError } from '../utils/botInputs';
 import { getBotVoiceContext, type BotVoiceContext } from '../utils/botVoice';
 import { BotScreenFrame } from './BotScreenFrame';
+import { showConfirm } from './Dialog';
 
 /** A persistent stage tile; viewing and layout never change the game's seats. */
 export class BotScreenView {
@@ -24,6 +25,7 @@ export class BotScreenView {
   private focused = false;
   private requestId: string | null = null;
   private endRequestId: string | null = null;
+  private pendingConsent: AbortController | null = null;
   private unbind: Array<() => void>;
 
   constructor(
@@ -86,23 +88,57 @@ export class BotScreenView {
   get isWatching(): boolean { return this.frame !== null; }
   get isEnding(): boolean { return this.endRequestId !== null; }
 
-  open(): void {
-    if (this.frame || !this.canRead()) return;
-    const frame = new BotScreenFrame(this.screen, {
-      id: this.context.user.id, nickname: this.context.user.nickname, locale: getLanguage(),
-    }, (action) => { void this.act(action); }, error => {
-      console.error('[Bot screens] Could not open miniapp document.', error);
-      this.leave();
-      this.error.textContent = t('botScreen.openError');
-      this.error.hidden = false;
-    });
-    this.frame = frame;
-    this.body.append(frame.element);
-    this.placeholder.hidden = true;
-    this.localize();
+  async open(): Promise<void> {
+    if (this.frame || this.pendingConsent || !this.canRead()) return;
+    const controller = new AbortController();
+    this.pendingConsent = controller;
+    const screen = this.screen;
+    this.error.hidden = true;
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      if (controller.signal.aborted || this.pendingConsent !== controller || !this.canRead()) return;
+      const approved = await showConfirm({
+        title: t('botScreen.permissionTitle', { title: screen.title }),
+        message: t('botScreen.permissionMessage'),
+        confirmLabel: t('botScreen.permissionAllow'),
+        cancelLabel: t('botScreen.permissionDeny'),
+        variant: 'info',
+        requireUserGesture: true, focusCancel: true, signal: controller.signal,
+      });
+      if (controller.signal.aborted || this.pendingConsent !== controller || !this.canRead()) return;
+      if (!approved) {
+        this.error.textContent = t('botScreen.permissionDenied');
+        this.error.hidden = false;
+        return;
+      }
+      if (this.screen.id !== screen.id || this.screen.instanceId !== screen.instanceId ||
+          this.screen.botId !== screen.botId || this.screen.html !== screen.html) {
+        throw new Error('Miniapp changed during permission review.');
+      }
+      const frame = new BotScreenFrame(this.screen, {
+        id: this.context.user.id, nickname: this.context.user.nickname, locale: getLanguage(),
+      }, {
+        policyVersion: BOT_SCREEN_PERMISSION_POLICY_VERSION, serverKey: this.context.session.key,
+        botId: screen.botId, screenId: screen.id, instanceId: screen.instanceId,
+      }, (action) => { void this.act(action); }, error => {
+        console.error('[Bot screens] Could not open miniapp document.', error);
+        this.leave();
+        this.error.textContent = t('botScreen.openError');
+        this.error.hidden = false;
+        appEvents.emit('stage.bot_screens_changed');
+      });
+      this.frame = frame;
+      this.body.append(frame.element);
+      this.placeholder.hidden = true;
+      this.localize();
+    } finally {
+      if (this.pendingConsent === controller) this.pendingConsent = null;
+    }
   }
 
   leave(): void {
+    this.pendingConsent?.abort();
+    this.pendingConsent = null;
     if (this.requestId) this.context.session.client.cancelRequest(this.requestId);
     this.requestId = null;
     this.frame?.destroy();
@@ -171,6 +207,7 @@ export class BotScreenView {
     };
     label(this.openButton, 'botScreen.openView', 'smart_display');
     label(this.close, 'botScreen.close', 'visibility_off');
+    this.close.title = t('botScreen.permissionRevokeHint');
     label(this.endButton, this.endRequestId ? 'botScreen.ending' : 'botScreen.end', 'stop_circle');
     this.endButton.title = t('botScreen.endHint');
     this.endButton.hidden = !this.canEnd();

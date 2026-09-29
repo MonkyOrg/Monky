@@ -100,6 +100,35 @@ o estado compartilhado e não libera automaticamente uma vaga de jogador.
 
 ## Recursos web do miniapp
 
+O administrador do servidor autoriza a capacidade `miniapps` do bot na revisão
+de permissões. Quem abre uma visualização recebe apenas um aviso informativo,
+com **Continuar e abrir** ou **Cancelar**; não escolhe capacidades nem concede
+novas permissões ao bot. O aviso descreve rede (inclusive rede local),
+armazenamento web, áudio/vídeo, arquivos escolhidos manualmente, downloads,
+tela cheia, captura do cursor e os dados fornecidos pelo bridge. Selecionar um
+arquivo permite que o app o leia e eventualmente o envie pela rede.
+
+Cancelar não cria o documento nem executa seu código. Sair, perder acesso, mudar de
+sala/servidor ou desconectar encerra a visualização e revoga as ações pelo bridge; abrir
+novamente exibe o aviso. Confirmar a abertura não ignora permissões negadas pelo
+administrador, nem confirma em nome de outros participantes. Execução local de
+ferramentas continua com suas próprias confirmações no computador executor.
+
+Quem hospeda o MonkyBot confirma separadamente a execução na máquina/VPS.
+Esse consentimento não concede capacidades em servidores Monky e não cria uma
+sandbox do sistema operacional.
+
+Páginas externas dentro do miniapp podem
+registrar Service Workers que continuam executando depois de fechar a visualização.
+O descarte da origem `monky-miniapp://…` não remove armazenamento ou workers de
+outras origens. Portanto, fechar a visualização não é uma revogação completa dos
+recursos web. O aviso informa esse comportamento sem prometer isolamento de
+todos os recursos externos.
+
+O aviso não adiciona restrições artificiais de rede: WebRTC não é coberto por
+`connect-src`. Quem cancela não executa o miniapp. Câmera, microfone e outros recursos não
+suportados continuam bloqueados mesmo após a confirmação.
+
 O documento tem uma origem própria e aleatória `monky-miniapp://…`, separada do Monky e de outras visualizações. Não é um `srcdoc` com a origem do aplicativo hospedeiro. É possível usar scripts e estilos externos, `fetch`, WebSocket, WebRTC, WebAssembly, Workers, canvas/WebGL, áudio/vídeo, formulários, armazenamento web, seleção de arquivos e downloads. Fullscreen e pointer lock seguem as regras de interação do navegador. Câmera, microfone, captura de tela, clipboard e dispositivos continuam sem autorização automática; o miniapp não herda as permissões do cliente.
 
 Os recursos externos seguem CORS e as regras do navegador. Configure o serviço para aceitar a origem do miniapp e use HTTPS/WSS em produção. A origem é nova a cada abertura: não use o armazenamento local como persistência da partida. Recursos grandes e tráfego em tempo real podem ir diretamente ao serviço do app; não precisam passar por `state` ou `sendAction`. Desse modo, o limite do envelope do Monky não limita o tamanho de uma engine, mídia ou arquivo carregado pela aplicação.
