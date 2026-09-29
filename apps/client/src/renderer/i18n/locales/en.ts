@@ -658,6 +658,7 @@ export const en: TranslationMap = {
   'screenShare.comingSoon': 'Coming soon',
   'screenShare.nativeReceiverUnavailable': 'The native receiver is unavailable. Monky will not switch to Chromium automatically.',
   'screenShare.nativeReceiverSettingsHint': 'You can select Chromium in Settings → Quality & sharing → Screen reception. Read the limitations before switching, then try watching again.',
+  'screenShare.chromiumReceiverSettingsHint': 'You are using the Chromium receiver, which cannot receive AV1 at high-resolution profiles. Select Native in Settings → Quality & sharing → Screen reception and try watching again, or ask the publisher to use H.264.',
   'settings.screenReceiverSection': 'Screen reception',
   'settings.screenReceiverNative': 'Native',
   'settings.screenReceiverNativeDesc': 'Default on Windows and macOS. Uses the native runtime included with Monky, with no automatic switch to Chromium.',

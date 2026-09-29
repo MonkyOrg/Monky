@@ -619,6 +619,7 @@ export const ptBR = {
   'screenShare.comingSoon': 'Em breve',
   'screenShare.nativeReceiverUnavailable': 'O receptor nativo não está disponível. Nenhuma troca automática para Chromium será feita.',
   'screenShare.nativeReceiverSettingsHint': 'Você pode selecionar Chromium em Configurações → Qualidade e compartilhamento → Recepção de tela. Leia o aviso de limitações antes de trocar e tente assistir novamente.',
+  'screenShare.chromiumReceiverSettingsHint': 'Você está usando o receptor Chromium, que não recebe AV1 em perfis de alta resolução. Selecione Nativo em Configurações → Qualidade e compartilhamento → Recepção de tela e tente assistir novamente, ou peça ao transmissor para usar H.264.',
   'settings.screenReceiverSection': 'Recepção de tela',
   'settings.screenReceiverNative': 'Nativo',
   'settings.screenReceiverNativeDesc': 'Padrão no Windows e macOS. Usa o runtime nativo incluído no Monky, sem troca automática para Chromium.',
