@@ -169,6 +169,16 @@ Stretch scaling happens before the encoder. On Windows receivers, Media
 Foundation decodes and SharedTexture supplies frames to the stage and overlay.
 Chromium receivers negotiate the actual H.264 profile before accepting a subscription.
 
+On macOS 14+ (arm64/x64), ScreenCaptureKit captures windows/monitors,
+Core Image/Metal scales; VideoToolbox encodes H.264 and libaom encodes software AV1.
+The AV1 encoder reads NV12 in C++ outside the Renderer, retains the Mach timestamp
+and applies bitrate/keyframe changes on the same serial capture queue. Process-isolated RTC
+transports video over P2P/SFU; VideoToolbox decodes H.264 and the software AV1
+decoder handles reception of that codec. Mach rights transfer IOSurfaces to Main;
+release requires Chromium's actual reference-retirement proof. Original audio
+uses Mach timestamps, not QPC. Per-decoder counters and native clocks measure
+FPS without confusing the requested profile with observed delivery.
+
 Each demanded profile owns a pipeline; viewers of the same profile share
 capture/encoding, but not viewing authorization. Limits are four profiles per
 source and 16 viewers per profile. With no demand, the pipeline closes and only
@@ -588,7 +598,7 @@ is why Monky has a native C++ module:
 | Platform | How |
 |---|---|
 | **Windows** | WASAPI *process loopback* — captures system sound or a specific app's, excluding Monky itself so it does not echo |
-| **macOS** | ScreenCaptureKit (macOS 13+), with a window filter so audio from apps you are not sharing does not leak |
+| **macOS** | ScreenCaptureKit (macOS 13+ for audio; native video requires 14+), capturing system audio or the entire selected application after confirmation |
 | **Others** | Not supported — the app keeps working, just without screen audio |
 
 If the module fails to load, nothing breaks: sharing keeps working without sound
@@ -690,9 +700,11 @@ Things that follow directly from the architecture, and are not bugs:
   `PROTOCOL_VERSION`; updating only one side breaks the connection.
 - **Screen audio only on Windows and macOS**, because it depends on each system's
   native API.
-- **Native publishing is qualified for Windows x64, windows and AMD/AMF H.264.**
-  Other paths retain Chromium. Windows loopback does not replace external
-  network QA, other GPU vendors or physical macOS testing.
+- **Qualification depends on hardware.** The macOS path was exercised on M1
+  with P2P/SFU audio/video and approximately 57 FPS at 4K60. The probe accepts
+  Main 6.0/4K120, but that does not qualify sustained 120 FPS or Intel GPUs.
+  Loopback and x64 compilation through Rosetta do not replace external-network
+  or Intel-hardware QA.
 
 ## Learn more
 

@@ -5,7 +5,7 @@ const { pathToFileURL } = require('node:url');
 const { NativeVideoPresentationSink } = require('../runtime/presentationSink.cjs');
 const { registerTextureReceiver } = require('../runtime/textureReceiver.cjs');
 const { EncodedPreviewRenderer } = require('../runtime/encodedPreviewRenderer.cjs');
-const { NATIVE_SCREEN_PREVIEW_IPC } = require('@monky/shared');
+const { NATIVE_SCREEN_PREVIEW_IPC, NATIVE_SCREEN_IPC, NATIVE_SCREEN_EVENT } = require('@monky/shared');
 const errors = [];
 let sink, pixels, presentationId, preview, copyPending = false;
 const onError = error => { errors.push(error.message); console.error(error); };
@@ -47,7 +47,26 @@ ipcRenderer.on(NATIVE_SCREEN_PREVIEW_IPC.port, (event, info) => {
   preview.attach(event.ports[0]);
 });
 
+async function stop() {
+  await preview?.stop(); preview = null;
+  const current = sink;
+  sink = null; presentationId = null;
+  return current ? current.stop() : null;
+}
+ipcRenderer.on(NATIVE_SCREEN_EVENT, (_event, value) => {
+  if (value.type === 'error') onError(new Error(value.message));
+  if (value.type === 'presentation-stop') {
+    void (async () => {
+      if (value.presentationId !== presentationId) throw new Error('Unexpected owned presentation retirement.');
+      await stop();
+      await ipcRenderer.invoke(NATIVE_SCREEN_IPC.reply, {
+        callId: value.callId, requestId: value.requestId, ok: true, value: null,
+      });
+    })().catch(onError);
+  }
+});
 contextBridge.exposeInMainWorld('nativeCaptureSmoke', {
+  command: value => ipcRenderer.invoke(NATIVE_SCREEN_IPC.invoke, value),
   async start(id, encoded = false) {
     if (sink) throw new Error('A smoke presentation is already active.');
     presentationId = id; pixels = null;
@@ -58,10 +77,5 @@ contextBridge.exposeInMainWorld('nativeCaptureSmoke', {
   async sample() {
     return { pixels, errors: [...errors], sampledAtMs: performance.now(), playback: await sink?.sample(), audio: audio.getStats() };
   },
-  async stop() {
-    await preview?.stop(); preview = null;
-    const current = sink;
-    sink = null; presentationId = null;
-    return current ? current.stop() : null;
-  },
+  stop,
 });

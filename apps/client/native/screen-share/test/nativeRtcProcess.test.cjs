@@ -18,6 +18,41 @@ function fixture(options = {}) {
   return { engine, events };
 }
 
+test('IOSurface IDs become Main-local leases and survive host death until external references retire', async () => {
+  const surfaces = require('./fixtures/rtcProcessSurfaces.cjs');
+  for (const crash of [false, true]) {
+    const events = [];
+    const engine = new ProcessEngine({
+      filename: path.join(__dirname, 'fixtures', 'rtcProcessAddonMac.cjs'),
+      handlesFile: path.join(__dirname, 'fixtures', 'rtcProcessSurfaces.cjs'),
+      capabilities: { fixture: 'owned-rtc-process', decodedOutput: 'NV12_IOSURFACE_LEASE' },
+      options: { operationTimeoutMs: 2000 }, onEvent: event => events.push(event),
+    });
+    try {
+      await engine.ready;
+      await engine.request(1, 'surface', 0, {});
+      const frame = events.find(event => event.type === 'frame');
+      assert.deepEqual(Object.keys(frame.data.textureInfo.handle), ['ioSurface']);
+      assert.equal(frame.data.textureInfo.handle.ioSurface.readBigUInt64LE(), 0x12345678n);
+      assert.equal(surfaces.leases.size, 1);
+      assert.equal(engine.leases.size, 1);
+      if (crash) {
+        engine.child.kill();
+        await engine.exitState.promise;
+        assert.equal(surfaces.leases.size, 1, 'OS exit cannot revoke Main/Chromium IOSurface ownership.');
+      }
+      const receipt = await engine.releaseFrame(1, 'all-references-released');
+      assert.equal(receipt.ok, true);
+      assert.equal(surfaces.leases.size, 0);
+      await engine.close();
+    } finally {
+      if (!engine.hostExited) { engine.child.kill(); await engine.exitState.promise; }
+      if (engine.leases.has(1)) await engine.releaseFrame(1, 'unused');
+      await engine.close();
+    }
+  }
+});
+
 test('RTC addon executes exclusively in an owned OS process; close waits for exit and new engine recovers', async () => {
   for (let index = 0; index < 2; index++) {
     const { engine } = fixture();

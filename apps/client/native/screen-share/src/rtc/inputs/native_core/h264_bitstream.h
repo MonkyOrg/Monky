@@ -44,6 +44,7 @@ std::uint8_t RequiredH264Level(std::uint32_t width, std::uint32_t height,
 std::uint32_t H264LevelMaxBitrate(std::uint8_t level);
 H264Sps ParseBaselineSps(std::span<const std::uint8_t> nal);
 H264Sps ParseH264Sps(std::span<const std::uint8_t> nal);
+H264Sps ParseProfileLevelId(const std::string& value);
 bool MatchesH264Profile(const H264Sps& sps, H264Profile profile);
 bool IsBt709LimitedCompatible(const H264Sps& sps);
 

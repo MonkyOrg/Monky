@@ -16,7 +16,7 @@ async function main() {
   const host = new MacNativeHost(loadMacCaptureRuntime().executable);
   try {
     const result = await host.request('media.probe', { video: {
-      width: 320, height: 180, fps: 30, bitrateKbps: 1000, mode: 'software', scaleMode: 'fit',
+      width: 320, height: 180, fps: 30, bitrateKbps: 1000, mode: 'software', scaleMode: 'fit', codec: 'h264',
     } });
     assert.equal(result.value.sessionUsesHardware, false);
     assert.equal(result.value.hardwareExecutionObserved, null);

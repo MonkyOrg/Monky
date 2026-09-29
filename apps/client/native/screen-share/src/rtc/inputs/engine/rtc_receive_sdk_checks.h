@@ -6,16 +6,16 @@
 #include <thread>
 
 #include "rtc_receive_diagnostics.h"
-#include "api\field_trials_view.h"
-#include "api\task_queue\task_queue_base.h"
-#include "api\video\i420_buffer.h"
-#include "modules\video_coding\generic_decoder.h"
-#include "modules\video_coding\include\video_coding_defines.h"
-#include "modules\video_coding\timing\timing.h"
-#include "rtc_base\logging.h"
-#include "system_wrappers\include\clock.h"
-#include "video\receive_statistics_proxy.h"
-#include "video\video_stream_buffer_controller.h"
+#include "api/field_trials_view.h"
+#include "api/task_queue/task_queue_base.h"
+#include "api/video/i420_buffer.h"
+#include "modules/video_coding/generic_decoder.h"
+#include "modules/video_coding/include/video_coding_defines.h"
+#include "modules/video_coding/timing/timing.h"
+#include "rtc_base/logging.h"
+#include "system_wrappers/include/clock.h"
+#include "video/receive_statistics_proxy.h"
+#include "video/video_stream_buffer_controller.h"
 
 #include <deque>
 #include <memory>

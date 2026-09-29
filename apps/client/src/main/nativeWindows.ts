@@ -21,7 +21,7 @@ type Inspection = {
   monitorState(deviceId: string): NativeMonitorInfo | null;
   isWindowExcluded?(hwnd: number): boolean;
 };
-type MonitorTarget = Extract<NativeScreenCaptureTarget, { kind: 'monitor' }>;
+type MonitorTarget = Extract<NativeScreenCaptureTarget, { deviceId: string }>;
 type WindowTarget = Extract<NativeScreenCaptureTarget, { hwnd: number }>;
 
 function monitorTarget(monitor: NativeMonitorInfo): MonitorTarget {

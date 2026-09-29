@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Compartilhamento nativo no macOS 14+: transmita janelas ou monitores com áudio em H.264 (VideoToolbox) ou AV1 por software (CPU) e assista nativamente aos dois codecs. Apple Silicon e Intel; perfis até 4K/120 FPS, sujeitos ao hardware, à fonte e à rede.",
+  "en": "Native screen sharing on macOS 14+: share windows or monitors with audio in H.264 (VideoToolbox) or software AV1 (CPU), and watch both codecs natively. Apple Silicon and Intel; profiles up to 4K/120 FPS, subject to hardware, source and network limits."
+}

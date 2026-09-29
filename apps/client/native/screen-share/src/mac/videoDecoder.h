@@ -12,6 +12,7 @@ class VideoDecoder {
   VideoDecoder(const VideoDecoder&) = delete;
   VideoDecoder& operator=(const VideoDecoder&) = delete;
   void Submit(const EncodedFrame& frame);
+  std::optional<bool> Hardware() const;
   void Close();
  private:
   struct State;

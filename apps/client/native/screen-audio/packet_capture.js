@@ -10,13 +10,14 @@ function createPacketCaptureFactory(binding, platform) {
     if (options.overflowMode !== undefined && !['fail', 'discontinue'].includes(options.overflowMode)) {
       throw new TypeError('overflowMode must be fail or discontinue');
     }
-    if (platform === 'win32' && binding && typeof binding.createPacketCapture === 'function') {
+    const supportedPlatform = platform === 'win32' || platform === 'darwin';
+    if (supportedPlatform && binding && typeof binding.createPacketCapture === 'function') {
       return binding.createPacketCapture(options, onEvent);
     }
-    const error = Object.assign(new Error(platform === 'win32'
+    const error = Object.assign(new Error(supportedPlatform
       ? 'Timestamped native audio capture module is unavailable'
-      : 'Timestamped WASAPI capture is only supported on Windows'), {
-      code: platform === 'win32' ? 'ERR_AUDIO_UNAVAILABLE' : 'ERR_AUDIO_UNSUPPORTED',
+      : 'Timestamped native audio capture requires Windows or macOS'), {
+      code: supportedPlatform ? 'ERR_AUDIO_UNAVAILABLE' : 'ERR_AUDIO_UNSUPPORTED',
     });
     const snapshot = Object.freeze({
       sessionId: null, state: 'failed', format: null, capturedPackets: 0,

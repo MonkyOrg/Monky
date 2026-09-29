@@ -81,19 +81,36 @@ test('AV1 preview derives profile, level and tier from the encoded sequence', ()
   assert.throws(() => av1Codec(highProfile), /profile/);
 });
 
-test('AV1 preview passes the actual encoded codec to WebCodecs', async () => {
+test('AV1 preview preserves the encoded codec and permits decoding without AV1 hardware', async () => {
   const platform = decoderPlatform(), port = new Port(), errors = [];
+  platform.VideoDecoder.isConfigSupported = async config => ({
+    supported: config.hardwareAcceleration === 'no-preference', config,
+  });
   const renderer = new EncodedPreviewRenderer({ acceptFrame() { assert.fail('No real frame was decoded.'); } },
     error => errors.push(error), platform);
   renderer.attach(port);
   port.receive({ ...packet(), codec: 'av1', data: av1Sequence });
   await renderer.tail;
   assert.equal(platform.decoders[0].config.codec, 'av01.0.04M.08');
+  assert.equal(platform.decoders[0].config.hardwareAcceleration, 'no-preference');
   assert.equal(platform.decoders[0].chunks.length, 1);
   assert.deepEqual(errors, []);
   await renderer.stop();
 });
 
+test('AV1 preview reports unsupported decoding rather than substituting another codec', async () => {
+  const platform = decoderPlatform(), port = new Port(), errors = [];
+  platform.VideoDecoder.isConfigSupported = async config => ({ supported: false, config });
+  const renderer = new EncodedPreviewRenderer({ acceptFrame() { assert.fail('Unsupported codec delivered a frame.'); } },
+    error => errors.push(error), platform);
+  renderer.attach(port);
+  port.receive({ ...packet(), codec: 'av1', data: av1Sequence });
+  await renderer.tail;
+  assert.equal(platform.decoders.length, 0);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].message, /does not support this AV1 stream/);
+  await renderer.stop();
+});
 test('preview accepts ordinary IPC buffers without requiring browser SharedArrayBuffer access', () => {
   assert.equal(nativeScreenPreviewPacketSchema.safeParse({ ...packet(), data: new Uint8Array(new SharedArrayBuffer(16)) }).success, false);
   const original = globalThis.SharedArrayBuffer;
@@ -252,6 +269,7 @@ test('presentation retirement aborts a blocked preview writer and releases alias
   port.receive(input);
   await tick();
   assert.equal(platform.decoders[0].config.codec, 'avc1.4d0033');
+  assert.equal(platform.decoders[0].config.hardwareAcceleration, 'prefer-hardware');
   let closed = 0;
   platform.decoders[0].callbacks.output({
     timestamp: input.timestampUs, codedWidth: 1920, codedHeight: 1080, displayWidth: 1920, displayHeight: 1080,

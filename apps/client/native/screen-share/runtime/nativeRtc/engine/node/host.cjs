@@ -9,12 +9,14 @@ const send = value => {
   if (parent) parent.postMessage(bytes);
   else process.send(bytes, error => { if (error) process.exit(71); });
 };
-let engine, parentHandles, timer, configured = false, closed = false;
+let engine, parentHandles, surfaceSender, timer, configured = false, closed = false;
 let nextEvent = 0, eventBytes = 0;
 const events = new Map(), pending = new Set();
 const inputLeases = new Map();
 const exit = code => { clearInterval(timer); process.exit(code); };
 function publish(event) {
+  if (event.type === 'frame' && surfaceSender)
+    surfaceSender.sendSurface(event.data.textureInfo.handle.ioSurfaceId, event.data.frameId);
   const id = ++nextEvent;
   const bytes = encode({ type: 'event', id, event });
   if (events.size >= 128 || eventBytes + bytes.length > 8 * 1024 * 1024) exit(72);
@@ -43,7 +45,10 @@ async function receive(bytes) {
     const addon = require(message.filename);
     const capabilities = addon.capabilities();
     assert.deepEqual(capabilities, message.capabilities, 'RTC binary capabilities differ from the verified build.');
-    if (message.handlesFile) parentHandles = require(message.handlesFile).openProcess(message.parentPid);
+    if (message.handlesFile && capabilities.decodedOutput !== 'NV12_IOSURFACE_LEASE')
+      parentHandles = require(message.handlesFile).openProcess(message.parentPid);
+    else if (capabilities.decodedOutput === 'NV12_IOSURFACE_LEASE')
+      surfaceSender = require(message.handlesFile).openSender(message.surfaceChannel);
     engine = addon.createEngine(message.options, publish);
     await engine.ready;
     send({ type: 'ready', snapshot: engine.snapshot(), capabilities });
@@ -75,6 +80,7 @@ async function receive(bytes) {
       closed = true;
       for (const lease of inputLeases.values()) lease.close();
       inputLeases.clear();
+      surfaceSender?.close();
     }
     send({ type: 'result', id: message.id, result });
   } catch (error) {

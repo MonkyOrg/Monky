@@ -5,6 +5,7 @@
 #include <winrt/base.h>
 
 #include "h264_bitstream.h"
+#include "encoder_config.h"
 #include "mf_h264_configuration_readback.h"
 
 #include <cstdint>
@@ -25,16 +26,6 @@ class EncoderError : public std::runtime_error {
       : std::runtime_error(std::move(message)), code(std::move(code)), hresult(hr) {}
   std::string code;
   HRESULT hresult;
-};
-
-struct EncoderConfig {
-  std::uint32_t width = 0;
-  std::uint32_t height = 0;
-  std::uint32_t fps = 0;
-  std::uint32_t bitrateBps = 0;
-  std::uint32_t maxInFlight = 8;
-  std::uint8_t level = 0;
-  H264Profile profile = H264Profile::Baseline;
 };
 
 // A real GPU frame. A caller may use an aliasing shared_ptr to retain its own

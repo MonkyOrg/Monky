@@ -25,13 +25,15 @@ class NativePcmCaptureHub {
     assert.equal(typeof captureModule?.createPacketCapture, 'function');
     assert.equal(typeof onError, 'function');
     assert.ok(selection && typeof selection === 'object' && !Array.isArray(selection));
-    assert.ok(Object.keys(selection).every(key => ['includeWindowId', 'excludePid', 'expectedProcessId'].includes(key)));
+    assert.ok(Object.keys(selection).every(key => ['includeWindowId', 'excludePid', 'expectedProcessId', 'expectedProcessStartTimeUs'].includes(key)));
     assert.ok(selection.excludePid === undefined || selection.excludePid === process.pid);
     assert.ok(selection.includeWindowId === undefined
       || (Number.isSafeInteger(selection.includeWindowId) && selection.includeWindowId > 0));
     assert.ok(selection.expectedProcessId === undefined || (selection.includeWindowId !== undefined
       && Number.isSafeInteger(selection.expectedProcessId) && selection.expectedProcessId > 0
       && selection.expectedProcessId <= 0xffffffff));
+    assert.ok(selection.expectedProcessStartTimeUs === undefined || (selection.expectedProcessId !== undefined
+      && typeof selection.expectedProcessStartTimeUs === 'string' && /^[1-9]\d{0,19}$/.test(selection.expectedProcessStartTimeUs)));
     this.#module = captureModule;
     this.#selection = Object.freeze({ ...selection });
     this.#onError = onError;

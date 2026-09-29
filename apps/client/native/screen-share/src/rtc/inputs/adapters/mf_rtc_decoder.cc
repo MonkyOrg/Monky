@@ -1,6 +1,6 @@
 #include "mf_rtc_internal.h"
 
-#include "api\rtp_packet_infos.h"
+#include "api/rtp_packet_infos.h"
 
 #include <algorithm>
 #include <cstring>
@@ -817,12 +817,12 @@ std::unique_ptr<webrtc::VideoDecoderFactory> MakeDecoderFactory(
 // Device-free DecoderWorker controls. Nothing below starts or initializes a worker.
 #include "mf_rtc_decoder_submit_checks.h"
 
-#include "api\environment\environment_factory.h"
-#include "api\make_ref_counted.h"
-#include "modules\video_coding\generic_decoder.h"
-#include "modules\video_coding\include\video_coding_defines.h"
-#include "rtc_base\logging.h"
-#include "system_wrappers\include\clock.h"
+#include "api/environment/environment_factory.h"
+#include "api/make_ref_counted.h"
+#include "modules/video_coding/generic_decoder.h"
+#include "modules/video_coding/include/video_coding_defines.h"
+#include "rtc_base/logging.h"
+#include "system_wrappers/include/clock.h"
 
 #include <numeric>
 #include <string_view>

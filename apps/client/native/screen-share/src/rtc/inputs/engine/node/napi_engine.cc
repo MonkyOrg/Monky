@@ -29,17 +29,24 @@
 #include <vector>
 
 #include "monky_rtc_engine.h"
-#include "audio\monky_rtc_audio.h"
+#include "audio/monky_rtc_audio.h"
 #include "input_leases.h"
 #include "event_queue.h"
 
-#if defined(__clang__) || !defined(_MSC_VER) || NAPI_VERSION != 8
+#if NAPI_VERSION != 8
+#error The RTC addon requires Node-API 8.
+#endif
+#if defined(_WIN32)
+#if defined(__clang__) || !defined(_MSC_VER)
 #error This consumer must be compiled independently with MSVC and Node-API 8.
 #endif
 #if !defined(_DLL) || !_HAS_EXCEPTIONS
 #error The Node consumer requires the dynamic MSVC CRT and C++ exceptions.
 #endif
 static_assert(_MSVC_LANG >= 202002L);
+#else
+static_assert(__cplusplus >= 202002L);
+#endif
 static_assert(sizeof(void*) == 8);
 static_assert(MONKY_ENGINE_ABI_VERSION == 2u);
 static_assert(MONKY_ENGINE_CONTRACT_REVISION == 8u);
@@ -101,9 +108,13 @@ constexpr size_t kEventQueueSize = 128;
 constexpr uint32_t kMaxJsonBytes = 1024 * 1024;
 constexpr uint32_t kMaxCloseWaitMs = 60000;
 constexpr uint32_t kSharedFrameFlags =
+#if defined(_WIN32)
     MONKY_ENGINE_SHARED_GPU_COPY | MONKY_ENGINE_SHARED_COPY_COMPLETE |
     MONKY_ENGINE_SHARED_KEYED_MUTEX_ZERO | MONKY_ENGINE_SHARED_RECLAIM_FENCE;
 static_assert(kSharedFrameFlags == 15u);
+#else
+    MONKY_ENGINE_SHARED_IOSURFACE;
+#endif
 constexpr napi_type_tag kEngineTag = {
     0x6d6f6e6b79525443ULL, 0x4e41504938000202ULL};
 
@@ -1523,10 +1534,7 @@ napi_value SharedFrameEnvelope(napi_env env, const StateOwner& state,
   if (String(env, Get(env, data, "format"), 4, 4, "Decoded format must be NV12") != "NV12") {
     ContractFailure(env, "Only explicit NV12 decoded leases are supported");
   }
-  if (Has(env, data, "gpuCopy") &&
-      !Boolean(env, Get(env, data, "gpuCopy"), "Decoded gpuCopy must be boolean")) {
-    ContractFailure(env, "Shared decoded NV12 must report its real GPU copy");
-  }
+  const bool gpu_copy = Boolean(env, Get(env, data, "gpuCopy"), "Decoded gpuCopy must be boolean");
 
   MonkyEngineSharedFrame frame{};
   frame.struct_size = sizeof(frame);
@@ -1542,7 +1550,12 @@ napi_value SharedFrameEnvelope(napi_env env, const StateOwner& state,
   if (frame.struct_size != sizeof(MonkyEngineSharedFrame) ||
       frame.abi_version != MONKY_ENGINE_ABI_VERSION || frame.reserved ||
       frame.pixel_format != MONKY_ENGINE_PIXEL_FORMAT_NV12 ||
-      frame.flags != kSharedFrameFlags || frame.gpu_copy_count != 1 ||
+      frame.flags != kSharedFrameFlags || frame.gpu_copy_count != static_cast<uint32_t>(gpu_copy) ||
+#if defined(_WIN32)
+      !gpu_copy ||
+#else
+      gpu_copy || frame.texture_nt_handle > UINT32_MAX ||
+#endif
       !frame.texture_nt_handle || frame.texture_nt_handle > INT64_MAX) {
     ContractFailure(env, "Invalid shared NV12 ABI, copy/reclamation flags or borrowed NT HANDLE");
   }
@@ -1575,7 +1588,11 @@ napi_value SharedFrameEnvelope(napi_env env, const StateOwner& state,
   // Electron45alpha6 duplicates this borrowed HANDLE internally. Neither this
   // Buffer nor the Node consumer owns a CloseHandle obligation.
   auto handles = Object(env);
+#if defined(_WIN32)
   Define(env, handles, "ntHandle", handle);
+#else
+  Define(env, handles, "ioSurfaceId", handle);
+#endif
   auto coded_size = Object(env);
   DefineNumber(env, coded_size, "width", frame.coded_width);
   DefineNumber(env, coded_size, "height", frame.coded_height);
@@ -1612,7 +1629,7 @@ napi_value SharedFrameEnvelope(napi_env env, const StateOwner& state,
     DefineNumber(env, output, "receiverEpoch", static_cast<double>(receiver_epoch));
   }
   Define(env, output, "format", Text(env, "NV12"));
-  DefineBool(env, output, "gpuCopy", true);
+  DefineBool(env, output, "gpuCopy", gpu_copy);
   Define(env, output, "textureInfo", texture_info);
   auto envelope = Object(env);
   Define(env, envelope, "type", Text(env, "frame"));
@@ -2478,15 +2495,24 @@ napi_value SubmitAudioPacket(napi_env env, napi_callback_info info) {
           timestamp_error != bool(packet.flags & 4))
         Invalid(env, "Capture flags disagree with their original raw bits");
       const auto device = Get(env, object, "devicePosition");
-      const auto qpc = Get(env, object, "qpcTimestampUs");
+      const auto clock = Get(env, object, "captureClock");
+      const bool explicit_clock = Type(env, clock) != napi_undefined;
+#if defined(__APPLE__)
+      if (!explicit_clock || String(env, clock, 1, 32, "Native audio clock is required") != "mach-host-us")
+        Invalid(env, "macOS audio requires its original Mach host clock timestamp");
+#else
+      if (explicit_clock && String(env, clock, 1, 32, "Invalid native audio clock") != "qpc-us")
+        Invalid(env, "Windows audio requires its original QPC clock timestamp");
+#endif
+      const auto qpc = Get(env, object, explicit_clock ? "captureTimestampUs" : "qpcTimestampUs");
       if (timestamp_error) {
         if (Type(env, device) != napi_null || Type(env, qpc) != napi_null)
-          Invalid(env, "Timestamp-invalid packets require null device/QPC anchors");
+          Invalid(env, "Timestamp-invalid packets require null device/capture anchors");
         packet.device_position = UINT64_MAX;
         packet.qpc_timestamp_us = -1;
       } else {
         packet.device_position = Type(env, device) == napi_null ? UINT64_MAX : Id(env, device, true);
-        packet.qpc_timestamp_us = Integer(env, qpc, 0, kMaxSafeInteger, "QPC anchor must be a safe integer");
+        packet.qpc_timestamp_us = Integer(env, qpc, 0, kMaxSafeInteger, "Capture clock anchor must be a safe integer");
       }
       packet.pcm_bytes = static_cast<uint32_t>(packet.frames * packet.channels * sizeof(float));
       if (packet.pcm_bytes > 1024 * 1024) Invalid(env, "Original audio packet exceeds 1 MiB");

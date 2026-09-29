@@ -3,19 +3,23 @@
 #include "operation_completion.h"
 #include "capture_clock.h"
 #include "encoded_video.h"
+#if defined(_WIN32)
 #include "cpu_frame_upload.h"
+#endif
 #include "screen_decoder_factory.h"
 #include "api/field_trials.h"
+#if defined(_WIN32)
 #include "encoder_diagnostics.h"
 #include "decoder_diagnostics.h"
+#endif
 #include "receive_routes.h"
-#include "presentation\presentation.h"
-#include "audio\runtime.h"
+#include "presentation/presentation.h"
+#include "audio/runtime.h"
 
-#include "audio\stereo_opus.h"
-#include "api\create_peerconnection_factory.h"
-#include "api\environment\environment_factory.h"
-#include "rtc_base\ssl_adapter.h"
+#include "audio/stereo_opus.h"
+#include "api/create_peerconnection_factory.h"
+#include "api/environment/environment_factory.h"
+#include "rtc_base/ssl_adapter.h"
 
 #include <algorithm>
 #include <array>
@@ -33,9 +37,20 @@
 namespace monky::native_rtc::engine {
 namespace {
 
-constexpr char kCapabilities[] =
+constexpr char kBaseCapabilities[] =
    R"({"abiVersion":2,"contractRevision":8,"audioExtensionVersion":1,"inputLeaseCorrelation":true,"pairedCaptureClock":true,"p2pReceiverRouting":true,"pcmTrackInput":true,"creditAudioPlayout":true,"calibratedAudioOutputClock":true,"perShareAvGroups":true,"sfuExplicitStreamId":true,"audioOutputInvalidation":true,"opusStereoNegotiation":true,"audioPreAdmissionRetry":true,"ownerScopedAudioOutput":true,"audioOutputEpochAdmission":true,"externallyEncodedH264":true,"externallyEncodedAV1":true,"encodedInputCopied":true,"encodedFeedback":true,"encodedProfileLevelId":"4d003c","encodedBitrateCeilingBps":80000000,"encodedInputMaximumBytes":4194304,"availabilityScope":"compiled-implementation-not-device-probe","videoAvailable":true,"p2pAvailable":true,"sfuAvailable":true,"audioAvailable":true,"audioRuntimeQualified":false,"captureAvailable":false,"presentationAvailable":true,"presentationStage":"shared-nv12-export-only-runtime-unqualified","presentationRuntimeQualified":false,"runtimeQualified":false,"hardwareExecutionObserved":null,"inputFormat":"NV12_SHARED_NT_KEY0","inputTimebase":"qpc-system-relative-us","encodedInputFormat":"H264_ANNEX_B","encodedInputFormats":["H264_ANNEX_B","AV1_OBU"],"decodedOutput":"NV12_SHARED_NT_LEASE","decodedTimestampSemantics":"rtc-render-deadline-or-immediate-us","audioInputFormat":"FLOAT32LE_ORIGINAL_PACKET","audioPlayoutFormat":"FLOAT32_STEREO_48000_480","codecs":["H264-constrained-baseline","H264-main","Opus-48000-2","AV1-main"],"scalabilityModes":["L1T1"]})";
 static_assert(MONKY_ENGINE_ABI_VERSION == 2 && MONKY_ENGINE_CONTRACT_REVISION == 8);
+
+const std::string kCapabilities = [] {
+  auto value = Json::parse(kBaseCapabilities);
+#if defined(__APPLE__)
+  value["inputFormat"] = nullptr;
+  value["inputTimebase"] = "mach-host-us";
+  value["decodedOutput"] = "NV12_IOSURFACE_LEASE";
+  value["presentationStage"] = "iosurface-export-only-runtime-unqualified";
+#endif
+  return value.dump();
+}();
 
 Json ErrorJson(const Error& error) {
   return {{"code", error.code}, {"message", error.what()}, {"status", error.status},
@@ -51,11 +66,17 @@ Error CurrentError() {
     return Error("ERR_RTC_AUDIO", error.what(),
         error.failure == audio::Failure::Closed ? MONKY_ENGINE_CLOSED : MONKY_ENGINE_INVALID);
   }
+#if defined(_WIN32)
   catch (const winrt::hresult_error& error) {
     return Error("ERR_RTC_COM", "A native COM operation failed", MONKY_ENGINE_FAILURE, error.code());
   }
+#endif
   catch (const std::bad_alloc&) {
+#if defined(_WIN32)
     return Error("ERR_RTC_MEMORY", "Native allocation failed", MONKY_ENGINE_FAILURE, E_OUTOFMEMORY);
+#else
+    return Error("ERR_RTC_MEMORY", "Native allocation failed", MONKY_ENGINE_FAILURE);
+#endif
   }
   catch (const std::exception&) { return Error("ERR_RTC_NATIVE", "Native operation failed"); }
   catch (...) { return Error("ERR_RTC_NATIVE", "Unknown native operation failure"); }
@@ -180,7 +201,7 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
     return factory_;
   }
   webrtc::Thread* SignalingThread() const override { return signaling_.get(); }
-  std::shared_ptr<mf::NativeRtcContext> MfContext() const override {
+  std::shared_ptr<video_backend::NativeRtcContext> MfContext() const override {
     std::lock_guard lock(mutex_);
     return mf_context_;
   }
@@ -372,7 +393,11 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
       try {
         auto gpu = context->GetDecodedFrame(input.video_frame_buffer());
         if (!gpu && input.video_frame_buffer()->type() == webrtc::VideoFrameBuffer::Type::kI420)
+#if defined(_WIN32)
           gpu = cpu_frame_upload_.Upload(input);
+#else
+          gpu = mac::UploadCpuFrame(input);
+#endif
         if (!gpu) throw Error("ERR_RTC_GPU_OUTPUT", "Unsupported decoded output", MONKY_ENGINE_UNSUPPORTED);
         if (!exporter->Submit(id, route, input.timestamp_us(), std::move(gpu))) {
           std::lock_guard lock(mutex_);
@@ -463,6 +488,7 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
   }
 
   void Submit(std::uint64_t source_id, const MonkyEngineInputFrame& input) {
+#if defined(_WIN32)
     SafeId(source_id);
     if (encoded_input_)
       throw Error("ERR_RTC_INPUT_MODE", "Encoded-H264 engines do not import NV12 input handles", MONKY_ENGINE_UNSUPPORTED);
@@ -491,6 +517,11 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
     frame->duration_us = input.duration_us;
     frame->ntp_time_ms = input.ntp_time_ms;
     source->Submit(std::move(frame));
+#else
+    (void)source_id; (void)input;
+    throw Error("ERR_RTC_INPUT_MODE", "macOS publishing accepts encoded frames, not Windows texture handles",
+                MONKY_ENGINE_UNSUPPORTED);
+#endif
   }
 
   void SubmitEncoded(std::uint64_t source_id, const MonkyEngineEncodedFrame& input) {
@@ -510,6 +541,7 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
   }
 
   void GetFrame(std::uint64_t id, MonkyEngineFrameCom& output) {
+#if defined(_WIN32)
     if (output.struct_size != sizeof(output) || output.abi_version != MONKY_ENGINE_ABI_VERSION)
       throw Error("ERR_RTC_ABI", "Frame COM structure mismatch", MONKY_ENGINE_INVALID);
     const auto frame_owner = PresentedFrame(id);
@@ -528,6 +560,11 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
     output.height = frame.info.height;
     output.reserved = 0;
     output.timestamp_us = frame.info.timestamp_us;
+#else
+    (void)id; (void)output;
+    throw Error("ERR_RTC_FRAME_MODE", "COM frames are unavailable on macOS; use IOSurface leases",
+                MONKY_ENGINE_UNSUPPORTED);
+#endif
   }
   void GetSharedFrame(std::uint64_t id, MonkyEngineSharedFrame& output) {
     if (output.struct_size != sizeof(output) || output.abi_version != MONKY_ENGINE_ABI_VERSION)
@@ -654,7 +691,7 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
       const auto& info = frame->info;
       Json data{{"frameId", id}, {"width", info.width}, {"height", info.height},
            {"codedWidth", info.coded_width}, {"codedHeight", info.coded_height},
-           {"timestampUs", info.timestamp_us}, {"format", "NV12"}, {"gpuCopy", true},
+           {"timestampUs", info.timestamp_us}, {"format", "NV12"}, {"gpuCopy", info.gpu_copy_count != 0},
            {"routeKind", frame->route.IsPeer() ? "peer" : "consumer"}};
       if (frame->route.IsPeer()) {
         data["receiverId"] = frame->route.receiver_id;
@@ -744,12 +781,12 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
     signaling_started_ = worker_started_ && signaling_->Start();
     if (!signaling_started_)
       throw Error("ERR_RTC_THREADS", "Cannot start RTC threads");
-    mf::AdapterOptions options;
+    video_backend::AdapterOptions options;
     options.maximum_h264_level = static_cast<std::uint8_t>(options_.maximum_h264_level);
     options.maximum_workers = 32;
     options.maximum_native_buffers = 256;
     options.operation_timeout = Timeout();
-    auto bundle = mf::CreateFactoryBundle(options);
+    auto bundle = video_backend::CreateFactoryBundle(options);
     bundle.decoder_factory = std::make_unique<ScreenDecoderFactory>(std::move(bundle.decoder_factory), encoded_input_, av1_);
     std::unique_ptr<webrtc::FieldTrialsView> video_field_trials =
         webrtc::FieldTrials::Create("WebRTC-Dav1dDecoder-CropToRenderResolution/Enabled/");
@@ -994,6 +1031,7 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
     auto mf = Json(nullptr);
     if (context) {
       const auto stats = context->Snapshot();
+#if defined(_WIN32)
       auto encoders = Json::array();
       for (const auto& encoder : stats.encoders) encoders.push_back(EncoderRuntimeJson(encoder));
       auto decoders = Json::array();
@@ -1007,6 +1045,9 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
             {"i420Readbacks", stats.i420_readbacks}, {"i420Failures", stats.i420_failures},
             {"hardwareExecutionObserved", stats.hardware_execution_observed ?
                 Json(*stats.hardware_execution_observed) : Json(nullptr)}};
+#else
+      mf = stats;
+#endif
     }
     std::lock_guard lock(mutex_);
     peer_snapshot_ = std::move(peers);
@@ -1114,11 +1155,15 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
   };
 
   void Run() noexcept {
+#if defined(_WIN32)
     bool apartment = false;
+#endif
     try {
+#if defined(_WIN32)
       const auto hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
       if (FAILED(hr)) throw Error("ERR_RTC_COM", "Cannot initialize control actor COM", MONKY_ENGINE_FAILURE, hr);
       apartment = true;
+#endif
       Initialize();
     } catch (...) { RememberCurrentFailure(); RequestClose(); }
     try {
@@ -1217,7 +1262,9 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
       presenter_.reset();
     }
     exporter.reset();
+#if defined(_WIN32)
     if (apartment) CoUninitialize();
+#endif
     {
       std::lock_guard lock(mutex_);
       done_ = true;
@@ -1235,7 +1282,9 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
   const MonkyEngineOptions options_;
   const bool encoded_input_;
   const bool av1_;
+#if defined(_WIN32)
   CpuFrameUpload cpu_frame_upload_;
+#endif
   mutable std::mutex mutex_;
   std::condition_variable wake_;
   std::mutex callback_mutex_, join_mutex_;
@@ -1263,7 +1312,7 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
   bool network_started_ = false, worker_started_ = false, signaling_started_ = false;
   bool ssl_started_ = false;
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory_;
-  std::shared_ptr<mf::NativeRtcContext> mf_context_;
+  std::shared_ptr<video_backend::NativeRtcContext> mf_context_;
   std::shared_ptr<EncodedVideoContext> encoded_context_;
   std::shared_ptr<CaptureClock> capture_clock_;
   std::shared_ptr<presentation::Exporter> presenter_;
@@ -1302,7 +1351,11 @@ MonkyEngineStatus Boundary(MonkyEngineError* error, Function&& function) noexcep
     try { return StoreError(error, rtc::CurrentError()); }
     catch (...) {
       error->status = MONKY_ENGINE_FAILURE;
+#if defined(_WIN32)
       error->hresult = E_OUTOFMEMORY;
+#else
+      error->hresult = 0;
+#endif
       std::snprintf(error->code, sizeof(error->code), "%s", "ERR_RTC_MEMORY");
       std::snprintf(error->message, sizeof(error->message), "%s", "Native error reporting allocation failed");
       return MONKY_ENGINE_FAILURE;

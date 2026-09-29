@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -43,6 +44,7 @@ struct VideoDecoder::State {
   CMVideoFormatDescriptionRef format = nullptr;
   VTDecompressionSessionRef session = nullptr;
   std::atomic<bool> failed{false};
+  std::atomic<int> hardware{-1};
   std::atomic<size_t> pending{0}, callbacks{0};
   screen_video::H264Bitstream bitstream;
   std::vector<uint8_t> sps, pps;
@@ -88,8 +90,19 @@ struct VideoDecoder::State {
       (__bridge NSString*)kCVPixelBufferMetalCompatibilityKey: @YES,
     };
     VTDecompressionOutputCallbackRecord callback{&State::Receive, this};
-    Check(VTDecompressionSessionCreate(kCFAllocatorDefault, format, nullptr,
+    NSDictionary* specification = @{
+      (__bridge NSString*)kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: @YES,
+    };
+    Check(VTDecompressionSessionCreate(kCFAllocatorDefault, format, (__bridge CFDictionaryRef)specification,
         (__bridge CFDictionaryRef)attributes, &callback, &session), "ERR_MAC_DECODE_SESSION");
+    CFTypeRef observed = nullptr;
+    const auto status = VTSessionCopyProperty(session,
+        kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder, kCFAllocatorDefault, &observed);
+    const bool valid = observed && CFGetTypeID(observed) == CFBooleanGetTypeID();
+    if (valid) hardware.store(CFBooleanGetValue(static_cast<CFBooleanRef>(observed)) ? 1 : 0);
+    if (observed) CFRelease(observed);
+    Check(status, "ERR_MAC_DECODE_HARDWARE_PROPERTY");
+    Require(valid, "ERR_MAC_DECODE_HARDWARE_PROPERTY");
   }
 };
 VideoDecoder::VideoDecoder(int width, int height, Output output, VideoEncoder::Failure failure)
@@ -100,12 +113,16 @@ VideoDecoder::VideoDecoder(int width, int height, Output output, VideoEncoder::F
 VideoDecoder::~VideoDecoder() {
   try { Close(); } catch (...) { std::terminate(); }
 }
+std::optional<bool> VideoDecoder::Hardware() const {
+  const auto observed = state_->hardware.load();
+  return observed < 0 ? std::nullopt : std::optional<bool>(observed != 0);
+}
 void VideoDecoder::Submit(const EncodedFrame& frame) {
   auto& self = *state_;
   Require(!self.closed && !self.failed.load(), "ERR_MAC_DECODE_CLOSED");
   Require(!frame.bytes.empty() && frame.bytes.size() <= 4 * 1024 * 1024 &&
       frame.timestamp_us >= 0 && frame.timestamp_us <= 9007199254740991LL &&
-      frame.timestamp_us > self.previous_timestamp && frame.duration_us > 0 &&
+      frame.timestamp_us > self.previous_timestamp && frame.duration_us >= 0 &&
       frame.duration_us <= 1000000 && self.pending.load() < 8, "ERR_MAC_DECODE_INPUT");
   const auto access_unit = self.bitstream.Convert(frame.bytes);
   Require(self.bitstream.Verified() && access_unit.hasPicture && access_unit.keyFrame == frame.keyframe &&
@@ -132,7 +149,7 @@ void VideoDecoder::Submit(const EncodedFrame& frame) {
         nullptr, 0, payload.size(), 0, &block), "ERR_MAC_DECODE_BLOCK");
     Check(CMBlockBufferReplaceDataBytes(payload.data(), block, 0, payload.size()), "ERR_MAC_DECODE_BLOCK_COPY");
     const size_t size = payload.size();
-    const CMSampleTimingInfo timing{CMTimeMake(frame.duration_us, 1000000),
+    const CMSampleTimingInfo timing{frame.duration_us ? CMTimeMake(frame.duration_us, 1000000) : kCMTimeInvalid,
       CMTimeMake(frame.timestamp_us, 1000000), kCMTimeInvalid};
     Check(CMSampleBufferCreateReady(kCFAllocatorDefault, block, self.format, 1, 1, &timing,
         1, &size, &sample), "ERR_MAC_DECODE_SAMPLE");

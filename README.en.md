@@ -119,6 +119,13 @@ window into the video frame without distortion, adding borders when needed.
 Turning it off stretches the window to fill that frame. This per-share choice
 survives quality changes and reconnection; it does not resize the window or monitor.
 
+On **macOS 14+ (Intel and Apple Silicon)**, windows and monitors use ScreenCaptureKit,
+VideoToolbox H.264 or software AV1 (libaom) and native WebRTC, with native reception
+and system/application audio. Select AV1 under Manual → Software → AV1;
+Automatic prioritizes hardware H.264. Software AV1 requires more CPU.
+Profiles reach 4K/120 FPS when source, hardware and network permit; they do not
+guarantee throughput. See requirements and limits in the [native guide](apps/client/native/screen-share/README.en.md).
+
 For native **window, monitor or Game Capture** on Windows x64, follow the
 [module guide](apps/client/native/screen-share/README.en.md): rebuilding addons
 for the pinned Electron, preparing libobs/WebRTC and meeting Python 3.11/MSVC/SDK

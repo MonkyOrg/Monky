@@ -1,7 +1,7 @@
 #pragma once
 
 #include "audio_types.h"
-#include "..\capture_clock.h"
+#include "../capture_clock.h"
 
 #include <memory>
 

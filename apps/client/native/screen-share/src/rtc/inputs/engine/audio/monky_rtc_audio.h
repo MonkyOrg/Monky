@@ -1,6 +1,6 @@
 #pragma once
 
-#include "..\monky_rtc_engine.h"
+#include "../monky_rtc_engine.h"
 
 #define MONKY_ENGINE_AUDIO_EXTENSION_VERSION 1u
 #define MONKY_ENGINE_EVENT_AUDIO_INPUT_RELEASED 10u
@@ -23,7 +23,7 @@ typedef struct MonkyEngineAudioPacket {
   uint64_t sequence;
   uint64_t frame_index;
   uint64_t device_position;  // UINT64_MAX when unavailable/unrequested; required with flags&4, optional with valid QPC.
-  int64_t qpc_timestamp_us;  // -1 only when timestamp_error.
+  int64_t qpc_timestamp_us;  // ABI name retained: QPC on Windows, Mach host on Apple; -1 on timestamp_error.
   uint32_t sample_rate;
   uint32_t channels;
   uint32_t channel_mask;

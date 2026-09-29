@@ -1,7 +1,7 @@
 #include "runtime.h"
 
-#include "..\peer_support.h"
-#include "api\make_ref_counted.h"
+#include "../peer_support.h"
+#include "api/make_ref_counted.h"
 
 #include <bit>
 #include <cstring>

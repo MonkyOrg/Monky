@@ -124,7 +124,7 @@ class EncodedPreviewRenderer {
     if (!this.decoder) {
       const config = { codec: packet.codec === 'av1' ? av1Codec(packet.data) : h264Codec(packet.data),
         codedWidth: packet.video.width, codedHeight: packet.video.height,
-        optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' };
+        optimizeForLatency: true, hardwareAcceleration: packet.codec === 'av1' ? 'no-preference' : 'prefer-hardware' };
       const supported = await this.platform.VideoDecoder.isConfigSupported(config);
       if (this.closed || !this.pending.has(packet.sequence)) return;
       if (!supported.supported) throw new Error(`The local preview does not support this ${packet.codec === 'av1' ? 'AV1' : 'H.264'} stream.`);

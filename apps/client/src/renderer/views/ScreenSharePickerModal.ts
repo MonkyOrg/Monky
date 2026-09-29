@@ -318,9 +318,9 @@ export class ScreenSharePickerModal {
     section.hidden = !visible;
     const label = section.querySelector<HTMLElement>('#share-method-label');
     if (label) label.textContent = source ? t('screenShare.captureMethodForWindow', { name: source.name }) : '';
-    const available = WINDOW_CAPTURE_METHODS.filter(method => this.supportsCaptureKind(method.id));
+    const available = this.windowCaptureMethods.filter(method => this.supportsCaptureKind(method.id));
     const focusMethod = available.find(method => method.id === this.windowCaptureMethod) ?? available[0];
-    for (const method of WINDOW_CAPTURE_METHODS) {
+    for (const method of this.windowCaptureMethods) {
       const button = section.querySelector<HTMLButtonElement>(`#share-method-${method.id}`);
       if (!button) continue;
       const supported = this.supportsCaptureKind(method.id);
@@ -344,23 +344,18 @@ export class ScreenSharePickerModal {
     }
   }
 
-  /** ScreenCaptureKit can only capture the whole system audio (#298). */
   private get isMac(): boolean {
     return window.api?.platform === 'darwin';
   }
 
-  /**
-   * Label for the "share audio" toggle. On Windows a shared window captures
-   * only that app's audio, so the label can promise "app audio". On macOS the
-   * OS captures the whole system mix even for a single window (#298), so the
-   * label must be honest instead of promising something we cannot deliver.
-   */
+  private get windowCaptureMethods() {
+    return WINDOW_CAPTURE_METHODS.filter(method => !this.isMac || method.id === 'window');
+  }
+
   private audioToggleLabel(tab: SourceTab): string {
     if (this.hasScreenAudio() && !this.canReplaceScreenAudio()) return t('screenShare.audioAlreadySharing');
     if (tab !== 'screen') {
-      return this.isMac
-        ? t('screenShare.shareAudioMacWindow')
-        : t('screenShare.shareAppAudio');
+      return t('screenShare.shareAppAudio');
     }
     return t('screenShare.shareAudio');
   }
@@ -427,7 +422,7 @@ export class ScreenSharePickerModal {
         <section id="share-window-methods" class="share-window-methods" hidden>
           <p id="share-method-label" class="share-method-label"></p>
           <div class="input-mode-cards share-capture-methods" role="group" aria-labelledby="share-method-label">
-            ${WINDOW_CAPTURE_METHODS.map(method => `
+            ${this.windowCaptureMethods.map(method => `
               <button type="button" id="share-method-${method.id}" class="input-mode-card"
                 aria-pressed="${this.windowCaptureMethod === method.id}" tabindex="-1" disabled>
                 <span class="input-mode-card-title">
@@ -802,12 +797,12 @@ export class ScreenSharePickerModal {
         modal.querySelector<HTMLButtonElement>(`#share-tab-${next.id}`)?.focus();
       }, options);
     }
-    for (const method of WINDOW_CAPTURE_METHODS) {
+    for (const method of this.windowCaptureMethods) {
       const button = modal.querySelector<HTMLButtonElement>(`#share-method-${method.id}`);
       button?.addEventListener('click', () => this.selectWindowCaptureMethod(method.id), options);
       button?.addEventListener('keydown', event => {
         if (this.isStarting || event.altKey || event.ctrlKey || event.metaKey || !this.selectedSource()) return;
-        const available = WINDOW_CAPTURE_METHODS.filter(item => this.supportsCaptureKind(item.id));
+        const available = this.windowCaptureMethods.filter(item => this.supportsCaptureKind(item.id));
         const index = available.findIndex(item => item.id === method.id);
         if (index < 0) return;
         let next: typeof available[number] | undefined;

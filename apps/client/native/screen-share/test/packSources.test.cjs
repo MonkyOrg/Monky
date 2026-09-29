@@ -34,7 +34,8 @@ test('source archive names use an unprefixed semantic version and reject path in
     assert.throws(() => options([`--version=${version}`]));
 });
 
-const python = process.env.PYTHON ?? path.resolve(__dirname, '..', '..', '..', '..', '..', '.native-screen', 'python', 'Scripts', 'python.exe');
+const python = process.env.PYTHON ?? path.resolve(__dirname, '..', '..', '..', '..', '..', '.native-screen',
+  ...(process.platform === 'darwin' ? ['mac-rtc', 'python-3.11', 'bin', 'python3'] : ['python', 'Scripts', 'python.exe']));
 test('the source archiver preserves a real file inventory without local-account metadata',
   { skip: !path.isAbsolute(python) || !fs.existsSync(python) }, t => {
     const directory = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'monky-source-archive-'));
@@ -79,4 +80,28 @@ test('the source archiver preserves a real file inventory without local-account 
     const checkout = spawnSync('git', ['-C', extractedSdk, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
     assert.equal(checkout.status, 0, checkout.stderr);
     assert.equal(fs.realpathSync.native(checkout.stdout.trim()), fs.realpathSync.native(extractedSdk));
+  });
+
+test('macOS sources preserve only explicitly enabled internal aliases, including upstream dangling links',
+  { skip: process.platform === 'win32' || !fs.existsSync(python) }, t => {
+    const directory = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'monky-mac-source-links-'));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const input = path.join(directory, 'input'), metadata = path.join(directory, 'metadata');
+    fs.mkdirSync(input); fs.mkdirSync(metadata);
+    fs.writeFileSync(path.join(input, 'source.cc'), 'owned source fixture\n');
+    fs.symlinkSync('source.cc', path.join(input, 'alias.cc'));
+    fs.symlinkSync('upstream-missing.txt', path.join(input, 'dangling.txt'));
+    assert.throws(() => sourceEntries(input, ['source.cc', 'alias.cc'], []), /Unexpected source alias/);
+    const entries = sourceEntries(input, ['source.cc', 'alias.cc', 'dangling.txt'], [], { allowInternalSymlinks: true });
+    fs.writeFileSync(path.join(directory, 'members.txt'), entries.join('\n') + '\n');
+    for (const filename of ['SOURCE-MANIFEST.json', 'SOURCE-README.md', 'SOURCE-README.en.md'])
+      fs.writeFileSync(path.join(metadata, filename), filename);
+    const result = spawnSync(python, ['-I', path.resolve(__dirname, '..', 'scripts', 'sourceArchive.py'),
+      `--root=${input}`, `--list=${path.join(directory, 'members.txt')}`, `--metadata=${metadata}`,
+      `--output=${path.join(directory, 'source.tar.xz')}`, '--allow-internal-symlinks'],
+    { encoding: 'utf8', timeout: 30000 });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(JSON.parse(result.stdout.trim()).sourceArchiveVerified, true);
+    fs.symlinkSync('../outside', path.join(input, 'escape'));
+    assert.throws(() => sourceEntries(input, ['escape'], [], { allowInternalSymlinks: true }), /Unsafe source archive/);
   });

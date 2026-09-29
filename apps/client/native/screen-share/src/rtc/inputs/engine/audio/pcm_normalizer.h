@@ -1,7 +1,7 @@
 #pragma once
 
 #include "audio_types.h"
-#include "common_audio\resampler\include\push_resampler.h"
+#include "common_audio/resampler/include/push_resampler.h"
 
 #include <functional>
 #include <memory>

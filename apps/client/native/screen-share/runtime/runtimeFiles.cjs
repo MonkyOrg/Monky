@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const encoded = require('./nativeRtc/engine/node/encoded.cjs');
+const defaultDirectory = () => path.resolve(__dirname, '..', 'bin', `${process.platform}-${process.arch}`);
 
 function verifiedFile(directory, record) {
   assert.ok(record && typeof record.path === 'string' && !path.isAbsolute(record.path));
@@ -21,7 +22,21 @@ function verifiedFile(directory, record) {
 // Hash verification only: neither this loader nor its support descriptor opens a
 // graphics device. probeCaptureCapabilities() or a selected CaptureBridge.prepare()
 // performs hardware probing; only the source-free probe also initializes an encoder.
-function loadCaptureRuntime(directory = path.resolve(__dirname, '..', 'bin', 'win32-x64')) {
+function loadCaptureRuntime(directory = defaultDirectory()) {
+  if (process.platform === 'darwin') {
+    const host = require('./mac/index.cjs').loadMacCaptureRuntime(directory);
+    const rtc = JSON.parse(fs.readFileSync(path.join(directory, 'rtc-build.json'), 'utf8'));
+    assert.equal(rtc.platform, 'darwin');
+    assert.equal(rtc.arch, process.arch);
+    const av1 = rtc.binaries.find(file => file.name === 'libmonky_av1.dylib');
+    assert.ok(av1, 'Rebuild the native macOS runtime with its AV1 encoder.');
+    verifiedFile(directory, { ...av1, path: av1.name });
+    return Object.freeze({ host, obs: null, capture: Object.freeze({
+      captureKinds: Object.freeze(['window', 'monitor']),
+      encoders: Object.freeze(['apple_vt_h264', 'apple_vt_h264_software', 'monky_aom_av1']),
+      requiresHardwareProbe: true, hardwareQualified: false,
+    }) });
+  }
   assert.equal(process.platform, 'win32', 'Native screen capture requires Windows.');
   assert.equal(process.arch, 'x64', 'Native screen capture requires x64.');
   const capture = JSON.parse(fs.readFileSync(path.join(directory, 'capture-build.json'), 'utf8'));
@@ -74,18 +89,27 @@ function loadCaptureRuntime(directory = path.resolve(__dirname, '..', 'bin', 'wi
   });
 }
 
-function loadRuntime(directory = path.resolve(__dirname, '..', 'bin', 'win32-x64')) {
+function loadRuntime(directory = defaultDirectory()) {
   const capture = loadCaptureRuntime(directory);
   const rtcBuild = JSON.parse(fs.readFileSync(path.join(directory, 'rtc-build.json'), 'utf8'));
   assert.equal(rtcBuild.schemaVersion, 1);
   assert.equal(rtcBuild.webrtcRevision, '36ea4535a500ac137dbf1f577ce40dc1aaa774ef');
-  assert.ok(Array.isArray(rtcBuild.binaries) && rtcBuild.binaries.length === 4);
-  for (const name of ['monky_screen_rtc.dll', 'monky_screen_rtc.node', 'monky_av1.dll', 'monky_native_handles.node']) {
+  const apple = process.platform === 'darwin';
+  if (apple) {
+    assert.equal(rtcBuild.platform, 'darwin');
+    assert.equal(rtcBuild.arch, process.arch);
+    assert.equal(rtcBuild.minimumMacOS, '14.0');
+  }
+  const binaries = apple ? ['libmonky_screen_rtc.dylib', 'libmonky_av1.dylib', 'monky_screen_rtc.node', 'monky_native_surfaces.node']
+    : ['monky_screen_rtc.dll', 'monky_screen_rtc.node', 'monky_av1.dll', 'monky_native_handles.node'];
+  assert.ok(Array.isArray(rtcBuild.binaries) && rtcBuild.binaries.length === binaries.length);
+  for (const name of binaries) {
     const file = rtcBuild.binaries.find(binary => binary.name === name);
     assert.ok(file); verifiedFile(directory, { ...file, path: name });
   }
   return Object.freeze({ ...capture, rtc: encoded.load(path.join(directory, 'monky_screen_rtc.node'), {
-    capabilities: rtcBuild.capabilities, handlesFile: path.join(directory, 'monky_native_handles.node'),
+    capabilities: rtcBuild.capabilities,
+    handlesFile: path.join(directory, apple ? 'monky_native_surfaces.node' : 'monky_native_handles.node'),
   }) });
 }
 

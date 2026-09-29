@@ -116,17 +116,18 @@
       "package.json",
       "!native/screen-share/{build,src,scripts,test}{,/**/*}",
       "!node_modules/@monky/screen-share/{build,src,scripts,test}{,/**/*}",
+      "!node_modules/**/build/node_gyp_bins{,/**/*}",
       "!apps/server/data{,/**/*}",
       "!node_modules/@monky/server/data{,/**/*}"
     ],
-    "extraFiles": [
-      {
-        "from": "../../LICENSE",
-        "to": "LICENSE"
-      }
-    ],
     "win": {
       "icon": "build/icon.ico",
+      "extraFiles": [
+        {
+          "from": "../../LICENSE",
+          "to": "LICENSE"
+        }
+      ],
       "target": [
         {
           "target": "nsis",
@@ -151,7 +152,22 @@
     "portable": {
       "artifactName": "Monky-${version}-win-${arch}-portable.${ext}"
     },
+    "linux": {
+      "extraFiles": [
+        {
+          "from": "../../LICENSE",
+          "to": "LICENSE"
+        }
+      ]
+    },
     "mac": {
+      "sign": "./native/screen-share/scripts/signMac.cjs",
+      "extraResources": [
+        {
+          "from": "../../LICENSE",
+          "to": "LICENSE"
+        }
+      ],
       "icon": "build/icon-mac.png",
       "category": "public.app-category.social-networking",
       "artifactName": "Monky-${version}-mac-${arch}.${ext}",

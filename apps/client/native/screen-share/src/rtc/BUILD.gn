@@ -1,7 +1,9 @@
 import("//build/config/c++/c++.gni")
 import("//webrtc.gni")
 
-assert(is_win && target_cpu == "x64" && is_clang && use_custom_libcxx)
+assert(((is_win && target_cpu == "x64") ||
+        (is_mac && (target_cpu == "arm64" || target_cpu == "x64"))) &&
+       is_clang && use_custom_libcxx)
 assert(!is_component_build && !is_debug)
 
 config("monky_screen_options") {
@@ -13,11 +15,34 @@ config("monky_screen_options") {
     "inputs/libmediasoupclient/include",
     "inputs/libsdptransform/include",
   ]
-  defines = [
-    "WEBRTC_WIN",
-    "NOMINMAX",
-    "WIN32_LEAN_AND_MEAN",
-  ]
+  if (is_win) {
+    defines = [ "WEBRTC_WIN", "NOMINMAX", "WIN32_LEAN_AND_MEAN" ]
+  } else {
+    defines = [ "WEBRTC_MAC", "WEBRTC_POSIX" ]
+  }
+}
+
+if (is_mac) {
+  rtc_library("monky_mac_rtc_adapters") {
+    sources = [
+      "inputs/adapters/codec_policy.cc",
+      "inputs/adapters/mac_rtc_adapters.mm",
+      "inputs/native_core/h264_bitstream.cc",
+      "../mac/videoDecoder.mm",
+    ]
+    include_dirs = [ "../mac" ]
+    cflags_objcc = [ "-fobjc-arc" ]
+    suppressed_configs = [ "//build/config/compiler:no_exceptions", "//build/config/compiler:no_rtti" ]
+    configs += [ "//build/config/compiler:exceptions", "//build/config/compiler:rtti", ":monky_screen_options" ]
+    public_configs = [ ":monky_screen_options" ]
+    frameworks = [ "Foundation.framework", "CoreVideo.framework", "CoreMedia.framework",
+                   "VideoToolbox.framework", "IOSurface.framework" ]
+    deps = [
+      "//api:make_ref_counted", "//api:scoped_refptr", "//api/video:video_frame",
+      "//api/video_codecs:video_codecs_api", "//common_video", "//third_party/libyuv",
+      "//modules/video_coding:video_codec_interface",
+    ]
+  }
 }
 
 rtc_shared_library("monky_av1") {
@@ -26,6 +51,9 @@ rtc_shared_library("monky_av1") {
   suppressed_configs = [ "//build/config/compiler:no_exceptions" ]
   configs += [ "//build/config/compiler:exceptions", ":monky_screen_options" ]
   deps = [ "//third_party/libaom", "//third_party/dav1d" ]
+  if (is_mac) {
+    ldflags = [ "-Wl,-install_name,@rpath/libmonky_av1.dylib" ]
+  }
 }
 
 rtc_library("monky_sdptransform") {
@@ -119,6 +147,7 @@ rtc_library("monky_qualified_mf_core") {
 
 rtc_library("monky_mf_rtc_adapters") {
   sources = [
+    "inputs/adapters/codec_policy.cc",
     "inputs/adapters/mf_rtc_common.cc",
     "inputs/adapters/mf_rtc_policy.cc",
     "inputs/adapters/mf_rtc_encoder.cc",
@@ -150,10 +179,11 @@ rtc_library("monky_mf_rtc_adapters") {
 rtc_shared_library("monky_screen_rtc") {
   output_name = "monky_screen_rtc"
   sources = [
-    "inputs/abi/rtc_link_probe.cc",
-    "inputs/abi/adapter_policy_probe.cc",
     "inputs/engine/engine.cc",
   ]
+  if (is_win) {
+    sources += [ "inputs/abi/rtc_link_probe.cc", "inputs/abi/adapter_policy_probe.cc" ]
+  }
   defines = [ "MONKY_RTC_BUILDING_DLL" ]
   suppressed_configs = [
     "//build/config/compiler:no_exceptions",
@@ -164,15 +194,14 @@ rtc_shared_library("monky_screen_rtc") {
     "//build/config/compiler:rtti",
     ":monky_screen_options",
   ]
-  ldflags = [
-    "/DELAYLOAD:mfplat.dll",
-    "/threads:4",
-  ]
+  if (is_win) {
+    ldflags = [ "/DELAYLOAD:mfplat.dll", "/threads:4" ]
+  } else {
+    ldflags = [ "-Wl,-install_name,@rpath/libmonky_screen_rtc.dylib" ]
+  }
   deps = [
     ":monky_mediasoupclient",
-    ":monky_mf_rtc_adapters",
     ":monky_rtc_engine_core",
-    ":monky_qualified_mf_core",
     ":monky_sdptransform",
     "//api:create_peerconnection_factory",
     "//api:libjingle_peerconnection_api",
@@ -181,6 +210,11 @@ rtc_shared_library("monky_screen_rtc") {
     "//third_party/dav1d",
     "//third_party/libyuv",
   ]
+  if (is_win) {
+    deps += [ ":monky_mf_rtc_adapters", ":monky_qualified_mf_core" ]
+  } else {
+    deps += [ ":monky_mac_rtc_adapters" ]
+  }
 }
 
 rtc_library("monky_rtc_engine_core") {
@@ -192,13 +226,18 @@ rtc_library("monky_rtc_engine_core") {
     "inputs/engine/audio/credit_audio_device.cc",
     "inputs/engine/audio/output_clock.cc",
     "inputs/engine/audio/runtime.cc",
-    "inputs/engine/gpu_source.cc",
     "inputs/engine/encoded_video.cc",
-    "inputs/engine/presentation/exporter.cc",
     "inputs/engine/peer_controller.cc",
     "inputs/engine/sfu_controller.cc",
     "inputs/engine/transport_parameters.cc",
   ]
+  if (is_win) {
+    sources += [ "inputs/engine/gpu_source.cc", "inputs/engine/presentation/exporter.cc" ]
+  } else {
+    sources += [ "inputs/engine/presentation/mac_exporter.mm" ]
+    cflags_objcc = [ "-fobjc-arc" ]
+    frameworks = [ "Foundation.framework", "CoreVideo.framework", "IOSurface.framework" ]
+  }
   suppressed_configs = [
     "//build/config/compiler:no_exceptions",
     "//build/config/compiler:no_rtti",
@@ -211,7 +250,6 @@ rtc_library("monky_rtc_engine_core") {
   public_configs = [ ":monky_screen_options" ]
   deps = [
     ":monky_mediasoupclient",
-    ":monky_mf_rtc_adapters",
     "//api:field_trials",
     "//api:libjingle_peerconnection_api",
     "//api:make_ref_counted",
@@ -235,15 +273,18 @@ rtc_library("monky_rtc_engine_core") {
     "//rtc_base:threading",
     "//stats:rtc_stats",
   ]
+  if (is_win) {
+    deps += [ ":monky_mf_rtc_adapters" ]
+  } else {
+    deps += [ ":monky_mac_rtc_adapters" ]
+  }
 }
 
 group("all") {
-  deps = [
-    ":monky_av1",
-    ":monky_screen_rtc",
-    ":monky_msvc_job",
-    ":monky_rtc_engine_contract_probe",
-  ]
+  deps = [ ":monky_screen_rtc", ":monky_av1" ]
+  if (is_win) {
+    deps += [ ":monky_msvc_job", ":monky_rtc_engine_contract_probe" ]
+  }
 }
 
 rtc_executable("monky_rtc_engine_contract_probe") {

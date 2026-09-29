@@ -17,9 +17,13 @@ struct SharedFrame {
   std::uint64_t id = 0;
   FrameRoute route;
   MonkyEngineSharedFrame info{};
+#if defined(_WIN32)
   winrt::com_ptr<ID3D11Texture2D> texture;
   winrt::com_ptr<ID3D11Fence> ready_fence;
   std::uint64_t ready_value = 0;
+#else
+  std::shared_ptr<const DecodedFrame> pixel;
+#endif
 };
 
 struct Completion {
@@ -47,7 +51,7 @@ class Exporter {
   // Called from RTC decode callbacks. Copies metadata/ownership only, never D3D
   // context work. False is bounded admission loss with no accepted lease.
   virtual bool Submit(std::uint64_t id, const FrameRoute& route, std::int64_t timestamp_us,
-                      std::shared_ptr<const screen_video::GpuDecodedFrame> frame) = 0;
+                      std::shared_ptr<const DecodedFrame> frame) = 0;
   // Thread-safe, nonblocking release admission; invalid/duplicate requests throw
   // Error without admission. Completion, not a successful return, retires the lease.
   virtual void Release(std::uint64_t id, std::uint32_t reason) = 0;

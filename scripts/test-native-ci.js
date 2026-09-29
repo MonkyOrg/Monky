@@ -210,6 +210,30 @@ test('release still generates corresponding sources from the clean version commi
   assert.match(step(build, 'Upload build artifacts').with.path, /release\/monky-native-sources-\*\.tar\.xz/u);
 });
 
+test('macOS native artifacts are built and tested in CI, then reused before release version mutation', () => {
+  const nativeMac = workflow('native-macos-validation.yml').jobs.sources;
+  assert.deepEqual(nativeMac.strategy.matrix.include.map(entry => entry.arch).sort(), ['arm64', 'x64']);
+  const audio = step(nativeMac, 'Build native audio and verify AppKit lifecycle requirements');
+  assert.match(audio.run, /node-gyp rebuild --directory=apps\/client\/native\/screen-audio/);
+  assert.match(audio.run, /macAudioRuntime\.test\.cjs/);
+  const prepare = step(ci.jobs.package, 'Build native macOS runtime and corresponding-source inputs');
+  assert.equal(prepare.if, "runner.os == 'macOS'");
+  assert.match(prepare.run, /for architecture in arm64 x64/);
+  assert.match(prepare.run, /packMacSources\.cjs --version=0\.0\.0-ci/);
+  assert.match(prepare.run, /npm run test:native-screen --workspace=apps\/client/);
+  assert.ok(ci.jobs.package.steps.indexOf(prepare)
+    < ci.jobs.package.steps.indexOf(step(ci.jobs.package, 'Package ${{ matrix.platform }} (dir, no publish)')));
+  const fresh = step(release.jobs.build, 'Build native media and corresponding sources (macOS)');
+  assert.match(fresh.if, /needs\.version\.outputs\.reuse_build != 'true'/);
+  const rebind = step(release.jobs.build, 'Bind approved corresponding sources to release (macOS)');
+  assert.equal(rebind.if, "needs.version.outputs.reuse_build == 'true' && runner.os == 'macOS'");
+  assert.match(rebind.run, /packMacSources\.cjs --from-ci --version=/);
+  assert.ok(release.jobs.build.steps.indexOf(rebind)
+    < release.jobs.build.steps.indexOf(step(release.jobs.build, 'Set build version')));
+  const verification = step(release.jobs.release, 'Verify corresponding sources before publishing binaries');
+  assert.match(verification.run, /check-native-source-release\.js[\s\S]*--mac/);
+});
+
 test('CI uploads only inventoried build outputs after testing, namespaced by immutable run attempt', () => {
   assert.deepEqual(ci.permissions, { contents: 'read' });
   assert.equal(step(ci.jobs['bot-tests'], 'Setup Python 3.11 (artifact regression tests)').with['python-version'], '3.11');

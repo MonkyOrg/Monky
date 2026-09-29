@@ -26,6 +26,7 @@ struct EncodedFrame {
 struct EncoderOptions {
   int width = 0, height = 0, fps = 0, bitrate_kbps = 0;
   bool hardware = false;
+  bool av1 = false;
 };
 class VideoEncoder {
  public:
@@ -41,9 +42,11 @@ class VideoEncoder {
   void Close();
   bool Hardware() const;
   bool Writable() const;
+  std::string ProfileLevelId() const;
  private:
   struct State;
   std::unique_ptr<State> state_;
 };
 NSDictionary* VideoEncoderSmoke(bool hardware);
+NSDictionary* ProbeVideoEncoder(EncoderOptions options);
 }

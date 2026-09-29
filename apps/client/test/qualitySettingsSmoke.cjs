@@ -107,7 +107,7 @@ async function runQualitySettingsSmoke() {
       settingsStore.preferredScreenCodec = 'h264';
       settingsStore.screenEncodingMode = 'hardware';
       settingsStore.screenEncodingStrategy = 'automatic';
-      settingsStore.screenShareReceiver = settingsStore.nativeScreenReceiverComingSoon ? 'chromium' : 'native';
+      settingsStore.screenShareReceiver = 'native';
       modal = new SettingsModal();
       for (const tab of Object.values(modal)) {
         if (tab !== modal.qualityTab && tab && typeof tab === 'object' && typeof tab.renderHtml === 'function') {
@@ -125,15 +125,14 @@ async function runQualitySettingsSmoke() {
       const voice = root.querySelector('#tab-panel-voice_video');
       const nativeReceiver = quality.querySelector('#screen-receiver-native');
       const chromiumReceiver = quality.querySelector('#screen-receiver-chromium');
-      const isMac = window.api.platform === 'darwin';
       check(nativeReceiver.tagName === 'BUTTON' && chromiumReceiver.tagName === 'BUTTON'
         && nativeReceiver.classList.contains('input-mode-card') && chromiumReceiver.classList.contains('input-mode-card'),
       'Receiver choices must use accessible selectable cards, not native radios.');
-      check(nativeReceiver.disabled === isMac && nativeReceiver.getAttribute('aria-pressed') === String(!isMac)
-        && chromiumReceiver.getAttribute('aria-pressed') === String(isMac),
-      'Native must be the Windows default; macOS must disable native and select Chromium.');
-      check(!isMac || nativeReceiver.textContent.includes(language.t('screenShare.comingSoon')),
-        'macOS must label unavailable native reception as coming soon.');
+      check(!nativeReceiver.disabled && nativeReceiver.getAttribute('aria-pressed') === 'true'
+        && chromiumReceiver.getAttribute('aria-pressed') === 'false',
+      'Native reception must be enabled by default on Windows and macOS.');
+      check(!nativeReceiver.textContent.includes(language.t('screenShare.comingSoon')),
+        'Implemented native reception must not be labeled as coming soon.');
       check(quality.querySelector('#screen-receiver-warning').textContent === language.t('settings.screenReceiverWarning')
         && quality.querySelector('#screen-receiver-apply').textContent === language.t('settings.screenReceiverApply'),
       'The receiver limitation and next-Watch application policy must be visible in the selected language.');
@@ -144,8 +143,11 @@ async function runQualitySettingsSmoke() {
       check(settingsStore.getScreenShareReceiver() === 'chromium' && chromiumReceiver.getAttribute('aria-pressed') === 'true',
         'Explicit Chromium selection must persist across settings reload.');
       nativeReceiver.click();
-      check(settingsStore.getScreenShareReceiver() === (isMac ? 'chromium' : 'native'),
-        'macOS cannot activate native reception; Windows can switch back explicitly.');
+      settingsStore.load(false);
+      check(settingsStore.getScreenShareReceiver() === 'native'
+        && nativeReceiver.getAttribute('aria-pressed') === 'true'
+        && chromiumReceiver.getAttribute('aria-pressed') === 'false',
+        'Windows and macOS must persist an explicit switch back to native reception.');
       const qualityTab = root.querySelector('[data-tab="quality"]');
       const menuLabel = locale === 'pt-BR' ? 'Qualidade e compartilhamento' : 'Quality & sharing';
       check(!/Verification pending|Verificação pendente/.test(quality.textContent),
@@ -164,7 +166,7 @@ async function runQualitySettingsSmoke() {
         'Manual codec selection must offer exact H.264 and AV1 only.');
       for (const codec of ['h264', 'av1'])
         check(!quality.querySelector(`#select-video-codec option[value="${codec}"]`).disabled,
-          'Both libobs modes must expose the implemented screen codec choices.');
+          'Both native encoding modes must expose the implemented screen codec choices.');
       const hardware = quality.querySelector('#screen-encoding-hardware');
       const software = quality.querySelector('#screen-encoding-software');
       const automatic = quality.querySelector('#screen-encoding-automatic');

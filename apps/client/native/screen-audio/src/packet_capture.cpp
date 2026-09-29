@@ -1,4 +1,4 @@
-#include "wasapi_capture.h"
+#include "packet_source.h"
 #include <napi.h>
 #include <algorithm>
 #include <memory>
@@ -72,9 +72,7 @@ struct State {
   // JS-thread-only admission receipts. They do not own native RTC processing.
   std::vector<std::shared_ptr<DeliveryCredit>> deliveryCredits;
   std::atomic<size_t> pendingEvents{0};
-  uint32_t excludedPid = 0;
-  uint32_t expectedPid = 0;
-  int64_t windowId = 0;
+  PacketCaptureSelection selection;
   std::mutex mutex;
   Format format;
   bool hasFormat = false;
@@ -347,7 +345,15 @@ void Deliver(napi_env env, napi_value callback, void*, void* data) noexcept {
       Set(env, value, "frameIndex", Number(env, timing.frameIndex));
       Set(env, value, "epoch", String(env, state.sessionId + ":" + std::to_string(timing.epoch)));
       Set(env, value, "devicePosition", timing.devicePosition ? Number(env, *timing.devicePosition) : Null(env));
-      Set(env, value, "qpcTimestampUs", timing.qpcTimestampUs ? Number(env, *timing.qpcTimestampUs) : Null(env));
+      const auto timestamp = timing.qpcTimestampUs ? Number(env, *timing.qpcTimestampUs) : Null(env);
+      Set(env, value, "captureTimestampUs", timestamp);
+#if defined(__MACOS__)
+      Set(env, value, "captureClock", String(env, "mach-host-us"));
+      Set(env, value, "qpcTimestampUs", Null(env));
+#else
+      Set(env, value, "captureClock", String(env, "qpc-us"));
+      Set(env, value, "qpcTimestampUs", timestamp);
+#endif
       auto flags = Object(env);
       Set(env, flags, "raw", Number(env, timing.flags));
       Set(env, flags, "silent", Boolean(env, (timing.flags & kSilent) != 0));
@@ -450,14 +456,11 @@ void Execute(Shared shared) noexcept {
   try {
     if (!state.lease.held()) throw Failure("ERR_AUDIO_BUSY", "Already capturing (legacy or packet mode)");
     if (!state.stop.load()) {
-      const auto target = ResolvePacketTarget(state.excludedPid, state.windowId);
-      if (state.expectedPid && target.pid != state.expectedPid)
-        throw Failure("ERR_AUDIO_TARGET", "The selected window no longer belongs to the expected process");
       Format format;
       Timeline timeline;
-      CaptureSink sink;
-      sink.ready = [&](const WAVEFORMATEX* wave) {
-        format = ParseWasapiFormat(wave, sizeof(WAVEFORMATEX) + wave->cbSize);
+      PacketCaptureSink sink;
+      sink.ready = [&](const Format& original) {
+        format = original;
         {
           std::lock_guard<std::mutex> lock(state.mutex);
           state.format = format;
@@ -483,7 +486,7 @@ void Execute(Shared shared) noexcept {
         if (queued == QueueResult::discarded) timeline.DiscontinueDelivery();
         return queued != QueueResult::stopped && !state.stop.load();
       };
-      RunWasapiCapture(target, state.stop, sink);
+      RunPacketCapture(state.selection, state.stop, sink);
     }
   } catch (const Failure& error) {
     state.Fail(error.code, error.what());
@@ -599,7 +602,7 @@ Napi::Value CreatePacketCapture(const Napi::CallbackInfo& info) {
       throw Failure("ERR_AUDIO_OPTIONS", "Expected (options, onEvent)");
     auto options = info[0].As<Napi::Object>();
     if (options.Has("sampleRate") || options.Has("channels"))
-      throw Failure("ERR_AUDIO_OPTIONS", "Packet mode preserves the original WASAPI format");
+      throw Failure("ERR_AUDIO_OPTIONS", "Packet mode preserves the original native capture format");
     const uint32_t excludedPid = static_cast<uint32_t>(Option(env, options, "excludePid", UINT32_MAX));
     const int64_t windowId = static_cast<int64_t>(Option(env, options, "includeWindowId", kSafeInteger));
     const uint32_t expectedPid = static_cast<uint32_t>(Option(env, options, "expectedProcessId", UINT32_MAX));
@@ -617,9 +620,19 @@ Napi::Value CreatePacketCapture(const Napi::CallbackInfo& info) {
     }
     state = std::make_shared<State>(env);
     state->discontinueOnOverflow = discontinueOnOverflow;
-    state->excludedPid = excludedPid;
-    state->windowId = windowId;
-    state->expectedPid = expectedPid;
+    state->selection.excludedPid = excludedPid;
+    state->selection.windowId = windowId;
+    state->selection.expectedPid = expectedPid;
+    if (options.Has("expectedProcessStartTimeUs") && !options.Get("expectedProcessStartTimeUs").IsUndefined()) {
+      const auto value = options.Get("expectedProcessStartTimeUs");
+      if (!expectedPid || !windowId || !value.IsString())
+        throw Failure("ERR_AUDIO_OPTIONS", "A process birth identity requires an included window and process");
+      const auto text = value.As<Napi::String>().Utf8Value();
+      if (text.empty() || text.size() > 20 || text.front() == '0' ||
+          !std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; }))
+        throw Failure("ERR_AUDIO_OPTIONS", "Invalid process birth identity");
+      state->selection.expectedProcessStartTimeUs = text;
+    }
     session = Object(env);
     napi_value ready, closed;
     NapiCheck(napi_create_promise(env, &state->ready, &ready));

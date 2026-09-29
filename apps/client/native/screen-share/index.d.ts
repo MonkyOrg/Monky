@@ -3,21 +3,25 @@ import type {
   NativeScreenAudioPreferences, NativeScreenEndpointDiagnostics,
 } from '@monky/shared';
 import type { IpcRenderer, MessageChannelMain, WebContents, WebFrameMain } from 'electron';
+import type { MacCaptureRuntime, MacCaptureTarget } from './runtime/mac/index.d.cts';
+export { createMacScreenProvider, type MacScreenProvider, type MacCaptureTarget } from './runtime/mac/index.cjs';
 
 type PacketCaptureModule = Pick<typeof import('@monky/screen-audio'), 'createPacketCapture'>;
 type PacketCapture = ReturnType<PacketCaptureModule['createPacketCapture']>;
 type PacketCaptureSelection = Pick<import('@monky/screen-audio').PacketCaptureOptions,
-  'includeWindowId' | 'excludePid' | 'expectedProcessId'>;
+  'includeWindowId' | 'excludePid' | 'expectedProcessId' | 'expectedProcessStartTimeUs'>;
 
 export type { NativeScreenAudioPreferences } from '@monky/shared';
 
 export type NativeScreenCaptureEncoder = 'auto' | 'h264_texture_amf' | 'obs_nvenc_h264_tex'
-  | 'obs_x264' | 'av1_texture_amf' | 'obs_nvenc_av1_tex' | 'monky_aom_av1';
+  | 'obs_x264' | 'av1_texture_amf' | 'obs_nvenc_av1_tex' | 'monky_aom_av1'
+  | 'apple_vt_h264' | 'apple_vt_h264_software';
 export type NativeScreenCaptureTarget =
-  | { kind: 'window' | 'game'; hwnd: number; expectedProcessId: number; expectedProcessCreationTime100ns: string }
-  | { kind: 'monitor'; deviceId: string; deviceName: string; bounds: { x: number; y: number; width: number; height: number } };
+  | MacCaptureTarget
+  | { platform?: never; kind: 'window' | 'game'; hwnd: number; expectedProcessId: number; expectedProcessCreationTime100ns: string }
+  | { platform?: never; kind: 'monitor'; deviceId: string; deviceName: string; bounds: { x: number; y: number; width: number; height: number } };
 
-export type LegacyNativeWindowCaptureTarget = { kind?: never; hwnd: number; expectedProcessId: number };
+export type LegacyNativeWindowCaptureTarget = { platform?: never; kind?: never; hwnd: number; expectedProcessId: number };
 
 /** Validates exact keys and returns the same input; cloning/freezing belongs to capture preparation. */
 export function validateCaptureTarget<T extends NativeScreenCaptureTarget | LegacyNativeWindowCaptureTarget>(target: T): T;
@@ -40,11 +44,11 @@ export interface NativeScreenCaptureCapability {
   readonly encoderId: Exclude<NativeScreenCaptureEncoder, 'auto'>;
   readonly codec: 'h264' | 'av1';
   readonly mode: 'hardware' | 'software';
-  readonly adapterIndex: 0;
-  readonly adapterLuid: string;
-  readonly vendorId: number;
-  readonly deviceId: number;
-  readonly probe: 'obs-amf-test' | 'nvenc-d3d11-session' | 'software-encoder';
+  readonly adapterIndex?: 0;
+  readonly adapterLuid?: string;
+  readonly vendorId?: number;
+  readonly deviceId?: number;
+  readonly probe: 'obs-amf-test' | 'nvenc-d3d11-session' | 'software-encoder' | 'videotoolbox-session' | 'libaom-session';
   readonly probeVerified: true;
   readonly textureInput: boolean;
   readonly dynamicBitrate: true;
@@ -70,14 +74,15 @@ export interface NativeScreenCaptureProbeResult extends NativeScreenCaptureCapab
   readonly encoderInitialized: true;
   readonly hardwareSessionConfirmed: false;
   readonly sourceCaptured: false;
-  readonly captureKinds: readonly ['window', 'monitor', 'game'];
+  readonly captureKinds: readonly import('@monky/shared').NativeScreenCaptureKind[];
   readonly video: Readonly<NativeScreenCaptureProbeOptions['video']>;
 }
 
 /**
  * Performs real source-free initialization of the selected encoder, not a static capability lookup.
- * Resolves only after native retirement and child exit; does not prove source/game compatibility
- * or encoded frames. The caller owns cleanup of the private nonce-bound run directory.
+ * Resolves after native retirement (Windows child exit or macOS shared-helper lease release).
+ * Does not prove source/game compatibility or sustained throughput. macOS also verifies a
+ * synthetic encoded frame. The caller owns cleanup of the private nonce-bound run directory.
  */
 export function probeCaptureCapabilities(
   options: NativeScreenCaptureProbeOptions, signal?: AbortSignal,
@@ -106,6 +111,9 @@ export class CaptureBridge {
   snapshot(): NativeScreenCaptureSnapshot;
   stop(): Promise<NativeScreenCaptureSnapshot>;
 }
+export function createCaptureBridge(options: ConstructorParameters<typeof CaptureBridge>[0]): CaptureBridge;
+/** Checks the original macOS bridge's private retirement state, not a replaceable public snapshot. */
+export function assertMacCaptureBridgeClosed(bridge: CaptureBridge): void;
 
 export interface NativeScreenAudioOptions extends NativeScreenAudioPreferences {
   output: {
@@ -153,11 +161,11 @@ export interface NativeScreenRuntime {
     capabilities(): Readonly<Record<string, unknown>>;
     createEngine(options: Readonly<Record<string, unknown>>, onEvent: (event: unknown) => void): unknown;
   };
-  readonly host: { readonly kind: 'verified-native-screen-capture-host'; readonly executable: string; readonly sha256: string };
+  readonly host: MacCaptureRuntime | { readonly kind: 'verified-native-screen-capture-host'; readonly executable: string; readonly sha256: string };
   readonly obs: {
     readonly kind: 'verified-stock-obs-runtime'; readonly version: string;
     readonly stockDirectory: string; readonly binaryDirectory: string;
-  };
+  } | null;
 }
 
 export type NativeScreenEndpointState =

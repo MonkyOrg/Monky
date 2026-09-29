@@ -36,16 +36,22 @@ function nativeFormat(format) {
 
 function validatePacket(packet, sessionId) {
   nativeFormat(packet?.format);
+  const timestamp = packet.captureClock === undefined ? packet.qpcTimestampUs : packet.captureTimestampUs;
   if (!text(packet.sessionId) || (sessionId !== null && packet.sessionId !== sessionId)
     || !text(packet.epoch) || !unsigned(packet.sequence) || !unsigned(packet.frameIndex)
     || !positive(packet.frames) || !unsigned(packet.frameIndex + packet.frames)
     || !Buffer.isBuffer(packet.pcm) || packet.pcm.buffer instanceof SharedArrayBuffer
     || packet.pcm.byteLength !== packet.frames * packet.format.channels * 4 || packet.pcm.byteLength > 1048576
     || (packet.qpcTimestampUs !== null && !unsigned(packet.qpcTimestampUs))
+    || (timestamp !== null && !unsigned(timestamp))
+    || (packet.captureClock !== undefined && !['qpc-us', 'mach-host-us'].includes(packet.captureClock))
+    || (packet.captureClock === undefined && packet.captureTimestampUs !== undefined)
+    || (packet.captureClock === 'mach-host-us' && packet.qpcTimestampUs !== null)
+    || (packet.captureClock === 'qpc-us' && timestamp !== packet.qpcTimestampUs)
     || (packet.devicePosition !== null && !unsigned(packet.devicePosition))
     || !unsigned(packet.flags?.raw) || packet.flags.raw > 0xffffffff
     || ['silent', 'dataDiscontinuity', 'timestampError'].some(key => typeof packet.flags[key] !== 'boolean')
-    || (packet.flags.timestampError && (packet.qpcTimestampUs !== null || packet.devicePosition !== null))) {
+    || (packet.flags.timestampError && (timestamp !== null || packet.qpcTimestampUs !== null || packet.devicePosition !== null))) {
     throw new Error('Invalid original PCM capture packet.');
   }
 }
@@ -100,11 +106,13 @@ class NativePcmCaptureBridge {
     signal?.throwIfAborted();
     if (this.started || this.stopping) throw new Error('A native PCM capture bridge cannot be reused.');
     if (!options || typeof options !== 'object' || Array.isArray(options) || !text(syncGroup)
-      || Object.keys(options).some(key => !['excludePid', 'includeWindowId', 'expectedProcessId'].includes(key))
+      || Object.keys(options).some(key => !['excludePid', 'includeWindowId', 'expectedProcessId', 'expectedProcessStartTimeUs'].includes(key))
       || (options.excludePid !== undefined && options.excludePid !== process.pid)
       || (options.includeWindowId !== undefined && !positive(options.includeWindowId))
       || (options.expectedProcessId !== undefined && (options.includeWindowId === undefined
-        || !positive(options.expectedProcessId) || options.expectedProcessId > 0xffffffff))) {
+        || !positive(options.expectedProcessId) || options.expectedProcessId > 0xffffffff))
+      || (options.expectedProcessStartTimeUs !== undefined && (!positive(options.expectedProcessId)
+        || typeof options.expectedProcessStartTimeUs !== 'string' || !/^[1-9]\d{0,19}$/.test(options.expectedProcessStartTimeUs)))) {
       throw new Error('Invalid native PCM capture selection.');
     }
     this.started = true;
@@ -122,8 +130,12 @@ class NativePcmCaptureBridge {
       });
       if (!NativePcmCaptureHub.matches(this.captureHub, this.captureModule, options))
         throw new Error('The native PCM subscriber does not belong to this capture selection and module.');
-      this.capture = this.captureHub.subscribe({ ...options }, event =>
-        Promise.resolve().then(() => this.onCaptureEvent(event)).catch(error => this.report(error)));
+      this.capture = this.captureHub.subscribe({ ...options }, event => {
+        // Error and closed can arrive in one native callback turn. Stop admission
+        // before closed is observed; packet processing keeps its own async queue.
+        try { return Promise.resolve(this.onCaptureEvent(event)).catch(error => this.report(error)); }
+        catch (error) { this.report(error); }
+      });
       if (this.capture?.kind !== 'native-pcm-subscription' || typeof this.capture.detach !== 'function'
         || typeof this.capture.getStats !== 'function' || typeof this.capture.ready?.then !== 'function'
         || typeof this.capture.detached?.then !== 'function') {
@@ -208,6 +220,8 @@ class NativePcmCaptureBridge {
     this.lastPacket = {
       epoch: packet.epoch, sequence: packet.sequence, frameIndex: packet.frameIndex, frames: packet.frames,
       devicePosition: packet.devicePosition, qpcTimestampUs: packet.qpcTimestampUs, flags: packet.flags.raw,
+      captureClock: packet.captureClock ?? 'qpc-us',
+      captureTimestampUs: packet.captureClock === undefined ? packet.qpcTimestampUs : packet.captureTimestampUs,
     };
     if (this.lastSequence !== null && packet.sequence <= this.lastSequence) {
       throw new Error('Duplicate or reordered PCM capture packet; earlier processing ownership is retained.');

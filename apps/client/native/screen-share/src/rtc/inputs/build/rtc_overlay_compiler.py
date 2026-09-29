@@ -12,18 +12,22 @@ def main():
     manifest, compiler = sys.argv[1], sys.argv[4]
     if not os.path.isabs(manifest) or not os.path.isfile(manifest):
         raise ValueError("The private SDK VFS manifest must be an existing absolute path")
-    if os.path.basename(compiler).lower() != "clang-cl.exe":
-        raise ValueError("The pinned SDK overlay only supports the configured clang-cl")
+    name = os.path.basename(compiler).lower()
+    if name not in ("clang-cl.exe", "clang", "clang++"):
+        raise ValueError("The pinned SDK overlay requires the configured Chromium clang")
     # LLVM's supported VFS changes compiler input resolution, not checkout bytes
     # or private class access. The owning build verifies both input hash sets.
-    arguments = [compiler, *sys.argv[5:], "/clang:-ivfsoverlay", "/clang:" + manifest]
+    windows = name == "clang-cl.exe"
+    arguments = [compiler, *sys.argv[5:],
+                 *(["/clang:-ivfsoverlay", "/clang:" + manifest] if windows
+                   else ["-ivfsoverlay", manifest])]
     # The opt-in mapping's provisional guards must unwind across a decoder's
     # exception. Keep this local to that SDK unit, not all of libwebrtc.
     decoder_unit = os.path.join("modules", "video_coding", "generic_decoder.cc")
     if any(not arg.startswith(("-", "/")) and
            os.path.normcase(os.path.abspath(arg)).endswith(os.sep + decoder_unit)
            for arg in sys.argv[5:]):
-        arguments.append("/EHsc")
+        arguments.append("/EHsc" if windows else "-fexceptions")
     return subprocess.run(arguments, check=False).returncode
 
 

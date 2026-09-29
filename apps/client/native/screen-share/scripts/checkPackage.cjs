@@ -34,20 +34,56 @@ function verifySourceInputs() {
   for (const file of obs.files) verify(path.join(root, 'src', 'vendor', 'obs', file.path), file);
 }
 
-function verifyLegalFiles(directory) {
+function verifyMacSourceInputs(arch) {
+  assert.ok(['arm64', 'x64'].includes(arch));
+  const bin = path.join(root, 'bin', `darwin-${arch}`);
+  const capture = JSON.parse(fs.readFileSync(path.join(bin, 'mac-capture-build.json'), 'utf8'));
+  const rtc = JSON.parse(fs.readFileSync(path.join(bin, 'rtc-build.json'), 'utf8'));
+  verify(path.join(root, 'scripts', 'buildMac.cjs'), capture.sourceRecipe);
+  verify(path.join(root, 'scripts', 'buildMacRtc.cjs'), rtc.sourceRecipe);
+  assert.equal(capture.tests?.deviceFree, true, 'The target capture executable must pass its device-free self-test.');
+  assert.deepEqual(capture.sourceFiles.map(file => file.path).sort(), regularFiles(path.join(root, 'src', 'mac')));
+  for (const file of capture.sourceFiles) verify(path.join(root, 'src', 'mac', file.path), file);
+  for (const file of capture.sharedSourceFiles) verify(path.join(root, file.path), file);
+  const sources = ['rtc', 'mac'].flatMap(name => regularFiles(path.join(root, 'src', name))
+    .map(file => path.join(name, file))).sort();
+  assert.deepEqual(rtc.sourceFiles.map(file => file.path).sort(), sources);
+  for (const file of rtc.sourceFiles)
+    assert.equal(digest(fs.readFileSync(path.join(root, 'src', file.path))), file.sha256,
+      `Native macOS source changed since compilation: ${file.path}`);
+}
+
+function verifyMacRuntime(directory, arch) {
+  require('../runtime/mac/index.cjs').loadMacCaptureRuntime(directory, 'darwin', arch);
+  const rtc = JSON.parse(fs.readFileSync(path.join(directory, 'rtc-build.json'), 'utf8'));
+  assert.equal(rtc.schemaVersion, 1);
+  assert.equal(rtc.platform, 'darwin');
+  assert.equal(rtc.arch, arch);
+  assert.equal(rtc.minimumMacOS, '14.0');
+  assert.equal(rtc.webrtcRevision, '36ea4535a500ac137dbf1f577ce40dc1aaa774ef');
+  assert.deepEqual(rtc.binaries.map(file => file.name).sort(),
+    ['libmonky_av1.dylib', 'libmonky_screen_rtc.dylib', 'monky_native_surfaces.node', 'monky_screen_rtc.node']);
+  for (const file of rtc.binaries) verifiedFile(directory, { ...file, path: file.name });
+  require('../runtime/nativeRtc/engine/node/encoded.cjs').validateCapabilities(rtc.capabilities, 'darwin');
+}
+
+function verifyLegalFiles(directory, platform = 'win32') {
   const catalog = JSON.parse(fs.readFileSync(path.join(directory, 'licenses', 'catalog.json'), 'utf8'));
   assert.equal(catalog.schemaVersion, 1);
   assert.equal(catalog.license, 'GPL-3.0-or-later');
   assert.equal(catalog.webrtcRevision, '36ea4535a500ac137dbf1f577ce40dc1aaa774ef');
-  assert.equal(catalog.obsRevision, '7272af1375b38bc3cf4e0f98a5d999e8b76e9309');
-  assert.ok(Array.isArray(catalog.files) && catalog.files.length >= 40, 'Native third-party notices are incomplete.');
+  if (platform === 'darwin') assert.equal(catalog.platform, 'darwin');
+  else assert.equal(catalog.obsRevision, '7272af1375b38bc3cf4e0f98a5d999e8b76e9309');
+  assert.ok(Array.isArray(catalog.files) && catalog.files.length >= (platform === 'darwin' ? 6 : 40),
+    'Native third-party notices are incomplete.');
   for (const record of catalog.files) verifiedFile(directory, record);
   const libraries = JSON.parse(fs.readFileSync(path.join(directory, 'licenses', 'webrtc', 'libraries.json'), 'utf8'));
   for (const name of ['libaom', 'dav1d'])
     assert.ok(libraries.includes(name), `Missing compiled AV1 dependency notices: ${name}`);
   assert.deepEqual(fs.readFileSync(path.join(directory, 'LICENSE')), fs.readFileSync(path.join(root, 'LICENSE')));
   const notice = fs.readFileSync(path.join(directory, 'THIRD_PARTY_NOTICES'), 'utf8');
-  assert.ok(notice.includes('Corresponding Source:') && notice.includes('Microsoft Visual C++'));
+  assert.ok(notice.includes('Corresponding Source:') &&
+    notice.includes(platform === 'darwin' ? 'VideoToolbox' : 'Microsoft Visual C++'));
   assert.ok(fs.statSync(path.join(directory, 'README.md')).isFile());
   return catalog;
 }
@@ -57,38 +93,56 @@ async function afterPack(context) {
   const contents = platform === 'darwin'
     ? path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, 'Contents')
     : context.appOutDir;
-  assert.deepEqual(fs.readFileSync(path.join(contents, 'LICENSE')),
+  const licenseDirectory = platform === 'darwin' ? path.join(contents, 'Resources') : contents;
+  assert.deepEqual(fs.readFileSync(path.join(licenseDirectory, 'LICENSE')),
     fs.readFileSync(path.resolve(root, '..', '..', '..', '..', 'LICENSE')), 'Missing packaged Monky GPL notice.');
   const modules = path.join(contents, platform === 'darwin' ? 'Resources' : 'resources',
     'app', 'node_modules', '@monky');
   assert.ok(!fs.existsSync(path.join(modules, 'server', 'data')), 'Server user data must never be packaged.');
   const directory = path.join(modules, 'screen-share');
-  assert.ok(fs.statSync(directory).isDirectory(), 'The packaged native screen module is missing.');
+  assert.ok(fs.lstatSync(directory).isDirectory(), 'The packaged native screen module must be a real directory.');
+  assert.ok(fs.realpathSync(directory).startsWith(fs.realpathSync(contents) + path.sep),
+    'The packaged native runtime must not alias the source checkout.');
   for (const name of ['build', 'src', 'scripts', 'test'])
     assert.ok(!fs.existsSync(path.join(directory, name)), `Native build/source-only material leaked into the application: ${name}`);
   copyMonkyLicenses(directory);
-  if (platform !== 'win32') return;
-  assert.equal(context.arch, require('builder-util').Arch.x64, 'The native Windows screen runtime requires x64.');
-  verifySourceInputs();
+  if (!['win32', 'darwin'].includes(platform)) return;
+  const arch = require('builder-util').Arch[context.arch];
+  if (platform === 'darwin') verifyMacSourceInputs(arch);
+  else {
+    assert.equal(arch, 'x64', 'The native Windows screen runtime requires x64.');
+    verifySourceInputs();
+  }
   const packagedRequire = createRequire(path.join(directory, 'index.cjs'));
   const h264Path = packagedRequire.resolve('h264-profile-level-id');
   assert.ok(h264Path.startsWith(path.resolve(modules, '..') + path.sep),
     'Packaged H264 negotiation dependency escaped the application.');
   assert.equal(packagedRequire('h264-profile-level-id').parseProfileLevelId('4d003c')?.level, 60,
     'Packaged H264 negotiation dependency is missing the maintained Level 6 patch.');
-  verifyLegalFiles(root);
+  verifyLegalFiles(root, platform);
   fs.cpSync(path.join(root, 'licenses'), path.join(directory, 'licenses'), { recursive: true });
   for (const name of ['README.md', 'README.en.md', 'THIRD_PARTY_NOTICES'])
     fs.copyFileSync(path.join(root, name), path.join(directory, name));
   for (const relative of ['index.cjs', ...regularFiles(path.join(root, 'runtime')).map(file => path.join('runtime', file))])
     assert.deepEqual(fs.readFileSync(path.join(directory, relative)), fs.readFileSync(path.join(root, relative)),
       `Packaged native runtime differs from the verified source: ${relative}`);
-  verifyLegalFiles(directory);
-  require(path.join(directory, 'index.cjs')).loadRuntime();
-  require(path.join(directory, 'index.cjs')).loadThumbnailRuntime();
-  console.log('Packaged native screen runtime, app-local CRT, source fingerprints and third-party notices verified.');
+  verifyLegalFiles(directory, platform);
+  for (const other of ['win32-x64', 'darwin-arm64', 'darwin-x64']) {
+    if (other === `${platform}-${arch}`) continue;
+    const unused = path.join(directory, 'bin', other);
+    if (fs.existsSync(unused)) {
+      assert.ok(fs.lstatSync(unused).isDirectory() && !fs.lstatSync(unused).isSymbolicLink());
+      fs.rmSync(unused, { recursive: true });
+    }
+  }
+  if (platform === 'darwin') verifyMacRuntime(path.join(directory, 'bin', `darwin-${arch}`), arch);
+  if (platform !== 'darwin' || arch === process.arch) require(path.join(directory, 'index.cjs')).loadRuntime();
+  if (platform === 'win32') require(path.join(directory, 'index.cjs')).loadThumbnailRuntime();
+  console.log('Packaged native screen runtime, source fingerprints and third-party notices verified.');
 }
 
 module.exports = afterPack;
 module.exports.verifySourceInputs = verifySourceInputs;
 module.exports.verifyLegalFiles = verifyLegalFiles;
+module.exports.verifyMacSourceInputs = verifyMacSourceInputs;
+module.exports.verifyMacRuntime = verifyMacRuntime;

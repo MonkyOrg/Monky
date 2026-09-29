@@ -1,8 +1,8 @@
 #pragma once
 
 #include "engine_shared.h"
-#include "api\stats\rtc_stats_report.h"
-#include "api\stats\rtcstats_objects.h"
+#include "api/stats/rtc_stats_report.h"
+#include "api/stats/rtcstats_objects.h"
 
 #include <algorithm>
 #include <array>

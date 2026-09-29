@@ -74,7 +74,7 @@ test('CI build export and validation accept squash commits only when the full so
   await assert.rejects(validateBuild(f.staged, f.root, 'cli', context), /integrated source tree/);
 });
 
-test('desktop artifacts include all client outputs and Windows native binaries, notices and matching sources', async t => {
+test('desktop artifacts include all client outputs and their native binaries, notices and matching sources', async t => {
   for (const variant of ['win', 'mac']) {
     const f = await fixture(t, variant);
     await validateBuild(f.staged, f.root, variant, f.environment);
@@ -82,17 +82,17 @@ test('desktop artifacts include all client outputs and Windows native binaries, 
     assert.ok(paths.some(name => name.startsWith('apps/client/dist/')));
     assert.ok(paths.some(name => name.startsWith('apps/client/dist-electron/')));
     assert.ok(paths.every(name => !name.includes('node_modules') && !name.includes('/data/')));
-    if (variant === 'win') {
-      assert.ok(paths.some(name => name.startsWith('apps/client/native/screen-share/bin/win32-x64/')));
-      assert.ok(paths.some(name => name.startsWith('apps/client/native/screen-share/licenses/')));
-      for (const relative of nativeLegalFiles) assert.ok(paths.includes(relative), `Missing native legal file: ${relative}`);
-      assert.ok(paths.includes('release/monky-native-sources-0.0.0-ci.tar.xz'));
-      assert.ok(paths.includes('release/monky-native-sources-0.0.0-ci.json'));
-      const filename = path.join(f.staged, 'build-manifest.json');
-      await fs.writeFile(filename, JSON.stringify({ ...f.manifest,
-        files: f.manifest.files.filter(entry => !entry.path.startsWith('apps/client/native/screen-share/licenses/')) }));
-      await assert.rejects(validateBuild(f.staged, f.root, variant, f.environment), /Missing build output/);
-    }
+    for (const arch of variant === 'mac' ? ['darwin-arm64', 'darwin-x64'] : ['win32-x64'])
+      assert.ok(paths.some(name => name.startsWith(`apps/client/native/screen-share/bin/${arch}/`)));
+    assert.ok(paths.some(name => name.startsWith('apps/client/native/screen-share/licenses/')));
+    for (const relative of nativeLegalFiles) assert.ok(paths.includes(relative), `Missing native legal file: ${relative}`);
+    const source = `release/monky-native-${variant === 'mac' ? 'macos-' : ''}sources-0.0.0-ci`;
+    assert.ok(paths.includes(`${source}.tar.xz`));
+    assert.ok(paths.includes(`${source}.json`));
+    const filename = path.join(f.staged, 'build-manifest.json');
+    await fs.writeFile(filename, JSON.stringify({ ...f.manifest,
+      files: f.manifest.files.filter(entry => !entry.path.startsWith('apps/client/native/screen-share/licenses/')) }));
+    await assert.rejects(validateBuild(f.staged, f.root, variant, f.environment), /Missing build output/);
   }
 });
 
@@ -267,7 +267,7 @@ for (const variant of ['cli', 'mac', 'win']) test(`${variant}: an immutable ZIP 
   };
   await restoreBuild(f.root, variant, 42, 100, { api, context: f.environment, tempParent: f.directory });
   for (const [relative, bytes] of expected) assert.deepEqual(await fs.readFile(path.join(f.root, relative)), bytes, relative);
-  if (variant === 'win') {
+  if (variant === 'win' || variant === 'mac') {
     for (const relative of nativeLegalFiles) {
       assert.ok(expected.has(relative));
       assert.ok((await fs.stat(path.join(f.root, relative))).isFile(), relative);
@@ -293,19 +293,26 @@ test('ZIP extraction refuses traversal, aliases, reserved devices and duplicate 
   }
 });
 
-async function sourceFixture(t) {
+async function sourceFixture(t, platform = 'win32') {
   const f = await fixture(t);
   const output = path.join(f.root, 'release');
   await fs.mkdir(output);
-  const input = path.join(output, 'monky-native-sources-0.0.0-ci');
+  const input = path.join(output, `monky-native-${platform === 'darwin' ? 'macos-' : ''}sources-0.0.0-ci`);
   const metadata = { schemaVersion: 1, version: '0.0.0-ci', sourceCommit: f.manifest.sourceCommit,
     sourceTree: f.manifest.sourceTree, publicationReady: true, monkySource: `https://github.com/${repository}/tree/${f.manifest.sourceCommit}`,
     webrtcRevision: '36ea4535a500ac137dbf1f577ce40dc1aaa774ef', obsRevision: '7272af1375b38bc3cf4e0f98a5d999e8b76e9309',
     sourceFiles: 1001, repositories: Array.from({ length: 40 }, () => ({})), libraries: Array.from({ length: 24 }, () => ({})) };
+  if (platform === 'darwin') {
+    const pins = JSON.parse(await fs.readFile(path.join(scripts, '..', 'apps', 'client', 'native',
+      'screen-share', 'scripts', 'native-rtc', 'pins.json'), 'utf8'));
+    Object.assign(metadata, { platform, architectures: ['arm64', 'x64'], repositories: pins.repositories });
+    delete metadata.obsRevision;
+    delete metadata.libraries;
+  }
   const snapshot = path.join(f.directory, 'source.json');
   await fs.writeFile(snapshot, JSON.stringify(metadata));
-  executePython('-c', 'import io,os,sys,tarfile\nwith tarfile.open(sys.argv[1],"w:xz") as tar:\n for name,data in [("webrtc/source.cpp",os.urandom(1000100)),("SOURCE-MANIFEST.json",open(sys.argv[2],"rb").read())]:\n  entry=tarfile.TarInfo(name);entry.size=len(data);tar.addfile(entry,io.BytesIO(data))',
-    `${input}.tar.xz`, snapshot);
+  executePython('-c', 'import io,os,sys,tarfile\nwith tarfile.open(sys.argv[1],"w:xz") as tar:\n for name,data in [("webrtc/source.cpp",os.urandom(1000100)),("SOURCE-MANIFEST.json",open(sys.argv[2],"rb").read())]:\n  entry=tarfile.TarInfo(name);entry.size=len(data);tar.addfile(entry,io.BytesIO(data))\n if sys.argv[3]=="darwin":\n  link=tarfile.TarInfo("webrtc/alias.cpp");link.type=tarfile.SYMTYPE;link.linkname="source.cpp";tar.addfile(link)',
+    `${input}.tar.xz`, snapshot, platform);
   metadata.archive = { name: path.basename(`${input}.tar.xz`),
     bytes: (await fs.stat(`${input}.tar.xz`)).size, sha256: await hashFile(`${input}.tar.xz`) };
   await fs.writeFile(`${input}.json`, JSON.stringify(metadata));
@@ -341,4 +348,21 @@ test('native source reuse rejects changed trees, archive corruption and mismatch
   await fs.writeFile(`${f.input}.json`, JSON.stringify({ ...f.metadata, monkySource: 'mismatched-source' }));
   await assert.rejects(rebindSources(config, f.root), /exited/);
   await assert.rejects(fs.stat(path.join(f.output, 'monky-native-sources-9.0.0-beta.tar.xz')), { code: 'ENOENT' });
+});
+
+test('macOS source reuse retains SDK links and both architectures while rebinding the approved source tree', async t => {
+  const f = await sourceFixture(t, 'darwin');
+  f.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
+    'commit', '--quiet', '--allow-empty', '-m', 'Integrated macOS source');
+  const version = '9.0.0-beta';
+  const result = await rebindSources({ output: f.output, version }, f.root, 'darwin');
+  const metadata = await checkNativeSourceRelease(f.output, version, f.git('rev-parse', 'HEAD'), 'darwin');
+  assert.equal(metadata.builtFromCommit, f.metadata.sourceCommit);
+  const contents = JSON.parse(executePython('-c',
+    'import json,sys,tarfile\nwith tarfile.open(sys.argv[1]) as tar:\n link=tar.getmember("webrtc/alias.cpp")\n print(json.dumps({"link":link.linkname,"isLink":link.issym(),"manifest":json.load(tar.extractfile("SOURCE-MANIFEST.json"))}))',
+    result.archive));
+  assert.equal(contents.isLink, true);
+  assert.equal(contents.link, 'source.cpp');
+  const { archive, ...snapshot } = metadata;
+  assert.deepEqual(contents.manifest, snapshot);
 });

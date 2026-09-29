@@ -35,6 +35,7 @@ class ProcessEngine {
     assert.equal(typeof onEvent, 'function');
     this.asynchronousNative = true;
     this.options = options;
+    this.surfaceOutput = capabilities.decodedOutput === 'NV12_IOSURFACE_LEASE';
     this.onEvent = onEvent;
     this.pending = new Map();
     this.leases = new Map();
@@ -65,8 +66,15 @@ class ProcessEngine {
       if (this.failure || this.hostExited) return;
       try {
         this.pid = this.child.pid;
-        if (handlesFile) this.handles = require(handlesFile).openProcess(this.child.pid);
-        this.send({ type: 'initialize', filename, capabilities, handlesFile, parentPid: process.pid, options });
+        if (handlesFile) {
+          const handles = require(handlesFile);
+          if (this.surfaceOutput) {
+            assert.equal(typeof handles.createReceiver, 'function');
+            this.surfaces = handles.createReceiver(this.child.pid);
+          } else this.handles = handles.openProcess(this.child.pid);
+        }
+        this.send({ type: 'initialize', filename, capabilities, handlesFile, parentPid: process.pid, options,
+          surfaceChannel: this.surfaces?.name });
       } catch (error) { this.fail(error); }
     };
     this.child.once('spawn', initialize);
@@ -96,11 +104,15 @@ class ProcessEngine {
       const event = message.event;
       if (event.type === 'process.snapshot') this.observeSnapshot(event.snapshot);
       else if (event.type === 'frame') {
-        assert.ok(this.handles && !this.leases.has(event.data.frameId));
+        assert.ok((this.surfaceOutput ? this.surfaces : this.handles) && !this.leases.has(event.data.frameId));
         assert.ok(this.leases.size < (this.options.maxDecodedFrames ?? 16));
-        const lease = this.handles.duplicate(event.data.textureInfo.handle.ntHandle);
+        const info = event.data.textureInfo;
+        const lease = this.surfaceOutput
+          ? this.surfaces.receiveSurface(event.data.frameId, event.data.codedWidth, event.data.codedHeight)
+          : this.handles.duplicate(info.handle.ntHandle);
         this.leases.set(event.data.frameId, { handle: lease, released: deferred(), proof: null });
-        event.data.textureInfo.handle.ntHandle = lease.handle;
+        // Electron accepts an IOSurfaceRef local to Main, never the child's pointer or numeric ID.
+        info.handle = this.surfaceOutput ? { ioSurface: lease.handle } : { ntHandle: lease.handle };
         this.emit(event);
       } else {
         if (event.type === 'audio.playout') {
@@ -202,7 +214,7 @@ class ProcessEngine {
         hostExited: true,
       } : { hostExited: true }));
     }
-    try { this.handles?.close(); }
+    try { this.handles?.close(); this.surfaces?.close(); }
     catch (failure) {
       this.failure ??= hostFailure('The RTC process exited but its process HANDLE could not be closed.', { cause: failure });
     }

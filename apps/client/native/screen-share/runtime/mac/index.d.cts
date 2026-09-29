@@ -29,8 +29,8 @@ export function createMacScreenProvider(options?: {
   directory?: string; excludeProcessIds?: readonly number[];
 }): MacScreenProvider;
 export function loadMacCaptureRuntime(directory?: string): MacCaptureRuntime;
-/** Fails closed until an actual compatible macOS RTC/presentation backend exists. */
-export function loadMacRuntime(options?: { directory?: string }): never;
+/** Verifies both capture and RTC binaries; source enumeration alone cannot enable media. */
+export function loadMacRuntime(options?: { directory?: string }): import('../../index.cjs').NativeScreenRuntime;
 export function validateMacTarget(value: unknown): MacCaptureTarget;
 export class MacVideoCapture {
   constructor(options: {

@@ -1,16 +1,18 @@
 'use strict';
 const assert = require('node:assert/strict');
-const { MacNativeHost, failure } = require('./host.cjs');
+const { failure } = require('./host.cjs');
+const { acquireMacHost } = require('./hostPool.cjs');
 const { validateMacTarget } = require('./target.cjs');
 const { normalizedVideo } = require('../captureProtocol.cjs');
 
 class MacVideoCapture {
-  constructor({ target, video, mode, onPacket, onError, directory }, dependencies = {}) {
+  constructor({ target, video, mode, codec = 'h264', onPacket, onError, directory }, dependencies = {}) {
     assert.ok(mode === 'hardware' || mode === 'software');
+    assert.ok(codec === 'h264' || codec === 'av1' && mode === 'software');
     assert.equal(typeof onPacket, 'function');
     assert.equal(typeof onError, 'function');
     this.target = validateMacTarget(target);
-    this.video = Object.freeze({ ...normalizedVideo(video), mode });
+    this.video = Object.freeze({ ...normalizedVideo(video), mode, codec });
     this.errors = [];
     this.onError = onError;
     this.firstFrame = new Promise((resolve, reject) => {
@@ -21,6 +23,7 @@ class MacVideoCapture {
     const options = {
       onVideo: frame => {
         if (this.closing) return;
+        assert.equal(frame.codec, codec, 'Native capture must not substitute the admitted codec.');
         this.firstReady();
         return onPacket(frame);
       },
@@ -30,7 +33,7 @@ class MacVideoCapture {
         try { onError(error); } catch (observerError) { console.error('[MacVideoCapture] Error observer failed:', observerError); }
       },
     };
-    this.host = (dependencies.hostFactory ?? ((executable, config) => new MacNativeHost(executable, config)))(
+    this.host = (dependencies.hostFactory ?? acquireMacHost)(
       runtime.executable, options);
   }
   start({ signal } = {}) {
@@ -51,7 +54,7 @@ class MacVideoCapture {
         signal?.throwIfAborted();
         if (this.host.failure) throw this.host.failure;
         assert.ok(!this.closing);
-        return { codec: 'h264', mode: this.video.mode, firstAccessUnitObserved: true,
+        return { codec: this.video.codec, mode: this.video.mode, firstAccessUnitObserved: true,
           hardwareSessionConfirmed: this.video.mode === 'hardware' };
       } catch (error) {
         await this.close();
@@ -97,8 +100,8 @@ class MacVideoCapture {
           catch (observerError) { console.error('[MacVideoCapture] Error observer failed:', observerError); }
         }
       }
-      assert.equal(this.host.exited, true);
-      return { nativeClosed: true, hostExited: true, retiredWithErrors: this.errors.length > 0 };
+      assert.ok(this.host.nativeClosed === true || this.host.exited === true);
+      return { nativeClosed: true, hostExited: this.host.exited === true, retiredWithErrors: this.errors.length > 0 };
     })();
     return this.closing;
   }

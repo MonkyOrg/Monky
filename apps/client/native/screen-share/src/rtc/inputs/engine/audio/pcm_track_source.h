@@ -1,7 +1,7 @@
 #pragma once
 
 #include "pcm_normalizer.h"
-#include "api\notifier.h"
+#include "api/notifier.h"
 
 #include <atomic>
 #include <mutex>

@@ -1,9 +1,9 @@
 #include "mf_rtc_internal.h"
 #include "mf_rtc_encoder_submit_checks.h"
 
-#include "api\environment\environment_factory.h"
-#include "api\make_ref_counted.h"
-#include "modules\video_coding\include\video_codec_interface.h"
+#include "api/environment/environment_factory.h"
+#include "api/make_ref_counted.h"
+#include "modules/video_coding/include/video_codec_interface.h"
 
 #include <limits>
 #include <numeric>

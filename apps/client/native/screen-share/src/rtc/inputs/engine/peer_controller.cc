@@ -1,8 +1,8 @@
 #include "peer_support.h"
 #include "receiver_policy.h"
-#include "audio\media_policy.h"
+#include "audio/media_policy.h"
 
-#include "api\data_channel_interface.h"
+#include "api/data_channel_interface.h"
 
 #include <map>
 

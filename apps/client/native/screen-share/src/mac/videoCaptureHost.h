@@ -5,7 +5,7 @@ namespace monky::screen::mac {
 class VideoCaptureHost {
  public:
   VideoCaptureHost(SCContentFilter* filter, EncoderOptions options, bool preserve_aspect_ratio,
-      std::function<void()> verify_target, VideoEncoder::Failure on_failure);
+      std::function<void()> verify_target, VideoEncoder::Failure on_failure, uint64_t capture_id = 0);
   ~VideoCaptureHost();
   std::future<void> Start();
   std::future<void> SetBitrate(int bitrate_kbps);

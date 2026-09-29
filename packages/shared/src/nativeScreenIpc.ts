@@ -147,7 +147,7 @@ export interface NativeScreenCapabilities {
   requiresSelectionProbe?: boolean;
   /** Selectable implementations; file presence alone does not establish hardware availability. */
   captureKinds?: readonly NativeScreenCaptureKind[];
-  backend: 'libobs-amf' | 'libobs-nvenc' | 'libobs-software' | null;
+  backend: 'libobs-amf' | 'libobs-nvenc' | 'libobs-software' | 'videotoolbox-hardware' | 'videotoolbox-software' | 'libaom-software' | null;
   reason: 'platform' | 'runtime' | 'encoder' | null;
 }
 

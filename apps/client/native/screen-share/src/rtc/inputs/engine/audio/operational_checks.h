@@ -2,7 +2,7 @@
 
 #include "media_policy.h"
 #include "stereo_checks.h"
-#include "..\receiver_policy.h"
+#include "../receiver_policy.h"
 
 namespace monky::native_rtc::engine::audio {
 

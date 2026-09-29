@@ -1,5 +1,5 @@
 #include "capture_timestamp.h"
-#include "common_audio\resampler\sinc_resampler.h"
+#include "common_audio/resampler/sinc_resampler.h"
 
 namespace monky::native_rtc::engine::audio {
 

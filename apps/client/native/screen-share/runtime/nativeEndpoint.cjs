@@ -8,8 +8,7 @@ const {
   getScreenShareProfile, getScreenH264ProfileLevelId, messageReferenceSchema, nativeScreenSourceSchema, nativeScreenP2pControlSchema,
   nativeScreenRenditionSchema, nativeScreenEndpointDiagnosticsSchema, screenShareProfileKey,
 } = require('@monky/shared');
-const { CaptureBridge } = require('./captureBridge.cjs');
-const { cloneSource, validateEncoder, ENCODERS } = require('./captureProtocol.cjs');
+const { createCaptureBridge, cloneCaptureTarget: cloneSource, captureEncoderProfile } = require('./captureBackend.cjs');
 const { LiveSenderFlow } = require('./encodedSender.cjs');
 const { NativeRtcCommands, assertNativeRtcEngineClosed } = require('./nativeRtcCommands.cjs');
 const { NativeP2pBroker } = require('./nativeP2pBroker.cjs');
@@ -63,9 +62,7 @@ class NativeScreenEndpoint {
     else assert.equal(typeof rpc, 'function');
     if (role === 'publish') {
       cloneSource(target);
-      validateEncoder(options.captureEncoder ?? 'auto');
-      assert.equal(!options.captureEncoder || options.captureEncoder === 'auto' ? 'h264' :
-        ENCODERS[options.captureEncoder].codec, source.codec ?? 'h264',
+      assert.equal(captureEncoderProfile(options.captureEncoder ?? 'auto', target).codec, source.codec ?? 'h264',
         'The selected capture encoder must match the announced screen codec.');
       if (options.preserveAspectRatio !== undefined) assert.equal(typeof options.preserveAspectRatio, 'boolean');
       assert.ok(path.isAbsolute(captureDirectory));
@@ -240,7 +237,10 @@ class NativeScreenEndpoint {
     this.pcm = new NativePcmCaptureBridge(this.engine, this.commands, this.audio.captureModule,
       error => this.report(error), { captureHub: this.audio.captureHub ?? null });
     const selection = this.target.kind === 'monitor' ? { excludePid: process.pid }
-      : { includeWindowId: this.target.hwnd, expectedProcessId: this.target.expectedProcessId };
+      : { includeWindowId: this.target.platform === 'darwin' ? this.target.windowId : this.target.hwnd,
+        expectedProcessId: this.target.expectedProcessId,
+        ...(this.target.expectedProcessStartTimeUs === undefined ? {}
+          : { expectedProcessStartTimeUs: this.target.expectedProcessStartTimeUs }) };
     const captured = await this.pcm.start(selection, this.source.instanceId, this.abort.signal);
     this.assertDemandCurrent();
     // A quiet application can legitimately have no packet yet. Publish its
@@ -443,7 +443,7 @@ class NativeScreenEndpoint {
       this.abort.signal.throwIfAborted();
     }
     const { width, height, fps, maxBitrateKbps } = this.profile;
-    this.host = new CaptureBridge({
+    this.host = createCaptureBridge({
       host: this.runtime.host, runtime: this.runtime.obs, runId, runDirectory: this.runDirectory,
       encoder: this.captureEncoder,
       bitrateCeilingKbps: maxBitrateKbps,
