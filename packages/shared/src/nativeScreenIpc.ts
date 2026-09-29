@@ -288,10 +288,22 @@ export const nativeScreenTexturePortInfoSchema = z.object({
   && transfer.visibleRect.x + transfer.visibleRect.width <= transfer.codedSize.width
   && transfer.visibleRect.y + transfer.visibleRect.height <= transfer.codedSize.height);
 export type NativeScreenTexturePortInfo = z.infer<typeof nativeScreenTexturePortInfoSchema>;
+export const nativeScreenTextureChannelInfoSchema = z.object({
+  channelId: z.string().uuid(),
+}).strict();
+export type NativeScreenTextureChannelInfo = z.infer<typeof nativeScreenTextureChannelInfoSchema>;
+const textureSequence = z.number().int().positive().safe();
+export const nativeScreenTextureMessageSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('frame'), sequence: textureSequence, info: nativeScreenTexturePortInfoSchema }).strict(),
+  z.object({ kind: z.literal('close') }).strict(),
+]);
 export const nativeScreenTextureReceiptSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('imported'), syncToken: textureBase64.refine(value => value.length <= 128) }).strict(),
-  z.object({ kind: z.literal('retired') }).strict(),
-  z.object({ kind: z.literal('error'), message: z.string().min(1).max(512) }).strict(),
+  z.object({ kind: z.literal('imported'), sequence: textureSequence,
+    syncToken: textureBase64.refine(value => value.length <= 128) }).strict(),
+  z.object({ kind: z.literal('retired'), sequence: textureSequence }).strict(),
+  z.object({ kind: z.literal('error'), sequence: textureSequence, message: z.string().min(1).max(512) }).strict(),
+  z.object({ kind: z.literal('drain') }).strict(),
+  z.object({ kind: z.literal('closed') }).strict(),
 ]);
 export const nativeScreenPreviewPacketSchema = z.object({
   type: z.literal('packet'), sequence: z.number().int().positive().safe(),

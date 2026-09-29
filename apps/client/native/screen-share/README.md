@@ -75,6 +75,16 @@ necessários antes de habilitar o compartilhamento nativo nessa plataforma.
 
 ### Backend Windows
 
+Antes de inicializar as janelas e o processo GPU, o cliente desabilita a promoção
+de vídeos para overlays DirectComposition com o workaround Chromium
+`disable_direct_composition_video_overlays`. Essa política de compatibilidade
+evita os bloqueios de apresentação reproduzidos ao iniciar uma transmissão
+enquanto uma recepção H.264 permanece ativa. Não desativa a aceleração por GPU,
+não troca codecs, resolução, FPS ou bitrate e não remove a janela de sobreposição
+do Monky. A composição de vídeo pode exigir mais trabalho da GPU sem essa
+otimização. A política vale para o cliente Windows; macOS e outros sistemas
+mantêm sua configuração de apresentação.
+
 Cada endpoint de publicação/recepção possui um **processo de mídia próprio**
 (`utilityProcess`, serviço **Monky native screen RTC**). Somente esse filho
 carrega `monky_screen_rtc.node` e o WebRTC/decoder nativo. Abort, access violation
@@ -114,8 +124,12 @@ autoriza reutilizar a textura do produtor: a API retém esse guard e rejeita
 o comprovante de fechamento, em vez de inventar aposentadoria de GPU.
 
 A entrega de texturas usa a API pública `sharedTexture.subtle` do Electron com
-um MessagePort privado e tipado por lease nativo, em vez do timeout fixo de um
-segundo de `sendSharedTexture`. O renderer devolve seu token real de criação e,
+um MessagePort privado, tipado e reutilizável por destino, em vez de criar um
+par de ports a cada quadro ou usar o timeout fixo de um segundo de
+`sendSharedTexture`. Cada quadro tem uma sequência própria e o canal admite
+no máximo 16 transferências pendentes. Isso evita filas de finalização dos
+wrappers nativos de milhares de ports, que podem atrasar o ciclo do Node e a
+entrega de áudio no Main. O renderer devolve seu token real de criação e,
 separadamente, um comprovante do callback nativo de liberação na GPU. Só então
 o Main libera seu wrapper importado e aguarda `allReferencesReleased` e o ACK de
 retirada do RTC. A aquisição conserva o prazo existente do endpoint; timeout,
@@ -123,7 +137,10 @@ comprovante inválido ou port fechado reportam erro, mas não autorizam reutiliz
 a textura. Comprovantes reais atrasados ainda podem concluir a limpeza.
 `delivered` conta aquisições; transferências pendentes incluem a retirada na GPU.
 Não há alteração de internals ou timers globais do Electron, e o pool nativo
-de decodificação continua limitando a quantidade de ports/texturas.
+de decodificação continua limitando a quantidade de texturas. Mudanças de
+destino drenam o canal anterior; desmontar o renderer solicita drenagem sem
+descartar quadros já enviados. O canal só fecha após os comprovantes de GPU
+de todos os quadros pendentes, sem reter wrappers encerrados indefinidamente.
 
 IPC tem limites de quantidade/bytes e confirmações correlacionadas. A entrada
 de vídeo aguarda o ACK real da cópia nativa mantendo um único AU na pipe
@@ -457,12 +474,22 @@ worklet](https://raw.githubusercontent.com/chromium/chromium/152.0.7977.130/thir
 essa [atualização pode ser pulada por um try-lock](https://raw.githubusercontent.com/chromium/chromium/152.0.7977.130/third_party/blink/renderer/modules/webaudio/base_audio_context.cc),
 repetindo o timestamp mesmo com callbacks novos. O receptor retira imediatamente
 a âncora de sincronização e incrementa apenas `clockEpoch`, sem trocar o epoch
-de saída, o dispositivo ou o owner. O PCM ainda não reproduzido é contabilizado
-em `discardedFrames`; os créditos em trânsito continuam válidos e limitados.
-Enquanto o relógio estiver congelado, a saída fica em buffering/silêncio,
-contabilizado em `repeatedContextFrames`. Só um avanço realmente observado e
-a profundidade de buffer exigida permitem nova âncora; não se inventam timestamps.
-Retrocesso real ou sobreposição parcial continua sendo erro explícito.
+de saída, o dispositivo ou o owner. O PCM válido na fila continua tocando:
+um timestamp indisponível não comprova falta de áudio. Observações repetidas
+ou saltadas são contabilizadas, mas não descartam amostras nem fabricam
+underruns. `clockAvailable` retira explicitamente a relação com o relógio do
+alto-falante até voltar uma observação contínua do grafo; não se inventam
+timestamps. Retrocesso real ou sobreposição parcial continua sendo erro explícito.
+
+A saída prepara 60 ms de PCM dentro de um buffer limitado a 80 ms. Um callback de
+10 ms do dispositivo pode renderizar vários blocos do worklet antes de seus
+créditos saírem da thread de áudio. Os 50 ms restantes acomodam a variação
+medida de cerca de 40 ms no IPC; o alvo anterior de 20 ms deixava cerca de 10 ms.
+Isso acrescenta 40 ms de buffering e 15 KiB de memória para PCM estéreo float,
+sem introduzir um timer de reprodução ou relaxar os limites do relógio. No máximo 20 ms de
+créditos nativos podem ficar pendentes, inclusive durante a partida. Falta
+real de áudio continua sendo reportada; isso não garante continuidade diante
+de bloqueios arbitrários dos processos ou interrupções de rede.
 
 ## Dependências OBS e Captura de Jogo
 
@@ -800,6 +827,20 @@ guards de produção nem confirmam, sozinhos, a causa de uma ocorrência externa
 (limite de 20 minutos). O ensaio prolongado registra atraso do event loop e
 frames apresentados, atualizando `progress.json` a cada cinco amostras.
 Somente a janela sintética própria fornece áudio/vídeo; não há gravação de mídia.
+
+`--single-receiver-soak-ms=180000` mede, em vez disso, um único receptor contínuo:
+silêncio/underruns do worklet, PCM nativo, perdas da fonte e tempos de créditos
+e PCM no IPC. Grava progresso limitado e registros incrementais em
+`audio-samples.jsonl`, mantendo somente a primeira e a última amostra em memória
+e no relatório final, com o total em `sampleCount`. Isso evita acumular ou
+serializar repetidamente o histórico durante a reprodução.
+Acrescente `--require-audio-continuity` para reprovar
+qualquer silêncio, underrun ou descarte novo após a partida da fonte,
+contadores de saída parados ou descontinuidade no tom recebido. Esse modo
+exige pelo menos 30 segundos e não pode ser combinado com os demais cenários
+de soak, injeção de falhas, mute ou ciclo de vida.
+Com `--mode=sfu`, `--sfu-listen-ip=<IPv4 local>` vincula e anuncia somente
+esse adaptador local validado, em vez de escutar em todas as interfaces.
 
 `--silent-source` não inicia o tom e exige PCM real silencioso com contadores
 avançando; é adequado para continuidade/pressão sem alterar o mixer. Esse modo

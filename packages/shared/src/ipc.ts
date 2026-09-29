@@ -708,7 +708,7 @@ export type NativeScreenAudioPortMessage =
 export interface IpcPortEvents {
   'native-screen:audio-output-port': NativeScreenAudioPortInfo;
   'native-screen:preview-port': import('./nativeScreenIpc.js').NativeScreenPreviewInfo;
-  'native-screen:texture-port': import('./nativeScreenIpc.js').NativeScreenTexturePortInfo;
+  'native-screen:texture-port': import('./nativeScreenIpc.js').NativeScreenTextureChannelInfo;
 }
 
 export const NATIVE_SCREEN_TEXTURE_IPC = {

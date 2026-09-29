@@ -73,6 +73,16 @@ required before enabling native screen sharing on this platform.
 
 ### Windows backend
 
+Before initializing windows and the GPU process, the client disables
+DirectComposition video-overlay promotion through Chromium's
+`disable_direct_composition_video_overlays` workaround. This compatibility policy
+avoids the presentation stalls reproduced when starting a screen publication
+while H.264 reception remains active. It does not disable GPU acceleration,
+change codecs, resolution, FPS or bitrate, or remove Monky's overlay window.
+Video composition may require more GPU work without this optimization. The
+policy applies to the Windows client; macOS and other platforms retain their
+existing presentation configuration.
+
 Each publishing/receiving endpoint owns a separate Electron `utilityProcess`
 named **Monky native screen RTC**. Only that child loads `monky_screen_rtc.node`,
 WebRTC and native decoders. An abort, access violation or timeout terminates
@@ -96,8 +106,12 @@ retire external references, clear ownership guards on timeout or reuse an old
 endpoint.
 
 Texture delivery uses Electron's documented `sharedTexture.subtle` transfer API
-over one private, typed MessagePort per native lease, not the convenience
-`sendSharedTexture` API's fixed one-second timeout. The renderer returns its real
+over a private, typed, reusable MessagePort per destination, rather than creating
+a port pair per frame or using the convenience `sendSharedTexture` API's fixed
+one-second timeout. Each frame has its own sequence and a channel admits at most
+16 pending transfers. This avoids native-wrapper finalization backlogs from
+thousands of ports that can delay Node's event loop and audio delivery in Main.
+The renderer returns its real
 creation sync token and, separately, a receipt from the native GPU-release
 callback. Only then can Main release its imported wrapper and await
 `allReferencesReleased` plus the RTC retirement ACK. Acquisition still has the
@@ -105,7 +119,10 @@ endpoint's existing deadline; a timeout, malformed receipt or closed port report
 an error but never authorizes GPU reuse. Late real receipts can finish cleanup.
 `delivered` counts acquisition; pending transfers include GPU retirement.
 No Electron internals or global timers are patched, and the native decoded-pool
-limits continue to bound outstanding ports/textures.
+limits continue to bound outstanding textures. Destination changes drain the
+previous channel; renderer detach requests draining without discarding already
+sent frames. A channel closes only after every pending frame's GPU receipt,
+without indefinitely retaining closed wrappers.
 A responsive JS host does not hide a stuck native worker: decoder operations
 observed in progress for eight seconds on the existing native diagnostic clock
 also terminate only that child, retaining the Main-owned duplicates.
@@ -444,12 +461,21 @@ worklet](https://raw.githubusercontent.com/chromium/chromium/152.0.7977.130/thir
 that [update can be skipped by a try-lock](https://raw.githubusercontent.com/chromium/chromium/152.0.7977.130/third_party/blink/renderer/modules/webaudio/base_audio_context.cc),
 repeating the timestamp despite new callbacks. The receiver immediately
 withdraws the synchronization anchor and increments only `clockEpoch`, without
-replacing the output epoch, device or owner. Unplayed PCM is accounted for in
-`discardedFrames`; in-flight credits remain valid and bounded. While the clock
-is frozen, output stays buffering/silent, counted in `repeatedContextFrames`.
-Only an actually observed advance and the required buffer depth allow a new
-anchor; timestamps are never fabricated. A genuinely backward or partially
-overlapping clock remains an explicit error.
+replacing the output epoch, device or owner. Valid queued PCM keeps playing:
+an unavailable graph timestamp is not evidence of missing audio. Repeated or
+skipped observations are counted, but neither discard samples nor manufacture
+an underrun. `clockAvailable` explicitly withdraws the speaker-clock relation
+until a continuous graph observation returns; timestamps are never fabricated.
+A genuinely backward or partially overlapping clock remains an explicit error.
+
+The output primes 60 ms of PCM within a bounded 80 ms ring. A 10 ms hardware
+callback can render several worklet quanta before its credit messages leave
+the audio thread. The remaining 50 ms provides refill headroom for measured
+IPC jitter of about 40 ms; the previous 20 ms target left only about 10 ms.
+This adds 40 ms of buffering and 15 KiB of stereo float ring storage, without
+timer-based pacing or relaxed clock tolerance. At most 20 ms of native credits may remain outstanding,
+including during startup. A real shortage still reports an underrun; this is
+not a guarantee against arbitrary process stalls or network interruptions.
 
 ## OBS dependencies and Game Capture
 
@@ -768,6 +794,19 @@ production guards nor independently establish the cause of an external incident.
 (20-minute maximum). The extended run records event-loop delay and presented
 frames, updating `progress.json` every five samples.
 Only its owned synthetic window supplies audio/video; no media is recorded.
+
+`--single-receiver-soak-ms=180000` instead measures one continuous receiver,
+including worklet silence/underruns, native PCM, source drops and credit/PCM IPC
+timing. It writes bounded progress snapshots and incremental `audio-samples.jsonl`
+records, retaining only the first and last sample in memory and in the final
+report, with the total in `sampleCount`. This avoids accumulating or repeatedly
+serializing the full history during playback.
+Add `--require-audio-continuity` to reject any added silence, underrun or discard
+after source startup, stalled output counters or a discontinuous received tone.
+This strict mode requires at least 30 seconds and cannot be combined with the
+other soak, fault-injection, mute or lifecycle scenarios.
+With `--mode=sfu`, `--sfu-listen-ip=<local IPv4>` binds and announces only that
+validated local adapter instead of listening on all interfaces.
 
 `--silent-source` does not start the tone and requires real silent PCM with
 advancing counters, allowing continuity/backpressure checks without changing

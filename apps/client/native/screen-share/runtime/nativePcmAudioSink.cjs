@@ -2,6 +2,8 @@
 
 const { boundedCleanup } = require('./frameSink.cjs');
 const { NativeAudioOutputClock } = require('./nativeAudioOutputClock.cjs');
+const PLAYOUT_CAPACITY_FRAMES = 3840;
+const PLAYOUT_TARGET_FRAMES = 2880;
 
 class NativePcmAudioSink {
   constructor({ epoch, sinkId, workletUrl, prepareOutput, onCredits, onFeedback, onError,
@@ -157,7 +159,10 @@ class NativePcmAudioSink {
       if (context.state !== 'running') throw new Error('Native audio output stopped during preparation.');
       this.node = this.createWorklet(context, {
         numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2,
-        channelCountMode: 'explicit', processorOptions: { epoch: this.epoch, capacityFrames: 1920, targetFrames: 960 },
+        // Hardware renders in bursts; the asynchronous IPC/mixer roundtrip is not a real-time callback.
+        // Keep refill headroom for the measured ~40 ms delivery jitter, without increasing native debt.
+        channelCountMode: 'explicit', processorOptions: { epoch: this.epoch,
+          capacityFrames: PLAYOUT_CAPACITY_FRAMES, targetFrames: PLAYOUT_TARGET_FRAMES },
       });
       this.node.port.onmessage = event => {
         if (this.stopping) return;
@@ -213,7 +218,8 @@ class NativePcmAudioSink {
     if (!value || numbers.some(name => !Number.isSafeInteger(value[name]) || value[name] < 0)
       || value.epoch !== this.epoch || value.clockEpoch !== message.clockEpoch || value.state !== message.state
       || value.queuedFrames !== message.queuedFrames || value.outstandingFrames !== message.outstandingFrames
-      || value.capacityFrames !== 1920 || value.targetFrames !== 960 || value.outstandingFrames > 960
+      || value.capacityFrames !== PLAYOUT_CAPACITY_FRAMES || value.targetFrames !== PLAYOUT_TARGET_FRAMES
+      || value.outstandingFrames > 960
       || value.queuedFrames + value.outstandingFrames > value.capacityFrames
       || value.acceptedFrames > this.stats.acceptedFrames || value.acceptedFrames % 480 !== 0
       || value.acceptedFrames !== value.renderedFrames + value.queuedFrames + value.discardedFrames

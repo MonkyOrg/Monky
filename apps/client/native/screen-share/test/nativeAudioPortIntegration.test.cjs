@@ -359,14 +359,14 @@ test('actual ports carry only worklet-earned PCM credits and transfer a copied p
 test('calibrated physical feedback crosses that same port without replacing a negative initial position', async t => {
   const f = fixture(t, { physicalTime: .998 });
   await f.main.start(config(1));
-  f.emit({ type: 'feedback', epoch: 1, clockEpoch: 1, state: 'running',
+  f.emit({ type: 'feedback', epoch: 1, clockEpoch: 1, state: 'running', clockAvailable: true,
     contextFrame: 48000, frames: 128, firstPlayoutFrame: 0, mediaFrames: 128, queuedFrames: 960 });
   await until(() => f.feedback.length === 1);
   assert.equal(f.feedback[0].available, true);
   assert.ok(f.feedback[0].estimatedPlayoutFrame < 0);
   assert.equal(f.feedback[0].calibrationId, 1);
   assert.equal(f.feedback[0].confirmedPcmEnd, 1088);
-  f.emit({ type: 'feedback', epoch: 1, clockEpoch: 2, state: 'buffering',
+  f.emit({ type: 'feedback', epoch: 1, clockEpoch: 2, state: 'buffering', clockAvailable: true,
     contextFrame: 48128, frames: 128, firstPlayoutFrame: null, mediaFrames: 0, queuedFrames: 0 });
   await until(() => f.feedback.length === 2);
   assert.deepEqual(f.feedback[1], { epoch: 1, available: false });
@@ -661,7 +661,7 @@ test('composed global owner accounts actual port credits, PCM and calibrated fee
     assert.equal(f.owner.handleNativeEvent({ type: 'audio.playout', target: 0, data: pcm(1, sequence) }), true);
   }
   await until(() => f.nodes[0].posted.filter(value => value.type === 'pcm').length === 2);
-  f.emit({ type: 'feedback', epoch: 1, clockEpoch: 1, state: 'running',
+  f.emit({ type: 'feedback', epoch: 1, clockEpoch: 1, state: 'running', clockAvailable: true,
     contextFrame: 48000, frames: 128, firstPlayoutFrame: 0, mediaFrames: 128, queuedFrames: 832 });
   await until(() => f.feedback.length === 1);
   assert.equal(f.feedback[0].available, true);
@@ -707,47 +707,57 @@ test('actual worklet clock recovery keeps the same calibrated output owner and b
     assert.equal(f.owner.handleNativeEvent({ type: 'audio.playout', target: 0, data: pcm(1, sequence) }), true);
   }
   await until(() => node.processor.queue.snapshot().queuedFrames === 960);
-  for (const frame of [128, 256, 384]) render(frame);
+  render(128);
+  await until(() => f.credits.length === 2);
+  assert.equal(f.owner.handleNativeEvent({ type: 'audio.playout', target: 0, data: pcm(1, 2) }), true);
+  assert.equal(f.owner.handleNativeEvent({ type: 'audio.playout', target: 0, data: pcm(1, 3) }), true);
+  await until(() => node.processor.queue.snapshot().queuedFrames === 1920);
+  render(256);
+  await until(() => f.credits.length === 3);
+  for (let sequence = 4; sequence < 6; sequence++)
+    assert.equal(f.owner.handleNativeEvent({ type: 'audio.playout', target: 0, data: pcm(1, sequence) }), true);
+  await until(() => node.processor.queue.snapshot().queuedFrames === 2880);
+  for (const frame of [384, 512, 640]) render(frame);
   await until(() => f.feedback.some(value => value.available));
   assert.equal(f.feedback.at(-1).clockEpoch, 1);
-  const repeated = render(384, 512);
-  assert.equal(repeated.every(channel => channel.every(sample => sample === 0)), true);
-  await until(() => f.feedback.at(-1).available === false && f.credits.length === 3);
+  const repeated = render(640, 768);
+  assert.equal(repeated.every(channel => channel.every(sample => sample === .25)), true);
+  await until(() => f.feedback.at(-1).available === false && f.credits.length === 5);
   assert.deepEqual(f.feedback.at(-1), { epoch: 1, available: false });
   assert.equal(f.owner.getStats().ready, true);
   assert.equal(f.owner.getStats().activeEpoch, 1);
   assert.equal(f.owner.getStats().outstandingCreditFrames, 960);
   const invalidated = f.receiver.getStats().sessions[0].sink;
-  assert.equal(invalidated.playout.contextFrame, 384);
+  assert.equal(invalidated.playout.contextFrame, 640);
   assert.equal(invalidated.playout.clockEpoch, 2);
   assert.equal(invalidated.playout.repeatedContextFrames, 128);
-  assert.equal(invalidated.playout.discardedFrames, 576);
-  assert.equal(invalidated.lastUnderrun.state, 'buffering');
-  assert.equal(invalidated.outputClock.lastUnavailableReason, 'buffering');
-  for (let sequence = 2; sequence < 4; sequence++) {
+  assert.equal(invalidated.playout.discardedFrames, 0);
+  assert.equal(invalidated.lastUnderrun, null);
+  assert.equal(invalidated.outputClock.lastUnavailableReason, 'context-clock-unavailable');
+  for (let sequence = 6; sequence < 8; sequence++) {
     assert.equal(f.owner.handleNativeEvent({ type: 'audio.playout', target: 0, data: pcm(1, sequence) }), true);
   }
-  await until(() => node.processor.queue.snapshot().queuedFrames === 960);
-  for (const frame of [640, 768, 896]) {
+  await until(() => node.processor.queue.snapshot().queuedFrames === 3328);
+  for (const frame of [896, 1024, 1152, 1280, 1408]) {
     assert.equal(render(frame).every(channel => channel.every(sample => sample === .25)), true);
   }
   await until(() => f.feedback.at(-1).available === true);
   assert.equal(f.feedback.at(-1).epoch, 1);
   assert.equal(f.feedback.at(-1).clockEpoch, 2);
   assert.equal(f.feedback.at(-1).calibrationId, 1);
-  assert.equal(f.feedback.at(-1).estimatedPlayoutFrame, 1088);
-  assert.equal(f.feedback.at(-1).confirmedPcmEnd, 1920);
-  assert.equal(f.owner.getStats().nextPlayoutFrame, 1920);
-  assert.equal(f.owner.getStats().nextSequence, 4);
+  assert.equal(f.feedback.at(-1).estimatedPlayoutFrame, 896);
+  assert.equal(f.feedback.at(-1).confirmedPcmEnd, 3840);
+  assert.equal(f.owner.getStats().nextPlayoutFrame, 3840);
+  assert.equal(f.owner.getStats().nextSequence, 8);
   assert.equal(f.contextCount(), 1);
   assert.equal(f.calls.filter(value => value === 'configure').length, 1);
   assert.equal(f.calls.some(value => value.startsWith('native-stop')), false);
   assert.equal(f.timers.size, 1, 'Recovery must not add a PCM timer or replace calibration ownership.');
   assert.deepEqual(f.errors, []);
   const playout = f.receiver.getStats().sessions[0].sink.playout;
-  assert.equal(playout.contextFrame, 896);
+  assert.equal(playout.contextFrame, 1408);
   assert.equal(playout.contextDiscontinuities, 1);
-  assert.equal(playout.discardedFrames, 576);
+  assert.equal(playout.discardedFrames, 0);
   assert.equal(playout.acceptedFrames, playout.renderedFrames + playout.queuedFrames + playout.discardedFrames);
   await f.owner.stop(1);
   assert.equal(f.owner.getStats().rendererRetired, true);

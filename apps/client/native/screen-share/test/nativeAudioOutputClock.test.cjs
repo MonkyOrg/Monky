@@ -5,7 +5,7 @@ const { test } = require('node:test');
 const { NativeAudioOutputClock } = require('../runtime/nativeAudioOutputClock.cjs');
 
 const feedback = (changes = {}) => ({
-  epoch: 1, clockEpoch: 1, state: 'running', contextFrame: 48000, frames: 128,
+  epoch: 1, clockEpoch: 1, state: 'running', clockAvailable: true, contextFrame: 48000, frames: 128,
   firstPlayoutFrame: 24000, mediaFrames: 128, queuedFrames: 832, ...changes,
 });
 
@@ -117,9 +117,9 @@ test('a repeated graph timestamp withdraws the old speaker anchor before clock r
   f.clock.update(feedback());
   assert.equal(f.clock.sample(f.context).available, true);
   f.at(1101);
-  assert.equal(f.clock.update(feedback({ clockEpoch: 2, state: 'buffering',
-    firstPlayoutFrame: null, mediaFrames: 0, queuedFrames: 0 })), true);
-  assert.deepEqual(f.clock.sample(f.context), { available: false, epoch: 1, reason: 'buffering' });
+  assert.equal(f.clock.update(feedback({ clockEpoch: 2, clockAvailable: false,
+    firstPlayoutFrame: 24128, queuedFrames: 704 })), true);
+  assert.deepEqual(f.clock.sample(f.context), { available: false, epoch: 1, reason: 'context-clock-unavailable' });
   assert.equal(f.clock.latest.contextFrame, 48000, 'Invalidation must accept the actual repeated timestamp.');
   assert.equal(f.clock.update(feedback({ contextFrame: 48512 })), false);
   assert.equal(f.clock.sample(f.context).available, false);
@@ -148,7 +148,7 @@ test('malformed feedback and non-monotonic browser/output clocks are rejected ex
   const f = fixture();
   for (const invalid of [
     feedback({ epoch: 2 }), feedback({ firstPlayoutFrame: null }), feedback({ mediaFrames: 0 }),
-    feedback({ state: 'buffering' }), feedback({ queuedFrames: -1 }),
+    feedback({ state: 'buffering' }), feedback({ queuedFrames: -1 }), feedback({ clockAvailable: 'yes' }),
   ]) assert.throws(() => f.clock.update(invalid));
   f.clock.update(feedback());
   f.at(1090);

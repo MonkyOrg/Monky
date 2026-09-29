@@ -26,8 +26,11 @@ import { CrashRecovery } from './crashRecovery';
 import { initializeMainLanguage, mt } from './i18n';
 import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
 import { ServerInviteInbox, registerServerInviteProtocol } from './serverInvites';
+import { configureVideoPresentation } from './videoPresentation';
 
 import fs from 'fs';
+
+configureVideoPresentation(app.commandLine, process.platform);
 
 const developmentQa = loadDevelopmentQa({
   packaged: app.isPackaged,

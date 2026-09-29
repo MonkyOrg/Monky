@@ -2,7 +2,7 @@
 
 const { boundedCleanup } = require('./frameSink.cjs');
 const { isPresentationId } = require('./presentationRoute.cjs');
-const { sendTexture } = require('./textureTransfer.cjs');
+const { TextureTransferSender } = require('./textureTransfer.cjs');
 
 const positiveId = value => Number.isSafeInteger(value) && value > 0;
 const coordinate = value => Number.isSafeInteger(value) && value >= 0;
@@ -50,7 +50,6 @@ class NativePresentationBridge {
     this.textures = textures;
     this.onError = onError;
     this.drainTimeoutMs = drainTimeoutMs;
-    this.createTextureChannel = createTextureChannel;
     this.accepting = true;
     this.leases = new Map();
     this.transfers = new Set();
@@ -61,6 +60,9 @@ class NativePresentationBridge {
     this.retired = 0;
     this.maximumOutstanding = 0;
     this.errors = [];
+    this.textureSender = new TextureTransferSender(error => this.report(error), {
+      timeoutMs: drainTimeoutMs, createChannel: createTextureChannel,
+    });
   }
 
   report(value) {
@@ -126,10 +128,9 @@ class NativePresentationBridge {
         throw new Error('Native texture import did not return an owned wrapper; ownership is retained.');
       }
       this.imported++;
-      await sendTexture(lease.imported, destination.frame,
+      await this.textureSender.send(lease.imported, destination.frame,
         { frameId, timestampUs: event.data.timestampUs, presentationId: destination.presentationId },
-        error => this.report(error), { timeoutMs: this.drainTimeoutMs, createChannel: this.createTextureChannel,
-          onAcquired: () => { this.delivered++; } });
+        () => { this.delivered++; });
     } catch (error) {
       failure = error;
     } finally {
@@ -220,6 +221,7 @@ class NativePresentationBridge {
     }
     await boundedCleanup(this.drainWork,
       'Native presentation cleanup timed out; GPU leases remain owned.', this.drainTimeoutMs);
+    await this.textureSender.close();
     return this.getStats();
   }
 }
