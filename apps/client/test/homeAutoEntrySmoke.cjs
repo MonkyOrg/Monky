@@ -91,7 +91,7 @@ if (!process.versions.electron) {
     const evaluate = code => window.webContents.executeJavaScript(code, true);
     phase = 'real startup and authentication';
     await evaluate(`(${setupHomeAutoEntrySmoke.toString()})()`);
-    for (const name of ['connections', 'cancellation', 'preferences', 'previews']) {
+    for (const name of ['onboarding', 'connections', 'cancellation', 'preferences', 'previews']) {
       phase = name;
       await evaluate(`window.homeAutoEntrySmoke.${name}()`);
     }
@@ -189,13 +189,13 @@ async function setupHomeAutoEntrySmoke() {
   const [{ HomeTestApp }, { AutoEntryService }, { sessionManager: sessions, sessionKeyFor }, navigation,
     { connectionStore: connection }, { settingsStore: settings }, { favoritesStore: favorites },
     { serverStore }, { voiceStore: voice }, { audioProcessor: audio }, { webRtcManager: rtc },
-    { videoService: video }, { settingsModal }, { appEvents: bus }, { t, setLanguage }, shared] = await Promise.all([
+    { videoService: video }, { settingsModal }, { appEvents: bus }, { t, setLanguage }, shared, { onboardingWizard }] = await Promise.all([
     import('/main.ts'), import('/core/AutoEntryService.ts'), import('/core/SessionManager.ts'),
     import('/core/serverConnection.ts'), import('/stores/connectionStore.ts'), import('/stores/settingsStore.ts'),
     import('/stores/favoritesStore.ts'), import('/stores/serverStore.ts'), import('/stores/voiceStore.ts'),
     import('/core/AudioProcessor.ts'), import('/core/WebRtcManager.ts'), import('/core/VideoService.ts'),
     import('/views/SettingsModal.ts'), import('/core/EventBus.ts'), import('/i18n/index.ts'),
-    import('/home-auto-entry-shared.js'),
+    import('/home-auto-entry-shared.js'), import('/views/OnboardingWizard.ts'),
   ]);
   const { MessageType, Permission, PROTOCOL_VERSION } = shared;
   const sockets = [];
@@ -388,6 +388,23 @@ async function setupHomeAutoEntrySmoke() {
   let keyboardPrevious = false;
   let keyboardHost = null;
   window.homeAutoEntrySmoke = {
+    async onboarding() {
+      const a = saved('a.test', 5201);
+      await reset([a]);
+      onboardingWizard.close(null, true);
+      home.onboardingAutoOpened = false;
+      settings.onboardingCompleted = false;
+      settings.save();
+      home.render();
+      check(onboardingWizard.isOpen, 'first launch auto-opens the onboarding wizard');
+      onboardingWizard.close();
+      check(settings.onboardingCompleted === true, 'dismissing the auto-opened wizard persists onboarding completion');
+      const stored = JSON.parse(localStorage.getItem('monky_settings') || '{}');
+      check(stored.onboardingCompleted === true, 'onboarding completion is persisted so the wizard will not reopen next launch');
+      home.onboardingAutoOpened = false;
+      home.render();
+      check(!onboardingWizard.isOpen, 'a completed onboarding never reopens on later renders');
+    },
     async connections() {
       const a = saved('a.test', 5201);
       const b = saved('b.test', 5202);

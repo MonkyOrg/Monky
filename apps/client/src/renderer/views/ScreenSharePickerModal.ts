@@ -543,6 +543,21 @@ export class ScreenSharePickerModal {
         return;
       }
       if (!window.api?.getDesktopSources) throw new Error('Desktop source enumeration is unavailable');
+      // macOS ties Screen Recording to the app's code signature. Because Monky
+      // ships ad-hoc signed, every update invalidates the previous grant while
+      // System Settings still shows it enabled, so enumeration fails silently
+      // (#327). Surface the re-request flow before listing so the user gets the
+      // actionable permission dialog instead of the generic "could not load".
+      if (typeof window.api?.ensureScreenPermission === 'function') {
+        const permitted = await window.api.ensureScreenPermission();
+        if (!isCurrent()) return;
+        if (!permitted) {
+          this.sourceState = { status: 'error' };
+          this.renderSources();
+          this.updateCaptureInfo();
+          return;
+        }
+      }
       const sources = await window.api.getDesktopSources({ metadataOnly: true, refresh: forceRefresh });
       if (!isCurrent()) return;
       this.sourceState = { status: 'ready', sources };

@@ -205,6 +205,20 @@ test('selection uses the actual merged PR and all artifacts of the successful wo
   await assert.rejects(selectBuild(apiFixture({ pr: false }), repository, commit), /merged main PR/);
 });
 
+test('selection reuses the highest available attempt per variant after a partial re-run', async () => {
+  const digest = `sha256:${'c'.repeat(64)}`;
+  const selected = await selectBuild(apiFixture({
+    selectedRun: { ...run, run_attempt: 2 },
+    artifacts: [
+      { id: 200, name: 'ci-build-cli-1', expired: false, digest },
+      { id: 201, name: 'ci-build-win-1', expired: false, digest },
+      { id: 202, name: 'ci-build-mac-1', expired: false, digest },
+      { id: 203, name: 'ci-build-mac-2', expired: false, digest },
+    ],
+  }), repository, commit);
+  assert.deepEqual(selected, { reuse: true, runId: 42, runAttempt: 2, artifacts: { cli: 200, mac: 203, win: 201 } });
+});
+
 test('only absent/expired legacy artifacts or legacy promotions select an explicit rebuild', async () => {
   for (const artifacts of [[], [{ id: 100, name: 'ci-build-cli-1', expired: true }],
     [{ id: 100, name: 'ci-build-cli-2', expired: false }]]) {

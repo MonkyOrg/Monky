@@ -1433,6 +1433,25 @@ test('capability/source generations, retries and close cleanup ignore late resul
   assert.equal(f.picker.eventController, null);
 });
 
+test('a denied macOS screen-recording grant surfaces the error state without enumerating sources', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  await f.picker.open();
+  const panel = control(f, 'share-sources-panel');
+  const enumeratedBefore = f.enumerations;
+  f.controls.screenPermission = async () => false;
+  await f.picker.loadSources(f.picker.modalEl);
+  assert.equal(f.picker.sourceState.status, 'error');
+  assert.ok(panel.querySelector('[role="alert"]'), 'A denied permission must present the load error state');
+  assert.equal(f.enumerations, enumeratedBefore, 'Enumeration must be skipped while the grant is missing');
+  f.controls.screenPermission = async () => true;
+  panel.querySelector('[data-loading-retry]').click();
+  await flush();
+  assert.ok(f.permissionChecks >= 2, 'Retrying must re-request the permission');
+  assert.equal(f.picker.sourceState.status, 'ready');
+  assert.equal(f.enumerations, enumeratedBefore + 1, 'A granted retry enumerates exactly once');
+});
+
 test('unavailable profile and application-wide Mac audio confirmation stay fail-closed', async t => {
   const f = fixture();
   t.after(() => f.close());

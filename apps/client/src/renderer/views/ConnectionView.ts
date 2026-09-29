@@ -1193,6 +1193,14 @@ export class ConnectionView {
     if (!settingsStore.onboardingCompleted && !onboardingWizard.isOpen && !this.onboardingAutoOpened) {
       this.onboardingAutoOpened = true;
       onboardingWizard.open((action) => {
+        // The wizard only self-marks completion when a path button is clicked.
+        // Dismissing it (backdrop/ESC) otherwise leaves it pending, so it would
+        // reopen on every launch. Persist completion for any close of the
+        // auto-opened wizard so it appears only once.
+        if (!settingsStore.onboardingCompleted) {
+          settingsStore.onboardingCompleted = true;
+          settingsStore.save();
+        }
         if (action === 'join' && this.activeTab !== 'join') {
           this.activeTab = 'join';
           this.render();

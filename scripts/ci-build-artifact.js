@@ -155,7 +155,17 @@ export async function selectBuild(api, repository, commit, promotion = false) {
   const listing = await api(`actions/runs/${run.id}/artifacts?per_page=100`);
   const artifacts = {};
   for (const variant of Object.keys(roots)) {
-    const artifact = listing.artifacts.find(item => item.name === `ci-build-${variant}-${run.run_attempt}` && !item.expired);
+    // A partial re-run (e.g. `gh run rerun --failed` after a flaky job) advances
+    // run_attempt but only re-uploads artifacts for the jobs that re-ran. Match
+    // the highest available attempt per variant instead of assuming every
+    // artifact shares the run's latest attempt, so a mixed-attempt run still
+    // reuses its verified build instead of forcing a full rebuild.
+    const prefix = `ci-build-${variant}-`;
+    const attempt = name => name.startsWith(prefix) && /^[0-9]+$/.test(name.slice(prefix.length))
+      ? Number(name.slice(prefix.length)) : null;
+    const artifact = listing.artifacts
+      .filter(item => !item.expired && attempt(item.name) !== null && attempt(item.name) <= run.run_attempt)
+      .sort((a, b) => attempt(b.name) - attempt(a.name))[0];
     if (!artifact) return { reuse: false, reason: 'Approved CI artifacts are absent or expired; rebuilding this legacy/recovery release.' };
     assert.ok(positiveId(artifact.id) && /^sha256:[a-f0-9]{64}$/.test(artifact.digest), 'Missing immutable artifact digest.');
     artifacts[variant] = artifact.id;
