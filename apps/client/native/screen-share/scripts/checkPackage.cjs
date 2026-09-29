@@ -88,6 +88,22 @@ function verifyLegalFiles(directory, platform = 'win32') {
   return catalog;
 }
 
+function detachPackagedHardLinks(directory) {
+  // electron-builder hard-links files on CI; signing must not change build inputs.
+  for (const relative of regularFiles(directory)) {
+    const filename = path.join(directory, relative);
+    if (fs.lstatSync(filename).nlink < 2) continue;
+    const temporary = fs.mkdtempSync(path.join(path.dirname(filename), '.monky-package-'));
+    try {
+      const copy = path.join(temporary, 'copy');
+      fs.copyFileSync(filename, copy, fs.constants.COPYFILE_EXCL | fs.constants.COPYFILE_FICLONE);
+      fs.renameSync(copy, filename);
+    } finally {
+      fs.rmSync(temporary, { recursive: true, force: true });
+    }
+  }
+}
+
 async function afterPack(context) {
   const platform = context.electronPlatformName;
   const contents = platform === 'darwin'
@@ -105,6 +121,7 @@ async function afterPack(context) {
     'The packaged native runtime must not alias the source checkout.');
   for (const name of ['build', 'src', 'scripts', 'test'])
     assert.ok(!fs.existsSync(path.join(directory, name)), `Native build/source-only material leaked into the application: ${name}`);
+  detachPackagedHardLinks(directory);
   copyMonkyLicenses(directory);
   if (!['win32', 'darwin'].includes(platform)) return;
   const arch = require('builder-util').Arch[context.arch];
@@ -146,3 +163,4 @@ module.exports.verifySourceInputs = verifySourceInputs;
 module.exports.verifyLegalFiles = verifyLegalFiles;
 module.exports.verifyMacSourceInputs = verifyMacSourceInputs;
 module.exports.verifyMacRuntime = verifyMacRuntime;
+module.exports.detachPackagedHardLinks = detachPackagedHardLinks;

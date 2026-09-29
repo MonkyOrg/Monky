@@ -748,6 +748,11 @@ CI/release runs before claiming a speedup.
 
 ## License and Corresponding Source
 
+Before refreshing licenses or signing, packaging detaches the hard links created
+by electron-builder on CI. Application files become independent of the checkout,
+avoiding license-copy collisions and changes to the original binaries or
+manifests during signing.
+
 Monky is **GPL-3.0-or-later**. Dependencies retain their own rights and licenses; see
 `THIRD_PARTY_NOTICES` and `licenses`. WebRTC notices are derived from the GN
 graph actually compiled. The distributed FFmpeg build uses GPL version 3 or

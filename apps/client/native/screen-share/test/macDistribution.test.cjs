@@ -7,8 +7,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
 const { test } = require('node:test');
-const { fingerprint } = require('../scripts/buildTools.cjs');
-const { verifyMacRuntime } = require('../scripts/checkPackage.cjs');
+const { fingerprint, regularFiles } = require('../scripts/buildTools.cjs');
+const { verifyMacRuntime, detachPackagedHardLinks } = require('../scripts/checkPackage.cjs');
 
 test('the Mac GPL notice is a bundle resource, while other desktop platforms keep their root notice', () => {
   const { build } = require('../../../package.json');
@@ -19,6 +19,38 @@ test('the Mac GPL notice is a bundle resource, while other desktop platforms kee
   assert.deepEqual(build.linux.extraFiles, [license]);
   assert.ok(build.files.includes('!node_modules/**/build/node_gyp_bins{,/**/*}'),
     'Generated node-gyp interpreter symlinks must never escape into the distributed application.');
+});
+
+test('CI hard links become independent package files before license refresh and signing', t => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-package-hardlinks-'));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const source = path.join(temporary, 'source'), packaged = path.join(temporary, 'packaged');
+  const files = ['licenses/libsdptransform/LICENSE', 'bin/darwin-arm64/rtc-build.json',
+    'bin/darwin-arm64/monky-screen-mac'];
+  for (const relative of files) {
+    const original = path.join(source, relative), destination = path.join(packaged, relative);
+    fs.mkdirSync(path.dirname(original), { recursive: true });
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(original, `original ${relative}`, { mode: 0o755 });
+    fs.linkSync(original, destination);
+    assert.ok(fs.lstatSync(destination).nlink > 1);
+  }
+  detachPackagedHardLinks(packaged);
+  for (const relative of files) {
+    const original = path.join(source, relative), destination = path.join(packaged, relative);
+    assert.equal(fs.lstatSync(destination).nlink, 1);
+    assert.deepEqual(fingerprint(destination), fingerprint(original));
+    assert.equal(fs.statSync(destination).mode & 0o777, fs.statSync(original).mode & 0o777);
+  }
+  fs.cpSync(path.join(source, 'licenses'), path.join(packaged, 'licenses'), { recursive: true });
+  for (const relative of files) {
+    fs.appendFileSync(path.join(packaged, relative), ' packaged update');
+    assert.equal(fs.readFileSync(path.join(source, relative), 'utf8'), `original ${relative}`);
+  }
+  const before = files.map(relative => fs.statSync(path.join(packaged, relative), { bigint: true }).ino);
+  detachPackagedHardLinks(packaged);
+  assert.deepEqual(files.map(relative => fs.statSync(path.join(packaged, relative), { bigint: true }).ino), before);
+  assert.deepEqual(regularFiles(packaged), files.map(relative => path.normalize(relative)).sort());
 });
 
 function fixture(t) {

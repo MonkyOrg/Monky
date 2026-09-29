@@ -764,6 +764,11 @@ meça as execuções reais de CI/release antes de afirmar ganho de tempo.
 
 ## Licença e fontes correspondentes
 
+Antes de atualizar licenças ou assinar, o empacotamento separa os hard links
+criados pelo electron-builder no CI. Arquivos do aplicativo ficam independentes
+do checkout, evitando colisões na cópia de licenças e alterações nos binários
+ou manifestos originais durante a assinatura.
+
 O Monky é **GPL-3.0-or-later**. Dependências mantêm seus próprios direitos e licenças; consulte
 `THIRD_PARTY_NOTICES` e `licenses`. Os avisos WebRTC são derivados do grafo GN
 realmente compilado. O FFmpeg distribuído usa GPL versão 3 ou posterior.
