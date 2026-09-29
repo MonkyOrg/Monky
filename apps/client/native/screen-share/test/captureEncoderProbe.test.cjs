@@ -9,6 +9,10 @@ const test = require('node:test');
 const protocol = require('../runtime/captureProtocol.cjs');
 const { probeCaptureCapabilities } = require('../runtime/captureBridge.cjs');
 
+test.beforeEach(t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+});
+
 const runId = 'a'.repeat(32);
 const video = Object.freeze({ width: 1280, height: 720, fps: 60, bitrateKbps: 5000 });
 const retirement = Object.freeze({
@@ -115,7 +119,7 @@ function fixture(settings = {}) {
   };
 }
 
-test('source-free probe proves encoder initialization and returns only after clean retirement and process exit', async () => {
+test('source-free probe proves encoder initialization and returns only after clean retirement and process exit', async t => {
   for (const [encoder, scaleMode] of Object.keys(protocol.ENCODERS).flatMap(encoder => [[encoder, undefined], [encoder, 'fit']])) {
     const selectedVideo = scaleMode ? { ...video, scaleMode } : video;
     const f = fixture({ encoder, scaleMode, holdExit: true,
@@ -127,6 +131,10 @@ test('source-free probe proves encoder initialization and returns only after cle
       await new Promise(resolve => setImmediate(resolve));
       assert.deepEqual(f.commands, ['1 stop\n']);
       assert.equal(resolved, false); assert.equal(f.closed, false);
+      t.mock.timers.tick(f.dependencies.deadlines.exit - 1);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(resolved, false); assert.equal(f.closed, false);
+      assert.deepEqual(f.kills, []);
       f.finish();
       const result = await pending;
       assert.equal(f.closed, true);
@@ -245,12 +253,23 @@ test('unconfirmed initialization, incorrect requested encoder and malformed reti
   }
 });
 
-test('probe timeout terminates only its owned helper and never reports verified retirement', async () => {
+test('probe timeout terminates only its owned helper and never reports verified retirement', async t => {
   const f = fixture({ neverPrepare: true, hangOnStop: true });
   try {
-    await assert.rejects(probeCaptureCapabilities(options, undefined, {
+    const rejected = assert.rejects(probeCaptureCapabilities(options, undefined, {
       ...f.dependencies, deadlines: { prepare: 10, stop: 10, exit: 10 },
     }), error => error instanceof AggregateError && /retirement/u.test(error.message));
+    t.mock.timers.tick(10);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(f.commands, ['1 stop\n']);
+    assert.deepEqual(f.kills, []);
+    t.mock.timers.tick(10);
+    await new Promise(resolve => setImmediate(resolve));
+    t.mock.timers.tick(9);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(f.kills, []);
+    t.mock.timers.tick(1);
+    await rejected;
     assert.deepEqual(f.kills, [{ pid: 42, signal: 'SIGTERM' }]);
     assert.equal(f.closed, true);
   } finally { await f.dispose(); }
