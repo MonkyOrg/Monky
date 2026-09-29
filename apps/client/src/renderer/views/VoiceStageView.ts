@@ -152,7 +152,7 @@ export class VoiceStageView {
 
   public isWatchingBotScreen(id: string): boolean { return this.botScreens.get(id)?.isWatching ?? false; }
 
-  public watchBotScreen(id: string, focus = false): void {
+  public watchBotScreen(id: string): void {
     this.refreshBotScreens();
     const view = this.botScreens.get(id);
     if (!view) return;
@@ -168,8 +168,7 @@ export class VoiceStageView {
         void showAlert({ title: t('common.error'), message: t('botScreen.openError'), variant: 'danger' });
       }
     };
-    if (focus) this.setFocusedTiles([`miniapp:${id}`], { afterRender: open });
-    else open();
+    this.setFocusedTiles([`miniapp:${id}`], { afterRender: open });
   }
 
   private closeBotScreen(id: string): void {

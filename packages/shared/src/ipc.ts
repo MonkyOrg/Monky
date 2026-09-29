@@ -60,6 +60,11 @@ export const SERVER_INVITE_IPC = {
 } as const satisfies Record<string, keyof IpcInvokeChannels>;
 export const SERVER_INVITE_AVAILABLE = 'server-invite:available' satisfies keyof IpcEvents;
 
+export const BOT_SCREEN_DOCUMENT_IPC = {
+  create: 'bot-screen-document:create',
+  remove: 'bot-screen-document:remove',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+
 export type CrashRecoveryActionResult =
   | { ok: true; copied?: boolean }
   | { ok: false; reason: 'unavailable' | 'open-failed' | 'copy-failed' | 'restart-failed'; copied?: boolean };
@@ -733,6 +738,8 @@ export const NATIVE_SCREEN_EVENT = 'native-screen:event' satisfies keyof IpcEven
  * Mapeamento de Canais Bidirecionais (Invoke / Handle)
  */
 export interface IpcInvokeChannels {
+  'bot-screen-document:create': { args: [html: string]; returnType: string };
+  'bot-screen-document:remove': { args: [url: string]; returnType: void };
   'editor:command': { args: [command: EditorCommand]; returnType: { success: boolean } };
   'native-screen:invoke': { args: [command: NativeScreenCommand]; returnType: NativeScreenCommandResult };
   'native-screen:reply': { args: [reply: NativeScreenReply]; returnType: void };

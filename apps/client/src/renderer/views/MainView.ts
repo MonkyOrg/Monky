@@ -614,7 +614,7 @@ export class MainView {
     this.setActiveContentView('stage');
     this.voiceStageView?.setChannel(channelId);
     if (watchSessionId) this.voiceStageView?.watchScreenShare(watchSessionId);
-    if (botScreenId) this.voiceStageView?.watchBotScreen(botScreenId, true);
+    if (botScreenId) this.voiceStageView?.watchBotScreen(botScreenId);
     this.renderChannels();
     this.updateScreenShareNotice();
   }
