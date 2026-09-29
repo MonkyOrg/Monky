@@ -18,7 +18,8 @@ permissions:
 jobs:
   sources:
     name: Native media (${{ matrix.arch }})
-    timeout-minutes: 90
+    # Cold Intel builds can reach 90 minutes before addon and runtime validation.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:

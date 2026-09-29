@@ -213,6 +213,11 @@ test('release still generates corresponding sources from the clean version commi
 test('macOS native artifacts are built and tested in CI, then reused before release version mutation', () => {
   const nativeMac = workflow('native-macos-validation.yml').jobs.sources;
   assert.deepEqual(nativeMac.strategy.matrix.include.map(entry => entry.arch).sort(), ['arm64', 'x64']);
+  assert.equal(nativeMac['timeout-minutes'], 120,
+    'Cold Intel builds need a bounded budget for compilation, addon linking and runtime validation.');
+  assert.ok(nativeMac.steps.every(candidate => !candidate['continue-on-error']));
+  assert.equal(step(nativeMac, 'Exercise native screen contracts').run,
+    'npm run test:native-screen --workspace=apps/client');
   const audio = step(nativeMac, 'Build native audio and verify AppKit lifecycle requirements');
   assert.match(audio.run, /node-gyp rebuild --directory=apps\/client\/native\/screen-audio/);
   assert.match(audio.run, /macAudioRuntime\.test\.cjs/);
