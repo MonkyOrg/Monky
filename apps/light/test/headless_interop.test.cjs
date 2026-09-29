@@ -114,9 +114,15 @@ for (const voiceMode of ['p2p', 'sfu']) {
       }
     }
 
+    const channelsSince = alice.events.length;
     const room = await admin.peer.request(MessageType.CHANNEL_CREATE, { name: 'Other', type: 'VOICE' },
       [MessageType.CHANNEL_CREATED]);
     const otherChannelId = room.payload.channel.id;
+    // An interface has to be told the list changed; it must not poll the state.
+    const announced = await alice.wait(event => event.event === 'channels-changed' &&
+      event.channels.some(channel => channel.id === otherChannelId), channelsSince);
+    assert.ok(announced.channels.every(channel => channel.serverId && channel.type),
+      'The announced channel list must carry the same shape the snapshot does');
     await alice.untilState(value => value.channels.some(channel => channel.id === otherChannelId),
       'New channel was not reflected in native state');
     await alice.join(otherChannelId);

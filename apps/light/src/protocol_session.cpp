@@ -230,6 +230,7 @@ void ProtocolSession::event(SessionEventKind kind, std::string type, Json payloa
     if (callScoped && (value.connection != connection_ || value.generation != generation_)) return;
     if (kind == SessionEventKind::authenticated && (!online_ || !auth_ || value.connection != connection_)) return;
     if (kind == SessionEventKind::policyChanged && value.connection != connection_) return;
+    if (kind == SessionEventKind::channelsChanged && value.connection != connection_) return;
     if (kind == SessionEventKind::reconnectRequested && (online_ || phase_ != SessionPhase::offline)) return;
     callbacks_.event(value);
   });
@@ -553,6 +554,7 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
     if (found == channels.end()) channels.push_back(value);
     else *found = value;
     if (desired_ == text(value, "id") && text(value, "type") != "VOICE") leave();
+    event(SessionEventKind::channelsChanged, type, Json{{"channels", channels}});
     return;
   }
   if (type == msg::CHANNEL_DELETED) {
@@ -561,6 +563,7 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
     channels.erase(std::remove_if(channels.begin(), channels.end(), [&](const Json& value) {
       return text(value, "id") == room;
     }), channels.end());
+    event(SessionEventKind::channelsChanged, type, Json{{"channels", channels}});
     if (desired_ == room) {
       desired_.reset();
       clearCall({FailureKind::cancelled, {}, "Channel no longer accessible"});

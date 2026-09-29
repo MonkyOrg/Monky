@@ -4,7 +4,8 @@
 
 Núcleo nativo **headless** do Monky Light, em desenvolvimento. Conecta ao servidor
 Monky e participa de chamadas de voz P2P e SFU, sem janela ou navegador residente.
-Ainda não é o aplicativo final de bandeja nem um instalador publicado.
+Já existe uma interface de bandeja (`--tray`); ainda não existem painéis nativos
+nem instalador publicado.
 
 O núcleo não depende de Electron, Node ou webview em tempo de execução. Node é
 uma ferramenta de construção: compila o `@monky/shared` e gera os contratos C++
@@ -57,12 +58,14 @@ O executável macOS fica dentro do bundle `monky-light.app`, em `bin` no diretó
 da arquitetura. Execute o binário do bundle em um terminal para manter stdin e
 stdout disponíveis. O bundle declara a finalidade de acesso ao microfone.
 
-`--help` lista as opções. `--channel` aceita o ID de um canal de voz;
+`--help` lista as opções. `--tray` adiciona a interface de bandeja, descrita
+adiante. `--channel` aceita o ID de um canal de voz;
 `--muted`/`--deafened` aplicam as preferências desde a entrada. Se o servidor
 exigir senha, forneça `MONKY_LIGHT_PASSWORD` no ambiente do processo, não na
 linha de comando. Ela não é salva no perfil.
 
-A saída contém eventos JSON, incluindo `authenticated` com a lista de canais.
+A saída contém eventos JSON, incluindo `authenticated` com o nome do servidor
+e a lista de canais, e `channels-changed` quando essa lista muda.
 Digite um objeto JSON por linha no terminal, usando o ID recebido:
 
 ```json
@@ -112,6 +115,63 @@ precisa transmitir. Enquanto a permissão está pendente, é possível receber
 áudio, sair da chamada e encerrar o aplicativo. Uma recusa mantém o microfone
 mutado e gera `microphone-error`; não tenta contornar as configurações do sistema.
 O fluxo de permissão do macOS ainda requer execução em um Mac.
+
+## Interface de bandeja
+
+`--tray` adiciona o ícone na área de notificação do Windows ou na barra de status
+do macOS. O controle por stdin continua valendo, então o mesmo processo serve
+para uso e para QA: o terminal mostra os eventos correspondentes a cada clique.
+
+Os laços de eventos das plataformas exigem a thread principal do processo: o
+`NSApplication` do macOS só funciona nela e o *message pump* do Windows precisa
+da thread que criou a janela. Por isso, com `--tray` a interface fica na thread
+principal e o laço do núcleo passa para uma thread trabalhadora. Sem `--tray` o
+núcleo mantém a thread principal, exatamente como o cliente já qualificado.
+
+A bandeja não consulta o núcleo: ela reconstrói o estado a partir dos mesmos
+eventos JSON impressos no stdout e envia os mesmos comandos aceitos no stdin, com
+a mesma validação e as mesmas respostas `command-accepted`/`command-error`. Não
+há segundo caminho de consulta nem cópia paralela do estado da sessão.
+
+O menu é montado na hora em que abre e descartado ao fechar; nada fica
+renderizando entre as ativações. Ele traz:
+
+- o estado da sessão e da chamada, com o canal atual;
+- os canais de voz do servidor, com o canal atual marcado, e `Sair do canal`;
+- mute e deafen, marcados e desabilitados quando a restrição é do servidor;
+- `Dispositivos de áudio`, com entrada, saída e `Padrão do sistema`;
+- `Reconectar agora` e `Sair do Monky Light`.
+
+Em menu nativo, escolha exclusiva (canal, dispositivo) usa marca de rádio e
+liga/desliga usa marca de seleção: são os equivalentes nativos do card
+selecionável e do switch da interface web. Switch e card propriamente ditos valem
+para os painéis, que não fazem parte desta etapa.
+
+O ícone reflete o estado com as mesmas cores do cliente completo: cinza
+desconectado, accent conectado sem chamada, verde em chamada e vermelho com uma
+barra diagonal quando mudo ou silenciado. Ele é desenhado em tempo de execução e
+**não** reutiliza o ícone do Monky completo, porque uma edição não deve se passar
+pela outra; a identidade própria do Light faz parte da distribuição, ainda não
+implementada. No macOS o ícone é um símbolo de sistema em modo *template*, que
+acompanha a aparência da barra de menus.
+
+A lista de dispositivos é pedida quando a sessão fica utilizável e a cada
+`audio-devices-changed`, nunca em intervalo fixo: enumerar abre o módulo de áudio
+por instantes e o libera em seguida. A lista de canais também chega por evento.
+`channels-changed` passou a ser emitido quando um canal de voz é criado,
+renomeado ou apagado, porque antes isso só era visível consultando `state`
+repetidamente, o que uma interface não deve fazer.
+
+Erros aparecem como notificação de balão no Windows e como primeira linha do menu
+no macOS: notificação nativa no macOS exige bundle assinado e autorizado, o que
+pertence à etapa de distribuição. A dica do ícone e o rótulo de acessibilidade
+carregam o estado atual, para o leitor de tela não anunciar apenas "ícone".
+
+O idioma acompanha o do sistema operacional, entre português e inglês. Escolher o
+idioma dentro do Light depende do painel de configurações, que ainda não existe.
+
+Ainda não há painéis nativos, atalhos globais, tela de conexão nem instalador: a
+bandeja é iniciada com as mesmas opções de linha de comando do núcleo.
 
 ## Contratos compartilhados
 

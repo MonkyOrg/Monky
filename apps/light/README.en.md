@@ -4,7 +4,8 @@
 
 Native **headless** Monky Light core, under development. It connects to a Monky
 server and participates in P2P and SFU voice calls without a resident window
-or browser. It is not yet the final tray application or a published installer.
+or browser. A tray interface already exists (`--tray`); native panels and a
+published installer do not.
 
 The core does not depend on Electron, Node, or a webview at runtime. Node is a
 build tool: it compiles `@monky/shared` and generates the C++ contracts before
@@ -57,12 +58,14 @@ The macOS executable is inside the `monky-light.app` bundle under `bin` in the
 architecture's build directory. Run the bundle's executable from a terminal to
 keep stdin and stdout available. The bundle declares its microphone usage purpose.
 
-`--help` lists the options. `--channel` takes a voice channel ID;
+`--help` lists the options. `--tray` adds the tray interface, described below.
+`--channel` takes a voice channel ID;
 `--muted`/`--deafened` apply preferences from entry. If the server requires a
 password, supply `MONKY_LIGHT_PASSWORD` in the process environment, not on the
 command line. It is not saved in the profile.
 
-Output consists of JSON events, including `authenticated` with the channel list.
+Output consists of JSON events, including `authenticated` with the server name
+and the channel list, and `channels-changed` whenever that list changes.
 Enter one JSON object per line in the terminal, using the received channel ID:
 
 ```json
@@ -111,6 +114,64 @@ audio. While permission is pending, receiving audio, leaving the call, and
 quitting remain available. Denial keeps the microphone muted and emits
 `microphone-error`; it does not try to bypass system settings. The macOS
 permission flow still requires execution on a Mac.
+
+## Tray interface
+
+`--tray` adds the icon to the Windows notification area or the macOS status bar.
+The stdin control stays available, so one process serves both use and QA: the
+terminal shows the events that correspond to each click.
+
+The platform event loops require the process main thread: macOS `NSApplication`
+only works there, and the Windows message pump needs the thread that created the
+window. So with `--tray` the interface keeps the main thread and the core loop
+moves to a worker thread. Without `--tray` the core keeps the main thread,
+exactly as the already qualified client does.
+
+The tray never queries the core: it rebuilds the state from the same JSON events
+printed on stdout, and sends the same commands accepted on stdin, with the same
+validation and the same `command-accepted`/`command-error` answers. There is no
+second query path and no parallel copy of the session state.
+
+The menu is built when it opens and discarded when it closes; nothing keeps
+rendering between activations. It carries:
+
+- the session and call state, with the current channel;
+- the server voice channels, with the current one marked, and `Leave the channel`;
+- mute and deafen, marked and disabled when the server imposed them;
+- `Audio devices`, with input, output, and `System default`;
+- `Reconnect now` and `Quit Monky Light`.
+
+In a native menu an exclusive choice (channel, device) uses a radio mark and a
+toggle uses a check mark: these are the native equivalents of the selectable card
+and the switch of the web interface. Actual switches and cards belong to the
+panels, which are not part of this milestone.
+
+The icon reports the state with the same colours as the full client: grey
+disconnected, accent connected without a call, green in a call, and red with a
+diagonal bar when muted or deafened. It is drawn at runtime and does **not**
+reuse the full Monky icon, because one edition must not pass for the other; the
+Light's own identity belongs to distribution, which is not implemented yet. On
+macOS the icon is a template system symbol, which follows the menu bar
+appearance.
+
+The device list is requested once the session becomes usable and on every
+`audio-devices-changed`, never on a timer: enumerating opens the audio module
+briefly and releases it right after. The channel list also arrives by event.
+`channels-changed` is now emitted when a voice channel is created, renamed, or
+deleted, because that used to be visible only by polling `state` repeatedly,
+which an interface must not do.
+
+Failures appear as a balloon notification on Windows and as the first menu row on
+macOS: a native macOS notification needs an authorized, signed bundle, which
+belongs to the distribution step. The icon tooltip and the accessibility label
+carry the current state, so a screen reader does not announce just "icon".
+
+The language follows the operating system, between Portuguese and English.
+Choosing the language inside the Light depends on the settings panel, which does
+not exist yet.
+
+There are still no native panels, global shortcuts, connection screen, or
+installer: the tray starts with the same command-line options as the core.
 
 ## Shared contracts
 

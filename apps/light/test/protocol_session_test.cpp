@@ -567,6 +567,49 @@ void adversarialLifecycleEdges() {
         "Reentrant teardown allowed queued successful RPC to recreate media");
 }
 
+void channelListAnnouncements() {
+  Fixture fixture;
+  fixture.auth();
+  check(fixture.count(SessionEventKind::channelsChanged) == 0, "Authentication announced a channel change");
+  fixture.receive(message::CHANNEL_CREATED, {{"channel", room("third")}});
+  check(fixture.count(SessionEventKind::channelsChanged) == 1, "A created channel was not announced");
+  const auto& created = fixture.events.back().payload.at("channels");
+  check(created.size() == 3, "The announcement must carry the whole list");
+  check(created.back().at("id") == "third", "The created channel is missing from the announcement");
+
+  auto renamed = room("other");
+  renamed["name"] = "Renamed";
+  fixture.receive(message::CHANNEL_UPDATED, {{"channel", renamed}});
+  check(fixture.count(SessionEventKind::channelsChanged) == 2, "A renamed channel was not announced");
+  const auto& updated = fixture.events.back().payload.at("channels");
+  check(updated.size() == 3, "A rename must not duplicate the channel");
+  check(updated.at(1).at("name") == "Renamed", "The rename is missing from the announcement");
+
+  // A channel from another server must not reach an interface as a real change.
+  auto foreign = room("intruder");
+  foreign["serverId"] = "elsewhere";
+  const auto failures = fixture.count(SessionEventKind::failure);
+  fixture.receive(message::CHANNEL_UPDATED, {{"channel", foreign}});
+  check(fixture.count(SessionEventKind::channelsChanged) == 2,
+        "A foreign channel was announced as a change");
+  check(fixture.count(SessionEventKind::failure) == failures + 1,
+        "A foreign channel was refused in silence");
+
+  fixture.join();
+  fixture.receive(message::CHANNEL_DELETED, {{"channelId", "third"}});
+  check(fixture.count(SessionEventKind::channelsChanged) == 3, "A deleted channel was not announced");
+  check(fixture.events.back().payload.at("channels").size() == 2, "The deletion is missing from the list");
+  check(fixture.session.phase() == SessionPhase::admitted, "Deleting another channel ended the call");
+
+  // The interface has to learn the list changed before the call is torn down.
+  const auto before = fixture.events.size();
+  fixture.receive(message::CHANNEL_DELETED, {{"channelId", "room"}});
+  check(fixture.events.at(before).kind == SessionEventKind::channelsChanged,
+        "The vanished channel must be reported before its call is cleared");
+  check(fixture.count(SessionEventKind::teardown) == 1, "Deleting the joined channel kept the call");
+  check(!fixture.session.admission().has_value(), "The admission outlived its channel");
+}
+
 void synchronousReentrancy() {
   Fixture f;
   f.onSend = [&](const Json& frame) {
@@ -617,6 +660,7 @@ int main() {
     kicksAndLogout();
     topologyTransitions();
     adversarialLifecycleEdges();
+    channelListAnnouncements();
     synchronousReentrancy();
     std::cout << "Protocol session: 9 focused native test groups passed\n";
     return 0;
