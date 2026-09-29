@@ -347,6 +347,23 @@ Para uma mudança visível no app, adicione um arquivo novo em
   Arquivos ainda não commitados não entram na geração de uma release.
 
 `node scripts/test-changelog.js` valida o formato e os arquivos de notas.
+O CI também exige pelo menos **uma nota nova e bilíngue no próprio PR** quando
+ele altera arquivos de aplicação em `apps/` ou `packages/`, dependências da raiz
+ou patches. A regra é conservadora e independe do título do PR: editar uma nota
+antiga não conta. Documentação, testes/fixtures e infraestrutura isolados não
+precisam inventar novidades. Descreva o efeito real e inclua notas para todas
+as mudanças relevantes; o CI verifica presença e formato, não a qualidade do texto.
+Confira os commits da sua branch com:
+
+```bash
+node scripts/check-client-release-notes.js --base origin/main --head HEAD --merge-base
+```
+
+A comparação usa o ancestral comum para não confundir mudanças recentes da
+`main` com alterações do PR. A release repete a checagem no intervalo da tag
+anterior antes de compilar; promoções de betas antigas preservam o fluxo legado.
+Falhas ao ler o Git ou notas inválidas interrompem a checagem.
+
 `scripts/generate-changelog.js` publica as traduções em um bloco de dados oculto
 na descrição da release, separado do `Changelog` técnico. O cliente continua
 buscando a tag instalada pela API do GitHub, sem serviço de tradução.

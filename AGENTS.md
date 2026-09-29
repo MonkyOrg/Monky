@@ -102,6 +102,7 @@ npm run start --workspace=apps/client -- --user-data-dir="C:\Projetos\Monky-qa\p
 
 ## 🚢 Publicação de Releases: Somente por Merge de PR
 
+- **Inclua o changelog do aplicativo no mesmo PR.** Mudanças de aplicação/dependências exigem um arquivo novo `release-notes/*.json` com `group`, `pt-BR` e `en`, conforme o `CONTRIBUTING.md`. O changelog técnico dos commits não substitui essas notas. Rode `node scripts/test-changelog.js` e, após os commits, `node scripts/check-client-release-notes.js --base origin/main --head HEAD --merge-base`; CI e release bloqueiam a ausência de notas.
 - **NUNCA publique releases a partir de branches de trabalho ou de integração.** Aprovar um teste local ou pedir uma release não autoriza publicar diretamente da branch.
 - **Novas versões devem sair exclusivamente do merge de um PR na `main`**, pelo workflow automático de release. Não use `workflow_dispatch`, `gh release create`, tags manuais ou upload de artefatos para contornar esse fluxo, mesmo que o CI da branch esteja aprovado.
 - O código publicado deve estar integrado à `main`. Não deixe a implementação apenas em uma branch com um PR aberto depois de anunciar a release.

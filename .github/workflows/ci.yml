@@ -155,6 +155,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Test client release-note gate
+        run: node --test scripts/test-client-release-notes.js
+
+      - name: Require bilingual client release notes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/check-client-release-notes.js --base "$BASE_SHA" --head "$HEAD_SHA" --merge-base
+
       - name: Conferir slug dos templates de discussao
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

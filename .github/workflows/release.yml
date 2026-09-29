@@ -97,6 +97,13 @@ jobs:
             echo "checkout_ref=${{ github.sha }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Require bilingual client release notes before building
+        if: github.event_name == 'push'
+        env:
+          PREV_TAG: ${{ steps.bump.outputs.prev_tag }}
+          CHECKOUT_REF: ${{ steps.ref.outputs.checkout_ref }}
+        run: node scripts/check-client-release-notes.js --base "$PREV_TAG" --head "$CHECKOUT_REF"
+
       - name: Select approved CI build
         id: ci
         env:
