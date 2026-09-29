@@ -350,6 +350,23 @@ For a user-visible change, add a new file in `release-notes/`, such as
   Uncommitted files are not included when generating a release.
 
 `node scripts/test-changelog.js` validates the format and note files.
+CI also requires at least **one new bilingual note in the PR itself** when
+it changes application files under `apps/` or `packages/`, root dependencies
+or patches. This conservative rule does not depend on the PR title: editing an
+old note does not count. Documentation, tests/fixtures and infrastructure-only
+changes do not need invented highlights. Describe the actual impact and cover
+every relevant change; CI checks presence and format, not the quality of the copy.
+Check your branch's commits with:
+
+```bash
+node scripts/check-client-release-notes.js --base origin/main --head HEAD --merge-base
+```
+
+The comparison uses the merge base so recent changes on `main` are not mistaken
+for PR changes. Releases repeat the check against the previous tag before
+building; promotions of older betas retain the legacy flow. Git read failures
+and invalid notes fail the check.
+
 `scripts/generate-changelog.js` publishes the translations in a hidden data
 block in the release description, separate from the technical `Changelog`.
 The client still fetches the installed tag through the GitHub API, with no
