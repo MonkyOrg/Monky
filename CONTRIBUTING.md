@@ -435,8 +435,10 @@ workflow; promoções de betas anteriores à otimização também são suportada
 Falhas de API, integridade, ambiente ou divergência de código interrompem a release,
 sem fallback silencioso. Uma nova beta sem PR integrado ou sem CI aprovado não
 é publicada. Reexecutar apenas jobs que falharam pode deixar artefatos de tentativas
-diferentes; nesse caso há recompilação explícita, ou reexecute o CI inteiro antes
-do merge para manter o reaproveitamento.
+diferentes. A release seleciona a maior tentativa disponível por variante dentro
+da mesma execução aprovada e valida o manifesto contra a tentativa que produziu
+cada artefato, não contra a última tentativa global. Não é preciso reexecutar o
+CI inteiro apenas para manter o reaproveitamento.
 
 A validação do usuário só começa **depois que a release estiver publicada** —
 nunca só após o merge. A otimização reduz trabalho duplicado na release; o PR

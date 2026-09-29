@@ -22,7 +22,7 @@ const executePython = (...args) => execFileSync(python, ['-I', ...args], { encod
 const nativeLegalFiles = ['LICENSE', 'THIRD_PARTY_NOTICES']
   .map(name => `apps/client/native/screen-share/${name}`);
 
-async function fixture(t, variant = 'cli') {
+async function fixture(t, variant = 'cli', runAttempt = 1) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'monky-ci-artifact-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const root = path.join(directory, 'repo'), staged = path.join(directory, 'staged');
@@ -42,7 +42,7 @@ async function fixture(t, variant = 'cli') {
     await fs.mkdir(path.dirname(filename), { recursive: true });
     await fs.writeFile(filename, `module.exports = ${JSON.stringify(relative)};\n`);
   }
-  const environment = { ...context, platform: { cli: 'linux', win: 'win32', mac: 'darwin' }[variant] };
+  const environment = { ...context, runAttempt, platform: { cli: 'linux', win: 'win32', mac: 'darwin' }[variant] };
   const manifest = await collectBuild(root, staged, variant, environment);
   return { directory, root, staged, manifest, git, environment };
 }
@@ -219,6 +219,23 @@ test('selection reuses the highest available attempt per variant after a partial
   assert.deepEqual(selected, { reuse: true, runId: 42, runAttempt: 2, artifacts: { cli: 200, mac: 203, win: 201 } });
 });
 
+test('selection ignores invalid, future and expired attempts instead of trusting their names', async () => {
+  const digest = `sha256:${'c'.repeat(64)}`;
+  for (const suffix of ['0', '01', '-1', '3', '1junk', '9007199254740992']) {
+    const selected = await selectBuild(apiFixture({
+      selectedRun: { ...run, run_attempt: 2 },
+      artifacts: [
+        { id: 100, name: `ci-build-cli-${suffix}`, expired: false, digest },
+        { id: 101, name: 'ci-build-mac-2', expired: false, digest },
+        { id: 102, name: 'ci-build-win-2', expired: false, digest },
+        { id: 103, name: 'ci-build-cli-2', expired: true, digest },
+      ],
+    }), repository, commit);
+    assert.equal(selected.reuse, false, suffix);
+    assert.match(selected.reason, /absent or expired/);
+  }
+});
+
 test('only absent/expired legacy artifacts or legacy promotions select an explicit rebuild', async () => {
   for (const artifacts of [[], [{ id: 100, name: 'ci-build-cli-1', expired: true }],
     [{ id: 100, name: 'ci-build-cli-2', expired: false }]]) {
@@ -233,7 +250,7 @@ test('only absent/expired legacy artifacts or legacy promotions select an explic
   await assert.rejects(selectBuild(async () => { throw new Error('HTTP 403'); }, repository, commit), /HTTP 403/);
 });
 
-test('GitHub archive download rejects cross-run, rerun, failed CI and corrupted immutable bytes', async t => {
+test('GitHub archive download rejects cross-run, invalid attempts, failed CI and corrupted immutable bytes', async t => {
   const f = await fixture(t);
   const bytes = Buffer.from('test zip bytes'), digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
   const artifact = { name: 'ci-build-cli-1', expired: false, digest, workflow_run: { id: 42, head_sha: head } };
@@ -246,18 +263,27 @@ test('GitHub archive download rejects cross-run, rerun, failed CI and corrupted 
   for (const [selectedRun, selectedArtifact, body, error] of [
     [{ ...run, conclusion: 'failure' }, artifact, bytes, /CI must still/],
     [run, { ...artifact, workflow_run: { id: 9, head_sha: head } }, bytes, /9 !== 42/],
-    [{ ...run, run_attempt: 2 }, artifact, bytes, /ci-build-cli/],
+    [run, { ...artifact, workflow_run: { id: 42, head_sha: commit } }, bytes, /strictly equal/],
+    ...['ci-build-cli-0', 'ci-build-cli-01', 'ci-build-cli-2', 'ci-build-cli-1junk',
+      'ci-build-cli-9007199254740992', 'ci-build-win-1'].map(name =>
+      [run, { ...artifact, name }, bytes, /artifact name or attempt/]),
     [run, { ...artifact, expired: true }, bytes, /expired/],
     [run, artifact, Buffer.from('changed'), /digest mismatch/],
   ]) {
     const destination = path.join(f.directory, `archive-${Math.random()}.zip`);
     await assert.rejects(downloadBuild(api(selectedRun, selectedArtifact, body), 100, 42, 'cli', destination), error);
   }
-  await downloadBuild(api(run, artifact), 100, 42, 'cli', path.join(f.directory, 'good.zip'));
+  for (const runAttempt of [1, 2]) {
+    const selectedRun = { ...run, run_attempt: runAttempt };
+    const downloaded = await downloadBuild(api(selectedRun, artifact), 100, 42, 'cli',
+      path.join(f.directory, `good-${runAttempt}.zip`));
+    assert.deepEqual(downloaded, { run: selectedRun, runAttempt: 1 });
+  }
 });
 
-for (const variant of ['cli', 'mac', 'win']) test(`${variant}: an immutable ZIP restores all outputs into a clean checkout without compiling`, async t => {
-  const f = await fixture(t, variant);
+for (const variant of ['cli', 'mac', 'win']) for (const artifactAttempt of [1, 2]) test(
+  `${variant}: selection restores attempt ${artifactAttempt} from successful run attempt 2 without compiling`, async t => {
+  const f = await fixture(t, variant, artifactAttempt);
   const expected = new Map(await Promise.all(f.manifest.files.map(async entry =>
     [entry.path, await fs.readFile(path.join(f.root, entry.path))])));
   const zip = path.join(f.directory, 'build.zip');
@@ -268,18 +294,40 @@ for (const variant of ['cli', 'mac', 'win']) test(`${variant}: an immutable ZIP 
     await fs.rm(path.join(f.root, relative), { recursive: true });
     await assert.rejects(fs.stat(path.join(f.root, relative)), { code: 'ENOENT' });
   }
-  const selectedRun = { ...run, head_sha: f.manifest.sourceCommit };
+  const selectedRun = { ...run, run_attempt: 2, head_sha: f.manifest.sourceCommit };
+  const artifacts = Object.keys(roots).map((name, index) => ({
+    id: 100 + index, name: `ci-build-${name}-${name === variant ? artifactAttempt : 2}`, expired: false, digest,
+    workflow_run: { id: 42, head_sha: selectedRun.head_sha },
+  }));
+  const artifact = artifacts[Object.keys(roots).indexOf(variant)];
   const api = async endpoint => {
+    if (endpoint.startsWith('commits/')) return [{
+      merged_at: '2026-09-28T00:00:00Z', merge_commit_sha: commit,
+      base: { ref: 'main', repo: { full_name: repository } }, head: { sha: selectedRun.head_sha },
+    }];
+    if (endpoint.startsWith('actions/workflows/')) return { workflow_runs: [selectedRun] };
+    if (endpoint === 'actions/runs/42/artifacts?per_page=100') return { artifacts };
     if (endpoint === 'actions/runs/42') return selectedRun;
-    if (endpoint === 'actions/artifacts/100') return { name: `ci-build-${variant}-1`, expired: false, digest,
-      workflow_run: { id: 42, head_sha: selectedRun.head_sha } };
+    if (endpoint === `actions/artifacts/${artifact.id}`) return artifact;
     if (endpoint.endsWith('/zip')) return new Response(bytes);
     if (endpoint.startsWith('git/commits/')) return {
       sha: selectedRun.head_sha, tree: { sha: f.manifest.sourceTree }, parents: [],
     };
     throw new Error(endpoint);
   };
-  await restoreBuild(f.root, variant, 42, 100, { api, context: f.environment, tempParent: f.directory });
+  const selected = await selectBuild(api, repository, commit);
+  assert.equal(selected.reuse, true);
+  assert.equal(selected.artifacts[variant], artifact.id);
+  const restore = () => restoreBuild(f.root, variant, selected.runId, selected.artifacts[variant],
+    { api, context: f.environment, tempParent: f.directory });
+  artifact.name = `ci-build-${variant}-${artifactAttempt === 1 ? 2 : 1}`;
+  await assert.rejects(restore(), /Build runAttempt does not match/);
+  for (const relative of roots[variant]) {
+    await assert.rejects(fs.stat(path.join(f.root, relative)), { code: 'ENOENT' });
+  }
+  artifact.name = `ci-build-${variant}-${artifactAttempt}`;
+  const restored = await restore();
+  assert.equal(restored.runAttempt, artifactAttempt);
   for (const [relative, bytes] of expected) assert.deepEqual(await fs.readFile(path.join(f.root, relative)), bytes, relative);
   if (variant === 'win' || variant === 'mac') {
     for (const relative of nativeLegalFiles) {
@@ -287,7 +335,7 @@ for (const variant of ['cli', 'mac', 'win']) test(`${variant}: an immutable ZIP 
       assert.ok((await fs.stat(path.join(f.root, relative))).isFile(), relative);
     }
   }
-  await assert.rejects(restoreBuild(f.root, variant, 42, 100, { api, context: f.environment, tempParent: f.directory }), /overlay existing/);
+  await assert.rejects(restore(), /overlay existing/);
 });
 
 test('ZIP extraction refuses traversal, aliases, reserved devices and duplicate paths before extraction', async t => {
