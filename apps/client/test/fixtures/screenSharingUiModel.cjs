@@ -253,7 +253,7 @@ function fixture(language = 'en') {
   const capabilities = { capture: true, captureAudio: true, receive: true, captureKinds: ['window', 'monitor', 'game'], backend: 'libobs-amf', reason: null };
   const controls = {
     capabilities: async () => capabilities, sources: async () => sources,
-    current: true, confirm: true, capturingAudio: false, settingsError: null,
+    current: true, confirm: true, capturingAudio: false, settingsError: null, screenPermission: async () => true,
     start: null, stop: null, reapply: async () => {},
     openExternal: async () => ({ success: true }),
     encoding: async input => ({
@@ -265,7 +265,7 @@ function fixture(language = 'en') {
       hardware: { available: true, reason: null }, fallback: false,
     }),
   };
-  let saves = 0, enumerations = 0, cancelled = 0, sequence = 0;
+  let saves = 0, enumerations = 0, cancelled = 0, sequence = 0, permissionChecks = 0;
   const listeners = new Map();
   const appEvents = {
     on(event, listener) {
@@ -365,6 +365,7 @@ function fixture(language = 'en') {
       throw new Error('Model must not perform other native IPC');
     },
     getDesktopSources: options => { enumerations++; return controls.sources(options); },
+    ensureScreenPermission: () => { permissionChecks++; return controls.screenPermission(); },
     getDesktopSourcePreviews: request => controls.previews ? controls.previews(request) : Promise.resolve([]),
     cancelDesktopSourcePreviews: async () => { traces.push(['cancel-previews']); },
     prepareScreenShareWindow: async id => { traces.push(['prepare-window', id]); return false; },
@@ -458,6 +459,7 @@ function fixture(language = 'en') {
     }),
     settingsStore, serverStore, voiceStore, streams, captures, capabilities, createStream, traces, alerts, warnings, events, observers, mediaQuery,
     get saves() { return saves; }, get enumerations() { return enumerations; }, get cancelled() { return cancelled; },
+    get permissionChecks() { return permissionChecks; },
     close() { picker.close(); quality.cleanup(); document.body.replaceChildren(); },
   };
 }
