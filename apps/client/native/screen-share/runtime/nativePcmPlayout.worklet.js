@@ -67,8 +67,10 @@ class NativePcmPlayoutQueue {
   reserveCredits() {
     if (this.state === 'failed' || this.state === 'stopped') return null;
     // Refill before a whole 10 ms block is missing; native mixing and IPC need that headroom.
-    const frames = Math.ceil((this.targetFrames - this.available - this.reserved) / this.blockFrames)
-      * this.blockFrames;
+    const frames = Math.min(
+      Math.ceil((this.targetFrames - this.available - this.reserved) / this.blockFrames) * this.blockFrames,
+      2 * this.blockFrames - this.reserved,
+    );
     if (frames <= 0) return null;
     this.reserved += frames;
     return { epoch: this.epoch, grantSequence: ++this.grantSequence, frames };
@@ -140,30 +142,23 @@ class NativePcmPlayoutQueue {
       this.reject('ERR_NATIVE_AUDIO_CLOCK',
         `AudioContext sample clock regressed: expected ${this.lastContextEnd}, observed ${contextFrame}.`);
     }
-    let underrun = false;
+    let underrun = false, clockChanged = false;
     if ((repeated || gap) && this.state !== 'stopped' && this.state !== 'failed') {
       if (repeated) this.stats.repeatedContextFrames += frames;
       if (gap) this.stats.skippedContextFrames += contextFrame - this.lastContextEnd;
       // Chromium can skip its try-locked currentFrame update while the graph advances.
-      // Withdraw the anchor once; keep in-flight credits and buffer until a real advance.
+      // Withdraw the timing anchor, not valid PCM: process() still renders real samples.
       if (!this.contextStalled) {
         this.stats.contextDiscontinuities++;
-        this.stats.discardedFrames += this.available;
-        this.stats.underruns++;
         this.clockEpoch++;
-        this.state = 'buffering';
-        this.available = 0;
-        this.readOffset = this.writeOffset;
-        this.nextReadFrame = this.nextWriteFrame;
-        this.ring.fill(0);
-        underrun = true;
+        clockChanged = true;
       }
     }
     this.lastContextFrame = contextFrame;
     this.lastContextEnd = contextFrame + frames;
     this.contextStalled = repeated;
     let firstPlayoutFrame = null, mediaFrames = 0;
-    if (this.state === 'buffering' && !repeated && this.available >= this.targetFrames) this.state = 'running';
+    if (this.state === 'buffering' && this.available >= this.targetFrames) this.state = 'running';
     if (this.state === 'running') {
       if (this.available < frames) {
         this.state = 'buffering';
@@ -188,6 +183,7 @@ class NativePcmPlayoutQueue {
     return {
       epoch: this.epoch, clockEpoch: this.clockEpoch, state: this.state,
       contextFrame, frames, firstPlayoutFrame, mediaFrames, underrun,
+      clockAvailable: !repeated && !gap, clockChanged,
       queuedFrames: this.available, outstandingFrames: this.reserved,
     };
   }
@@ -247,7 +243,7 @@ if (typeof AudioWorkletProcessor === 'function' && typeof registerProcessor === 
         const credit = this.queue.reserveCredits();
         if (credit) this.port.postMessage({ type: 'credits', ...credit });
         this.feedbackFrames += feedback.frames;
-        if (feedback.underrun || this.feedbackFrames >= this.queue.blockFrames) {
+        if (feedback.underrun || feedback.clockChanged || this.feedbackFrames >= this.queue.blockFrames) {
           this.feedbackFrames %= this.queue.blockFrames;
           // This anchors rendered graph samples, not their physical speaker time.
           const playout = this.queue.snapshot();

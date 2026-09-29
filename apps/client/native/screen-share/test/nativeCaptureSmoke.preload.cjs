@@ -7,11 +7,49 @@ const { registerTextureReceiver } = require('../runtime/textureReceiver.cjs');
 const { EncodedPreviewRenderer } = require('../runtime/encodedPreviewRenderer.cjs');
 const { NATIVE_SCREEN_PREVIEW_IPC } = require('@monky/shared');
 const errors = [];
+const audioScheduling = [];
 let sink, pixels, presentationId, preview, copyPending = false;
 const onError = error => { errors.push(error.message); console.error(error); };
 const { registerNativeAudioPortReceiver } = require('../runtime/nativeAudioPortRenderer.cjs');
 const audio = registerNativeAudioPortReceiver(ipcRenderer, require('@monky/shared'), {
   workletUrl: pathToFileURL(require.resolve('../runtime/nativePcmPlayout.worklet.js')).href, onError,
+  createWorklet: process.argv.includes('--native-audio-continuity-diagnostics') ? function(context, options) {
+    const node = new AudioWorkletNode(context, 'native-pcm-playout', options);
+    const state = { epoch: options.processorOptions.epoch, timeOrigin: performance.timeOrigin, credits: [], events: [], maxRoundtripMs: 0,
+      maxPcmGapMs: 0, lastPcmAt: null, baseLatency: context.baseLatency, outputLatency: context.outputLatency };
+    audioScheduling.push(state);
+    const record = event => {
+      state.events.push(event);
+      if (state.events.length > 256) state.events.shift();
+    };
+    node.port.addEventListener('message', ({ data }) => {
+      const at = performance.now();
+      if (data.type === 'credits') {
+        state.credits.push({ at, frames: data.frames });
+        record({ type: 'credits', at, frames: data.frames, grantSequence: data.grantSequence });
+      } else if (data.type === 'feedback' && data.underrun) {
+        record({ type: 'underrun', at, playout: data.playout });
+      }
+    });
+    const postMessage = node.port.postMessage.bind(node.port);
+    node.port.postMessage = (data, ...args) => {
+      if (data.type === 'pcm') {
+        const at = performance.now(), credit = state.credits[0];
+        if (!credit || credit.frames < data.packet.frames)
+          throw new Error('The real audio diagnostic observed PCM without its worklet credit.');
+        credit.frames -= data.packet.frames;
+        if (credit.frames === 0) state.credits.shift();
+        const roundtripMs = at - credit.at;
+        state.maxRoundtripMs = Math.max(state.maxRoundtripMs, roundtripMs);
+        const gapMs = state.lastPcmAt === null ? 0 : at - state.lastPcmAt;
+        state.maxPcmGapMs = Math.max(state.maxPcmGapMs, gapMs);
+        state.lastPcmAt = at;
+        record({ type: 'pcm', at, sequence: data.packet.sequence, roundtripMs, gapMs });
+      }
+      return postMessage(data, ...args);
+    };
+    return node;
+  } : undefined,
 });
 window.addEventListener('beforeunload', () => { void audio.dispose().catch(onError); }, { once: true });
 
@@ -56,7 +94,8 @@ contextBridge.exposeInMainWorld('nativeCaptureSmoke', {
     return sink.start();
   },
   async sample() {
-    return { pixels, errors: [...errors], sampledAtMs: performance.now(), playback: await sink?.sample(), audio: audio.getStats() };
+    return { pixels, errors: [...errors], sampledAtMs: performance.now(), playback: await sink?.sample(),
+      audio: audio.getStats(), audioScheduling };
   },
   async stop() {
     await preview?.stop(); preview = null;

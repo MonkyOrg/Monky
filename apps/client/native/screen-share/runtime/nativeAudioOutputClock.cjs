@@ -32,6 +32,7 @@ class NativeAudioOutputClock {
     if (feedback.epoch < this.epoch) return false;
     if (feedback.epoch !== this.epoch || !Number.isSafeInteger(feedback.clockEpoch) || feedback.clockEpoch < 1
       || !['buffering', 'running', 'stopped', 'failed'].includes(feedback.state)
+      || typeof feedback.clockAvailable !== 'boolean'
       || !Number.isSafeInteger(feedback.contextFrame) || feedback.contextFrame < 0
       || !Number.isInteger(feedback.frames) || feedback.frames < 1 || feedback.frames > 480
       || !Number.isInteger(feedback.queuedFrames) || feedback.queuedFrames < 0 || feedback.queuedFrames > 4800) {
@@ -55,6 +56,7 @@ class NativeAudioOutputClock {
     }
     this.latest = {
       epoch: feedback.epoch, clockEpoch: feedback.clockEpoch, state: feedback.state,
+      clockAvailable: feedback.clockAvailable,
       contextFrame: feedback.contextFrame, frames: feedback.frames,
       firstPlayoutFrame: feedback.firstPlayoutFrame, queuedFrames: feedback.queuedFrames, receivedAt,
     };
@@ -74,6 +76,7 @@ class NativeAudioOutputClock {
     };
     if (!this.latest) return unavailable('no-render-anchor');
     if (this.latest.state !== 'running') return unavailable(this.latest.state);
+    if (!this.latest.clockAvailable) return unavailable('context-clock-unavailable');
     if (context.state !== 'running') return unavailable('context-not-running');
     if (typeof context.getOutputTimestamp !== 'function') return unavailable('output-clock-unavailable');
     if (context.sampleRate !== 48000) return unavailable('incompatible-output-format');
