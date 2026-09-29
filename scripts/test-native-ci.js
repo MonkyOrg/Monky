@@ -211,7 +211,12 @@ test('release still generates corresponding sources from the clean version commi
 });
 
 test('macOS native artifacts are built and tested in CI, then reused before release version mutation', () => {
-  const nativeMac = workflow('native-macos-validation.yml').jobs.sources;
+  const nativeWorkflow = workflow('native-macos-validation.yml');
+  assert.deepEqual(nativeWorkflow.on.push.branches, ['main'],
+    'PR branches already run the native matrix through the required CI workflow.');
+  assert.ok(Object.hasOwn(nativeWorkflow.on, 'workflow_call'));
+  assert.equal(ci.jobs['mac-native-sources'].uses, './.github/workflows/native-macos-validation.yml');
+  const nativeMac = nativeWorkflow.jobs.sources;
   assert.deepEqual(nativeMac.strategy.matrix.include.map(entry => entry.arch).sort(), ['arm64', 'x64']);
   assert.equal(nativeMac['timeout-minutes'], 120,
     'Cold Intel builds need a bounded budget for compilation, addon linking and runtime validation.');
