@@ -113,6 +113,8 @@ test('code signing refreshes native hashes before sealing the outer app without 
     { appInfo: { productFilename: 'Fixture' } });
   assert.equal(calls.length, 2);
   assert.equal(executions.length, 6);
+  assert.equal(fs.statSync(path.join(f.directory, 'monky-screen-mac')).mode & 0o111, 0o111,
+    'The packaged macOS capture host must keep the execute bit or macOS refuses to spawn it.');
   const rtc = JSON.parse(fs.readFileSync(path.join(f.directory, 'rtc-build.json')));
   for (const record of rtc.binaries) {
     assert.equal(record.buildSha256, f.records.find(before => before.name === record.name).sha256);

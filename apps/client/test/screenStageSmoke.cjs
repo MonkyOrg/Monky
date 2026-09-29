@@ -332,6 +332,15 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
         check(!card(remote.sessionId, remoteSource.shareId).querySelector('.stage-native-error'),
           'A cleared failure must remove the obsolete receiver hint.');
       }
+      watchState = { state: 'unavailable', reason: 'unsupported', receiver: 'chromium' };
+      appEvents.emit('native_screen.updated');
+      const unsupported = card(remote.sessionId, remoteSource.shareId).querySelector('.stage-native-error');
+      check(unsupported?.textContent.includes(language.t('screenShare.chromiumReceiverSettingsHint')),
+        'Chromium codec rejections must point the viewer at the native receiver, not only the publisher.');
+      check(!unsupported.textContent.includes(language.t('screenShare.nativeReceiverSettingsHint')),
+        'The Chromium hint must not also suggest switching to Chromium.');
+      watchState = null;
+      appEvents.emit('native_screen.updated');
       card(remote.sessionId, remoteSource.shareId).querySelector('.stage-quality-button').click();
       card(remote.sessionId, remoteSource.shareId).querySelector('[data-screen-quality="480p30"]').click();
       modes.set(modeKey(remote.sessionId, remoteSource.shareId), 'normal');

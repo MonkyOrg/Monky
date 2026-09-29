@@ -1205,6 +1205,7 @@ export class VoiceStageView {
       const text = document.createElement('span');
       text.textContent = t(`screenShare.nativeFailure.${state.reason ?? 'connection-failed'}`);
       if (state.receiver === 'native') text.textContent += ` ${t('screenShare.nativeReceiverSettingsHint')}`;
+      else if (state.reason === 'unsupported') text.textContent += ` ${t('screenShare.chromiumReceiverSettingsHint')}`;
       const retry = document.createElement('button');
       retry.type = 'button';
       retry.className = 'btn btn-secondary';

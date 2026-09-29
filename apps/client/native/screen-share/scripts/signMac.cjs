@@ -33,6 +33,12 @@ async function signMac(options) {
   // those binaries again; electron-builder notarizes only after this returns.
   await sign({ ...signing, ignore: file => file !== options.app });
   execute('codesign', ['--verify', '--deep', '--strict', options.app]);
+  // electron-builder copies packaged files with a stripped 0644 mask, but macOS
+  // refuses to spawn the capture host without the execute bit (EACCES surfaces as
+  // "could not load screens"). Restore it as the final packaging step; Unix
+  // permission bits are not part of the code signature, so this keeps it valid.
+  const { executable } = JSON.parse(fs.readFileSync(path.join(directory, 'mac-capture-build.json'), 'utf8'));
+  fs.chmodSync(path.join(directory, executable.name), 0o755);
 }
 
 module.exports = signMac;
