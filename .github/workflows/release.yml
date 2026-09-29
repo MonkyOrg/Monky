@@ -126,7 +126,7 @@ jobs:
         include:
           - os: windows-2022
             platform: win
-          - os: macos-latest
+          - os: macos-15
             platform: mac
     runs-on: ${{ matrix.os }}
     steps:
@@ -203,6 +203,22 @@ jobs:
         if: needs.version.outputs.reuse_build == 'true' && runner.os == 'Windows'
         run: npm run pack:native-sources -- --from-ci --version=${{ needs.version.outputs.version }}
 
+      - name: Build native media and corresponding sources (macOS)
+        if: needs.version.outputs.reuse_build != 'true' && runner.os == 'macOS' && hashFiles('apps/client/native/screen-share/scripts/prepareMacRtc.cjs') != ''
+        run: |
+          arch -x86_64 /usr/bin/true
+          node apps/client/native/screen-share/scripts/prepareMacRtc.cjs
+          for architecture in arm64 x64; do
+            node apps/client/native/screen-share/scripts/buildMac.cjs --arch=$architecture
+            node apps/client/native/screen-share/scripts/buildMacRtc.cjs --arch=$architecture
+          done
+          node apps/client/native/screen-share/scripts/notices.cjs --mac
+          node apps/client/native/screen-share/scripts/packMacSources.cjs --version=${{ needs.version.outputs.version }}
+
+      - name: Bind approved corresponding sources to release (macOS)
+        if: needs.version.outputs.reuse_build == 'true' && runner.os == 'macOS'
+        run: node apps/client/native/screen-share/scripts/packMacSources.cjs --from-ci --version=${{ needs.version.outputs.version }}
+
       - name: Set build version
         shell: bash
         run: |
@@ -260,6 +276,8 @@ jobs:
             release/*.zip
             release/monky-native-sources-*.tar.xz
             release/monky-native-sources-*.json
+            release/monky-native-macos-sources-*.tar.xz
+            release/monky-native-macos-sources-*.json
             release/*.blockmap
             release/latest*.yml
 
@@ -430,6 +448,11 @@ jobs:
           else
             echo "required=false" >> "$GITHUB_OUTPUT"
           fi
+          if [ -f apps/client/native/screen-share/scripts/packMacSources.cjs ]; then
+            node scripts/check-native-source-release.js artifacts \
+              "${{ needs.version.outputs.version }}" "${{ steps.changelog.outputs.commit }}" --mac
+            echo "mac_required=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
@@ -437,7 +460,7 @@ jobs:
       - name: Generate checksums and sign artifacts
         run: |
           cd artifacts
-          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.tgz' -o -name '*.tar.xz' -o -name 'monky-native-sources-*.json' -o -name 'monky-compatibility-*.json' \) \
+          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.tgz' -o -name '*.tar.xz' -o -name 'monky-native*-sources-*.json' -o -name 'monky-compatibility-*.json' \) \
             -exec sha256sum {} + | sort > checksums-sha256.txt
           echo "=== Checksums ==="
           cat checksums-sha256.txt
@@ -479,6 +502,8 @@ jobs:
 
             ${{ steps.native_sources.outputs.required == 'true' && format('**Fontes correspondentes (GPL)**: código Monky da mesma tag e `monky-native-sources-{0}.tar.xz`, acompanhado do manifesto JSON. O arquivo inclui fontes nativas, bibliotecas OBS/FFmpeg, receitas e patches; os checksums abaixo também cobrem esses arquivos.', needs.version.outputs.version) || '' }}
 
+            ${{ steps.native_sources.outputs.mac_required == 'true' && format('**Fontes nativas macOS**: `monky-native-macos-sources-{0}.tar.xz` e seu manifesto incluem o SDK WebRTC utilizado nas duas arquiteturas e as modificações nativas correspondentes.', needs.version.outputs.version) || '' }}
+
             ### Verificação de autenticidade
             Todos os artefatos são assinados com [Sigstore Cosign](https://docs.sigstore.dev/) (keyless, via OIDC do GitHub Actions).
 
@@ -513,7 +538,7 @@ jobs:
         run: |
           cd artifacts
           shopt -s nullglob
-          FILES=( *.exe *.dmg *.zip *.tgz *.tar.xz *.blockmap latest*.yml monky-native-sources-*.json monky-compatibility-*.json checksums-sha256.txt* )
+          FILES=( *.exe *.dmg *.zip *.tgz *.tar.xz *.blockmap latest*.yml monky-native*-sources-*.json monky-compatibility-*.json checksums-sha256.txt* )
           if [ ${#FILES[@]} -eq 0 ]; then
             echo "No artifacts to upload." >&2
             exit 1

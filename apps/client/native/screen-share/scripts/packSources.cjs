@@ -16,28 +16,37 @@ const keptArtifacts = new Set([
   'webrtc/src/third_party/ninja',
 ]);
 
-function archiveEntryAllowed(relative, omitted = []) {
+function archiveEntryAllowed(relative, omitted = [], gitDirectory = sdkGit) {
   const normalized = relative.replaceAll('\\', '/');
   assert.ok(normalized && !normalized.startsWith('/') && !normalized.includes(':') &&
     !/[\0\r\n]/u.test(normalized) && !normalized.split('/').includes('..'), 'Unsafe source archive path.');
   if (omitted.some(prefix => normalized === prefix || normalized.startsWith(prefix + '/'))) return false;
   const components = normalized.split('/');
   if (components.includes('.git')) {
-    if (!normalized.startsWith(sdkGit + '/') && normalized !== sdkGit) return false;
-    const suffix = normalized.slice(sdkGit.length + 1);
+    if (!normalized.startsWith(gitDirectory + '/') && normalized !== gitDirectory) return false;
+    const suffix = normalized.slice(gitDirectory.length + 1);
     if (/^(?:hooks|logs)(?:\/|$)/u.test(suffix) || /^(?:FETCH_HEAD|ORIG_HEAD)$/u.test(suffix)) return false;
   }
   if (components.some(part => ['out', '.cipd', '__pycache__', 'node_modules'].includes(part))) return false;
   return true;
 }
 
-function sourceEntries(directory, members, omitted) {
+function sourceEntries(directory, members, omitted, { gitDirectory = sdkGit, allowInternalSymlinks = false } = {}) {
   const entries = [];
   function visit(relative) {
-    if (!archiveEntryAllowed(relative, omitted)) return;
+    if (!archiveEntryAllowed(relative, omitted, gitDirectory)) return;
     const filename = path.join(directory, relative);
     const stat = fs.lstatSync(filename);
-    assert.ok(!stat.isSymbolicLink(), `Unexpected source alias: ${relative}`);
+    if (stat.isSymbolicLink()) {
+      assert.ok(allowInternalSymlinks && !path.isAbsolute(fs.readlinkSync(filename)),
+        `Unexpected source alias: ${relative}`);
+      const destination = path.resolve(path.dirname(filename), fs.readlinkSync(filename));
+      const target = path.relative(fs.realpathSync(directory),
+        fs.existsSync(destination) ? fs.realpathSync(destination) : destination).replaceAll('\\', '/');
+      assert.ok(archiveEntryAllowed(target, omitted, gitDirectory), `Source alias escapes its inventory: ${relative}`);
+      entries.push(relative.replaceAll('\\', '/'));
+      return;
+    }
     if (stat.isDirectory()) {
       entries.push(relative.replaceAll('\\', '/') + '/');
       for (const name of fs.readdirSync(filename).sort()) visit(path.join(relative, name));
@@ -141,13 +150,19 @@ async function packSources(config) {
   }
 }
 
-async function rebindSources(config, sourceRoot = repository) {
-  const input = path.join(sourceRoot, 'release', 'monky-native-sources-0.0.0-ci');
+async function rebindSources(config, sourceRoot = repository, platform = 'win32') {
+  assert.ok(['win32', 'darwin'].includes(platform));
+  const basename = `monky-native-${platform === 'darwin' ? 'macos-' : ''}sources`;
+  const input = path.join(sourceRoot, 'release', `${basename}-0.0.0-ci`);
   const previous = JSON.parse(fs.readFileSync(`${input}.json`, 'utf8'));
   const sourceCommit = execute('git', ['-C', sourceRoot, 'rev-parse', 'HEAD'], { capture: true });
   const sourceTree = execute('git', ['-C', sourceRoot, 'rev-parse', 'HEAD^{tree}'], { capture: true });
   assert.equal(previous.schemaVersion, 1);
   assert.equal(previous.version, '0.0.0-ci');
+  if (platform === 'darwin') {
+    assert.equal(previous.platform, 'darwin');
+    assert.deepEqual(previous.architectures, ['arm64', 'x64']);
+  }
   assert.equal(previous.publicationReady, true, 'CI sources were not publication-ready.');
   assert.equal(previous.sourceTree, sourceTree, 'Cannot rebind sources from a different source tree.');
   assert.equal(execute('git', ['-C', sourceRoot, 'status', '--porcelain', '--untracked-files=normal'], { capture: true }), '',
@@ -156,8 +171,8 @@ async function rebindSources(config, sourceRoot = repository) {
   const { archive: oldArchive, ...snapshot } = previous;
   const metadata = { ...snapshot, version: config.version, sourceCommit, sourceTree,
     builtFromCommit: previous.sourceCommit, monkySource: `https://github.com/MonkyOrg/Monky/tree/${sourceCommit}` };
-  const archive = path.join(config.output, `monky-native-sources-${config.version}.tar.xz`);
-  const manifest = path.join(config.output, `monky-native-sources-${config.version}.json`);
+  const archive = path.join(config.output, `${basename}-${config.version}.tar.xz`);
+  const manifest = path.join(config.output, `${basename}-${config.version}.json`);
   assert.ok(!fs.existsSync(archive) && !fs.existsSync(manifest), 'Source package already exists.');
   fs.mkdirSync(config.output, { recursive: true });
   const pending = manifest + '.partial';

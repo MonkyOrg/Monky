@@ -1,11 +1,11 @@
 #include "engine_shared.h"
 #include "capture_clock.h"
 
-#include "api\make_ref_counted.h"
-#include "api\video\color_space.h"
-#include "media\base\video_broadcaster.h"
-#include "modules\video_coding\include\video_error_codes.h"
-#include "pc\video_track_source.h"
+#include "api/make_ref_counted.h"
+#include "api/video/color_space.h"
+#include "media/base/video_broadcaster.h"
+#include "modules/video_coding/include/video_error_codes.h"
+#include "pc/video_track_source.h"
 
 #include <dxgi1_4.h>
 

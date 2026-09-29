@@ -41,7 +41,8 @@ function getStatus() {
 const { createPacketCaptureFactory } = require('./packet_capture');
 const createPacketCapture = createPacketCaptureFactory(binding, process.platform);
 function isPacketCaptureSupported() {
-  return process.platform === 'win32' && !!binding && typeof binding.createPacketCapture === 'function' && binding.isSupported();
+  return ['win32', 'darwin'].includes(process.platform) && !!binding
+    && typeof binding.createPacketCapture === 'function' && binding.isSupported();
 }
 
 function listWindowOwners() {

@@ -18,16 +18,19 @@ function build({ arch = process.arch } = {}) {
       '-Wall', '-Wextra', '-Werror', '-mmacosx-version-min=14.0',
       '-arch', arch === 'x64' ? 'x86_64' : 'arm64', '-isysroot', sdk,
       path.join(source, 'host.mm'), path.join(source, 'videoEncoder.mm'), path.join(source, 'videoDecoder.mm'),
+      path.join(source, 'av1Encoder.mm'),
       path.join(source, 'videoCapture.mm'),
+      path.join(source, 'videoScaler.mm'),
       path.join(source, 'videoCaptureHost.mm'),
       path.join(source, 'ownedWindow.mm'),
       path.join(root, 'src', 'rtc', 'inputs', 'native_core', 'h264_bitstream.cc'),
       '-framework', 'Foundation', '-framework', 'AppKit', '-framework', 'ScreenCaptureKit',
       '-framework', 'CoreGraphics', '-framework', 'VideoToolbox', '-framework', 'CoreMedia',
-      '-framework', 'CoreVideo', '-o', executable]);
-    const tests = arch === process.arch
-      ? JSON.parse(execute(executable, ['--self-test'], { capture: true })) : null;
-    if (tests) assert.equal(tests.deviceFree, true);
+      '-framework', 'CoreVideo', '-framework', 'CoreImage', '-framework', 'Metal',
+      '-Wl,-sectcreate,__TEXT,__info_plist,' + path.join(source, 'Info.plist'),
+      '-o', executable]);
+    const tests = JSON.parse(execute(executable, ['--self-test'], { capture: true }));
+    assert.equal(tests.deviceFree, true);
     execute('codesign', ['--force', '--sign', '-', executable]);
     write(path.join(output, 'monky-screen-mac'), fs.readFileSync(executable));
     fs.chmodSync(path.join(output, 'monky-screen-mac'), 0o755);
@@ -36,9 +39,9 @@ function build({ arch = process.arch } = {}) {
       executable: { name: 'monky-screen-mac', ...fingerprint(executable) },
       sourceFiles: regularFiles(source).map(name => ({ path: name, ...fingerprint(path.join(source, name)) })),
       sourceRecipe: fingerprint(__filename), tests,
-      sharedSourceFiles: ['h264_bitstream.h', 'h264_bitstream.cc'].map(name => ({
-        path: path.join('src', 'rtc', 'inputs', 'native_core', name),
-        ...fingerprint(path.join(root, 'src', 'rtc', 'inputs', 'native_core', name)),
+      sharedSourceFiles: ['native_core/h264_bitstream.h', 'native_core/h264_bitstream.cc', 'abi/monky_av1.h'].map(name => ({
+        path: path.join('src', 'rtc', 'inputs', name),
+        ...fingerprint(path.join(root, 'src', 'rtc', 'inputs', name)),
       })),
     };
     write(path.join(output, 'mac-capture-build.json'), JSON.stringify(manifest, null, 2) + '\n');

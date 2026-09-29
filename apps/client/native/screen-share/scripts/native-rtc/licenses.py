@@ -9,7 +9,7 @@ import sys
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sdk", required=True)
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--output", required=True, action="append")
     parser.add_argument("--root-target", required=True)
     parser.add_argument("--licenses", required=True)
     args = parser.parse_args()
@@ -25,7 +25,8 @@ def main():
         def _run_gn(buildfile_dir, target):
             return subprocess.check_output(
                 [
-                    str(sdk / "buildtools" / "win" / "gn.exe"),
+                    str(sdk / "buildtools" / ("mac" if sys.platform == "darwin" else "win") /
+                        ("gn" if sys.platform == "darwin" else "gn.exe")),
                     "desc", str(Path(buildfile_dir).resolve()), target,
                     "--all", "--format=json", f"--root={sdk}",
                     f"--root-target={args.root_target}",
@@ -46,9 +47,10 @@ def main():
     destination = Path(args.licenses).resolve()
     destination.mkdir(parents=True, exist_ok=True)
     targets = [args.root_target + ":monky_screen_rtc", args.root_target + ":monky_av1"]
-    builder = NativeLicenseBuilder([args.output], targets)
+    builder = NativeLicenseBuilder(args.output, targets)
     builder.generate_license_text(str(destination))
-    libraries = sorted(set().union(*(builder._get_third_party_libraries(args.output, target) for target in targets)))
+    libraries = sorted(set().union(*(builder._get_third_party_libraries(output, target)
+                                    for output in args.output for target in targets)))
     (destination / "libraries.json").write_text(json.dumps(libraries, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"nativeRtcLicenses": libraries}))
 

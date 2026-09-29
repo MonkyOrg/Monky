@@ -291,7 +291,7 @@ test('renderer failure after import still requires its GPU callback before Main 
   await f.detach();
 });
 
-test('the real presentation bridge releases Main then RTC only after renderer GPU retirement', async () => {
+for (const surface of [false, true]) test(`presentation releases ${surface ? 'IOSurface' : 'NT'} leases only after renderer GPU retirement`, async () => {
   const f = fixture();
   let releaseMain = 0, resolveRtc;
   const rtcRetired = new Promise(resolve => { resolveRtc = resolve; });
@@ -304,14 +304,15 @@ test('the real presentation bridge releases Main then RTC only after renderer GP
       return rtcRetired.then(() => ({ frameId, ok: true }));
     },
   }, {
-    importSharedTexture({ allReferencesReleased }) {
+    importSharedTexture({ textureInfo, allReferencesReleased }) {
+      assert.deepEqual(Object.keys(textureInfo.handle), [surface ? 'ioSurface' : 'ntHandle']);
       return { subtle: f.source, release() { releaseMain++; allReferencesReleased(); } };
     },
     sendSharedTexture() { assert.fail('The fixed-timeout Electron convenience API must not be used.'); },
   }, error => f.errors.push(error), { createTextureChannel: f.createChannel });
   const event = { type: 'frame', target: 1, data: { frameId: 1, timestampUs: 123,
-    format: 'NV12', gpuCopy: true, width: 1280, height: 720, codedWidth: 1280, codedHeight: 720,
-    textureInfo: { pixelFormat: 'nv12', timestamp: 123, handle: { ntHandle: Buffer.alloc(8) },
+    format: 'NV12', gpuCopy: !surface, width: 1280, height: 720, codedWidth: 1280, codedHeight: 720,
+    textureInfo: { pixelFormat: 'nv12', timestamp: 123, handle: { [surface ? 'ioSurface' : 'ntHandle']: Buffer.alloc(8) },
       codedSize: f.transfer.codedSize, visibleRect: f.transfer.visibleRect,
       colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' } } } };
   const work = bridge.publish(event, { frame: f.destination, presentationId: f.metadata.presentationId });

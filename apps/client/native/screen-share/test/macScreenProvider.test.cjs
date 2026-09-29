@@ -81,18 +81,58 @@ test('duplicate native Mac identities and malformed process or monitor metadata 
     { ...monitor, displayUuid: '-'.repeat(36) }, { ...monitor, bounds: { ...monitor.bounds, width: 0 } }])
     assert.throws(() => sourceIdentity(invalid));
 });
-function hostFixture(t, { hello = true, onVideo } = {}) {
+function hostFixture(t, { hello = true, onVideo, multiplexed = false } = {}) {
   const child = new EventEmitter();
   child.pid = 100; child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
   child.stdio = [child.stdin, child.stdout, child.stderr, new PassThrough()];
   child.kills = []; child.kill = signal => { child.kills.push(signal); return true; };
-  const host = new MacNativeHost('owned-mac-host', { onVideo }, { spawn: () => child });
+  const host = new MacNativeHost('owned-mac-host', { onVideo, multiplexed }, { spawn: () => child });
   host.onError = () => {};
   const output = (header, payload) => child.stdout.write(encode(header, payload));
   if (hello) output({ type: 'hello', protocol: 1, platform: 'darwin', pid: 100 });
   t.after(() => { child.stdout.end(); child.stdio[3].end(); child.emit('close', 0, null); });
   return { host, child, output };
 }
+test('a multiplexed capture failure preserves other sessions and accepts its actual media retirement', async t => {
+  const f = hostFixture(t, { multiplexed: true }), errors = [], packets = [], retired = [];
+  for (const id of [1, 2]) {
+    f.host.sessions.set(id, { child: f.child, mediaRequested: true, mediaCodec: id === 1 ? 'h264' : 'av1', mediaSequence: 0,
+      onVideo: frame => { packets.push([id, frame]); }, onError: error => errors.push([id, error.code]),
+      finished: { resolve: () => retired.push(id), reject() {} } });
+    f.child.stdio[3].write(encode({ type: 'hello', captureId: id, protocol: 1, pid: 100,
+      codec: id === 1 ? 'h264' : 'av1', timebase: 'mach-host-us' }));
+  }
+  f.output({ type: 'failure', captureId: 1, code: 'ERR_MAC_SOURCE_CHANGED', nativeStatus: 0 });
+  f.child.stdio[3].write(encode({ type: 'closed', captureId: 1, packets: 0,
+    writerDrained: true, retainedFrames: 0, retainedBytes: 0 }));
+  f.child.stdio[3].write(encode({ type: 'video', captureId: 2, id: 1,
+    timestampUs: 1000000, durationUs: 33333, keyframe: true }, Buffer.from([0, 0, 0, 1, 0x65])));
+  f.child.stdio[3].write(encode({ type: 'closed', captureId: 2, packets: 1,
+    writerDrained: true, retainedFrames: 0, retainedBytes: 0 }));
+  await tick();
+  assert.deepEqual(errors, [[1, 'ERR_MAC_SOURCE_CHANGED']]);
+  assert.equal(packets.length, 1);
+  assert.equal(packets[0][0], 2);
+  assert.equal(packets[0][1].codec, 'av1');
+  assert.deepEqual(retired, [1, 2]);
+  assert.deepEqual(f.child.kills, []);
+  assert.equal(f.host.failure, undefined);
+});
+
+test('failed scoped startup retains its native owner for media.stop instead of killing unrelated sessions', async t => {
+  const f = hostFixture(t, { multiplexed: true });
+  const session = { onVideo() {}, finished: { reject() {} } };
+  f.host.sessions.set(1, session);
+  const result = assert.rejects(f.host.request('media.start', { captureId: 1, video: { codec: 'h264' } }), { code: 'ERR_MAC_VIDEO_SESSION' });
+  await tick();
+  f.output({ type: 'result', id: 1, error: { code: 'ERR_MAC_VIDEO_SESSION', nativeStatus: -12908,
+    nativeOwnershipRetained: true } });
+  await result;
+  assert.equal(session.started, true);
+  assert.equal(f.host.pending.size, 0);
+  assert.deepEqual(f.child.kills, []);
+});
+
 test('Mac cancellation does not release callbacks or request credits before actual host exit', async t => {
   const f = hostFixture(t), abort = new AbortController();
   let settled = false;
@@ -201,7 +241,7 @@ test('Mac shutdown escalates to SIGKILL while retaining pending requests until t
 test('Mac native video backpressure never blocks controls and shutdown drains the original media pipe', async t => {
   const offered = [];
   const f = hostFixture(t, { onVideo: frame => { offered.push(frame); return false; } });
-  const start = f.host.request('media.start');
+  const start = f.host.request('media.start', { video: { codec: 'h264' } });
   await tick();
   f.output({ type: 'result', id: 1, value: { captureStarted: true } });
   await start;
@@ -226,6 +266,19 @@ test('Mac native video backpressure never blocks controls and shutdown drains th
   f.child.stdout.end(); await tick(); f.child.emit('close', 0, null);
   assert.equal((await close).hostExited, true);
 });
+test('Mac media hello must match the exact codec admitted for its capture owner', async t => {
+  for (const codec of ['h264', 'av1']) {
+    const f = hostFixture(t, { onVideo() { assert.fail('A mismatched codec cannot deliver pixels.'); } });
+    const started = f.host.request('media.start', { video: { codec } });
+    await tick();
+    f.output({ type: 'result', id: 1, value: { captureStarted: true } });
+    await started;
+    f.child.stdio[3].write(encode({ type: 'hello', protocol: 1, pid: 100,
+      codec: codec === 'av1' ? 'h264' : 'av1', timebase: 'mach-host-us' }));
+    assert.ok(f.host.failure);
+    assert.deepEqual(f.child.kills, ['SIGTERM']);
+  }
+});
 test('Mac capture errors retaining native ownership settle only after actual process retirement', async t => {
   const f = hostFixture(t);
   const work = f.host.request('media.probe');
@@ -249,7 +302,7 @@ test('Mac capture cannot publish pixels before explicit source selection or reus
   assert.equal(received, 0);
   assert.deepEqual(f.child.kills, ['SIGTERM']);
   const other = hostFixture(t, { onVideo: () => {} });
-  const started = other.host.request('media.start');
+  const started = other.host.request('media.start', { video: { codec: 'h264' } });
   await tick();
   other.output({ type: 'result', id: 1, value: { captureStarted: true } });
   await started;

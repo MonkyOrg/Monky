@@ -1,4 +1,5 @@
 #include "videoEncoder.h"
+#include "av1Encoder.h"
 #include "videoDecoder.h"
 #include "../rtc/inputs/native_core/h264_bitstream.h"
 #import <VideoToolbox/VideoToolbox.h>
@@ -92,6 +93,7 @@ struct VideoEncoder::State {
   Output output;
   Failure failure;
   VTCompressionSessionRef session = nullptr;
+  std::unique_ptr<Av1Encoder> av1;
   std::mutex pending_mutex;
   std::unordered_map<uintptr_t, int64_t> pending;
   uintptr_t next_frame = 0;
@@ -101,6 +103,7 @@ struct VideoEncoder::State {
   std::unique_ptr<screen_video::H264Bitstream> bitstream;
   bool hardware = false, keyframe = true, closed = false;
   uint32_t maximum_bitrate_bps = 0;
+  uint8_t minimum_level = 0;
   int64_t last_timestamp = -1;
 
   void Report(const char* code, OSStatus status) noexcept {
@@ -132,6 +135,7 @@ struct VideoEncoder::State {
         auto frame = Packet(sample, duration);
         std::lock_guard lock(self.output_mutex);
         const auto unit = self.bitstream->Convert(frame.bytes);
+        Require(self.bitstream->Sps().levelIdc >= self.minimum_level, "ERR_MAC_VIDEO_PROFILE_UNSUPPORTED");
         Require(unit.hasPicture && unit.keyFrame == frame.keyframe &&
             self.bitstream->Verified() && screen_video::IsBt709LimitedCompatible(self.bitstream->Sps()),
             "ERR_MAC_VIDEO_BITSTREAM");
@@ -153,13 +157,20 @@ VideoEncoder::VideoEncoder(EncoderOptions options, Output output, Failure failur
       options.bitrate_kbps >= 50 && options.bitrate_kbps <= 80000 &&
       options.bitrate_kbps % 50 == 0 && output && failure, "ERR_MAC_VIDEO_OPTIONS");
   self.options = options;
-  const auto level = screen_video::RequiredH264Level(options.width, options.height, options.fps,
-      options.bitrate_kbps * 1000);
-  self.maximum_bitrate_bps = screen_video::H264LevelMaxBitrate(level);
-  self.bitstream = std::make_unique<screen_video::H264Bitstream>(options.width, options.height, level,
-      screen_video::H264Profile::Main, screen_video::H264LevelPolicy::Exact);
   self.output = std::move(output);
   self.failure = std::move(failure);
+  if (options.av1) {
+    self.av1 = std::make_unique<Av1Encoder>(options);
+    self.maximum_bitrate_bps = 80000000;
+    return;
+  }
+  const auto level = screen_video::RequiredH264Level(options.width, options.height, options.fps,
+      options.bitrate_kbps * 1000);
+  self.minimum_level = level;
+  self.maximum_bitrate_bps = screen_video::H264LevelMaxBitrate(level);
+  self.bitstream = std::make_unique<screen_video::H264Bitstream>(options.width, options.height, level,
+      screen_video::H264Profile::Main, level > 52 ? screen_video::H264LevelPolicy::Maximum
+        : screen_video::H264LevelPolicy::Exact);
   NSDictionary* specification = options.hardware
       ? @{(__bridge NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @YES}
       : @{(__bridge NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: @NO};
@@ -170,21 +181,26 @@ VideoEncoder::VideoEncoder(EncoderOptions options, Output output, Failure failur
     (__bridge NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{},
   };
   try {
-    Check(VTCompressionSessionCreate(kCFAllocatorDefault, options.width, options.height,
+    const auto created = VTCompressionSessionCreate(kCFAllocatorDefault, options.width, options.height,
         kCMVideoCodecType_H264, (__bridge CFDictionaryRef)specification,
-        (__bridge CFDictionaryRef)attributes, nullptr, &State::Receive, &self, &self.session),
-        "ERR_MAC_VIDEO_SESSION");
+        (__bridge CFDictionaryRef)attributes, nullptr, &State::Receive, &self, &self.session);
+    Check(created, created == kVTCouldNotFindVideoEncoderErr
+      ? "ERR_MAC_VIDEO_ENCODER_UNSUPPORTED" : "ERR_MAC_VIDEO_SESSION");
     self.Property(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
     self.Property(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
-    NSString* profile = [NSString stringWithFormat:@"H264_Main_%u_%u",
-      static_cast<unsigned>(level / 10), static_cast<unsigned>(level % 10)];
-    self.Property(kVTCompressionPropertyKey_ProfileLevel, (__bridge CFStringRef)profile);
     self.Property(kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2);
     self.Property(kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2);
     self.Property(kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2);
     self.Integer(kVTCompressionPropertyKey_ExpectedFrameRate, options.fps);
     self.Integer(kVTCompressionPropertyKey_MaxKeyFrameInterval, options.fps);
     self.Integer(kVTCompressionPropertyKey_AverageBitRate, options.bitrate_kbps * 1000);
+    NSString* profile = level > 52 ? (__bridge NSString*)kVTProfileLevel_H264_Main_AutoLevel
+      : [NSString stringWithFormat:@"H264_Main_%u_%u",
+          static_cast<unsigned>(level / 10), static_cast<unsigned>(level % 10)];
+    const auto selected = VTSessionSetProperty(self.session, kVTCompressionPropertyKey_ProfileLevel,
+        (__bridge CFStringRef)profile);
+    Check(selected, selected == kVTPropertyNotSupportedErr || selected == kVTParameterErr
+      ? "ERR_MAC_VIDEO_PROFILE_UNSUPPORTED" : "ERR_MAC_VIDEO_PROPERTY");
     Check(VTCompressionSessionPrepareToEncodeFrames(self.session), "ERR_MAC_VIDEO_PREPARE");
     if (options.hardware) {
       CFTypeRef using_hardware = nullptr;
@@ -205,12 +221,16 @@ VideoEncoder::VideoEncoder(EncoderOptions options, Output output, Failure failur
   }
 }
 VideoEncoder::~VideoEncoder() {
-  if (state_->session) {
+  if (state_->session || state_->av1) {
     // The owner must close before destroying callback storage.
     try { Close(); } catch (...) { std::terminate(); }
   }
 }
 bool VideoEncoder::Hardware() const { return state_->hardware; }
+std::string VideoEncoder::ProfileLevelId() const {
+  Require(state_->bitstream && state_->bitstream->Verified(), "ERR_MAC_VIDEO_PROFILE_UNVERIFIED");
+  return state_->bitstream->Sps().ProfileLevelId();
+}
 bool VideoEncoder::Writable() const {
   std::lock_guard lock(state_->pending_mutex);
   return !state_->closed && !state_->failed.load() && state_->pending.size() < 8;
@@ -224,6 +244,13 @@ void VideoEncoder::Submit(CVPixelBufferRef buffer, CMTime timestamp, CMTime dura
       "ERR_MAC_VIDEO_PIXEL_FORMAT");
   const auto pts = Microseconds(timestamp), interval = Microseconds(duration);
   Require(pts > self.last_timestamp && interval > 0 && interval <= 1000000, "ERR_MAC_VIDEO_TIMESTAMP_ORDER");
+  if (self.av1) {
+    auto frame = self.av1->Encode(buffer, pts, interval, self.keyframe);
+    self.keyframe = false;
+    self.last_timestamp = pts;
+    self.output(std::move(frame));
+    return;
+  }
   uintptr_t id;
   {
     std::lock_guard lock(self.pending_mutex);
@@ -241,6 +268,10 @@ void VideoEncoder::Submit(CVPixelBufferRef buffer, CMTime timestamp, CMTime dura
     self.Report(result != noErr ? "ERR_MAC_VIDEO_ENCODE" : "ERR_MAC_VIDEO_FRAME_DROPPED", result);
     throw EncoderError("ERR_MAC_VIDEO_ENCODE", result);
   }
+  // Apple's software encoder lacks MaxFrameDelayCount and can buffer beyond
+  // our eight input credits. Flush this timestamp on the capture queue, not Main.
+  if (!self.hardware)
+    Check(VTCompressionSessionCompleteFrames(self.session, timestamp), "ERR_MAC_VIDEO_COMPLETE_FRAME");
   self.keyframe = false;
   self.last_timestamp = pts;
 }
@@ -249,7 +280,8 @@ void VideoEncoder::SetBitrate(int bitrate_kbps) {
   Require(!self.closed && !self.failed.load() && bitrate_kbps >= 50 &&
       bitrate_kbps <= 80000 && bitrate_kbps % 50 == 0 &&
       static_cast<uint32_t>(bitrate_kbps) * 1000 <= self.maximum_bitrate_bps, "ERR_MAC_VIDEO_BITRATE");
-  self.Integer(kVTCompressionPropertyKey_AverageBitRate, bitrate_kbps * 1000);
+  if (self.av1) self.av1->SetBitrate(bitrate_kbps);
+  else self.Integer(kVTCompressionPropertyKey_AverageBitRate, bitrate_kbps * 1000);
   self.options.bitrate_kbps = bitrate_kbps;
 }
 void VideoEncoder::RequestKeyframe() {
@@ -259,6 +291,11 @@ void VideoEncoder::RequestKeyframe() {
 void VideoEncoder::Close() {
   auto& self = *state_;
   if (self.closed) return;
+  if (self.av1) {
+    self.av1->Close();
+    self.closed = true;
+    return;
+  }
   // CompleteFrames waits for the original output callbacks, including failed
   // ones, before their state or the underlying pixel-buffer leases disappear.
   const auto completed = VTCompressionSessionCompleteFrames(self.session, kCMTimeInvalid);
@@ -274,6 +311,42 @@ void VideoEncoder::Close() {
     self.pending.clear();
   }
   Check(completed, "ERR_MAC_VIDEO_DRAIN");
+}
+
+NSDictionary* ProbeVideoEncoder(EncoderOptions options) {
+  std::mutex mutex;
+  std::optional<EncodedFrame> encoded;
+  std::string failure;
+  OSStatus failure_status = 0;
+  VideoEncoder encoder(options, [&](EncodedFrame frame) {
+    std::lock_guard lock(mutex);
+    Require(!encoded, "ERR_MAC_VIDEO_PROBE_DUPLICATE");
+    encoded = std::move(frame);
+  }, [&](const char* code, OSStatus status) {
+    std::lock_guard lock(mutex);
+    failure = code; failure_status = status;
+  });
+  CVPixelBufferRef buffer = nullptr;
+  NSDictionary* attributes = @{(__bridge NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{}};
+  Check(CVPixelBufferCreate(kCFAllocatorDefault, options.width, options.height,
+      kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, (__bridge CFDictionaryRef)attributes, &buffer),
+      "ERR_MAC_VIDEO_PROBE_BUFFER");
+  struct Release { CVPixelBufferRef value; ~Release() { CVPixelBufferRelease(value); } } release{buffer};
+  Check(CVPixelBufferLockBaseAddress(buffer, 0), "ERR_MAC_VIDEO_PROBE_LOCK");
+  for (size_t plane = 0; plane < 2; ++plane)
+    std::memset(CVPixelBufferGetBaseAddressOfPlane(buffer, plane), plane == 0 ? 16 : 128,
+        CVPixelBufferGetBytesPerRowOfPlane(buffer, plane) * CVPixelBufferGetHeightOfPlane(buffer, plane));
+  Check(CVPixelBufferUnlockBaseAddress(buffer, 0), "ERR_MAC_VIDEO_PROBE_UNLOCK");
+  encoder.Submit(buffer, CMTimeMake(0, options.fps), CMTimeMake(1, options.fps));
+  encoder.Close();
+  std::lock_guard lock(mutex);
+  if (!failure.empty()) throw VideoError(failure.c_str(), failure_status);
+  Require(encoded && encoded->keyframe && !encoded->bytes.empty(), "ERR_MAC_VIDEO_PROFILE_UNVERIFIED");
+  return @{@"sessionUsesHardware": @(encoder.Hardware()), @"hardwareExecutionObserved": [NSNull null],
+    @"syntheticFrameEncoded": @YES, @"codec": options.av1 ? @"av1" : @"h264",
+    @"profileLevelId": options.av1 ? [NSNull null] : @(encoder.ProfileLevelId().c_str()),
+    @"sequenceVerified": @(options.av1),
+    @"captureStarted": @NO, @"nativeClosed": @YES};
 }
 
 NSDictionary* VideoEncoderSmoke(bool hardware) {

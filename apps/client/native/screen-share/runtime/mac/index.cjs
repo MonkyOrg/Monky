@@ -4,7 +4,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
-const { MacNativeHost, failure } = require('./host.cjs');
+const { failure } = require('./host.cjs');
+const { acquireMacHost } = require('./hostPool.cjs');
 const { validatePreviewImage } = require('../nativePreviewImage.cjs');
 const { validateMacTarget } = require('./target.cjs');
 
@@ -45,21 +46,31 @@ function sourceIdentity(source) {
 class MacScreenProvider {
   constructor(options = {}, dependencies = {}) {
     this.runtime = dependencies.runtime ?? loadMacCaptureRuntime(options.directory);
-    this.hostFactory = dependencies.hostFactory ?? (() => new MacNativeHost(this.runtime.executable));
+    this.hostFactory = dependencies.hostFactory ?? (() => acquireMacHost(this.runtime.executable));
     this.sources = new Map();
     this.generation = 0;
     this.excludeProcessIds = new Set(options.excludeProcessIds ?? [process.pid]);
   }
-  getHost() {
+  async getHost() {
     if (this.closed) throw failure('ERR_MAC_PROVIDER_CLOSED', 'Native macOS source provider is closed.');
-    if (!this.host || this.host.exited) {
+    if (this.host?.exited) {
+      const previous = this.host;
       this.sources.clear();
+      try { await previous.close(); }
+      catch (error) {
+        if (!previous.exited || previous.pending.size) throw error;
+        console.warn('[MacScreenProvider] Releasing an exited source owner:', error.code ?? error.name);
+      }
+      if (this.closed) throw failure('ERR_MAC_PROVIDER_CLOSED', 'Native macOS source provider is closed.');
+      if (this.host === previous) this.host = null;
+    }
+    if (!this.host) {
       this.host = this.hostFactory();
     }
     return this.host;
   }
   async capabilities(options = {}) {
-    const { value } = await this.getHost().request('capabilities', {}, options.signal);
+    const { value } = await (await this.getHost()).request('capabilities', {}, options.signal);
     assert.equal(value.platform, 'darwin');
     assert.equal(value.minimumMacOS, MINIMUM_MACOS);
     assert.equal(value.enumeration, 'ScreenCaptureKit');
@@ -72,7 +83,7 @@ class MacScreenProvider {
     return Object.freeze(value);
   }
   async listSources(options = {}) {
-    const host = this.getHost(), generation = ++this.generation;
+    const host = await this.getHost(), generation = ++this.generation;
     const { value } = await host.request('list', {}, options.signal);
     assert.ok(Array.isArray(value.sources) && value.sources.length <= 512);
     if (host !== this.host || generation !== this.generation || this.closed)
@@ -84,7 +95,7 @@ class MacScreenProvider {
       const hash = identity(target);
       const id = target.kind === 'monitor' ? `native-monitor:${hash}` : `window:${target.windowId}:${hash}`;
       assert.ok(!next.has(id), 'Native macOS enumeration contained duplicate identities.');
-      next.set(id, Object.freeze(target));
+      next.set(id, this.sources.get(id) ?? Object.freeze(target));
       rows.push({ id, name: source.name, type: target.kind === 'monitor' ? 'screen' : 'window',
         thumbnailDataUrl: '', appIconDataUrl: null, thumbnailState: 'pending',
         ...(target.kind === 'monitor' ? { displayNumber: rows.filter(row => row.type === 'screen').length + 1 } : {}) });
@@ -93,7 +104,7 @@ class MacScreenProvider {
     return rows;
   }
   async resolveTarget(sourceId, kind, options = {}) {
-    const host = this.getHost(), target = this.sources.get(sourceId);
+    const host = await this.getHost(), target = this.sources.get(sourceId);
     if (!target || target.kind !== kind)
       throw failure('ERR_SCREEN_CAPTURE_SOURCE_LOST', 'The selected native macOS source is no longer registered.');
     const { value } = await host.request('resolve', { target }, options.signal);
@@ -104,7 +115,7 @@ class MacScreenProvider {
   }
   async thumbnail(sourceId, { signal, width = 320, height = 180 } = {}) {
     assert.ok(integer(width, 1, 640) && integer(height, 1, 360));
-    const host = this.getHost();
+    const host = await this.getHost();
     const target = this.sources.get(sourceId);
     if (!target) throw failure('ERR_SCREEN_CAPTURE_SOURCE_LOST', 'Native thumbnail source is no longer registered.');
     const { value, payload } = await host.request('thumbnail', { target, width, height }, signal);
@@ -133,12 +144,8 @@ class MacScreenProvider {
 function createMacScreenProvider(options) { return new MacScreenProvider(options); }
 
 function loadMacRuntime(options = {}) {
-  const capture = loadMacCaptureRuntime(options.directory);
-  // Capture support is not a transport implementation. Do not let Main enable
-  // publishing/receiving merely because the ScreenCaptureKit executable exists.
-  throw failure('ERR_MAC_RTC_UNAVAILABLE',
-    'Native macOS WebRTC transport and cross-process IOSurface presentation are not available in this build.',
-    { captureBackendAvailable: !!capture, nativeReceiveAvailable: false });
+  if (process.platform !== 'darwin') throw failure('ERR_MAC_PLATFORM', 'Native macOS RTC requires macOS.');
+  return require('../runtimeFiles.cjs').loadRuntime(options.directory);
 }
 
 module.exports = { MINIMUM_MACOS, createMacScreenProvider, loadMacCaptureRuntime, loadMacRuntime,

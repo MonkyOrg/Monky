@@ -1450,9 +1450,23 @@ test('unavailable profile and application-wide Mac audio confirmation stay fail-
   assert.equal(f.alerts.length, alertsBefore);
   assert.equal(nativeStarts(f).length, 0);
   assert.equal(f.traces.some(value => value[0] === 'prepare-window'), false);
-  assert.equal(control(f, 'share-audio-text').textContent, f.i18n.t('screenShare.shareAudioMacWindow'));
+  assert.equal(control(f, 'share-audio-text').textContent, f.i18n.t('screenShare.shareAppAudio'));
 });
 
+test('macOS offers native reception and only its supported window capture method', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  f.api.platform = 'darwin';
+  await f.picker.open();
+  f.document.querySelector('.source-item').click();
+  assert.ok(f.document.querySelector('#share-method-window'));
+  assert.equal(f.document.querySelector('#share-method-game'), null);
+  assert.equal(control(f, 'share-audio-text').textContent, f.i18n.t('screenShare.shareAppAudio'));
+  f.picker.close();
+  const root = f.mountQuality();
+  assert.equal(root.querySelector('#screen-receiver-native').disabled, false);
+  assert.equal(f.settingsStore.getScreenShareReceiver(), 'native');
+});
 for (const saved of ['vp8', 'vp9', 'av1']) {
   test(`legacy camera ${saved} stays persisted independently of screen codec selection`, async t => {
     const f = fixture();

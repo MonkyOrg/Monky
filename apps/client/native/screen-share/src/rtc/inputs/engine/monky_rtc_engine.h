@@ -1,12 +1,17 @@
 #pragma once
 
 #include <stdint.h>
+#if defined(_WIN32)
 #include <unknwn.h>
-
 #if defined(MONKY_RTC_BUILDING_DLL)
 #define MONKY_ENGINE_API __declspec(dllexport)
 #else
 #define MONKY_ENGINE_API __declspec(dllimport)
+#endif
+#else
+typedef struct IUnknown IUnknown;
+#define __cdecl
+#define MONKY_ENGINE_API __attribute__((visibility("default")))
 #endif
 #ifdef __cplusplus
 #define MONKY_ENGINE_NOEXCEPT noexcept
@@ -70,6 +75,7 @@ typedef struct MonkyEngineOptions {
 #define MONKY_ENGINE_SHARED_COPY_COMPLETE 2u
 #define MONKY_ENGINE_SHARED_KEYED_MUTEX_ZERO 4u
 #define MONKY_ENGINE_SHARED_RECLAIM_FENCE 8u
+#define MONKY_ENGINE_SHARED_IOSURFACE 16u
 
 typedef struct MonkyEngineEvent {
   uint32_t struct_size;

@@ -23,7 +23,7 @@ import { createLocalExecutionService } from './localExecution/createService';
 import { setupLocalExecutionIpc, type LocalExecutionIpc } from './localExecution/ipc';
 import { setupNativeScreenSharingIpc } from './nativeScreenSharing';
 import { NativeDesktopSources, nativeWindowIdFromSourceId, nativeMonitorDesktopSources } from './nativeWindows';
-import { NativeThumbnailCapturer, loadThumbnailRuntime } from '@monky/screen-share';
+import { NativeThumbnailCapturer, loadThumbnailRuntime, createMacScreenProvider, type MacScreenProvider } from '@monky/screen-share';
 import { DesktopSourcePreviews } from './desktopSourcePreviews';
 import type { NativeWindowInfo, NativeMonitorInfo, NativeWindowState } from '@monky/screen-audio';
 import { exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
@@ -358,9 +358,15 @@ export function setupIpcHandlers(
       throw new Error(mt('screenShare.overlayWindowUnavailable'));
     }
   };
+  let macSources: MacScreenProvider | undefined;
+  const getMacSources = (): MacScreenProvider => macSources ??= createMacScreenProvider();
   const nativeScreenSharing = setupNativeScreenSharingIpc(
     mainWindow, (sourceId, kind) => {
       assertCaptureSourceAllowed(sourceId);
+      if (process.platform === 'darwin') {
+        if (kind === 'game') throw new Error('macOS does not support Windows game hooks.');
+        return getMacSources().resolveTarget(sourceId, kind);
+      }
       return nativeSources.resolve(sourceId, kind);
     }, options?.clientLogger,
   );
@@ -626,6 +632,27 @@ export function setupIpcHandlers(
     sourceIds?: readonly string[], signal?: AbortSignal): Promise<DesktopSource[]> {
     if (desktopSourcesFrozen || signal?.aborted)
       throw new DOMException('Desktop source enumeration was cancelled.', 'AbortError');
+    if (process.platform === 'darwin') {
+      const provider = getMacSources();
+      let sources = (await provider.listSources({ signal })).filter(source =>
+        (!type || source.type === type) && !overlayManager.isScreenShareSource(source.id));
+      if (metadataOnly) return sources;
+      if (sourceIds) sources = sources.filter(source => sourceIds.includes(source.id));
+      for (let offset = 0; offset < sources.length; offset += 4) {
+        await Promise.all(sources.slice(offset, offset + 4).map(async source => {
+          try {
+            const bytes = await provider.thumbnail(source.id, { signal });
+            source.thumbnailDataUrl = `data:image/png;base64,${bytes.toString('base64')}`;
+            source.thumbnailState = 'ready';
+          } catch (error) {
+            if (signal?.aborted || error instanceof Error && error.name === 'AbortError') throw error;
+            console.warn('[ScreenShare:Main] Native macOS preview unavailable:', error);
+            source.thumbnailState = 'unavailable';
+          }
+        }));
+      }
+      return sources;
+    }
     if (process.platform === 'win32') {
       let windows: ReturnType<NativeDesktopSources['listWindows']>;
       let result: DesktopSource[];
@@ -720,7 +747,7 @@ export function setupIpcHandlers(
   const sourcePreviews = new DesktopSourcePreviews((type, ids, signal) => enumerateDesktopSources(false, type, ids, signal));
   const stopDesktopPreviews = async (): Promise<void> => {
     desktopSourcesFrozen = true;
-    await Promise.all([sourcePreviews.dispose(), nativeThumbnails?.close()]);
+    await Promise.all([sourcePreviews.dispose(), nativeThumbnails?.close(), macSources?.close()]);
   };
   ipcMain.handle(DESKTOP_SOURCES_IPC.list, async (_event, input: unknown) => {
     const options = desktopSourcesOptionsSchema.parse(input === undefined ? {} : input);

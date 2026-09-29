@@ -1,7 +1,7 @@
 #include "credit_audio_device.h"
 #include "playout_delay.h"
 
-#include "common_audio\include\audio_util.h"
+#include "common_audio/include/audio_util.h"
 
 namespace monky::native_rtc::engine::audio {
 

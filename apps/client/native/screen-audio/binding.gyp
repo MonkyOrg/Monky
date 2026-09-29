@@ -31,7 +31,7 @@
               "src/win/wasapi_loopback.cpp",
               "src/win/wasapi_capture.cpp",
               "src/win/wasapi_format.cpp",
-              "src/win/packet_capture.cpp",
+              "src/packet_capture.cpp",
               "src/win/window_enum.cpp",
               "src/win/window_resize.cpp",
               "src/win/keyboard_layout.cpp"
@@ -59,9 +59,10 @@
         [
           "OS=='mac'",
           {
-            "sources": ["src/mac/sc_capture.mm", "src/mac/window_owners.mm"],
+            "sources": ["src/mac/sc_capture.mm", "src/mac/window_owners.mm", "src/packet_capture.cpp", "src/mac/packet_source.mm"],
             "xcode_settings": {
               "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
+              "GCC_ENABLE_CPP_RTTI": "YES",
               "CLANG_ENABLE_OBJC_ARC": "YES",
               "OTHER_CPLUSPLUSFLAGS": ["-std=c++17"],
               "OTHER_LDFLAGS": [
@@ -74,7 +75,7 @@
                 "-framework CoreAudio"
               ]
             },
-            "defines": ["__MACOS__"]
+            "defines": ["__MACOS__", "NAPI_VERSION=8"]
           }
         ]
       ]

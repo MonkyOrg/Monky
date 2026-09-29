@@ -13,6 +13,7 @@ namespace monky::screen::mac {
 namespace {
 constexpr size_t kMaximumFrames = 8;
 constexpr size_t kMaximumBytes = 32 * 1024 * 1024;
+std::mutex media_pipe_mutex;
 void Write(const uint8_t* bytes, size_t count) {
   while (count) {
     const auto written = write(3, bytes, count);
@@ -22,12 +23,18 @@ void Write(const uint8_t* bytes, size_t count) {
     count -= static_cast<size_t>(written);
   }
 }
-void Packet(NSDictionary* message, const std::vector<uint8_t>& payload = {}) {
+void Packet(uint64_t capture_id, NSDictionary* message, const std::vector<uint8_t>& payload = {}) {
+  if (capture_id) {
+    NSMutableDictionary* scoped = [message mutableCopy];
+    scoped[@"captureId"] = @(capture_id);
+    message = scoped;
+  }
   NSError* error = nil;
   NSData* json = [NSJSONSerialization dataWithJSONObject:message options:0 error:&error];
   if (error || !json || json.length > 65536 || payload.size() > 4 * 1024 * 1024) _exit(74);
   const uint32_t prefix[] = {htonl(0x4d435331), htonl(static_cast<uint32_t>(json.length)),
     htonl(static_cast<uint32_t>(payload.size()))};
+  std::lock_guard lock(media_pipe_mutex);
   Write(reinterpret_cast<const uint8_t*>(prefix), sizeof(prefix));
   Write(static_cast<const uint8_t*>(json.bytes), json.length);
   Write(payload.data(), payload.size());
@@ -39,6 +46,8 @@ struct VideoCaptureHost::State : std::enable_shared_from_this<State> {
   std::deque<EncodedFrame> queue;
   size_t frames = 0, bytes = 0, peak_frames = 0, peak_bytes = 0;
   uint64_t written = 0;
+  uint64_t capture_id = 0;
+  bool av1 = false;
   bool stopping = false, writer_closed = false, owner_closed = false;
   NSString* error_code = nil;
   OSStatus error_status = 0;
@@ -74,41 +83,54 @@ struct VideoCaptureHost::State : std::enable_shared_from_this<State> {
   }
   void Run() {
     @autoreleasepool {
-      Packet(@{@"type": @"hello", @"protocol": @1, @"pid": @(getpid()),
-        @"codec": @"h264", @"timebase": @"mach-host-us"});
+      bool failure_sent = false;
+      Packet(capture_id, @{@"type": @"hello", @"protocol": @1, @"pid": @(getpid()),
+        @"codec": av1 ? @"av1" : @"h264", @"timebase": @"mach-host-us"});
       for (;;) {
         EncodedFrame frame;
         {
           std::unique_lock lock(mutex);
-          changed.wait(lock, [&] { return error_code || stopping || !queue.empty(); });
-          if (error_code) {
+          changed.wait(lock, [&] { return stopping || (error_code ? !failure_sent : !queue.empty()); });
+          if (error_code && !failure_sent) {
             NSString* code = error_code; const auto status = error_status;
+            failure_sent = true;
             lock.unlock();
-            Packet(@{@"type": @"failure", @"code": code, @"nativeStatus": @(status)});
-            ::close(3);
-            return;
+            Packet(capture_id, @{@"type": @"failure", @"code": code, @"nativeStatus": @(status)});
+            continue;
+          }
+          if (error_code && stopping) {
+            // Stop is published only after SCK and every encoder callback retire.
+            queue.clear(); frames = 0; bytes = 0;
+            break;
           }
           if (queue.empty() && stopping) break;
           frame = std::move(queue.front()); queue.pop_front();
         }
-        Packet(@{@"type": @"video", @"id": @(++written), @"timestampUs": @(frame.timestamp_us),
+        Packet(capture_id, @{@"type": @"video", @"id": @(++written), @"timestampUs": @(frame.timestamp_us),
           @"durationUs": @(frame.duration_us), @"keyframe": @(frame.keyframe)}, frame.bytes);
         {
           std::lock_guard lock(mutex);
           --frames; bytes -= frame.bytes.size();
         }
       }
-      Packet(@{@"type": @"closed", @"packets": @(written), @"writerDrained": @YES,
+      {
+        std::lock_guard lock(mutex);
+        if (frames || bytes || !queue.empty()) throw VideoError("ERR_MAC_CAPTURE_WRITER_RETIREMENT", 0);
+      }
+      Packet(capture_id, @{@"type": @"closed", @"packets": @(written), @"writerDrained": @YES,
         @"retainedFrames": @0, @"retainedBytes": @0});
-      ::close(3);
+      if (!capture_id) ::close(3);
       { std::lock_guard lock(mutex); writer_closed = true; }
     }
   }
 };
 VideoCaptureHost::VideoCaptureHost(SCContentFilter* filter, EncoderOptions options, bool aspect,
-    std::function<void()> verify, VideoEncoder::Failure failure) : state_(std::make_shared<State>()) {
+    std::function<void()> verify, VideoEncoder::Failure failure, uint64_t capture_id)
+    : state_(std::make_shared<State>()) {
   if (fcntl(3, F_GETFD) == -1) throw std::runtime_error("ERR_MAC_CAPTURE_MEDIA_PIPE");
   const auto owner = state_;
+  owner->capture_id = capture_id;
+  owner->av1 = options.av1;
   if (!failure) throw std::runtime_error("ERR_MAC_CAPTURE_FAILURE_OBSERVER");
   owner->notify = std::move(failure);
   const std::weak_ptr<State> weak = owner;
@@ -179,6 +201,7 @@ std::shared_future<void> VideoCaptureHost::Close() {
 NSDictionary* VideoCaptureHost::Snapshot() const {
   std::lock_guard lock(state_->mutex);
   return @{@"writerClosed": @(state_->writer_closed),
+    @"capture": state_->capture->Snapshot(),
     @"nativeClosed": @(state_->owner_closed),
     @"retainedFrames": @(state_->frames), @"retainedBytes": @(state_->bytes),
     @"peakFrames": @(state_->peak_frames), @"peakBytes": @(state_->peak_bytes)};

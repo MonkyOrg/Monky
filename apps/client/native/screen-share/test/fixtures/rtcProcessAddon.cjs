@@ -15,6 +15,15 @@ function createEngine(options, emit) {
       if (operation === 'crash') { process.abort(); return; }
       if (operation === 'exit') { process.exit(37); return; }
       if (operation === 'reject') throw Object.assign(new Error('Fixture rejection'), { code: 'ERR_FIXTURE', status: 6 });
+      if (operation === 'surface') {
+        const id = Buffer.alloc(8);
+        id.writeBigUInt64LE(7n);
+        emit({ type: 'frame', target: 1, data: { frameId: 1, format: 'NV12', gpuCopy: false,
+          timestampUs: 123, width: 4, height: 2, codedWidth: 4, codedHeight: 2,
+          textureInfo: { handle: { ioSurfaceId: id }, pixelFormat: 'nv12',
+            codedSize: { width: 4, height: 2 }, visibleRect: { x: 0, y: 0, width: 4, height: 2 },
+            timestamp: 123, colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' } } } });
+      }
       if (operation === 'playout') emit({ type: 'audio.playout', target: 0, data: {
         epoch: 1, sequence: 0, firstPlayoutFrame: 0, frames: 480, sampleRate: 48000, channels: 2,
         samples: new Float32Array(960).fill(.125),

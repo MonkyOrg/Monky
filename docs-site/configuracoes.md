@@ -508,7 +508,7 @@ compartilhamento, recepção de tela e telemetria; os perfis continuam incluindo
 ### Recepção de tela
 
 Em **Configurações → Qualidade e compartilhamento → Recepção de tela**, escolha
-**Nativo** ou **Chromium**. No Windows, **Nativo é o padrão**, usando o runtime
+**Nativo** ou **Chromium**. No Windows e macOS, **Nativo é o padrão**, usando o runtime
 incluído no Monky. Não há fallback automático: se ele falhar, o aviso indica
 onde selecionar Chromium manualmente. A escolha é salva e vale ao começar a
 assistir ou clicar em **Tentar novamente**; para uma tela já aberta, pare de
@@ -516,9 +516,10 @@ assistir e assista novamente. Câmera, voz e transmissão da própria tela não 
 
 **Chromium tem uma limitação conhecida:** no ensaio Windows houve quedas de FPS
 e congelamentos periódicos. O aviso permanece visível nas configurações; escolher
-esse receptor não corrige a limitação. No macOS, **Chromium é o padrão** e
-**Nativo** fica desabilitado como **Em breve**. Isso permite assistir a perfis
-compatíveis, mas não habilita captura libobs no Mac nem qualifica seu desempenho.
+esse receptor não corrige a limitação. Uma escolha Chromium já salva no macOS
+é preservada. O caminho nativo macOS requer 14+ e usa VideoToolbox/IOSurface;
+não depende de libobs. Os perfis até 4K/120 FPS dependem da fonte, do hardware
+e da rede, e não garantem essa taxa sustentada em todo Mac.
 
 ### Perfis de qualidade
 
@@ -545,10 +546,13 @@ próxima da que você já usava.
 ### Compartilhando a tela enquanto joga
 
 Codificar vídeo consome recursos. A aceleração depende da placa, do driver e
-do suporte confirmado pelo backend. Para compartilhar a tela, **Automático**
-usa **H.264 / AVC** hoje; **AV1** continua desabilitado como **Em breve**.
-A escolha do codificador de hardware é separada do codec. Se não houver
-suporte, o cliente informa o motivo em vez de trocar silenciosamente de codec.
+do suporte confirmado pelo backend. No Windows, **Automático** prioriza AV1 por
+hardware, depois H.264 por hardware; no macOS, prioriza H.264 VideoToolbox.
+Somente após comprovar ausência de hardware compatível usa H.264 por software,
+com aviso. Em **Manual**, escolha Hardware/Software e H.264/AV1.
+No macOS, **Software + AV1** usa libaom nativo na CPU; comece em 720p30 e ajuste
+pela taxa observada. AV1 por hardware não está disponível nesse backend.
+Uma combinação Manual indisponível é bloqueada, sem troca silenciosa de codec.
 
 O seletor separa **Telas** e **Janelas**. Cada janela aparece uma única vez
 na lista de janelas; não existe uma lista de jogos detectados. Depois de

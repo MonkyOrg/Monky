@@ -159,7 +159,7 @@ export class SettingsStore {
     this.screenEncodingMode = 'hardware';
     this.screenEncodingStrategy = 'automatic';
     this.preferredScreenCodec = 'h264';
-    this.screenShareReceiver = this.nativeScreenReceiverComingSoon ? 'chromium' : 'native';
+    this.screenShareReceiver = 'native';
     this.soundboardLimiterEnabled = false;
     this.soundboardLoudnessLimit = 6;
     this.botDownloadConfirmationExceptions = [];
@@ -187,8 +187,7 @@ export class SettingsStore {
           && parsed.screenShareReceiver !== 'chromium') {
           console.warn('[Settings] Invalid screen receiver preference; restoring the platform default.');
         }
-        this.screenShareReceiver = this.nativeScreenReceiverComingSoon ? 'chromium'
-          : parsed.screenShareReceiver === 'chromium' ? 'chromium' : 'native';
+        this.screenShareReceiver = parsed.screenShareReceiver === 'chromium' ? 'chromium' : 'native';
         this.autoEntryServerKeys = restoreAutoEntryServerKeys(parsed.autoEntryServerKeys);
         this.botLocalePreferences = restoreBotLocalePreferences(parsed.botLocalePreferences);
         if (!this.userVolumes || typeof this.userVolumes !== 'object') {
@@ -628,16 +627,12 @@ export class SettingsStore {
     }
   }
 
-  public get nativeScreenReceiverComingSoon(): boolean {
-    return typeof window !== 'undefined' && window.api?.platform === 'darwin';
-  }
-
   public getScreenShareReceiver(): ScreenShareReceiver {
-    return this.nativeScreenReceiverComingSoon ? 'chromium' : this.screenShareReceiver;
+    return this.screenShareReceiver;
   }
 
   public setScreenShareReceiver(receiver: ScreenShareReceiver): void {
-    if ((receiver !== 'native' && receiver !== 'chromium') || (receiver === 'native' && this.nativeScreenReceiverComingSoon)) {
+    if (receiver !== 'native' && receiver !== 'chromium') {
       throw new TypeError('The selected screen receiver is unavailable on this platform.');
     }
     const previous = this.screenShareReceiver;

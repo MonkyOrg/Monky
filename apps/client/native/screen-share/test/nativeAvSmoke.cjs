@@ -13,8 +13,10 @@ const soakMs = Number(process.argv.find(value => value.startsWith('--soak-ms='))
 const singleReceiverSoakMs = Number(process.argv.find(value => value.startsWith('--single-receiver-soak-ms='))?.slice('--single-receiver-soak-ms='.length) ?? 0);
 const requireAudioContinuity = process.argv.includes('--require-audio-continuity');
 const mainStallMs = Number(process.argv.find(value => value.startsWith('--main-stall-ms='))?.slice('--main-stall-ms='.length) ?? 0);
-const encoder = process.argv.find(value => value.startsWith('--encoder='))?.slice('--encoder='.length) ?? 'auto';
-assert.ok(['auto', 'h264_texture_amf', 'obs_nvenc_h264_tex', 'av1_texture_amf', 'obs_nvenc_av1_tex'].includes(encoder));
+const encoder = process.argv.find(value => value.startsWith('--encoder='))?.slice('--encoder='.length)
+  ?? (process.platform === 'darwin' ? 'apple_vt_h264' : 'auto');
+assert.ok(['auto', 'h264_texture_amf', 'obs_nvenc_h264_tex', 'av1_texture_amf', 'obs_nvenc_av1_tex',
+  'apple_vt_h264', 'apple_vt_h264_software', 'monky_aom_av1'].includes(encoder));
 const codec = encoder.includes('av1') ? 'av1' : 'h264';
 const selectedProfile = process.argv.find(value => value.startsWith('--profile='))?.slice('--profile='.length) ?? '1080p120';
 assert.ok(['1080p120', '720p30'].includes(selectedProfile));
@@ -44,8 +46,10 @@ if (!process.versions.electron) {
   const sourceProfile = `${directory}-source`;
   assert.equal(fs.existsSync(directory), false);
   assert.equal(fs.existsSync(sourceProfile), false);
-  const source = spawn(require('electron'), [path.join(__dirname, 'nativeAvSource.cjs'), `--profile=${sourceProfile}`],
-    { env, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+  const source = process.platform === 'darwin'
+    ? require('../../screen-audio/test/macAudioSource.cjs').createMacAudioSource(sourceProfile)
+    : spawn(require('electron'), [path.join(__dirname, 'nativeAvSource.cjs'), `--profile=${sourceProfile}`],
+      { env, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
   let test, sourceRetiring = false;
   const sourceExited = new Promise(resolve => source.once('exit', code => {
     if (!sourceRetiring) { console.error(`Owned source exited unexpectedly (${code}).`); test?.kill('SIGKILL'); process.exitCode = 1; }
@@ -90,11 +94,12 @@ try {
   placement = require('../../../test/fixtures/testDisplay.cjs').installTestDisplay({ app, screen, BrowserWindow });
 }
 catch (error) { console.error('[TestDisplay] A/V launch rejected:', error); app.exit(1); return; }
-const { loadRuntime, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription, NativePcmCaptureHub } = require('../index.cjs');
+const { loadRuntime, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription, NativePcmCaptureHub,
+  createMacScreenProvider } = require('../index.cjs');
 const captureModule = audioAddon ? require(audioAddon) : require('@monky/screen-audio');
 const { createSfuFixture } = require('./sfuFixture.cjs');
 const { assertNativeScreenEndpointLocallyClosed } = require('../runtime/nativeEndpoint.cjs');
-const target = {
+let target = {
   hwnd: Number(process.argv.find(value => value.startsWith('--source-hwnd='))?.slice('--source-hwnd='.length)),
   expectedProcessId: Number(process.argv.find(value => value.startsWith('--source-pid='))?.slice('--source-pid='.length)),
 };
@@ -112,10 +117,11 @@ const report = { mode, encoder, codec, selectedProfile, silentSource, audioAddon
   personalCapture: false, recordedMedia: false, phases: [] };
 const eventLoopDelay = require('node:perf_hooks').monitorEventLoopDelay({ resolution: 20 });
 eventLoopDelay.enable();
-let publisher, hub, sfu, expectingSourceLoss = false;
+let publisher, hub, sfu, sourceProvider, expectingSourceLoss = false;
 // Destruction may invalidate the stock finder before the next HWND liveness check.
 // Both refusals are expected only for an acknowledged, explicitly destroyed source.
-const sourceLossCodes = new Set(['ERR_SCREEN_CAPTURE_SOURCE_LOST', 'ERR_SCREEN_CAPTURE_SOURCE_AMBIGUOUS']);
+const sourceLossCodes = new Set(['ERR_SCREEN_CAPTURE_SOURCE_LOST', 'ERR_SCREEN_CAPTURE_SOURCE_AMBIGUOUS',
+  'ERR_MAC_SOURCE_LOST', 'ERR_MAC_SOURCE_CHANGED', 'ERR_MAC_SOURCE_IDENTITY', 'ERR_AUDIO_TARGET']);
 const expectedSourceLoss = error => sourceLossCodes.has(error.code) || error.name === 'AbortError'
   || (error instanceof AggregateError && error.errors.length > 0 && error.errors.every(expectedSourceLoss));
 const fatal = error => {
@@ -213,6 +219,9 @@ const receivedAudio = id => {
   const signal = receivers.get(id).audioOutput.owner.getStats().pcmSignal;
   return signal?.frames > 4800 && (silentSource ? signal.nonzeroFrames === 0 : signal.nonzeroFrames > 4800);
 };
+const audioSelection = () => ({ includeWindowId: target.platform === 'darwin' ? target.windowId : target.hwnd,
+  expectedProcessId: target.expectedProcessId,
+  ...(target.platform === 'darwin' ? { expectedProcessStartTimeUs: target.expectedProcessStartTimeUs } : {}) });
 async function signalWindow(id, milliseconds = 700) {
   const endpoint = receivers.get(id);
   const before = endpoint.audioOutput.owner.getStats().pcmSignal;
@@ -226,7 +235,7 @@ async function signalWindow(id, milliseconds = 700) {
 }
 async function observeCapturedStereo(reportKey = 'originalCapture') {
   const original = { frames: 0, channels: null, format: null, crossProduct: 0 };
-  const observer = hub.subscribe({ includeWindowId: target.hwnd, expectedProcessId: target.expectedProcessId }, event => {
+  const observer = hub.subscribe(audioSelection(), event => {
     if (event.type !== 'packet') return;
     const channels = event.format.channels;
     original.format = event.format;
@@ -253,6 +262,15 @@ async function observeCapturedStereo(reportKey = 'originalCapture') {
 async function run() {
   phase('starting');
   const runtime = loadRuntime(), channelId = randomUUID();
+  if (process.platform === 'darwin') {
+    sourceProvider = createMacScreenProvider();
+    const sources = await sourceProvider.listSources();
+    const source = sources.find(row => row.id.startsWith(`window:${target.hwnd}:`));
+    assert.ok(source, 'ScreenCaptureKit did not enumerate the owned synthetic application.');
+    const resolved = await sourceProvider.resolveTarget(source.id, 'window');
+    assert.equal(resolved.expectedProcessId, target.expectedProcessId, 'Never capture an unowned source.');
+    target = resolved;
+  }
   const source = { shareId: 'owned-av', instanceId: randomUUID(), audio: true, codec,
     video: selectedProfile === '720p30'
       ? { width: 1280, height: 720, fps: 30, maxBitrateKbps: 2000 }
@@ -260,13 +278,12 @@ async function run() {
   const lowerQuality = selectedProfile === '720p30' ? '480p30' : '720p60';
   const ownerWindow = await createWindow('publisher');
   const invalid = captureModule.createPacketCapture({
-    includeWindowId: target.hwnd, expectedProcessId: process.pid,
+    ...audioSelection(), expectedProcessId: process.pid,
   }, () => {});
   await assert.rejects(invalid.ready, { code: 'ERR_AUDIO_TARGET' });
   await invalid.closed;
   report.changedWindowOwnerRejected = true;
-  hub = new NativePcmCaptureHub(captureModule,
-    { includeWindowId: target.hwnd, expectedProcessId: target.expectedProcessId }, failure);
+  hub = new NativePcmCaptureHub(captureModule, audioSelection(), failure);
   sfu = mode === 'sfu' ? await createSfuFixture(channelId, sfuListenIp) : null;
   sfu?.onProducer(producer => {
     for (const subscription of subscriptions.values()) deliver(subscription.addRemoteProducer(producer));
@@ -411,7 +428,7 @@ async function run() {
   await start('viewer-b', 'source');
   await start('viewer-c', lowerQuality);
   assert.equal(senders.length, 2);
-  assert.equal(hub.getStats().captureStarts, 1, 'Each quality opened a redundant WASAPI capture.');
+  assert.equal(hub.getStats().captureStarts, 1, 'Each quality opened a redundant native audio capture.');
   assert.equal(hub.getStats().subscriptions, 2);
   for (const id of ['viewer-a', 'viewer-b', 'viewer-c']) {
     await waitFor(() => receivedAudio(id),
@@ -603,7 +620,7 @@ app.whenReady().then(async () => {
     const closures = await Promise.allSettled([...subscriptions.values()].map(subscription => subscription.close()));
     const owners = await Promise.allSettled([publisher?.close()]);
     await within(Promise.allSettled([...deliveries]), 15000, 'Owned A/V signaling did not drain.').catch(failure);
-    const captures = await Promise.allSettled([hub?.close()]);
+    const captures = await Promise.allSettled([hub?.close(), sourceProvider?.close()]);
     for (const result of [...closures, ...owners, ...captures]) if (result.status === 'rejected') failure(result.reason);
     report.endpoints = [...senders, ...receivers.values()].map(endpoint => endpoint.snapshot());
     try {

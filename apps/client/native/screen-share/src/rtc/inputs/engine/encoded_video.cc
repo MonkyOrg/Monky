@@ -1,21 +1,22 @@
 #include "encoded_video.h"
 #include "capture_clock.h"
+#include "platform_clock.h"
 #include "h264_bitstream.h"
 #include "av1_obu.h"
 #include "av1_sequence.h"
-#include "mf_rtc_internal.h"
+#include "codec_policy.h"
 #include "peer_support.h"
 
-#include "api\environment\environment_factory.h"
-#include "api\field_trials.h"
-#include "api\make_ref_counted.h"
-#include "api\video\encoded_image.h"
-#include "media\base\video_broadcaster.h"
-#include "modules\video_coding\include\video_codec_interface.h"
+#include "api/environment/environment_factory.h"
+#include "api/field_trials.h"
+#include "api/make_ref_counted.h"
+#include "api/video/encoded_image.h"
+#include "media/base/video_broadcaster.h"
+#include "modules/video_coding/include/video_codec_interface.h"
 #include "modules/video_coding/svc/create_scalability_structure.h"
-#include "pc\video_track_source.h"
-#include "rtc_base\logging.h"
-#include "rtc_base\experiments\rate_control_settings.h"
+#include "pc/video_track_source.h"
+#include "rtc_base/logging.h"
+#include "rtc_base/experiments/rate_control_settings.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -31,7 +32,7 @@
 namespace monky::native_rtc::engine {
 namespace {
 namespace sv = monky::screen_video;
-namespace policy = monky::native_rtc::mf::detail;
+namespace policy = monky::native_rtc::codec_policy;
 using Clock = std::chrono::steady_clock;
 using Gate = policy::CallbackGate<webrtc::EncodedImageCallback>;
 
@@ -132,11 +133,8 @@ void ValidateEncodedLevel(const sv::H264Sps& sps, const EncodedConfiguration& vi
 }
 
 std::int64_t QpcNowUs() {
-  LARGE_INTEGER ticks{}, frequency{};
   std::int64_t result = 0;
-  Require(QueryPerformanceCounter(&ticks) && QueryPerformanceFrequency(&frequency) &&
-      CaptureQpcMicroseconds(ticks.QuadPart, frequency.QuadPart, result),
-      "Cannot read the local system-QPC clock", MONKY_ENGINE_FAILURE);
+  Require(NativeCaptureNowUs(result), "Cannot read the native capture clock", MONKY_ENGINE_FAILURE);
   return result;
 }
 
@@ -542,7 +540,6 @@ class Encoder final : public webrtc::VideoEncoder {
       Require(codec->maxBitrate <= kEncodedBitrateCeiling / 1000 &&
               codec->startBitrate <= kEncodedBitrateCeiling / 1000,
           "Encoded bitrate exceeds the 80000Kbps product ceiling");
-      mf::AdapterOptions options;
       std::uint32_t initial_bitrate = 0, maximum_bitrate = kEncodedBitrateCeiling;
       if (state_->video.av1) {
         Require(codec->codecType == webrtc::kVideoCodecAV1 && settings.number_of_cores > 0 &&
@@ -554,7 +551,7 @@ class Encoder final : public webrtc::VideoEncoder {
         initial_bitrate = codec->active ? codec->startBitrate * 1000 : 0;
         maximum_bitrate = codec->maxBitrate ? codec->maxBitrate * 1000 : kEncodedBitrateCeiling;
       } else {
-        const auto setup = policy::MakeEncoderSetup(*codec, settings, {sv::H264Profile::Main, negotiated_level_}, options);
+        const auto setup = policy::MakeEncoderSetup(*codec, settings, {sv::H264Profile::Main, negotiated_level_}, 8);
         initial_bitrate = setup.initial_bitrate;
         maximum_bitrate = setup.maximum_bitrate;
       }

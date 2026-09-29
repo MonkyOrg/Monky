@@ -64,6 +64,27 @@ test('encoding policy prefers initialized hardware AV1, then H264, then visible 
   }
 });
 
+test('macOS keeps Automatic on hardware H264 and exposes AV1 only as explicit native software', async () => {
+  const encoders = ['apple_vt_h264', 'apple_vt_h264_software', 'monky_aom_av1'];
+  const tried = [];
+  const probe = async selection => { tried.push(selection.encoder); };
+  const automatic = await policy.exports.selectScreenEncoding('automatic', 'software', 'av1', encoders, probe);
+  assert.equal(automatic.selection.encoder, 'apple_vt_h264');
+  assert.deepEqual(tried.splice(0), ['apple_vt_h264']);
+  const software = await policy.exports.selectScreenEncoding('manual', 'software', 'av1', encoders, probe, false);
+  assert.deepEqual(software.selection, { mode: 'software', codec: 'av1', encoder: 'monky_aom_av1' });
+  assert.deepEqual(tried.splice(0), ['monky_aom_av1']);
+  const hardware = await policy.exports.selectScreenEncoding('manual', 'hardware', 'av1', encoders, probe);
+  assert.equal(hardware.selection, null);
+  assert.deepEqual(tried, []);
+  const fallback = await policy.exports.selectScreenEncoding('automatic', 'hardware', 'auto', encoders, async selection => {
+    if (selection.mode === 'hardware')
+      throw Object.assign(new Error('No hardware encoder for this profile.'), { code: 'ERR_MAC_VIDEO_ENCODER_UNSUPPORTED' });
+  });
+  assert.equal(fallback.selection.encoder, 'apple_vt_h264_software');
+  assert.equal(fallback.fallback, true);
+});
+
 test('manual software remains software and manual hardware AV1 never switches mode or codec', async () => {
   const compiled = ['obs_nvenc_av1_tex', 'obs_nvenc_h264_tex', 'obs_x264', 'monky_aom_av1'];
   for (const codec of ['h264', 'av1']) {
@@ -214,10 +235,12 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   encoder = 'h264_texture_amf', probeFailure, probeFailureBeforeSpawn, probeStop,
   probeVerified = true, probeRetires = true, probeStopReportsFailure = false, logger, packetCapture,
   compiledEncoders = [encoder],
-  encodingProbe } = {}) {
+  encodingProbe, arch = 'x64' } = {}) {
   const handlers = new Map(), sent = [], endpoints = [], selections = [], errors = [], captures = [], directories = [];
   const probes = [], removedDirectories = [], logs = [], ports = [], encodingProbes = [];
-  const encoderMode = id => ['obs_x264', 'monky_aom_av1'].includes(id) ? 'software' : 'hardware';
+  const retiredMacProbes = new WeakSet();
+  const sharedMacChild = Object.assign(new EventEmitter(), { pid: 90000 });
+  const encoderMode = id => ['obs_x264', 'monky_aom_av1', 'apple_vt_h264_software'].includes(id) ? 'software' : 'hardware';
   const encoderCodec = id => id.includes('av1') ? 'av1' : 'h264';
   let target = { kind: 'window', hwnd: 12345, expectedProcessId: 56789,
     expectedProcessCreationTime100ns: '123456789' }, frameDestroyed = false, contentDestroyed = false;
@@ -254,7 +277,8 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
       signal.throwIfAborted();
       if (probeFailureBeforeSpawn) throw probeFailureBeforeSpawn;
       this.target = structuredClone(selected);
-      this.child = Object.assign(new EventEmitter(), { pid: 90000 + probes.indexOf(this) });
+      this.child = platform === 'darwin' ? sharedMacChild
+        : Object.assign(new EventEmitter(), { pid: 90000 + probes.indexOf(this) });
       if (gpu) await new Promise((resolve, reject) => {
         const abort = () => { signal.removeEventListener('abort', abort); reject(signal.reason); };
         signal.addEventListener('abort', abort, { once: true });
@@ -281,7 +305,8 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
       if (!this.closed && probeRetires) {
         this.closed = true;
         const code = this.failure ? 1 : 0;
-        this.child?.emit('exit', code, null); this.child?.emit('close', code, null);
+        if (platform === 'darwin') retiredMacProbes.add(this);
+        else { this.child?.emit('exit', code, null); this.child?.emit('close', code, null); }
       }
       if (this.failure && probeStopReportsFailure) throw this.failure;
       return this.snapshot();
@@ -334,6 +359,10 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
     if (name === './i18n') return { mt: key => key };
     if (name === './screenEncodingPolicy') return policy.exports;
     if (name === '@monky/screen-share') return { ...runtime, NativeScreenEndpoint: Endpoint, CaptureBridge: Probe,
+      createCaptureBridge: options => new Probe(options),
+      assertMacCaptureBridgeClosed: probe => {
+        assert.ok(retiredMacProbes.has(probe), 'The original macOS capture lease has not proved retirement.');
+      },
       probeCaptureCapabilities: async (options, signal) => {
         signal.throwIfAborted();
         encodingProbes.push(options);
@@ -344,7 +373,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
           adapterIndex: 0, vendorId: options.encoder.startsWith('obs_nvenc_') ? 0x10de : 0x1002, deviceId: 1,
           encoderInitialized: true, sourceCaptured: false, hardwareQualified: false, hardwareSessionConfirmed: false };
       },
-      loadRuntime: () => ({ capture: { captureKinds: ['window', 'monitor', 'game'],
+      loadRuntime: () => ({ capture: { captureKinds: platform === 'darwin' ? ['window', 'monitor'] : ['window', 'monitor', 'game'],
         encoders: compiledEncoders, requiresHardwareProbe: true, hardwareQualified: false } }) };
     if (name === '@monky/screen-audio') return captureModule;
     if (name === 'node:fs/promises') return {
@@ -360,10 +389,13 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   }, module, sourceFile, path.dirname(sourceFile), {
     debug() {},
     error: (...values) => errors.push(values), warn: (...values) => errors.push(values),
-  }, { platform, arch: 'x64', pid: process.pid });
+  }, { platform, arch, pid: process.pid });
   const service = module.exports.setupNativeScreenSharingIpc(window, (id, kind) => {
     selections.push(id);
-    if (kind === 'monitor') { assert.equal(id, monitorId); return structuredClone(monitorTarget); }
+    if (kind === 'monitor') {
+      assert.equal(id, monitorId);
+      return structuredClone(platform === 'darwin' ? target : monitorTarget);
+    }
     assert.match(id, /^window:/);
     return { ...target, kind };
   }, { write: entry => { logs.push(structuredClone(entry)); logger?.write(entry); } });
@@ -781,6 +813,29 @@ test('RTC host exits retain bounded OS status without exporting native messages 
   await f.command({ action: 'leave' });
 });
 
+test('macOS capture diagnostics retain the numeric native status without leaking source or native text', async t => {
+  const f = fixture(t, { role: 'viewer' });
+  await f.join(); await f.participants(); await f.watch();
+  await f.accepted(f.sent.find(event => event.type === 'signal' && event.signal.action === 'watch').signal);
+  const endpoint = f.endpoints[0];
+  for (const nativeStatus of [-3821, -3808, 0]) {
+    endpoint.options.onDiagnostic(Object.assign(new Error('secret-native-message'), {
+      code: 'ERR_MAC_CAPTURE_STOPPED', nativeStatus, sourceTitle: 'secret-title', path: 'secret-path',
+    }));
+    assert.deepEqual(f.logs.findLast(entry => entry.message === 'Native screen receive-diagnostic failed')
+      .data.nativeDiagnostics, [{ kind: 'mac-native-status', code: 'ERR_MAC_CAPTURE_STOPPED', nativeStatus }]);
+  }
+  for (const nativeStatus of ['secret-status', NaN, Infinity, 2147483648, -2147483649, .5]) {
+    endpoint.options.onDiagnostic(Object.assign(new Error('secret-native-message'), {
+      code: 'ERR_MAC_CAPTURE_STOPPED', nativeStatus,
+    }));
+    assert.equal(f.logs.findLast(entry => entry.message === 'Native screen receive-diagnostic failed')
+      .data.nativeDiagnostics, undefined);
+  }
+  assert.doesNotMatch(JSON.stringify(f.logs), /secret-/);
+  await f.command({ action: 'leave' });
+});
+
 test('asynchronous capture and preview failures persist bounded diagnostics without changing source ownership', async t => {
   const f = fixture(t);
   await f.join();
@@ -816,7 +871,7 @@ test('a failed diagnostic sink cannot bypass native ownership guards or prevent 
 });
 
 test('unsupported native platforms report browser-only capabilities without touching GPU or capture', async t => {
-  const f = fixture(t, { platform: 'darwin' });
+  const f = fixture(t, { platform: 'linux' });
   const result = await f.invoke({ action: 'capabilities' });
   assert.deepEqual(result, { kind: 'capabilities', capabilities: {
     capture: false, captureAudio: false, receive: false, backend: null, reason: 'platform',
@@ -832,7 +887,34 @@ test('static implemented capture kinds permit explicit preparation but are not h
   assert.equal(f.probes.length + f.captures.length + f.endpoints.length, 0);
 });
 
+for (const arch of ['arm64', 'x64']) {
+  test(`macOS ${arch} exposes native reception and window/monitor preparation without touching devices`, async t => {
+    const f = fixture(t, { platform: 'darwin', arch, encoder: 'apple_vt_h264' });
+    const { capabilities } = await f.invoke({ action: 'capabilities' });
+    assert.equal(capabilities.receive, true);
+    assert.equal(capabilities.captureAudio, true);
+    assert.equal(capabilities.capture, false);
+    assert.equal(capabilities.requiresSelectionProbe, true);
+    assert.deepEqual(capabilities.captureKinds, ['window', 'monitor']);
+    assert.equal(f.probes.length + f.captures.length + f.endpoints.length, 0);
+  });
+}
 for (const mode of ['p2p', 'sfu']) {
+  test(`macOS ${mode}: native AV1 admission preserves software selection and reports the libaom backend`, async t => {
+    const f = fixture(t, { platform: 'darwin', arch: 'arm64', encoder: 'monky_aom_av1',
+      compiledEncoders: ['apple_vt_h264', 'apple_vt_h264_software', 'monky_aom_av1'] });
+    f.config.mode = mode;
+    f.replaceTarget({ platform: 'darwin', kind: 'window', windowId: 12345,
+      expectedProcessId: 56789, expectedProcessStartTimeUs: '123456789' });
+    await f.join();
+    const result = await f.addSource('mac-av1', { codec: 'av1', encodingMode: 'software', audio: false });
+    assert.equal(result.source.codec, 'av1');
+    assert.equal(f.probes[0].options.encoder, 'monky_aom_av1');
+    assert.equal(f.endpoints.length + f.captures.length, 0);
+    assert.equal((await f.invoke({ action: 'capabilities' })).capabilities.backend, 'libaom-software');
+    await f.command({ action: 'source-remove', shareId: 'mac-av1' });
+    assert.ok(f.probes.every(probe => probe.closed));
+  });
   for (const captureKind of ['window', 'game']) {
     test(`${mode}/${captureKind}: own-window audio is rejected before probing and does not poison the next share`, async t => {
       const f = fixture(t);
@@ -982,6 +1064,46 @@ test('monitor Stop then rejected window releases its audio reservation and permi
   await f.join();
   assert.equal((await f.addSource('after-reconnect')).kind, 'source');
   assert.equal(f.captures.length + f.endpoints.length, 0, 'Source preparation cannot activate PCM or transport.');
+});
+
+for (const kind of ['window', 'monitor']) {
+  test(`macOS ${kind}: shared-helper retirement releases audio reservations without child exit or listener leaks`, async t => {
+    const f = fixture(t, { platform: 'darwin', encoder: 'apple_vt_h264' });
+    const target = kind === 'window'
+      ? { platform: 'darwin', kind, windowId: 12345, expectedProcessId: 56789, expectedProcessStartTimeUs: '123456789' }
+      : { platform: 'darwin', kind, displayId: 1, displayUuid: '11111111-1111-1111-1111-111111111111',
+        bounds: { x: 0, y: 0, width: 1920, height: 1080 } };
+    f.replaceTarget(target);
+    await f.join();
+    const options = { captureKind: kind, desktopSourceId: kind === 'monitor' ? monitorId : 'window:12345:0' };
+    const failure = Object.assign(new Error('The selected source changed.'), { code: 'ERR_MAC_SOURCE_CHANGED' });
+    f.setProbeFailure(failure);
+    await assert.rejects(f.addSource('failed-audio', options), error => error === failure);
+    f.setProbeFailure(null);
+    for (let index = 0; index < 12; ++index) {
+      const shareId = `retry-${index}`;
+      assert.equal((await f.addSource(shareId, options)).kind, 'source');
+      await f.command({ action: 'source-remove', shareId });
+    }
+    assert.equal(new Set(f.probes.map(probe => probe.child)).size, 1);
+    assert.ok(f.probes.every(probe => probe.closed));
+    assert.equal(f.probes[0].child.listenerCount('exit'), 0);
+    assert.equal(f.probes[0].child.listenerCount('close'), 0);
+    assert.equal(f.endpoints.length + f.captures.length, 0);
+  });
+}
+
+test('macOS does not release audio from a forged snapshot while its original lease still owns resources', async t => {
+  const f = fixture(t, { platform: 'darwin', encoder: 'apple_vt_h264', probeRetires: false });
+  f.replaceTarget({ platform: 'darwin', kind: 'window', windowId: 12345,
+    expectedProcessId: 56789, expectedProcessStartTimeUs: '123456789' });
+  await f.join();
+  await assert.rejects(f.addSource(), /original macOS capture lease/);
+  assert.equal(f.probes[0].snapshot().nativeClosed, true);
+  await assert.rejects(f.addSource('another'), /reserve capture audio/);
+  f.allowProbeRetirement();
+  await f.command({ action: 'source-remove', shareId: f.source.shareId });
+  assert.equal((await f.addSource('recovered')).kind, 'source');
 });
 
 test('IPC error serialization keeps the actual nested cleanup failure instead of only AggregateError', async t => {

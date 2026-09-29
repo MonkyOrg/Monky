@@ -1495,9 +1495,11 @@ test('inaccessible cache data is reported as a storage failure, not zero bytes',
 test('missing archive prerequisites disable preparation without executing or fetching anything', async (t) => {
   const { tools, requests, probes } = await fixture(t);
   await tools.initialize();
+  const support = await localToolExtractionSupport(process.platform, process.arch);
+  assert.ok(support);
   const original = fs.access.bind(fs);
   t.mock.method(fs, 'access', async (...args: Parameters<typeof fs.access>): Promise<void> => {
-    if (['tar.exe', 'tar'].includes(path.basename(String(args[0])))) {
+    if (args[0] === support.tar) {
       throw Object.assign(new Error('Controlled missing tar'), { code: 'ENOENT' });
     }
     await original(...args);
@@ -1513,9 +1515,11 @@ test('changing OS prerequisites updates support without corrupting otherwise val
   await tools.prepare(signal());
   const calls = requests.length;
   const checked = probes.length;
+  const support = await localToolExtractionSupport(process.platform, process.arch);
+  assert.ok(support);
   const original = fs.access.bind(fs);
   const unavailable = t.mock.method(fs, 'access', async (...args: Parameters<typeof fs.access>): Promise<void> => {
-    if (['tar.exe', 'tar'].includes(path.basename(String(args[0])))) {
+    if (args[0] === support.tar) {
       throw Object.assign(new Error('Controlled missing tar'), { code: 'ENOENT' });
     }
     await original(...args);

@@ -1,8 +1,8 @@
 #include "pcm_normalizer.h"
 
-#include "audio\utility\channel_mixing_matrix.h"
-#include "common_audio\include\audio_util.h"
-#include "common_audio\resampler\sinc_resampler.h"
+#include "audio/utility/channel_mixing_matrix.h"
+#include "common_audio/include/audio_util.h"
+#include "common_audio/resampler/sinc_resampler.h"
 
 #include <algorithm>
 #include <charconv>

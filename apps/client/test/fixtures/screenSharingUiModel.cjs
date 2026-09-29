@@ -277,10 +277,9 @@ function fixture(language = 'en') {
   };
   const settingsStore = {
     screenShareReceiver: 'native',
-    get nativeScreenReceiverComingSoon() { return api.platform === 'darwin'; },
-    getScreenShareReceiver() { return this.nativeScreenReceiverComingSoon ? 'chromium' : this.screenShareReceiver; },
+    getScreenShareReceiver() { return this.screenShareReceiver; },
     setScreenShareReceiver(value) {
-      if (value === 'native' && this.nativeScreenReceiverComingSoon) throw new Error('Native receiver unavailable');
+      if (!['native', 'chromium'].includes(value)) throw new Error('Invalid receiver preference');
       this.screenShareReceiver = value;
       this.save();
     },

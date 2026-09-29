@@ -8,8 +8,8 @@
 #include "output_epoch.h"
 #include "monky_rtc_audio.h"
 #include "runtime.h"
-#include "api\make_ref_counted.h"
-#include "common_audio\include\audio_util.h"
+#include "api/make_ref_counted.h"
+#include "common_audio/include/audio_util.h"
 
 #include <algorithm>
 #include <cmath>

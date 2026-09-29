@@ -150,6 +150,20 @@ test('native decoder observations keep each worker clock and lifetime counter ra
   assert.equal(sampler.sample(target, [observation(7, 340, 3000000)]).fps, null);
 });
 
+test('VideoToolbox uses the same per-worker completed-callback observation contract', () => {
+  const snapshot = { backend: 'VideoToolbox', decodedGpuFrames: 900, decoders: [
+    { sessionId: 2, hardwareExecutionObserved: true, diagnostics: {
+      observedAtSteadyUs: 1230000, snapshotCopyMs: 0.05, clock: 'process-steady-clock',
+      counterScope: 'decoder-worker-lifetime', output: { outcomes: { 'callback-completed': 123 } },
+    } },
+    { sessionId: 3, hardwareExecutionObserved: false, diagnostics: {
+      observedAtSteadyUs: 1230000, snapshotCopyMs: 0.05, clock: 'process-steady-clock',
+      counterScope: 'decoder-worker-lifetime', output: { outcomes: { 'callback-completed': 77 } },
+    } },
+  ] };
+  assert.deepEqual(decoderObservations(snapshot), [observation(2, 123, 1230000), observation(3, 77, 1230000)]);
+});
+
 test('native decoder replacement, transition and retirement cannot reuse a previous worker baseline', () => {
   const sampler = new NativeDecoderDiagnosticsSampler(), target = {}, other = {};
   sampler.sample(target, [observation(1, 100, 1000000)]);

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "capture_clock.h"
-#include "system_wrappers\include\clock.h"
+#include "system_wrappers/include/clock.h"
 
 #include <array>
 #include <cstdint>

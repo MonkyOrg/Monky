@@ -152,24 +152,16 @@ for (const platform of ['win32', 'darwin']) {
     Object.defineProperty(globalThis, 'window', { configurable: true, value: { api: { platform } } });
     try {
       withSettingsStorage(storage => {
-        const defaultReceiver = platform === 'darwin' ? 'chromium' : 'native';
+        const defaultReceiver = 'native';
         const store = new SettingsStore();
         assert.equal(store.getScreenShareReceiver(), defaultReceiver);
-        assert.equal(store.nativeScreenReceiverComingSoon, platform === 'darwin');
         storage.setItem('monky_settings', JSON.stringify({ screenShareReceiver: 'automatic' }));
         store.load(false);
         assert.equal(store.getScreenShareReceiver(), defaultReceiver);
         store.setScreenShareReceiver('chromium');
         assert.equal(new SettingsStore().getScreenShareReceiver(), 'chromium');
-        if (platform === 'darwin') {
-          assert.throws(() => store.setScreenShareReceiver('native'), /unavailable/);
-          storage.setItem('monky_settings', JSON.stringify({ screenShareReceiver: 'native' }));
-          store.load(false);
-          assert.equal(store.getScreenShareReceiver(), 'chromium');
-        } else {
-          store.setScreenShareReceiver('native');
-          assert.equal(new SettingsStore().getScreenShareReceiver(), 'native');
-        }
+        store.setScreenShareReceiver('native');
+        assert.equal(new SettingsStore().getScreenShareReceiver(), 'native');
         storage.clear();
         store.load(false);
         assert.equal(store.getScreenShareReceiver(), defaultReceiver, 'Cleared preferences must restore the platform default.');

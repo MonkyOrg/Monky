@@ -15,6 +15,7 @@ struct Encoder {
   aom_codec_ctx_t codec{};
   aom_codec_enc_cfg_t config{};
   bool initialized = false;
+  bool keyframe = false;
   std::vector<uint8_t> packet;
   ~Encoder() { if (initialized) aom_codec_destroy(&codec); }
   void Check(aom_codec_err_t result) {
@@ -66,25 +67,30 @@ void* MonkyAv1Create(const MonkyAv1Config* requested, char* error, size_t capaci
   return nullptr;
 }
 
-int MonkyAv1Encode(void* opaque, const uint8_t* const planes[3], const uint32_t strides[3],
-                   int64_t pts, MonkyAv1Packet* output, char* error, size_t capacity) {
+}
+
+namespace {
+int Encode(void* opaque, const uint8_t* const* planes, const uint32_t* strides,
+           bool nv12, int64_t pts, MonkyAv1Packet* output, char* error, size_t capacity) {
   try {
-    if (!opaque || !output || !planes || !strides || !planes[0] || !planes[1] || !planes[2])
+    if (!opaque || !output || !planes || !strides || !planes[0] || !planes[1] || (!nv12 && !planes[2]))
       throw std::runtime_error("Missing AV1 input planes");
     auto& encoder = *static_cast<Encoder*>(opaque);
     aom_image_t image{};
-    if (!aom_img_wrap(&image, AOM_IMG_FMT_I420, encoder.config.g_w, encoder.config.g_h, 1,
+    if (!aom_img_wrap(&image, nv12 ? AOM_IMG_FMT_NV12 : AOM_IMG_FMT_I420,
+                      encoder.config.g_w, encoder.config.g_h, 1,
                       const_cast<uint8_t*>(planes[0])))
       throw std::runtime_error("Cannot describe AV1 input");
-    for (size_t plane = 0; plane < 3; ++plane) {
-      if (strides[plane] < (encoder.config.g_w >> (plane ? 1 : 0)) || strides[plane] > 65536)
+    for (size_t plane = 0; plane < (nv12 ? 2u : 3u); ++plane) {
+      if (strides[plane] < (encoder.config.g_w >> (!nv12 && plane ? 1 : 0)) || strides[plane] > 65536)
         throw std::runtime_error("Invalid AV1 input stride");
       image.planes[plane] = const_cast<uint8_t*>(planes[plane]);
       image.stride[plane] = static_cast<int>(strides[plane]);
     }
     image.cp = AOM_CICP_CP_BT_709; image.tc = AOM_CICP_TC_BT_709;
     image.mc = AOM_CICP_MC_BT_709; image.range = AOM_CR_STUDIO_RANGE;
-    encoder.Check(aom_codec_encode(&encoder.codec, &image, pts, 1, 0));
+    encoder.Check(aom_codec_encode(&encoder.codec, &image, pts, 1, encoder.keyframe ? AOM_EFLAG_FORCE_KF : 0));
+    encoder.keyframe = false;
     encoder.packet.clear();
     aom_codec_iter_t iterator = nullptr;
     const aom_codec_cx_pkt_t* packet;
@@ -105,6 +111,22 @@ int MonkyAv1Encode(void* opaque, const uint8_t* const planes[3], const uint32_t 
   } catch (const std::exception& failure) { Error(error, capacity, failure.what()); }
   catch (...) { Error(error, capacity, "Unknown AV1 encode failure"); }
   return 0;
+}
+}
+
+extern "C" {
+int MonkyAv1Encode(void* opaque, const uint8_t* const planes[3], const uint32_t strides[3],
+                   int64_t pts, MonkyAv1Packet* output, char* error, size_t capacity) {
+  return Encode(opaque, planes, strides, false, pts, output, error, capacity);
+}
+int MonkyAv1EncodeNv12(void* opaque, const uint8_t* const planes[2], const uint32_t strides[2],
+                      int64_t pts, MonkyAv1Packet* output, char* error, size_t capacity) {
+  return Encode(opaque, planes, strides, true, pts, output, error, capacity);
+}
+int MonkyAv1RequestKeyframe(void* opaque, char* error, size_t capacity) {
+  if (!opaque) { Error(error, capacity, "Missing AV1 encoder"); return 0; }
+  static_cast<Encoder*>(opaque)->keyframe = true;
+  return 1;
 }
 
 int MonkyAv1SetBitrate(void* opaque, uint32_t bitrate, char* error, size_t capacity) {

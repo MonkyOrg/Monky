@@ -1,6 +1,6 @@
 #include "peer_support.h"
 #include "transport_parameters.h"
-#include "audio\media_policy.h"
+#include "audio/media_policy.h"
 
 #include "Device.hpp"
 #include "PeerConnection.hpp"
@@ -9,8 +9,8 @@
 #define MSC_CLASS "MonkyRtcEngine"
 #include "Logger.hpp"
 
-#include "api\data_channel_interface.h"
-#include "api\sctp_transport_interface.h"
+#include "api/data_channel_interface.h"
+#include "api/sctp_transport_interface.h"
 
 #include <cctype>
 #include <map>

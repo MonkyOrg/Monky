@@ -499,7 +499,7 @@ preview, screen reception and telemetry; profiles still include voice and camera
 ### Screen reception
 
 Under **Settings → Quality & sharing → Screen reception**, choose **Native** or
-**Chromium**. On Windows, **Native is the default**, using the runtime included
+**Chromium**. On Windows and macOS, **Native is the default**, using the runtime included
 with Monky. There is no automatic fallback: if it fails, the message explains
 where to select Chromium manually. The choice is saved and applies when you
 start watching or click **Try again**; for an open screen, stop watching and
@@ -507,9 +507,10 @@ watch again. Camera, voice and outgoing screen sharing are unchanged.
 
 **Chromium has a known limitation:** the Windows scenario showed FPS drops and
 periodic freezes. The warning remains visible in settings; selecting this
-receiver does not fix the limitation. On macOS, **Chromium is the default** and
-**Native** is disabled as **Coming soon**. This allows watching compatible
-profiles, but does not enable libobs capture on Mac or qualify its performance.
+receiver does not fix the limitation. An existing saved Chromium choice on macOS
+is preserved. Native macOS requires 14+ and uses VideoToolbox/IOSurface, not libobs.
+Profiles up to 4K/120 FPS depend on source, hardware and network; they do not
+guarantee that sustained rate on every Mac.
 
 ### Quality profiles
 
@@ -536,10 +537,13 @@ resolution closest to the one you were already using.
 ### Sharing your screen while gaming
 
 Encoding video consumes resources. Acceleration depends on the hardware, driver
-and support confirmed by the backend. For screen sharing, **Automatic** uses
-**H.264 / AVC** today; **AV1** remains disabled as **Coming soon**.
-Hardware encoder selection is separate from the codec. If support is
-unavailable, the client explains why instead of silently changing codecs.
+and support confirmed by the backend. On Windows, **Automatic** prioritizes hardware
+AV1, then hardware H.264; on macOS it prioritizes VideoToolbox H.264.
+Only after proving no compatible hardware is available does it use software H.264,
+with a notice. In **Manual**, choose Hardware/Software and H.264/AV1.
+On macOS, **Software + AV1** uses native libaom on the CPU; start at 720p30 and adjust
+based on observed delivery. Hardware AV1 is not available in this backend.
+An unavailable Manual combination is blocked without silently changing the codec.
 
 The picker separates **Screens** and **Windows**. Each window appears only
 once in the window list; there is no list of detected games. After selecting a

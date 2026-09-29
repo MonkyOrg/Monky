@@ -33,7 +33,7 @@ test('Mac capture does not report a running encoder until its first real access 
   const start = f.capture.start().then(result => { ready = true; return result; });
   await tick();
   assert.equal(ready, false);
-  assert.deepEqual(f.requests[0], { method: 'media.start', data: { target, video: { ...video, mode: 'hardware' } } });
+  assert.deepEqual(f.requests[0], { method: 'media.start', data: { target, video: { ...video, mode: 'hardware', codec: 'h264' } } });
   f.frame();
   assert.equal((await start).hardwareSessionConfirmed, true);
   assert.equal(f.packets.length, 1);

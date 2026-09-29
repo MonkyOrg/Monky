@@ -9,7 +9,7 @@ const { validateCaptureTarget, probeCaptureCapabilities } = require(path.resolve
 test('the public source-free probe export is the native-owned implementation, without invoking it', () => {
   assert.equal(typeof probeCaptureCapabilities, 'function');
   assert.equal(probeCaptureCapabilities,
-    require(path.resolve(__dirname, '..', 'runtime', 'captureBridge.cjs')).probeCaptureCapabilities);
+    require(path.resolve(__dirname, '..', 'runtime', 'captureBackend.cjs')).probeCaptureCapabilities);
 });
 
 test('the public target validator returns the original explicit or legacy input without freezing it', () => {
@@ -57,7 +57,11 @@ test('capture declarations preserve exact target and source-free initialization 
     void bridge.prepare(monitorTarget);
     const checked = validateCaptureTarget(input);
     if (checked.kind === 'monitor') {
-      const deviceId: string = checked.deviceId;
+      if (checked.platform === 'darwin') {
+        const displayUuid: string = checked.displayUuid;
+      } else {
+        const deviceId: string = checked.deviceId;
+      }
     } else {
       const processId: number = checked.expectedProcessId;
     }
@@ -78,7 +82,7 @@ test('capture declarations preserve exact target and source-free initialization 
     const captured: false = proof.sourceCaptured;
     const hardwareSession: false = proof.hardwareSessionConfirmed;
     const qualified: false = proof.hardwareQualified;
-    const kinds: readonly ['window', 'monitor', 'game'] = proof.captureKinds;
+    const kinds: readonly ('window' | 'monitor' | 'game')[] = proof.captureKinds;
     const observedBitrate: number = proof.video.bitrateKbps;
     // @ts-expect-error A source-free probe cannot receive a selected target.
     void probeCaptureCapabilities({ ...probeOptions, target: windowTarget });

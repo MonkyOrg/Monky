@@ -1,7 +1,7 @@
 #include "transport_parameters.h"
 #include "peer_support.h"
 #include "resource_registry.h"
-#include "presentation\lease_policy_checks.h"
+#include "presentation/lease_policy_checks.h"
 #include "operation_completion_checks.h"
 #include "receive_mid_checks.h"
 #include "receive_route_checks.h"
@@ -9,10 +9,10 @@
 #include "capture_clock_checks.h"
 #include "encoded_video.h"
 #include "av1_encoder_checks.h"
-#include "node\input_leases_checks.h"
-#include "node\event_queue_checks.h"
-#include "audio\foundation_checks.h"
-#include "audio\operational_checks.h"
+#include "node/input_leases_checks.h"
+#include "node/event_queue_checks.h"
+#include "audio/foundation_checks.h"
+#include "audio/operational_checks.h"
 #include "mf_rtc_timing_checks.h"
 #include "mf_rtc_configuration_checks.h"
 #include "mf_rtc_encoder_diagnostic_checks.h"
@@ -28,7 +28,7 @@
 #ifdef GetObject
 #undef GetObject
 #endif
-#include "sdp\MediaSection.hpp"
+#include "sdp/MediaSection.hpp"
 
 #include <cstddef>
 #include <cstdio>

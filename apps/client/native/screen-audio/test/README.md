@@ -41,7 +41,7 @@ $out = 'apps\client\native\screen-audio\build\packet-tests'
 New-Item -ItemType Directory -Force "$out\capture_double\obj", "$out\core_controls\obj" | Out-Null
 $env:MONKY_PCM_TEST_NODE = Join-Path $env:LOCALAPPDATA "node-gyp\Cache\$(node -p 'process.versions.node')"
 
-& $env:ComSpec /d /c 'call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul && cl /nologo /EHsc /std:c++17 /MD /O1 /DNAPI_DISABLE_CPP_EXCEPTIONS /DNAPI_VERSION=8 /D_HAS_EXCEPTIONS=1 /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /DMONKY_PACKET_CAPTURE_TEST /I"%MONKY_PCM_TEST_NODE%\include\node" /I"apps\client\node_modules\node-addon-api" /LD "apps\client\native\screen-audio\test\capture_double.cpp" "apps\client\native\screen-audio\src\win\packet_capture.cpp" "apps\client\native\screen-audio\src\win\wasapi_format.cpp" /Fo"apps\client\native\screen-audio\build\packet-tests\capture_double\obj\\" /Fe"apps\client\native\screen-audio\build\packet-tests\capture_double\capture_double.node" /link /INCREMENTAL:NO "%MONKY_PCM_TEST_NODE%\x64\node.lib" ksuser.lib'
+& $env:ComSpec /d /c 'call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul && cl /nologo /EHsc /std:c++17 /MD /O1 /DNAPI_DISABLE_CPP_EXCEPTIONS /DNAPI_VERSION=8 /D_HAS_EXCEPTIONS=1 /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /DMONKY_PACKET_CAPTURE_TEST /I"%MONKY_PCM_TEST_NODE%\include\node" /I"apps\client\node_modules\node-addon-api" /LD "apps\client\native\screen-audio\test\capture_double.cpp" "apps\client\native\screen-audio\src\packet_capture.cpp" "apps\client\native\screen-audio\src\win\wasapi_format.cpp" /Fo"apps\client\native\screen-audio\build\packet-tests\capture_double\obj\\" /Fe"apps\client\native\screen-audio\build\packet-tests\capture_double\capture_double.node" /link /INCREMENTAL:NO "%MONKY_PCM_TEST_NODE%\x64\node.lib" ksuser.lib'
 if ($LASTEXITCODE -ne 0) { throw 'Packet capture test build failed.' }
 
 & $env:ComSpec /d /c 'call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul && cl /nologo /EHsc /std:c++17 /MD /O1 /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 "apps\client\native\screen-audio\test\core_controls.cpp" "apps\client\native\screen-audio\src\win\wasapi_format.cpp" /Fo"apps\client\native\screen-audio\build\packet-tests\core_controls\obj\\" /Fe"apps\client\native\screen-audio\build\packet-tests\core_controls\core_controls.exe" /link /INCREMENTAL:NO ksuser.lib'
@@ -63,6 +63,32 @@ into a separate directory, set `MONKY_PACKET_CAPTURE_TEST_DIR` to that absolute
 directory, and run the same suite using that runtime. `core_controls.exe` is
 independent of Node. Never run the Node-24-only post-finalizer ownership scenario
 on Node 20; the suite selects it only on the verified runtime.
+
+## Actual macOS packet acquisition
+
+The shared Node-API lifecycle lives in `src/packet_capture.cpp`; acquisition is
+provided by `src/mac/packet_source.mm` on macOS. Original timestamps are exposed
+as `captureTimestampUs` with `captureClock: 'mach-host-us'`; `qpcTimestampUs` is
+null on macOS. A selected window captures the entire application's audio, with
+PID/process-birth checks and an independent window-loss watchdog.
+
+With the production addon built and Screen Recording permission granted:
+
+```sh
+npm exec --no -- node-gyp rebuild --directory=apps/client/native/screen-audio
+node apps/client/native/screen-audio/test/macPacketAudioSmoke.cjs --artifacts="$PWD/.qa/mac-packet-audio"
+```
+
+This creates an owned AppKit/AVAudioEngine application with synthetic stereo
+tones; it never acquires a microphone or another application's audio. It checks
+timestamps, channel separation, legacy/packet exclusivity, cancellation, repeated
+start/stop, selected-window loss and application exit with active capture.
+The fixture requires Electron/AppKit; bare Node capture fails explicitly.
+Production capture shutdown does not depend on Main-thread UI dispatch.
+The device-free check `node --test apps/client/native/screen-audio/test/macAudioRuntime.test.cjs`
+loads the compiled production addon, verifies that bare Node is rejected with
+`ERR_AUDIO_RUNTIME`, and waits for native worker retirement. CI builds and runs
+this check separately on Apple Silicon and Intel runners.
 
 ## Electron fixture
 

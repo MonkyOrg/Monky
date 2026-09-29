@@ -1,8 +1,8 @@
 #pragma once
 
 #include "audio_types.h"
-#include "api\audio\audio_device.h"
-#include "system_wrappers\include\clock.h"
+#include "api/audio/audio_device.h"
+#include "system_wrappers/include/clock.h"
 
 #include <mutex>
 #include <thread>

@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-O Monky usa libobs para capturar e redimensionar a fonte escolhida, **AMD AMF
+No Windows, o Monky usa libobs para capturar e redimensionar a fonte escolhida, **AMD AMF
 ou NVIDIA NVENC para codificar H.264/AV1 em hardware**, ou x264/libaom para
 codificação por software, e WebRTC nativo para
 transportar os frames **sem decodificar e recodificar o vídeo no transmissor**.
@@ -11,7 +11,7 @@ AV1, com apresentação SharedTexture. A decodificação AV1 é feita na CPU;
 a preferência Hardware/Software controla a codificação no transmissor. Voz e
 câmera continuam usando seus caminhos próprios.
 
-O backend de captura implementado é **Windows x64**. **Automático é o padrão
+Há backends nativos para **Windows x64 e macOS 14+ (arm64/x64)**. No Windows, **Automático é o padrão
 recomendado** e prioriza Hardware: AV1, depois H.264 e, somente quando o probe
 confirma ausência de hardware compatível, H.264 por Software com aviso.
 Os campos de codificação e codec mostram a seleção efetiva como somente leitura.
@@ -21,15 +21,15 @@ sem substituição silenciosa. Software + AV1 usa libaom.
 Ausência de suporte não é confundida com falha de
 driver, arquivos ou encerramento. Não há troca silenciosa para CPU durante a
 transmissão, transcodificação no servidor, nem fallback para captura Chromium.
-Intel/QSV não está implementado; Software continua usando a captura libobs.
+Intel/QSV não está implementado; no Windows, Software continua usando a captura libobs.
 Se Captura de jogo não conseguir iniciar, há uma tentativa em **Normal** para
 a mesma janela, após comprovar o encerramento da tentativa anterior.
 A recepção Chromium continua disponível para perfis H.264/AV1 que o
 dispositivo receptor consiga decodificar; isso não comprova capacidade de envio.
-Em **Configurações → Qualidade e compartilhamento → Recepção de tela**, Windows
+Em **Configurações → Qualidade e compartilhamento → Recepção de tela**, Windows e macOS
 usa Nativo por padrão e Chromium somente por escolha explícita, nunca como
-fallback. Uma falha nativa indica essa opção sem mudar o receptor. No macOS,
-Chromium é o padrão e Nativo permanece desabilitado como Em breve. A preferência
+fallback. Uma falha nativa indica essa opção sem mudar o receptor. Uma preferência
+Chromium já salva no macOS é preservada. A preferência
 salva vale para o próximo Assistir/Tentar novamente, sem interromper a recepção
 ativa, alterar câmera/voz ou a captura. O aviso de limitações Chromium permanece
 visível nas configurações.
@@ -46,32 +46,107 @@ estar desatualizado.
 
 ### Estado do desenvolvimento macOS
 
-`src/mac/host.mm` e `runtime/mac` implementam um provedor separado de fontes
-ScreenCaptureKit e imagens PNG do SCScreenshotManager para macOS 14+ (Intel e
-Apple Silicon). Esse provedor **ainda não está habilitado no aplicativo**.
-Seu protocolo declara explicitamente `capture: false`, `encoder: null`,
-`transport: false` e `receive: false`: listar fontes e gerar miniaturas não
-significa transmitir ou receber vídeo.
+O aplicativo transmite janelas e monitores por **ScreenCaptureKit → H.264
+VideoToolbox ou AV1 libaom → WebRTC nativo**, em P2P ou SFU. Core Image/Metal
+redimensiona antes da codificação; não há decodificação/recodificação no transmissor.
+VideoToolbox oferece H.264 por hardware ou software. **Manual → Software → AV1**
+usa o mesmo encoder C++ libaom do Windows, lendo NV12 nativo fora do Renderer;
+essa leitura usa CPU, não é codificação AV1 por hardware nem um caminho zero-copy.
+Automático prioriza H.264 por hardware e só usa H.264 por software após comprovar
+ausência de hardware compatível. Não troca AV1 por H.264 silenciosamente.
+O hook de Captura de jogo continua exclusivo do Windows. O receptor Mac usa
+VideoToolbox para H.264 e dav1d por software para AV1, com apresentação IOSurface/SharedTexture.
 
-O código experimental também inclui captura contínua com SCStream e
-codificação/decodificação H.264 com VideoToolbox.
-Esses componentes não habilitam o backend no aplicativo: a integração completa
-de RTC, áudio, apresentação e distribuição permanece adiada para desenvolvimento
-e testes no próprio Mac. Esta entrega preserva o comportamento atual do macOS.
+A observação de uso de hardware do decoder é opcional. Se o VideoToolbox retornar
+`kVTPropertyNotSupportedErr` para essa propriedade, a decodificação nativa continua
+e `hardwareExecutionObserved` permanece `null`, sem inferir execução por software.
+Outros erros e respostas inválidas continuam sendo reportados.
 
-Para compilar e verificar o processo nativo em um Mac:
+Enumeração, miniaturas e capturas compartilham um helper, com ownership separado
+por sessão. O probe de seleção comprova a liberação da sua própria sessão; não
+exige encerrar o helper enquanto o seletor ou outra captura ainda o utiliza.
+Essa prova usa o estado privado do owner original, não apenas seu snapshot.
+O RTC fica em `utilityProcess`; o Main recebe direitos Mach verificados
+por PID/euid e mantém a IOSurface até a liberação real do Chromium, inclusive
+após crash do filho. O protocolo de capacidades do provedor continua descrevendo
+apenas enumeração/miniaturas; o suporte RTC vem do manifesto da biblioteca compilada.
+
+Áudio original estéreo é adquirido pelo ScreenCaptureKit, marcado com relógio
+Mach e enviado por Opus. Selecionar uma janela inclui o áudio do **aplicativo
+inteiro**, mediante confirmação, não apenas daquela janela. Perda da janela,
+cancelamento e encerramento liberam a captura; parar de assistir não encerra outros
+espectadores. A permissão de gravação de tela do macOS é necessária.
+
+Os perfis chegam a **3840×2160/120 FPS**, sujeitos à fonte, hardware e rede. O
+probe codifica um quadro sintético e verifica o SPS H.264 real, incluindo Main 6.0,
+ou a sequência AV1 Main/8 bits/BT.709 limitada; isso não homologa throughput.
+AV1 por software pode consumir muita CPU: comece em 720p30 e ajuste pela taxa
+observada, sem esperar 4K120 do M1. No ensaio local M1, P2P/SFU com áudio e múltiplos
+espectadores passaram, e a fonte sintética rasterizada em 4K sustentou cerca de
+57 FPS em 4K60. **4K120 sustentado e GPU Intel não foram homologados nesse ensaio**.
+Compilar/executar o x64 via Rosetta não substitui validação em um Mac Intel.
+
+Com Xcode/SDK macOS, Python 3.11, Node e dependências instaladas:
 
 ```sh
+node apps/client/native/screen-share/scripts/prepareMacRtc.cjs
 node apps/client/native/screen-share/scripts/buildMac.cjs
-node --test apps/client/native/screen-share/test/macScreenProvider.test.cjs
+node apps/client/native/screen-share/scripts/buildMacRtc.cjs
+node apps/client/native/screen-share/scripts/notices.cjs --mac
+npm exec --no -- node-gyp rebuild --directory=apps/client/native/screen-audio
+npm run build
+npm run test:native-screen --workspace=apps/client
 node apps/client/native/screen-share/test/macNativeHostSmoke.cjs
 ```
 
-O smoke verifica handshake, capacidades e encerramento real sem capturar fontes
-pessoais nem solicitar permissão de gravação. Ele **não valida captura visual,
-VideoToolbox, RTC, áudio ou apresentação IOSurface**. Essas integrações, a
-assinatura/empacotamento e os testes de mídia em hardware macOS ainda são
-necessários antes de habilitar o compartilhamento nativo nessa plataforma.
+Use `--arch=x64` nos dois builds para produzir Intel em Apple Silicon com Rosetta.
+O build executa o autoteste do helper e consulta a biblioteca da arquitetura real;
+não fabrica capacidades a partir do arm64. O CI também compila em runners Intel
+e Apple Silicon. `macNativeHostSmoke.cjs` é device-free, não prova mídia.
+Para mídia real, `nativeCaptureSmoke.cjs`, `nativeAvSmoke.cjs` e
+`screen-audio/test/macPacketAudioSmoke.cjs` usam fontes sintéticas próprias e exigem
+um diretório absoluto em `--artifacts`. Não são testes de rede externa.
+Após `npm run build`, `macSourceAdmissionSmoke.cjs --artifacts=<diretório-absoluto-novo>`
+exercita Main/IPC/helper reais: admite e remove monitores e janelas repetidamente,
+reserva/libera áudio e mantém o seletor vivo. Só captura pixels da janela sintética
+própria, verificando miniatura e prévia H.264/AV1; a admissão do monitor não captura
+a área de trabalho. O último owner precisa encerrar o helper. A prévia local AV1
+permite decode por software quando não há hardware, inclusive no M1; isso não
+altera o codec transmitido nem a preferência de recepção remota.
+As prévias H.264 (hardware/software) e AV1 permanecem ativas por 15 segundos cada,
+com enumeração e miniaturas concorrentes, antes da remoção e nova admissão.
+`macCaptureStopSmoke.cjs --artifacts=<diretório-absoluto-novo>` exercita uma
+interrupção controlada no delegate nativo de uma captura própria, preservando
+uma segunda captura real; aceita `--arch=x64` para Rosetta. Não induz pressão no
+sistema. A notificação `didStopWithError` comprova a parada do stream, mas não
+dispensa drenar callbacks, remover outputs e fechar o encoder. O erro original
+continua visível; um segundo `stopCapture` não deve derrubar o helper compartilhado.
+Interrupções do sistema (`-3821`) também podem ocorrer por pouco espaço em disco:
+verifique o evento do sistema, sem atribuir toda falha à identidade da janela.
+O encoder H.264 por software conclui cada timestamp na fila de captura para evitar
+que seu buffering interno esgote os créditos de entrada antes do primeiro quadro.
+`macAv1ReceiveSmoke.cjs --artifacts=<diretório-absoluto-novo>` codifica uma fonte
+I420 BT.709 própria com WebCodecs, transmite AV1 pelo RTC nativo e verifica codec,
+quadros interdependentes, pixels IOSurface e teardown. Não exige captura da tela
+do usuário nem afirma codificação AV1 nativa no Mac. Use `--mode=sfu` para repetir
+pelo SFU real. Para testar **transmissão AV1 nativa**, use
+`nativeCaptureSmoke.cjs --encoder=monky_aom_av1 --profile=480p15 --quality=source --mode=p2p --artifacts=<diretório-absoluto-novo>`
+e `nativeAvSmoke.cjs --encoder=monky_aom_av1 --profile=720p30 --mode=p2p --artifacts=<diretório-absoluto-novo>`;
+repita com `--mode=sfu`. Esses caminhos capturam fontes próprias pelo ScreenCaptureKit
+e usam libaom nativo, não WebCodecs. `macAv1Encoder.test.cjs` verifica a ABI I420/NV12,
+keyframes solicitados, frames dependentes, mudança de bitrate e probes sem captura até 4K120.
+Ensaios de cadência exigem sessão macOS desbloqueada: a tela
+bloqueada impede foco e pode limitar o compositor/captura.
+
+O empacotamento verifica fontes, binários e licenças do grafo GN compilado. A
+assinatura atualiza hashes dos binários assinados e sela novamente somente o app;
+a notarização ocorre depois. Sem Developer ID, o build local é ad-hoc, não
+notarizado. A release inclui `monky-native-macos-sources-<versão>.tar.xz` e
+manifesto, além do código Monky da mesma tag. O arquivo preserva links relativos
+internos do SDK; ferramentas baixáveis e saídas compiladas ficam de fora.
+O artefato aprovado do CI inclui os dois runtimes, licenças e fontes; a release
+os reaproveita e atualiza a proveniência para o commit integrado, sem recompilar
+o SDK quando a árvore de fontes e o ambiente conferem.
 
 ### Backend Windows
 
@@ -688,6 +763,11 @@ promessa de duração nem eliminação do custo principal da compilação nativa
 meça as execuções reais de CI/release antes de afirmar ganho de tempo.
 
 ## Licença e fontes correspondentes
+
+Antes de atualizar licenças ou assinar, o empacotamento separa os hard links
+criados pelo electron-builder no CI. Arquivos do aplicativo ficam independentes
+do checkout, evitando colisões na cópia de licenças e alterações nos binários
+ou manifestos originais durante a assinatura.
 
 O Monky é **GPL-3.0-or-later**. Dependências mantêm seus próprios direitos e licenças; consulte
 `THIRD_PARTY_NOTICES` e `licenses`. Os avisos WebRTC são derivados do grafo GN

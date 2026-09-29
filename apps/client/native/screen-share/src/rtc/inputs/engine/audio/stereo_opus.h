@@ -1,9 +1,9 @@
 #pragma once
 
-#include "api\audio_codecs\audio_decoder_factory_template.h"
-#include "api\audio_codecs\audio_encoder_factory_template.h"
-#include "api\audio_codecs\opus\audio_decoder_opus.h"
-#include "api\audio_codecs\opus\audio_encoder_opus.h"
+#include "api/audio_codecs/audio_decoder_factory_template.h"
+#include "api/audio_codecs/audio_encoder_factory_template.h"
+#include "api/audio_codecs/opus/audio_decoder_opus.h"
+#include "api/audio_codecs/opus/audio_encoder_opus.h"
 
 #include <stdexcept>
 

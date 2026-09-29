@@ -90,6 +90,13 @@ function fixture({ autoReady = true, holdInputs = false, createSource, timeoutMs
     bridge, engine, commands, capture, captureModule, submissions, commandsSeen, errors, nativeSources,
     captureCalls: () => captureCalls, captureStops: () => captureStops,
     emitReady, emit: event => callback(event),
+    failCapture(error) {
+      captured = false;
+      callback({ type: 'error', error });
+      const final = { ...snapshot(), state: 'failed', error };
+      closed.resolve(final);
+      callback({ type: 'closed', snapshot: final });
+    },
     async packet(overrides = {}) {
       const frames = overrides.frames ?? 441;
       const packet = {
@@ -133,6 +140,38 @@ test('PCM bridge construction is inert and accepts only matching command/engine 
   assert.equal(f.commandsSeen.length, 0);
   assert.throws(() => new NativePcmCaptureBridge(f.engine, new NativeRtcCommands({ request() {} }),
     f.captureModule, () => {}), /requires its engine/u);
+});
+
+test('Mach host audio retains its original timestamp without fabricating a Windows QPC anchor', async () => {
+  const f = fixture();
+  await f.bridge.start({ includeWindowId: 100, expectedProcessId: 42,
+    expectedProcessStartTimeUs: '1710000000123456' }, 'screen-group');
+  const original = await f.activate({
+    devicePosition: null, qpcTimestampUs: null, captureClock: 'mach-host-us', captureTimestampUs: 9123456789,
+  });
+  assert.equal(f.submissions[0].packet, original);
+  assert.equal(f.bridge.getStats().lastPacket.captureClock, 'mach-host-us');
+  assert.equal(f.bridge.getStats().lastPacket.captureTimestampUs, 9123456789);
+  assert.equal(f.bridge.getStats().lastPacket.qpcTimestampUs, null);
+  await f.bridge.finishAfterEngineClose(f.commands.closeEngine());
+  assert.deepEqual(f.errors, []);
+});
+
+test('PCM clock identities cannot contradict their aliases or lose an original timestamp', async () => {
+  for (const invalid of [
+    { captureClock: 'mach-host-us', captureTimestampUs: 1000, qpcTimestampUs: 1000 },
+    { captureClock: 'qpc-us', captureTimestampUs: 1000, qpcTimestampUs: 2000 },
+    { captureClock: 'mach-host-us', qpcTimestampUs: null },
+    { captureClock: 'invented', captureTimestampUs: 1000 },
+    { captureTimestampUs: 1000 },
+  ]) {
+    const f = fixture();
+    await f.start();
+    await f.packet(invalid);
+    assert.match(f.errors[0]?.message ?? '', /Invalid original PCM capture packet/u);
+    assert.equal(f.submissions.length, 0);
+    await f.bridge.finishAfterEngineClose(f.commands.closeEngine());
+  }
 });
 
 test('a replaceable instance verifier cannot retire an outstanding PCM processing identity', async t => {
@@ -273,6 +312,18 @@ test('missing initial PCM has an explicit bounded activation failure, not a succ
   assert.equal(f.bridge.getStats().enabled, false);
   assert.equal(f.errors.length, 1);
   await f.bridge.stop();
+});
+
+test('native source failure is handled before same-turn closure without replacing its original cause', async () => {
+  const f = fixture();
+  await f.start();
+  const error = Object.assign(new Error('The selected audio window closed.'), { code: 'ERR_AUDIO_TARGET' });
+  f.failCapture(error);
+  assert.equal(f.bridge.getStats().stopping, true);
+  assert.deepEqual(f.errors, [error]);
+  await f.bridge.stop();
+  assert.deepEqual(f.errors, [error]);
+  assert.equal(f.nativeSources.size, 0);
 });
 
 test('silence and timestamp errors preserve original flags and never acquire synthetic clock anchors', async () => {

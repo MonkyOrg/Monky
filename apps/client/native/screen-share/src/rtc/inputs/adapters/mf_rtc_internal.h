@@ -1,11 +1,12 @@
 #pragma once
 
 #include "mf_rtc_adapters.h"
+#include "codec_policy.h"
 
-#include "api\environment\environment.h"
-#include "api\video\i420_buffer.h"
-#include "api\video_codecs\h264_profile_level_id.h"
-#include "modules\video_coding\include\video_error_codes.h"
+#include "api/environment/environment.h"
+#include "api/video/i420_buffer.h"
+#include "api/video_codecs/h264_profile_level_id.h"
+#include "modules/video_coding/include/video_error_codes.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -29,16 +30,7 @@ constexpr auto kStopDrainDeadline = std::chrono::seconds(2);
 constexpr auto kFenceRetryInterval = std::chrono::milliseconds(100);
 constexpr auto kFenceHealthInterval = std::chrono::seconds(1);
 
-class AdapterError : public std::runtime_error {
- public:
-  AdapterError(const char* code, const char* message,
-               std::int32_t status = WEBRTC_VIDEO_CODEC_ERR_PARAMETER,
-               HRESULT hr = S_OK)
-      : std::runtime_error(message), code(code), status(status), hresult(hr) {}
-  const char* code;
-  std::int32_t status;
-  HRESULT hresult;
-};
+using codec_policy::AdapterError;
 
 AdapterDiagnostic Diagnostic(const char* code, const char* message,
                              std::int32_t status = WEBRTC_VIDEO_CODEC_ERROR,
@@ -198,65 +190,7 @@ class FenceNotification {
   std::optional<SteadyClock::time_point> retry_at_;
 };
 
-template <typename Callback>
-class CallbackGate {
- public:
-  void Register(Callback* callback) {
-    std::lock_guard lock(mutex_);
-    callback_ = callback;
-  }
-  void Clear() {
-    std::lock_guard lock(mutex_);
-    active_ = false;
-    callback_ = nullptr;
-  }
-  std::uint64_t Activate() {
-    std::lock_guard lock(mutex_);
-    if (++generation_ == 0) {
-      throw AdapterError("ERR_RTC_CALLBACK_GENERATION",
-                         "Callback generation exhausted");
-    }
-    active_ = true;
-    return generation_;
-  }
-  void Deactivate(std::uint64_t generation) {
-    std::lock_guard lock(mutex_);
-    if (generation == generation_) active_ = false;
-  }
-  bool HasCallback(std::uint64_t generation) const {
-    std::lock_guard lock(mutex_);
-    return active_ && generation == generation_ && callback_;
-  }
-  bool IsInvokingOnCurrentThread() const {
-    return invoking_thread_.load() == GetCurrentThreadId();
-  }
-  template <typename Function>
-  void Synchronize(Function&& function) {
-    std::lock_guard lock(mutex_);
-    std::forward<Function>(function)();
-  }
-  template <typename Function>
-  bool Invoke(std::uint64_t generation, Function&& function) {
-    // Recursive solely to permit unregister/Release from the callback itself.
-    // No worker queue or codec-object mutex is held while calling foreign code.
-    std::lock_guard lock(mutex_);
-    if (!active_ || generation != generation_ || !callback_) return false;
-    const auto previous_thread = invoking_thread_.exchange(GetCurrentThreadId());
-    struct RestoreInvocation {
-      std::atomic<DWORD>& thread;
-      DWORD previous;
-      ~RestoreInvocation() { thread.store(previous); }
-    } restore{invoking_thread_, previous_thread};
-    std::forward<Function>(function)(*callback_);
-    return true;
-  }
- private:
-  mutable std::recursive_mutex mutex_;
-  Callback* callback_ = nullptr;
-  std::atomic<DWORD> invoking_thread_{0};
-  std::uint64_t generation_ = 0;
-  bool active_ = false;
-};
+using codec_policy::CallbackGate;
 
 struct NativeLease {
   NativeLease(std::shared_ptr<Worker> owner,
@@ -380,26 +314,16 @@ class Worker : public std::enable_shared_from_this<Worker> {
   std::optional<SteadyClock::time_point> readback_watchdog_;
 };
 
-struct NegotiatedH264 {
-  sv::H264Profile profile;
-  std::uint8_t level;
-};
+using codec_policy::NegotiatedH264;
 
 void ValidateOptions(const AdapterOptions& options);
-std::optional<NegotiatedH264> ParseFormat(
-    const webrtc::SdpVideoFormat& format, std::uint8_t maximum_level);
-std::vector<webrtc::SdpVideoFormat> SupportedFormats(std::uint8_t maximum_level);
-bool IsSupportedLevel(std::uint8_t level);
-webrtc::ColorSpace Bt709Limited();
-bool IsBt709Limited(const webrtc::ColorSpace& color);
+using codec_policy::ParseFormat;
+using codec_policy::SupportedFormats;
+using codec_policy::IsSupportedLevel;
+using codec_policy::Bt709Limited;
+using codec_policy::IsBt709Limited;
 
-struct EncoderSetup {
-  sv::EncoderConfig core;
-  std::uint32_t initial_bitrate = 0;
-  std::uint32_t maximum_bitrate = 0;
-  std::uint32_t keyframe_interval = 0;
-  webrtc::VideoContentType content_type = webrtc::VideoContentType::UNSPECIFIED;
-};
+using codec_policy::EncoderSetup;
 EncoderSetup MakeEncoderSetup(const webrtc::VideoCodec& codec,
                              const webrtc::VideoEncoder::Settings& settings,
                              NegotiatedH264 negotiated,

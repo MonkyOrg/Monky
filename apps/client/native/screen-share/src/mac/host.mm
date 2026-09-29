@@ -23,6 +23,7 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+#include <map>
 #include "videoEncoder.h"
 #include "videoCaptureHost.h"
 #include "videoDecoder.h"
@@ -38,7 +39,7 @@ std::atomic<bool> closing{false};
 std::atomic<unsigned> operations{0};
 std::atomic<uint64_t> latestCommand{0};
 std::mutex captureMutex;
-std::shared_ptr<monky::screen::mac::VideoCaptureHost> captureHost;
+std::map<uint64_t, std::shared_ptr<monky::screen::mac::VideoCaptureHost>> captures;
 
 struct Failure : std::runtime_error {
   explicit Failure(const char* code) : std::runtime_error(code) {}
@@ -109,7 +110,7 @@ NSDictionary* MonitorTarget(SCDisplay* display) {
   return @{@"platform": @"darwin", @"kind": @"monitor", @"displayId": @(display.displayID),
       @"displayUuid": DisplayUuid(display.displayID),
       @"bounds": @{@"x": @(frame.origin.x), @"y": @(frame.origin.y),
-        @"width": @(display.width), @"height": @(display.height)}};
+        @"width": @(frame.size.width), @"height": @(frame.size.height)}};
 }
 SCContentFilter* Resolve(SCShareableContent* content, NSDictionary* target) {
   Require([target isKindOfClass:NSDictionary.class] && [target[@"platform"] isEqual:@"darwin"]);
@@ -158,7 +159,7 @@ void Finish() {
   --operations;
 }
 monky::screen::mac::EncoderOptions VideoOptions(NSDictionary* value) {
-  Exact(value, @[@"width", @"height", @"fps", @"bitrateKbps", @"mode", @"scaleMode"]);
+  Exact(value, @[@"width", @"height", @"fps", @"bitrateKbps", @"mode", @"scaleMode", @"codec"]);
   monky::screen::mac::EncoderOptions result;
   result.width = static_cast<int>(Number(value[@"width"], 4, 3840));
   result.height = static_cast<int>(Number(value[@"height"], 2, 2160));
@@ -167,14 +168,25 @@ monky::screen::mac::EncoderOptions VideoOptions(NSDictionary* value) {
   Require([value[@"mode"] isEqual:@"hardware"] || [value[@"mode"] isEqual:@"software"]);
   Require([value[@"scaleMode"] isEqual:@"fit"] || [value[@"scaleMode"] isEqual:@"stretch"]);
   result.hardware = [value[@"mode"] isEqual:@"hardware"];
+  Require([value[@"codec"] isEqual:@"h264"] || [value[@"codec"] isEqual:@"av1"]);
+  result.av1 = [value[@"codec"] isEqual:@"av1"];
+  Require(!result.av1 || !result.hardware, "ERR_MAC_AV1_HARDWARE_UNSUPPORTED");
   return result;
 }
-std::shared_ptr<monky::screen::mac::VideoCaptureHost> CaptureOwner() {
+uint64_t CaptureId(NSDictionary* arguments) {
+  return arguments[@"captureId"] ? static_cast<uint64_t>(Number(arguments[@"captureId"], 1, 9007199254740991LL)) : 0;
+}
+NSArray<NSString*>* MediaKeys(NSDictionary* arguments, NSArray<NSString*>* keys) {
+  return arguments[@"captureId"] ? [keys arrayByAddingObject:@"captureId"] : keys;
+}
+std::shared_ptr<monky::screen::mac::VideoCaptureHost> CaptureOwner(uint64_t id) {
   std::lock_guard lock(captureMutex);
-  return captureHost;
+  const auto found = captures.find(id);
+  return found == captures.end() ? nullptr : found->second;
 }
 void StartMedia(uint64_t request, SCShareableContent* content, NSDictionary* arguments) {
-  Exact(arguments, @[@"target", @"video"]);
+  Exact(arguments, MediaKeys(arguments, @[@"target", @"video"]));
+  const auto capture_id = CaptureId(arguments);
   NSDictionary* target = arguments[@"target"];
   NSDictionary* video = arguments[@"video"];
   const auto options = VideoOptions(video);
@@ -182,13 +194,18 @@ void StartMedia(uint64_t request, SCShareableContent* content, NSDictionary* arg
   std::shared_ptr<monky::screen::mac::VideoCaptureHost> owner;
   {
     std::lock_guard lock(captureMutex);
-    Require(!captureHost && !closing, "ERR_MAC_CAPTURE_STATE");
+    Require(!captures.contains(capture_id) && !closing && captures.size() < 8, "ERR_MAC_CAPTURE_STATE");
     owner = std::make_shared<monky::screen::mac::VideoCaptureHost>(filter, options,
-      [video[@"scaleMode"] isEqual:@"fit"], [target] { VerifyTarget(target); },
-      [](const char* code, OSStatus status) {
-        Output(@{@"type": @"failure", @"code": @(code), @"nativeStatus": @(status)});
-      });
-    captureHost = owner;
+      [video[@"scaleMode"] isEqual:@"fit"], [target] {
+        try { VerifyTarget(target); }
+        catch (const Failure& error) { throw monky::screen::mac::VideoError(error.what(), 0); }
+      },
+      [capture_id](const char* code, OSStatus status) {
+        NSMutableDictionary* message = [@{@"type": @"failure", @"code": @(code), @"nativeStatus": @(status)} mutableCopy];
+        if (capture_id) message[@"captureId"] = @(capture_id);
+        Output(message);
+      }, capture_id);
+    captures.emplace(capture_id, owner);
   }
   std::thread([owner, request, target, video] {
     @autoreleasepool {
@@ -210,30 +227,32 @@ void MediaCommand(uint64_t request, NSString* method, NSDictionary* arguments) {
         if ([method isEqual:@"media.probe"]) {
           Exact(arguments, @[@"video"]);
           const auto options = VideoOptions(arguments[@"video"]);
-          monky::screen::mac::VideoEncoder encoder(options,
-            [](auto) { throw Failure("ERR_MAC_PROBE_CAPTURED"); },
-            [](const char*, OSStatus) { _exit(70); });
-          const auto hardware = encoder.Hardware();
-          encoder.Close();
-          Output(@{@"type": @"result", @"id": @(request), @"value": @{
-            @"sessionUsesHardware": @(hardware), @"hardwareExecutionObserved": [NSNull null],
-            @"captureStarted": @NO, @"nativeClosed": @YES}});
+          const auto verified = monky::screen::mac::ProbeVideoEncoder(options);
+          Output(@{@"type": @"result", @"id": @(request), @"value": verified});
         } else {
-          const auto owner = CaptureOwner();
+          const auto capture_id = CaptureId(arguments);
+          const auto owner = CaptureOwner(capture_id);
           Require(owner != nullptr, "ERR_MAC_CAPTURE_STATE");
-          if ([method isEqual:@"media.stop"]) {
-            Exact(arguments, @[]);
+          if ([method isEqual:@"media.stats"]) {
+            Exact(arguments, MediaKeys(arguments, @[]));
+            Output(@{@"type": @"result", @"id": @(request), @"value": owner->Snapshot()});
+          } else if ([method isEqual:@"media.stop"]) {
+            Exact(arguments, MediaKeys(arguments, @[]));
             owner->Close().get();
             Output(@{@"type": @"result", @"id": @(request), @"value": owner->Snapshot()});
+            if (capture_id) {
+              std::lock_guard lock(captureMutex);
+              captures.erase(capture_id);
+            }
           } else if ([method isEqual:@"media.bitrate"]) {
-            Exact(arguments, @[@"bitrateKbps"]);
+            Exact(arguments, MediaKeys(arguments, @[@"bitrateKbps"]));
             const auto bitrate = static_cast<int>(Number(arguments[@"bitrateKbps"], 50, 80000));
             owner->SetBitrate(bitrate).get();
             Output(@{@"type": @"result", @"id": @(request), @"value": @{
               @"bitrateKbps": @(bitrate), @"settingsAccepted": @YES,
               @"hardwareApplicationConfirmed": @NO, @"fpsApplied": [NSNull null]}});
           } else if ([method isEqual:@"media.keyframe"]) {
-            Exact(arguments, @[]);
+            Exact(arguments, MediaKeys(arguments, @[]));
             owner->RequestKeyframe().get();
             Output(@{@"type": @"result", @"id": @(request), @"value": @{
               @"mode": @"next-real-idr", @"keyframeConfirmed": @NO, @"maximumWaitMs": @1500}});
@@ -243,7 +262,7 @@ void MediaCommand(uint64_t request, NSString* method, NSDictionary* arguments) {
         Error(request, error.code.c_str(), error.status);
       } catch (const Failure& error) { Error(request, error.what()); }
       catch (...) {
-        const auto owner = CaptureOwner();
+        const auto owner = CaptureOwner(CaptureId(arguments));
         const bool retained = owner && ![owner->Snapshot()[@"nativeClosed"] boolValue];
         Error(request, "ERR_MAC_CAPTURE_COMMAND", 0, retained);
       }
@@ -355,7 +374,12 @@ void Command(NSData* bytes) {
     closing = true;
     std::thread([request] {
       bool retired_with_errors = false;
-      if (const auto owner = CaptureOwner()) {
+      std::vector<std::shared_ptr<monky::screen::mac::VideoCaptureHost>> owners;
+      {
+        std::lock_guard lock(captureMutex);
+        for (const auto& [id, owner] : captures) owners.push_back(owner);
+      }
+      for (const auto& owner : owners) {
         try { owner->Close().get(); }
         catch (...) {
           if (![owner->Snapshot()[@"nativeClosed"] boolValue]) _exit(124);
@@ -386,7 +410,7 @@ void Command(NSData* bytes) {
     Output(@{@"type": @"result", @"id": @(request), @"value": @{@"granted": @(allowed)}});
     return;
   }
-  const bool media_command = [method isEqual:@"media.probe"] || [method isEqual:@"media.stop"] ||
+  const bool media_command = [method isEqual:@"media.probe"] || [method isEqual:@"media.stop"] || [method isEqual:@"media.stats"] ||
       [method isEqual:@"media.bitrate"] || [method isEqual:@"media.keyframe"];
   Require([method isEqual:@"list"] || [method isEqual:@"resolve"] || [method isEqual:@"thumbnail"] ||
       [method isEqual:@"media.start"] || media_command);
@@ -466,6 +490,9 @@ int main(int argc, const char* argv[]) {
         return 0;
       }
       if (argc != 1) return 64;
+      // ScreenCaptureKit window filters need an initialized WindowServer connection.
+      [NSApplication sharedApplication];
+      [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
       signal(SIGPIPE, SIG_IGN);
       const pid_t owner = getppid();
       std::thread([owner] {
@@ -499,7 +526,7 @@ int main(int argc, const char* argv[]) {
           }
         }
       }).detach();
-      dispatch_main();
+      [NSApp run];
     }
     return 69;
   }

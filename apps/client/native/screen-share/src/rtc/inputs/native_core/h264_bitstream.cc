@@ -7,6 +7,27 @@
 #include <sstream>
 
 namespace monky::screen_video {
+H264Sps ParseProfileLevelId(const std::string& value) {
+  if (value.size() != 6) throw std::runtime_error("profileLevelId must contain exactly six hexadecimal digits");
+  std::uint32_t number = 0;
+  for (const auto c : value) {
+    unsigned digit;
+    if (c >= '0' && c <= '9') digit = c - '0';
+    else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+    else throw std::runtime_error("Invalid hexadecimal profileLevelId");
+    number = (number << 4) | digit;
+  }
+  H264Sps result;
+  result.profileIdc = static_cast<std::uint8_t>(number >> 16);
+  result.compatibility = static_cast<std::uint8_t>(number >> 8);
+  result.levelIdc = static_cast<std::uint8_t>(number);
+  if ((result.profileIdc != 66 && result.profileIdc != 77) || (result.compatibility & 3))
+    throw std::runtime_error("Decoder qualification supports only Baseline/Main profileLevelId");
+  H264LevelMaxBitrate(result.levelIdc);
+  return result;
+}
+
 namespace {
 
 struct Level {

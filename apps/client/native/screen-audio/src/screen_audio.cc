@@ -1,5 +1,5 @@
 #include <napi.h>
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__MACOS__)
 #include "packet_core.h"
 #include <memory>
 namespace screen_audio { Napi::Value CreatePacketCapture(const Napi::CallbackInfo& info); }
@@ -64,7 +64,7 @@ Napi::Value Start(const Napi::CallbackInfo& info) {
   Napi::Object opts = info[0].As<Napi::Object>();
   Napi::Function callback = info[1].As<Napi::Function>();
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__MACOS__)
   auto lease = std::make_unique<screen_audio::CaptureLease>(screen_audio::CaptureOwner::legacy);
   if (!lease->held()) {
     result.Set("success", false);
@@ -121,7 +121,7 @@ Napi::Value Start(const Napi::CallbackInfo& info) {
   bool ok = platform_start(targetPid, loopbackMode, includeWindowId, sampleRate, channels, g_tsfn);
   if (ok) {
     g_running = true;
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__MACOS__)
     g_legacyLease = std::move(lease);
 #endif
     result.Set("success", Napi::Boolean::New(env, true));
@@ -143,7 +143,7 @@ Napi::Value Stop(const Napi::CallbackInfo& info) {
     g_running = false;
     platform_stop();
     g_tsfn.Release();
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__MACOS__)
     g_legacyLease.reset();
 #endif
     result.Set("success", Napi::Boolean::New(env, true));
@@ -213,6 +213,8 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("getMonitorState", Napi::Function::New(env, platform_get_monitor_state));
   exports.Set("getKeyboardLayout", Napi::Function::New(env, GetKeyboardLayoutSnapshot));
   exports.Set("setWindowResizeAspect", Napi::Function::New(env, SetWindowResizeAspect));
+#endif
+#if defined(_WIN32) || defined(__MACOS__)
   exports.Set("createPacketCapture", Napi::Function::New(env, screen_audio::CreatePacketCapture));
 #endif
   return exports;

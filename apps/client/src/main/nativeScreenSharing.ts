@@ -15,7 +15,7 @@ import {
 } from '@monky/shared';
 import {
   loadRuntime, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription, NativePcmCaptureHub,
-  NativeScreenPreviewBridge, CaptureBridge, probeCaptureCapabilities,
+  NativeScreenPreviewBridge, createCaptureBridge, type CaptureBridge, probeCaptureCapabilities, assertMacCaptureBridgeClosed,
   validateCaptureTarget, type NativeScreenRuntime, type NativeScreenAudioOptions, type NativeScreenCaptureTarget,
   type NativeScreenCaptureCapability,
   type NativeScreenEndpointState,
@@ -68,6 +68,10 @@ const nvencCapabilities = [
   'NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE', 'NV_ENC_CAPS_WIDTH_MAX', 'NV_ENC_CAPS_HEIGHT_MAX',
 ] as const;
 function nativeErrorDiagnostics(error: Error): NativeErrorDiagnostic[] {
+  if (record(error) && typeof error.code === 'string' && /^ERR_MAC_[A-Z0-9_]{1,80}$/.test(error.code)
+    && typeof error.nativeStatus === 'number' && Number.isInteger(error.nativeStatus)
+    && error.nativeStatus >= -2147483648 && error.nativeStatus <= 2147483647)
+    return [{ kind: 'mac-native-status', code: error.code, nativeStatus: error.nativeStatus }];
   if (record(error) && error.code === 'ERR_RTC_HOST_EXIT' && error.hostExited === true) {
     const exitCode = typeof error.exitCode === 'number' && Number.isInteger(error.exitCode)
       && error.exitCode >= -2147483648 && error.exitCode <= 4294967295 ? error.exitCode : null;
@@ -173,12 +177,18 @@ function failureReason(error: unknown): NativeScreenFailure {
     const current = pending.shift();
     if (seen.has(current)) continue;
     seen.add(current);
-    if (record(current) && current.code === 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED') return 'unsupported';
+    if (record(current) && typeof current.code === 'string' && [
+      'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED', 'ERR_MAC_VIDEO_PROFILE_UNSUPPORTED',
+      'ERR_MAC_VIDEO_ENCODER_UNSUPPORTED',
+    ].includes(current.code)) return 'unsupported';
+    if (record(current) && typeof current.code === 'string' && [
+      'ERR_SCREEN_CAPTURE_SOURCE_LOST', 'ERR_MAC_SOURCE_LOST', 'ERR_MAC_SOURCE_CHANGED',
+      'ERR_MAC_SOURCE_IDENTITY', 'ERR_MAC_CAPTURE_SOURCE_CHANGED', 'ERR_AUDIO_TARGET',
+    ].includes(current.code)) return 'source-unavailable';
     if (current instanceof AggregateError) pending.push(...current.errors.slice(0, 8));
     if (current instanceof Error && current.cause !== undefined) pending.push(current.cause);
   }
   const code = record(error) && typeof error.code === 'string' ? error.code : '';
-  if (code === 'ERR_SCREEN_CAPTURE_SOURCE_LOST') return 'source-unavailable';
   if (code.includes('CAPTURE')) return 'capture-failed';
   return 'connection-failed';
 }
@@ -195,6 +205,7 @@ class SelectedCaptureProbe {
   private child: CaptureBridge['child'] = undefined;
   private exited = false;
   private childClosed = false;
+  private sharedHost = false;
   private directoryCreated = false;
   private closeWork: Promise<void> | null = null;
   retired = false;
@@ -212,8 +223,9 @@ class SelectedCaptureProbe {
       await mkdir(this.directory);
       this.directoryCreated = true;
       signal.throwIfAborted();
+      this.sharedHost = target.platform === 'darwin';
       const { width, height, fps, maxBitrateKbps } = video;
-      this.bridge = new CaptureBridge({
+      this.bridge = createCaptureBridge({
         host: this.runtime.host, runtime: this.runtime.obs, runId: this.runId, runDirectory: this.directory,
         encoder: encoding.encoder, video: { width, height, fps, bitrateKbps: maxBitrateKbps,
           scaleMode: preserveAspectRatio ? 'fit' : 'stretch' },
@@ -225,14 +237,17 @@ class SelectedCaptureProbe {
       });
       const preparing = this.bridge.prepare(target, signal);
       this.child = this.bridge.child;
-      // Observe this exact child's lifecycle independently of mutable bridge snapshots.
-      this.child?.once('exit', () => { this.exited = true; });
-      this.child?.once('close', () => { this.childClosed = true; });
+      // Windows owns a dedicated process; macOS owns a lease alongside the picker and other captures.
+      if (!this.sharedHost) {
+        this.child?.once('exit', () => { this.exited = true; });
+        this.child?.once('close', () => { this.childClosed = true; });
+      }
       await preparing;
       signal.throwIfAborted();
       const proof = this.bridge.getCapabilities();
       if (!proof || !proof.probeVerified || !proof.dynamicBitrate
-        || proof.textureInput !== (encoding.mode === 'hardware')
+        || proof.textureInput !== (encoding.mode === 'hardware'
+          || target.platform === 'darwin' && encoding.encoder === 'apple_vt_h264_software')
         || proof.hardwareSessionConfirmed || proof.hardwareQualified || proof.codec !== encoding.codec
         || proof.mode !== encoding.mode || proof.encoderId !== encoding.encoder
         || !this.runtime.capture.encoders.includes(proof.encoderId))
@@ -264,7 +279,15 @@ class SelectedCaptureProbe {
       try { await this.bridge.stop(); }
       catch (error) { failure = error; }
       const snapshot = this.bridge.snapshot();
-      if (this.child && (!this.exited || !this.childClosed || !snapshot.nativeClosed || snapshot.forcedTermination)) {
+      if (this.sharedHost) {
+        try {
+          assertMacCaptureBridgeClosed(this.bridge);
+          if (!snapshot.nativeClosed || snapshot.forcedTermination)
+            throw new Error('The original macOS selected-source probe has not proved clean lease retirement.');
+        } catch (error) {
+          throw failure ? new AggregateError([failure, error], 'Selected-source lease retirement failed.') : error;
+        }
+      } else if (this.child && (!this.exited || !this.childClosed || !snapshot.nativeClosed || snapshot.forcedTermination)) {
         const error = new Error('The original selected-source probe has not proved native process retirement.');
         throw failure ? new AggregateError([failure, error], error.message) : error;
       }
@@ -311,7 +334,7 @@ class NativeScreenSharingService {
 
   constructor(
     private readonly window: BrowserWindow,
-    private readonly resolveSource: (sourceId: string, kind: NativeScreenCaptureKind) => NativeScreenCaptureTarget,
+    private readonly resolveSource: (sourceId: string, kind: NativeScreenCaptureKind) => NativeScreenCaptureTarget | Promise<NativeScreenCaptureTarget>,
     private readonly logger?: Pick<ClientLogger, 'write'>,
   ) {}
 
@@ -487,7 +510,8 @@ class NativeScreenSharingService {
 
   private capabilities(): Promise<NativeScreenCapabilities> {
     if (!this.availability) this.availability = (async (): Promise<NativeScreenCapabilities> => {
-      if (process.platform !== 'win32' || process.arch !== 'x64') {
+      if (!(process.platform === 'win32' && process.arch === 'x64')
+        && !(process.platform === 'darwin' && ['arm64', 'x64'].includes(process.arch))) {
         this.log('runtime-unavailable', { reason: 'platform' }, 'WARN');
         return { capture: false, captureAudio: false, receive: false, backend: null, reason: 'platform' };
       }
@@ -862,13 +886,17 @@ class NativeScreenSharingService {
         throw new Error('Native source identity does not match its requested capture kind.');
       if (!(capabilities.captureKinds ?? (capabilities.capture ? ['window'] : [])).includes(kind))
         throw new Error('The selected native capture kind is not implemented by this verified runtime.');
-      const target = this.resolveSource(command.desktopSourceId, kind);
+      const target = await this.resolveSource(command.desktopSourceId, kind);
+      assertCurrent();
       validateCaptureTarget(target);
       if (target.kind !== kind) throw new Error('Native source resolution changed the requested capture kind.');
       if (command.audio && target.kind !== 'monitor' && target.expectedProcessId === process.pid)
         throw Object.assign(new Error(mt('screenShare.ownWindowAudioUnavailable')), { code: 'ERR_AUDIO_TARGET' });
       let paused = false;
+      let sourceFailure: unknown;
       const sourceState = (): void => {
+        if (sourceFailure) throw sourceFailure;
+        if (target.platform === 'darwin') return; // The helper verifies ownership again before each captured frame.
         if (target.kind === 'monitor') {
           const current = screenAudio.getMonitorState(target.deviceId);
           if (!current || current.deviceId !== target.deviceId || current.deviceName !== target.deviceName
@@ -905,12 +933,12 @@ class NativeScreenSharingService {
         command.preserveAspectRatio);
       assertCurrent();
       sourceState();
-      this.availability = Promise.resolve({ ...capabilities, capture: true,
-        backend: proof.mode === 'software' ? 'libobs-software'
-          : proof.encoderId.includes('nvenc') ? 'libobs-nvenc' : 'libobs-amf' });
-      this.log('preflight-ready', { ...diagnostic, encoder: proof.encoderId,
-        backend: proof.mode === 'software' ? 'libobs-software'
-          : proof.encoderId.includes('nvenc') ? 'libobs-nvenc' : 'libobs-amf' });
+      const backend = target.platform === 'darwin'
+        ? proof.codec === 'av1' ? 'libaom-software'
+          : proof.mode === 'hardware' ? 'videotoolbox-hardware' : 'videotoolbox-software'
+        : proof.mode === 'software' ? 'libobs-software' : proof.encoderId.includes('nvenc') ? 'libobs-nvenc' : 'libobs-amf';
+      this.availability = Promise.resolve({ ...capabilities, capture: true, backend });
+      this.log('preflight-ready', { ...diagnostic, encoder: proof.encoderId, backend });
       if (replacement) {
         stage = 'source-retirement';
         await this.retireSource(call, command.shareId, replacement);
@@ -937,7 +965,9 @@ class NativeScreenSharingService {
           });
       };
       const audioSelection = target.kind === 'monitor' ? { excludePid: process.pid }
-        : { includeWindowId: target.hwnd, expectedProcessId: target.expectedProcessId };
+        : { includeWindowId: target.platform === 'darwin' ? target.windowId : target.hwnd,
+          expectedProcessId: target.expectedProcessId,
+          ...(target.platform === 'darwin' ? { expectedProcessStartTimeUs: target.expectedProcessStartTimeUs } : {}) };
       const captureHub = command.audio ? new NativePcmCaptureHub(screenAudio, audioSelection, onError) : null;
       let captureTarget = target;
       const publisher = new NativeScreenPublisher({
@@ -1004,16 +1034,27 @@ class NativeScreenSharingService {
       call.sources.set(source.shareId, entry);
       // An announcement owns its exact target even without a capture pipeline.
       let observedPaused = paused;
-      entry.monitor = setInterval(() => {
+      let sourceCheckPending = false;
+      const checkSource = async (): Promise<void> => {
+        if (sourceCheckPending || call.stopping || call.sources.get(source.shareId) !== entry) return;
+        sourceCheckPending = true;
         try {
+          if (target.platform === 'darwin') {
+            const current = await this.resolveSource(command.desktopSourceId, kind);
+            if (!isDeepStrictEqual(current, target))
+              throw Object.assign(new Error('The selected macOS source changed identity.'),
+                { code: 'ERR_SCREEN_CAPTURE_SOURCE_LOST' });
+          }
+          if (call.stopping || call.sources.get(source.shareId) !== entry) return;
           sourceState();
           if (observedPaused !== paused) {
             observedPaused = paused;
             entry.preview?.reset(paused || !this.previewAllowed(call, entry) ? 'paused' : 'waiting');
           }
           publisher.refreshSourceState();
-        }
-        catch (error) {
+        } catch (error) {
+          if (call.stopping || call.sources.get(source.shareId) !== entry) return;
+          sourceFailure = error;
           if (entry.monitor) clearInterval(entry.monitor);
           entry.monitor = null;
           this.logFailure('source-monitor', error, undefined, this.context(call, source.shareId));
@@ -1021,8 +1062,11 @@ class NativeScreenSharingService {
             this.error(call, error, call.config.sessionId, source.shareId, undefined, source.instanceId);
           void this.removeSource(call, source.shareId).catch(cleanupError =>
             this.error(call, cleanupError, call.config.sessionId, source.shareId, undefined, source.instanceId));
-        }
-      }, 250);
+        } finally { sourceCheckPending = false; }
+      };
+      entry.monitor = setInterval(() => {
+        void checkSource().catch(error => this.error(call, error, call.config.sessionId, source.shareId));
+      }, target.platform === 'darwin' ? 1000 : 250);
       entry.monitor.unref();
       this.log('source-admitted', { ...diagnostic, instance: diagnosticId(source.instanceId) });
       return { kind: 'source', source, encoding };
@@ -1378,7 +1422,7 @@ class NativeScreenSharingService {
 
 export function setupNativeScreenSharingIpc(
   window: BrowserWindow,
-  resolveSource: (sourceId: string, kind: NativeScreenCaptureKind) => NativeScreenCaptureTarget,
+  resolveSource: (sourceId: string, kind: NativeScreenCaptureKind) => NativeScreenCaptureTarget | Promise<NativeScreenCaptureTarget>,
   logger?: Pick<ClientLogger, 'write'>,
 ): NativeScreenSharingIpc {
   const service = new NativeScreenSharingService(window, resolveSource, logger);

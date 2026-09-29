@@ -77,7 +77,6 @@ struct I420Image {
 };
 
 // Pure layout helpers also exercised by no-media contract tests.
-H264Sps ParseProfileLevelId(const std::string& value);
 I420Image CopyNv12ToI420(std::span<const std::uint8_t> mapped, std::size_t rowPitch,
                          std::uint32_t textureWidth, std::uint32_t textureHeight, VideoFrameRect crop);
 FrameInspection InspectLuma(std::span<const std::uint8_t> mapped, std::size_t rowPitch);

@@ -19,6 +19,7 @@ class VideoCapture {
   std::shared_future<void> Close();
   NSDictionary* Snapshot() const;
  private:
+  friend struct VideoCaptureTestAccess;
   struct State;
   std::shared_ptr<State> state_;
 };

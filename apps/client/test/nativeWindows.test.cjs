@@ -57,7 +57,8 @@ function desktopEnumerator(sources, { previewError, platform = 'win32', chromium
   const native = moduleFor();
   const load = vm.runInThisContext(`(function(nativeSources, nativeMonitorDesktopSources,
     nativeWindowIdFromSourceId, isGhostWindow, desktopCapturer, screen, resolveMacAppIcons,
-    resolveWindowsAppIcons, process, console, options, NativeThumbnailCapturer, loadThumbnailRuntime, overlayManager) {
+    resolveWindowsAppIcons, process, console, options, NativeThumbnailCapturer, loadThumbnailRuntime, overlayManager,
+    getMacSources) {
       let desktopSourcesFrozen = false, nativeThumbnails;
       ${body}; return enumerateDesktopSources; })`, { filename: handlerFile });
   const enumerate = load(sources, native.nativeMonitorDesktopSources, native.nativeWindowIdFromSourceId,
@@ -78,7 +79,15 @@ function desktopEnumerator(sources, { previewError, platform = 'win32', chromium
         if (previewError) throw previewError;
         return Buffer.from('owned-native-image');
       }
-    }, () => ({}), { isScreenShareSource });
+    }, () => ({}), { isScreenShareSource }, () => ({
+      listSources: async () => chromiumSources.map(({ id, name }) => ({
+        id, name, type: id.startsWith('window:') ? 'window' : 'screen', thumbnailDataUrl: '', thumbnailState: 'pending',
+      })),
+      thumbnail: async id => {
+        captures.push(id);
+        return Buffer.from('owned-native-image');
+      },
+    }));
   return { enumerate, calls, warnings, logs, captures };
 }
 
@@ -157,6 +166,10 @@ for (const platform of ['darwin', 'linux']) {
     });
     for (const metadata of [true, false]) {
       assert.deepEqual((await e.enumerate(metadata)).map(source => source.id), ['window:124:0', 'screen:123:0']);
+    }
+    if (platform === 'darwin') {
+      assert.deepEqual(e.calls, [], 'macOS enumeration and previews must not consult Chromium.');
+      assert.deepEqual(e.captures, ['window:124:0', 'screen:123:0']);
     }
   });
 }

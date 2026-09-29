@@ -12,9 +12,12 @@ function decodedTextureInfo(event) {
   const data = event?.data;
   const info = data?.textureInfo;
   const coded = info?.codedSize, rect = info?.visibleRect, color = info?.colorSpace;
-  const handle = info?.handle?.ntHandle;
+  const surface = info?.handle?.ioSurface !== undefined;
+  const handleKey = surface ? 'ioSurface' : 'ntHandle';
+  const handle = info?.handle?.[handleKey];
   if (event?.type !== 'frame' || !positiveId(event.target) || !positiveId(data?.frameId)
-    || data.format !== 'NV12' || data.gpuCopy !== true || info?.pixelFormat !== 'nv12'
+    || data.format !== 'NV12' || data.gpuCopy !== !surface || info?.pixelFormat !== 'nv12'
+    || Object.keys(info.handle ?? {}).length !== 1
     || !Number.isSafeInteger(data.timestampUs) || data.timestampUs < -1 || info.timestamp !== data.timestampUs
     || !dimension(coded?.width) || !dimension(coded?.height)
     || coded.width !== data.codedWidth || coded.height !== data.codedHeight
@@ -28,7 +31,7 @@ function decodedTextureInfo(event) {
     throw new Error('Invalid native decoded NV12 texture descriptor.');
   }
   return {
-    pixelFormat: 'nv12', handle: { ntHandle: Buffer.from(handle) },
+    pixelFormat: 'nv12', handle: { [handleKey]: Buffer.from(handle) },
     codedSize: { width: coded.width, height: coded.height },
     visibleRect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
     timestamp: data.timestampUs,

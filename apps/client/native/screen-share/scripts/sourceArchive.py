@@ -2,6 +2,7 @@ import argparse
 import copy
 import io
 import json
+import posixpath
 from pathlib import Path, PurePosixPath
 import sys
 import tarfile
@@ -20,11 +21,13 @@ def main():
     parser.add_argument("--list", required=True)
     parser.add_argument("--metadata", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--allow-internal-symlinks", action="store_true")
     args = parser.parse_args()
     root = Path(args.root).resolve()
     metadata = Path(args.metadata).resolve()
     entries = Path(args.list).read_text(encoding="utf-8").splitlines()
     members = [(safe_member(value), value.endswith("/")) for value in entries]
+    inventory = {relative for relative, _ in members}
     extra = ["SOURCE-MANIFEST.json", "SOURCE-README.md", "SOURCE-README.en.md"]
     patches = metadata / "SOURCE-PATCHES"
     if patches.exists():
@@ -42,23 +45,33 @@ def main():
         return info
 
     with tarfile.open(args.output, "w:xz", format=tarfile.PAX_FORMAT, preset=3) as archive:
+        kinds = []
         for index, (relative, directory) in enumerate(members):
             filename = root.joinpath(*PurePosixPath(relative).parts)
-            if filename.is_symlink() or not (filename.is_dir() if directory else filename.is_file()):
+            alias = filename.is_symlink()
+            if alias:
+                if not args.allow_internal_symlinks or filename.readlink().is_absolute():
+                    raise ValueError(f"Unexpected source alias: {relative}")
+                target = filename.resolve(strict=False).relative_to(root).as_posix()
+                if filename.exists() and target not in inventory:
+                    raise ValueError(f"Source alias target is missing from the archive: {relative}")
+            elif not (filename.is_dir() if directory else filename.is_file()):
                 raise ValueError(f"Source changed into an alias or changed type: {relative}")
+            kinds.append(alias)
             archive.add(filename, arcname=relative, recursive=False, filter=public_metadata)
             if (index + 1) % 25000 == 0:
                 print(json.dumps({"sourceEntriesArchived": index + 1, "total": len(members)}), flush=True)
         for relative in extra:
             archive.add(metadata / relative, arcname=relative, recursive=False, filter=public_metadata)
 
-    expected = members + [(relative, False) for relative in extra]
+    expected = [(relative, directory, alias) for (relative, directory), alias in zip(members, kinds)]
+    expected += [(relative, False, False) for relative in extra]
     count = 0
     with tarfile.open(args.output, "r|xz") as archive:
         for member in archive:
-            if count >= len(expected) or (member.name, member.isdir()) != expected[count]:
+            if count >= len(expected) or (member.name, member.isdir(), member.issym()) != expected[count]:
                 raise ValueError(f"Source archive inventory mismatch at entry {count}: {member.name}")
-            if not member.isdir() and not member.isfile():
+            if not member.isdir() and not member.isfile() and not (args.allow_internal_symlinks and member.issym()):
                 raise ValueError("Source archive contains an unexpected entry type.")
             if member.uname or member.gname:
                 raise ValueError("Source archive leaked local account metadata.")
@@ -77,10 +90,14 @@ def rebind(archive, previous_file, metadata_file, output):
         raise ValueError("Rebinding requires the same clean source tree.")
     seen = set()
     replaced = False
+    mac_links = previous.get("platform") == metadata.get("platform") == "darwin"
     with tarfile.open(archive, "r|xz") as source, tarfile.open(output, "w:xz", format=tarfile.PAX_FORMAT, preset=3) as target:
         for member in source:
             name = safe_member(member.name)
-            if name in seen or not (member.isfile() or member.isdir()) or member.uname or member.gname:
+            alias = mac_links and member.issym() and not PurePosixPath(member.linkname).is_absolute()
+            if alias:
+                safe_member(posixpath.normpath(str(PurePosixPath(name).parent / member.linkname)))
+            if name in seen or not (member.isfile() or member.isdir() or alias) or member.uname or member.gname:
                 raise ValueError("Unsafe or duplicate corresponding-source archive member.")
             seen.add(name)
             contents = source.extractfile(member) if member.isfile() else None

@@ -1,8 +1,8 @@
 #include "capture_clock.h"
 
-#include "system_wrappers\include\clock.h"
+#include "system_wrappers/include/clock.h"
 
-#include <windows.h>
+#include "platform_clock.h"
 
 namespace monky::native_rtc::engine {
 namespace {
@@ -12,13 +12,10 @@ bool ValidTimestamp(std::int64_t value) noexcept {
 }
 
 CaptureClockSample SampleClocks(webrtc::Clock& clock) {
-  LARGE_INTEGER frequency{}, before{}, after{};
   CaptureClockSample sample;
-  if (!QueryPerformanceFrequency(&frequency) || !QueryPerformanceCounter(&before)) return sample;
+  if (!NativeCaptureNowUs(sample.qpc_before_us)) return sample;
   const auto rtc_now = clock.CurrentTime();
-  if (!QueryPerformanceCounter(&after) || !rtc_now.IsFinite()) return sample;
-  if (!CaptureQpcMicroseconds(before.QuadPart, frequency.QuadPart, sample.qpc_before_us) ||
-      !CaptureQpcMicroseconds(after.QuadPart, frequency.QuadPart, sample.qpc_after_us)) return sample;
+  if (!NativeCaptureNowUs(sample.qpc_after_us) || !rtc_now.IsFinite()) return sample;
   sample.rtc_now_us = rtc_now.us();
   sample.valid = true;
   return sample;

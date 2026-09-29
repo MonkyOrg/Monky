@@ -1,4 +1,5 @@
 #include "videoCapture.h"
+#include "videoScaler.h"
 #import <CoreGraphics/CoreGraphics.h>
 #include <atomic>
 #include <cmath>
@@ -25,7 +26,7 @@ namespace monky::screen::mac {
 namespace {
 enum class Phase { Created, Starting, Running, Stopping, Closed };
 std::exception_ptr Failure(const char* code, NSInteger status = 0) {
-  return std::make_exception_ptr(std::runtime_error(std::string(code) + " nativeStatus=" + std::to_string(status)));
+  return std::make_exception_ptr(VideoError(code, static_cast<OSStatus>(status)));
 }
 }
 struct VideoCapture::State : std::enable_shared_from_this<State> {
@@ -34,8 +35,11 @@ struct VideoCapture::State : std::enable_shared_from_this<State> {
   MonkyNativeVideoOutput* delegate = nil;
   dispatch_queue_t control = dispatch_queue_create("com.monky.capture.control", DISPATCH_QUEUE_SERIAL);
   dispatch_queue_t video = dispatch_queue_create("com.monky.capture.video", DISPATCH_QUEUE_SERIAL);
+  dispatch_source_t liveness = nullptr;
   EncoderOptions options;
   bool preserve_aspect_ratio, output_registered = false, start_pending = false, stop_pending = false;
+  bool stream_stopped = false;
+  NSInteger stream_stop_status = 0;
   std::atomic<Phase> phase{Phase::Created};
   std::atomic<bool> failed{false};
   std::atomic<uint64_t> samples{0}, encoded{0}, idle{0}, backpressured{0};
@@ -44,7 +48,10 @@ struct VideoCapture::State : std::enable_shared_from_this<State> {
   std::function<bool()> writable;
   std::function<void()> verify_target;
   std::unique_ptr<VideoEncoder> encoder;
+  std::unique_ptr<VideoScaler> scaler;
   std::mutex close_mutex;
+  mutable std::mutex frame_mutex;
+  NSDictionary* last_frame = nil;
   std::shared_ptr<std::promise<void>> closing;
   std::shared_future<void> closed;
 
@@ -61,6 +68,15 @@ struct VideoCapture::State : std::enable_shared_from_this<State> {
     if (failed.exchange(true)) return;
     try { failure(code, static_cast<OSStatus>(status)); } catch (...) { std::terminate(); }
   }
+  void StreamStopped(NSError* error) {
+    const auto owner = shared_from_this();
+    dispatch_async(control, ^{
+      // The delegate is the native stop acknowledgement, including system/user interruptions.
+      owner->stream_stopped = true;
+      owner->stream_stop_status = error.code;
+      owner->Report("ERR_MAC_CAPTURE_STOPPED", error.code);
+    });
+  }
   void Sample(CMSampleBufferRef sample) noexcept {
     if (phase != Phase::Running || failed) return;
     try {
@@ -72,18 +88,38 @@ struct VideoCapture::State : std::enable_shared_from_this<State> {
       NSNumber* status = information[SCStreamFrameInfoStatus];
       if (![status isKindOfClass:NSNumber.class]) throw std::runtime_error("ERR_MAC_CAPTURE_FRAME_STATUS");
       if (status.integerValue != SCFrameStatusComplete) { ++idle; return; }
+      {
+        std::lock_guard lock(frame_mutex);
+        last_frame = @{
+          @"contentRect": information[SCStreamFrameInfoContentRect] ?: [NSNull null],
+          @"contentScale": information[SCStreamFrameInfoContentScale] ?: [NSNull null],
+          @"scaleFactor": information[SCStreamFrameInfoScaleFactor] ?: [NSNull null],
+        };
+      }
       ++samples;
+      verify_target();
       // Drop only before encoding: an encoded reference chain is never cut to
       // make space for a newer access unit.
       if (!encoder->Writable() || !writable()) { ++backpressured; return; }
-      verify_target();
       const auto image = CMSampleBufferGetImageBuffer(sample);
       const auto pts = CMSampleBufferGetPresentationTimeStamp(sample);
-      encoder->Submit(image, pts, CMTimeMake(1, options.fps));
+      CGRect content;
+      NSDictionary* rect = information[SCStreamFrameInfoContentRect];
+      NSNumber* factor = information[SCStreamFrameInfoScaleFactor];
+      if (!image || ![rect isKindOfClass:NSDictionary.class] ||
+          ![factor isKindOfClass:NSNumber.class] || !std::isfinite(factor.doubleValue) || factor.doubleValue <= 0 ||
+          !CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)rect, &content))
+        throw VideoError("ERR_MAC_VIDEO_CONTENT_RECT", 0);
+      content = CGRectMake(std::round(content.origin.x * factor.doubleValue),
+        std::round(content.origin.y * factor.doubleValue), std::round(content.size.width * factor.doubleValue),
+        std::round(content.size.height * factor.doubleValue));
+      const auto scaled = scaler->Render(image, content);
+      struct Release { CVPixelBufferRef buffer; ~Release() { CVPixelBufferRelease(buffer); } } release{scaled};
+      encoder->Submit(scaled, pts, CMTimeMake(1, options.fps));
     } catch (const VideoError& error) { Report(error.code.c_str(), error.status); }
     catch (...) { Report("ERR_MAC_CAPTURE_FRAME", 0); }
   }
-  void Start(const std::shared_ptr<std::promise<void>>& result) {
+  void Start(std::shared_ptr<std::promise<void>> result) {
     if (phase != Phase::Created) { result->set_exception(Failure("ERR_MAC_CAPTURE_STATE")); return; }
     phase = Phase::Starting;
     const auto owner = shared_from_this();
@@ -92,6 +128,7 @@ struct VideoCapture::State : std::enable_shared_from_this<State> {
       encoder = std::make_unique<VideoEncoder>(options,
         [this](EncodedFrame packet) { output(std::move(packet)); ++encoded; },
         [this](const char* code, OSStatus status) { Report(code, status); });
+      scaler = std::make_unique<VideoScaler>(options.width, options.height, preserve_aspect_ratio);
       delegate = [MonkyNativeVideoOutput new];
       const std::weak_ptr<State> weak = owner;
       delegate.sample = ^(CMSampleBufferRef sample) {
@@ -99,7 +136,7 @@ struct VideoCapture::State : std::enable_shared_from_this<State> {
         else std::terminate();
       };
       delegate.failure = ^(NSError* error) {
-        if (const auto current = weak.lock()) current->Report("ERR_MAC_CAPTURE_STOPPED", error.code);
+        if (const auto current = weak.lock()) current->StreamStopped(error);
         else std::terminate();
       };
       SCStreamConfiguration* config = [SCStreamConfiguration new];
@@ -111,9 +148,16 @@ struct VideoCapture::State : std::enable_shared_from_this<State> {
       config.colorMatrix = kCGDisplayStreamYCbCrMatrix_ITU_R_709_2;
       config.scalesToFit = YES;
       config.preservesAspectRatio = preserve_aspect_ratio;
+      config.ignoreShadowsSingleWindow = YES;
+      config.ignoreGlobalClipSingleWindow = YES;
+      config.captureResolution = SCCaptureResolutionBest;
+      if (!preserve_aspect_ratio)
+        config.destinationRect = CGRectMake(0, 0, options.width, options.height);
       config.showsCursor = YES;
       config.capturesAudio = NO;
-      config.queueDepth = 3;
+      // VideoToolbox retains input surfaces asynchronously; three SCK slots
+      // starve full-resolution 4K delivery. Keep the documented maximum of eight.
+      config.queueDepth = 8;
       stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:delegate];
       NSError* error = nil;
       if (![stream addStreamOutput:delegate type:SCStreamOutputTypeScreen sampleHandlerQueue:video error:&error])
@@ -128,10 +172,25 @@ struct VideoCapture::State : std::enable_shared_from_this<State> {
             result->set_exception(Failure("ERR_MAC_CAPTURE_START", error.code));
           } else if (owner->phase == Phase::Stopping) {
             result->set_exception(Failure("ERR_MAC_CAPTURE_CANCELLED"));
+          } else if (owner->stream_stopped) {
+            result->set_exception(Failure("ERR_MAC_CAPTURE_STOPPED", owner->stream_stop_status));
           } else {
             try {
               owner->verify_target();
               owner->phase = Phase::Running;
+              owner->liveness = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, owner->control);
+              if (!owner->liveness) throw VideoError("ERR_MAC_CAPTURE_MONITOR", 0);
+              dispatch_source_set_timer(owner->liveness, dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
+                  250 * NSEC_PER_MSEC, 25 * NSEC_PER_MSEC);
+              const std::weak_ptr<State> watch = owner;
+              dispatch_source_set_event_handler(owner->liveness, ^{
+                const auto current = watch.lock();
+                if (!current || current->phase != Phase::Running || current->failed) return;
+                try { current->verify_target(); }
+                catch (const VideoError& failure) { current->Report(failure.code.c_str(), failure.status); }
+                catch (...) { current->Report("ERR_MAC_CAPTURE_SOURCE_CHANGED", 0); }
+              });
+              dispatch_resume(owner->liveness);
               result->set_value();
             } catch (...) {
               owner->Report("ERR_MAC_CAPTURE_SOURCE_CHANGED", 0);
@@ -161,6 +220,7 @@ struct VideoCapture::State : std::enable_shared_from_this<State> {
     dispatch_async(video, ^{
       try {
         if (owner->encoder) { owner->encoder->Close(); owner->encoder.reset(); }
+        owner->scaler.reset();
         dispatch_async(owner->control, ^{
           if (owner->output_registered) {
             owner->closing->set_exception(Failure("ERR_MAC_CAPTURE_OUTPUT_RETIREMENT", removal_status));
@@ -182,12 +242,18 @@ struct VideoCapture::State : std::enable_shared_from_this<State> {
     });
   }
   void Stop() {
+    if (liveness) { dispatch_source_cancel(liveness); liveness = nullptr; }
     if (stop_pending || start_pending) return;
     stop_pending = true;
     const auto owner = shared_from_this();
-    if (!stream) { Drain(0); return; }
+    if (!stream || stream_stopped) { Drain(0); return; }
     [stream stopCaptureWithCompletionHandler:^(NSError* error) {
-      dispatch_async(owner->control, ^{ owner->Drain(error.code); });
+      dispatch_async(owner->control, ^{
+        const bool acknowledged_stop = owner->stream_stopped
+          && [error.domain isEqualToString:SCStreamErrorDomain]
+          && error.code == SCStreamErrorAttemptToStopStreamState;
+        owner->Drain(acknowledged_stop ? 0 : error.code);
+      });
     }];
   }
 };
@@ -246,9 +312,11 @@ std::future<void> VideoCapture::RequestKeyframe() {
   return future;
 }
 NSDictionary* VideoCapture::Snapshot() const {
+  std::lock_guard lock(state_->frame_mutex);
   return @{@"completeSourceFrames": @(state_->samples.load()),
     @"encodedFrames": @(state_->encoded.load()), @"nonCompleteSourceFrames": @(state_->idle.load()),
     @"rawBackpressureDrops": @(state_->backpressured.load()),
-    @"nativeClosed": @(state_->phase == Phase::Closed), @"audioAvailable": @NO};
+    @"nativeClosed": @(state_->phase == Phase::Closed), @"audioAvailable": @NO,
+    @"frameGeometry": state_->last_frame ?: [NSNull null]};
 }
 }

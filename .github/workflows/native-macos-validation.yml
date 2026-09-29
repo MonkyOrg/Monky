@@ -1,13 +1,14 @@
-name: Native macOS source validation
+name: Native macOS media validation
 
 on:
   push:
+    branches: [main]
     paths:
       - '.github/workflows/native-macos-validation.yml'
-      - 'apps/client/native/screen-share/src/mac/**'
-      - 'apps/client/native/screen-share/runtime/mac/**'
-      - 'apps/client/native/screen-share/runtime/nativePreviewImage.cjs'
-      - 'apps/client/native/screen-share/scripts/buildMac.cjs'
+      - 'apps/client/native/screen-share/src/**'
+      - 'apps/client/native/screen-share/runtime/**'
+      - 'apps/client/native/screen-share/scripts/**'
+      - 'apps/client/native/screen-audio/**'
       - 'apps/client/native/screen-share/test/mac*.cjs'
   workflow_dispatch:
   workflow_call:
@@ -17,7 +18,9 @@ permissions:
 
 jobs:
   sources:
-    name: ScreenCaptureKit sources (${{ matrix.arch }})
+    name: Native media (${{ matrix.arch }})
+    # Cold Intel builds can reach 90 minutes before addon and runtime validation.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -35,9 +38,33 @@ jobs:
           architecture: ${{ matrix.arch }}
       - name: Build ScreenCaptureKit source host
         run: node apps/client/native/screen-share/scripts/buildMac.cjs --arch=${{ matrix.arch }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies and compile the application contracts
+        run: |
+          npm ci
+          npm run build
+      - name: Build native audio and verify AppKit lifecycle requirements
+        run: |
+          npm exec --no -- node-gyp rebuild --directory=apps/client/native/screen-audio
+          node --test apps/client/native/screen-audio/test/macAudioRuntime.test.cjs
+      - name: Prepare the pinned macOS RTC SDK
+        run: node apps/client/native/screen-share/scripts/prepareMacRtc.cjs
+      - name: Build RTC, IOSurface ownership and compiled dependency notices
+        run: |
+          node apps/client/native/screen-share/scripts/buildMacRtc.cjs --arch=${{ matrix.arch }}
+          node apps/client/native/screen-share/scripts/notices.cjs --mac
+      - name: Verify source inventory, binary hashes and compiled architecture
+        run: |
+          node -e "const p=require('./apps/client/native/screen-share/scripts/checkPackage.cjs'); const {root}=require('./apps/client/native/screen-share/scripts/buildTools.cjs'); p.verifyMacSourceInputs(process.arch); p.verifyMacRuntime(root+'/bin/darwin-'+process.arch,process.arch); p.verifyLegalFiles(root,'darwin');"
+      - name: Exercise native screen contracts
+        run: npm run test:native-screen --workspace=apps/client
       - name: Verify bounded native source transport and cleanup
         run: |
           node --test apps/client/native/screen-share/test/macScreenProvider.test.cjs apps/client/native/screen-share/test/macVideoCapture.test.cjs
           node apps/client/native/screen-share/test/macNativeHostSmoke.cjs
       - name: Exercise actual VideoToolbox H264 encoding and callback retirement
         run: apps/client/native/screen-share/bin/darwin-${{ matrix.arch }}/monky-screen-mac --encoder-smoke
+      - name: Exercise native AV1 software encoding, keyframes and source-free profiles
+        run: node --test apps/client/native/screen-share/test/macAv1Encoder.test.cjs

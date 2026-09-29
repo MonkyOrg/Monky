@@ -5,7 +5,7 @@ import type {
 
 const hardwareEncoders: Readonly<Record<ScreenCodec, readonly ScreenEncoder[]>> = {
   av1: ['av1_texture_amf', 'obs_nvenc_av1_tex'],
-  h264: ['h264_texture_amf', 'obs_nvenc_h264_tex'],
+  h264: ['h264_texture_amf', 'obs_nvenc_h264_tex', 'apple_vt_h264'],
 };
 
 /** Only a positive unsupported diagnosis permits falling back to software. */
@@ -15,6 +15,7 @@ export function isUnsupportedScreenEncoder(error: unknown): boolean {
   return typeof error.code === 'string' && [
     'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED', 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED',
     'ERR_SCREEN_CAPTURE_NO_ENCODER', 'ERR_SCREEN_CAPTURE_ENCODER_UNAVAILABLE',
+    'ERR_MAC_VIDEO_PROFILE_UNSUPPORTED', 'ERR_MAC_VIDEO_ENCODER_UNSUPPORTED',
   ].includes(error.code);
 }
 
@@ -70,7 +71,8 @@ export async function selectScreenEncoding(
   if (strategy === 'manual' && mode === 'hardware')
     return { selection: null, hardware: hardwareAvailability, fallback: false, reason };
   const codec = preference === 'av1' ? 'av1' : 'h264';
-  const encoder = codec === 'av1' ? 'monky_aom_av1' : 'obs_x264';
+  const encoder = codec === 'av1' ? 'monky_aom_av1'
+    : compiled.includes('apple_vt_h264_software') ? 'apple_vt_h264_software' : 'obs_x264';
   const selection: ScreenEncodingSelection = { mode: 'software', codec, encoder };
   if (!compiled.includes(encoder))
     return { selection: null, hardware: hardwareAvailability, fallback: false, reason: 'The selected software encoder is not compiled into this runtime.' };

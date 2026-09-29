@@ -20,6 +20,7 @@ export type ScreenCodecPreference = z.infer<typeof screenCodecPreferenceSchema>;
 export const screenEncoderSchema = z.enum([
   'h264_texture_amf', 'obs_nvenc_h264_tex', 'obs_x264',
   'av1_texture_amf', 'obs_nvenc_av1_tex', 'monky_aom_av1',
+  'apple_vt_h264', 'apple_vt_h264_software',
 ]);
 export type ScreenEncoder = z.infer<typeof screenEncoderSchema>;
 export interface ScreenEncodingSelection {

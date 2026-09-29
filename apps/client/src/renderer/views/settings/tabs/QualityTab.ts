@@ -122,9 +122,9 @@ export class QualityTab {
         <label>${t('settings.screenReceiverSection')}</label>
         <div class="input-mode-cards" role="group" aria-label="${escapeHtml(t('settings.screenReceiverSection'))}" aria-describedby="screen-receiver-warning screen-receiver-apply">
           <button type="button" class="voice-mode-card input-mode-card" id="screen-receiver-native"
-            aria-pressed="${settingsStore.getScreenShareReceiver() === 'native'}" ${settingsStore.nativeScreenReceiverComingSoon ? 'disabled' : ''}>
-            <span class="input-mode-card-title">${t('settings.screenReceiverNative')}${settingsStore.nativeScreenReceiverComingSoon ? ` · ${t('screenShare.comingSoon')}` : ''}</span>
-            <span class="input-mode-card-description">${t(settingsStore.nativeScreenReceiverComingSoon ? 'settings.screenReceiverMac' : 'settings.screenReceiverNativeDesc')}</span>
+            aria-pressed="${settingsStore.getScreenShareReceiver() === 'native'}">
+            <span class="input-mode-card-title">${t('settings.screenReceiverNative')}</span>
+            <span class="input-mode-card-description">${t('settings.screenReceiverNativeDesc')}</span>
           </button>
           <button type="button" class="voice-mode-card input-mode-card" id="screen-receiver-chromium"
             aria-pressed="${settingsStore.getScreenShareReceiver() === 'chromium'}">

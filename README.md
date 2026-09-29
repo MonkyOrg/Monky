@@ -120,6 +120,13 @@ Desligado, estica a janela para preencher esse quadro. A escolha vale apenas par
 o compartilhamento atual e é mantida ao mudar a qualidade ou reconectar; não altera
 a resolução da janela nem do monitor.
 
+No **macOS 14+ (Intel e Apple Silicon)**, janelas e monitores usam ScreenCaptureKit,
+H.264 VideoToolbox ou AV1 por software (libaom) e WebRTC nativo, com recepção nativa
+e áudio do sistema/aplicativo. AV1 é selecionado em Manual → Software → AV1;
+Automático prioriza H.264 por hardware. AV1 por software exige mais CPU.
+Os perfis chegam a 4K/120 FPS quando fonte, hardware e rede permitem; não são
+garantia de throughput. Veja os requisitos e limites no [guia nativo](apps/client/native/screen-share/README.md).
+
 Para captura nativa de **janela, monitor ou Game Capture** no Windows x64,
 siga o [guia do módulo](apps/client/native/screen-share/README.md): recompilação
 dos addons para o Electron fixado, preparo libobs/WebRTC e pré-requisitos

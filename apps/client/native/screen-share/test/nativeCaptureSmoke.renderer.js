@@ -6,7 +6,15 @@ if (location.hash === '#source') {
   let frames = 0;
   const paintTasks = new MessageChannel();
   paintTasks.port1.onmessage = paint;
-  globalThis.nativeCaptureSourceSample = () => ({ frames, at: performance.now() });
+  globalThis.nativeCaptureSourceSample = () => ({ frames, at: performance.now(),
+    pixelWidth: canvas.width, pixelHeight: canvas.height });
+  function resize() {
+    canvas.width = Math.round(innerWidth * devicePixelRatio);
+    canvas.height = Math.round(innerHeight * devicePixelRatio);
+    context.setTransform(canvas.width / 800, 0, 0, canvas.height / 600, 0, 0);
+  }
+  addEventListener('resize', resize);
+  resize();
   function paint() {
     context.fillStyle = '#ff00ff'; context.fillRect(0, 0, 800, 600);
     context.fillStyle = '#ff0000'; context.fillRect(0, 0, 800, 60);

@@ -4,8 +4,8 @@
 #include "media_policy.h"
 #pragma push_macro("GetObject")
 #undef GetObject
-#include "sdp\MediaSection.hpp"
-#include "modules\audio_coding\codecs\opus\opus_interface.h"
+#include "sdp/MediaSection.hpp"
+#include "modules/audio_coding/codecs/opus/opus_interface.h"
 
 #include <array>
 #include <cmath>

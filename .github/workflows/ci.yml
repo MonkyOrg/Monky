@@ -312,7 +312,7 @@ jobs:
         include:
           - os: windows-2022
             platform: win
-          - os: macos-latest
+          - os: macos-15
             platform: mac
     runs-on: ${{ matrix.os }}
     steps:
@@ -358,6 +358,19 @@ jobs:
       - name: Verify macOS DMG packaging dependencies
         if: runner.os == 'macOS'
         run: node -e "require('dmg-builder/out/dmgLicense.js')"
+
+      - name: Build native macOS runtime and corresponding-source inputs
+        if: runner.os == 'macOS'
+        run: |
+          arch -x86_64 /usr/bin/true
+          node apps/client/native/screen-share/scripts/prepareMacRtc.cjs
+          for architecture in arm64 x64; do
+            node apps/client/native/screen-share/scripts/buildMac.cjs --arch=$architecture
+            node apps/client/native/screen-share/scripts/buildMacRtc.cjs --arch=$architecture
+          done
+          node apps/client/native/screen-share/scripts/notices.cjs --mac
+          node apps/client/native/screen-share/scripts/packMacSources.cjs --version=0.0.0-ci
+          npm run test:native-screen --workspace=apps/client
 
       # Only content-addressed upstream archives are portable. Do not cache the
       # checkout-owned RTC tree, generated binaries, toolchains or Python venv.

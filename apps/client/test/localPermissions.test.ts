@@ -21,7 +21,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 }
 
 async function fixture(t: TestContext): Promise<{ root: string; filename: string; permissions: LocalPermissions }> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'monky-local-permissions-'));
+  const root = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'monky-local-permissions-'));
   const filename = path.join(root, 'permissions.json');
   const permissions = new LocalPermissions(filename);
   t.after(async () => {

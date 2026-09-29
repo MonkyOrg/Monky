@@ -44,6 +44,8 @@ export interface PacketCaptureOptions {
   includeWindowId?: number;
   /** When a window was resolved by Main, reject reuse by another process. */
   expectedProcessId?: number;
+  /** macOS process birth identity bound to the selected native window. */
+  expectedProcessStartTimeUs?: string;
   /** Defaults to fail. Live consumers may discard unadmitted packets and resume in a new native epoch. */
   overflowMode?: 'fail' | 'discontinue';
 }
@@ -52,7 +54,7 @@ export function isPacketCaptureSupported(): boolean;
 
 export interface PacketCaptureFormat {
   encoding: 'float32-interleaved';
-  /** Original WASAPI mix rate and every original channel; no resampling/downmix. */
+  /** Original WASAPI/SCK output rate and channels; no additional resampling/downmix. */
   sampleRate: number;
   channels: number;
   channelMask: number | null;
@@ -98,7 +100,10 @@ export interface AudioCapturePacket {
    * TIMESTAMP_ERROR also invalidates any supplied device position.
    */
   devicePosition: number | null;
-  /** Original WASAPI QPC100ns / 10, floored; null only with TIMESTAMP_ERROR, independent of devicePosition. */
+  /** Original first-frame capture timestamp in the explicitly identified native clock. */
+  captureTimestampUs: number | null;
+  captureClock: 'qpc-us' | 'mach-host-us';
+  /** Legacy Windows timestamp alias; always null on macOS, where QPC does not exist. */
   qpcTimestampUs: number | null;
   flags: { raw: number; silent: boolean; dataDiscontinuity: boolean; timestampError: boolean };
 }
@@ -112,7 +117,7 @@ export type PacketCaptureEvent =
   | { type: 'closed'; snapshot: PacketCaptureSnapshot };
 
 export interface PacketCaptureSession {
-  /** Resolves only after actual WASAPI Start; rejects on startup failure/cancellation. */
+  /** Resolves only after actual WASAPI/SCK start; rejects on startup failure/cancellation. */
   readonly ready: Promise<PacketCaptureSnapshot>;
   /** Resolves after native acquisition/TSFN drain; cancels admission waits, not RTC processing. */
   readonly closed: Promise<PacketCaptureSnapshot>;

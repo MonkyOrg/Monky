@@ -1,12 +1,16 @@
 #pragma once
 
 #include "monky_rtc_engine.h"
+#if defined(_WIN32)
 #include "mf_rtc_adapters.h"
+#else
+#include "mac_rtc_adapters.h"
+#endif
 #include "frame_route.h"
 
-#include "api\peer_connection_interface.h"
-#include "api\video\video_frame.h"
-#include "rtc_base\thread.h"
+#include "api/peer_connection_interface.h"
+#include "api/video/video_frame.h"
+#include "rtc_base/thread.h"
 #include "json.hpp"
 
 #include <algorithm>
@@ -20,6 +24,13 @@
 
 namespace monky::native_rtc::engine {
 
+#if defined(_WIN32)
+namespace video_backend = mf;
+using DecodedFrame = screen_video::GpuDecodedFrame;
+#else
+namespace video_backend = mac;
+using DecodedFrame = mac::PixelFrame;
+#endif
 using Json = nlohmann::json;
 constexpr std::uint64_t kMaxId = 9007199254740991ull;
 constexpr std::size_t kMaxJson = 1024 * 1024;
@@ -27,11 +38,11 @@ constexpr std::size_t kMaxJson = 1024 * 1024;
 class Error : public std::runtime_error {
  public:
   Error(std::string code, std::string message, MonkyEngineStatus status = MONKY_ENGINE_FAILURE,
-        HRESULT hr = S_OK)
+        std::int32_t hr = 0)
       : std::runtime_error(std::move(message)), code(std::move(code)), status(status), hr(hr) {}
   std::string code;
   MonkyEngineStatus status;
-  HRESULT hr;
+  std::int32_t hr;
 };
 
 struct Cancellation {
@@ -62,7 +73,7 @@ class Host {
   virtual std::chrono::milliseconds Timeout() const = 0;
   virtual webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> Factory() const = 0;
   virtual webrtc::Thread* SignalingThread() const = 0;
-  virtual std::shared_ptr<mf::NativeRtcContext> MfContext() const = 0;
+  virtual std::shared_ptr<video_backend::NativeRtcContext> MfContext() const = 0;
   virtual std::shared_ptr<CaptureClock> CaptureTimebase() const = 0;
   virtual std::shared_ptr<VideoSource> FindSource(std::uint64_t id) const = 0;
   virtual std::shared_ptr<audio::AudioSource> FindAudioSource(std::uint64_t id) const = 0;
@@ -77,10 +88,14 @@ class Host {
 };
 
 struct InputFrame {
+#if defined(_WIN32)
   HANDLE texture = nullptr;
+#endif
   std::uint64_t id = 0;
   std::int64_t timestamp_us = 0, duration_us = 0, ntp_time_ms = -1;
+#if defined(_WIN32)
   ~InputFrame() { if (texture) CloseHandle(texture); }
+#endif
   InputFrame() = default;
   InputFrame(const InputFrame&) = delete;
   InputFrame& operator=(const InputFrame&) = delete;
