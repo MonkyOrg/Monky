@@ -440,8 +440,11 @@ Missing or expired artifacts use the original build with a warning in the workfl
 summary; promotions of betas predating the optimization are also supported.
 API, integrity, environment or source mismatches stop the release, without silent
 fallbacks. A new beta without a merged PR or successful CI is not published.
-Rerunning only failed jobs may leave artifacts from different run attempts; this
-triggers an explicit rebuild, or rerun the entire CI before merging to retain reuse.
+Rerunning only failed jobs may leave artifacts from different run attempts.
+Release selects the highest available attempt per variant within the same
+successful run and validates each manifest against the attempt that produced
+its artifact, not the latest overall attempt. There is no need to rerun all of
+CI merely to retain reuse.
 
 User validation only starts **after the release is published**, never merely after
 the merge. The optimization reduces duplicate release work; PRs still run all

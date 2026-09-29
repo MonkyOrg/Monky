@@ -135,6 +135,13 @@ export function githubApi(token = process.env.GH_TOKEN, repository = process.env
   };
 }
 
+function artifactRunAttempt(name, variant, maxAttempt) {
+  const match = new RegExp(`^ci-build-${variant}-([1-9][0-9]*)$`).exec(name);
+  const attempt = Number(match?.[1]);
+  return Number.isSafeInteger(attempt) && Number.isSafeInteger(maxAttempt) && attempt <= maxAttempt
+    ? attempt : null;
+}
+
 export async function selectBuild(api, repository, commit, promotion = false) {
   assert.ok(sha(commit), 'Invalid release commit.');
   const prs = await api(`commits/${commit}/pulls?per_page=100`);
@@ -155,16 +162,10 @@ export async function selectBuild(api, repository, commit, promotion = false) {
   const listing = await api(`actions/runs/${run.id}/artifacts?per_page=100`);
   const artifacts = {};
   for (const variant of Object.keys(roots)) {
-    // A partial re-run (e.g. `gh run rerun --failed` after a flaky job) advances
-    // run_attempt but only re-uploads artifacts for the jobs that re-ran. Match
-    // the highest available attempt per variant instead of assuming every
-    // artifact shares the run's latest attempt, so a mixed-attempt run still
-    // reuses its verified build instead of forcing a full rebuild.
-    const prefix = `ci-build-${variant}-`;
-    const attempt = name => name.startsWith(prefix) && /^[0-9]+$/.test(name.slice(prefix.length))
-      ? Number(name.slice(prefix.length)) : null;
+    // Partial reruns only upload new artifacts for the jobs that ran again.
+    const attempt = name => artifactRunAttempt(name, variant, run.run_attempt);
     const artifact = listing.artifacts
-      .filter(item => !item.expired && attempt(item.name) !== null && attempt(item.name) <= run.run_attempt)
+      .filter(item => !item.expired && attempt(item.name) !== null)
       .sort((a, b) => attempt(b.name) - attempt(a.name))[0];
     if (!artifact) return { reuse: false, reason: 'Approved CI artifacts are absent or expired; rebuilding this legacy/recovery release.' };
     assert.ok(positiveId(artifact.id) && /^sha256:[a-f0-9]{64}$/.test(artifact.digest), 'Missing immutable artifact digest.');
@@ -183,7 +184,8 @@ export async function downloadBuild(api, artifactId, runId, variant, destination
   const artifact = await api(`actions/artifacts/${artifactId}`);
   assert.equal(artifact.workflow_run.id, Number(runId));
   assert.equal(artifact.workflow_run.head_sha, run.head_sha);
-  assert.equal(artifact.name, `ci-build-${variant}-${run.run_attempt}`);
+  const runAttempt = artifactRunAttempt(artifact.name, variant, run.run_attempt);
+  assert.ok(runAttempt !== null, `Invalid CI artifact name or attempt: ${artifact.name}.`);
   assert.equal(artifact.expired, false, 'The selected build expired before download.');
   assert.match(artifact.digest, /^sha256:[a-f0-9]{64}$/);
   let response = await api(`actions/artifacts/${artifactId}/zip`, true);
@@ -196,7 +198,7 @@ export async function downloadBuild(api, artifactId, runId, variant, destination
   assert.ok(response.ok && response.body, 'Artifact download failed.');
   await pipeline(response.body, createWriteStream(destination, { flags: 'wx' }));
   assert.equal(`sha256:${await hashFile(destination)}`, artifact.digest, 'GitHub artifact digest mismatch.');
-  return run;
+  return { run, runAttempt };
 }
 
 export async function restoreBuild(root, variant, runId, artifactId, {
@@ -206,11 +208,11 @@ export async function restoreBuild(root, variant, runId, artifactId, {
   try {
     const archive = path.join(temp, 'build.zip');
     const extracted = path.join(temp, 'extracted');
-    const run = await downloadBuild(api, artifactId, runId, variant, archive);
+    const { run, runAttempt } = await downloadBuild(api, artifactId, runId, variant, archive);
     assert.equal(run.repository.full_name, context.repository, 'CI belongs to another repository.');
     execFileSync('python', [path.join(root, 'scripts', 'ci-build-archive.py'), archive, extracted], { stdio: 'inherit' });
     const manifest = await validateBuild(extracted, root, variant, {
-      ...context, runId: Number(runId), runAttempt: run.run_attempt,
+      ...context, runId: Number(runId), runAttempt,
     });
     const source = await api(`git/commits/${manifest.sourceCommit}`);
     assert.equal(source.tree.sha, manifest.sourceTree, 'Artifact source identity disagrees with GitHub.');
