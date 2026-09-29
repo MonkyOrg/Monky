@@ -96,8 +96,10 @@ test('screen init JSON cannot break out into the trusted or author script docume
   const document = botScreenDocument({ ...snapshot(), state: { text: '</script><script>ESCAPE()</script>' } }, { id: 'alice', nickname: '</script>', locale: 'en' });
   assert.equal(document.includes('<script>ESCAPE()'), false);
   assert.ok(document.includes('\\u003c/script>'));
-  assert.ok(document.includes("default-src 'none'"));
-  assert.ok(document.includes("connect-src 'none'"));
+  assert.ok(document.includes("connect-src 'self' http: https: ws: wss: data: blob:"));
+  assert.ok(document.includes("worker-src 'self' http: https: data: blob:"));
+  assert.ok(document.includes("'unsafe-eval'"), 'WASM and ordinary web libraries may compile code');
+  assert.equal(document.includes("value: undefined"), false, 'WebRTC remains available');
   assert.ok(document.includes('"locale":"en"'));
 });
 

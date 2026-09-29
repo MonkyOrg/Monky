@@ -90,7 +90,12 @@ export class BotScreenView {
     if (this.frame || !this.canRead()) return;
     const frame = new BotScreenFrame(this.screen, {
       id: this.context.user.id, nickname: this.context.user.nickname, locale: getLanguage(),
-    }, (action) => { void this.act(action); });
+    }, (action) => { void this.act(action); }, error => {
+      console.error('[Bot screens] Could not open miniapp document.', error);
+      this.leave();
+      this.error.textContent = t('botScreen.openError');
+      this.error.hidden = false;
+    });
     this.frame = frame;
     this.body.append(frame.element);
     this.placeholder.hidden = true;
