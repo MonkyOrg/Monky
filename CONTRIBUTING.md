@@ -427,8 +427,10 @@ que sobraram da compilação no runner do CI.
 
 A release ainda instala dependências, aplica a versão final, gera os instaladores
 e tarballs, testa o SDK empacotado e assina/publica os arquivos. As fontes nativas
-correspondentes também vêm do CI: só seus metadados de versão/commit são atualizados
-e o arquivo é reempacotado e verificado, sem recompilar o runtime.
+correspondentes também vêm do CI: o `.tar.xz` é verificado e reutilizado byte a byte,
+sem recompilar o runtime nem recomprimir os fontes. O manifesto externo de esquema
+2 vincula a versão/commit da release ao `archiveManifest` original do CI, que
+permanece dentro do arquivo. Ambos precisam representar a mesma árvore Git.
 
 Artefatos ausentes ou expirados usam o build original com aviso no resumo do
 workflow; promoções de betas anteriores à otimização também são suportadas.

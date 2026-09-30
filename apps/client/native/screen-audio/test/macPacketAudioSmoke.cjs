@@ -99,6 +99,15 @@ async function runHost() {
   await assert.rejects(invalid.ready, { code: 'ERR_AUDIO_TARGET' });
   const invalidClosed = await invalid.closed;
   assert.equal(invalidClosed.state, 'failed');
+  const system = audio.createPacketCapture({ excludePid: process.pid }, () => {});
+  let systemClosed;
+  try {
+    await system.ready;
+  } finally {
+    systemClosed = await system.stop();
+  }
+  assert.equal(systemClosed.state, 'closed', 'System capture must not inspect protected unrelated processes.');
+  assert.equal(systemClosed.queuedPackets, 0);
   const cancellations = [];
   for (const waitMs of [0, 10]) {
     const capture = audio.createPacketCapture(selection, () => {});
@@ -167,7 +176,8 @@ async function runHost() {
   assert.equal(lostClosed.error.code, 'ERR_AUDIO_TARGET');
   assert.equal(lostClosed.queuedPackets, 0);
   fs.writeFileSync(path.join(directory, 'report.json'), JSON.stringify({ platform: process.platform,
-    arch: process.arch, capturedOnlyOwnedSyntheticApplication: true, cancellations, rounds, lostClosed }, null, 2));
+    arch: process.arch, recordedMedia: false, measuredOnlyOwnedSyntheticApplication: true,
+    systemCaptureReadiness: systemClosed, cancellations, rounds, lostClosed }, null, 2));
 }
 
 void app.whenReady().then(async () => {

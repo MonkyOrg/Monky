@@ -164,34 +164,38 @@ async function rebindSources(config, sourceRoot = repository, platform = 'win32'
     assert.deepEqual(previous.architectures, ['arm64', 'x64']);
   }
   assert.equal(previous.publicationReady, true, 'CI sources were not publication-ready.');
+  assert.match(previous.sourceCommit, /^[a-f0-9]{40}$/u);
   assert.equal(previous.sourceTree, sourceTree, 'Cannot rebind sources from a different source tree.');
   assert.equal(execute('git', ['-C', sourceRoot, 'status', '--porcelain', '--untracked-files=normal'], { capture: true }), '',
     'Source rebinding requires the clean merged checkout.');
   assert.equal(await fileHash(`${input}.tar.xz`), previous.archive.sha256, 'CI source archive checksum mismatch.');
   const { archive: oldArchive, ...snapshot } = previous;
-  const metadata = { ...snapshot, version: config.version, sourceCommit, sourceTree,
-    builtFromCommit: previous.sourceCommit, monkySource: `https://github.com/MonkyOrg/Monky/tree/${sourceCommit}` };
+  const metadata = { ...snapshot, schemaVersion: 2, version: config.version, sourceCommit, sourceTree,
+    builtFromCommit: previous.sourceCommit, monkySource: `https://github.com/MonkyOrg/Monky/tree/${sourceCommit}`,
+    archiveManifest: snapshot };
   const archive = path.join(config.output, `${basename}-${config.version}.tar.xz`);
   const manifest = path.join(config.output, `${basename}-${config.version}.json`);
   assert.ok(!fs.existsSync(archive) && !fs.existsSync(manifest), 'Source package already exists.');
   fs.mkdirSync(config.output, { recursive: true });
-  const pending = manifest + '.partial';
-  const partial = archive + '.partial';
+  const partial = archive + '.' + crypto.randomUUID() + '.partial';
   try {
-    write(pending, JSON.stringify(metadata, null, 2) + '\n');
-    execute(process.env.PYTHON ?? 'python', [path.join(__dirname, 'sourceArchive.py'), 'rebind',
-      `${input}.tar.xz`, `${input}.json`, pending, partial]);
+    execute(process.env.PYTHON ?? 'python', [path.join(__dirname, 'sourceArchive.py'), 'verify',
+      `${input}.tar.xz`, `${input}.json`]);
+    // The full source tree is identical; only the external release binding changes.
+    fs.copyFileSync(`${input}.tar.xz`, partial, fs.constants.COPYFILE_EXCL | fs.constants.COPYFILE_FICLONE);
     const bytes = fs.statSync(partial).size;
     assert.ok(bytes > 1_000_000 && bytes < 2_000_000_000, 'Invalid rebound source archive size.');
+    assert.equal(bytes, oldArchive.bytes, 'CI source archive size mismatch.');
     const sha256 = await fileHash(partial);
+    assert.equal(sha256, oldArchive.sha256, 'Reused source archive checksum mismatch.');
     fs.renameSync(partial, archive);
     write(manifest, JSON.stringify({ ...metadata, archive: { name: path.basename(archive), bytes, sha256 } }, null, 2) + '\n');
     fs.unlinkSync(`${input}.tar.xz`);
     fs.unlinkSync(`${input}.json`);
-    console.log(`Rebound verified CI corresponding sources to ${config.version}, commit ${sourceCommit}; no native compilation.`);
+    console.log(`Reused verified CI corresponding sources for ${config.version}, commit ${sourceCommit}; no recompilation or recompression.`);
     return { archive, manifest };
   } finally {
-    for (const file of [pending, partial]) if (fs.existsSync(file)) fs.unlinkSync(file);
+    if (fs.existsSync(partial)) fs.unlinkSync(partial);
   }
 }
 

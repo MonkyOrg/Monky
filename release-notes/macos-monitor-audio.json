@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "No macOS, compartilhar a tela inteira com áudio não falha mais ao encontrar processos protegidos do sistema. O áudio de Monky continua excluído da transmissão.",
+  "en": "On macOS, sharing the entire screen with audio no longer fails when protected system processes are present. Monky's own audio remains excluded from the stream."
+}

@@ -381,8 +381,9 @@ async function sourceFixture(t, platform = 'win32') {
   return { ...f, output, input, metadata };
 }
 
-test('native source reuse rewrites embedded provenance for squash/version while preserving every source byte', async t => {
+test('native source reuse binds squash/version externally and preserves every compressed byte without Python compression', async t => {
   const f = await sourceFixture(t);
+  assert.equal((await checkNativeSourceRelease(f.output, '0.0.0-ci', f.metadata.sourceCommit)).schemaVersion, 1);
   const sourceHash = executePython('-c', 'import hashlib,sys,tarfile\nwith tarfile.open(sys.argv[1]) as tar: print(hashlib.sha256(tar.extractfile("webrtc/source.cpp").read()).hexdigest())',
     `${f.input}.tar.xz`).trim();
   f.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
@@ -391,12 +392,25 @@ test('native source reuse rewrites embedded provenance for squash/version while 
   const result = await rebindSources({ output: f.output, version }, f.root);
   const metadata = await checkNativeSourceRelease(f.output, version, f.git('rev-parse', 'HEAD'));
   assert.equal(metadata.builtFromCommit, f.metadata.sourceCommit);
+  assert.equal(metadata.schemaVersion, 2);
+  assert.equal(metadata.archive.bytes, f.metadata.archive.bytes);
+  assert.equal(metadata.archive.sha256, f.metadata.archive.sha256);
+  assert.equal(await hashFile(result.archive), f.metadata.archive.sha256);
   const contents = JSON.parse(executePython('-c',
     'import hashlib,json,sys,tarfile\nwith tarfile.open(sys.argv[1]) as tar: print(json.dumps({"source":hashlib.sha256(tar.extractfile("webrtc/source.cpp").read()).hexdigest(),"manifest":json.load(tar.extractfile("SOURCE-MANIFEST.json"))}))',
     result.archive));
-  const { archive, ...snapshot } = metadata;
+  const { archive, ...snapshot } = f.metadata;
   assert.equal(contents.source, sourceHash);
   assert.deepEqual(contents.manifest, snapshot);
+  assert.deepEqual(metadata.archiveManifest, snapshot);
+  for (const change of [
+    { builtFromCommit: 'c'.repeat(40) }, { sourceTree: 'd'.repeat(40) },
+    { archiveManifest: { ...snapshot, version } }, { archiveManifest: { ...snapshot, publicationReady: false } },
+  ]) {
+    await fs.writeFile(result.manifest, JSON.stringify({ ...metadata, ...change }));
+    await assert.rejects(checkNativeSourceRelease(f.output, version, f.git('rev-parse', 'HEAD')), /provenance/);
+  }
+  await fs.writeFile(result.manifest, JSON.stringify(metadata));
   await assert.rejects(fs.stat(`${f.input}.tar.xz`), { code: 'ENOENT' });
 });
 
@@ -414,17 +428,20 @@ test('native source reuse rejects changed trees, archive corruption and mismatch
 
 test('macOS source reuse retains SDK links and both architectures while rebinding the approved source tree', async t => {
   const f = await sourceFixture(t, 'darwin');
+  assert.equal((await checkNativeSourceRelease(f.output, '0.0.0-ci', f.metadata.sourceCommit, 'darwin')).schemaVersion, 1);
   f.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
     'commit', '--quiet', '--allow-empty', '-m', 'Integrated macOS source');
   const version = '9.0.0-beta';
   const result = await rebindSources({ output: f.output, version }, f.root, 'darwin');
   const metadata = await checkNativeSourceRelease(f.output, version, f.git('rev-parse', 'HEAD'), 'darwin');
   assert.equal(metadata.builtFromCommit, f.metadata.sourceCommit);
+  assert.equal(await hashFile(result.archive), f.metadata.archive.sha256);
   const contents = JSON.parse(executePython('-c',
     'import json,sys,tarfile\nwith tarfile.open(sys.argv[1]) as tar:\n link=tar.getmember("webrtc/alias.cpp")\n print(json.dumps({"link":link.linkname,"isLink":link.issym(),"manifest":json.load(tar.extractfile("SOURCE-MANIFEST.json"))}))',
     result.archive));
   assert.equal(contents.isLink, true);
   assert.equal(contents.link, 'source.cpp');
-  const { archive, ...snapshot } = metadata;
+  const { archive, ...snapshot } = f.metadata;
   assert.deepEqual(contents.manifest, snapshot);
+  assert.deepEqual(metadata.archiveManifest, snapshot);
 });

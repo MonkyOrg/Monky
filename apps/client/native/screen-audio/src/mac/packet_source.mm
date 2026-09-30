@@ -1,4 +1,5 @@
 #include "../packet_source.h"
+#include "process_tree.h"
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <CoreMedia/CoreMedia.h>
 #import <Foundation/Foundation.h>
@@ -59,17 +60,6 @@ std::string Birth(const proc_bsdinfo& info) {
   if (info.pbi_start_tvsec > (UINT64_MAX - info.pbi_start_tvusec) / 1000000)
     throw Failure("ERR_AUDIO_TARGET", "Invalid process birth timestamp");
   return std::to_string(info.pbi_start_tvsec * 1000000 + info.pbi_start_tvusec);
-}
-bool OwnProcess(uint32_t pid) {
-  for (size_t depth = 0; pid > 1 && depth < 1024; ++depth) {
-    if (pid == static_cast<uint32_t>(getpid())) return true;
-    if (pid == static_cast<uint32_t>(getppid())) return false;
-    const auto parent = Process(pid).pbi_ppid;
-    if (parent == pid) throw Failure("ERR_AUDIO_TARGET", "Invalid process ancestry");
-    pid = parent;
-  }
-  if (pid > 1) throw Failure("ERR_AUDIO_TARGET", "Unbounded process ancestry");
-  return false;
 }
 void CheckProcess(Capture& capture) {
   if (!capture.selection.windowId) return;
@@ -183,6 +173,8 @@ namespace screen_audio {
 namespace {
 void Start(std::shared_ptr<Capture> capture, SCShareableContent* content) {
   if (capture->stop.load()) return;
+  // Inspect our descendants, not protected or disappearing unrelated applications.
+  const auto ownProcesses = ProcessTree(getpid());
   SCContentFilter* filter = nil;
   if (capture->selection.windowId) {
     SCWindow* target = nil;
@@ -192,7 +184,7 @@ void Start(std::shared_ptr<Capture> capture, SCShareableContent* content) {
     if (!owner || owner.processID <= 0 ||
         (capture->selection.expectedPid && static_cast<uint32_t>(owner.processID) != capture->selection.expectedPid))
       throw Failure("ERR_AUDIO_TARGET", "The selected audio window has exited or changed its owner");
-    if (OwnProcess(owner.processID))
+    if (ownProcesses.count(owner.processID))
       throw Failure("ERR_AUDIO_TARGET", "Capturing Monky's own process tree is not allowed");
     capture->selection.expectedPid = owner.processID;
     capture->processBirth = Birth(Process(owner.processID));
@@ -209,7 +201,7 @@ void Start(std::shared_ptr<Capture> capture, SCShareableContent* content) {
     if (!display) throw Failure("ERR_AUDIO_TARGET", "No display is available for system audio capture");
     NSMutableArray<SCRunningApplication*>* excluded = [NSMutableArray array];
     for (SCRunningApplication* application in content.applications)
-      if (OwnProcess(application.processID)) [excluded addObject:application];
+      if (ownProcesses.count(application.processID)) [excluded addObject:application];
     filter = [[SCContentFilter alloc] initWithDisplay:display excludingApplications:excluded exceptingWindows:@[]];
   }
   SCStreamConfiguration* config = [[SCStreamConfiguration alloc] init];

@@ -105,7 +105,10 @@ não fabrica capacidades a partir do arm64. O CI também compila em runners Inte
 e Apple Silicon. `macNativeHostSmoke.cjs` é device-free, não prova mídia.
 Para mídia real, `nativeCaptureSmoke.cjs`, `nativeAvSmoke.cjs` e
 `screen-audio/test/macPacketAudioSmoke.cjs` usam fontes sintéticas próprias e exigem
-um diretório absoluto em `--artifacts`. Não são testes de rede externa.
+um diretório absoluto em `--artifacts`. O teste de áudio também inicia e encerra
+a captura de sistema, descartando os pacotes sem gravar mídia, para verificar a
+exclusão de processos sem depender de acesso a processos protegidos.
+Não são testes de rede externa.
 Após `npm run build`, `macSourceAdmissionSmoke.cjs --artifacts=<diretório-absoluto-novo>`
 exercita Main/IPC/helper reais: admite e remove monitores e janelas repetidamente,
 reserva/libera áudio e mantém o seletor vivo. Só captura pixels da janela sintética
@@ -145,8 +148,11 @@ notarizado. A release inclui `monky-native-macos-sources-<versão>.tar.xz` e
 manifesto, além do código Monky da mesma tag. O arquivo preserva links relativos
 internos do SDK; ferramentas baixáveis e saídas compiladas ficam de fora.
 O artefato aprovado do CI inclui os dois runtimes, licenças e fontes; a release
-os reaproveita e atualiza a proveniência para o commit integrado, sem recompilar
-o SDK quando a árvore de fontes e o ambiente conferem.
+os reaproveita e vincula a proveniência ao commit integrado, sem recompilar
+o SDK quando a árvore de fontes e o ambiente conferem. O `.tar.xz` aprovado não
+é recomprimido: seu manifesto interno continua identificando o build do CI.
+O manifesto externo de esquema 2 registra essa identidade em `archiveManifest`
+e a vincula à versão/commit da release, com a mesma árvore Git e o mesmo SHA-256.
 
 ### Backend Windows
 
@@ -522,6 +528,9 @@ Captura de Jogo, que não precisa de um espectador remoto para a prévia.
 O áudio usa o caminho PCM nativo com timestamps: janela/jogo captura o
 aplicativo selecionado; monitor captura o sistema **excluindo o Monky**, não
 somente aplicativos visíveis naquele monitor. Não é captura de microfone.
+No macOS, essa exclusão enumera os descendentes do próprio processo, sem consultar
+dados protegidos de aplicativos alheios. A validação de identidade da janela
+selecionada continua obrigatória.
 Apenas uma fonte pode capturar áudio por vez. Ao substituir uma transmissão
 com som, o seletor mantém a opção de áudio habilitada: o Main prepara a nova
 fonte sem adquirir PCM, e o renderer aguarda o encerramento da fonte anterior
