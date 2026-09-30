@@ -103,7 +103,9 @@ library; it never fabricates capabilities from arm64. CI also builds on Intel
 and Apple Silicon runners. `macNativeHostSmoke.cjs` is device-free, not media proof.
 For actual media, `nativeCaptureSmoke.cjs`, `nativeAvSmoke.cjs` and
 `screen-audio/test/macPacketAudioSmoke.cjs` use owned synthetic sources and require
-an absolute `--artifacts` directory. They do not test external networks.
+an absolute `--artifacts` directory. The audio test also starts and stops system
+capture, discarding packets without recording media, to verify process exclusion
+without requiring access to protected processes. They do not test external networks.
 After `npm run build`, `macSourceAdmissionSmoke.cjs --artifacts=<new-absolute-directory>`
 exercises the actual Main/IPC/helper: it repeatedly admits and removes monitors
 and windows, reserves/releases audio and keeps the picker alive. It captures
@@ -144,8 +146,11 @@ notarized. Releases include `monky-native-macos-sources-<version>.tar.xz` and it
 manifest alongside the matching Monky tag. The archive preserves SDK-internal
 relative links; downloadable tools and compiled outputs are excluded.
 The approved CI artifact includes both runtimes, licenses and sources; release
-reuses them and rebinds provenance to the integrated commit without recompiling
-the SDK when the source tree and environment match.
+reuses them and binds provenance to the integrated commit without recompiling
+the SDK when the source tree and environment match. The approved `.tar.xz` is
+not recompressed: its embedded manifest still identifies the CI build.
+The schema-2 external manifest records that identity in `archiveManifest` and
+binds it to the release version/commit, with the same Git tree and SHA-256.
 
 ### Windows backend
 
@@ -511,8 +516,10 @@ does not need a remote viewer for local preview.
 
 Audio uses the timestamped native PCM path: window/game captures the selected
 application; monitor captures the system **excluding Monky**, not just apps
-visible on that monitor. It does not capture the microphone. Only one source
-can capture audio at a time. When replacing an audible share, the picker keeps
+visible on that monitor. It does not capture the microphone. On macOS, exclusion
+enumerates our own descendants without inspecting protected data from unrelated
+applications. The selected window's identity must still be verified.
+Only one source can capture audio at a time. When replacing an audible share, the picker keeps
 the audio option enabled: Main prepares the new source without acquiring PCM,
 and the renderer waits for the previous source to retire before activating
 preview and the new audio selector. Preparation failure preserves the old share;

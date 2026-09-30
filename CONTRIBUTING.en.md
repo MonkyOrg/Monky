@@ -433,8 +433,11 @@ left over from compilation on the CI runner.
 
 Release still installs dependencies, applies the final version, creates installers
 and tarballs, tests the packaged SDK, and signs/publishes the files. Corresponding
-native sources also come from CI: only their version/commit metadata is updated
-before repacking and verification, without recompiling the runtime.
+native sources also come from CI: the `.tar.xz` is verified and reused byte for
+byte, without recompiling the runtime or recompressing sources. The schema-2
+external manifest binds the release version/commit to the original CI
+`archiveManifest`, which remains inside the archive. Both must describe the
+same Git tree.
 
 Missing or expired artifacts use the original build with a warning in the workflow
 summary; promotions of betas predating the optimization are also supported.

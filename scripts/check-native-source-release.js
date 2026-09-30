@@ -10,10 +10,18 @@ export async function checkNativeSourceRelease(directory, version, commit, platf
   assert.ok(['win32', 'darwin'].includes(platform));
   const basename = `monky-native-${platform === 'darwin' ? 'macos-' : ''}sources-${version}`;
   const metadata = JSON.parse(fs.readFileSync(path.join(directory, `${basename}.json`), 'utf8'));
-  assert.equal(metadata.schemaVersion, 1);
+  assert.ok([1, 2].includes(metadata.schemaVersion), 'Unsupported source manifest schema.');
   assert.equal(metadata.version, version);
   assert.equal(metadata.publicationReady, true, 'Never publish corresponding sources from a dirty worktree.');
   assert.equal(metadata.sourceCommit, commit, 'Native sources were built from another Monky commit.');
+  if (metadata.schemaVersion === 2) {
+    assert.match(metadata.builtFromCommit, /^[a-f0-9]{40}$/u);
+    assert.match(metadata.sourceTree, /^[a-f0-9]{40}$/u);
+    const { archive, archiveManifest, builtFromCommit, ...releaseManifest } = metadata;
+    assert.deepEqual(archiveManifest, { ...releaseManifest, schemaVersion: 1, version: '0.0.0-ci',
+      sourceCommit: builtFromCommit, monkySource: `https://github.com/MonkyOrg/Monky/tree/${builtFromCommit}` },
+    'Reused source provenance does not match the released source tree and dependencies.');
+  }
   assert.equal(metadata.webrtcRevision, '36ea4535a500ac137dbf1f577ce40dc1aaa774ef');
   if (platform === 'darwin') {
     assert.equal(metadata.platform, 'darwin');
