@@ -35,7 +35,8 @@ async function packMacSources(config) {
     const publicationReady = execute('git', ['-C', repository, 'status', '--porcelain',
       '--untracked-files=normal'], { capture: true }) === '';
     const snapshot = { schemaVersion: 1, platform: 'darwin', version: config.version, sourceCommit, sourceTree,
-      publicationReady, architectures, webrtcRevision: pins.repositories.webrtc.commit,
+      publicationReady, architectures, monkySource: `https://github.com/MonkyOrg/Monky/tree/${sourceCommit}`,
+      webrtcRevision: pins.repositories.webrtc.commit,
       repositories: pins.repositories, omittedBuildTools: omitted,
       sourceFiles: entries.filter(entry => !entry.endsWith('/')).length,
     };
