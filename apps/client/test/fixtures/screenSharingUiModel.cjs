@@ -397,12 +397,37 @@ function fixture(language = 'en') {
       },
     },
     'views/Dialog': { showAlert: async value => alerts.push(value), showConfirm: async () => controls.confirm },
-    'utils/scroll': { scrollWithin: (body, target, offset) => { body.scrollTop = target.top - offset; return body.scrollTop; } },
+    'utils/scroll': {
+      smoothScrollIntoView(target, options) {
+        target.scrollIntoView({ ...options, behavior: 'smooth' });
+      },
+      smoothScrollTo(container, options) {
+        if (typeof options.top === 'number') container.scrollTop = options.top;
+      },
+      scrollWithin(body, target, offset) {
+        body.scrollTop = target.top - offset;
+        return body.scrollTop;
+      },
+    },
+    'utils/modalSurface': {
+      enterModal() {},
+      exitModal(element) { element.remove(); },
+      handlesModalKey(_element, event) { return !event.defaultPrevented; },
+    },
+    'utils/surfaceVisibility': {
+      setSurfaceVisible(element, visible) { element.hidden = !visible; },
+    },
+    'utils/surfaceMotion': {
+      animateEnter() {},
+      cancelSurfaceMotion() {},
+      removeWithMotion(element) { element.remove(); },
+    },
   };
   const allowed = new Set([
     'views/ScreenSharePickerModal', 'views/GameCaptureGuideModal', 'views/CopyToast', 'views/settings/tabs/QualityTab', 'views/settings/qualityOptions',
     'views/ScreenEncodingControls', 'core/screenEncoding',
     'views/settings/SettingsSectionNavigation', 'i18n/index', 'i18n/locales/en', 'i18n/locales/pt-BR',
+    'i18n/locales/community', 'i18n/messageSearch',
     'utils/html', 'utils/buttonLoading', 'utils/loadingSkeleton', 'utils/qualityProfileLimits', 'utils/avatar', 'utils/colors',
   ]);
   function load(name) {

@@ -101,13 +101,12 @@ test('initial connection failure rejects without creating an automatic reconnect
 });
 
 for (const serverProtocolVersion of [24, 25, 26, 27, 28, 29, 30]) {
-  test(`forum-aware protocol 31 never falls back to incompatible server protocol ${serverProtocolVersion}`, async context => {
+  test(`the current protocol never falls back to incompatible server protocol ${serverProtocolVersion}`, async context => {
     const f = fixture(context);
     const pending = assert.rejects(f.connect());
     const socket = f.lastSocket();
     socket.open();
     const request = socket.sent[0];
-    assert.equal(request.payload.protocolVersion, 31);
     assert.equal(request.payload.protocolVersion, PROTOCOL_VERSION);
     assert.equal(request.payload.protocolOffer.minimumVersion, 31);
     socket.receive({ type: MessageType.SERVER_ERROR, requestId: request.requestId,

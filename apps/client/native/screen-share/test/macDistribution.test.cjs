@@ -88,7 +88,7 @@ test('packaged macOS binaries require matching architecture, hashes and compiled
 });
 
 test('code signing refreshes native hashes before sealing the outer app without signing binaries twice', async t => {
-  const f = fixture(t), executions = [];
+  const f = fixture(t), executions = [], chmods = [];
   const filename = path.resolve(__dirname, '..', 'scripts', 'signMac.cjs');
   const localRequire = createRequire(filename), module = { exports: {} };
   const calls = [];
@@ -105,6 +105,13 @@ test('code signing refreshes native hashes before sealing the outer app without 
   const requireForTest = name => {
     if (name === './buildTools.cjs') return { fingerprint, execute: (...args) => executions.push(args) };
     if (name === '@electron/osx-sign') return { signAsync };
+    if (name === 'node:fs') return {
+      ...fs,
+      chmodSync(filename, mode) {
+        chmods.push([filename, mode]);
+        fs.chmodSync(filename, mode);
+      },
+    };
     return localRequire(name);
   };
   vm.runInThisContext(`(function(require, module, exports) { ${fs.readFileSync(filename, 'utf8')}\n})`,
@@ -113,8 +120,12 @@ test('code signing refreshes native hashes before sealing the outer app without 
     { appInfo: { productFilename: 'Fixture' } });
   assert.equal(calls.length, 2);
   assert.equal(executions.length, 6);
-  assert.equal(fs.statSync(path.join(f.directory, 'monky-screen-mac')).mode & 0o111, 0o111,
-    'The packaged macOS capture host must keep the execute bit or macOS refuses to spawn it.');
+  const executable = path.join(f.directory, 'monky-screen-mac');
+  assert.deepEqual(chmods, [[executable, 0o755]]);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(executable).mode & 0o111, 0o111,
+      'The packaged macOS capture host must keep the execute bit or macOS refuses to spawn it.');
+  }
   const rtc = JSON.parse(fs.readFileSync(path.join(f.directory, 'rtc-build.json')));
   for (const record of rtc.binaries) {
     assert.equal(record.buildSha256, f.records.find(before => before.name === record.name).sha256);

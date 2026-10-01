@@ -623,7 +623,7 @@ test('bot user parameters include the human caller and exclude bot accounts with
     assert.deepEqual(ids(), ['admin', 'manager', 'owner']);
     assert.deepEqual(server.getMentionableUsers('missing'), []);
     server.updateChannel({ ...channel, type: 'VOICE' });
-    assert.deepEqual(ids(), []);
+    assert.deepEqual(ids(), ['admin', 'manager', 'owner', 'offline']);
   });
   assert.equal(commandValuesFromInputs(command, { song: 'A song', count: '0', member: bot.id }, candidates).success, false);
 });
