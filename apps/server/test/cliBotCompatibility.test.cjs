@@ -1,7 +1,10 @@
 const assert = require('node:assert/strict');
+const { once } = require('node:events');
+const http = require('node:http');
 const path = require('node:path');
+const { performance } = require('node:perf_hooks');
 const test = require('node:test');
-const { formatBotCompatibilityWarnings } = require('../dist/cli/botCompatibility');
+const { formatBotCompatibilityWarnings, printBotCompatibilityWarning } = require('../dist/cli/botCompatibility');
 const { getCliLanguage, setCliLanguage, t: translate } = require('../dist/cli/i18n');
 const lifecycle = require('../dist/cli/commands/serverLifecycle');
 const preview = require('../dist/cli/onlineUsers');
@@ -41,6 +44,156 @@ test('bot warnings are localized and compatible, unchecked and unavailable state
       assert.deepEqual(formatBotCompatibilityWarnings(null).map(withoutAnsi), [
         translate('botCompatibility.unavailable'),
       ]);
+    });
+  }
+});
+
+test('startup compatibility waits for a refused connection to become a responding server', async (t) => {
+  const output = isolate(t, 'pt-BR');
+  const endpoint = http.createServer((request, response) => {
+    assert.equal(request.url, '/preview');
+    response.end(JSON.stringify({ userCount: 0, voiceUserCount: 0, botCompatibility: pending }));
+  });
+  endpoint.listen(0, '127.0.0.1');
+  await once(endpoint, 'listening');
+  const port = endpoint.address().port;
+  await new Promise((resolve, reject) => endpoint.close((error) => error ? reject(error) : resolve()));
+  t.after(() => new Promise((resolve, reject) => endpoint.close((error) => error ? reject(error) : resolve())));
+  const readPreview = preview.readLocalServerPreview;
+  let attempts = 0;
+  t.mock.method(preview, 'readLocalServerPreview', async (...args) => {
+    const result = await readPreview(...args);
+    if (++attempts === 1) {
+      assert.equal(result, null, 'the first post-PM2 connection is refused');
+      endpoint.listen(port, '127.0.0.1');
+      await once(endpoint, 'listening');
+    }
+    return result;
+  });
+
+  await printBotCompatibilityWarning(port, { waitForStartup: true });
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(output.map(withoutAnsi), formatBotCompatibilityWarnings(pending).map(withoutAnsi));
+});
+
+test('startup compatibility retries an HTTP failure without inventing bot incompatibilities', async (t) => {
+  const output = isolate(t);
+  let requests = 0;
+  const endpoint = http.createServer((_request, response) => {
+    if (++requests === 1) {
+      response.writeHead(503);
+      response.end();
+    } else {
+      response.end(JSON.stringify({ userCount: 0, voiceUserCount: 0, botCompatibility: compatible }));
+    }
+  });
+  endpoint.listen(0, '127.0.0.1');
+  await once(endpoint, 'listening');
+  t.after(() => new Promise((resolve, reject) => endpoint.close((error) => error ? reject(error) : resolve())));
+
+  await printBotCompatibilityWarning(endpoint.address().port, { waitForStartup: true });
+
+  assert.equal(requests, 2);
+  assert.deepEqual(output, []);
+});
+
+test('startup compatibility has a ten-second total budget including requests and retry delays', async (t) => {
+  for (const responseTime of [0, 1500]) {
+    await t.test(`failed probes take ${responseTime}ms`, async (t) => {
+      const output = isolate(t);
+      let elapsed = 0;
+      t.mock.method(performance, 'now', () => elapsed);
+      t.mock.method(global, 'setTimeout', (callback, delay) => {
+        assert.ok(delay > 0 && delay <= 250);
+        elapsed += delay;
+        queueMicrotask(callback);
+      });
+      const probe = t.mock.method(preview, 'readLocalServerPreview', async (_port, timeout = 1500) => {
+        assert.ok(elapsed < 10_000, 'no new request may start after the deadline');
+        assert.ok(timeout > 0 && timeout <= Math.min(1500, 10_000 - elapsed));
+        elapsed += Math.min(responseTime, timeout);
+        return null;
+      });
+
+      await printBotCompatibilityWarning(server.port, { waitForStartup: true });
+
+      assert.equal(elapsed, 10_000);
+      assert.equal(probe.mock.callCount(), responseTime === 0 ? 40 : 6);
+      assert.deepEqual(output.map(withoutAnsi), [translate('botCompatibility.unavailable')]);
+    });
+  }
+});
+
+test('ready servers with missing or invalid compatibility data are not retried or reported compatible', async (t) => {
+  const output = isolate(t);
+  let payload = { userCount: 0, voiceUserCount: 0 };
+  let requests = 0;
+  const endpoint = http.createServer((_request, response) => {
+    requests++;
+    response.end(JSON.stringify(payload));
+  });
+  endpoint.listen(0, '127.0.0.1');
+  await once(endpoint, 'listening');
+  t.after(() => new Promise((resolve, reject) => endpoint.close((error) => error ? reject(error) : resolve())));
+  await printBotCompatibilityWarning(endpoint.address().port, { waitForStartup: true });
+  payload = { ...payload, botCompatibility: { ...pending, incompatibleBots: -1 } };
+  await printBotCompatibilityWarning(endpoint.address().port, { waitForStartup: true });
+  assert.equal(requests, 2);
+  assert.deepEqual(output.map(withoutAnsi), Array(2).fill(translate('botCompatibility.unavailable')));
+});
+
+test('ordinary compatibility queries keep their one-shot behavior', async (t) => {
+  const output = isolate(t);
+  const probe = t.mock.method(preview, 'readLocalServerPreview', async () => null);
+  await printBotCompatibilityWarning(server.port);
+  assert.equal(probe.mock.callCount(), 1);
+  assert.deepEqual(output.map(withoutAnsi), [translate('botCompatibility.unavailable')]);
+});
+
+test('preview deadline also bounds a response that keeps sending data without finishing', async (t) => {
+  let finishedBody = false;
+  const endpoint = http.createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.write('{"userCount":0');
+    let chunks = 0;
+    const timer = setInterval(() => {
+      response.write(' ');
+      if (++chunks === 30) {
+        finishedBody = true;
+        response.end('}');
+        clearInterval(timer);
+      }
+    }, 20);
+    response.on('close', () => clearInterval(timer));
+  });
+  endpoint.listen(0, '127.0.0.1');
+  await once(endpoint, 'listening');
+  t.after(() => new Promise((resolve, reject) => endpoint.close((error) => error ? reject(error) : resolve())));
+
+  assert.equal(await preview.readLocalServerPreview(endpoint.address().port, 100), null);
+  assert.equal(finishedBody, false, 'activity must not extend the total request deadline');
+});
+
+test('preview failures settle as unavailable and release their connections', async (t) => {
+  const cases = [
+    ['invalid JSON', (_request, response) => response.end('{')],
+    ['non-object JSON', (_request, response) => response.end('null')],
+    ['oversized body', (_request, response) => response.write(' '.repeat(64_001))],
+    ['aborted body', (_request, response) => {
+      response.writeHead(200, { 'Content-Length': '1000' });
+      response.write('{');
+      setImmediate(() => response.destroy());
+    }],
+    ['no response', () => {}],
+  ];
+  for (const [name, handler] of cases) {
+    await t.test(name, async (t) => {
+      const endpoint = http.createServer(handler);
+      endpoint.listen(0, '127.0.0.1');
+      await once(endpoint, 'listening');
+      t.after(() => new Promise((resolve, reject) => endpoint.close((error) => error ? reject(error) : resolve())));
+      assert.equal(await preview.readLocalServerPreview(endpoint.address().port, 100), null);
     });
   }
 });

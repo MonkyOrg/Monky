@@ -3,6 +3,8 @@ import { settingsStore } from '../stores/settingsStore';
 import { overlayBridgeService } from '../core/OverlayBridgeService';
 import { appEvents } from '../core/EventBus';
 import { t } from '../i18n';
+import { enterModal, exitModal } from '../utils/modalSurface';
+import { setSurfaceVisible } from '../utils/surfaceVisibility';
 
 export class OverlayConfigModal {
   private modalEl: HTMLElement | null = null;
@@ -259,6 +261,7 @@ export class OverlayConfigModal {
     `;
 
     document.body.appendChild(this.modalEl);
+    enterModal(this.modalEl);
     this.attachEvents();
 
     // Resizing the overlay window while this modal is open must reveal (or hide)
@@ -331,7 +334,7 @@ export class OverlayConfigModal {
       this.overlaySettingsUnbind = null;
     }
     if (this.modalEl) {
-      this.modalEl.remove();
+      exitModal(this.modalEl);
       this.modalEl = null;
     }
   }
@@ -360,7 +363,7 @@ export class OverlayConfigModal {
         card.classList.add('selected');
         this.currentMode = card.getAttribute('data-mode') as OverlayMode;
         if (focusWrapper) {
-          focusWrapper.style.display = this.currentMode === 'cameras-only' && !this.currentMinimalistMode ? 'flex' : 'none';
+          setSurfaceVisible(focusWrapper, this.currentMode === 'cameras-only' && !this.currentMinimalistMode, 'panel', 'flex');
         }
         this.syncLiveIfActive();
       });
@@ -383,7 +386,7 @@ export class OverlayConfigModal {
         modeSection.style.pointerEvents = this.currentMinimalistMode ? 'none' : 'auto';
       }
       if (focusWrapper) {
-        focusWrapper.style.display = this.currentMode === 'cameras-only' && !this.currentMinimalistMode ? 'flex' : 'none';
+        setSurfaceVisible(focusWrapper, this.currentMode === 'cameras-only' && !this.currentMinimalistMode, 'panel', 'flex');
       }
       this.syncLiveIfActive();
     });

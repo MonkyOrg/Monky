@@ -1,4 +1,7 @@
 import { escapeHtml } from '../utils/html';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
+import { setSurfaceVisible } from '../utils/surfaceVisibility';
+import { animateEnter, cancelSurfaceMotion } from '../utils/surfaceMotion';
 import { LIMITS, MAX_SERVER_INVITE_LENGTH, parseServerInviteLink } from '@monky/shared';
 import { connectionStore, type CreatedServer, type SavedServer } from '../stores/connectionStore';
 import { favoritesStore, savedServerFavoriteKey } from '../stores/favoritesStore';
@@ -20,6 +23,7 @@ import { confirmStopHostedServer } from '../utils/hostedServer';
 import { checkServerOnline } from '../utils/serverStatus';
 import { sortFavoritesFirst, type FavoriteOrderEntry } from '../utils/favoriteOrder';
 import { FavoriteListMotion, type FavoriteMotionKind } from '../utils/favoriteMotion';
+import { smoothScrollIntoView } from '../utils/scroll';
 import { renderFavoriteToggle, renderFavoritesFilter, updateFavoritesFilter } from './FavoritesControls';
 import { renderServerAutoEntryToggle } from './ServerAutoEntryControls';
 import { parseHomeVoicePreview } from '../utils/voicePreview';
@@ -738,10 +742,10 @@ export class ConnectionView {
       if (hiddenFocus) {
         const next = visibleButtons[0] ?? section.querySelector<HTMLButtonElement>('#home-saved-filter-favorites');
         next?.focus({ preventScroll: true });
-        next?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+        if (next) smoothScrollIntoView(next, { block: 'nearest', inline: 'nearest' });
       } else if (focused instanceof HTMLElement && list.contains(focused)) {
         if (document.activeElement !== focused) focused.focus({ preventScroll: true });
-        focused.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+        smoothScrollIntoView(focused, { block: 'nearest', inline: 'nearest' });
       }
     }, animate);
   }
@@ -1232,8 +1236,8 @@ export class ConnectionView {
       const section = document.getElementById('host-create-form-section');
       const toggleBtn = document.getElementById('btn-show-create-form');
       if (section && toggleBtn) {
-        const visible = section.style.display !== 'none';
-        section.style.display = visible ? 'none' : 'block';
+        const visible = !section.hidden && section.style.display !== 'none' && !section.hasAttribute('data-ui-closing');
+        setSurfaceVisible(section, !visible, 'panel', 'block');
         toggleBtn.innerHTML = visible
           ? `<span class="material-symbols-outlined md-18" style="margin-right: 6px;">add_circle</span> ${t('connection.createServer')}`
           : `<span class="material-symbols-outlined md-18" style="margin-right: 6px;">close</span> ${t('common.cancel')}`;
@@ -1408,6 +1412,8 @@ export class ConnectionView {
       tabJoin.classList.add('active');
       tabHost?.classList.remove('active');
       formJoin.style.display = 'block';
+      cancelSurfaceMotion(formHost);
+      animateEnter(formJoin, 'panel');
       formHost.style.display = 'none';
       this.hideError();
       void this.syncLanDiscoveryForActiveTab();
@@ -1418,6 +1424,8 @@ export class ConnectionView {
       tabHost.classList.add('active');
       tabJoin?.classList.remove('active');
       formHost.style.display = 'block';
+      cancelSurfaceMotion(formJoin);
+      animateEnter(formHost, 'panel');
       formJoin.style.display = 'none';
       this.hideError();
       void this.syncLanDiscoveryForActiveTab();
@@ -1425,7 +1433,7 @@ export class ConnectionView {
 
     btnSelectAvatar?.addEventListener('click', async (e) => {
       e.preventDefault();
-      const croppedAvatar = await pickAndCropImage();
+      const croppedAvatar = await pickAndCropImage(e.currentTarget as HTMLElement);
       if (croppedAvatar) {
         this.selectedAvatarBase64 = croppedAvatar;
         const img = document.getElementById('avatar-preview') as HTMLImageElement;
@@ -1443,7 +1451,7 @@ export class ConnectionView {
     const limitToggle = document.getElementById('host-limit-members') as HTMLInputElement | null;
     const limitGroup = document.getElementById('host-max-users-group') as HTMLElement | null;
     limitToggle?.addEventListener('change', () => {
-      if (limitGroup) limitGroup.hidden = !limitToggle.checked;
+      if (limitGroup) setSurfaceVisible(limitGroup, limitToggle.checked);
     });
 
     formHost?.addEventListener('submit', async (e) => {
@@ -1569,7 +1577,7 @@ export class ConnectionView {
 
     const close = () => {
       document.removeEventListener('keydown', onKey, true);
-      backdrop.remove();
+      exitModal(backdrop);
     };
 
     const save = () => {
@@ -1599,7 +1607,7 @@ export class ConnectionView {
     };
 
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') { e.preventDefault(); close(); }
+      if (e.key === 'Escape' && handlesModalKey(backdrop, e)) { e.preventDefault(); close(); }
       if (e.key === 'Enter') { e.preventDefault(); save(); }
     };
 
@@ -1609,6 +1617,7 @@ export class ConnectionView {
     document.addEventListener('keydown', onKey, true);
 
     document.body.appendChild(backdrop);
+    enterModal(backdrop);
     (backdrop.querySelector('#edit-srv-name') as HTMLInputElement)?.focus();
   }
 }

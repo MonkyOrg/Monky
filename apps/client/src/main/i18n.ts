@@ -13,6 +13,9 @@ export type MainLanguage = 'pt-BR' | 'en';
 
 const CATALOGS = {
   'pt-BR': {
+    'calendar.save': 'Exportar evento para calendário',
+    'calendar.filter': 'Calendário iCalendar',
+    'calendar.failed': 'Não foi possível salvar o evento no calendário.',
     'screenShare.ownWindowAudioUnavailable': 'A janela do Monky só pode ser compartilhada sem áudio, para evitar eco da chamada.',
     'screenShare.overlayWindowUnavailable': 'A janela de sobreposição não pode ser compartilhada. Selecione outra janela.',
     'crash.title': 'Ops! O Monky encontrou uma falha',
@@ -42,6 +45,7 @@ const CATALOGS = {
     'crash.fieldError': 'Erro',
     'crash.fieldSource': 'Origem',
     'dialog.selectProfilePhoto': 'Selecionar Foto de Perfil',
+    'dialog.selectImages': 'Selecionar imagens',
     'dialog.selectSoundFile': 'Selecionar Arquivo de Som',
     'dialog.saveBackup': 'Salvar backup do Monky',
     'dialog.openBackup': 'Abrir backup do Monky',
@@ -182,6 +186,9 @@ const CATALOGS = {
     'tray.quit': 'Fechar Monky',
   },
   en: {
+    'calendar.save': 'Export event to calendar',
+    'calendar.filter': 'iCalendar calendar',
+    'calendar.failed': 'Could not save the event to a calendar.',
     'screenShare.ownWindowAudioUnavailable': 'Monky windows can only be shared without audio to prevent call feedback.',
     'screenShare.overlayWindowUnavailable': 'The overlay window cannot be shared. Select another window.',
     'crash.title': 'Oops! Monky ran into a problem',
@@ -211,6 +218,7 @@ const CATALOGS = {
     'crash.fieldError': 'Error',
     'crash.fieldSource': 'Source',
     'dialog.selectProfilePhoto': 'Select Profile Picture',
+    'dialog.selectImages': 'Select images',
     'dialog.selectSoundFile': 'Select Sound File',
     'dialog.saveBackup': 'Save Monky backup',
     'dialog.openBackup': 'Open Monky backup',

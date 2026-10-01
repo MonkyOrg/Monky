@@ -13,6 +13,7 @@ import { getActiveServerStore, type ServerStore } from '../stores/serverStore';
 import { settingsStore } from '../stores/settingsStore';
 import { getLanguage, SUPPORTED_LANGUAGES, t } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { renderLoadingIndicator } from '../utils/loadingIndicator';
 import { getAvatarUrl } from '../utils/avatar';
 import { enableBackdropClose } from '../utils/modal';
@@ -362,6 +363,7 @@ export class BotSettingsModal {
 
   private render(): void {
     if (!this.root || !this.session) return;
+    const opening = this.root.childElementCount === 0;
     const focused = document.activeElement instanceof HTMLElement && this.root.contains(document.activeElement)
       ? document.activeElement : null;
     const selection = focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement
@@ -462,9 +464,10 @@ export class BotSettingsModal {
       </div>
       </div>
     </div>`;
+    if (opening) enterModal(this.root);
     this.sectionNavigation = new SettingsSectionNavigation(this.root);
     this.sectionNavigation.setTab(snapshot ? this.scope : 'catalog');
-    const restored = focused?.id ? document.getElementById(focused.id) : null;
+    const restored = focused?.id ? this.root?.querySelector<HTMLElement>(`#${CSS.escape(focused.id)}`) : null;
     if (restored && this.root.contains(restored)) {
       restored.focus({ preventScroll: true });
       if (selection?.start !== null && selection?.start !== undefined && selection.end !== null &&
@@ -701,7 +704,7 @@ export class BotSettingsModal {
 
   private onKeyDown = (event: KeyboardEvent): void => {
     if (!this.root || event.defaultPrevented) return;
-    if ([...document.querySelectorAll('.modal-backdrop')].filter((element) => element.getClientRects().length).at(-1) !== this.root) return;
+    if (!handlesModalKey(this.root, event)) return;
     if (event.key === 'Escape') { event.preventDefault(); this.close(); return; }
     const target = event.target instanceof Element ? event.target : null;
     const tab = target?.closest<HTMLButtonElement>('button[data-settings-scope]');
@@ -744,7 +747,7 @@ export class BotSettingsModal {
     this.pending.clear();
     this.unbind.forEach((unbind) => unbind());
     this.unbind = [];
-    if (this.root) { audioPreviewService.release(this.root); this.root.remove(); }
+    if (this.root) { audioPreviewService.release(this.root); exitModal(this.root); }
     this.root = null;
     this.session = null;
     this.snapshot = null;

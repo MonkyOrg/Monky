@@ -1,8 +1,10 @@
 import { escapeHtml } from '../../../utils/html';
+import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import { getAvatarUrl } from '../../../utils/avatar';
 import { serverStore } from '../../../stores/serverStore';
 import { t } from '../../../i18n';
-import { LIMITS } from '@monky/shared';
+import { LIMITS, Permission } from '@monky/shared';
+import type { ServerCommunitySettings } from '../ServerCommunitySettings';
 import { bindVersionCopyButton, renderVersionCopyButton } from '../../VersionCopyButton';
 import logoUrl from '../../../assets/Logo.png';
 import {
@@ -24,7 +26,7 @@ export class ServerGeneralTab {
     return Math.max(serverStore.knownMembers.size, new Set(s.members.map((m) => m.id)).size);
   }
 
-  public renderHtml(): string {
+  public renderHtml(community: ServerCommunitySettings | null = null): string {
     const s = serverStore.serverDetails;
     if (!s) return '';
 
@@ -37,18 +39,9 @@ export class ServerGeneralTab {
     const iconSrc = s.iconUrl ? getAvatarUrl(s.iconUrl) : logoUrl;
 
     return `
-      <div data-settings-section="message-limit" data-settings-label="${escapeHtml(t('serverSettings.messageLimit'))}" class="form-group">
-        <label class="toggle-switch" aria-label="${t('serverSettings.messageLimit')}">
-          <input id="toggle-message-limit" type="checkbox" ${(s.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH) > 0 ? 'checked' : ''}
-            ${s.protocol?.features.includes('message-length-setting') ? '' : 'disabled'}>
-          <span class="toggle-slider"></span>
-        </label>
-        <label for="input-message-limit">${t('serverSettings.messageLimit')}</label>
-        <input id="input-message-limit" type="number" min="1" step="1" value="${s.maxMessageLength || LIMITS.MAX_MESSAGE_LENGTH}"
-          ${s.protocol?.features.includes('message-length-setting') && s.maxMessageLength !== 0 ? '' : 'disabled'}>
-        <small>${t(s.protocol?.features.includes('message-length-setting') ? 'serverSettings.messageLimitHint' : 'chat.featureUpdateRequired')}</small>
-      </div>
-      <div data-settings-section="server-profile" data-settings-label="${escapeHtml(t('serverSettings.nameLabel'))}" style="display: flex; gap: 16px; align-items: center; padding: 14px; background: var(--bg-card); border-radius: var(--radius-md); margin-bottom: 16px; border: 1px solid var(--border-color);">
+      <fieldset class="server-settings-fieldset" data-server-permission="${Permission.MANAGE_SERVER}">
+      <div data-settings-section="server-profile" data-settings-label="${escapeHtml(t('serverSettings.nameLabel'))}" style="padding: 14px; background: var(--bg-card); border-radius: var(--radius-md); margin-bottom: 16px; border: 1px solid var(--border-color);">
+        <div style="display: flex; gap: 16px; align-items: center;">
         <button type="button" id="server-icon-wrapper" class="settings-avatar-wrapper" style="border-radius: 12px; width: 64px; height: 64px; padding: 0; border: 0; flex-shrink: 0;" title="${t('serverSettings.iconTitle')}">
           <img id="server-icon-preview" class="settings-avatar-img" style="border-radius: 10px; width: 64px; height: 64px; object-fit: cover;" src="${iconSrc}" alt="${t('serverSettings.iconAlt')}">
           <div class="settings-avatar-overlay" style="border-radius: 10px;">
@@ -66,8 +59,27 @@ export class ServerGeneralTab {
             </div>
           </div>
         </div>
+        </div>
+        ${community?.renderBannerHtml() ?? ''}
       </div>
+      </fieldset>
 
+      ${community?.renderEventsHtml() ?? ''}
+
+      <fieldset class="server-settings-fieldset" data-server-permission="${Permission.MANAGE_SERVER}">
+      <div data-settings-section="message-limit" data-settings-label="${escapeHtml(t('serverSettings.messageLimit'))}" class="form-group">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+          <label for="input-message-limit">${t('serverSettings.messageLimit')}</label>
+          <label class="toggle-switch" aria-label="${t('serverSettings.messageLimit')}">
+            <input id="toggle-message-limit" type="checkbox" ${(s.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH) > 0 ? 'checked' : ''}
+              ${s.protocol?.features.includes('message-length-setting') ? '' : 'disabled'}>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <input id="input-message-limit" type="number" min="1" step="1" value="${s.maxMessageLength || LIMITS.MAX_MESSAGE_LENGTH}"
+          ${s.protocol?.features.includes('message-length-setting') && s.maxMessageLength !== 0 ? '' : 'disabled'}>
+        <small>${t(s.protocol?.features.includes('message-length-setting') ? 'serverSettings.messageLimitHint' : 'chat.featureUpdateRequired')}</small>
+      </div>
       <div data-settings-section="member-limit" data-settings-label="${escapeHtml(t('serverSettings.memberLimitLabel'))}" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px; margin-bottom: 16px;">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
           <div>
@@ -137,6 +149,7 @@ export class ServerGeneralTab {
           <div style="grid-column: span 2; font-size: 11px; color: var(--text-muted); word-break: break-all;"><strong>ID:</strong> ${s.id}</div>
         </div>
       </div>
+      </fieldset>
     `;
   }
 
@@ -155,7 +168,7 @@ export class ServerGeneralTab {
     const group = root.querySelector('#max-users-group') as HTMLElement | null;
 
     const sync = () => {
-      if (toggle && group) group.hidden = !toggle.checked;
+      if (toggle && group) setSurfaceVisible(group, toggle.checked);
     };
     if (toggle && group) {
       toggle.addEventListener('change', sync);

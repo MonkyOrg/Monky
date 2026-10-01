@@ -30,6 +30,8 @@ import { exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, 
 import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';
 import { HostServerOptions, ServerManager } from './serverManager';
 import { mt, setMainLanguage } from './i18n';
+import { setupEventCalendarIpc } from './serverEventCalendarIpc';
+import { setupRecentSoundSaveIpc } from './recentSoundSaveIpc';
 import { fetchLinkPreview } from './linkPreview';
 import { TrayManager, VoiceStatus } from './trayManager';
 import type { DesktopSource, IpcInvokeChannels, OverlayBounds, OverlayConfig, OverlaySignalPayload, OverlaySyncState } from '@monky/shared';
@@ -381,6 +383,8 @@ export function setupIpcHandlers(
   });
   const disposeSoundboardFiles = setupSoundboardFilesIpc(mainWindow, new SoundboardFiles(soundDownloads, soundboardEncoder));
   const disposeEditorCommands = setupEditorCommands(mainWindow);
+  const disposeEventCalendar = setupEventCalendarIpc(mainWindow, sanitizeDownloadFileName);
+  const disposeRecentSoundSave = setupRecentSoundSaveIpc(mainWindow, sanitizeDownloadFileName);
   ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, async (event): Promise<string | null> => {
     if (!ownsSoundDownload(event)) throw new Error(mt('error.defaultSoundboardFolder'));
     try {
@@ -808,6 +812,28 @@ export function setupIpcHandlers(
       mimeType: mime,
       base64: `data:${mime};base64,${base64}`,
     };
+  });
+
+  ipcMain.handle('dialog:select-images', async (_event, maxFiles: number) => {
+    const limit = Math.min(5, Math.max(1, Number.isInteger(maxFiles) ? maxFiles : 1));
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: mt('dialog.selectImages'),
+      filters: [
+        { name: 'Imagens (PNG, JPG, WebP)', extensions: ['png', 'jpg', 'jpeg', 'webp'] },
+      ],
+      properties: ['openFile', 'multiSelections'],
+    });
+    if (result.canceled || result.filePaths.length === 0) return [];
+    return Promise.all(result.filePaths.slice(0, limit).map(async filePath => {
+      const buffer = await fs.promises.readFile(filePath);
+      const ext = path.extname(filePath).toLowerCase().replace('.', '');
+      const mime = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`;
+      return {
+        fileName: path.basename(filePath),
+        mimeType: mime,
+        base64: `data:${mime};base64,${buffer.toString('base64')}`,
+      };
+    }));
   });
 
   // Custom sound file selection (#7)
@@ -1278,6 +1304,28 @@ export function setupIpcHandlers(
     }
   });
 
+  ipcMain.handle('app:save-csv-file', async (_, content: string, fileName: string) => {
+    try {
+      if (typeof content !== 'string' || Buffer.byteLength(content, 'utf8') > 128 * 1024 * 1024) {
+        return { success: false, error: 'Invalid CSV content' };
+      }
+      const safeName = sanitizeDownloadFileName(fileName || 'responses.csv');
+      const suggestedName = safeName.toLowerCase().endsWith('.csv') ? safeName : `${safeName}.csv`;
+      const saveResult = await dialog.showSaveDialog(mainWindow, {
+        defaultPath: path.join(app.getPath('downloads'), suggestedName),
+        filters: [{ name: 'CSV', extensions: ['csv'] }],
+      });
+      if (saveResult.canceled || !saveResult.filePath) return { success: false };
+      await fs.promises.writeFile(saveResult.filePath, content, 'utf8');
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
+    }
+  });
+
   // TCP reachability probe (#37): distinguishes an unreachable host (offline)
   // from a reachable host whose port refuses the connection (server closed).
   ipcMain.handle('net:probe-server', async (_, host: string, port: number) => {
@@ -1440,7 +1488,10 @@ export function setupIpcHandlers(
     for (const channel of Object.values(SOUND_DOWNLOAD_IPC)) ipcMain.removeHandler(channel);
     disposeSoundboardFiles();
     disposeEditorCommands();
+    disposeEventCalendar();
+    disposeRecentSoundSave();
     for (const channel of Object.values(AUDIO_PREVIEW_IPC)) ipcMain.removeHandler(channel);
+    ipcMain.removeHandler('app:save-csv-file');
     clearAudioBufferAccumulator();
     // Recovery keeps Main alive after the renderer is retired (#454).
     try { screenAudio?.stop(); } catch (error: unknown) {

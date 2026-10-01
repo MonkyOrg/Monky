@@ -1532,7 +1532,7 @@ async function setupNavigationFavoritesSmoke() {
         await tick();
         check(sessions.isHome(), 'Cancelling review leaves Home and existing sessions untouched');
         preserveVoice(before, call, 'Cancelled invitation');
-        const invite = { v: 1, host: 'invited.test', port: 4600, name: '\ufeff<Fixture name>', password: '\ufeff Exact 🐵 password ' };
+        const invite = { v: 1, host: 'invited.test', port: 4600, name: '\ufeff<Fixture name>', password: '\ufeff Exact 🐵 password ', eventId: 'shared-event' };
         const decodedInvite = parseServerInviteLink(createServerInviteLink(invite));
         check(decodedInvite.ok, 'The compact link retains the complete invitation');
         const opening = joinInviteModal.open(decodedInvite.invite);
@@ -1545,6 +1545,7 @@ async function setupNavigationFavoritesSmoke() {
         submit();
         check(await opening, 'Explicit confirmation joins the invited server');
         const added = sessions.get(sessionKeyFor(invite.host, invite.port));
+        equal(added.community.takeEventRequest(), invite.eventId, 'Event destination is queued only on the invited session after confirmation');
         equal(added.client.fixtureNickname, 'Renamed identity', 'Authentication uses the current profile name, not an old field or another server alias');
         equal(profileSaves, savesBeforeJoin, 'An invitation does not rewrite a configured identity profile');
         equal(added.password, invite.password, 'Connection receives the exact invitation password');

@@ -6,9 +6,54 @@ to a server and joining a call are separate actions.
 
 <AppScreenshot src="/screenshots/conversa-en.png" alt="A demo conversation with servers and channels on the left, messages in the center and members on the right." caption="Windows client capture using demo data. The names, conversation and bot were created for this guide." />
 
+## Channels and categories
+
+People allowed to manage channels can drag channels to reorder them or move them
+between categories, and drag category headers to reorder the categories
+themselves. While dragging, the destination category gets the same dashed
+highlight used when moving participants between voice channels. This outline
+appears only over the category name; over channels, a line marks the exact
+position. Collapsed categories also accept the channel. To remove it from a
+category, drag it to **Uncategorized**, which appears at the top and pushes the
+categories down.
+
+## Forums
+
+Forums organize conversations into threads. Use search and the sorting control
+to find discussions by recent activity, newest creation date, or oldest
+creation date. When there are no threads yet, the forum only invites someone
+to start the first conversation.
+
+The top field searches threads as you type. While it is focused,
+**Shift + Enter** opens a new post and reuses the text as its title. During
+creation, photos and videos have a dedicated picker that blocks other formats,
+accepts up to five media items, and shows a compact carousel preview. Focus
+moves directly to the message without enlarging the search field. The file
+picker accepts any attachment, including photos and videos, and shows compact
+cards with their name, format, and size before publishing.
+When multiple media items are published, the first message keeps the carousel
+instead of displaying each item separately.
+Large forums load threads in batches as you approach the end of the list and
+show skeleton cards during each load.
+
+Authors can rename, close, reopen, or delete their own threads. Closing stops
+new replies but remains an author action. People allowed to manage channels can
+pin, lock, unlock, rename, or delete threads; an administrative lock is
+separate from an author closure. In both states, the composer becomes read-only
+and explains why in its placeholder without an additional warning.
+
 ## Voice
 
 Click a **voice channel** to join the call. Whoever speaks gets a green ring around the avatar. The bottom bar has microphone, headphones/deafen and disconnect. The panel shows average ping and lets you leave only the call.
+
+Every voice channel also has persistent chat. Hover the channel row and use the
+round speech-bubble button beside the three-dot menu to open the stage and
+right-side chat without joining the call. On the stage, the same button in the
+top-right corner uses the filled bubble and shows or hides the panel. Drag the
+chat's left edge to resize it; the chosen width is remembered. Messages,
+attachments, reactions,
+polls, mentions, and search remain available even while you are not connected
+to voice.
 
 Right-click a participant to adjust their individual volume. The setting applies only on this computer and to that device: if the same person is connected from two machines, each one gets its own volume.
 
@@ -90,6 +135,64 @@ from the same person appear separately. It refreshes approximately every two
 seconds; failed requests show an unavailable state rather than a stale count.
 The local preview is not counted as a viewer.
 
+## Events
+
+When creating or editing an event, you can click or drag up to **5 images** at
+once. Each image goes through the 5:2 cropper and can be browsed, reordered, or
+removed in the same editor. The first one is the compact cover in lists; the
+full carousel appears only in event details. The sidebar shortcut reports event
+status without repeating banners or images. In the list, click any free area of
+an event card to open its details; the ellipsis menu groups editing, ending, and
+the remaining management actions.
+
+Start and end are required and displayed together; the time zone remains under
+secondary options. Advancing with an invalid value shows a toast, highlights
+the corresponding field, and moves focus to it. Forums can host events, but
+threads are not offered as location channels. Enabling private visibility
+scrolls to **Who can access** without opening the list automatically.
+
+## Live Actions
+
+Events are calendar commitments with a date, time, location, and interested
+members. **Live Actions** are temporary interactions happening now. Their
+shortcuts are independent and appear only to people who can view or manage
+their content.
+
+People with **Emit live actions** can open **Live Actions → Create Live Action**
+and choose:
+
+- **Poll**, using the native poll flow and always published as a Live Action;
+- **Form**, with short text, long text, number, yes/no switch, single-choice,
+  multiple-choice, dropdown, and 1–5 rating fields. Each question has its own
+  card; choices use radio or checkbox lists. Choices are added or removed as
+  individual rows.
+
+A multiple-choice answer may contain several valid, non-duplicated choices.
+A form belongs to a text channel and accepts one response per person.
+Forum threads are not publication channels, so they do not offer poll, event,
+or form creation.
+Before publishing, the creator can enable **Anonymous responses**. In this mode, names,
+avatars, and timestamps are never sent to results screens or CSV; the server
+keeps the internal association only to prevent a second response and let the
+participant edit their own submission. This setting cannot change after
+publishing. While it
+is open, participants can reopen it and edit their own response. Only its
+creator or people with **Emit live actions** can view results and close the
+action. These controls live in the action card's ellipsis menu instead of the
+response form; when the form is not anonymous, the results view also identifies participants.
+The results screen offers **Summary**, **Question**, and
+**Individual** views. Summary and Question use donut or bar charts when the
+answer type supports a distribution; the last view reuses the form in read-only
+mode. Text answers in Summary use an internally scrollable, progressively
+loaded list. In **Question**, answers are paginated and can open the corresponding
+individual submission; repeated values provide a selector for choosing which
+submission to open. All responses can also be exported as CSV. Closed forms disappear from the list and their data is
+removed from the server after 30 days.
+
+Polls, forms, and bot actions share the aggregated Live Actions list. Images and
+carousels appear in details, never in the sidebar. Giveaways remain a bot
+action, not a native creator type.
+
 ## Chat
 
 Each text channel has history saved on the server, avatars, timestamps, basic formatting and an anti-flood limit of 10 messages every 5 seconds.
@@ -110,6 +213,22 @@ is needed.
 
 A message you started but haven't sent stays with the channel you were typing in. Jumping to the voice stage, opening another channel and coming back does not wipe the text — each channel keeps its own draft, which only goes away when you send the message or leave the server.
 
+The **+** button opens composer actions. **Attach file** keeps the existing upload
+flow; **Create poll** opens a three-step flow for the question, 2–10 answers with
+an optional emoji each, up to 5 carousel images selectable at once with an
+animated preview, navigation and reordering, and a duration and/or voter
+limit. A poll can allow one answer or several; in the latter case, each person
+confirms any number of answers together, including all of them. The vote may be
+changed until closure. The first reached limit closes the poll, while its
+message retains final counts and percentages.
+
+People with **Emit live actions** may also highlight the same poll above the
+channels. The message and live action are two surfaces for one resource: a vote
+cast from either appears in both without duplication. Without that permission,
+the switch remains visible with an explanation and the regular poll can still
+be sent.
+Images remain visible in the message even when the poll is not a live action.
+
 Hover over a message (or reach its buttons with `Tab`) to reveal a floating toolbar with **Emoji**, **Reply**, **Copy message** and **More options**. The three-dot menu displays full action names; **Edit message** is only available to the author when the server permits editing, and **Delete message** to the author or moderators. Navigate menus with arrow keys and close them with `Escape`.
 
 After deleting a message, **Undo** restores the same message, including its blocks, attachments and reactions, for **60 seconds** by default. Switching channels or reconnecting does not cancel the server-controlled time window. Only the person who deleted it can undo; restoring someone else's message still requires moderation permission. Authors cannot reverse a moderator's deletion. Reply references show the restored message again without creating another message or repeating mention notifications.
@@ -128,7 +247,7 @@ Right-click the message field for **Cut**, **Copy**, **Paste**, **Paste as plain
 
 Clicking outside closes the menu, including clicks inside the message field or code editor. **Cut**, **Copy** and **Copy link** display brief confirmation feedback. In the link form, addresses such as `www.google.com` or `example.com` automatically use HTTPS when the scheme is omitted; an explicit `http://` is preserved.
 
-**Formatting options**, beside the emoji button, opens an inline toolbar. **Bold**, **italic**, and **strike** are toggles: without a selection, they enable or disable the effect for subsequent typing; with a selection, they change formatting without inserting placeholder text. `Ctrl+B` and `Ctrl+I` also work. Dividers group these controls and the lists. Lists and quotes can format existing lines or start in an empty field, with the caret after their marker. The link button opens a non-modal form above the button with **Text to display** and **Address**, prefilling the first field from the selection. Errors appear only after attempting to insert; `Escape` or clicking outside closes the form. `Escape` collapses the toolbar. The paperclip opens attachments. `Enter` sends or saves; `Shift+Enter` inserts a line and continues lists. Inside the code editor, `Enter` inserts a line and `Ctrl+Enter` (`Cmd+Enter` on macOS) sends or saves. Blank lines between passages are preserved in sent messages and copied text, just as in the preview.
+**Formatting options**, beside the emoji button, opens an inline toolbar. **Bold**, **italic**, and **strike** are toggles: without a selection, they enable or disable the effect for subsequent typing; with a selection, they change formatting without inserting placeholder text. `Ctrl+B` and `Ctrl+I` also work. Dividers group these controls and the lists. Lists and quotes can format existing lines or start in an empty field, with the caret after their marker. The link button opens a non-modal form above the button with **Text to display** and **Address**, prefilling the first field from the selection. Errors appear only after attempting to insert; `Escape` or clicking outside closes the form. `Escape` collapses the toolbar. The **+** menu groups attachments and polls. `Enter` sends or saves; `Shift+Enter` inserts a line and continues lists. Inside the code editor, `Enter` inserts a line and `Ctrl+Enter` (`Cmd+Enter` on macOS) sends or saves. Blank lines between passages are preserved in sent messages and copied text, just as in the preview.
 
 To copy the **image**, rather than its file name or address, use **Copy image**
 in the attachment controls or its right-click menu. Sticker menus also offer

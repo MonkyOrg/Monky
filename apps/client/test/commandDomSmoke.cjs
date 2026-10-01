@@ -43,6 +43,7 @@ if (!process.versions.electron) {
     vite = await createServer({
       configFile: path.join(clientRoot, 'vite.config.ts'),
       logLevel: 'error',
+      cacheDir: path.join(app.getPath('userData'), 'vite-cache'),
       server: { host: '127.0.0.1', port: 0, strictPort: true, open: false },
       plugins: [{
         name: 'command-dom-fixture',
@@ -127,6 +128,15 @@ if (!process.versions.electron) {
       })()`, true);
       fs.writeFileSync(path.join(output, 'bot-settings.png'), (await window.webContents.capturePage()).toPNG());
       console.log(`Bot settings DOM smoke: ${checks} checks passed`);
+      await finish(0);
+      return;
+    }
+    if (process.argv.includes('--surfaces-only')) {
+      await window.webContents.executeJavaScript(`(${runDomSmoke.toString()})()`, true);
+      const result = await window.webContents.executeJavaScript('window.commandDomCaptureComposer()', true);
+      await runMessageToolbarPointerSmoke(window);
+      await window.webContents.executeJavaScript('window.commandDomCleanup()', true);
+      console.log(`Chat surfaces: ${result.checks} checks plus trusted message toolbar input passed`);
       await finish(0);
       return;
     }
@@ -2230,7 +2240,11 @@ async function runMessageToolbarPointerSmoke(window) {
   window.focus();
   window.webContents.focus();
   const evaluate = code => window.webContents.executeJavaScript(code, true);
-  const wait = () => new Promise(resolve => setTimeout(resolve, 50));
+  const wait = async () => {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await evaluate(`Promise.allSettled([...document.querySelectorAll('[data-ui-closing]')]
+      .flatMap(element => element.getAnimations().map(animation => animation.finished)))`);
+  };
   const row = '.chat-message-row[data-message-id="toolbar-pointer"]';
   const action = name => `${row} [data-message-action="${name}"]`;
   const check = async (expression, message) => {
@@ -3277,8 +3291,11 @@ async function runDomSmoke() {
   ]);
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  const activeAll = selector => [...document.querySelectorAll(selector)].filter(element => !element.closest('[data-ui-closing]'));
+  const active = selector => activeAll(selector)[0] ?? null;
   const find = (selector) => {
-    const element = document.querySelector(selector);
+    const element = [...document.querySelectorAll(selector)].find(element =>
+      !element.closest('.modal-backdrop[data-ui-closing], .floating-context-menu[data-ui-closing], .user-context-menu[data-ui-closing], .emoji-picker[data-ui-closing], .chat-copy-toast[data-ui-closing]'));
     if (!element) throw new Error(`Missing ${selector}`);
     return element;
   };
@@ -3391,17 +3408,17 @@ async function runDomSmoke() {
   const rightClick = element => element.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 150, clientY: 100 }));
   try {
     rightClick(row.querySelector('.chat-author-name'));
-    check(!!document.querySelector('.user-context-menu #ctx-volume-slider'), 'Right-clicking another chat author must open their user menu');
+    check(!!active('.user-context-menu #ctx-volume-slider'), 'Right-clicking another chat author must open their user menu');
     userContextMenu.close();
     server.currentUser = otherCaller;
     rightClick(row.querySelector('.chat-author-name'));
-    check(!!document.querySelector('.user-context-menu [data-action="self-mute"]')
-      && !document.querySelector('.user-context-menu #ctx-volume-slider'), 'Right-clicking own chat name opens manual controls without self volume');
+    check(!!active('.user-context-menu [data-action="self-mute"]')
+      && !active('.user-context-menu #ctx-volume-slider'), 'Right-clicking own chat name opens manual controls without self volume');
     rightClick(row.querySelector('.chat-message-text'));
-    check(!!document.querySelector('.floating-context-menu') && !document.querySelector('.user-context-menu'), 'Message body retains message actions rather than opening the user menu');
+    check(!!active('.floating-context-menu') && !active('.user-context-menu'), 'Message body retains message actions rather than opening the user menu');
     rightClick(row.querySelector('.chat-author-avatar'));
-    check(!!document.querySelector('.user-context-menu [data-action="self-deafen"]')
-      && !document.querySelector('.floating-context-menu'), 'Own chat avatar opens the user menu and closes message actions');
+    check(!!active('.user-context-menu [data-action="self-deafen"]')
+      && !active('.floating-context-menu'), 'Own chat avatar opens the user menu and closes message actions');
   } finally {
     contextMenu.close();
     userContextMenu.close();
@@ -3422,11 +3439,11 @@ async function runDomSmoke() {
   events.appEvents.emit('server.roles_updated');
   check(!find('[data-message-action="emoji"]').disabled && getComputedStyle(find('[data-message-action="emoji"]')).opacity === '1', 'Restoring permission must restore full emoji opacity');
   find('[data-message-action="more"]').click();
-  check(document.querySelectorAll('.floating-context-menu [role="menuitem"]').length === 4, 'Other authors offer emoji, reply, copy and moderator delete but not edit');
+  check(activeAll('.floating-context-menu [role="menuitem"]').length === 4, 'Other authors offer emoji, reply, copy and moderator delete but not edit');
   key(document.activeElement, 'ArrowDown');
   check(document.activeElement.textContent.includes('Responder'), 'Arrow keys must navigate message menu');
   key(document.activeElement, 'Escape');
-  check(!document.querySelector('.floating-context-menu'), 'Escape must close message menu');
+  check(!active('.floating-context-menu'), 'Escape must close message menu');
   check(document.activeElement.dataset.messageAction === 'more', 'Escape must return focus to toolbar');
   const originalWriteText = navigator.clipboard.writeText;
   const originalWrite = navigator.clipboard.write;
@@ -3459,40 +3476,40 @@ async function runDomSmoke() {
     language.setLanguage('en');
     navigator.clipboard.writeText = async (value) => { copiedMessage = value; };
     find('[data-message-action="more"]').click();
-    const menuCopy = [...document.querySelectorAll('.floating-context-menu [role="menuitem"]')]
+    const menuCopy = activeAll('.floating-context-menu [role="menuitem"]')
       .find((button) => button.textContent.includes('Copy message'));
     check(!!menuCopy, 'Message menu must expose its localized copy action');
     menuCopy.querySelector('.context-menu-trailing').click();
-    check(document.querySelectorAll('.floating-context-submenu button').length === 3, 'The Copy arrow exposes all three formatting modes');
+    check(activeAll('.floating-context-submenu button').length === 3, 'The Copy arrow exposes all three formatting modes');
     find('.floating-context-submenu button').click();
     await Promise.resolve();
-    check(!document.querySelector('.floating-context-menu'), 'Copy from menu must close the menu');
+    check(!active('.floating-context-menu'), 'Copy from menu must close the menu');
     check(find('.chat-copy-toast-label').textContent === 'Copied!', 'Menu copy must show the same toast in English');
-    check(document.querySelectorAll('.chat-copy-toast').length === 1, 'Repeated copies must replace the toast instead of stacking');
+    check(activeAll('.chat-copy-toast').length === 1, 'Repeated copies must replace the toast instead of stacking');
     await new Promise((resolve) => setTimeout(resolve, 850));
     check(!!document.querySelector('.chat-copy-toast'), 'Copying again must renew the toast duration');
     await new Promise((resolve) => setTimeout(resolve, 850));
-    check(!document.querySelector('.chat-copy-toast'), 'Copy toast must disappear automatically');
+    check(!active('.chat-copy-toast'), 'Copy toast must disappear automatically');
     check(find('[data-message-action="copy"]').getAttribute('aria-label') === copyLabel, 'Copy action label must remain unchanged after toast dismissal');
     language.setLanguage('pt-BR');
     navigator.clipboard.writeText = async () => { throw new Error('Clipboard denied by fixture'); };
     find('[data-message-action="copy"]').click();
     await Promise.resolve();
-    check(!document.querySelector('.chat-copy-toast'), 'Clipboard failure must never show a success toast');
+    check(!active('.chat-copy-toast'), 'Clipboard failure must never show a success toast');
     check(find('.dialog-message').textContent === 'Não foi possível copiar a mensagem.', 'Clipboard failure must retain localized error feedback');
     find('.dialog-card [data-action="confirm"]').click();
     navigator.clipboard.writeText = async () => {};
     find('[data-message-action="copy"]').click();
     await Promise.resolve();
     view.setChannel('two');
-    check(!document.querySelector('.chat-copy-toast'), 'Changing channels must clean up the active copy toast');
+    check(!active('.chat-copy-toast'), 'Changing channels must clean up the active copy toast');
     view.setChannel('one');
     navigator.clipboard.writeText = () => new Promise((resolve) => { finishCopy = resolve; });
     find('[data-message-action="copy"]').click();
     view.destroy();
     finishCopy();
     await Promise.resolve();
-    check(!document.querySelector('.chat-copy-toast'), 'Clipboard completion after view destruction must not resurrect a toast');
+    check(!active('.chat-copy-toast'), 'Clipboard completion after view destruction must not resurrect a toast');
     view.render();
   } finally {
     navigator.clipboard.writeText = originalWriteText;
@@ -3504,7 +3521,8 @@ async function runDomSmoke() {
   type(find('#chat-message-input'), 'Answer');
   key(find('#chat-message-input'), 'Enter');
   check(sent.at(-1).payload.replyToMessageId === original.id && sent.at(-1).payload.content === 'Answer', 'Composer must send only the selected reply ID with text');
-  check(find('#chat-reply-composer').hidden, 'Sending must clear reply draft');
+  check(find('#chat-reply-composer').hidden || find('#chat-reply-composer').hasAttribute('data-ui-closing'),
+    'Sending must clear reply draft immediately while its surface exits');
   store.addMessage({ ...original, id: 'chat-response', content: 'Answer', createdAt: 2, reply: store.messageReply(original) });
   check(find('[data-reply-target]').textContent.includes('Original <safe>'), 'Reply preview must escape untrusted text');
   find('[data-reply-target]').click();
@@ -3561,7 +3579,7 @@ async function runDomSmoke() {
   check(recentEmojis.get()[0] === selectedEmoji, 'Actual composer selection must persist recency');
   find('.chat-reaction-add').click();
   await frame();
-  check(!!document.querySelector('[data-goto-group="recent"]') && !document.querySelector('.emoji-picker-tabs'), 'Reaction picker must have Recent in its category bar, without redundant tabs');
+  check(!!active('[data-goto-group="recent"]') && !active('.emoji-picker-tabs'), 'Reaction picker must have Recent in its category bar, without redundant tabs');
   checkPickerSearch();
   find('[data-goto-group="recent"]').click();
   check(find('[data-emoji-group="recent"] [data-emoji]').dataset.emoji === selectedEmoji, 'Reaction picker must share composer recency');
@@ -3578,7 +3596,7 @@ async function runDomSmoke() {
   contextMenu.open(10, 10, [{ label: 'Test', onClick() {} }]);
   contextMenu.close();
   await new Promise((resolve) => setTimeout(resolve, 20));
-  check(!document.querySelector('.floating-context-menu'), 'Immediate menu teardown must stay closed');
+  check(!active('.floating-context-menu'), 'Immediate menu teardown must stay closed');
   const [{ VoiceVideoTab }, { settingsStore: voiceSettings }, { voiceStore: voiceState }, pttIndicators] = await Promise.all([
     import('/views/settings/tabs/VoiceVideoTab.ts'), import('/stores/settingsStore.ts'),
     import('/stores/voiceStore.ts'), import('/views/PttIndicator.ts'),
@@ -3613,7 +3631,8 @@ async function runDomSmoke() {
     check(indicators.every((indicator) => indicator.hidden), 'VAD mode must not show a PTT badge');
     pttCard.click();
     check(voiceSettings.inputMode === 'push_to_talk' && pttCard.getAttribute('aria-pressed') === 'true' && vadCard.getAttribute('aria-pressed') === 'false', 'Selecting the PTT card must persist one exclusive mode');
-    check(voicePanel.querySelector('#container-vad-settings').style.display === 'none' && voicePanel.querySelector('#container-ptt-settings').style.display === 'block', 'Input cards must switch their settings panels');
+    check(voicePanel.querySelector('#container-vad-settings').hasAttribute('data-ui-closing')
+      && !voicePanel.querySelector('#container-ptt-settings').hidden, 'Input cards must switch their settings panels');
     check(indicators.every((indicator) => !indicator.hidden && indicator.dataset.state === 'inactive'), 'PTT enabled outside a call must remain visible without claiming an open microphone');
     voiceState.currentVoiceChannelId = 'ptt-fixture';
     events.appEvents.emit('voice.channel_changed', 'ptt-fixture');
@@ -3758,7 +3777,7 @@ async function runDomSmoke() {
     check(!!find('#input-channel-bot-commands').closest('.toggle-switch'), 'Channel bot setting must use the established toggle switch');
     find('#input-channel-bot-commands').checked = false;
     find('input[name="channel-type"][value="VOICE"]').click();
-    check(find('#channel-bot-commands-group').hidden, 'Voice channels must hide the text-only bot setting');
+    check(find('#channel-bot-commands-group').hidden || find('#channel-bot-commands-group').hasAttribute('data-ui-closing'), 'Voice channels must hide the text-only bot setting');
     find('input[name="channel-type"][value="TEXT"]').click();
     check(!find('#channel-bot-commands-group').hidden && !find('#input-channel-bot-commands').checked, 'Switching channel type must preserve the chosen bot setting');
     type(find('#input-channel-name'), 'channel-test');
@@ -3913,10 +3932,10 @@ async function runDomSmoke() {
     'Completed required parameters must enable command execution visually');
   countInput.setSelectionRange(0, 0);
   key(countInput, 'ArrowRight');
-  check(find('#bot-parameter-options').hidden, 'ArrowRight inside text must not open optional parameters early');
+  check(find('#bot-parameter-options').hidden || find('#bot-parameter-options').hasAttribute('data-ui-closing'), 'ArrowRight inside text must not open optional parameters early');
   countInput.setSelectionRange(countInput.value.length, countInput.value.length);
   countInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', isComposing: true, bubbles: true, cancelable: true }));
-  check(find('#bot-parameter-options').hidden, 'IME ArrowRight must not open optional parameters');
+  check(find('#bot-parameter-options').hidden || find('#bot-parameter-options').hasAttribute('data-ui-closing'), 'IME ArrowRight must not open optional parameters');
   key(countInput, 'ArrowRight');
   check(!find('#bot-parameter-options').hidden, 'ArrowRight at the end of the last parameter must open optional parameters');
   key(find('[data-bot-action="optional-parameters"]'), 'Enter');
@@ -3956,7 +3975,7 @@ async function runDomSmoke() {
   key(find('[data-bot-choice="mode"]'), 'ArrowDown');
   key(find('[data-bot-choice="mode"]'), 'Enter');
   check(store.getCommandDraft('one').values.mode === 'shuffle', 'Choice must keep declared value, not label');
-  check(find('#bot-parameter-options').hidden, 'Choosing an option must close its list');
+  check(find('#bot-parameter-options').hidden || find('#bot-parameter-options').hasAttribute('data-ui-closing'), 'Choosing an option must close its list');
   const typing = find('#chat-command-composer [data-field-name="song"] [data-bot-input]');
   typing.focus();
   typing.setSelectionRange(4, 12, 'backward');

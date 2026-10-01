@@ -9,7 +9,8 @@ const screenStageOnly = process.argv.includes('--screen-stage');
 const screenAudienceOnly = process.argv.includes('--screen-audience');
 const overlayWindowOnly = process.argv.includes('--overlay-window');
 const displayPlacementOnly = process.argv.includes('--verify-display-placement');
-if ([releaseNotesOnly, qualitySettingsOnly, screenStageOnly, screenAudienceOnly, overlayWindowOnly, displayPlacementOnly].filter(Boolean).length > 1)
+const navigationOnly = process.argv.includes('--navigation-only');
+if ([releaseNotesOnly, qualitySettingsOnly, screenStageOnly, screenAudienceOnly, overlayWindowOnly, displayPlacementOnly, navigationOnly].filter(Boolean).length > 1)
   throw new Error('Choose one targeted UI smoke.');
 
 if (!process.versions.electron) {
@@ -44,7 +45,9 @@ if (!process.versions.electron) {
       await finish(0);
       return;
     }
-    const placement = require('./fixtures/testDisplay.cjs').installTestDisplay({ app, screen, BrowserWindow });
+    const placement = navigationOnly
+      ? null
+      : require('./fixtures/testDisplay.cjs').installTestDisplay({ app, screen, BrowserWindow });
     const { createServer } = await import('vite');
     vite = await createServer({
       configFile: path.join(clientRoot, 'vite.config.ts'), logLevel: 'error',
@@ -187,7 +190,8 @@ if (!process.versions.electron) {
           window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
           window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
           if (!await evaluate(`new Promise(resolve => requestAnimationFrame(() =>
-            resolve(!document.querySelector('.stage-viewers-popup').matches(':popover-open')
+            resolve((document.querySelector('.stage-viewers-popup').hasAttribute('data-ui-closing')
+              || !document.querySelector('.stage-viewers-popup').matches(':popover-open'))
               && document.activeElement.matches('.stage-viewers-button'))))`))
             throw new Error('Escape must close the viewer list and restore trigger focus');
           checks += 2;
@@ -231,6 +235,10 @@ if (!process.versions.electron) {
     }
     const checks = await evaluate(`(${runSettingsNavigationSmoke.toString()})()`);
     console.log(`Settings navigation and emoji scrolling: ${checks} checks passed`);
+    if (navigationOnly) {
+      await finish(0);
+      return;
+    }
     for (const kind of ['app', 'server']) {
       await evaluate(`(() => {
         const preview = window.settingsPreviews.${kind};

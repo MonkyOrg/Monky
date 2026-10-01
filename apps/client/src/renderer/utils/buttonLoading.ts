@@ -11,11 +11,17 @@ export function setButtonLoading(btn: HTMLElement | null, loading: boolean): voi
   const el = btn as HTMLButtonElement;
 
   if (loading) {
+    if (el.dataset.loading === '1') return;
+    el.dataset.loadingWasDisabled = String(el.hasAttribute('disabled'));
     el.dataset.loading = '1';
+    el.setAttribute('aria-busy', 'true');
     el.setAttribute('disabled', 'true');
   } else {
+    const wasDisabled = el.dataset.loadingWasDisabled === 'true';
     delete el.dataset.loading;
-    el.removeAttribute('disabled');
+    delete el.dataset.loadingWasDisabled;
+    el.removeAttribute('aria-busy');
+    if (!wasDisabled) el.removeAttribute('disabled');
   }
 }
 
@@ -28,15 +34,47 @@ export function isButtonLoading(btn: HTMLElement | null): boolean {
  * triggering button until the modal is actually open (i.e. until the promise
  * resolves) (#48).
  */
-export async function withButtonLoading(
+export async function withButtonLoading<T>(
   btn: HTMLElement | null,
-  action: () => void | Promise<void>
-): Promise<void> {
-  if (!btn || isButtonLoading(btn)) return;
+  action: () => T | Promise<T>
+): Promise<T | undefined> {
+  if (!btn || isButtonLoading(btn)) return undefined;
   setButtonLoading(btn, true);
   try {
-    await action();
+    return await action();
   } finally {
     setButtonLoading(btn, false);
+  }
+}
+
+/**
+ * Opens a browser-backed native file picker and keeps its visible trigger busy
+ * until Chromium reports selection/cancellation or the app regains focus.
+ */
+export function openFileInputPicker(input: HTMLInputElement | null, trigger: HTMLElement | null): void {
+  if (!input || !trigger || isButtonLoading(trigger)) return;
+  setButtonLoading(trigger, true);
+  let settled = false;
+  let focusTimer: number | null = null;
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    if (focusTimer !== null) window.clearTimeout(focusTimer);
+    input.removeEventListener('change', settle);
+    input.removeEventListener('cancel', settle);
+    window.removeEventListener('focus', onFocus);
+    setButtonLoading(trigger, false);
+  };
+  const onFocus = () => {
+    focusTimer = window.setTimeout(settle, 0);
+  };
+  input.addEventListener('change', settle, { once: true });
+  input.addEventListener('cancel', settle, { once: true });
+  window.addEventListener('focus', onFocus, { once: true });
+  try {
+    input.click();
+  } catch (error) {
+    settle();
+    throw error;
   }
 }

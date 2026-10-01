@@ -408,6 +408,8 @@ export const en: CliTranslationMap = {
   'permission.USE_BOT_COMMANDS': 'Use Bot Commands',
   'permission.CONFIGURE_BOTS': 'Configure Bots',
   'permission.VIEW_SERVER_MONITOR': 'View Server Monitor',
+  'permission.MANAGE_EVENTS': 'Manage Events',
+  'permission.EMIT_LIVE_ACTIONS': 'Emit Live Actions',
 
   // ── Voice mode comparison ──────────────────────────────────────────────
   'voice.data': 'Data',

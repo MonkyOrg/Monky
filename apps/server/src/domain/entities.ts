@@ -11,6 +11,8 @@ export interface ServerRecord {
   maxUsers: number;
   ownerUserId?: string | null;
   allowSoundboard?: boolean;
+  recentSoundCacheEnabled?: boolean;
+  recentSoundCacheLimit?: number;
   /** Whether `@todos` / `@everyone` pings the whole channel (#464). */
   allowEveryoneMention?: boolean;
   allowMessageEdit?: boolean;
@@ -50,6 +52,11 @@ export interface UserRecord {
 }
 
 export interface ChannelRecord {
+  forumId?: string | null;
+  forumLocked?: boolean;
+  forumClosed?: boolean;
+  categoryId?: string | null;
+  inheritCategoryPermissions?: boolean;
   botCommandsEnabled: boolean;
   id: string;
   serverId: string;
@@ -58,9 +65,9 @@ export interface ChannelRecord {
   position: number;
   createdAt: number;
   maxParticipants: number;
-  /** Private channels (#384). */
+  /** Effective privacy, including inherited category access. */
   isPrivate: boolean;
-  /** Roles allowed in, loaded from `channel_allowed_roles`. */
+  /** Effective allowed roles. Repository reads resolve inheritance centrally. */
   allowedRoleIds: string[];
 }
 
@@ -84,6 +91,25 @@ export interface MessageRecord {
   revision?: number;
   deletedByUserId?: string | null;
   deleteUndoUntil?: number | null;
+}
+
+export interface NativePollRecord {
+  id: string;
+  messageId: string;
+  channelId: string;
+  creatorUserId: string;
+  question: string;
+  allowMultiple: boolean;
+  imagePaths: string[];
+  options: Array<{ id: string; label: string; emoji: string | null }>;
+  allowChange: boolean;
+  closesAt: number | null;
+  maxVoters: number | null;
+  closedAt: number | null;
+  liveAction: boolean;
+  createdAt: number;
+  revision: number;
+  audience: import('@monky/shared').ResourceAudience;
 }
 
 export interface MentionRecord {

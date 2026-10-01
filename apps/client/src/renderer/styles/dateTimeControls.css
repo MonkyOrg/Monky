@@ -1,0 +1,64 @@
+.date-time-popup {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  font: 13px/1.5 var(--font-main);
+  box-shadow: 0 16px 42px rgb(0 0 0 / 38%);
+}
+.date-time-popup::backdrop { background: transparent; pointer-events: none; }
+.date-time-popup button {
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 8px;
+}
+.date-time-popup button:not(:disabled):hover { background: var(--bg-card-hover); }
+.date-time-popup button:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: -2px; }
+.date-time-popup button[aria-selected=true] { background: var(--accent-primary); color: white; }
+.date-time-popup button:disabled { color: var(--text-muted); cursor: not-allowed; }
+.calendar-popup { width: 300px; }
+.calendar-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.calendar-heading strong { text-transform: capitalize; }
+.calendar-heading button { display: flex; }
+.calendar-grid > [role=row] { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); text-align: center; }
+.calendar-grid [role=columnheader] { padding: 6px; color: var(--text-secondary); }
+.calendar-grid .is-other-month:not([aria-selected=true]) { color: var(--text-secondary); }
+.calendar-actions { display: flex; justify-content: space-between; border-top: 1px solid var(--border-color); margin-top: 8px; padding-top: 4px; }
+.calendar-range-status { margin: 0 0 8px; color: var(--text-secondary); font-size: 12px; }
+.calendar-grid button.is-in-range:not([aria-selected=true]) { background: color-mix(in srgb, var(--accent-primary) 20%, var(--bg-panel)); }
+.time-popup { min-width: 160px; }
+.time-popup button { display: flex; justify-content: space-between; width: 100%; padding: 10px 12px; text-align: left; }
+.time-popup [aria-selected=true]::after { content: '\2713'; }
+input:is([data-date-picker], [type=time]) { color-scheme: dark; }
+input:is([data-date-picker], [type=time])[aria-expanded=true] { outline: 2px solid var(--accent-primary); outline-offset: 1px; }
+input:is([data-date-picker], [type=time])[data-picker-only] {
+  cursor: pointer;
+  caret-color: transparent;
+  user-select: none;
+  appearance: none;
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 18px;
+  padding-right: 40px;
+}
+input[data-date-picker][data-picker-only] {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239da7b3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='5' width='18' height='16' rx='2'/%3E%3Cpath d='M16 3v4M8 3v4M3 10h18'/%3E%3C/svg%3E");
+}
+input[type=time][data-picker-only] {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239da7b3' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+input:is([type=date], [type=time])[data-picker-only]::-webkit-calendar-picker-indicator {
+  display: none;
+  opacity: 0;
+  pointer-events: none;
+}

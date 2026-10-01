@@ -36,10 +36,15 @@ import {
 import { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
 import { RateLimiter } from '../../infrastructure/security/RateLimiter';
 import { AttachmentService } from './AttachmentService';
+import type { NativePollService } from './NativePollService';
 
 export type BotMessageResult =
   | { success: true; message: ChatMessage }
   | { success: false; errorCode: ProtocolErrorCode; errorMessage: string };
+
+function isMessageChannel(type: string): boolean {
+  return type === 'TEXT' || type === 'VOICE';
+}
 
 export class ChatService {
   constructor(
@@ -58,7 +63,8 @@ export class ChatService {
      * written in.
      */
     private canUserAccessChannel: (userId: string, channelId: string) => Promise<boolean>,
-    private canUserReadMessages: (userId: string) => Promise<boolean>
+    private canUserReadMessages: (userId: string) => Promise<boolean>,
+    private readonly polls?: NativePollService,
   ) {}
 
   public async sendBotMessage(
@@ -84,10 +90,13 @@ export class ChatService {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem de bot inválida.' };
     }
     const channel = await this.channelRepo.findById(channelId);
-    if (!channel || channel.type !== 'TEXT' || !(await this.canUserAccessChannel(accessUserId, channelId))) {
+    if (!channel || !isMessageChannel(channel.type) || !(await this.canUserAccessChannel(accessUserId, channelId))) {
       return { success: false, errorCode: ProtocolErrorCode.CHANNEL_NOT_FOUND, errorMessage: 'Canal não encontrado.' };
     }
-    if (!(await this.isValidReply(channelId, replyToMessageId))) {
+    if (channel.forumLocked || channel.forumClosed) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Forum post is not accepting replies.' };
+    }
+    if (!(await this.isValidReply(channelId, replyToMessageId, false, accessUserId))) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem de referência indisponível.' };
     }
     const existing = messageId ? await this.messageRepo.findById(messageId) : null;
@@ -98,7 +107,7 @@ export class ChatService {
           !isDeepStrictEqual(existing.localizations, variants.data)) {
         return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Identificador de mensagem já utilizado.' };
       }
-      return { success: true, message: { ...this.botMessage(existing), reply: await this.resolveReply(existing) } };
+      return { success: true, message: { ...this.botMessage(existing), reply: await this.resolveReply(existing, accessUserId) } };
     }
     if (!this.rateLimiter.checkLimit(bot.id)) {
       return { success: false, errorCode: ProtocolErrorCode.RATE_LIMITED, errorMessage: 'Aguarde antes de publicar novamente.' };
@@ -119,30 +128,49 @@ export class ChatService {
         !isDeepStrictEqual(persisted.localizations, variants.data)) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Identificador de mensagem já utilizado.' };
     }
-    return { success: true, message: { ...this.botMessage(persisted), reply: await this.resolveReply(persisted) } };
+    return { success: true, message: { ...this.botMessage(persisted), reply: await this.resolveReply(persisted, accessUserId) } };
   }
 
-  private async isValidReply(channelId: string, messageId?: string, allowDeleted = false): Promise<boolean> {
+  private async canViewMessage(viewerUserId: string | undefined, record: MessageRecord): Promise<boolean> {
+    if (!viewerUserId || !this.polls) return true;
+    const poll = this.polls.repository.findByMessageId(record.id);
+    return !poll || await this.polls.canView(viewerUserId, poll);
+  }
+
+  private async isValidReply(
+    channelId: string,
+    messageId?: string,
+    allowDeleted = false,
+    viewerUserId?: string,
+  ): Promise<boolean> {
     if (messageId === undefined) return true;
     if (!messageReferenceSchema.safeParse(messageId).success) return false;
     const original = await this.messageRepo.findById(messageId);
-    return !!original && original.channelId === channelId && !original.isSystem && (allowDeleted || !original.deletedAt);
+    return !!original && original.channelId === channelId && !original.isSystem &&
+      (allowDeleted || !original.deletedAt) && await this.canViewMessage(viewerUserId, original);
   }
 
-  private async resolveBlocks(record: MessageRecord): Promise<ResolvedMessageBlock[] | undefined> {
+  private async resolveBlocks(record: MessageRecord, viewerUserId?: string): Promise<ResolvedMessageBlock[] | undefined> {
     if (!record.blocks || record.deletedAt) return undefined;
-    return Promise.all(record.blocks.map(async (block): Promise<ResolvedMessageBlock> => {
-      if (block.type !== 'reply') return block;
-      const reply = await this.resolveReply({ ...record, replyToMessageId: block.messageId });
-      if (!reply) throw new Error('Missing resolved message reference');
-      return { ...block, reply };
-    }));
+    const resolved: ResolvedMessageBlock[] = [];
+    for (const block of record.blocks) {
+      if (block.type !== 'reply') {
+        resolved.push(block);
+        continue;
+      }
+      const reply = await this.resolveReply({ ...record, replyToMessageId: block.messageId }, viewerUserId);
+      if (reply) resolved.push({ ...block, reply });
+    }
+    return resolved.length > 0 ? resolved : undefined;
   }
 
-  private async resolveReply(record: MessageRecord): Promise<MessageReply | undefined> {
+  private async resolveReply(record: MessageRecord, viewerUserId?: string): Promise<MessageReply | undefined> {
     if (!record.replyToMessageId || record.deletedAt) return undefined;
     const original = await this.messageRepo.findById(record.replyToMessageId);
     // A dangling/cross-channel reference must never reveal any original data.
+    if (original && original.channelId === record.channelId && !await this.canViewMessage(viewerUserId, original)) {
+      return undefined;
+    }
     if (!original || original.channelId !== record.channelId || original.deletedAt) {
       return { messageId: record.replyToMessageId, userNickname: '', content: '', deleted: true, hasAttachments: false };
     }
@@ -188,11 +216,12 @@ export class ChatService {
     }
     const { channelId, messageId, emoji } = parsed.data;
     const channel = await this.channelRepo.findById(channelId);
-    if (!channel || channel.type !== 'TEXT' || !(await this.canUserAccessChannel(userId, channelId))) {
+    if (!channel || !isMessageChannel(channel.type) || !(await this.canUserAccessChannel(userId, channelId))) {
       return { success: false, errorCode: ProtocolErrorCode.CHANNEL_NOT_FOUND, errorMessage: 'Canal não encontrado.' };
     }
     const message = await this.messageRepo.findById(messageId);
-    if (!message || message.channelId !== channelId || message.isSystem || message.deletedAt) {
+    if (!message || message.channelId !== channelId || message.isSystem || message.deletedAt ||
+        !await this.canViewMessage(userId, message)) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Essa mensagem não pode receber reações.' };
     }
     if (!canReact()) return { success: false, errorCode: ProtocolErrorCode.UNAUTHORIZED, errorMessage: 'Conexão encerrada.' };
@@ -223,6 +252,7 @@ export class ChatService {
     replyToMessageId?: string,
     rawBlocks?: unknown,
     clientMessageId?: string,
+    canSend: () => boolean = () => true,
   ): Promise<{
     success: boolean;
     errorCode?: ProtocolErrorCode;
@@ -250,14 +280,17 @@ export class ChatService {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Anexos inválidos.' };
     }
     const channel = await this.channelRepo.findById(channelId);
-    if (!channel || channel.type !== 'TEXT' || !(await this.canUserAccessChannel(userId, channelId))) {
-      return { success: false, errorCode: ProtocolErrorCode.CHANNEL_NOT_FOUND, errorMessage: 'Canal de texto não encontrado' };
+    if (!channel || !isMessageChannel(channel.type) || !(await this.canUserAccessChannel(userId, channelId))) {
+      return { success: false, errorCode: ProtocolErrorCode.CHANNEL_NOT_FOUND, errorMessage: 'Canal de conversa não encontrado' };
+    }
+    if (channel.forumLocked || channel.forumClosed) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Forum post is not accepting replies.' };
     }
     const replay = async (existing: MessageRecord) => {
       if (existing.userId !== userId || existing.channelId !== channelId || existing.isSystem || existing.botAuthor) {
         return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Identificador de mensagem já utilizado.' };
       }
-      const [message] = await this.loadHistory(channelId, 1, undefined, existing.id);
+      const [message] = await this.loadHistory(channelId, 1, undefined, existing.id, userId);
       return { success: true, message, replayed: true };
     };
     const existing = clientMessageId ? await this.messageRepo.findById(clientMessageId) : null;
@@ -273,7 +306,7 @@ export class ChatService {
       content = messageBlocksContent(blocks);
       replyToMessageId = blocks.find(block => block.type === 'reply')?.messageId;
       for (const block of blocks) {
-        if (block.type === 'reply' && !(await this.isValidReply(channelId, block.messageId, true))) {
+        if (block.type === 'reply' && !(await this.isValidReply(channelId, block.messageId, true, userId))) {
           return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem de referência indisponível.' };
         }
       }
@@ -289,7 +322,7 @@ export class ChatService {
       };
     }
 
-    if (!(await this.isValidReply(channelId, replyToMessageId, !!blocks))) {
+    if (!(await this.isValidReply(channelId, replyToMessageId, !!blocks, userId))) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem de referência indisponível.' };
     }
 
@@ -315,6 +348,7 @@ export class ChatService {
     };
 
     const mentions = await this.collectMentions(user.id, channelId, messageRecord);
+    if (!canSend()) return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Access changed.' };
     const committed = await this.messageRepo.createChatMessage(messageRecord, attachmentIds ?? [], mentions);
     if (!committed) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Anexo indisponível. Selecione o arquivo novamente.' };
@@ -332,8 +366,8 @@ export class ChatService {
       createdAt: messageRecord.createdAt,
       isSystem: false,
       attachments: attachments.length > 0 ? attachments : undefined,
-      reply: await this.resolveReply(messageRecord),
-      blocks: await this.resolveBlocks(messageRecord),
+      reply: await this.resolveReply(messageRecord, userId),
+      blocks: await this.resolveBlocks(messageRecord, userId),
     };
 
     return {
@@ -371,7 +405,10 @@ export class ChatService {
     }
 
     const existing = await this.messageRepo.findById(messageId);
-    if (!existing || existing.channelId !== channelId) {
+    if (this.polls?.repository.findByMessageId(messageId)) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Poll messages cannot be edited.' };
+    }
+    if (!existing || existing.channelId !== channelId || !await this.canViewMessage(userId, existing)) {
       return {
         success: false,
         errorCode: ProtocolErrorCode.BAD_REQUEST,
@@ -411,7 +448,7 @@ export class ChatService {
       ? [...existing.blocks.filter(block => block.type === 'reply'), { type: 'text', text: parseResult.data }] : undefined;
     await this.messageRepo.updateContent(messageId, parseResult.data, editedAt, blocks);
 
-    const [message] = await this.loadHistory(channelId, 1, undefined, messageId);
+    const [message] = await this.loadHistory(channelId, 1, undefined, messageId, userId);
     if (!message || message.deletedAt) return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST,
       errorMessage: 'Essa mensagem não pode ser editada.' };
     return { success: true, message };
@@ -433,7 +470,7 @@ export class ChatService {
     canModerate: boolean
   ): Promise<{ success: boolean; errorCode?: ProtocolErrorCode; errorMessage?: string; message?: ChatMessage }> {
     const existing = await this.messageRepo.findById(messageId);
-    if (!existing || existing.channelId !== channelId) {
+    if (!existing || existing.channelId !== channelId || !await this.canViewMessage(userId, existing)) {
       return {
         success: false,
         errorCode: ProtocolErrorCode.BAD_REQUEST,
@@ -462,9 +499,10 @@ export class ChatService {
       const deletedAt = Date.now();
       await this.messageRepo.markDeleted(messageId, deletedAt, userId,
         deletedAt + (server?.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS) * 1000);
+      this.polls?.closeForMessage(messageId, deletedAt);
     }
 
-    const [message] = await this.loadHistory(channelId, 1, undefined, messageId);
+    const [message] = await this.loadHistory(channelId, 1, undefined, messageId, userId);
     return { success: true, message };
   }
 
@@ -477,6 +515,7 @@ export class ChatService {
     }
     const existing = await this.messageRepo.findById(messageId);
     if (!existing || existing.channelId !== channelId || existing.isSystem
+      || !await this.canViewMessage(userId, existing)
       || !(await this.canUserAccessChannel(userId, channelId)) || !(await this.canUserReadMessages(userId))) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem indisponível.' };
     }
@@ -487,13 +526,16 @@ export class ChatService {
     const restored = await this.messageRepo.restoreDeleted(messageId, userId, deletedAt, revision, Date.now());
     if (!restored) return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST,
       errorMessage: 'O prazo para desfazer expirou ou a mensagem já mudou.' };
-    const [message] = await this.loadHistory(channelId, 1, undefined, messageId);
+    const [message] = await this.loadHistory(channelId, 1, undefined, messageId, userId);
     if (!message) return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem indisponível.' };
     return { success: true, message };
   }
 
   public async expireDeletedMessages(): Promise<void> {
-    await this.messageRepo.purgeExpiredDeletions(Date.now());
+    const now = Date.now();
+    const messageIds = await this.messageRepo.listExpiredDeletionMessageIds(now);
+    this.polls?.deleteForMessages(messageIds);
+    await this.messageRepo.purgeExpiredDeletions(now);
   }
 
   /**
@@ -553,24 +595,45 @@ export class ChatService {
     channelId: string,
     limit: number = LIMITS.MAX_HISTORY_MESSAGES_INITIAL,
     beforeTimestamp?: number,
-    aroundMessageId?: string
+    aroundMessageId?: string,
+    viewerUserId?: string,
   ): Promise<ChatMessage[]> {
     const boundedLimit = Number.isFinite(limit)
       ? Math.max(1, Math.min(LIMITS.MAX_HISTORY_MESSAGES_INITIAL, Math.floor(limit)))
       : LIMITS.MAX_HISTORY_MESSAGES_INITIAL;
     const target = aroundMessageId ? await this.messageRepo.findById(aroundMessageId) : null;
-    if (aroundMessageId && (!target || target.channelId !== channelId)) return [];
+    if (aroundMessageId && (!target || target.channelId !== channelId ||
+        !await this.canViewMessage(viewerUserId, target))) return [];
     const rawMessages = target
-      ? [...(boundedLimit > 1 ? await this.messageRepo.listByChannel(channelId, boundedLimit - 1, target.createdAt) : []), target]
-      : await this.messageRepo.listByChannel(channelId, boundedLimit, beforeTimestamp);
-    const uniqueUserIds = [...new Set(rawMessages.map((m) => m.userId))];
+      ? [...(boundedLimit > 1
+        ? await this.messageRepo.listByChannel(channelId, LIMITS.MAX_HISTORY_MESSAGES_INITIAL, target.createdAt)
+        : []), target]
+      : await this.messageRepo.listByChannel(channelId, LIMITS.MAX_HISTORY_MESSAGES_INITIAL, beforeTimestamp);
+    const visible: MessageRecord[] = [];
+    for (const message of rawMessages) {
+      if (await this.canViewMessage(viewerUserId, message)) visible.push(message);
+    }
+    return this.hydrateMessages(visible.slice(-boundedLimit), viewerUserId);
+  }
+
+  /** Shared by history and search so replies, blocks and deleted content have one policy. */
+  public async hydrateMessages(rawMessages: MessageRecord[], viewerUserId?: string): Promise<ChatMessage[]> {
+    const visibleMessages: MessageRecord[] = [];
+    for (const message of rawMessages) {
+      if (await this.canViewMessage(viewerUserId, message)) visibleMessages.push(message);
+    }
+    const uniqueUserIds = [...new Set(visibleMessages.map((m) => m.userId))];
     const users = await this.userRepo.findByIds(uniqueUserIds);
     const userMap = new Map(users.map((u) => [u.id, u]));
 
-    const attachmentsByMessage = await this.attachmentService.getForMessages(rawMessages.map((m) => m.id));
-    const reactionsByMessage = await this.getReactions(rawMessages.filter((m) => !m.deletedAt && !m.isSystem).map((m) => m.id));
+    const attachmentsByMessage = await this.attachmentService.getForMessages(visibleMessages.map((m) => m.id));
+    const reactionsByMessage = await this.getReactions(visibleMessages.filter((m) => !m.deletedAt && !m.isSystem).map((m) => m.id));
+    const pollsByMessage = await this.polls?.pollsForMessages(
+      visibleMessages.filter(message => !message.deletedAt).map(message => message.id),
+      viewerUserId,
+    ) ?? new Map();
 
-    return Promise.all(rawMessages.map(async (m) => {
+    return Promise.all(visibleMessages.map(async (m) => {
       const user = userMap.get(m.userId);
       // A deleted message keeps its row but nothing of its content: its files
       // must not travel to clients either (#504).
@@ -594,8 +657,9 @@ export class ChatService {
         deletedByUserId: m.deletedByUserId,
         deleteUndoUntil: m.deleteUndoUntil,
         reactions: reactionsByMessage.get(m.id) ?? [],
-        reply: await this.resolveReply(m),
-        blocks: await this.resolveBlocks(m),
+        reply: await this.resolveReply(m, viewerUserId),
+        blocks: await this.resolveBlocks(m, viewerUserId),
+        poll: pollsByMessage.get(m.id),
       };
     }));
   }

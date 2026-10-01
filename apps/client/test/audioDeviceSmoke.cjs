@@ -197,7 +197,7 @@ async function runAudioDeviceSmoke() {
     gum: navigator.mediaDevices.getUserMedia, enumerate: navigator.mediaDevices.enumerateDevices,
     AudioContext: window.AudioContext, raw: audio.getRawMicrophoneStream,
     sink: HTMLMediaElement.prototype.setSinkId, mic: settings.selectedMicrophoneId,
-    speaker: settings.selectedSpeakerId, noiseMode: settings.noiseSuppressionMode,
+    speaker: settings.selectedSpeakerId, noiseMode: settings.noiseSuppressionMode, inputMode: settings.inputMode,
     channel: voice.currentVoiceChannelId,
     muted: voice.isMuted, serverMuted: voice.serverMuted,
     raf: window.requestAnimationFrame, cancelRaf: window.cancelAnimationFrame,
@@ -264,6 +264,7 @@ async function runAudioDeviceSmoke() {
   settings.selectedMicrophoneId = '';
   settings.selectedSpeakerId = '';
   settings.noiseSuppressionMode = 'off';
+  settings.inputMode = 'voice_activity';
   voice.currentVoiceChannelId = null;
   voice.isMuted = false;
   voice.serverMuted = false;
@@ -277,7 +278,7 @@ async function runAudioDeviceSmoke() {
   const inputTrigger = root.querySelector('[data-audio-device="input"]');
   const outputTrigger = root.querySelector('[data-audio-device="output"]');
   const off = bindAudioDevicePopovers(root);
-  const panel = () => document.querySelector('.audio-device-popover');
+  const panel = () => document.querySelector('.audio-device-popover:not([data-ui-closing])');
   let offExtra = () => {};
   let offApply = devices.registerAudioDeviceApplier(async () => {});
   try {
@@ -287,8 +288,21 @@ async function runAudioDeviceSmoke() {
     check(getComputedStyle(inputTrigger).width === '18px', 'footer specificity preserves compact independent arrow');
     check(panel()?.querySelector('select')?.hidden && panel().querySelectorAll('.vad-meter').length === 1,
       'input panel replaces the native picker with a device row and shared meter');
-    check(panel().querySelectorAll('button').length === 2 && !panel().querySelector('input'),
-      'panel contains only device navigation and settings access, without adding volume/profile controls');
+    const inputModes = [...panel().querySelectorAll('[data-input-mode]')];
+    check(panel().querySelectorAll('button').length === 4 && inputModes.length === 2 && !panel().querySelector('input'),
+      'panel contains device navigation, input mode choices and settings access without volume controls');
+    check(inputModes[0].getAttribute('aria-pressed') === 'true'
+      && inputModes[0].querySelector('.audio-input-mode-check').textContent === 'check',
+    'quick input mode reflects the persisted VAD selection');
+    inputModes[1].click();
+    await wait();
+    check(settings.inputMode === 'push_to_talk' && inputModes[1].getAttribute('aria-pressed') === 'true'
+      && JSON.parse(localStorage.getItem('monky_settings')).inputMode === 'push_to_talk',
+    'quick input mode switches to PTT through the shared persisted setting');
+    inputModes[0].click();
+    await wait();
+    check(settings.inputMode === 'voice_activity' && inputModes[0].getAttribute('aria-pressed') === 'true',
+      'quick input mode switches back to voice activity');
     check(panel().querySelector('option[value="mic-1"]').textContent === '<b>Microphone</b>' && !panel().querySelector('b'),
       'device labels are escaped by DOM options');
     check(panel().getBoundingClientRect().bottom <= inputTrigger.getBoundingClientRect().top, 'panel opens above anchor');
@@ -306,7 +320,7 @@ async function runAudioDeviceSmoke() {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
     check(document.activeElement.dataset.deviceId === 'mic-2', 'End selects the last available device for keyboard navigation');
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-    check(submenu.hidden && !!panel() && document.activeElement === row, 'First Escape closes only the submenu and restores row focus');
+    check((submenu.hidden || submenu.hasAttribute('data-ui-closing')) && !!panel() && document.activeElement === row, 'First Escape closes only the submenu and restores row focus');
     const extra = document.createElement('div');
     extra.className = 'vad-meter';
     extra.innerHTML = '<div class="vad-meter-fill"></div>';
@@ -333,7 +347,7 @@ async function runAudioDeviceSmoke() {
     check(!panel().querySelector('.vad-meter') && captures.length === captureCount, 'output selector never captures microphone');
     const output = panel().querySelector('select');
     panel().querySelector('.audio-device-current').click();
-    document.querySelector('.audio-device-options [data-device-id="speaker-1"]').click();
+    document.querySelector('.audio-device-options:not([data-ui-closing]) [data-device-id="speaker-1"]').click();
     await wait();
     check(settings.selectedSpeakerId === 'speaker-1' && sinks.includes('speaker-1'), 'output persisted and validated');
     check(panel().querySelector('.audio-device-current-value').textContent === 'Speaker', 'current row shows the applied device');
@@ -355,7 +369,7 @@ async function runAudioDeviceSmoke() {
       outputTrigger.click();
       await wait();
       panel().querySelector('.audio-device-settings').click();
-      check(settingsTab === 'voice_video' && !panel() && !document.querySelector('.audio-device-options'),
+      check(settingsTab === 'voice_video' && !panel() && !document.querySelector('.audio-device-options:not([data-ui-closing]):not([hidden])'),
         'settings shortcut opens the voice tab after disposing both popup layers');
     } finally {
       settingsModal.open = openSettings;
@@ -541,6 +555,7 @@ async function runAudioDeviceSmoke() {
     settings.selectedMicrophoneId = original.mic;
     settings.selectedSpeakerId = original.speaker;
     settings.noiseSuppressionMode = original.noiseMode;
+    settings.inputMode = original.inputMode;
     voice.currentVoiceChannelId = original.channel;
     voice.isMuted = original.muted;
     voice.serverMuted = original.serverMuted;

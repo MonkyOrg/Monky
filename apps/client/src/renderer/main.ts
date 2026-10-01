@@ -12,6 +12,7 @@ import {
   chatReactionEventSchema,
   MessageType,
   type NativeScreenEvent,
+  nativePollSchema,
   MemberKickedPayload,
   Permission,
   ProtocolErrorCode,
@@ -40,6 +41,7 @@ import { sessionManager } from './core/SessionManager';
 import type { LocalExecutionTaskNotice } from './core/LocalExecutionController';
 import { currentEventOrigin, emitOutsideRouting, isForegroundEvent } from './core/sessionRouting';
 import { soundEffects } from './core/SoundEffects';
+import type { CommunityStartNotice } from './core/CommunityFeed';
 import { soundboardService } from './core/SoundboardService';
 import { keybindService } from './core/KeybindService';
 import { toggleAudioDeafen, toggleMicrophoneMute, toggleSoundboardMute, updateLocalSpeaking } from './core/voiceControls';
@@ -71,6 +73,7 @@ import { bindBotChatEvents } from './core/botChatEvents';
 import { bindBotScreenEvents } from './core/botScreenEvents';
 import { bindBotVoiceCommandEvents } from './core/botVoiceCommandEvents';
 import { selectEnhancer } from './core/SelectEnhancer';
+import { dateTimeControls } from './core/DateTimeControls';
 import { initTooltips } from './core/TooltipService';
 import { bindCameraPublication } from './core/CameraPublication';
 import { cameraEffectErrorMessage } from './utils/cameraEffectErrors';
@@ -143,11 +146,13 @@ class App {
     installImageFallback();
     const disposeTooltips = initTooltips();
     selectEnhancer.init();
+    dateTimeControls.init();
     window.addEventListener('pagehide', () => {
       this.disposed = true;
       this.unbindInvites?.();
       joinInviteModal.close();
       selectEnhancer.dispose();
+      dateTimeControls.dispose();
       disposeTooltips();
     }, { once: true });
 
@@ -162,6 +167,10 @@ class App {
     // place before any connection exists, otherwise the first events would be
     // applied to whatever store happens to be active (#400).
     sessionManager.install();
+    appEvents.on<CommunityStartNotice>('community.event_started', notice => {
+      soundEffects.play('chat_message');
+      showInfoToast(t('community.started', { event: notice.title, server: notice.serverName }), 7000);
+    });
     this.connectionView = new ConnectionView(this.appContainer);
     this.mainView = new MainView(this.appContainer, this.connectionView);
     window.addEventListener('pagehide', () => {
@@ -705,7 +714,8 @@ class App {
     appEvents.on(`message.${MessageType.SERVER_SETTINGS_UPDATED}`, (payload: ServerSettingsUpdatedPayload) => {
       serverStore.updateServerMeta(payload.name, payload.hasPassword, payload.allowSoundboard, payload.iconUrl,
         payload.attachmentStorage, payload.maxUsers, payload.turnEnabled, payload.allowEveryoneMention,
-        payload.allowMessageEdit, payload.voiceMode, payload.showRoleBadgesToEveryone, payload.maxMessageLength, payload.messageDeleteUndoSeconds);
+        payload.allowMessageEdit, payload.voiceMode, payload.showRoleBadgesToEveryone, payload.maxMessageLength,
+        payload.messageDeleteUndoSeconds, payload.recentSoundCacheEnabled, payload.recentSoundCacheLimit);
       serverStore.setTurnAvailability(payload.turnAvailability);
       const origin = currentEventOrigin();
       if (!origin) return;
@@ -796,6 +806,10 @@ class App {
       serverStore.applyChannelPositions(payload.positions);
     });
 
+    appEvents.on(`message.${MessageType.CATEGORIES_UPDATED}`, (payload: import('@monky/shared').CategoriesUpdatedPayload) => {
+      serverStore.setCategories(payload.categories);
+    });
+
     appEvents.on(`message.${MessageType.CHAT_MESSAGE}`, (message: ChatMessage) => {
       chatStore.addMessage(message);
       // Incoming chat cue (#152), honoring the mute / mentions-only settings
@@ -863,6 +877,10 @@ class App {
     // marker: nothing new was said, so nothing should call attention to it.
     appEvents.on(`message.${MessageType.CHAT_MESSAGE_UPDATED}`, (payload: ChatMessageUpdatedPayload) => {
       if (payload?.message) chatStore.updateMessage(payload.message);
+    });
+    appEvents.on(`message.${MessageType.POLL_UPDATED}`, (payload: unknown) => {
+      const poll = nativePollSchema.safeParse(payload);
+      if (poll.success) chatStore.updatePoll(poll.data);
     });
 
     appEvents.on(`message.${MessageType.VOICE_USER_JOINED}`, (payload: VoiceUserJoinedPayload) => {

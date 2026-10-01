@@ -21,12 +21,12 @@ export class AccountTab {
       </div>
       <!-- Nickname & Profile -->
       <div data-settings-section="profile" data-settings-label="${escapeHtml(t('settings.tabAccount'))}" style="display: flex; gap: 16px; align-items: center; padding: 14px; background: var(--bg-card); border-radius: var(--radius-md); margin-bottom: 16px; border: 1px solid var(--border-color);">
-        <div id="settings-avatar-wrapper" class="settings-avatar-wrapper" title="${t('settings.avatarTitle')}">
+        <button type="button" id="settings-avatar-wrapper" class="settings-avatar-wrapper" title="${t('settings.avatarTitle')}">
           <img id="settings-avatar-preview" class="settings-avatar-img" src="${serverStore.currentUser?.avatarUrl ? getAvatarUrl(serverStore.currentUser.avatarUrl) : (connectionStore.savedAvatarBase64 || getAvatarUrl(null))}" alt="Avatar" data-fallback="avatar">
           <div class="settings-avatar-overlay">
             <span class="material-symbols-outlined md-20">photo_camera</span>
           </div>
-        </div>
+        </button>
         <div style="flex: 1;">
           <div class="form-group" style="margin-bottom: 0;">
             <label>${t('connection.nicknameLabel')}</label>
@@ -165,7 +165,7 @@ export class AccountTab {
     });
 
     avatarWrapper?.addEventListener('click', async () => {
-      const croppedBase64 = await pickAndCropImage();
+      const croppedBase64 = await pickAndCropImage(avatarWrapper);
       if (croppedBase64) {
         await callbacks.onAvatarChanged(croppedBase64);
         const preview = container.querySelector<HTMLImageElement>('#settings-avatar-preview');
@@ -214,12 +214,12 @@ export class AccountTab {
       }
     });
 
-    container.querySelector<HTMLButtonElement>('#btn-export-backup')?.addEventListener('click', async () => {
-      await showBackupExportDialog();
+    container.querySelector<HTMLButtonElement>('#btn-export-backup')?.addEventListener('click', async (event) => {
+      await showBackupExportDialog(event.currentTarget as HTMLElement);
     });
 
-    container.querySelector<HTMLButtonElement>('#btn-import-backup')?.addEventListener('click', async () => {
-      const applied = await showBackupImportDialog();
+    container.querySelector<HTMLButtonElement>('#btn-import-backup')?.addEventListener('click', async (event) => {
+      const applied = await showBackupImportDialog(event.currentTarget as HTMLElement);
       if (applied && applied.length > 0) callbacks.onReloadModal();
     });
   }

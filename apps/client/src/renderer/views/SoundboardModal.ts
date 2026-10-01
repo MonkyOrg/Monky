@@ -1,4 +1,5 @@
 import { escapeHtml } from '../utils/html';
+import { enterModal, exitModal } from '../utils/modalSurface';
 import { Permission } from '@monky/shared';
 import { soundboardService, SoundItem } from '../core/SoundboardService';
 import { settingsStore } from '../stores/settingsStore';
@@ -17,6 +18,8 @@ import { finishSoundboardMutation, soundboardFileValue, validateSoundboardName, 
 import { enableBackdropClose } from '../utils/modal';
 import { matchesSearch as matchesSoundSearch } from '../utils/search';
 import { sortFavoritesFirst } from '../utils/favoriteOrder';
+import { setButtonLoading } from '../utils/buttonLoading';
+import { smoothScrollIntoView } from '../utils/scroll';
 import { FavoriteListMotion, type FavoriteMotionKind } from '../utils/favoriteMotion';
 import { renderFavoriteToggle, renderFavoritesFilter, updateFavoritesFilter } from './FavoritesControls';
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
@@ -163,7 +166,7 @@ export class SoundboardModal {
 
         <!-- Voice channel warning if not in call -->
         ${!voiceStore.currentVoiceChannelId ? `
-          <div style="margin: 12px 20px 0; padding: 8px 12px; background: rgba(240, 178, 50, 0.15); border: 1px solid rgba(240, 178, 50, 0.3); border-radius: var(--radius-md); color: #f0b232; font-size: 12px; display: flex; align-items: center; gap: 8px;">
+          <div class="sb-modal-local-warning" style="margin: 12px 20px 6px; padding: 8px 12px; background: rgba(240, 178, 50, 0.15); border: 1px solid rgba(240, 178, 50, 0.3); border-radius: var(--radius-md); color: #f0b232; font-size: 12px; display: flex; align-items: center; gap: 8px;">
             <span class="material-symbols-outlined md-16">info</span>
             <span>${t('soundboard.localPreviewOnly')}</span>
           </div>
@@ -186,6 +189,7 @@ export class SoundboardModal {
     `;
 
     document.body.appendChild(this.modalEl);
+    enterModal(this.modalEl);
     this.attachEvents();
     const playersSlot = this.modalEl.querySelector<HTMLElement>('#sb-modal-players');
     if (playersSlot) this.players.mount(playersSlot);
@@ -397,7 +401,7 @@ export class SoundboardModal {
       return;
     }
     if (container) this.favoriteMotion.update(container, '.sb-sound-card, .sb-sound-row', () => {
-      const scroller = modal.querySelector<HTMLElement>('.sb-modal-body') ?? container;
+      const scroller = container;
       const scrollTop = scroller.scrollTop;
       const focused = document.activeElement;
       const favoriteButtons = Array.from(container.querySelectorAll<HTMLButtonElement>('.favorite-toggle'));
@@ -426,7 +430,7 @@ export class SoundboardModal {
           ?? nextButtons[Math.min(focusedIndex, nextButtons.length - 1)]
           ?? modal.querySelector<HTMLButtonElement>('#sb-filter-favorites');
         next?.focus({ preventScroll: true });
-        next?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+        if (next) smoothScrollIntoView(next, { block: 'nearest', inline: 'nearest' });
       }
     }, animate);
   }
@@ -526,12 +530,13 @@ export class SoundboardModal {
     }
   }
 
-  private async changeFolder(): Promise<void> {
+  private async changeFolder(trigger: HTMLButtonElement): Promise<void> {
     if (this.changingFolder || !this.modalEl) return;
     const lifecycle = this.lifecycle;
     this.changingFolder = true;
     this.modalEl.querySelectorAll<HTMLButtonElement>('#sb-btn-change-folder, #sb-btn-select-folder-empty')
       .forEach(button => { button.disabled = true; });
+    setButtonLoading(trigger, true);
     try {
       await soundboardService.selectFolder();
       if (lifecycle !== this.lifecycle) return;
@@ -547,6 +552,7 @@ export class SoundboardModal {
     } finally {
       if (lifecycle === this.lifecycle) {
         this.changingFolder = false;
+        setButtonLoading(trigger, false);
         this.modalEl?.querySelectorAll<HTMLButtonElement>('#sb-btn-change-folder, #sb-btn-select-folder-empty')
           .forEach(button => { button.disabled = false; });
       }
@@ -584,6 +590,7 @@ export class SoundboardModal {
     `;
 
     document.body.appendChild(backdrop);
+    enterModal(backdrop);
 
     let isClosed = false;
     const cleanup = async () => {
@@ -591,7 +598,7 @@ export class SoundboardModal {
       isClosed = true;
       this.closeShortcutCapture = null;
       disposeCapture();
-      backdrop.remove();
+      exitModal(backdrop);
     };
 
     const disposeCapture = captureShortcut(backdrop, backdrop.querySelector('#sb-keybind-box'), async (combo) => {
@@ -657,7 +664,7 @@ export class SoundboardModal {
 
     const btnClose = this.modalEl.querySelector('#modal-close');
     const btnFooterClose = this.modalEl.querySelector('#sb-btn-close');
-    const btnChangeFolder = this.modalEl.querySelector('#sb-btn-change-folder');
+    const btnChangeFolder = this.modalEl.querySelector<HTMLButtonElement>('#sb-btn-change-folder');
     const btnMute = this.modalEl.querySelector('#sb-btn-mute');
     const sliderVol = this.modalEl.querySelector('#sb-slider-volume') as HTMLInputElement | null;
     const volLabel = this.modalEl.querySelector('#sb-volume-label');
@@ -681,7 +688,7 @@ export class SoundboardModal {
       this.clearSearch();
     });
 
-    btnChangeFolder?.addEventListener('click', () => { void this.changeFolder(); });
+    btnChangeFolder?.addEventListener('click', () => { void this.changeFolder(btnChangeFolder); });
     this.modalEl.querySelectorAll<HTMLButtonElement>('[data-favorites-filter]').forEach(button => {
       button.addEventListener('click', () => this.setFavoritesOnly(button.dataset.favoritesFilter === 'favorites'));
     });
@@ -765,7 +772,7 @@ export class SoundboardModal {
     const emptyFolderButton = container.querySelector<HTMLButtonElement>('#sb-btn-select-folder-empty');
     if (emptyFolderButton) {
       emptyFolderButton.disabled = this.changingFolder;
-      emptyFolderButton.addEventListener('click', () => { void this.changeFolder(); });
+      emptyFolderButton.addEventListener('click', () => { void this.changeFolder(emptyFolderButton); });
     }
 
     container.querySelectorAll<HTMLButtonElement>('.favorite-toggle').forEach(button => {
@@ -962,7 +969,7 @@ export class SoundboardModal {
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
     if (this.modalEl) {
-      this.modalEl.remove();
+      exitModal(this.modalEl);
       this.modalEl = null;
     }
   }

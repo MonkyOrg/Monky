@@ -179,15 +179,15 @@ implementar. Consulte o [guia de voz](/bots-voz) antes de conceder acesso.
 
 ## Monky Bot (bot oficial)
 
-O [MonkyBot](https://github.com/MonkyOrg/MonkyBot) oferece utilitários, votações,
-música e um jogo da velha. A instalação do processo é descrita no repositório
+O [MonkyBot](https://github.com/MonkyOrg/MonkyBot) oferece utilitários,
+lembretes, sorteios, música e jogos. A instalação do processo é descrita no repositório
 do bot; depois, faça o vínculo e a revisão no Monky.
 
 | Objetivo | Comandos |
 | --- | --- |
 | Conferir disponibilidade e ajuda | `/ping`, `/ajuda` |
 | Utilitários | `/dado`, `/moeda`, `/8ball` |
-| Criar uma votação | `/enquete` |
+| Agendar lembrete e criar sorteio | `/lembrete`, `/sorteio` |
 | Buscar e adicionar música | `/play` |
 | Ver a reprodução | `/queue`, `/nowplaying` |
 | Controlar a fila | `/pause`, `/resume`, `/skip`, `/remove`, `/clear` |

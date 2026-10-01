@@ -5,6 +5,7 @@ import {
   type BotForm,
   type BotFormValues,
   type ChatMessage,
+  type NativePoll,
   type ChatSendPayload,
   type MessageReply,
   type ResolvedMessageBlock,
@@ -303,6 +304,7 @@ export class ChatStore {
     for (const block of this.getBlockDraft(message.channelId)) {
       if (block.type === 'reply' && block.messageId === message.id) { block.reply = reply; updatesBlockDraft = true; }
     }
+
     const updatesDraft = this.replyDrafts.get(message.channelId)?.messageId === message.id;
     if (updatesDraft) {
       this.replyDrafts.set(message.channelId, reply);
@@ -330,6 +332,20 @@ export class ChatStore {
         ? { isBot: true, botCommand: message.botCommand ?? previous.botCommand } : {}),
     };
     this.bus.emit('chat.message_updated', list[index]);
+  }
+
+  public updatePoll(poll: NativePoll): void {
+    const collections = [...this.messages.values(), ...this.ephemeralMessages.values()];
+    for (const outgoing of this.outgoing.values()) collections.push([outgoing.message]);
+    for (const list of collections) {
+      const message = list.find(entry => entry.poll?.id === poll.id);
+      if (!message?.poll || poll.revision < message.poll.revision) continue;
+      message.poll = {
+        ...poll,
+        myVoteOptionIds: poll.myVoteOptionIds ?? message.poll.myVoteOptionIds,
+      };
+      this.bus.emit('chat.message_updated', message);
+    }
   }
 
   public getMessages(channelId: string): ChatMessage[] {

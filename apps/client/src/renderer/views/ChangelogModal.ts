@@ -3,6 +3,7 @@ import { appEvents } from '../core/EventBus';
 import { getLanguage, t, tCount, type SupportedLanguage, type TranslationKey } from '../i18n';
 import { CLIENT_NOTE_GROUPS, parseClientReleaseNotes, type ClientNoteGroup, type ClientReleaseNotes } from '../utils/clientReleaseNotes';
 import { escapeHtml } from '../utils/html';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { enableBackdropClose } from '../utils/modal';
 import { bindVersionCopyButton, renderVersionCopyButton } from './VersionCopyButton';
 import { renderLoadingSkeleton } from '../utils/loadingSkeleton';
@@ -101,7 +102,7 @@ export class ChangelogModal {
     this.unbind.forEach((fn) => fn());
     this.unbind = [];
     if (this.modalEl) {
-      this.modalEl.remove();
+      exitModal(this.modalEl);
       this.modalEl = null;
     }
     this.bodyEl = null;
@@ -153,6 +154,7 @@ export class ChangelogModal {
 
     this.previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     document.body.appendChild(backdrop);
+    enterModal(backdrop);
     this.modalEl = backdrop;
     this.bodyEl = backdrop.querySelector('[data-el="body"]');
     this.titleEl = backdrop.querySelector('[data-el="title"]');
@@ -164,8 +166,7 @@ export class ChangelogModal {
     enableBackdropClose(backdrop, () => this.close());
 
     const onKeyDown = (e: KeyboardEvent): void => {
-      const modals = document.querySelectorAll('.modal-backdrop');
-      if (modals[modals.length - 1] !== backdrop) return;
+      if (!handlesModalKey(backdrop, e)) return;
       if (e.key === 'Escape') {
         e.preventDefault();
         e.stopImmediatePropagation();

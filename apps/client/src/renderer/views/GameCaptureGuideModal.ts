@@ -1,5 +1,6 @@
 import { t, type TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 
 export const GAME_CAPTURE_GUIDE_SOURCE = 'https://obsproject.com/kb/game-capture-troubleshooting';
 
@@ -105,7 +106,7 @@ export class GameCaptureGuideModal {
       if (event.target === modal) this.close();
     }, options);
     modal.addEventListener('keydown', event => {
-      if (event.defaultPrevented || [...document.querySelectorAll('.modal-backdrop')].at(-1) !== modal) return;
+      if (!handlesModalKey(modal, event)) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
@@ -127,6 +128,7 @@ export class GameCaptureGuideModal {
     opener.setAttribute('aria-expanded', 'true');
     opener.setAttribute('aria-controls', 'game-capture-guide');
     document.body.appendChild(modal);
+    enterModal(modal);
     this.renderResults(modal, '');
     search?.focus();
   }
@@ -179,7 +181,7 @@ export class GameCaptureGuideModal {
     this.eventController?.abort();
     this.eventController = null;
     this.modalEl?.querySelector('#game-capture-guide-source')?.removeAttribute('href');
-    this.modalEl?.remove();
+    if (this.modalEl) exitModal(this.modalEl);
     this.modalEl = null;
     this.sourceOpening = false;
     const parent = this.parent;

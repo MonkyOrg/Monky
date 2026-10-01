@@ -4,6 +4,7 @@ import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
 import { clientLog } from '../../../core/ClientLogService';
 import { showAlert } from '../../Dialog';
+import { setButtonLoading } from '../../../utils/buttonLoading';
 
 export class NotificationsTab {
   private unbind: (() => void) | null = null;
@@ -150,7 +151,9 @@ export class NotificationsTab {
   }
 
   private async handleSoundAction(button: HTMLButtonElement, container: HTMLElement, generation: number): Promise<void> {
-    button.disabled = true;
+    const nativePicker = button.classList.contains('btn-sound-change');
+    if (nativePicker) setButtonLoading(button, true);
+    else button.disabled = true;
     try {
       if (button.id === 'btn-reset-all-sounds') {
         this.saveCustomSounds({});
@@ -185,7 +188,10 @@ export class NotificationsTab {
         await showAlert({ message: t('settings.customSoundFailed'), variant: 'danger' });
       }
     } finally {
-      if (button.isConnected) button.disabled = false;
+      if (button.isConnected) {
+        if (nativePicker) setButtonLoading(button, false);
+        else button.disabled = false;
+      }
     }
   }
 }

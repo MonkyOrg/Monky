@@ -19,7 +19,7 @@ import {
 } from '@monky/shared';
 import { ServerRecord, UserRecord } from '../../domain/entities';
 import { CapacityEstimator } from '../../domain/services/CapacityEstimator';
-import { IChannelRepository, IMentionRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
+import { ICategoryRepository, IChannelRepository, IMentionRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
 import { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
 import { PasswordService } from '../../infrastructure/security/PasswordService';
 import { Logger } from '../../infrastructure/logger/Logger';
@@ -100,7 +100,8 @@ export class AuthService {
     private getActiveOnlineUsers: () => Map<string, { user: UserSummary }>,
     private attachmentService: AttachmentService,
     private permissionService: PermissionService,
-    private roleService: RoleService
+    private roleService: RoleService,
+    private categoryRepo?: ICategoryRepository
   ) {}
 
   public async createChallenge(
@@ -399,6 +400,8 @@ export class AuthService {
     // channel the member cannot access never reaches them — not even its name (#384).
     const myRoleIds = roleState.userRoles.find((ur) => ur.userId === userRecord.id)?.roleIds ?? [];
     const visibleChannels = channels.filter((c) => canAccessChannel(c, myPermissions, myRoleIds));
+    const categories = (await this.categoryRepo?.listByServerId(server.id) ?? []).filter((category) =>
+      canAccessChannel(category, myPermissions, myRoleIds) || visibleChannels.some((channel) => channel.categoryId === category.id));
 
     const serverDetails: ServerDetails = {
       id: server.id,
@@ -408,6 +411,8 @@ export class AuthService {
       maxMessageLength: server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
       hasPassword: !!(server.passwordHash && server.passwordHash.length > 0),
       allowSoundboard: server.allowSoundboard !== false,
+      recentSoundCacheEnabled: Boolean(server.recentSoundCacheEnabled),
+      recentSoundCacheLimit: server.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT,
       allowEveryoneMention: server.allowEveryoneMention !== false,
       allowMessageEdit: server.allowMessageEdit !== false,
       messageDeleteUndoSeconds: server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,
@@ -418,6 +423,11 @@ export class AuthService {
       maxBots: server.maxBots ?? LIMITS.MAX_BOTS_DEFAULT,
       iconUrl: this.avatarStorage.getPublicUrl(server.iconPath),
       channels: visibleChannels.map((c) => ({
+        categoryId: c.categoryId ?? null,
+        forumId: c.forumId ?? null,
+        forumLocked: c.forumLocked ?? false,
+        forumClosed: c.forumClosed ?? false,
+        inheritCategoryPermissions: c.inheritCategoryPermissions ?? true,
         id: c.id,
         serverId: c.serverId,
         name: c.name,
@@ -429,6 +439,7 @@ export class AuthService {
         botCommandsEnabled: c.botCommandsEnabled,
         allowedRoleIds: c.allowedRoleIds,
       })),
+      categories,
       members,
       knownMembers,
       mentionedChannelIds,
@@ -479,6 +490,8 @@ export class AuthService {
     name?: string;
     password?: string | null;
     allowSoundboard?: boolean;
+    recentSoundCacheEnabled?: boolean;
+    recentSoundCacheLimit?: number;
     allowEveryoneMention?: boolean;
     allowMessageEdit?: boolean;
     messageDeleteUndoSeconds?: number;
@@ -495,6 +508,8 @@ export class AuthService {
     name?: string;
     hasPassword?: boolean;
     allowSoundboard?: boolean;
+    recentSoundCacheEnabled?: boolean;
+    recentSoundCacheLimit?: number;
     allowEveryoneMention?: boolean;
     allowMessageEdit?: boolean;
     messageDeleteUndoSeconds?: number;
@@ -575,6 +590,21 @@ export class AuthService {
 
     if (payload.allowSoundboard !== undefined) {
       updates.allowSoundboard = Boolean(payload.allowSoundboard);
+      if (!updates.allowSoundboard) updates.recentSoundCacheEnabled = false;
+    }
+    if (payload.recentSoundCacheEnabled !== undefined) {
+      updates.recentSoundCacheEnabled = Boolean(payload.recentSoundCacheEnabled);
+    }
+    if (payload.recentSoundCacheLimit !== undefined) {
+      if (!Number.isSafeInteger(payload.recentSoundCacheLimit)
+        || payload.recentSoundCacheLimit < LIMITS.RECENT_SOUND_CACHE_MIN_LIMIT
+        || payload.recentSoundCacheLimit > LIMITS.RECENT_SOUND_CACHE_MAX_LIMIT) {
+        return {
+          success: false,
+          errorMessage: `O cache de áudios deve manter entre ${LIMITS.RECENT_SOUND_CACHE_MIN_LIMIT} e ${LIMITS.RECENT_SOUND_CACHE_MAX_LIMIT} itens.`,
+        };
+      }
+      updates.recentSoundCacheLimit = payload.recentSoundCacheLimit;
     }
     if (payload.allowEveryoneMention !== undefined) {
       updates.allowEveryoneMention = Boolean(payload.allowEveryoneMention);
@@ -648,6 +678,8 @@ export class AuthService {
       name: updatedServer?.name || server.name,
       hasPassword: !!(updatedServer?.passwordHash && updatedServer.passwordHash.length > 0),
       allowSoundboard: updatedServer?.allowSoundboard !== false,
+      recentSoundCacheEnabled: Boolean(updatedServer?.recentSoundCacheEnabled),
+      recentSoundCacheLimit: updatedServer?.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT,
       allowEveryoneMention: updatedServer?.allowEveryoneMention !== false,
       allowMessageEdit: updatedServer?.allowMessageEdit !== false,
       messageDeleteUndoSeconds: updatedServer?.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,

@@ -81,7 +81,7 @@ async function runUserContextMenuSmoke() {
   let lastClose;
   const originalClose = menu.close;
   menu.close = function() {
-    if (document.querySelector('.user-context-menu')) lastClose = new Error('Menu closed').stack;
+    if (document.querySelector('.user-context-menu:not([data-ui-closing])')) lastClose = new Error('Menu closed').stack;
     return originalClose.call(this);
   };
   const check = (condition, message) => {
@@ -89,7 +89,7 @@ async function runUserContextMenuSmoke() {
     checks++;
   };
   const delay = () => new Promise(resolve => setTimeout(resolve, 20));
-  const find = selector => document.querySelector(`.user-context-menu ${selector}`);
+  const find = selector => document.querySelector(`.user-context-menu:not([data-ui-closing]) ${selector}`);
   const button = action => find(`[data-action="${action}"]`);
   const click = action => { check(!!button(action), `${action} action exists`); button(action).click(); };
   const currentServer = servers.getActiveServerStore();
@@ -152,7 +152,7 @@ async function runUserContextMenuSmoke() {
   try {
     language.setLanguage('en');
     menu.open(30, 30, user);
-    check(!!document.querySelector('.user-context-menu'), 'Own menu opens');
+    check(!!document.querySelector('.user-context-menu:not([data-ui-closing])'), 'Own menu opens');
     check(find('.context-menu-nickname').textContent === user.nickname && !find('.context-menu-nickname b'), 'Own nickname is escaped');
     check(!find('#ctx-volume-slider') && !find('.context-menu-volume-section') && !find('.btn-ctx-quick'), 'Self has no volume controls');
     check(!find('input[type="checkbox"],input[type="radio"]'), 'No native checkboxes or radio buttons');
@@ -321,7 +321,7 @@ async function runUserContextMenuSmoke() {
     network.sendRequest = async () => { throw new Error('Policy lookup failed'); };
     menu.open(30, 30, remote);
     await delay();
-    check(!document.querySelector('.user-context-menu') && document.querySelector('.modal-backdrop')?.textContent.includes('Policy lookup failed'),
+    check(!document.querySelector('.user-context-menu:not([data-ui-closing])') && document.querySelector('.modal-backdrop:not([data-ui-closing])')?.textContent.includes('Policy lookup failed'),
       'A failed lookup is surfaced instead of guessing an unmuted state');
     document.querySelector('.modal-backdrop [data-action="confirm"]').click();
     network.sendRequest = request;
@@ -355,7 +355,7 @@ async function runUserContextMenuSmoke() {
     for (const event of ['network.disconnected', 'voice.channel_changed', 'session.changed']) {
       await open(user);
       appEvents.emit(event);
-      check(!document.querySelector('.user-context-menu'), `${event} closes menu`);
+      check(!document.querySelector('.user-context-menu:not([data-ui-closing])'), `${event} closes menu`);
     }
     menu.open(30, 30, user);
     menu.close();
@@ -363,11 +363,11 @@ async function runUserContextMenuSmoke() {
     menu.open(30, 30, user);
     await delay();
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
-    check(!document.querySelector('.user-context-menu'), 'Escape works after immediate close/reopen');
+    check(!document.querySelector('.user-context-menu:not([data-ui-closing])'), 'Escape works after immediate close/reopen');
     menu.open(30, 30, user);
     await delay();
     document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-    check(!document.querySelector('.user-context-menu'), 'Outside pointer closes menu');
+    check(!document.querySelector('.user-context-menu:not([data-ui-closing])'), 'Outside pointer closes menu');
     const listenerCount = () => [...appEvents.listeners.values()].reduce((total, listeners) => total + listeners.size, 0);
     const before = listenerCount();
     for (let attempt = 0; attempt < 5; attempt++) { menu.open(30, 30, user); menu.close(); }

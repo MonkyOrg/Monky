@@ -10,6 +10,7 @@ import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadRes
 import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } from './botInteractions.js';
 import type { ReleaseCompatibilityResult } from './releaseCompatibility.js';
 import type { ServerInviteResult } from './serverInvites.js';
+import type { EventCalendarExport, EventCalendarSaveResult } from './serverEventCalendar.js';
 import type { NativeScreenCommand, NativeScreenCommandResult, NativeScreenEvent, NativeScreenReply } from './nativeScreenIpc.js';
 import type { NativeScreenCaptureMode } from './screenSharing.js';
 import type {
@@ -121,6 +122,18 @@ export interface ImageSelectionResult {
   fileName: string;
   mimeType: string;
   base64: string;
+}
+
+export interface RecentSoundSaveInput {
+  fileName: string;
+  mimeType: string;
+  base64: string;
+}
+
+export interface RecentSoundSaveResult {
+  success: boolean;
+  canceled?: boolean;
+  error?: string;
 }
 
 export interface SoundboardSoundEntry {
@@ -436,6 +449,7 @@ export interface HostServerOptions {
   password?: string;
   initialVoiceChannel?: string;
   initialTextChannel?: string;
+  categoryLocale?: 'pt-BR' | 'en';
   /** Id of the entry in "Meus Servidores" that owns this instance (#333). */
   serverId?: string;
   /**
@@ -791,6 +805,8 @@ export interface IpcInvokeChannels {
   'app:set-auto-start': { args: [enabled: boolean]; returnType: void };
   'app:set-minimize-to-tray': { args: [enabled: boolean]; returnType: void };
   'app:download-file': { args: [url: string, fileName: string]; returnType: { success: boolean; error?: string } };
+  'app:save-recent-sound': { args: [input: RecentSoundSaveInput]; returnType: RecentSoundSaveResult };
+  'community:save-event-calendar': { args: [input: EventCalendarExport]; returnType: EventCalendarSaveResult };
   // Ack do renderer ao 'app:before-quit': confirma que ja saiu das chamadas (#458)
   'app:leave-complete': { args: [request: AppShutdownRequest]; returnType: void };
 
@@ -830,6 +846,7 @@ export interface IpcInvokeChannels {
 
   // Diálogos Nativos
   'dialog:select-image': { args: []; returnType: ImageSelectionResult | null };
+  'dialog:select-images': { args: [maxFiles: number]; returnType: ImageSelectionResult[] };
   'dialog:select-sound-file': { args: []; returnType: string | null };
   'dialog:select-soundboard-folder': { args: []; returnType: string | null };
   'dialog:select-stickers-folder': { args: []; returnType: string | null };

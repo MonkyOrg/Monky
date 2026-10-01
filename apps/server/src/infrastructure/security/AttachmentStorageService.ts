@@ -113,6 +113,9 @@ export class AttachmentStorageService {
       if (b[8] === 0x41 && b[9] === 0x56 && b[10] === 0x49 && b[11] === 0x20) {
         return { kind: 'video', mimeType: 'video/x-msvideo', extension: 'avi', previewable: true };
       }
+      if (b[8] === 0x57 && b[9] === 0x41 && b[10] === 0x56 && b[11] === 0x45) {
+        return { kind: 'file', mimeType: 'audio/wav', extension: 'wav', previewable: true };
+      }
     }
     // MP4 / MOV / M4V: 'ftyp' box at offset 4
     if (b.length >= 8 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {

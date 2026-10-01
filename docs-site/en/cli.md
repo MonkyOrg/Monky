@@ -369,9 +369,11 @@ a read-only query has no side effects, so asking would be busywork.
 
 Detailed status for a running server also reports bots with an incompatible
 or unchecked protocol. These warnings appear after `monky start` and
-`monky restart` and explain when to update or check the bots' SDK. If the
-server is still starting or `/preview` does not respond, the CLI reports that
-compatibility could not be retrieved; check again with
+`monky restart` and explain when to update or check the bots' SDK. After starting
+or restarting (including after `monky update`), the CLI retries for up to 10
+seconds while `/preview` is unavailable, ending the wait as soon as it receives
+data. If the deadline expires or the response lacks valid compatibility data,
+the CLI reports that compatibility could not be retrieved; check again with
 `monky status --data <folder>`.
 
 `monky list` and multi-server tables keep these warnings next to the relevant

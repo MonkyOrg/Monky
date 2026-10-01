@@ -23,10 +23,19 @@ import { soundEffects } from '../core/SoundEffects';
 import { toAbsoluteServerIconUrl } from '../utils/avatar';
 import { t } from '../i18n';
 import { contextMenu } from './ContextMenu';
+import { appEvents } from '../core/EventBus';
 
 type DraggedRailItem =
   | { type: 'server'; host: string; port: number }
   | { type: 'folder'; folderId: string };
+
+export function serverRailCallIcon(
+  events: readonly { status: string; location: { kind: string; channelId?: string } }[] | undefined,
+  channelId: string | null,
+): 'calendar_month' | 'volume_up' {
+  return channelId && events?.some(event => event.status === 'active' && event.location.kind === 'voice'
+    && event.location.channelId === channelId) ? 'calendar_month' : 'volume_up';
+}
 
 export class ServerRailView {
   /**
@@ -40,6 +49,10 @@ export class ServerRailView {
   private lastProbeTime = 0;
   private probeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly PROBE_INTERVAL_MS = 15000;
+
+  constructor() {
+    appEvents.on('community.updated', () => this.render());
+  }
 
   private static keyOf(host: string, port: number): string {
     return `${host.trim().replace(/^wss?:\/\//, '')}:${port}`;
@@ -230,6 +243,7 @@ export class ServerRailView {
     // is merely retrying does not count as online.
     const background = !isCurrent && live?.client.getStatus() === 'CONNECTED' ? live : undefined;
     const hasCall = voiceStore.voiceSessionKey === url;
+    const callIcon = serverRailCallIcon(live?.community.snapshot?.events, voiceStore.currentVoiceChannelId);
     // A mention outranks a plain unread, so the row shows the red dot instead
     // of the white one when both are pending (#479).
     const hasMention = !!background?.chatStore.hasAnyMention();
@@ -250,7 +264,7 @@ export class ServerRailView {
         ? t('main.serverHostingCall', { name: label })
         : label;
     const badge = hasCall
-      ? `<span class="server-rail-badge" data-kind="call" title="${escapeHtml(t('main.callHereTooltip'))}"><span class="material-symbols-outlined md-14">graphic_eq</span></span>`
+      ? `<span class="server-rail-badge" data-kind="call" title="${escapeHtml(t('main.callHereTooltip'))}"><span class="material-symbols-outlined md-14">${callIcon}</span></span>`
       : hasMention
         ? `<span class="server-rail-badge" data-kind="mention" title="${escapeHtml(t('main.mentionHereTooltip'))}"></span>`
         : hasUnread

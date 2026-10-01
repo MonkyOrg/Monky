@@ -4,12 +4,15 @@ const { spawn } = require('node:child_process');
 const { runCustomSoundsSmoke } = require('./fixtures/customSounds.cjs');
 
 const clientRoot = path.resolve(__dirname, '..');
+const customSoundsOnly = process.argv.includes('--custom-sounds-only');
 if (!process.versions.electron) {
   const profile = path.join(clientRoot, 'dist-test', `soundboard-limiter-profile-${process.pid}`);
   fs.mkdirSync(profile, { recursive: true });
   const env = { ...process.env, MONKY_SOUNDBOARD_TEST_PROFILE: profile };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(require('electron'), [__filename, `--user-data-dir=${profile}`], { cwd: clientRoot, env, stdio: 'inherit' });
+  const child = spawn(require('electron'), [
+    __filename, `--user-data-dir=${profile}`, ...(customSoundsOnly ? ['--custom-sounds-only'] : []),
+  ], { cwd: clientRoot, env, stdio: 'inherit' });
   const cleanup = () => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   child.once('error', error => { console.error(error); cleanup(); process.exitCode = 1; });
   child.once('exit', code => { cleanup(); process.exitCode = code ?? 1; });
@@ -92,6 +95,12 @@ if (!process.versions.electron) {
       folder, base64: bytes.toString('base64'), shortBase64: wav(0.02).toString('base64'), size: bytes.length,
     })})`, true);
     console.log(`Soundboard limiter smoke: ${checks} checks passed (real AudioWorklet, mixed PCM, local UI and resource teardown; physical audio muted)`);
+    if (customSoundsOnly) {
+      const customChecks = await window.webContents.executeJavaScript(`(${runCustomSoundsSmoke.toString()})(${JSON.stringify(bytes.toString('base64'))})`, true);
+      console.log(`Custom sound effects smoke: ${customChecks} checks passed (all catalogue entries, real media, overrides, defaults, locales and cleanup)`);
+      await finish(0);
+      return;
+    }
     await window.webContents.executeJavaScript(`(${setupModalSmoke.toString()})()`, true);
     window.focus();
     window.webContents.focus();

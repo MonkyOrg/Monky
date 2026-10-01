@@ -1,3 +1,7 @@
+import { animateEnter, ownSurface, positionAnchoredSurface, removeWithMotion } from '../utils/surfaceMotion';
+import { normalizeSearchString } from '../utils/search';
+import { smoothScrollIntoView } from '../utils/scroll';
+
 const OPEN_ATTRIBUTES = ['aria-expanded', 'aria-controls', 'aria-activedescendant'] as const;
 
 interface OptionRow {
@@ -21,6 +25,8 @@ export class SelectEnhancer {
   private search = '';
   private searchTime = 0;
   private sequence = 0;
+  private pointerSelect: HTMLSelectElement | null = null;
+  private releaseOwner: (() => void) | null = null;
 
   public init(): void {
     if (this.listeners) return;
@@ -41,6 +47,7 @@ export class SelectEnhancer {
 
   public dispose(): void {
     this.close();
+    this.pointerSelect = null;
     this.listeners?.abort();
     this.listeners = null;
   }
@@ -63,11 +70,13 @@ export class SelectEnhancer {
   }
 
   private onPointerDown = (event: PointerEvent): void => {
+    this.pointerSelect = null;
     if (event.button !== 0) {
       if (!this.popup?.contains(event.target as Node)) this.close();
       return;
     }
     if (this.eligible(event.target)) {
+      this.pointerSelect = event.target;
       event.preventDefault();
       event.target.focus({ preventScroll: true });
       if (this.select === event.target) this.close();
@@ -86,10 +95,15 @@ export class SelectEnhancer {
   };
 
   private onClick = (event: MouseEvent): void => {
+    const pointerSelect = this.pointerSelect;
+    this.pointerSelect = null;
     if (this.eligible(event.target)) {
       event.preventDefault();
       // Assistive technology and associated labels can activate without pointerdown.
-      if (event.detail === 0 && !this.select) this.open(event.target);
+      if (event.detail === 0 || pointerSelect !== event.target) {
+        if (this.select === event.target) this.close();
+        else this.open(event.target);
+      }
       return;
     }
     if (!(event.target instanceof Element) || !this.popup?.contains(event.target)) return;
@@ -252,12 +266,14 @@ export class SelectEnhancer {
       this.listbox = list;
     }
     document.body.append(popup);
+    this.releaseOwner = ownSurface(popup, select);
     // The top layer escapes modal stacking contexts without moving the select.
     popup.showPopover();
     select.setAttribute('aria-expanded', 'true');
     select.setAttribute('aria-controls', this.listbox.id);
     this.render();
     if (this.popup !== popup) return;
+    animateEnter(popup);
     this.filterInput?.focus({ preventScroll: true });
     popup.addEventListener('pointermove', event => {
       const row = this.rows.find(({ element }) => element.contains(event.target as Node));
@@ -298,8 +314,8 @@ export class SelectEnhancer {
     groupContainer.setAttribute('role', 'presentation');
     for (const option of Array.from(select.options)) {
       if (!this.visible(option)) continue;
-      const term = this.filterInput?.value.trim().toLocaleLowerCase();
-      if (term && !`${option.label} ${option.value} ${option.dataset.searchTerms ?? ''}`.toLocaleLowerCase().includes(term)) continue;
+      const term = normalizeSearchString(this.filterInput?.value.trim() ?? '');
+      if (term && !normalizeSearchString(`${option.label} ${option.value} ${option.dataset.searchTerms ?? ''}`).includes(term)) continue;
       const group = option.parentElement instanceof HTMLOptGroupElement ? option.parentElement : null;
       if (group !== lastGroup) {
         groupContainer = document.createElement('div');
@@ -322,6 +338,15 @@ export class SelectEnhancer {
       element.setAttribute('aria-selected', String(option.selected));
       element.setAttribute('aria-disabled', String(!this.available(option)));
       element.textContent = option.label;
+      if (option.dataset.icon) {
+        const icon = document.createElement('span');
+        icon.className = 'material-symbols-outlined md-20';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = option.dataset.icon;
+        element.prepend(icon);
+        element.classList.add('has-icon');
+        element.setAttribute('aria-label', option.label);
+      }
       groupContainer.append(element);
       this.rows.push({ option, element });
     }
@@ -355,7 +380,7 @@ export class SelectEnhancer {
       if (row.option === option) {
         this.select?.setAttribute('aria-activedescendant', row.element.id);
         this.filterInput?.setAttribute('aria-activedescendant', row.element.id);
-        if (scroll) row.element.scrollIntoView({ block: 'nearest' });
+        if (scroll) smoothScrollIntoView(row.element, { block: 'nearest' });
       }
     }
   }
@@ -379,45 +404,37 @@ export class SelectEnhancer {
     if (!this.popup || !this.select) return;
     if (!this.valid()) { this.close(); return; }
     const rect = this.select.getBoundingClientRect();
-    const margin = 8;
-    const gap = 6;
     const width = document.documentElement.clientWidth;
     const height = document.documentElement.clientHeight;
     if (rect.bottom < 0 || rect.top > height || rect.right < 0 || rect.left > width) { this.close(); return; }
-    const popup = this.popup;
-    const availableBelow = Math.max(0, height - rect.bottom - margin - gap);
-    const availableAbove = Math.max(0, rect.top - margin - gap);
-    const above = availableBelow < Math.min(popup.scrollHeight, 240) && availableAbove > availableBelow;
-    const maxHeight = Math.min(360, above ? availableAbove : availableBelow);
-    popup.style.maxHeight = `${maxHeight}px`;
-    popup.style.minWidth = `${Math.min(rect.width, width - margin * 2)}px`;
-    popup.style.maxWidth = `${Math.max(0, width - margin * 2)}px`;
-    const popupRect = popup.getBoundingClientRect();
-    const alignedLeft = getComputedStyle(this.select).direction === 'rtl' ? rect.right - popupRect.width : rect.left;
-    popup.style.left = `${Math.max(margin, Math.min(alignedLeft, width - popupRect.width - margin))}px`;
-    popup.style.top = `${Math.max(margin, Math.min(above ? rect.top - gap - popupRect.height : rect.bottom + gap, height - popupRect.height - margin))}px`;
+    positionAnchoredSurface(this.popup, this.select);
   };
 
   private close(): void {
+    const popup = this.popup;
+    const select = this.select;
+    const attributes = this.savedAttributes;
+    this.popup = null;
+    this.select = null;
+    this.filterInput = null;
+    this.listbox = null;
+    this.savedAttributes = new Map();
     this.optionObserver?.disconnect();
     this.documentObserver?.disconnect();
     this.resizeObserver?.disconnect();
     this.optionObserver = this.documentObserver = null;
     this.resizeObserver = null;
-    this.popup?.remove();
-    if (this.select) {
-      for (const [name, value] of this.savedAttributes) {
-        if (value === null) this.select.removeAttribute(name);
-        else this.select.setAttribute(name, value);
+    this.releaseOwner?.();
+    this.releaseOwner = null;
+    if (popup) removeWithMotion(popup);
+    if (select) {
+      for (const [name, value] of attributes) {
+        if (value === null) select.removeAttribute(name);
+        else select.setAttribute(name, value);
       }
     }
-    this.select = null;
-    this.popup = null;
-    this.filterInput = null;
-    this.listbox = null;
     this.rows = [];
     this.active = null;
-    this.savedAttributes.clear();
     this.search = '';
     this.searchTime = 0;
   }

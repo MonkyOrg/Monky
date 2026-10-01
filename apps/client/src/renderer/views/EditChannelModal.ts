@@ -2,11 +2,15 @@ import { ChannelSummary, MessageType } from '@monky/shared';
 import { networkClient } from '../core/NetworkClient';
 import { serverStore } from '../stores/serverStore';
 import { t } from '../i18n';
+import { enterModal, exitModal } from '../utils/modalSurface';
 import { escapeHtml } from '../utils/html';
 import { enableBackdropClose } from '../utils/modal';
 import { attachInputEmojiPicker } from '../utils/inputEmojiPicker';
 import {
   attachChannelPrivacyFields,
+  renderChannelCategoryFields,
+  attachChannelCategoryFields,
+  readChannelCategoryFields,
   readChannelBotCommandsField,
   renderChannelBotCommandsField,
   readChannelPrivacyFields,
@@ -24,6 +28,7 @@ export class EditChannelModal {
   private modalEl: HTMLElement | null = null;
   private detachPrivacyFields: (() => void) | null = null;
   private detachEmojiPicker: (() => void) | null = null;
+  private detachCategoryFields: (() => void) | null = null;
 
   public open(channelId: string): void {
     const channel = serverStore.serverDetails?.channels.find((c) => c.id === channelId);
@@ -35,6 +40,7 @@ export class EditChannelModal {
     this.modalEl.innerHTML = this.buildMarkup(channel);
 
     document.body.appendChild(this.modalEl);
+    enterModal(this.modalEl);
     this.attachEvents(channel);
   }
 
@@ -72,11 +78,12 @@ export class EditChannelModal {
             </div>
           </div>
 
-          ${renderChannelPrivacyFields({
+          ${renderChannelCategoryFields(channel.categoryId ?? null, channel.inheritCategoryPermissions ?? true)}
+          <div id="channel-permission-overrides">${renderChannelPrivacyFields({
             isPrivate: channel.isPrivate,
             allowedRoleIds: channel.allowedRoleIds,
-          })}
-          ${renderChannelBotCommandsField(channel.botCommandsEnabled, channel.type)}
+          })}</div>
+          ${renderChannelBotCommandsField(channel.botCommandsEnabled)}
 
           <div class="modal-footer">
             <button type="button" id="btn-cancel" class="btn btn-secondary">${t('common.cancel')}</button>
@@ -89,6 +96,7 @@ export class EditChannelModal {
 
   private attachEvents(channel: ChannelSummary): void {
     if (!this.modalEl) return;
+    const root = this.modalEl;
 
     const btnClose = this.modalEl.querySelector('#modal-close');
     const btnCancel = this.modalEl.querySelector('#btn-cancel');
@@ -101,6 +109,7 @@ export class EditChannelModal {
     btnCancel?.addEventListener('click', () => this.close());
     enableBackdropClose(this.modalEl, () => this.close());
     this.detachPrivacyFields = attachChannelPrivacyFields(this.modalEl);
+    this.detachCategoryFields = attachChannelCategoryFields(this.modalEl);
 
     if (btnEmoji && inputName) {
       this.detachEmojiPicker = attachInputEmojiPicker(inputName, btnEmoji);
@@ -108,6 +117,7 @@ export class EditChannelModal {
 
     form?.addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (this.modalEl !== root) return;
       const name = inputName?.value.trim();
       if (!name || !this.modalEl) return;
 
@@ -116,16 +126,18 @@ export class EditChannelModal {
       try {
         await networkClient.sendRequest(MessageType.CHANNEL_UPDATE, {
           channelId: channel.id,
+          ...readChannelCategoryFields(this.modalEl),
           name,
           isPrivate: privacy.isPrivate,
           allowedRoleIds: privacy.allowedRoleIds,
-          ...(channel.type === 'TEXT' ? { botCommandsEnabled: readChannelBotCommandsField(this.modalEl) } : {}),
+          botCommandsEnabled: readChannelBotCommandsField(this.modalEl),
         });
-        this.close();
-      } catch (err: any) {
+        if (this.modalEl === root) this.close();
+      } catch (err: unknown) {
+        if (this.modalEl !== root) return;
         const banner = this.modalEl?.querySelector('#channel-error-banner') as HTMLElement | null;
         if (banner) {
-          banner.innerText = err.message || t('channelModal.editError');
+          banner.innerText = err instanceof Error ? err.message : t('channelModal.editError');
           banner.classList.add('show');
         }
       }
@@ -133,12 +145,14 @@ export class EditChannelModal {
   }
 
   public close(): void {
+    this.detachCategoryFields?.();
+    this.detachCategoryFields = null;
     this.detachEmojiPicker?.();
     this.detachEmojiPicker = null;
     this.detachPrivacyFields?.();
     this.detachPrivacyFields = null;
     if (this.modalEl) {
-      this.modalEl.remove();
+      exitModal(this.modalEl);
       this.modalEl = null;
     }
   }

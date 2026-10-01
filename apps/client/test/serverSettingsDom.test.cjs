@@ -37,6 +37,8 @@ if (!process.versions.electron) {
   };
   app.whenReady().then(async () => {
     const { createServer } = await import('vite');
+    const fonts = ['material-symbols/outlined.css', '@fontsource/inter/400.css', '@fontsource/inter/600.css']
+      .map(id => `<link rel="stylesheet" href="/@fs/${require.resolve(id).replaceAll('\\', '/')}">`).join('');
     vite = await createServer({
       configFile: path.join(clientRoot, 'vite.config.ts'), logLevel: 'error',
       cacheDir: path.join(app.getPath('userData'), 'vite-cache'),
@@ -45,9 +47,14 @@ if (!process.versions.electron) {
         name: 'server-settings-regression-fixture',
         configureServer(server) {
           server.middlewares.use((request, response, next) => {
+            if (request.url === '/avatars/cover.png') {
+              response.setHeader('Content-Type', 'image/svg+xml');
+              response.end('<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="400"><rect width="1000" height="400" fill="#363586"/><circle cx="700" cy="180" r="170" fill="#6965d9"/></svg>');
+              return;
+            }
             if (request.url !== '/__server_settings_regression__') return next();
             response.setHeader('Content-Type', 'text/html');
-            response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css"></head><body></body></html>');
+            response.end(`<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css">${fonts}</head><body></body></html>`);
           });
         },
       }],
@@ -69,21 +76,34 @@ if (!process.versions.electron) {
     for (const language of ['pt-BR', 'en']) {
       await browser.loadURL(`http://127.0.0.1:${address.port}/__server_settings_regression__`);
       await browser.webContents.executeJavaScript('localStorage.clear(); sessionStorage.clear();', true);
-      const checks = await browser.webContents.executeJavaScript(
-        `(${runRegression.toString()})(${JSON.stringify(language)})`, true);
-      console.log(`Server settings DOM (${language}): ${checks} checks passed`);
+      const sharedModule = '/@fs/' + path.resolve(clientRoot, '..', '..', 'packages', 'shared', 'src', 'index.ts').replace(/\\/g, '/');
+      await browser.webContents.executeJavaScript(
+        `window.settingsRegression = (${runRegression.toString()})(${JSON.stringify(language)}, ${JSON.stringify(sharedModule)}); void 0`, true);
+      for (;;) {
+        const step = await browser.webContents.executeJavaScript('window.settingsRegression.next().catch(error => ({ failure: error.stack || String(error) }))', true);
+        if (step.failure) throw new Error(step.failure);
+        if (step.done) { console.log(`Server settings DOM (${language}): ${step.value} checks passed`); break; }
+        if (process.env.MONKY_COMMUNITY_SCREENSHOTS) {
+          await browser.webContents.executeJavaScript('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
+          fs.writeFileSync(path.join(process.env.MONKY_COMMUNITY_SCREENSHOTS, `727-${language}-${step.value}.png`),
+            (await browser.webContents.capturePage()).toPNG());
+        }
+      }
     }
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
 }
 
-async function runRegression(language) {
+async function* runRegression(language, sharedModule) {
   const { setLanguage, t } = await import('/i18n/index.ts');
   setLanguage(language);
   const [{ ServerSettingsModal }, stores, network, { appEvents }] = await Promise.all([
     import('/views/ServerSettingsModal.ts'), import('/stores/serverStore.ts'),
     import('/core/NetworkClient.ts'), import('/core/EventBus.ts'),
   ]);
+  const { Permission } = await import(sharedModule);
+  const { CommunityFeed } = await import('/core/CommunityFeed.ts');
+  const { sessionManager } = await import('/core/SessionManager.ts');
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
   const copiedVersions = [];
@@ -92,7 +112,11 @@ async function runRegression(language) {
   });
   const listenerCount = () => [...appEvents.listeners.values()].reduce((total, listeners) => total + listeners.size, 0);
   const initialListeners = listenerCount();
-  const flush = async () => { for (let index = 0; index < 20; index++) await Promise.resolve(); };
+  const flush = async () => {
+    for (let index = 0; index < 20; index++) await Promise.resolve();
+    await Promise.allSettled(document.getAnimations().filter(animation =>
+      animation.effect?.getComputedTiming().iterations !== Infinity).map(animation => animation.finished));
+  };
   const settle = async (predicate, message) => {
     for (let attempt = 0; attempt < 100; attempt++) {
       if (predicate()) return;
@@ -137,8 +161,9 @@ async function runRegression(language) {
     id: 'server-a', name: 'Server A', serverVersion: '44.7.9-beta', createdAt: 1, maxUsers: 0, hasPassword: false,
     iconUrl: 'data:image/png;base64,AA==', voiceMode: 'p2p', turnEnabled: false,
     turnAvailability: { supported: false, reason: 'not-installed', autoInstallable: true },
-    allowSoundboard: true, allowEveryoneMention: true, allowMessageEdit: true, showRoleBadgesToEveryone: true,
-    messageDeleteUndoSeconds: 60, protocol: { version: 27, minimumVersion: 27, features: ['message-delete-undo'] },
+    allowSoundboard: true, recentSoundCacheEnabled: true, recentSoundCacheLimit: 20,
+    allowEveryoneMention: true, allowMessageEdit: true, showRoleBadgesToEveryone: true,
+    messageDeleteUndoSeconds: 60, protocol: { version: 34, minimumVersion: 27, features: ['message-delete-undo', 'recent-sounds'] },
     channels: [], members: [member('admin'), member('bob')],
     knownMembers: [member('admin'), member('bob'), { ...member('carol'), status: 'DISCONNECTED' }, { ...member('helper'), isBot: true }],
     voiceStates: {}, roles: [role], userRoles: [], ownerId: 'admin', myPermissions: 0xFFFFFFFF,
@@ -148,9 +173,12 @@ async function runRegression(language) {
   client.sessionKey = 'server-a';
   client.getStatus = () => 'CONNECTED';
   client.getCurrentServerUrl = () => 'wss://server-a.example/';
+  client.getHttpBaseUrl = () => window.location.origin;
   const requests = [];
+  const communitySnapshot = { settings: { eventsEnabled: true, bannerUrl: null }, events: [], liveActions: [] };
   let bots = [botInfo()];
   client.sendRequest = (type, payload) => {
+    if (type === 'COMMUNITY_GET') return Promise.resolve(structuredClone(communitySnapshot));
     if (type === 'BOT_LIST') return Promise.resolve({ bots: structuredClone(bots) });
     if (type === 'BOT_SETTINGS_GET') return Promise.resolve(botSettingsSnapshot(payload.botId));
     return new Promise((resolve, reject) => { requests.push({ type, payload: structuredClone(payload), resolve, reject, done: false }); });
@@ -167,9 +195,10 @@ async function runRegression(language) {
     let result = {};
     if (type === 'SERVER_UPDATE_SETTINGS') {
       const s = store.serverDetails;
-      for (const key of ['name', 'maxUsers', 'allowSoundboard', 'allowEveryoneMention', 'allowMessageEdit', 'showRoleBadgesToEveryone', 'turnEnabled', 'voiceMode', 'messageDeleteUndoSeconds']) {
+      for (const key of ['name', 'maxUsers', 'allowSoundboard', 'recentSoundCacheEnabled', 'recentSoundCacheLimit', 'allowEveryoneMention', 'allowMessageEdit', 'showRoleBadgesToEveryone', 'turnEnabled', 'voiceMode', 'messageDeleteUndoSeconds']) {
         if (payload[key] !== undefined) s[key] = payload[key];
       }
+      if (payload.allowSoundboard === false) s.recentSoundCacheEnabled = false;
       if (payload.voiceMode === 'sfu') s.turnEnabled = false;
       if (payload.turnEnabled) s.turnAvailability = { supported: true };
       if ('password' in payload) s.hasPassword = Boolean(payload.password);
@@ -178,6 +207,10 @@ async function runRegression(language) {
       if (payload.maxAttachmentStorageBytes !== undefined) s.attachmentStorage.maxTotalBytes = payload.maxAttachmentStorageBytes;
       result = { ...s };
       appEvents.emit('server.updated');
+    } else if (type === 'COMMUNITY_UPDATE_SETTINGS') {
+      if (payload.eventsEnabled !== undefined) communitySnapshot.settings.eventsEnabled = payload.eventsEnabled;
+      if ('bannerBase64' in payload) communitySnapshot.settings.bannerUrl = payload.bannerBase64;
+      void community.load();
     } else if (type === 'MEMBER_KICK') {
       store.removeMemberCompletely(payload.targetUserId);
     } else if (type === 'ROLE_UPDATE') {
@@ -214,8 +247,12 @@ async function runRegression(language) {
   };
   stores.setActiveServerStore(store);
   network.setActiveNetworkClient(client);
+  const community = new CommunityFeed(client, store);
+  await community.load();
+  const originalGetActive = sessionManager.getActive;
+  sessionManager.getActive = () => ({ community });
   const modal = new ServerSettingsModal();
-  const field = (id) => document.querySelector(id);
+  const field = (id) => [...document.querySelectorAll(id)].find(element => !element.closest('[data-ui-closing]'));
   const change = (id, value) => {
     const input = field(id);
     if (!input) throw new Error(`Missing ${id}`);
@@ -226,9 +263,72 @@ async function runRegression(language) {
   };
   const tab = (name) => field(`[data-tab="${name}"]`).click();
   const locked = () => field('#btn-done')?.disabled === true;
-  const mainBackdrop = () => document.querySelector('.server-settings-modal-card')?.closest('.modal-backdrop');
+  const mainBackdrop = () => field('.server-settings-modal-card')?.closest('.modal-backdrop');
   modal.open();
   await flush();
+  check(!field('[data-tab="community"]') && !field('#tab-panel-community'), 'Events and banner have no standalone settings category');
+  const general = field('#tab-panel-general');
+  const profile = field('[data-settings-section="server-profile"]');
+  check(profile.contains(field('#community-server-banner')) && profile.contains(field('#server-icon-wrapper')),
+    'Banner belongs to the same General profile card as the server name and photo');
+  check(general.contains(field('#community-events-enabled'))
+    && field('#community-events-enabled').closest('[data-settings-section="server-events"]').textContent.includes(t('community.enabled')),
+  'The master Events and Live Actions switch is in General with localized copy');
+  const bannerLabel = getComputedStyle(field('[data-settings-section="server-banner"] > label'));
+  const nameLabel = getComputedStyle(field('#input-server-name').closest('.form-group').querySelector('label'));
+  check(['fontSize', 'fontFamily', 'fontWeight', 'textTransform', 'letterSpacing'].every(key => bannerLabel[key] === nameLabel[key]),
+    'Banner title uses the same typography as the server name field');
+  for (const selector of ['#community-events-enabled', '#toggle-message-limit', '#checkbox-limit-members']) {
+    const toggle = field(selector).closest('.toggle-switch');
+    const row = toggle.parentElement;
+    const box = row.getBoundingClientRect();
+    const style = getComputedStyle(row);
+    const inset = parseFloat(style.paddingRight) + parseFloat(style.borderRightWidth);
+    check(Math.abs(toggle.getBoundingClientRect().right - (box.right - inset)) < 2, `${selector} is aligned at the right edge`);
+  }
+  yield 'settings-general';
+  change('#community-events-enabled', false);
+  await flush();
+  check(locked() && pendingRequest('COMMUNITY_UPDATE_SETTINGS').payload.eventsEnabled === false, 'General event switch applies immediately with the normal dismissal guard');
+  acknowledge('COMMUNITY_UPDATE_SETTINGS');
+  await flush();
+  check(!locked() && !field('#community-events-enabled').checked, 'Event acknowledgement refreshes the persisted switch');
+  change('#community-events-enabled', true);
+  await flush();
+  reject('COMMUNITY_UPDATE_SETTINGS', 'Events update failed');
+  await flush();
+  check(!field('#community-events-enabled').checked && field('#server-settings-banner').textContent.includes('Events update failed'),
+    'Rejected event changes restore persisted state and display the failure');
+  store.myPermissions = Permission.MANAGE_EVENTS;
+  appEvents.emit('server.updated');
+  check(field('#community-events-enabled').matches(':disabled') && field('#input-server-name').matches(':disabled') &&
+    field('#community-choose-banner').matches(':disabled'), 'Event managers cannot change the server-wide master switch');
+  store.myPermissions = Permission.MANAGE_SERVER;
+  appEvents.emit('server.updated');
+  check(!field('#community-events-enabled').matches(':disabled') && !field('#input-server-name').matches(':disabled') &&
+    !field('#community-choose-banner').matches(':disabled'), 'Server managers can change the master switch and server profile');
+  store.myPermissions = 0xFFFFFFFF;
+  appEvents.emit('server.updated');
+  change('#community-events-enabled', true);
+  await flush();
+  acknowledge('COMMUNITY_UPDATE_SETTINGS');
+  await flush();
+  communitySnapshot.settings.bannerUrl = '/avatars/cover.png';
+  await community.load();
+  await settle(() => field('#community-server-banner').complete && field('#community-server-banner').naturalWidth > 0,
+    'The server banner preview did not finish loading');
+  check(!field('#community-server-banner').hidden && !field('[data-community-setting="remove"]').disabled,
+    'Banner preview updates without rebuilding the profile form');
+  check(field('#community-server-banner').getBoundingClientRect().right <= profile.getBoundingClientRect().right,
+    'The banner preview fits within the name and photo card');
+  yield 'settings-banner';
+  field('[data-community-setting="remove"]').click();
+  await flush();
+  check(locked() && pendingRequest('COMMUNITY_UPDATE_SETTINGS').payload.bannerBase64 === null, 'Removing the profile banner preserves immediate persistence');
+  acknowledge('COMMUNITY_UPDATE_SETTINGS');
+  await flush();
+  check(field('#community-server-banner').hidden && field('[data-community-setting="remove"]').disabled,
+    'Removing the banner clears its preview and disables a second removal');
   tab('members');
   const memberIds = () => [...document.querySelectorAll('#tab-panel-members .member-actions-trigger')].map(button => button.dataset.userId);
   const memberRow = id => field(`#tab-panel-members .member-actions-trigger[data-user-id="${id}"]`)?.closest('tr');
@@ -305,6 +405,8 @@ async function runRegression(language) {
   change('#input-server-name', 'Rapid one');
   change('#input-server-name', 'Rapid two');
   tab('voice_video');
+  check(field('#checkbox-recent-sounds').checked && field('#input-recent-sounds-limit').value === '20',
+    'Recent audio cache settings are shown for compatible servers');
   change('#checkbox-allow-soundboard', false);
   await flush();
   check(pendingRequest('SERVER_UPDATE_SETTINGS').payload.name === 'Rapid one', 'First rapid edit is not replaced by a later DOM value');
@@ -318,6 +420,9 @@ async function runRegression(language) {
   acknowledge('SERVER_UPDATE_SETTINGS');
   await flush();
   check(!locked() && store.serverDetails.allowSoundboard === false, 'All queued changes finish before dismissal unlocks');
+  check(store.serverDetails.recentSoundCacheEnabled === false, 'Disabling soundboard also disables its recent audio cache');
+  check(field('#checkbox-recent-sounds').disabled && field('#input-recent-sounds-limit').disabled,
+    'Disabling soundboard also disables recent audio cache controls');
   change('#checkbox-turn-enabled', true);
   await flush();
   appEvents.emit('message.TURN_INSTALL_PROGRESS', { stage: 'configuring', percent: 100 });
@@ -460,7 +565,7 @@ async function runRegression(language) {
   field('#role-editor-color').click();
   const colorOwner = field('#role-editor-color').closest('.modal-backdrop');
   window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-  check(colorOwner.isConnected && !document.querySelector('.color-picker-popover'),
+  check(colorOwner.isConnected && !field('.color-picker-popover'),
     'Escape closes the role color picker before the server settings capture-phase handler');
   field('#role-editor-color').click();
   field('[data-color-preset="#ed4245"]').click();
@@ -815,6 +920,8 @@ async function runRegression(language) {
     field('#server-settings-version-unavailable').textContent === t('serverSettings.serverVersionUnavailable'),
   'Missing server metadata is explicit and never replaced with the local app version');
   modal.close();
+  community.dispose();
+  sessionManager.getActive = originalGetActive;
   client.dispose();
   otherClient.dispose();
   return checks;

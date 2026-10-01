@@ -1,5 +1,5 @@
 import { connectionStore, type CreatedServer } from '../stores/connectionStore';
-import { t } from '../i18n';
+import { t, getLanguage } from '../i18n';
 
 let pendingStart: { id: string; port: number; promise: Promise<void> } | null = null;
 
@@ -38,6 +38,7 @@ export async function ensureHostedServerStarted(server: CreatedServer): Promise<
       serverName: target.name,
       password: target.password,
       initialTextChannel: target.textChannel,
+      categoryLocale: getLanguage(),
       initialVoiceChannel: target.voiceChannel,
       serverId: target.id,
       maxUsers: target.maxUsers,

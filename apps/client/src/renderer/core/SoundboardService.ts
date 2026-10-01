@@ -1,4 +1,10 @@
-import { MessageType, Permission, SoundboardPlayedPayload, SoundboardStoppedPayload } from '@monky/shared';
+import {
+  MessageType,
+  Permission,
+  SoundboardPlayedPayload,
+  SoundboardStoppedPayload,
+  type SoundboardSoundData,
+} from '@monky/shared';
 import { appEvents } from './EventBus';
 import { callClient } from './serverConnection';
 import { sessionManager } from './SessionManager';
@@ -32,6 +38,7 @@ interface PendingSoundPlayback {
 
 interface ManagedSoundPlayback extends ActiveSoundPlayback {
   dispose: () => void;
+  showInGlobalPlayer: boolean;
 }
 
 export class SoundboardService {
@@ -181,7 +188,7 @@ export class SoundboardService {
   public getPlayingSoundNames(): Set<string> {
     const active = new Set<string>();
     for (const p of this.activePlaybacks.values()) {
-      if (!p.audio.paused && !p.audio.ended) {
+      if (p.showInGlobalPlayer && !p.audio.paused && !p.audio.ended) {
         active.add(p.soundName);
       }
     }
@@ -194,6 +201,12 @@ export class SoundboardService {
     );
   }
 
+  public getGlobalPlayerPlaybacks(includePaused = false): ActiveSoundPlayback[] {
+    return Array.from(this.activePlaybacks.values()).filter(
+      (p) => p.showInGlobalPlayer && (includePaused || !p.audio.paused) && !p.audio.ended
+    );
+  }
+
   public getCurrentPlayback(): {
     soundName: string | null;
     isPlaying: boolean;
@@ -201,7 +214,7 @@ export class SoundboardService {
     duration: number;
     activeCount: number;
   } {
-    const active = this.getActivePlaybacks();
+    const active = this.getGlobalPlayerPlaybacks();
     const latest = active[active.length - 1];
     return {
       soundName: latest ? latest.soundName : null,
@@ -288,6 +301,31 @@ export class SoundboardService {
     this.stopSoundForUser('editor-preview');
   }
 
+  public stopRecentPreview(): void {
+    this.stopSoundForUser('recent-preview');
+  }
+
+  /** Plays a cached server sound locally without broadcasting or recording it again. */
+  public async previewRecentSound(soundName: string, audioBase64: string, mimeType: string): Promise<boolean> {
+    const userId = 'recent-preview';
+    const pending = this.beginPlayback(userId, soundName);
+    try {
+      const audio = new Audio(`data:${mimeType};base64,${audioBase64}`);
+      pending.audio = audio;
+      this.audioOutput.setVolume(this.getEffectiveVolume());
+      await setAudioOutputSink(audio, this.sinkId);
+      await this.audioOutput.connect(audio, pending.controller.signal);
+      if (this.pendingPlaybacks.get(userId) !== pending) return false;
+      return await this.playAudioForUser(audio, userId, t('common.you'), soundName, undefined, false);
+    } catch (err) {
+      if (!pending.controller.signal.aborted) console.warn('[SoundboardService] Recent sound preview failed:', err);
+      pending.controller.abort();
+      return false;
+    } finally {
+      if (this.pendingPlaybacks.get(userId) === pending) this.pendingPlaybacks.delete(userId);
+    }
+  }
+
   /** Explicit local-only preview through the same volume, sink and limiter graph. */
   public async previewEditedSound(bytes: Uint8Array, soundName: string, startTime = 0): Promise<boolean> {
     const userId = 'editor-preview';
@@ -348,8 +386,16 @@ export class SoundboardService {
     const voiceKey = voiceStore.voiceSessionKey;
     if (!currentChannelId || !voiceKey) {
       console.warn('[SoundboardService] Cannot play sound: not in a voice channel');
-      // Local preview if clicked outside call
-      return await this.playLocalPreview(filePath);
+      try {
+        const soundData = await window.api.readSoundboardSound(filePath);
+        if (!soundData) return false;
+        const played = await this.playLocalPreview(filePath, soundData);
+        if (played) this.recordLocalPreview(soundData);
+        return played;
+      } catch (err) {
+        console.warn('[SoundboardService] Local preview failed:', err);
+        return false;
+      }
     }
 
     // Check permissions on the server hosting the call (not necessarily the one in foreground)
@@ -393,7 +439,8 @@ export class SoundboardService {
     userId: string,
     userName: string | undefined,
     soundName: string,
-    release?: () => void
+    release?: () => void,
+    showInGlobalPlayer = true,
   ): Promise<boolean> {
     const playback: ManagedSoundPlayback = {
       userId,
@@ -401,6 +448,7 @@ export class SoundboardService {
       soundName,
       audio,
       dispose: () => cleanup(),
+      showInGlobalPlayer,
     };
     this.activePlaybacks.set(userId, playback);
 
@@ -498,10 +546,23 @@ export class SoundboardService {
     return pending;
   }
 
-  private async playLocalPreview(filePath: string): Promise<boolean> {
+  private recordLocalPreview(soundData: SoundboardSoundData): void {
+    const session = sessionManager.getActive();
+    const details = session?.serverStore.serverDetails;
+    if (!session || details?.allowSoundboard === false || !details?.recentSoundCacheEnabled ||
+        !details.protocol?.features.includes('recent-sounds') ||
+        !session.serverStore.hasPermission(Permission.USE_SOUNDBOARD)) return;
+    session.client.send(MessageType.RECENT_SOUND_RECORD, {
+      soundName: soundData.soundName,
+      audioBase64: soundData.base64,
+      mimeType: soundData.mimeType,
+    });
+  }
+
+  private async playLocalPreview(filePath: string, providedData?: SoundboardSoundData): Promise<boolean> {
     const pending = this.beginPlayback('local', this.sounds.find(sound => sound.filePath === filePath)?.name);
     try {
-      const soundData = await window.api.readSoundboardSound(filePath);
+      const soundData = providedData ?? await window.api.readSoundboardSound(filePath);
       if (!soundData) throw new Error('Could not read the soundboard file');
       if (this.pendingPlaybacks.get('local') !== pending) return false;
 

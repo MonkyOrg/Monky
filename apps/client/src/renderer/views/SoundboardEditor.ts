@@ -2,6 +2,7 @@ import { encodeSoundboardEdit } from '@monky/shared';
 import { decodeSoundboardEdit, soundboardFileMessage, soundboardFileValue, validateSoundboardName, SoundboardLibraryError } from '../core/SoundboardLibrary';
 import { soundboardService, type SoundItem } from '../core/SoundboardService';
 import { t } from '../i18n';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { escapeHtml } from '../utils/html';
 import { enableBackdropClose } from '../utils/modal';
 import { SoundboardEditorPlayer } from './SoundboardEditorPlayer';
@@ -47,6 +48,7 @@ export class SoundboardEditor {
         <p data-editor-status role="status">${t('common.loading')}</p>
       </div>`;
     document.body.appendChild(backdrop);
+    enterModal(backdrop);
     const close = () => {
       this.close();
       if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
@@ -54,7 +56,7 @@ export class SoundboardEditor {
     backdrop.querySelector('[data-editor-close]')?.addEventListener('click', close);
     enableBackdropClose(backdrop, close);
     const keys = (event: KeyboardEvent) => {
-      if (document.querySelector('.modal-backdrop:last-of-type') !== backdrop) return;
+      if (!handlesModalKey(backdrop, event)) return;
       if (event.key === 'Escape') {
         event.preventDefault(); event.stopImmediatePropagation();
         if (!this.timeline?.cancelDrag()) close();
@@ -176,7 +178,7 @@ export class SoundboardEditor {
     this.removeKeys?.();
     this.removeKeys = null;
     soundboardService.stopEditorPreview();
-    this.backdrop?.remove();
+    if (this.backdrop) exitModal(this.backdrop);
     this.backdrop = null;
   }
 }

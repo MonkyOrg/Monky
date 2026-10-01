@@ -35,6 +35,10 @@ export enum ProtocolErrorCode {
   UNAUTHORIZED = 'UNAUTHORIZED',
   PERMISSION_DENIED = 'PERMISSION_DENIED',
   BAD_REQUEST = 'BAD_REQUEST',
+  COMMUNITY_INVALID = 'COMMUNITY_INVALID',
+  COMMUNITY_CONFLICT = 'COMMUNITY_CONFLICT',
+  FORUM_INVALID = 'FORUM_INVALID',
+  MESSAGE_SEARCH_INVALID = 'MESSAGE_SEARCH_INVALID',
   BOT_OFFLINE = 'BOT_OFFLINE',
   BOT_COMMAND_NOT_FOUND = 'BOT_COMMAND_NOT_FOUND',
   BOT_INVALID_OPTIONS = 'BOT_INVALID_OPTIONS',
@@ -68,6 +72,41 @@ export enum ProtocolErrorCode {
 }
 
 export enum MessageType {
+  COMMUNITY_GET = 'COMMUNITY_GET',
+  COMMUNITY_IMAGE_UPLOAD = 'COMMUNITY_IMAGE_UPLOAD',
+  COMMUNITY_UPDATE_SETTINGS = 'COMMUNITY_UPDATE_SETTINGS',
+  COMMUNITY_SNAPSHOT = 'COMMUNITY_SNAPSHOT',
+  COMMUNITY_ACK = 'COMMUNITY_ACK',
+  EVENT_SAVE = 'EVENT_SAVE',
+  EVENT_GET = 'EVENT_GET',
+  EVENT_GET_INTERESTED = 'EVENT_GET_INTERESTED',
+  EVENT_INTERESTED_LIST = 'EVENT_INTERESTED_LIST',
+  EVENT_SAVED = 'EVENT_SAVED',
+  EVENT_CONTROL = 'EVENT_CONTROL',
+  EVENT_INTEREST = 'EVENT_INTEREST',
+  EVENT_STARTED = 'EVENT_STARTED',
+  LIVE_ACTION_CREATE = 'LIVE_ACTION_CREATE',
+  LIVE_ACTION_UPDATE = 'LIVE_ACTION_UPDATE',
+  LIVE_ACTION_CLOSE = 'LIVE_ACTION_CLOSE',
+  LIVE_ACTION_LIST = 'LIVE_ACTION_LIST',
+  LIVE_ACTION_LIST_RESULT = 'LIVE_ACTION_LIST_RESULT',
+  LIVE_ACTION_SNAPSHOT = 'LIVE_ACTION_SNAPSHOT',
+  LIVE_ACTION_SUBMIT = 'LIVE_ACTION_SUBMIT',
+  LIVE_ACTION_SUBMITTED = 'LIVE_ACTION_SUBMITTED',
+  NATIVE_FORM_CREATE = 'NATIVE_FORM_CREATE',
+  NATIVE_FORM_SUBMIT = 'NATIVE_FORM_SUBMIT',
+  NATIVE_FORM_CLOSE = 'NATIVE_FORM_CLOSE',
+  NATIVE_FORM_RESULTS = 'NATIVE_FORM_RESULTS',
+  NATIVE_FORM_SNAPSHOT = 'NATIVE_FORM_SNAPSHOT',
+  NATIVE_FORM_RESULTS_RESULT = 'NATIVE_FORM_RESULTS_RESULT',
+  FORUM_LIST = 'FORUM_LIST',
+  FORUM_LIST_RESULT = 'FORUM_LIST_RESULT',
+  FORUM_CREATE_POST = 'FORUM_CREATE_POST',
+  FORUM_UPDATE_POST = 'FORUM_UPDATE_POST',
+  FORUM_DELETE_POST = 'FORUM_DELETE_POST',
+  FORUM_POST_SAVED = 'FORUM_POST_SAVED',
+  CHAT_SEARCH = 'CHAT_SEARCH',
+  CHAT_SEARCH_RESULTS = 'CHAT_SEARCH_RESULTS',
   SELECTOR_CREATE = 'SELECTOR_CREATE',
   SELECTOR_LIST = 'SELECTOR_LIST',
   SELECTOR_UPDATE = 'SELECTOR_UPDATE',
@@ -117,6 +156,11 @@ export enum MessageType {
   CHANNEL_UPDATE = 'CHANNEL_UPDATE',
   CHANNEL_DELETE = 'CHANNEL_DELETE',
   CHANNEL_REORDER = 'CHANNEL_REORDER',
+  CATEGORY_CREATE = 'CATEGORY_CREATE',
+  CATEGORY_UPDATE = 'CATEGORY_UPDATE',
+  CATEGORY_DELETE = 'CATEGORY_DELETE',
+  CATEGORY_REORDER = 'CATEGORY_REORDER',
+  CATEGORIES_UPDATED = 'CATEGORIES_UPDATED',
   USER_CHANGE_NICKNAME = 'USER_CHANGE_NICKNAME',
   USER_UPDATE_AVATAR = 'USER_UPDATE_AVATAR',
   SERVER_UPDATE_SETTINGS = 'SERVER_UPDATE_SETTINGS',
@@ -145,6 +189,9 @@ export enum MessageType {
   PING = 'PING',
   USER_LOGOUT = 'USER_LOGOUT',
   SOUNDBOARD_PLAY = 'SOUNDBOARD_PLAY',
+  RECENT_SOUND_RECORD = 'RECENT_SOUND_RECORD',
+  RECENT_SOUNDS_LIST = 'RECENT_SOUNDS_LIST',
+  RECENT_SOUND_DOWNLOAD = 'RECENT_SOUND_DOWNLOAD',
   /**
    * Client -> server, when the person who triggered a sound stops it. The audio
    * is broadcast once and then played by each listener on their own, so a stop
@@ -264,11 +311,18 @@ export enum MessageType {
   /** Server -> clients: an existing message was edited or deleted (#504). */
   CHAT_MESSAGE_UPDATED = 'CHAT_MESSAGE_UPDATED',
   CHAT_UPLOAD_TOKEN = 'CHAT_UPLOAD_TOKEN',
+  POLL_CREATE = 'POLL_CREATE',
+  POLL_VOTE = 'POLL_VOTE',
+  POLL_CLOSE = 'POLL_CLOSE',
+  POLL_UPDATED = 'POLL_UPDATED',
   VOICE_USER_JOINED = 'VOICE_USER_JOINED',
   VOICE_USER_LEFT = 'VOICE_USER_LEFT',
   VOICE_STATE_CHANGED = 'VOICE_STATE_CHANGED',
   VOICE_RESTRICTIONS_UPDATED = 'VOICE_RESTRICTIONS_UPDATED',
   SOUNDBOARD_PLAYED = 'SOUNDBOARD_PLAYED',
+  RECENT_SOUND_ADDED = 'RECENT_SOUND_ADDED',
+  RECENT_SOUNDS_RESULT = 'RECENT_SOUNDS_RESULT',
+  RECENT_SOUND_DATA = 'RECENT_SOUND_DATA',
   /** Server -> clients in the channel: drop this user's ongoing sound (#499). */
   SOUNDBOARD_STOPPED = 'SOUNDBOARD_STOPPED',
   SERVER_ERROR = 'SERVER_ERROR',
@@ -361,9 +415,11 @@ export interface ChatMentionsReadPayload {
 }
 
 export interface ChannelCreatePayload {
+  categoryId?: string | null;
+  inheritCategoryPermissions?: boolean;
   botCommandsEnabled?: boolean;
   name: string;
-  type: 'VOICE' | 'TEXT';
+  type: ChannelType;
   maxParticipants?: number;
   isPrivate?: boolean;
   allowedRoleIds?: string[];
@@ -375,6 +431,9 @@ export interface ChannelCreatePayload {
  * resending the name.
  */
 export interface ChannelUpdatePayload {
+  categoryId?: string | null;
+  /** Explicit ACL fields imply an override unless this is explicitly true. */
+  inheritCategoryPermissions?: boolean;
   botCommandsEnabled?: boolean;
   channelId: string;
   name?: string;
@@ -388,17 +447,35 @@ export interface ChannelDeletePayload {
 }
 
 /**
- * Reorders the channels of one kind (#471).
+ * Reorders a mixed category, with type-scoped ordering retained for callers.
  *
  * The whole list is sent rather than a single "move this one here": the client
  * already knows the order it is showing, and sending it whole means the server
  * never has to guess what the other positions became.
  */
 export interface ChannelReorderPayload {
-  type: ChannelType;
-  /** Every channel of that type, in the order they should appear. */
+  type?: ChannelType;
+  categoryId?: string | null;
+  /** Every channel of the selected category or type, in display order. */
   orderedIds: string[];
 }
+
+export interface CategoryCreatePayload {
+  name: string;
+  isPrivate?: boolean;
+  allowedRoleIds?: string[];
+}
+
+export interface CategoryUpdatePayload {
+  categoryId: string;
+  name?: string;
+  isPrivate?: boolean;
+  allowedRoleIds?: string[];
+}
+
+export interface CategoryDeletePayload { categoryId: string }
+export interface CategoryReorderPayload { orderedIds: string[] }
+export interface CategoriesUpdatedPayload { categories: import('./models.js').ChannelCategory[] }
 
 /**
  * The new positions, broadcast after a reorder (#471). Only the channels the
@@ -423,6 +500,8 @@ export interface ServerUpdateSettingsPayload {
   name?: string;
   password?: string | null; // null or empty string removes the password
   allowSoundboard?: boolean;
+  recentSoundCacheEnabled?: boolean;
+  recentSoundCacheLimit?: number;
   /** Enables or disables the `@todos` / `@everyone` mention (#464). */
   allowEveryoneMention?: boolean;
   /** Enables or disables editing of already-sent messages (#504). */
@@ -492,6 +571,12 @@ export interface ChatRestorePayload extends ChatDeletePayload {
 
 export interface SoundboardPlayPayload {
   channelId: string;
+  soundName: string;
+  audioBase64: string;
+  mimeType?: string;
+}
+
+export interface RecentSoundRecordPayload {
   soundName: string;
   audioBase64: string;
   mimeType?: string;
@@ -642,6 +727,8 @@ export interface ServerSettingsUpdatedPayload {
   name: string;
   hasPassword: boolean;
   allowSoundboard?: boolean;
+  recentSoundCacheEnabled?: boolean;
+  recentSoundCacheLimit?: number;
   /** Current state of the `@todos` / `@everyone` mention (#464). */
   allowEveryoneMention?: boolean;
   /** Current state of the message-editing switch (#504). */
@@ -1049,13 +1136,15 @@ export interface CommandInvokedPayload {
 /** Bot -> server. The destination and author come from the stored invocation. */
 export interface CommandResponsePayload {
   localizations?: import('./botMessages.js').BotMessageLocalizations;
+  components?: import('./botCarousels.js').BotMessageComponentInput[];
   invocationId: string;
   content: string;
   /** Private by default. Public output must be explicitly requested. */
   ephemeral?: boolean;
 }
 
-export interface BotCommandMessagePayload extends CommandResponsePayload, BotCommandContext {
+export interface BotCommandMessagePayload extends Omit<CommandResponsePayload, 'components'>, BotCommandContext {
+  components?: import('./botCarousels.js').BotMessageComponent[];
   messageId: string;
   channelId: string;
   botId: string;

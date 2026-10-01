@@ -1,5 +1,7 @@
 import { MessageType, getScreenShareQualities, screenShareQualitySchema, type BotScreen, type NativeScreenSource } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
+import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
+import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
 import { appEvents } from '../core/EventBus';
 import { networkClient } from '../core/NetworkClient';
 import { callClient, leaveCurrentCall } from '../core/serverConnection';
@@ -86,8 +88,12 @@ const FOCUS_ZOOM_STEP = 0.25;
 const MAX_TELEMETRY_SAMPLES = 20;
 
 export class VoiceStageView {
+  public onToggleChat?: (channelId: string) => void;
+  public onJoinChannel?: (channelId: string) => Promise<void>;
   private container: HTMLElement;
   private currentChannelId: string | null = null;
+  private chatOpen = false;
+  private renderedJoined = false;
   private unbindEvents: Array<() => void> = [];
   private focusedTileKeys: string[] = [];
   private focusEpoch = 0;
@@ -130,9 +136,25 @@ export class VoiceStageView {
     this.container = container;
   }
 
+  private isJoinedHere(): boolean {
+    return isViewingCallServer() && voiceStore.currentVoiceChannelId === this.currentChannelId;
+  }
+
+  public setChatOpen(open: boolean): void {
+    this.chatOpen = open;
+    const button = this.container.querySelector<HTMLButtonElement>('#stage-btn-chat');
+    if (!button) return;
+    button.classList.toggle('active', open);
+    button.setAttribute('aria-pressed', String(open));
+    button.setAttribute('aria-label', t(open ? 'voiceChat.hide' : 'voiceChat.show'));
+    button.title = t(open ? 'voiceChat.hide' : 'voiceChat.show');
+  }
+
   public setChannel(channelId: string | null): void {
-    if (channelId === this.currentChannelId && this.container.querySelector('.voice-stage-container')) {
+    if (channelId === this.currentChannelId && this.renderedJoined === this.isJoinedHere()
+        && this.container.querySelector('.voice-stage-container')) {
       this.refreshBotScreens();
+      this.setChatOpen(this.chatOpen);
       return;
     }
     this.focusEpoch++;
@@ -338,6 +360,8 @@ export class VoiceStageView {
 
     const channel = serverStore.serverDetails.channels.find((c) => c.id === this.currentChannelId);
     const channelName = channel ? channel.name : 'Geral';
+    const joinedHere = this.isJoinedHere();
+    this.renderedJoined = joinedHere;
 
     // Fresh DOM below means the (empty) banner wrapper must be repopulated by
     // updateControlsUI(), so drop the cached signature (#70).
@@ -351,6 +375,12 @@ export class VoiceStageView {
           </div>
 
           <div style="display: flex; align-items: center; gap: 10px;">
+            <button id="stage-btn-chat" class="btn btn-icon stage-chat-toggle ${this.chatOpen ? 'active' : ''}"
+              aria-pressed="${this.chatOpen}" aria-label="${t(this.chatOpen ? 'voiceChat.hide' : 'voiceChat.show')}"
+              title="${t(this.chatOpen ? 'voiceChat.hide' : 'voiceChat.show')}">
+              <span class="material-symbols-outlined">chat_bubble</span>
+            </button>
+            ${joinedHere ? `
             <!-- Ping / Latency Badge -->
             <div id="stage-ping-badge" class="stage-ping-badge good" tabindex="0" data-tooltip-source="ping-tooltip-content">
               <span class="ping-dot"></span>
@@ -371,6 +401,7 @@ export class VoiceStageView {
                      </div>`
               }
             </div>
+            ` : ''}
           </div>
         </div>
 
@@ -384,6 +415,7 @@ export class VoiceStageView {
           <div id="stage-bot-screens" class="stage-bot-screen-layer" hidden></div>
         </div>
 
+        ${joinedHere ? `
         <!-- Stage Bottom Controls Bar -->
         <div class="stage-call-controls">
           <button id="stage-btn-mic" class="btn btn-icon ${voiceStore.isMuted || voiceStore.isDeafened ? 'danger-active' : ''}" aria-pressed="${voiceStore.isMuted}" title="${voiceStore.isMuted ? t('stage.unmuteMic') : t('stage.muteMic')}">
@@ -414,6 +446,14 @@ export class VoiceStageView {
             <span>${t('stage.leaveVoice')}</span>
           </button>
         </div>
+        ` : `
+        <div class="stage-preview-controls">
+          <button id="stage-btn-join" type="button" class="btn btn-primary">
+            <span class="material-symbols-outlined md-18" aria-hidden="true">call</span>
+            <span>${t('voiceChat.join')}</span>
+          </button>
+        </div>
+        `}
       </div>
     `;
     if (!this.hasOpenBotScreen() ||
@@ -425,7 +465,8 @@ export class VoiceStageView {
     this.renderParticipants();
     this.updateControlsUI();
     this.attachEvents();
-    this.startPingMonitor();
+    if (joinedHere) this.startPingMonitor();
+    else this.stopPingMonitor();
     this.syncTelemetryMonitor();
   }
 
@@ -512,7 +553,6 @@ export class VoiceStageView {
       if (signature !== this.broadcastBannerSignature) {
         this.broadcastBannerSignature = signature;
         if (isBroadcasting) {
-          bannerWrapper.style.display = 'block';
           bannerWrapper.innerHTML = `
             <div class="stage-broadcast-banner">
               <div style="display: flex; align-items: center; gap: 10px;">
@@ -531,9 +571,9 @@ export class VoiceStageView {
           `;
           const btnQuickStop = document.getElementById('btn-stage-quick-stop');
           btnQuickStop?.addEventListener('click', () => this.handleStopStreaming());
+          setSurfaceVisible(bannerWrapper, true, 'panel', 'block');
         } else {
-          bannerWrapper.style.display = 'none';
-          bannerWrapper.innerHTML = '';
+          setSurfaceVisible(bannerWrapper, false, 'panel', undefined, () => bannerWrapper.replaceChildren());
         }
       }
     }
@@ -626,7 +666,7 @@ export class VoiceStageView {
   }
 
   private clearFocusError(): void {
-    this.focusError?.remove();
+    if (this.focusError) removeWithMotion(this.focusError, 'notice');
     this.focusError = null;
   }
 
@@ -734,6 +774,7 @@ export class VoiceStageView {
       this.focusError.setAttribute('role', 'alert');
       this.focusError.textContent = t('stage.fullscreenExitError');
       (this.container.contains(fullscreen) ? fullscreen : root).append(this.focusError);
+      animateEnter(this.focusError, 'notice');
       hooks?.onFailure?.();
     });
   }
@@ -791,7 +832,7 @@ export class VoiceStageView {
       this.releaseStageVideos(area);
       area.innerHTML = `
         <div style="flex: 1; display: flex; align-items: center; justify-content: center; color: var(--text-muted);">
-          Aguardando outros amigos entrarem na chamada...
+          ${t('voiceChat.empty')}
         </div>
       `;
       return;
@@ -933,6 +974,14 @@ export class VoiceStageView {
       });
     });
 
+    area.querySelectorAll<HTMLButtonElement>('.stage-pip-btn').forEach(button => {
+      button.addEventListener('click', event => {
+        event.stopPropagation();
+        const targetId = button.dataset.pipTarget;
+        if (targetId) void this.openPictureInPicture(targetId, button);
+      });
+    });
+
     area.querySelectorAll<HTMLButtonElement>('.stage-diagnostics-btn').forEach(button => {
       const onCopy = (event: MouseEvent): void => {
         event.stopPropagation();
@@ -983,14 +1032,15 @@ export class VoiceStageView {
       if (!menu) return;
       button.addEventListener('click', event => {
         event.stopPropagation();
-        menu.hidden = !menu.hidden;
-        button.setAttribute('aria-expanded', String(!menu.hidden));
-        if (!menu.hidden) menu.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus();
+        const open = button.getAttribute('aria-expanded') !== 'true';
+        setSurfaceVisible(menu, open, 'popover');
+        button.setAttribute('aria-expanded', String(open));
+        if (open) menu.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus();
       });
       menu.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
           event.stopPropagation();
-          menu.hidden = true;
+          setSurfaceVisible(menu, false, 'popover');
           button.setAttribute('aria-expanded', 'false');
           button.focus();
         }
@@ -1004,7 +1054,7 @@ export class VoiceStageView {
           voiceStore.setScreenQuality(sessionId, shareId, quality);
           for (const option of menu.querySelectorAll('[data-screen-quality]'))
             option.setAttribute('aria-pressed', String(option === choice));
-          menu.hidden = true;
+          setSurfaceVisible(menu, false, 'popover');
           button.setAttribute('aria-expanded', 'false');
           button.focus();
         });
@@ -1195,8 +1245,8 @@ export class VoiceStageView {
         }
       }
       const state = webRtcManager.getNativeScreenWatchState(sessionId, shareId);
-      const existing = card.querySelector('.stage-native-error');
-      if (state?.state !== 'unavailable') { existing?.remove(); continue; }
+      const existing = card.querySelector<HTMLElement>('.stage-native-error:not([data-ui-closing])');
+      if (state?.state !== 'unavailable') { if (existing) removeWithMotion(existing, 'notice'); continue; }
       if (existing) continue;
       card.querySelector('.stage-loading-overlay')?.remove();
       const error = document.createElement('div');
@@ -1216,6 +1266,7 @@ export class VoiceStageView {
       });
       error.append(text, retry);
       card.append(error);
+      animateEnter(error, 'notice');
     }
   }
 
@@ -1249,7 +1300,7 @@ export class VoiceStageView {
       videoEl.removeEventListener('loadeddata', hide);
       this.videoLoadingListeners.delete(videoEl);
     };
-    const hide = (): void => { cleanup(); overlay.remove(); };
+    const hide = (): void => { cleanup(); removeWithMotion(overlay, 'panel'); };
     if (videoEl.readyState >= 2) {
       hide();
       return;
@@ -1394,6 +1445,41 @@ export class VoiceStageView {
     }
   }
 
+  private isPictureInPictureAvailable(): boolean {
+    return document.pictureInPictureEnabled === true
+      && typeof HTMLVideoElement.prototype.requestPictureInPicture === 'function';
+  }
+
+  private async openPictureInPicture(videoId: string, button: HTMLButtonElement): Promise<void> {
+    const video = document.getElementById(videoId) as HTMLVideoElement | null;
+    if (!video || !this.isPictureInPictureAvailable()
+      || typeof video.requestPictureInPicture !== 'function') {
+      button.hidden = true;
+      return;
+    }
+    if (document.pictureInPictureElement === video || button.disabled) return;
+
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    try {
+      await video.requestPictureInPicture();
+    } catch (error: unknown) {
+      console.warn('[VoiceStageView] Picture-in-Picture request failed:', error);
+      if (button.isConnected) {
+        void showAlert({
+          title: t('stage.pictureInPictureErrorTitle'),
+          message: t('stage.pictureInPictureErrorMessage'),
+          variant: 'danger',
+        });
+      }
+    } finally {
+      if (button.isConnected) {
+        button.disabled = false;
+        button.removeAttribute('aria-busy');
+      }
+    }
+  }
+
   private renderCardContent(tile: StageTile, isFocused: boolean = false, isMini: boolean = false): string {
     if (tile.kind === 'miniapp') return '';
     const p = tile.p;
@@ -1476,6 +1562,11 @@ export class VoiceStageView {
               <button class="stage-stopwatch-btn" data-stopwatch-session="${sidOf(p)}" data-stopwatch-share="${tile.shareId}" title="${t('stage.stopWatching')}" aria-label="${t('stage.stopWatching')}">
                 <span class="material-symbols-outlined md-18">visibility_off</span>
               </button>
+              ${this.isPictureInPictureAvailable() ? `
+                <button type="button" class="stage-pip-btn" data-pip-target="${videoId}" title="${t('stage.pictureInPicture')}" aria-label="${t('stage.pictureInPicture')}">
+                  <span class="material-symbols-outlined md-18">picture_in_picture_alt</span>
+                </button>
+              ` : ''}
             ` : ''}
             ${!isMini ? `
               <button type="button" class="stage-diagnostics-btn" data-diagnostics-key="${escapeHtml(tile.key)}" ${settingsStore.screenShareTelemetryEnabled ? '' : 'hidden'}
@@ -1959,7 +2050,7 @@ export class VoiceStageView {
     this.stopTelemetryMonitor();
     soundEffects.play('leave_voice');
     leaveCurrentCall();
-    this.setChannel(null);
+    this.setChannel(channelId);
   }
 
   private async handleStopStreaming(): Promise<void> {
@@ -2043,6 +2134,23 @@ export class VoiceStageView {
     const btnScreen = document.getElementById('stage-btn-screen');
     const btnStopShare = document.getElementById('stage-btn-stop-share');
     const btnLeave = document.getElementById('stage-btn-leave');
+    const btnChat = this.container.querySelector<HTMLButtonElement>('#stage-btn-chat');
+    const btnJoin = this.container.querySelector<HTMLButtonElement>('#stage-btn-join');
+
+    btnChat?.addEventListener('click', () => {
+      if (this.currentChannelId) this.onToggleChat?.(this.currentChannelId);
+    });
+
+    btnJoin?.addEventListener('click', async () => {
+      const channelId = this.currentChannelId;
+      if (!channelId || isButtonLoading(btnJoin)) return;
+      setButtonLoading(btnJoin, true);
+      try {
+        await this.onJoinChannel?.(channelId);
+      } finally {
+        if (btnJoin.isConnected) setButtonLoading(btnJoin, false);
+      }
+    });
 
     btnMic?.addEventListener('click', () => {
       toggleMicrophoneMute();
@@ -2203,6 +2311,7 @@ export class VoiceStageView {
   }
 
   private unbindTelemetryControls(): void {
+    this.container.querySelectorAll<HTMLElement>('.stage-quality-menu').forEach(cancelSurfaceMotion);
     this.screenViewers.forEach(view => view.destroy());
     this.screenViewers = [];
     this.unbindTelemetryButtons.forEach(unbind => unbind());
@@ -2214,6 +2323,7 @@ export class VoiceStageView {
     this.unbindTelemetryControls();
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
+    this.container.querySelectorAll<HTMLElement>('[data-ui-motion]').forEach(cancelVisibilityMotion);
   }
 
   public destroy(): void {

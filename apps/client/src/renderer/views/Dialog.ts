@@ -1,5 +1,6 @@
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 
 type DialogVariant = 'info' | 'warning' | 'danger' | 'success';
 
@@ -140,8 +141,8 @@ function buildDialog(params: {
     const checked = !!checkbox?.checked;
     document.removeEventListener('keydown', onKeyDown, true);
     params.signal?.removeEventListener('abort', onAbort);
-    backdrop.remove();
-    if (previousFocus instanceof HTMLElement && previousFocus.isConnected && !document.querySelector('.modal-backdrop')) {
+    exitModal(backdrop);
+    if (previousFocus instanceof HTMLElement && previousFocus.isConnected && !previousFocus.closest('[inert], [hidden], [data-ui-closing]')) {
       previousFocus.focus();
     }
     params.onResolve(confirmed, checked, inputs[0]?.value ?? '', inputs.map(field => field.value));
@@ -149,8 +150,7 @@ function buildDialog(params: {
 
   const onAbort = (): void => settle(false);
   const onKeyDown = (e: KeyboardEvent): void => {
-    const backdrops = document.querySelectorAll('.modal-backdrop');
-    if (backdrops[backdrops.length - 1] !== backdrop) return;
+    if (!handlesModalKey(backdrop, e)) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -192,6 +192,7 @@ function buildDialog(params: {
   inputs.forEach(field => field.addEventListener('input', validateInput));
 
   document.body.appendChild(backdrop);
+  enterModal(backdrop);
   if (params.signal?.aborted) { settle(false); return; }
   validateInput();
   if (params.focusCancel && params.showCancel) backdrop.querySelector<HTMLElement>('[data-action="cancel"]')?.focus();

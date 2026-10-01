@@ -12,8 +12,11 @@ import { setButtonLoading } from '../utils/buttonLoading';
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
 import { showAlert, showConfirm } from './Dialog';
 import { t } from '../i18n';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
+import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { nativeScreenProfile } from '../core/webrtc/NativeScreenController';
 import { GameCaptureGuideModal } from './GameCaptureGuideModal';
+import { smoothScrollIntoView } from '../utils/scroll';
 
 type SourceLoadState =
   | { status: 'loading' }
@@ -68,7 +71,7 @@ export class ScreenSharePickerModal {
       trigger.setAttribute('aria-expanded', String(this.audienceOpen));
     }
     const popup = modal.querySelector<HTMLElement>('#share-audience-popup');
-    if (popup) popup.hidden = !this.audienceOpen;
+    if (popup) setSurfaceVisible(popup, this.audienceOpen, 'popover');
     if (!this.privateShare) return;
     if (!this.audienceRendered) {
       const choices = modal.querySelector<HTMLElement>('.share-audience-options');
@@ -509,6 +512,7 @@ export class ScreenSharePickerModal {
 
     const modal = this.modalEl;
     document.body.appendChild(modal);
+    enterModal(modal);
     this.renderSources();
     this.attachEvents();
     this.updateCaptureInfo();
@@ -775,14 +779,14 @@ export class ScreenSharePickerModal {
       else if (index >= 0 && event.key === 'End') next = buttons[buttons.length - 1];
       if (!next) return;
       event.preventDefault();
-      next.focus();
-      next.scrollIntoView({ block: 'nearest' });
+      next.focus({ preventScroll: true });
+      smoothScrollIntoView(next, { block: 'nearest' });
     }, options);
     modal.querySelector('#modal-close')?.addEventListener('click', () => this.close(), options);
     modal.querySelector('#btn-cancel')?.addEventListener('click', () => this.close(), options);
     modal.addEventListener('mousedown', event => { if (event.target === modal) this.close(); }, options);
     modal.addEventListener('keydown', event => {
-      if (event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); this.close(); }
+      if (event.key === 'Escape' && handlesModalKey(this.modalEl, event)) { event.preventDefault(); this.close(); }
     }, options);
     modal.querySelector('#btn-share')?.addEventListener('click', () => { void this.startSharing('replace'); }, options);
     modal.querySelector('#btn-share-add')?.addEventListener('click', () => { void this.startSharing('add'); }, options);
@@ -1033,7 +1037,7 @@ export class ScreenSharePickerModal {
     const wasOpen = this.modalEl !== null;
     if (this.modalEl) {
       if (this.isStarting) videoService.cancelPendingScreenShare();
-      this.modalEl.remove();
+      exitModal(this.modalEl);
       this.modalEl = null;
       this.selectedSourceId = null;
       this.windowCaptureMethod = 'window';

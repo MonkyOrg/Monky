@@ -1,4 +1,5 @@
 import { appEvents } from '../core/EventBus';
+import { animateEnter, ownSurface, removeWithMotion, topModal } from '../utils/surfaceMotion';
 
 export interface ContextMenuItem {
   label: string;
@@ -41,6 +42,9 @@ export class ContextMenu {
     document.body.appendChild(menu);
     this.menuEl = menu;
     this.positionMenu(menu, x, y);
+    const owner = anchor ?? topModal();
+    if (owner) this.unbindGlobalListeners.push(ownSurface(menu, owner));
+    animateEnter(menu);
 
     this.attachDismiss();
     menu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true });
@@ -126,6 +130,8 @@ export class ContextMenu {
       const width = submenu.getBoundingClientRect().width;
       const x = parent.right + width > window.innerWidth - 12 ? parent.left - width : parent.right;
       this.positionMenu(submenu, x, rect.top);
+      ownSurface(submenu, trigger);
+      animateEnter(submenu);
     }
     if (focus) this.submenuEl?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true });
   }
@@ -147,8 +153,7 @@ export class ContextMenu {
     const handleOutsideClick = (e: Event) => {
       if (e.target instanceof Node && this.menuEl
         && !this.menuEl.contains(e.target) && !this.submenuEl?.contains(e.target)
-        && (!this.returnFocus?.contains(e.target)
-          || this.returnFocus.matches('monky-markdown-input, input, textarea, [contenteditable="true"]'))) this.close();
+        && !(this.returnFocus instanceof HTMLButtonElement && this.returnFocus.contains(e.target))) this.close();
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.key === 'Escape' || e.key === 'ArrowLeft') && this.submenuEl) {
@@ -212,7 +217,7 @@ export class ContextMenu {
     this.unbindGlobalListeners.forEach((u) => u());
     this.unbindGlobalListeners = [];
     if (this.menuEl) {
-      this.menuEl.remove();
+      removeWithMotion(this.menuEl);
       this.menuEl = null;
     }
   }
@@ -221,7 +226,7 @@ export class ContextMenu {
     this.submenuTrigger?.setAttribute('aria-expanded', 'false');
     this.submenuTrigger?.removeAttribute('aria-controls');
     this.submenuTrigger = null;
-    this.submenuEl?.remove();
+    if (this.submenuEl) removeWithMotion(this.submenuEl);
     this.submenuEl = null;
   }
 }

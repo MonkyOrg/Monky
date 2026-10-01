@@ -6,6 +6,16 @@ import { ServerInviteInbox } from '../src/main/serverInvites';
 const first: ServerInvite = { v: 1, host: 'localhost', port: 3000, name: 'First invitation' };
 const second: ServerInvite = { v: 1, host: '127.0.0.1', port: 3001, name: 'Second invitation' };
 
+test('event destinations survive cold start, URI delivery and second-instance inbox handoff', () => {
+  const inbox = new ServerInviteInbox();
+  const invite = { ...second, eventId: 'event-123' };
+  inbox.receiveArguments(['Monky.exe', createServerInviteAppLink(invite)]);
+  assert.deepEqual(inbox.take(), { ok: true, invite });
+  inbox.receive(createServerInviteAppLink({ ...first, eventId: 'older' }));
+  inbox.receiveArguments(['Monky.exe', createServerInviteAppLink(invite)]);
+  assert.deepEqual(inbox.take(), { ok: true, invite });
+});
+
 test('cold-start arguments retain an invitation until the renderer and identity are ready', () => {
   const inbox = new ServerInviteInbox();
   assert.equal(inbox.take(), null);

@@ -12,6 +12,46 @@ import { createFixture, identity, record, records, text } from './testFixtures/b
 import { SqliteMentionRepository, SqliteMessageRepository } from './infrastructure/database/SqliteRepositories';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 
+const PNG_DATA = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+test('voice channels expose their persistent chat without requiring voice admission', async t => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Voice chat owner');
+  const reader = await f.human('Voice chat reader');
+  const channels = records(record(owner.auth.payload.server).channels);
+  const channelId = text(channels.find(channel => channel.type === 'VOICE')?.id);
+  const ownerSessionId = text(record(owner.auth.payload.currentUser).sessionId);
+  assert.equal(f.signalingService.getVoiceState(ownerSessionId), undefined);
+
+  const sent = await owner.peer.request(MessageType.CHAT_SEND, {
+    channelId,
+    content: '@Voice chat reader persistent voice-room message',
+  });
+  assert.equal(sent.type, MessageType.CHAT_MESSAGE);
+  const history = await reader.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId, limit: 50 });
+  assert.deepEqual(records(history.payload.messages).map(message => message.content),
+    ['@Voice chat reader persistent voice-room message']);
+  const image = await owner.peer.request(MessageType.COMMUNITY_IMAGE_UPLOAD, {
+    channelId,
+    imageData: PNG_DATA,
+  });
+  assert.equal(image.type, MessageType.COMMUNITY_IMAGE_UPLOAD);
+  const reaction = await reader.peer.request(MessageType.CHAT_REACTION_ADD, {
+    channelId,
+    messageId: sent.payload.id,
+    emoji: '👍',
+  });
+  assert.equal(reaction.type, MessageType.CHAT_REACTION_ADDED);
+  const search = await reader.peer.request(MessageType.CHAT_SEARCH, {
+    query: 'persistent',
+    channelIds: [channelId],
+  });
+  assert.deepEqual(records(search.payload.messages).map(message => message.channelId), [channelId]);
+  assert.equal(f.signalingService.getVoiceState(ownerSessionId), undefined,
+    'Reading and writing the voice chat must not join the call');
+});
+
 test('a pending deletion survives closing and reopening the database with its original deadline and code blocks', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-delete-undo-'));
   const filename = path.join(root, 'server.db');
@@ -111,6 +151,41 @@ test('undo settings validate, affect only new deletions, and the server rejects 
   const next = await author.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Short window' });
   const nextDeletion = record((await author.peer.request(MessageType.CHAT_DELETE, { channelId, messageId: next.payload.id })).payload.message);
   assert.equal(Number(nextDeletion.deleteUndoUntil) - Number(nextDeletion.deletedAt), 1000);
+});
+
+test('expired poll deletions remove the poll record and its promoted media', async t => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Poll deletion owner');
+  const channelId = text(records(record(owner.auth.payload.server).channels)
+    .find(channel => channel.type === 'TEXT')?.id);
+  await owner.peer.request(MessageType.COMMUNITY_UPDATE_SETTINGS, { eventsEnabled: true });
+  const upload = await owner.peer.request(MessageType.COMMUNITY_IMAGE_UPLOAD, {
+    channelId,
+    imageData: PNG_DATA,
+  });
+  const messageId = randomUUID();
+  const created = await owner.peer.request(MessageType.POLL_CREATE, {
+    channelId,
+    clientMessageId: messageId,
+    question: 'Remove this poll?',
+    options: [{ label: 'Yes', emoji: null }, { label: 'No', emoji: null }],
+    imageAssetRefs: [text(upload.payload.ref)],
+    durationMinutes: 60,
+  });
+  assert.equal(created.type, MessageType.CHAT_MESSAGE);
+  const poll = record(created.payload.poll);
+  const imageUrl = text((poll.imageUrls as unknown[])[0]);
+  const filename = imageUrl.split('/').pop()!;
+  assert.ok(f.avatars.getAvatarFile(filename));
+
+  const deleted = record((await owner.peer.request(MessageType.CHAT_DELETE, { channelId, messageId })).payload.message);
+  const now = t.mock.method(Date, 'now', () => Number(deleted.deleteUndoUntil));
+  await f.chatService.expireDeletedMessages();
+  now.mock.restore();
+
+  assert.equal(f.database.getDb().prepare('SELECT 1 FROM native_polls WHERE message_id = ?').get(messageId), undefined);
+  assert.equal(f.avatars.getAvatarFile(filename), null);
 });
 
 test('delivery retries, concurrent requests and reconnects acknowledge one durable message without duplicate mentions or broadcasts', async (t) => {

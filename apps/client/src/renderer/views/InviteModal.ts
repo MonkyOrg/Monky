@@ -8,6 +8,7 @@ import { findOwnedServer } from '../core/hostedServerStart';
 import { escapeHtml } from '../utils/html';
 import { enableBackdropClose } from '../utils/modal';
 import { t } from '../i18n';
+import { enterModal, exitModal } from '../utils/modalSurface';
 import { showAlert } from './Dialog';
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
 
@@ -138,6 +139,7 @@ export class InviteModal {
     `;
 
     document.body.appendChild(this.modalEl);
+    enterModal(this.modalEl);
     this.attachEvents();
     this.unbindSession = appEvents.on('session.changed', () => this.close());
     await this.fetchServerInviteInfo();
@@ -403,7 +405,7 @@ export class InviteModal {
     this.copyTimer = null;
     this.networkInterfaces = [];
     if (this.modalEl) {
-      this.modalEl.remove();
+      exitModal(this.modalEl);
       this.modalEl = null;
     }
   }

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O CLI aguarda o servidor responder antes de consultar a compatibilidade dos bots ao iniciar, reiniciar ou atualizar, evitando avisos prematuros de falha na consulta.",
+  "en": "The CLI waits for the server to respond when checking bot compatibility after starting, restarting or updating, avoiding premature lookup failure warnings."
+}

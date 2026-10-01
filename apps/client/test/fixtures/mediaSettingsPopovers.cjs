@@ -101,7 +101,7 @@ async function runMediaSettingsPopoverSmoke() {
   hidden.style.cssText = 'position:fixed;right:12px;top:12px;width:360px;max-height:70vh;overflow:auto;background:var(--bg-secondary)';
   const fullCamera = new CameraEffectsControl();
   const fullNoise = new NoiseSuppressionControl();
-  const panel = () => document.querySelector('.audio-device-popover');
+  const panel = () => document.querySelector('.audio-device-popover:not([data-ui-closing])');
   const escape = () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   const preview = () => panel()?.querySelector('video.camera-effects-preview');
   const ready = () => preview()?.srcObject && preview().readyState >= 2 && video.getCameraState().status === 'ready';
@@ -113,7 +113,7 @@ async function runMediaSettingsPopoverSmoke() {
     const row = panel().querySelector('.audio-device-current');
     await until(() => !row.disabled, 'Camera device row must be available');
     row.click();
-    const option = document.querySelector(`.audio-device-options button[data-device-id="${id}"]`);
+    const option = document.querySelector(`.audio-device-options:not([data-ui-closing]) button[data-device-id="${id}"]`);
     check(option && !option.disabled, `Camera ${id} is selectable in the shared-style device submenu`);
     option.click();
     await until(() => !row.disabled, 'Camera device selection must settle');
@@ -264,7 +264,7 @@ async function runMediaSettingsPopoverSmoke() {
     for (const [setting, color] of [['backgroundColor', '#663399'], ['keyColor', '#11ff11']]) {
       const trigger = panel().querySelector(`.color-picker-trigger[name="${setting}"]`);
       trigger.click();
-      const picker = document.querySelector('.color-picker-popover:popover-open');
+      const picker = document.querySelector('.color-picker-popover:popover-open:not([data-ui-closing])');
       check(picker && panel().contains(picker) && !panel().querySelector('input[type="color"]'),
         'Camera color selection uses the shared nested picker rather than a native dialog');
       const input = picker.querySelector('[data-color-hex]');
@@ -275,7 +275,7 @@ async function runMediaSettingsPopoverSmoke() {
       check(effects.snapshot.settings[setting] === color && trigger.value === color
         && hidden.querySelector(`.color-picker-trigger[name="${setting}"]`).value === color,
         `${setting}: committing a chosen color must not read the old value restored by a UI refresh`);
-      check(!document.querySelector('.color-picker-popover') && panel() && !video.getCameraState().publishing,
+      check(!document.querySelector('.color-picker-popover:not([data-ui-closing])') && panel() && !video.getCameraState().publishing,
         'Outside click keeps the selected color, parent popup and local-only preview');
       if (setting === 'backgroundColor') {
         await until(() => {
@@ -291,7 +291,7 @@ async function runMediaSettingsPopoverSmoke() {
     for (const color of ['#ffffff', '#000000', '#808080', '#808182']) {
       const trigger = panel().querySelector('.color-picker-trigger[name="keyColor"]');
       trigger.click();
-      const picker = panel().querySelector('.color-picker-popover');
+      const picker = panel().querySelector('.color-picker-popover:not([data-ui-closing])');
       const input = picker.querySelector('[data-color-hex]');
       input.value = color;
       input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -520,10 +520,19 @@ async function runMediaSettingsPopoverSmoke() {
         const transfer = new DataTransfer();
         transfer.items.add(new File([blob], 'recovered-background.png', { type: 'image/png' }));
         const file = panel().querySelector('input[type=file]');
+        const imagePicker = panel().querySelector('[data-camera-pick-image]');
+        Object.defineProperty(file, 'click', { configurable: true, value: () => {} });
+        imagePicker.click();
+        imagePicker.click();
+        check(imagePicker.disabled && imagePicker.dataset.loading === '1'
+          && imagePicker.getAttribute('aria-busy') === 'true',
+        'Camera background selection shows loading and blocks duplicate native picker clicks');
         file.files = transfer.files;
         file.dispatchEvent(new Event('change', { bubbles: true }));
         await until(() => effects.snapshot.image && !panel()?.querySelector('[data-camera-preview-toggle]').disabled,
           'Choosing a background in the same panel unlocks preview');
+        check(!imagePicker.disabled && !imagePicker.dataset.loading && !imagePicker.hasAttribute('aria-busy'),
+          'Selecting a camera background restores the native picker trigger');
         check(panel() && !panel().textContent.includes(language.t('cameraEffects.errorImageMissing')),
           'The missing-image error clears after the image is saved');
         panel().querySelector('[data-camera-preview-toggle]').click();
@@ -537,6 +546,37 @@ async function runMediaSettingsPopoverSmoke() {
         await video.removeCameraBackgroundImage();
       }
     } finally { offEffectError(); }
+    const { bindCameraPublication } = await import('/core/CameraPublication.ts');
+    const { showAlert } = await import('/views/Dialog.ts');
+    const unbindPublication = bindCameraPublication();
+    let previewNotices = 0;
+    const offNotice = appEvents.on('camera.error_notice', error => {
+      previewNotices++;
+      void showAlert({ message: String(error) });
+    });
+    const syntheticCapture = navigator.mediaDevices.getUserMedia;
+    try {
+      for (const name of ['NotFoundError', 'NotAllowedError', 'NotReadableError']) {
+        navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('Synthetic unavailable camera', name); };
+        cameraTrigger.click();
+        await until(() => video.getCameraState().status === 'error', `${name}: camera failure becomes observable`);
+        check(panel() && panel().querySelector('.camera-effects-status')?.textContent,
+          `${name}: failed preview leaves the camera menu open with an inline error`);
+        check(previewNotices === 0 && !document.querySelector('.dialog-card'),
+          `${name}: local preview failure cannot open a global dialog and steal focus`);
+        check(!panel().querySelector('.audio-device-settings').disabled,
+          `${name}: full camera settings remain reachable without hardware`);
+        escape();
+      }
+      navigator.mediaDevices.getUserMedia = syntheticCapture;
+      await openCamera();
+      check(!!preview()?.srcObject, 'Camera menu recovers after hardware becomes available again');
+      escape();
+    } finally {
+      navigator.mediaDevices.getUserMedia = syntheticCapture;
+      offNotice();
+      unbindPublication();
+    }
     check(primaryActions === 0 && voice.isMuted && voice.isDeafened,
       'Quick arrows, previews, settings and device choices never activate mute, deafen or camera primary toggles');
     check(maxLiveCaptures === 1, 'All preview, device, image and permission races have at most one live hardware capture');

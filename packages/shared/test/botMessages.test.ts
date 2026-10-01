@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  botMessageLocalizationsSchema, botMessagePreviewLocalizations, getMessageText, normalizeBotMessageContent,
+  botLocalizedMessageSchema, botMessageLocalizationsSchema, botMessagePreviewLocalizations, getMessageText,
+  normalizeBotMessageContent,
 } from '../src/botMessages';
 import { commandResponseSchema } from '../src/botInteractions';
 import { botChatMessageSchema } from '../src/reactions';
@@ -43,4 +44,25 @@ test('command replies and durable acknowledgements retain variants and localized
     reply: { messageId: 'original', userNickname: 'Bot', ...translated, isBot: true, deleted: false, hasAttachments: false },
   };
   assert.deepEqual(botChatMessageSchema.parse(message), message);
+});
+
+test('private bot replies accept bounded declarative carousels', () => {
+  const component = {
+    type: 'carousel' as const,
+    imageAssetRefs: ['f2b47144-577a-4ea0-8d09-93e0d39a6b6e'],
+    label: 'Examples',
+    presentation: { format: 'landscape' as const, fit: 'contain' as const, size: 'wide' as const },
+  };
+  assert.deepEqual(normalizeBotMessageContent({ content: 'Choose an image', components: [component] }), {
+    content: 'Choose an image', components: [component],
+  });
+  assert.equal(commandResponseSchema.safeParse({
+    invocationId: 'i', content: 'Choose an image', components: [component],
+  }).success, true);
+  assert.equal(botLocalizedMessageSchema.safeParse({
+    content: 'Unsafe', components: [{ ...component, presentation: { css: 'width: 200vw' } }],
+  }).success, false);
+  assert.equal(botLocalizedMessageSchema.safeParse({
+    content: 'Too many', components: [{ ...component, imageAssetRefs: Array(6).fill(component.imageAssetRefs[0]) }],
+  }).success, false);
 });

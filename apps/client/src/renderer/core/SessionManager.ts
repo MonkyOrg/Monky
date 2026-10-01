@@ -1,4 +1,5 @@
 import { MessageType } from '@monky/shared';
+import { CommunityFeed } from './CommunityFeed';
 import { BotScreenStore, setActiveBotScreenStore } from '../stores/botScreenStore';
 import { appEvents } from './EventBus';
 import { clientLog } from './ClientLogService';
@@ -50,6 +51,7 @@ export interface ServerSession {
   botScreenStore: BotScreenStore;
   participants: ParticipantManager;
   localExecution: LocalExecutionController;
+  community: CommunityFeed;
   /** Credentials kept so the rail can show the session and reconnect it. */
   host: string;
   port: number;
@@ -173,6 +175,7 @@ export class SessionManager {
       botScreenStore: new BotScreenStore(key),
       participants,
       localExecution,
+      community: new CommunityFeed(client, server),
       host,
       port,
       nickname,
@@ -218,6 +221,7 @@ export class SessionManager {
         error: error instanceof Error ? error.message : String(error),
       });
     });
+    session.community.dispose();
     session.client.dispose();
     this.sessions.delete(key);
     // The disconnect above may have already handed the screen to another

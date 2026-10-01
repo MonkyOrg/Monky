@@ -1,6 +1,8 @@
 import { z } from 'zod';
+import { communityImageAssetRefSchema } from './nativePolls.js';
 import { LIMITS } from './constants.js';
 import { botMessageLocalizationsSchema } from './botMessages.js';
+import { botCarouselPresentationSchema, botMessageComponentInputSchema } from './botCarousels.js';
 import { botCapabilitiesSchema, botPermissionsSchema } from './botPermissions.js';
 import type { CommandOption } from './models.js';
 import {
@@ -281,6 +283,13 @@ export const botFormFieldSchema = z.discriminatedUnion('type', [
     defaultValue: z.array(z.string().max(LIMITS.MAX_MESSAGE_LENGTH))
       .max(LIMITS.MAX_BOT_FORM_LIST_ITEMS).optional(),
   }).strict(),
+  z.object({
+    ...fieldBase,
+    type: z.literal('image-list'),
+    minItems: z.number().int().min(0).max(LIMITS.MAX_LIVE_ACTION_IMAGES).optional(),
+    maxItems: z.number().int().min(1).max(LIMITS.MAX_LIVE_ACTION_IMAGES).optional(),
+    presentation: botCarouselPresentationSchema.optional(),
+  }).strict(),
 ]);
 
 export type BotFormField = z.infer<typeof botFormFieldSchema>;
@@ -298,11 +307,13 @@ export const botFormSchema = z.object({
     const invalidRange =
       (field.type === 'text' && (field.minLength ?? 0) > (field.maxLength ?? LIMITS.MAX_MESSAGE_LENGTH)) ||
       (field.type === 'integer' && field.min !== undefined && field.max !== undefined && field.min > field.max) ||
-      (field.type === 'string-list' && (field.minItems ?? 1) > (field.maxItems ?? LIMITS.MAX_BOT_FORM_LIST_ITEMS));
+      (field.type === 'string-list' && (field.minItems ?? 1) > (field.maxItems ?? LIMITS.MAX_BOT_FORM_LIST_ITEMS)) ||
+      (field.type === 'image-list' && (field.minItems ?? 0) > (field.maxItems ?? LIMITS.MAX_LIVE_ACTION_IMAGES));
     if (invalidRange) ctx.addIssue({ code: 'custom', message: 'Invalid field range', path: ['fields', field.name] });
-    const emptyDefault = field.defaultValue === '' ||
-      (Array.isArray(field.defaultValue) && field.defaultValue.length === 0);
-    if (field.defaultValue !== undefined && !emptyDefault && validateField(field, field.defaultValue) !== null) {
+    const defaultValue = 'defaultValue' in field ? field.defaultValue : undefined;
+    const emptyDefault = defaultValue === '' ||
+      (Array.isArray(defaultValue) && defaultValue.length === 0);
+    if (defaultValue !== undefined && !emptyDefault && validateField(field, defaultValue) !== null) {
       ctx.addIssue({ code: 'custom', message: 'Invalid default value', path: ['fields', field.name] });
     }
   }
@@ -333,6 +344,10 @@ export const botSettingsDefinitionSchema = z.object({
     ctx.addIssue({ code: 'custom', message: 'Settings declaration exceeds the size limit' });
   }
   for (const scope of ['server', 'user'] as const) {
+    if (definition[scope]?.fields.some(field => field.type === 'image-list')) {
+      ctx.addIssue({ code: 'custom', message: 'Image fields are not supported in persistent settings', path: [scope, 'fields'] });
+      continue;
+    }
     const defaults = resolveBotSettingsValues(definition[scope], {});
     if (!defaults.success) {
       ctx.addIssue({
@@ -390,7 +405,8 @@ export function localizeBotSettingsForm(
         ...field,
         label: text?.label ?? field.label,
         description: text?.description ?? field.description,
-        ...(field.type !== 'boolean' ? { placeholder: text?.placeholder ?? field.placeholder } : {}),
+        ...(field.type !== 'boolean' && field.type !== 'image-list'
+          ? { placeholder: text?.placeholder ?? field.placeholder } : {}),
         ...(field.type === 'select' ? { choices: localizeBotChoices(field.choices, text?.choices) } : {}),
       };
     }),
@@ -462,6 +478,7 @@ export const commandFinishedSchema = commandCancelSchema.extend({
 export const commandResponseSchema = commandCancelSchema.extend({
   content: z.string().trim().min(1).max(LIMITS.WS_MAX_PAYLOAD_BYTES),
   localizations: botMessageLocalizationsSchema.optional(),
+  components: z.array(botMessageComponentInputSchema).min(1).max(1).optional(),
   ephemeral: z.boolean().optional(),
 });
 
@@ -594,7 +611,7 @@ export function resolveBotSettingsValues(form: BotForm | undefined, input: unkno
   if (!declaration.success) return { success: false, field: '', reason: 'type' };
   const defaults: BotFormValues = {};
   for (const field of declaration.data.fields) {
-    if (field.defaultValue !== undefined) defaults[field.name] = field.defaultValue;
+    if ('defaultValue' in field && field.defaultValue !== undefined) defaults[field.name] = field.defaultValue;
   }
   const result = validateBotFormValues(declaration.data, { ...defaults, ...parsed.data });
   if (!result.success) return result;
@@ -632,6 +649,13 @@ function validateField(field: BotFormField, value: BotFormValues[string]): BotIn
       if (value.some((entry) => !entry.trim())) return 'required';
       if (value.some((entry) => entry.length > (field.maxLength ?? LIMITS.MAX_MESSAGE_LENGTH))) return 'max';
       if (new Set(value.map((entry) => entry.trim().toLowerCase())).size !== value.length) return 'duplicate';
+      return null;
+    case 'image-list':
+      if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) return 'type';
+      if (value.length < (field.minItems ?? 0)) return 'min';
+      if (value.length > (field.maxItems ?? LIMITS.MAX_LIVE_ACTION_IMAGES)) return 'max';
+      if (value.some((entry) => !communityImageAssetRefSchema.safeParse(entry).success)) return 'type';
+      if (new Set(value).size !== value.length) return 'duplicate';
       return null;
   }
 }

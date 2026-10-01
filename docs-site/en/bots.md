@@ -181,15 +181,15 @@ granting access.
 
 ## Monky Bot (official bot)
 
-[MonkyBot](https://github.com/MonkyOrg/MonkyBot) provides utilities, polls,
-music and tic-tac-toe. Its repository explains how to install the process;
+[MonkyBot](https://github.com/MonkyOrg/MonkyBot) provides utilities, reminders,
+giveaways, music and games. Its repository explains how to install the process;
 then link it and review permissions in Monky.
 
 | Goal | Commands |
 | --- | --- |
 | Check availability and help | `/ping`, `/ajuda` |
 | Utilities | `/dado`, `/moeda`, `/8ball` |
-| Create a poll | `/enquete` |
+| Schedule a reminder or giveaway | `/reminder`, `/giveaway` |
 | Search and queue music | `/play` |
 | Inspect playback | `/queue`, `/nowplaying` |
 | Control the queue | `/pause`, `/resume`, `/skip`, `/remove`, `/clear` |

@@ -372,8 +372,11 @@ uma consulta não tem efeito colateral, então não faz sentido perguntar.
 O status detalhado de um servidor em execução também informa se há bots com
 protocolo incompatível ou ainda não verificado. Esses avisos aparecem após
 `monky start` e `monky restart` e orientam a atualizar ou conferir o SDK dos
-bots. Se o servidor ainda estiver iniciando ou `/preview` não responder, o CLI
-informa que não conseguiu consultar a compatibilidade; consulte novamente com
+bots. Após iniciar ou reiniciar (inclusive depois de `monky update`), o CLI
+repete a consulta por até 10 segundos enquanto `/preview` não responde,
+encerrando a espera assim que recebe os dados. Se o prazo esgotar ou a resposta
+não incluir dados válidos de compatibilidade, informa que não conseguiu
+consultá-la; consulte novamente com
 `monky status --data <pasta>`.
 
 O `monky list` e a tabela de vários servidores mantêm esses avisos junto ao

@@ -248,7 +248,8 @@ export class BotSelectorHandler {
     const [channel, context] = await Promise.all([
       this.channels.getChannelSummary(channelId), this.channels.getAccessContext(userId),
     ]);
-    if (!channel || channel.type !== 'TEXT' || (human && !hasPermission(context.permissions, Permission.READ_MESSAGES)) ||
+    if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE') ||
+        (human && !hasPermission(context.permissions, Permission.READ_MESSAGES)) ||
         !canAccessChannel(channel, context.permissions, context.roleIds)) {
       throw new SelectorAccessError('Channel is unavailable.', ProtocolErrorCode.CHANNEL_NOT_FOUND);
     }

@@ -29,6 +29,7 @@ Ao criar ou editar um canal de texto, o switch **Permitir comandos de bots** vem
 | `sound_download` | Solicitação de salvar áudio no Soundboard de quem chamou, sem acesso geral a arquivos |
 | `selectors` | Controles públicos persistentes de escolha e suas respostas; publicar também exige `send_messages` |
 | `miniapps` | Miniapps compartilhados nas salas de voz, incluindo ações de participantes autorizados |
+| `live_actions` | Banners com formulários e seletores nativos; exige também `commands` e `EMIT_LIVE_ACTIONS` para quem iniciou |
 
 Registrar comandos exige `commands`; comandos com `downloadsSound` também declaram `sound_download`, e aqueles com `localCapabilities` declaram `local_execution`. Respostas públicas exigem `send_messages`; a resposta privada padrão exige apenas `commands`. As permissões dos cargos, dos canais e de quem iniciou a ação continuam valendo.
 

@@ -67,7 +67,7 @@ export class SoundboardPlayersBar {
   private sync(): void {
     if (!this.slot) return;
 
-    const playbacks = soundboardService.getActivePlaybacks(true);
+    const playbacks = soundboardService.getGlobalPlayerPlaybacks(true);
     const activeIds = new Set(playbacks.map((p) => p.userId));
 
     for (const bar of Array.from(this.slot.children) as HTMLElement[]) {

@@ -11,6 +11,7 @@ export const BOT_CAPABILITIES = [
   'sound_download',
   'selectors',
   'miniapps',
+  'live_actions',
 ] as const;
 
 export const botCapabilitySchema = z.enum(BOT_CAPABILITIES);

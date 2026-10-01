@@ -6,6 +6,11 @@ import WebSocket from 'ws';
 import { BotVoiceConnection } from './voice/BotVoiceConnection';
 import { BotScreenClient } from './BotScreenClient';
 import {
+  liveActionCreateSchema, liveActionSchema, liveActionUpdateSchema, liveActionSubmissionSchema,
+  type LiveAction, type LiveActionCreate, type LiveActionUpdate, type LiveActionSubmission,
+} from '@monky/shared';
+export type { LiveAction, LiveActionCreate, LiveActionUpdate, LiveActionSubmission } from '@monky/shared';
+import {
   BotLocalExecutionClient, type LocalExecutionCaller, type LocalExecutionConnection,
   type LocalExecutionContextLifetime,
 } from './localExecution/LocalExecutionClient';
@@ -44,6 +49,7 @@ import {
   chatReactionEventSchema,
   normalizeBotMessageContent,
   type BotMessageContent,
+  type BotPublishedMessageContent,
   messageReferenceSchema,
   commandDefinitionSchema,
   commandDefinitionsSchema,
@@ -206,7 +212,7 @@ export interface CommandContext {
   reply: (content: BotMessageContent) => void;
   replyEphemeral: (content: BotMessageContent) => void;
   /** Explicitly publish a result to everyone allowed into the channel. */
-  publish: (content: BotMessageContent) => void;
+  publish: (content: BotPublishedMessageContent) => void;
   /** Wait for a private form. Returns null if the interaction ends/cancels. */
   prompt: (form: BotForm) => Promise<BotFormValues | null>;
   /** Ask one private choice; buttons submit immediately, dropdowns require confirmation. */
@@ -215,6 +221,7 @@ export interface CommandContext {
   downloadSound: (request: SoundDownloadRequest) => Promise<SoundDownloadResult | null>;
   /** Publish durable channel controls, independent of this invocation's lifetime. */
   createSelector: (input: Omit<BotSelectorCreate, 'channelId' | 'invokerId' | 'invocationId'>) => Promise<BotSelector>;
+  createLiveAction: (input: Omit<LiveActionCreate, 'channelId' | 'invocationId'>) => Promise<LiveAction>;
   /** Open a shared miniapp in the caller's current voice room, independent of this command's lifetime. */
   createScreen: (input: Omit<BotScreenCreate, 'channelId' | 'invocationId'>) => Promise<BotScreen>;
 }
@@ -308,6 +315,9 @@ interface IncomingMessage {
 }
 
 const RESOURCE_RESPONSES = new Set<string>([
+  MessageType.COMMUNITY_ACK,
+  MessageType.LIVE_ACTION_SNAPSHOT,
+  MessageType.LIVE_ACTION_LIST_RESULT,
   MessageType.SERVER_ERROR,
   MessageType.SELECTOR_SNAPSHOT,
   MessageType.SELECTOR_LIST_RESULT,
@@ -630,6 +640,33 @@ export class BotClient extends EventEmitter {
     return botSelectorSchema.parse(await this.requestResource(serverId, MessageType.SELECTOR_CREATE, parsed));
   }
 
+  async createLiveAction(serverId: string, input: LiveActionCreate): Promise<LiveAction> {
+    const parsed = liveActionCreateSchema.parse({ ...input, id: input.id ?? randomUUID() });
+    return liveActionSchema.parse(await this.requestResource(serverId, MessageType.LIVE_ACTION_CREATE, parsed));
+  }
+
+  async updateLiveAction(serverId: string, input: LiveActionUpdate): Promise<LiveAction> {
+    return liveActionSchema.parse(await this.requestResource(serverId, MessageType.LIVE_ACTION_UPDATE,
+      liveActionUpdateSchema.parse(input)));
+  }
+
+  async closeLiveAction(serverId: string, id: string): Promise<void> {
+    await this.requestResource(serverId, MessageType.LIVE_ACTION_CLOSE, { id });
+  }
+
+  async listLiveActions(serverId: string): Promise<LiveAction[]> {
+    const result = await this.requestResource(serverId, MessageType.LIVE_ACTION_LIST, {});
+    if (!isRecord(result) || !Array.isArray(result.liveActions)) throw new Error('Invalid live action list.');
+    return result.liveActions.map((entry) => liveActionSchema.parse(entry));
+  }
+
+  onLiveActionSubmission(listener: (event: LiveActionSubmission, context: { serverId: string }) => void): () => void {
+    const handler = (event: LiveActionSubmission, context: { serverId: string }) =>
+      listener(immutableCopy(event), immutableCopy(context));
+    this.on('liveActionSubmission', handler);
+    return () => { this.off('liveActionSubmission', handler); };
+  }
+
   async listSelectors(serverId: string): Promise<BotSelector[]> {
     const result = await this.requestResource(serverId, MessageType.SELECTOR_LIST, {});
     if (!isRecord(result) || !Array.isArray(result.selectors)) throw new Error('Invalid selector list.');
@@ -645,7 +682,7 @@ export class BotClient extends EventEmitter {
     return botSelectorSchema.parse(await this.requestResource(serverId, MessageType.SELECTOR_CLOSE, { id }));
   }
 
-  async finalizeSelector(serverId: string, id: string, content: BotMessageContent): Promise<BotSelector> {
+  async finalizeSelector(serverId: string, id: string, content: BotPublishedMessageContent): Promise<BotSelector> {
     return botSelectorSchema.parse(await this.requestResource(serverId, MessageType.SELECTOR_FINALIZE,
       botSelectorFinalizeSchema.parse({ id, ...normalizeBotMessageContent(content) })));
   }
@@ -673,7 +710,7 @@ export class BotClient extends EventEmitter {
 
   /** Post persistent channel text and resolve with its server-assigned ID. */
   async sendMessage(
-    serverId: string, channelId: string, content: BotMessageContent,
+    serverId: string, channelId: string, content: BotPublishedMessageContent,
     options: Pick<ChatSendPayload, 'replyToMessageId'> = {}
   ): Promise<ChatMessage> {
     const conn = this.requireConnection(serverId);
@@ -1127,6 +1164,12 @@ export class BotClient extends EventEmitter {
         const parsed = botSelectorSchema.safeParse(msg.payload);
         if (parsed.success) this.emit('selectorUpdate', { serverId: conn.serverId, selector: parsed.data });
         else this.reportError(new Error('Invalid selector snapshot.'), conn);
+        return;
+      }
+      case MessageType.LIVE_ACTION_SUBMITTED: {
+        const parsed = liveActionSubmissionSchema.safeParse(msg.payload);
+        if (parsed.success) this.emit('liveActionSubmission', immutableCopy(parsed.data), { serverId: conn.serverId });
+        else this.reportError(new Error('Invalid live action submission.'), conn);
         return;
       }
       case MessageType.AUTH_SUCCESS: {
@@ -1684,8 +1727,12 @@ export class BotClient extends EventEmitter {
     };
     const reply = (content: BotMessageContent, ephemeral: boolean) => {
       requireActive();
+      const message = normalizeBotMessageContent(content);
+      if (!ephemeral && message.components) {
+        throw new Error('Carousel components are supported in private replies and Live Actions, not persistent publications.');
+      }
       const response: CommandResponsePayload = commandResponseSchema.parse({
-        invocationId: payload.invocationId, ...normalizeBotMessageContent(content), ephemeral,
+        invocationId: payload.invocationId, ...message, ephemeral,
       });
       this.sendToConn(conn, { type: MessageType.COMMAND_RESPONSE, payload: response });
     };
@@ -1734,6 +1781,12 @@ export class BotClient extends EventEmitter {
         requireActive();
         return this.createSelector(conn.serverId, {
           ...input, channelId: payload.channelId, invokerId: payload.invokerId, invocationId: payload.invocationId,
+        });
+      },
+      createLiveAction: (input) => {
+        requireActive();
+        return this.createLiveAction(conn.serverId, {
+          ...input, channelId: payload.channelId, invocationId: payload.invocationId,
         });
       },
       createScreen: async (input) => {
@@ -2003,7 +2056,9 @@ export type {
   CommandPresentation, BotFieldLocalization,
   BotSettingsDefinition, BotSettingsContext, BotServerSettingsSnapshot, BotSettingsSnapshot, BotSettingsSummary,
   BotInputResult,
-  ChatMessage, ChatReactionEventPayload, MessageReaction, BotMessageContent, BotLocalizedMessage, BotMessageLocalizations,
+  ChatMessage, ChatReactionEventPayload, MessageReaction, BotMessageContent, BotPublishedMessageContent,
+  BotLocalizedMessage, BotMessageLocalizations, BotCarouselPresentation, BotCarouselFormat, BotCarouselFit,
+  BotCarouselSize, BotCarouselInput, BotCarouselComponent, BotMessageComponentInput, BotMessageComponent,
   SlashCommand, CommandOption, CommandValue, CommandValues, CommandVoiceRequirement, CommandResponsePayload,
   CommandAutocompleteChoice, CommandAutocompletePage, CommandAudioPreviewMimeType, SoundDownloadRequest, SoundDownloadResult, SoundDownloadFailureReason,
   AudioPreviewSource, SelectionChoice,

@@ -106,7 +106,15 @@ if (!process.versions.electron) {
         dataUrl: `data:${mimeType};base64,${bytes.toString('base64')}`, mimeType, sizeBytes: bytes.length };
     });
     timeout = setTimeout(() => { console.error('Soundboard file DOM test timed out'); void finish(1); }, 120000);
+    const settleModalMotion = () => browser.webContents.executeJavaScript(`(async () => {
+      const modal = [...document.querySelectorAll('.modal-backdrop:not([data-ui-closing]):not([inert])')].at(-1);
+      await Promise.allSettled((modal?.getAnimations({ subtree: true }) ?? [])
+        .filter(animation => animation.effect?.getComputedTiming().iterations !== Infinity)
+        .map(animation => animation.finished));
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    })()`);
     const nativeClick = async selector => {
+      await settleModalMotion();
       const box = await browser.webContents.executeJavaScript(`(() => {
         const b=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
         return {x:Math.round(b.x+b.width/2),y:Math.round(b.y+b.height/2)};
@@ -115,6 +123,7 @@ if (!process.versions.electron) {
       browser.webContents.sendInputEvent({ type: 'mouseUp', ...box, button: 'left', clickCount: 1 });
     };
     const nativeDrag = async (handle, fraction, cancel = false) => {
+      await settleModalMotion();
       const box = await browser.webContents.executeJavaScript(`(() => {
         const b=document.querySelector('[data-handle="${handle}"]').getBoundingClientRect();
         const c=document.querySelector('.sb-timeline canvas').getBoundingClientRect();
@@ -163,7 +172,8 @@ if (!process.versions.electron) {
       browser.setContentSize(700, 850);
       await new Promise(resolve => setTimeout(resolve, 100));
       await nativeDrag('end', 0.95);
-      assert.ok(Math.abs((await browser.webContents.executeJavaScript('window.soundboardFilesQa.waveformState()')).end - 2.85) < 0.015);
+      const resized = await browser.webContents.executeJavaScript('window.soundboardFilesQa.waveformState()');
+      assert.ok(Math.abs(resized.end - 2.85) < 0.015, JSON.stringify(resized));
       browser.setContentSize(1000, 850);
       await new Promise(resolve => setTimeout(resolve, 100));
       await browser.webContents.executeJavaScript('window.soundboardFilesQa.setExactSelection()', true);
@@ -184,7 +194,7 @@ if (!process.versions.electron) {
       assert.ok(!fs.existsSync(path.join(folder, 'renamed.wav')), 'Confirmed deletion removed actual OS file');
       await browser.webContents.executeJavaScript('window.soundboardFilesQa.prepareOverwrite()', true);
       assert.deepEqual(fs.readFileSync(path.join(folder, 'other.wav')), original, 'Cancelled overwrite preserves bytes');
-      await nativeClick('.dialog-card [data-action="confirm"]');
+      await nativeClick('.modal-backdrop:not([data-ui-closing]):not([inert]) .dialog-card [data-action="confirm"]');
       await browser.webContents.executeJavaScript('window.soundboardFilesQa.finishOverwrite()', true);
       const replacement = fs.readFileSync(path.join(folder, 'other.wav'));
       assert.equal(replacement.readUInt32LE(40) / 6 / 48000, 1);
@@ -244,7 +254,14 @@ async function runDom(fixture) {
   const root = () => document.querySelector('.soundboard-modal-card');
   const menuTrigger = fileName => [...root().querySelectorAll('[data-file-menu]')]
     .find(button => button.dataset.filepath.endsWith(fileName));
-  const popup = () => document.querySelector('.floating-context-menu');
+  const popup = () => document.querySelector('.floating-context-menu:not([data-ui-closing])');
+  const dialog = () => document.querySelector('.modal-backdrop:not([data-ui-closing]):not([inert]) .dialog-card');
+  check(getComputedStyle(root().querySelector('.sb-modal-body')).overflow === 'hidden'
+    && getComputedStyle(root().querySelector('#sb-sounds-container')).overflowY === 'auto'
+    && getComputedStyle(root().querySelector('.sb-modal-players')).flexShrink === '0',
+  'Soundboard controls and playback stack stay fixed while only the sound library scrolls');
+  check(getComputedStyle(root().querySelector('.sb-modal-local-warning')).marginBottom === '6px',
+    'Local preview warning keeps breathing room before the sound library');
   const openMenu = fileName => {
     const trigger = menuTrigger(fileName);
     if (trigger.getAttribute('aria-expanded') !== 'true') trigger.click();
@@ -253,7 +270,8 @@ async function runDom(fixture) {
   const actions = (action, fileName) => [...openMenu(fileName).querySelectorAll('[role="menuitem"]')]
     .find(button => button.lastElementChild.textContent === t(action === 'edit' ? 'common.edit' : `soundboard.${action}`));
   const input = (selector, value) => {
-    const field = document.querySelector(selector); field.value = String(value);
+    const field = [...document.querySelectorAll(selector)].find(element => !element.closest('[data-ui-closing], [inert]'));
+    field.value = String(value);
     field.dispatchEvent(new Event('input', { bubbles: true }));
     return field;
   };
@@ -304,11 +322,11 @@ async function runDom(fixture) {
     trigger.click();
     check(!popup(), `${mode}: clicking open trigger toggles dropdown closed`);
     openMenu('tone.wav'); openMenu('other.wav');
-    check(document.querySelectorAll('.floating-context-menu').length === 1 && trigger.getAttribute('aria-expanded') === 'false', `${mode}: switching sounds cannot leave multiple menus`);
+    check(document.querySelectorAll('.floating-context-menu:not([data-ui-closing])').length === 1 && trigger.getAttribute('aria-expanded') === 'false', `${mode}: switching sounds cannot leave multiple active menus`);
     document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
     check(!popup(), `${mode}: outside pointer dismisses dropdown`);
     openMenu('tone.wav');
-    root().querySelector('.sb-modal-body').dispatchEvent(new Event('scroll'));
+    root().querySelector('#sb-sounds-container').dispatchEvent(new Event('scroll'));
     check(!popup(), `${mode}: scrolling dismisses stale dropdown`);
     openMenu('tone.wav');
     input('#sb-search-input', 'tone');
@@ -363,12 +381,12 @@ async function runDom(fixture) {
   await soundboardService.playSound(tone.filePath);
   check(soundboardService.getActivePlaybacks().some(entry => entry.soundName === 'rename-me'), 'Rename fixture is actually playing');
   actions('rename', 'rename-me.wav').click();
-  await until(() => document.querySelector('[data-dialog-input]'), 'Rename dialog missing');
-  check(document.querySelector('.dialog-text-suffix').textContent === '.wav', 'Rename preserves extension');
+  await until(() => dialog()?.querySelector('[data-dialog-input]'), 'Rename dialog missing');
+  check(dialog().querySelector('.dialog-text-suffix').textContent === '.wav', 'Rename preserves extension');
   input('[data-dialog-input]', '../escape');
-  check(document.querySelector('[data-action="confirm"]').disabled, 'Traversal rejected before IPC');
+  check(dialog().querySelector('[data-action="confirm"]').disabled, 'Traversal rejected before IPC');
   input('[data-dialog-input]', 'renamed');
-  document.querySelector('[data-action="confirm"]').click();
+  dialog().querySelector('[data-action="confirm"]').click();
   await until(() => name('renamed.wav') && exactStatus(t('soundboard.fileRenamed')), 'Rename did not update list/status');
   check(!name('rename-me.wav'), 'Old filename removed from list');
   const renamed = name('renamed.wav');
@@ -377,16 +395,16 @@ async function runDom(fixture) {
   check(soundboardService.getActivePlaybacks(true).length === 0, 'File actions never trigger row playback');
   actions('rename', 'renamed.wav').click();
   input('[data-dialog-input]', 'other');
-  document.querySelector('[data-action="confirm"]').click();
+  dialog().querySelector('[data-action="confirm"]').click();
   await until(() => exactStatus(t('soundboard.fileError.exists')), 'Duplicate rename must show exact localized error');
   check(!!name('renamed.wav') && !!name('other.wav'), 'Duplicate rename retains both list entries');
   actions('delete', 'renamed.wav').click();
-  check(document.querySelector('.dialog-message').textContent === t('soundboard.deleteConfirm', { name: 'renamed.wav' }), 'Permanent deletion warning exact');
-  document.querySelector('[data-action="cancel"]').click();
+  check(dialog().querySelector('.dialog-message').textContent === t('soundboard.deleteConfirm', { name: 'renamed.wav' }), 'Permanent deletion warning exact');
+  dialog().querySelector('[data-action="cancel"]').click();
   await wait(30);
   check(!!name('renamed.wav'), 'Cancelled delete preserves file');
   actions('delete', 'renamed.wav').click();
-  document.querySelector('[data-action="confirm"]').click();
+  dialog().querySelector('[data-action="confirm"]').click();
   await until(() => !name('renamed.wav') && exactStatus(t('soundboard.fileDeleted')), 'Confirmed delete must refresh list and status');
   check(!favoritesStore.isSoundFavorite(renamed.filePath) && !settingsStore.soundboardShortcuts.renamed, 'Delete cleans favorite and shortcut');
   // Real browser decoding feeds the shared encoder; no microphone or external audio.
@@ -439,11 +457,24 @@ async function runDom(fixture) {
   // Simulate a voice connection without networking: only the controller's send spy is used.
   const sent = [];
   const priorGet = sessionManager.get;
-  const session = { client: { send: (...args) => sent.push(args) }, serverStore: { currentUser: { id: 'self' }, serverDetails: {}, hasPermission: () => true } };
+  const priorGetActive = sessionManager.getActive;
+  const session = { client: { send: (...args) => sent.push(args) }, serverStore: {
+    currentUser: { id: 'self' },
+    serverDetails: { allowSoundboard: true, recentSoundCacheEnabled: true, protocol: { features: ['recent-sounds'] } },
+    hasPermission: () => true,
+  } };
   sessionManager.get = () => session;
-  voiceStore.currentVoiceChannelId = 'qa-channel';
-  voiceStore.voiceSessionKey = 'qa-session';
+  sessionManager.getActive = () => session;
   try {
+    voiceStore.currentVoiceChannelId = null;
+    voiceStore.voiceSessionKey = null;
+    await soundboardService.playSound(name('tone.wav').filePath);
+    check(sent.length === 1 && sent[0][0] === shared.MessageType.RECENT_SOUND_RECORD &&
+      sent[0][1].soundName === 'tone', 'Local Soundboard playback is recorded on the active server');
+    soundboardService.stopSound();
+    sent.length = 0;
+    voiceStore.currentVoiceChannelId = 'qa-channel';
+    voiceStore.voiceSessionKey = 'qa-session';
     await soundboardService.playSound(name('tone.wav').filePath);
     check(sent.length === 1 && sent[0][0] === shared.MessageType.SOUNDBOARD_PLAY && sent[0][1].channelId === 'qa-channel', 'Normal playback still broadcasts exact soundboard message');
     const incoming = await window.api.readSoundboardSound(name('tone.wav').filePath);
@@ -451,6 +482,16 @@ async function runDom(fixture) {
     await until(() => soundboardService.getActivePlaybacks().some(entry => entry.userId === 'self'), 'Own incoming audio did not play');
     soundboardService.stopSoundFromUi('self');
     check(sent.at(-1)[0] === shared.MessageType.SOUNDBOARD_STOP, 'Explicit own stop still broadcasts');
+    const beforeRecentPreview = sent.length;
+    await soundboardService.previewRecentSound('Cached tone', incoming.base64, incoming.mimeType);
+    await until(() => soundboardService.getActivePlaybacks().some(entry => entry.userId === 'recent-preview'),
+      'Cached recent sound did not start its local preview');
+    check(sent.length === beforeRecentPreview, 'Recent sound preview remains local and never records or broadcasts again');
+    check(!soundboardService.getGlobalPlayerPlaybacks(true).some(entry => entry.userId === 'recent-preview'),
+      'Recent sound preview stays out of the global Soundboard player bar');
+    soundboardService.stopRecentPreview();
+    check(!soundboardService.getActivePlaybacks().some(entry => entry.userId === 'recent-preview'),
+      'Recent sound preview stop releases its local playback');
     const before = sent.length;
     const preview = shared.encodeSoundboardEdit(originalChannels, 48000, { start: 0, end: 1, fadeIn: 0.1, fadeOut: 0.1 });
     await soundboardService.previewEditedSound(preview.bytes, 'private');
@@ -458,7 +499,8 @@ async function runDom(fixture) {
     soundboardService.stopSoundFromUi('editor-preview');
     check(sent.length === before, 'Editor preview and stop never send anything to the channel');
   } finally {
-    sessionManager.get = priorGet; voiceStore.currentVoiceChannelId = null; voiceStore.voiceSessionKey = null;
+    sessionManager.get = priorGet; sessionManager.getActive = priorGetActive;
+    voiceStore.currentVoiceChannelId = null; voiceStore.voiceSessionKey = null;
     soundboardService.stopSound();
   }
   window.soundboardFilesQa = {
@@ -592,7 +634,7 @@ async function runDom(fixture) {
       }
       check(baselineListeners() === listenerCount, 'Repeated editor/modal teardown leaves exact listener baseline');
       actions('delete', 'tone.wav').click(); modal.close();
-      check(!document.querySelector('.dialog-card'), 'Closing parent aborts delete confirmation');
+      check(!document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card'), 'Closing parent aborts delete confirmation');
       await modal.open(); check(!!name('tone.wav'), 'Aborted confirmation preserves original');
       check(settingsStore.soundboardVolume === 37 && settingsStore.soundboardLoudnessLimit === 4 && !settingsStore.soundboardLimiterEnabled, 'All file operations preserve volume/limiter preferences');
       check(JSON.parse(localStorage.getItem('monky_settings')).soundboardLoudnessLimit === 4, 'Ceiling remains persisted');
@@ -712,13 +754,13 @@ async function runDom(fixture) {
       key('fadeIn', 'ArrowRight', 2, true); key('fadeOut', 'ArrowRight', 3, true);
       check(waveformState().end === 1, 'Overwrite selection exact');
       document.querySelector('[data-editor-overwrite]').click();
-      await until(() => document.querySelector('.dialog-card'), 'Overwrite confirmation missing');
-      check(document.querySelector('.dialog-message').textContent === t('soundboard.overwriteConfirm', { name: 'other.wav' }), 'Irreversible replacement warning localized');
-      document.querySelector('[data-action="cancel"]').click();
+      await until(() => dialog(), 'Overwrite confirmation missing');
+      check(dialog().querySelector('.dialog-message').textContent === t('soundboard.overwriteConfirm', { name: 'other.wav' }), 'Irreversible replacement warning localized');
+      dialog().querySelector('[data-action="cancel"]').click();
       await until(() => !document.querySelector('[data-editor-form] fieldset').disabled, 'Cancelled overwrite must re-enable editor');
       check(!!document.querySelector('.sb-editor-card'), 'Cancelled overwrite leaves editor open');
       document.querySelector('[data-editor-overwrite]').click();
-      await until(() => document.querySelector('.dialog-card'), 'Second overwrite confirmation missing');
+      await until(() => dialog(), 'Second overwrite confirmation missing');
     },
     async finishOverwrite() {
       await until(() => !document.querySelector('.sb-editor-card') && exactStatus(t('soundboard.originalSaved', { name: 'other.wav' })), 'Confirmed overwrite did not finish');

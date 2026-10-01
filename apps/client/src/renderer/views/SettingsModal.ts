@@ -4,6 +4,7 @@ import { sessionManager } from '../core/SessionManager';
 import { serverStore } from '../stores/serverStore';
 import { connectionStore } from '../stores/connectionStore';
 import { t } from '../i18n';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { enableBackdropClose } from '../utils/modal';
 import { escapeHtml } from '../utils/html';
 import { AccountTab } from './settings/tabs/AccountTab';
@@ -160,6 +161,7 @@ export class SettingsModal {
     `;
 
     document.body.appendChild(this.modalEl);
+    enterModal(this.modalEl);
     const localToolsReady = this.attachEvents();
     this.sectionNavigation = new SettingsSectionNavigation(this.modalEl);
     this.sectionNavigation.setTab(this.activeTab);
@@ -223,11 +225,9 @@ export class SettingsModal {
     enableBackdropClose(this.modalEl, closeModal);
 
     const onEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        const nestedModal = document.querySelector('.modal-backdrop:not(.modal-backdrop--settings)');
-        if (!nestedModal) {
-          closeModal();
-        }
+      if (e.key === 'Escape' && handlesModalKey(this.modalEl, e)) {
+        e.preventDefault();
+        closeModal();
       }
     };
     window.addEventListener('keydown', onEsc);
@@ -320,7 +320,7 @@ export class SettingsModal {
     if (this.modalEl) {
       const handler = (this.modalEl as any)._escHandler;
       if (handler) window.removeEventListener('keydown', handler);
-      this.modalEl.remove();
+      exitModal(this.modalEl);
       this.modalEl = null;
     }
   }

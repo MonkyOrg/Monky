@@ -11,6 +11,24 @@ const token = (bytes: readonly number[] | Uint8Array): string => `~${Buffer.from
 const oldWebLink = (invite: ServerInvite): string =>
   `https://monkyorg.github.io/Monky/convite.html#${Buffer.from(JSON.stringify(invite)).toString('base64url')}`;
 
+test('event destinations extend only the fragment while ordinary invitation bytes stay unchanged', () => {
+  const server: ServerInvite = { v: 1, host: 'localhost', port: 3000 };
+  const plain = createServerInviteLink(server);
+  assert.equal(createServerInviteAppLink(server), 'monky://#~Aw');
+  for (const eventId of ['event-1', 'c1829235-48ad-4824-840e-d613171d4031', 'a'.repeat(128)]) {
+    const invite = { ...server, eventId };
+    const link = createServerInviteLink(invite);
+    assert.equal(link, `${plain}.event.${eventId}`);
+    assert.equal(new URL(link).search, '');
+    for (const value of [link, createServerInviteAppLink(invite)]) {
+      assert.deepEqual(parseServerInviteLink(value), { ok: true, invite });
+    }
+  }
+  for (const suffix of ['.event.', '.event.a.b', '.wrong.a', '.event.a/b', '.event.a%20b', '.event.' + 'a'.repeat(129)]) {
+    assert.equal(parseServerInviteLink(plain + suffix).ok, false);
+  }
+});
+
 test('compact web and native invitations preserve every supplied field', () => {
   for (const host of [
     '192.168.1.5', 'example.org', 'localhost', '127.0.0.1', '[::1]', '[::]',

@@ -2,7 +2,9 @@ import jsQR from 'jsqr';
 import QRCode from 'qrcode';
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { applyBackup, BACKUP_FILE_EXTENSION, BackupScope, collectBackup, parseBackup, scopesInBackup } from '../utils/backup';
+import { withButtonLoading } from '../utils/buttonLoading';
 
 export interface IdentityInfo {
   publicKey: string;
@@ -76,11 +78,12 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
 
   const cleanup = () => {
     document.removeEventListener('keydown', onKeyDown, true);
-    backdrop.remove();
+    exitModal(backdrop);
   };
 
   const close = () => cleanup();
   const onKeyDown = (event: KeyboardEvent) => {
+    if (!handlesModalKey(backdrop, event)) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       close();
@@ -161,7 +164,9 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
   });
 
   fileButton.addEventListener('click', async () => {
-    const result = await window.api.saveBackupFile(codeTextarea.value, `monky-identidade.${BACKUP_FILE_EXTENSION}`);
+    const result = await withButtonLoading(fileButton, () =>
+      window.api.saveBackupFile(codeTextarea.value, `monky-identidade.${BACKUP_FILE_EXTENSION}`));
+    if (!result) return;
     if (!result.success && result.error) showError(result.error);
   });
 
@@ -173,6 +178,7 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
   });
   document.addEventListener('keydown', onKeyDown, true);
   document.body.appendChild(backdrop);
+  enterModal(backdrop);
   passwordInput.focus();
 }
 
@@ -255,7 +261,7 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
     const cleanup = () => {
       stopScan();
       document.removeEventListener('keydown', onKeyDown, true);
-      backdrop.remove();
+      exitModal(backdrop);
     };
 
     const settle = (identity: IdentityInfo | null) => {
@@ -300,6 +306,7 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (!handlesModalKey(backdrop, event)) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         settle(null);
@@ -343,7 +350,8 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
 
     fileButton.addEventListener('click', async () => {
       clearError();
-      const result = await window.api.openBackupFile();
+      const result = await withButtonLoading(fileButton, () => window.api.openBackupFile());
+      if (!result) return;
       if (!result.success) {
         if (result.error) showError(result.error);
         return;
@@ -360,6 +368,7 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
     });
     document.addEventListener('keydown', onKeyDown, true);
     document.body.appendChild(backdrop);
+    enterModal(backdrop);
     codeInput.focus();
   });
 }

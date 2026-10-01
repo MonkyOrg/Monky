@@ -3,6 +3,7 @@ import { getServerSessionForAddress, openServerSession, updateSessionAvatar } fr
 import { connectionStore } from '../stores/connectionStore';
 import { clientLog } from '../core/ClientLogService';
 import { t } from '../i18n';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { escapeHtml } from '../utils/html';
 import { enableBackdropClose } from '../utils/modal';
 
@@ -29,6 +30,7 @@ export class JoinInviteModal {
           <button type="button" class="modal-close-btn" data-invite-cancel aria-label="${t('common.close')}">&times;</button>
         </div>
         <p>${escapeHtml(t('invite.review', { name: invite.name ?? 'Monky' }))}</p>
+        ${invite.eventId ? `<p>${escapeHtml(t('community.invitedEventHint'))}</p>` : ''}
         <dl style="display: grid; grid-template-columns: auto 1fr; gap: 8px; margin: 0;">
           <dt>${t('connection.hostLabel')}</dt><dd style="overflow-wrap: anywhere; margin: 0;" data-invite-host>${escapeHtml(invite.host)}</dd>
           <dt>${t('connection.portLabel')}</dt><dd style="margin: 0;" data-invite-port>${invite.port}</dd>
@@ -89,15 +91,14 @@ export class JoinInviteModal {
         closed = true;
         document.removeEventListener('keydown', onKey, true);
         nickname?.removeEventListener('input', clearNicknameValidity);
-        modal.remove();
+        exitModal(modal);
         this.closeCurrent = null;
         this.completion = null;
         if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
         resolve(joined);
       };
       const onKey = (event: KeyboardEvent): void => {
-        const backdrops = document.querySelectorAll('.modal-backdrop');
-        if (backdrops[backdrops.length - 1] !== modal) return;
+        if (!handlesModalKey(modal, event)) return;
         if (event.key === 'Escape') {
           event.preventDefault();
           event.stopImmediatePropagation();
@@ -156,7 +157,10 @@ export class JoinInviteModal {
             });
             await updateSessionAvatar(invite.host, invite.port, avatar);
           }
+          const eventSession = invite.eventId ? getServerSessionForAddress(invite.host, invite.port) : undefined;
+          if (invite.eventId && !eventSession) throw new Error(t('community.loadError'));
           close(true, true);
+          if (invite.eventId && eventSession) eventSession.community.requestOpenEvent(invite.eventId);
           await window.api.maximize?.().catch(() => clientLog.warn('APP', 'Could not maximize after joining the invited server'));
         } catch (error: unknown) {
           clientLog.warn('CONNECTION', 'Could not join the invited server');
@@ -176,6 +180,7 @@ export class JoinInviteModal {
       });
     });
     document.body.appendChild(modal);
+    enterModal(modal);
     const nicknameToFocus = modal.querySelector<HTMLInputElement>('#invite-join-nickname');
     if (nicknameToFocus) nicknameToFocus.focus();
     else join.focus();

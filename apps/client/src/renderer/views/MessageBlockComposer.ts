@@ -4,12 +4,22 @@ import { renderReplyPreview } from '../utils/messageReply';
 import { bindCodeComposer, renderCodeComposer } from './CodeComposer';
 import { t } from '../i18n';
 import { MarkdownInput } from './MarkdownInput';
+import { setSurfaceVisible } from '../utils/surfaceVisibility';
+
+const bindings = new WeakMap<HTMLElement, Array<() => void>>();
 
 export function renderMessageBlockComposer(
   root: HTMLElement, store: ChatStore, channelId: string, changed: () => void, disabled: boolean,
 ): void {
+  bindings.get(root)?.forEach(dispose => dispose());
+  const disposers: Array<() => void> = [];
+  bindings.set(root, disposers);
   const blocks = store.getBlockDraft(channelId);
-  root.hidden = blocks.length === 0;
+  if (blocks.length === 0) {
+    root.querySelectorAll<MarkdownInput>('monky-markdown-input').forEach(input => input.destroy());
+    setSurfaceVisible(root, false, 'panel', undefined, () => root.replaceChildren());
+    return;
+  }
   const persist = () => { store.setBlockDraft(channelId, blocks); changed(); };
   const render = () => renderMessageBlockComposer(root, store, channelId, changed, disabled);
   const previous = Array.from(root.querySelectorAll('fieldset'));
@@ -30,7 +40,7 @@ export function renderMessageBlockComposer(
     } else if (block.type === 'code') {
       element.innerHTML = renderCodeComposer(block, remove);
       root.append(element);
-      bindCodeComposer(element, block, value => { Object.assign(block, value); persist(); });
+      disposers.push(bindCodeComposer(element, block, value => { Object.assign(block, value); persist(); }).destroy);
     } else {
       element.innerHTML = `${remove}<monky-markdown-input aria-label="${t('chat.formatText')}"></monky-markdown-input>`;
     }
@@ -78,6 +88,7 @@ export function renderMessageBlockComposer(
     });
     root.append(element);
   });
+  setSurfaceVisible(root, true);
   if (focusIndex >= 0 && selection && !disabled) {
     const input = root.querySelectorAll('fieldset')[focusIndex]?.querySelector<HTMLTextAreaElement | MarkdownInput>('textarea, monky-markdown-input');
     input?.focus({ preventScroll: true });

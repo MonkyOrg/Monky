@@ -100,16 +100,16 @@ test('initial connection failure rejects without creating an automatic reconnect
   assert.equal(f.sockets.length, 1);
 });
 
-for (const serverProtocolVersion of [24, 25, 26, 27, 28]) {
-  test(`screen privacy protocol 29 never falls back to incompatible server protocol ${serverProtocolVersion}`, async context => {
+for (const serverProtocolVersion of [24, 25, 26, 27, 28, 29, 30]) {
+  test(`forum-aware protocol 31 never falls back to incompatible server protocol ${serverProtocolVersion}`, async context => {
     const f = fixture(context);
     const pending = assert.rejects(f.connect());
     const socket = f.lastSocket();
     socket.open();
     const request = socket.sent[0];
-    assert.equal(request.payload.protocolVersion, 30);
+    assert.equal(request.payload.protocolVersion, 31);
     assert.equal(request.payload.protocolVersion, PROTOCOL_VERSION);
-    assert.equal(request.payload.protocolOffer.minimumVersion, 29);
+    assert.equal(request.payload.protocolOffer.minimumVersion, 31);
     socket.receive({ type: MessageType.SERVER_ERROR, requestId: request.requestId,
       payload: { code: 'PROTOCOL_VERSION_UNSUPPORTED', serverProtocolVersion } });
     await pending;
@@ -119,19 +119,16 @@ for (const serverProtocolVersion of [24, 25, 26, 27, 28]) {
   });
 }
 
-test('viewer-list protocol can reconnect to a compatible protocol 29 server', async context => {
+test('current clients advertise server community, forums and message search to compatible servers', async context => {
   const f = fixture(context);
   const pending = f.connect();
   const socket = f.lastSocket();
   socket.open();
   const initial = socket.sent[0];
-  socket.receive({ type: MessageType.SERVER_ERROR, requestId: initial.requestId,
-    payload: { code: 'PROTOCOL_VERSION_UNSUPPORTED', serverProtocolVersion: 29 } });
-  await setImmediate();
-  const retries = socket.sent.filter(message => message.type === MessageType.AUTH_CONNECT);
-  assert.equal(retries.length, 2);
-  assert.equal(retries[1].payload.protocolVersion, 29);
-  socket.receive({ type: MessageType.AUTH_SUCCESS, requestId: retries[1].requestId, payload: {} });
+  for (const feature of ['server-community', 'forums', 'message-search']) {
+    assert.ok(initial.payload.protocolOffer.features.includes(feature));
+  }
+  socket.receive({ type: MessageType.AUTH_SUCCESS, requestId: initial.requestId, payload: {} });
   await pending;
   assert.equal(f.client.getStatus(), 'CONNECTED');
 });

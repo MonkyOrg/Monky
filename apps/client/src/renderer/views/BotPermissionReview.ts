@@ -1,5 +1,6 @@
 import type { BotCapability, BotInstallPreview } from '@monky/shared';
 import { t } from '../i18n';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { escapeHtml } from '../utils/html';
 import { enableBackdropClose } from '../utils/modal';
 import { readBotPermissionChange, renderBotPermissionControls, syncBotPermissionControls } from './botPermissionControls';
@@ -29,13 +30,13 @@ export function showBotPermissionReview(preview: BotInstallPreview, signal: Abor
       settled = true;
       document.removeEventListener('keydown', onKeyDown, true);
       signal.removeEventListener('abort', onAbort);
-      root.remove();
+      exitModal(root);
       if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus({ preventScroll: true });
       resolve(result);
     };
     const onAbort = () => close(null);
     const onKeyDown = (event: KeyboardEvent): void => {
-      if ([...document.querySelectorAll('.modal-backdrop')].at(-1) !== root) return;
+      if (!handlesModalKey(root, event)) return;
       if (event.key === 'Escape') {
         event.preventDefault(); event.stopImmediatePropagation(); close(null);
       } else if (event.key === 'Tab') {
@@ -58,6 +59,7 @@ export function showBotPermissionReview(preview: BotInstallPreview, signal: Abor
     document.addEventListener('keydown', onKeyDown, true);
     signal.addEventListener('abort', onAbort, { once: true });
     document.body.append(root);
+    enterModal(root);
     if (signal.aborted) close(null);
     else root.querySelector<HTMLElement>('[data-review-cancel]')?.focus();
   });

@@ -137,10 +137,18 @@ monky-bot-sdk add form signup --field name:text --field age:integer --field noti
 monky-bot-sdk add selector poll --public --choice "Option A" --choice "Option B" --non-interactive
 ```
 
-Fields accept `text`, `integer`, `boolean`, `string-list` and
+Fields accept `text`, `integer`, `boolean`, `string-list`, `image-list` and
 `select:ChoiceA,ChoiceB`. The sample form only acknowledges submission; implement
 your behavior using `values`. Translate author-written titles and labels in the
 module using `ctx.locale`; the generator does not invent translations.
+`image-list` lets a person select, crop, preview, reorder and upload up to five
+carousel images at once. Use `presentation` to choose `format` (`banner`,
+`landscape`, `square` or `portrait`), `fit` (`cover` or `contain`) and `size`
+(`compact`, `regular` or `wide`). Sizes are responsive hints bounded by the
+client; bots cannot provide CSS or arbitrary dimensions. The field returns
+opaque temporary references. Use them in a `ctx.reply()` component or as a Live
+Action's `imageAssetRefs`; in the latter case the server promotes the images to
+persistent `imageUrls`. This field is not supported in persistent settings.
 The settings module declares options and their defaults; implement their effects
 in handlers using `ctx.settings.server` and `ctx.settings.user`.
 

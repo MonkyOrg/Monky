@@ -22,11 +22,19 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
   const denyMedia = async () => { mediaRequests++; throw new Error('The screen stage UI smoke cannot capture media.'); };
   replace(navigator.mediaDevices, 'getUserMedia', denyMedia);
   replace(navigator.mediaDevices, 'getDisplayMedia', denyMedia);
+  const pipRequests = [];
+  let rejectPip = false;
+  replace(document, 'pictureInPictureEnabled', true);
+  replace(HTMLVideoElement.prototype, 'requestPictureInPicture', async function requestPictureInPicture() {
+    if (rejectPip) throw new DOMException('Expected Picture-in-Picture rejection', 'NotAllowedError');
+    pipRequests.push(this);
+    return {};
+  });
 
-  const [{ VoiceStageView }, { voiceStore: voice }, { settingsStore: settings }, { serverStore: server },
+  const [{ VoiceStageView }, { MainView }, { voiceStore: voice }, { settingsStore: settings }, { serverStore: server },
     { participantManager: participants }, { appEvents }, { videoService }, { webRtcManager: rtc },
     { sessionManager }, language, { showInfoToast }, { overlayBridgeService }] = await Promise.all([
-    import('/views/VoiceStageView.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
+    import('/views/VoiceStageView.ts'), import('/views/MainView.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
     import('/stores/serverStore.ts'), import('/core/ParticipantManager.ts'), import('/core/EventBus.ts'),
     import('/core/VideoService.ts'), import('/core/WebRtcManager.ts'), import('/core/SessionManager.ts'),
     import('/i18n/index.ts'), import('/views/CopyToast.ts'), import('/core/OverlayBridgeService.ts'),
@@ -63,7 +71,9 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
     sessionId === remote.sessionId && shareId === remoteSource.shareId ? watchState : null);
   replace(rtc, 'getAverageP2pPing', async () => 0);
   replace(rtc, 'getScreenViewers', async () => []);
+  const screenWatchCalls = [];
   replace(rtc, 'setRemoteScreenWatching', (sessionId, shareId, watching) => {
+    screenWatchCalls.push({ sessionId, shareId, watching });
     if (!watching) modes.delete(modeKey(sessionId, shareId));
     voice.setScreenWatching(sessionId, shareId, watching);
   });
@@ -203,6 +213,7 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       verifyBadge(remote.sessionId, remoteSource.shareId, null);
       verifyBadge(remote.sessionId, 'remote-browser', 'normal');
       check(!root.querySelector('[data-kind="camera"] .stage-capture-mode-badge'), 'Camera tiles must not inherit a screen capture mode');
+      check(!root.querySelector('.stage-pip-btn'), 'Locked broadcasts and ordinary camera tiles do not expose Picture-in-Picture');
       check(card(remote.sessionId, remoteSource.shareId).querySelector('.stage-viewers'),
         'Allowed non-watchers can see a remote screen audience');
       check(!root.querySelector('[data-kind="camera"] .stage-viewers'), 'Cameras do not acquire screen viewer badges');
@@ -217,6 +228,7 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       check(card(remote.sessionId, remoteSource.shareId).classList.contains('stage-mini-card'), 'Remote status must also render in the mini strip');
       checkBadgeLayout();
       const focusedCard = card(local.sessionId, first.id);
+      check(!focusedCard.querySelector('.stage-pip-btn'), 'The broadcaster preview never exposes viewer Picture-in-Picture');
       check(focusedCard.querySelector('.stage-viewers') && root.querySelector('.stage-mini-card .stage-viewers'),
         'Viewer lists are present on local, focused and mini screen cards');
       const focusedVideo = video(local.sessionId, first.id);
@@ -301,9 +313,32 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       card(remote.sessionId, remoteSource.shareId).querySelector('.stage-watch-btn').click();
       verifyBadge(local.sessionId, first.id, 'game');
       verifyBadge(remote.sessionId, remoteSource.shareId, 'game');
+      check(card(remote.sessionId, remoteSource.shareId).querySelector('.stage-pip-btn')
+        && !document.querySelector('[data-kind="camera"] .stage-pip-btn')
+        && !card(local.sessionId, first.id).querySelector('.stage-pip-btn'),
+      'Picture-in-Picture is limited to viewers of live screen broadcasts');
+      document.pictureInPictureEnabled = false;
+      stage.renderParticipants();
+      check(!root.querySelector('.stage-pip-btn'), 'Picture-in-Picture stays hidden when Chromium reports it unavailable');
+      document.pictureInPictureEnabled = true;
+      stage.renderParticipants();
       const remoteVideo = video(remote.sessionId, remoteSource.shareId);
       const remoteStream = remoteVideo.srcObject;
       const remoteCard = card(remote.sessionId, remoteSource.shareId);
+      const pipButton = remoteCard.querySelector('.stage-pip-btn');
+      pipButton.click();
+      await settle();
+      check(pipRequests.at(-1) === remoteVideo && remoteVideo.srcObject === remoteStream
+        && !pipButton.disabled && !pipButton.hasAttribute('aria-busy'),
+      'Manual Picture-in-Picture targets the watched broadcast without disturbing playback');
+      rejectPip = true;
+      pipButton.click();
+      await settle();
+      check(document.querySelector('.dialog-card')?.textContent.includes(language.t('stage.pictureInPictureErrorMessage')),
+        'A rejected Picture-in-Picture request reports a localized error instead of failing silently');
+      document.querySelector('.dialog-card [data-action="confirm"]').click();
+      await new Promise(resolve => setTimeout(resolve, 400));
+      rejectPip = false;
       fullscreen = remoteCard;
       for (const muted of [true, false, true, false]) {
         const state = participants.get(remote.sessionId).voiceState;
@@ -322,14 +357,14 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       for (const receiver of ['native', 'chromium']) {
         watchState = { state: 'unavailable', reason: 'connection-failed', receiver };
         appEvents.emit('native_screen.updated');
-        const error = card(remote.sessionId, remoteSource.shareId).querySelector('.stage-native-error');
+        const error = card(remote.sessionId, remoteSource.shareId).querySelector('.stage-native-error:not([data-ui-closing])');
         check(error?.textContent.includes(language.t('screenShare.nativeFailure.connection-failed')),
           'Receiver failures must remain visible in the selected language.');
         check(error.textContent.includes(language.t('screenShare.nativeReceiverSettingsHint')) === (receiver === 'native'),
           'Only native receiver errors suggest manually choosing Chromium in settings.');
         watchState = null;
         appEvents.emit('native_screen.updated');
-        check(!card(remote.sessionId, remoteSource.shareId).querySelector('.stage-native-error'),
+        check(!card(remote.sessionId, remoteSource.shareId).querySelector('.stage-native-error:not([data-ui-closing])'),
           'A cleared failure must remove the obsolete receiver hint.');
       }
       watchState = { state: 'unavailable', reason: 'unsupported', receiver: 'chromium' };
@@ -356,7 +391,45 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       check(overlay.getBoundingClientRect().top >= badge(remote.sessionId, remoteSource.shareId).getBoundingClientRect().bottom,
         'Top-left telemetry must not cover the mode badge');
       overlay.classList.add('is-hidden');
-      card(remote.sessionId, remoteSource.shareId).querySelector('.stage-stopwatch-btn').click();
+      const callsBeforeNavigation = screenWatchCalls.length;
+      stage.destroy();
+      root.replaceChildren();
+      check(voice.isWatchingScreen(remote.sessionId, remoteSource.shareId)
+        && screenWatchCalls.length === callsBeforeNavigation && listenerCounts() === baselineListeners,
+      'Leaving the stage preserves watching without adding subscriptions or listeners');
+
+      const noticeHost = document.createElement('div');
+      noticeHost.innerHTML = '<div id="screenshare-notice-slot"></div>';
+      document.body.append(noticeHost);
+      const mainView = new MainView(noticeHost);
+      mainView.activeContentView = 'chat';
+      mainView.updateScreenShareNotice();
+      const notice = noticeHost.querySelector('#screenshare-viewer-stop-btn')?.closest('.screenshare-notice');
+      check(notice?.querySelector('.screenshare-notice-text')?.textContent
+        === (locale === 'pt-BR' ? 'Você está assistindo' : 'You are watching')
+        && noticeHost.querySelector('#screenshare-viewer-stop-btn')?.textContent
+        === (locale === 'pt-BR' ? 'Parar de assistir' : 'Stop watching'),
+      'Navigating away shows the localized viewer status and stop affordance');
+
+      stage = new VoiceStageView(root);
+      stage.setChannel(channel.id);
+      check(voice.isWatchingScreen(remote.sessionId, remoteSource.shareId)
+        && !card(remote.sessionId, remoteSource.shareId).querySelector('.screen-locked')
+        && screenWatchCalls.length === callsBeforeNavigation,
+      'Re-entering the stage restores the viewer state without a duplicate subscription');
+      stage.destroy();
+      root.replaceChildren();
+      noticeHost.querySelector('#screenshare-viewer-stop-btn').click();
+      check(!voice.isWatchingScreen(remote.sessionId, remoteSource.shareId)
+        && participants.get(remote.sessionId).voiceState.isScreenSharing
+        && screenWatchCalls.at(-1)?.watching === false,
+      'Stopping from the status affordance ends only the viewer subscription');
+      noticeHost.remove();
+
+      stage = new VoiceStageView(root);
+      stage.setChannel(channel.id);
+      check(card(remote.sessionId, remoteSource.shareId).querySelector('.screen-locked'),
+        'Returning after stopping keeps the publisher live behind the viewer gate');
       verifyBadge(remote.sessionId, remoteSource.shareId, null);
 
       const camera = document.querySelector(`[data-tile-key="${remote.sessionId}:camera"] video`);

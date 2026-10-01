@@ -111,12 +111,21 @@ async function runCustomSoundsSmoke(base64) {
       'Reset all clears cached synthesized overrides as well as stored preferences');
     }
     let finishPicker;
-    window.api.selectSoundFile = () => new Promise(resolve => { finishPicker = resolve; });
-    root.querySelector('.btn-sound-change[data-sound-key="chat_message"]').click();
+    let pickerCalls = 0;
+    window.api.selectSoundFile = () => new Promise(resolve => { pickerCalls++; finishPicker = resolve; });
+    const pendingSoundPicker = root.querySelector('.btn-sound-change[data-sound-key="chat_message"]');
+    pendingSoundPicker.click();
+    pendingSoundPicker.click();
+    check(pendingSoundPicker.disabled && pendingSoundPicker.dataset.loading === '1'
+      && pendingSoundPicker.getAttribute('aria-busy') === 'true' && pickerCalls === 1,
+    'Custom sound selection shows loading and blocks duplicate native dialogs');
     tab.cleanup();
     finishPicker(source);
     await new Promise(resolve => setTimeout(resolve, 30));
     check(!settingsStore.customSounds.chat_message, 'Closing settings cancels a late native picker result');
+    check(!pendingSoundPicker.disabled && !pendingSoundPicker.dataset.loading
+      && !pendingSoundPicker.hasAttribute('aria-busy'),
+    'A resolved native sound picker restores its loading trigger after cleanup');
   } finally {
     tab.cleanup();
     manager?.stopReconnectingLoop();

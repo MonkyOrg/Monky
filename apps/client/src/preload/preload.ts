@@ -4,7 +4,7 @@ import {
   createNativeScreenPresentation, registerNativeAudioPortReceiver, type NativeScreenPresentationController,
 } from '@monky/screen-share';
 import * as nativeAudioProtocol from '@monky/shared';
-import { BOT_SCREEN_DOCUMENT_IPC, SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, DESKTOP_SOURCES_IPC, type BotScreenDocumentConsent, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
+import { BOT_SCREEN_DOCUMENT_IPC, SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, DESKTOP_SOURCES_IPC, EVENT_CALENDAR_IPC, type BotScreenDocumentConsent, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
 import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenEventSchema } from '@monky/shared';
 import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
 import type {
@@ -129,6 +129,7 @@ export interface ElectronApi {
   prepareScreenShareWindow: (sourceId: string) => Promise<boolean>;
   ensureScreenPermission: () => Promise<boolean>;
   selectImageDialog: () => Promise<ImageSelectionResult | null>;
+  selectImagesDialog: (maxFiles: number) => Promise<ImageSelectionResult[]>;
   selectSoundFile: () => Promise<string | null>;
   selectSoundboardFolder: () => Promise<string | null>;
   getDefaultSoundboardFolder: () => Promise<string | null>;
@@ -198,6 +199,9 @@ export interface ElectronApi {
   editorCommand: (command: EditorCommand) => Promise<{ success: boolean }>;
   fetchLinkPreview: (url: string) => Promise<LinkPreviewData | null>;
   downloadFile: (url: string, fileName: string) => Promise<{ success: boolean; error?: string }>;
+  saveRecentSound: (input: IpcInvokeChannels['app:save-recent-sound']['args'][0]) => Promise<IpcInvokeChannels['app:save-recent-sound']['returnType']>;
+  saveCsvFile: (content: string, fileName: string) => Promise<{ success: boolean; error?: string }>;
+  saveEventCalendar: (input: IpcInvokeChannels['community:save-event-calendar']['args'][0]) => Promise<IpcInvokeChannels['community:save-event-calendar']['returnType']>;
   probeServer: (host: string, port: number) => Promise<ServerProbeResult>;
   screenAudioSupported: () => Promise<boolean>;
   screenAudioDiagnose: () => Promise<ScreenAudioDiagnostics>;
@@ -359,6 +363,7 @@ const api: ElectronApi = {
   prepareScreenShareWindow: (sourceId: string) => ipcRenderer.invoke('screen-share:prepare-window', sourceId),
   ensureScreenPermission: (): Promise<boolean> => ipcRenderer.invoke('screen-share:ensure-permission'),
   selectImageDialog: () => ipcRenderer.invoke('dialog:select-image'),
+  selectImagesDialog: (maxFiles) => ipcRenderer.invoke('dialog:select-images', maxFiles),
   selectSoundFile: () => ipcRenderer.invoke('dialog:select-sound-file'),
   selectSoundboardFolder: () => ipcRenderer.invoke('dialog:select-soundboard-folder'),
   getDefaultSoundboardFolder: () => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.defaultFolder),
@@ -487,6 +492,9 @@ const api: ElectronApi = {
   editorCommand: (command) => ipcRenderer.invoke(EDITOR_COMMAND_IPC, command),
   fetchLinkPreview: (url) => ipcRenderer.invoke('link-preview:fetch', url),
   downloadFile: (url, fileName) => ipcRenderer.invoke('app:download-file', url, fileName),
+  saveRecentSound: (input) => ipcRenderer.invoke('app:save-recent-sound', input),
+  saveCsvFile: (content, fileName) => ipcRenderer.invoke('app:save-csv-file', content, fileName),
+  saveEventCalendar: (input) => ipcRenderer.invoke(EVENT_CALENDAR_IPC, input),
   probeServer: (host, port) => ipcRenderer.invoke('net:probe-server', host, port),
   screenAudioSupported: () => ipcRenderer.invoke('screen-audio:is-supported'),
   screenAudioDiagnose: () => ipcRenderer.invoke('screen-audio:diagnose'),

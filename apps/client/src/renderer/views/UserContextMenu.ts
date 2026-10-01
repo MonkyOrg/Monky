@@ -15,6 +15,8 @@ import { showAlert } from './Dialog';
 import { downloadLightboxFile, lightboxModal } from './LightboxModal';
 import { warnIfMoveBlocked } from '../utils/channelAccess';
 import { t } from '../i18n';
+import { animateEnter, ownSurface, removeWithMotion, topModal } from '../utils/surfaceMotion';
+import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { botSettingsMenuItem } from './BotSettingsModal';
 
 export class UserContextMenu {
@@ -191,6 +193,9 @@ export class UserContextMenu {
 
     this.menuEl.style.left = `${posX}px`;
     this.menuEl.style.top = `${posY}px`;
+    const owner = topModal();
+    if (owner) this.unbindGlobalListeners.push(ownSurface(this.menuEl, owner));
+    animateEnter(this.menuEl);
 
     this.syncSubmenuPlacement();
     this.attachEvents(user);
@@ -453,15 +458,29 @@ export class UserContextMenu {
     // never leaves "Roles" hanging open next to it (#258).
     this.menuEl.querySelectorAll<HTMLElement>('.ctx-submenu-wrap').forEach((wrap) => {
       const trigger = wrap.querySelector<HTMLButtonElement>('.ctx-submenu-trigger');
+      const submenu = wrap.querySelector<HTMLElement>('.ctx-submenu');
+      if (submenu) { submenu.hidden = true; submenu.style.display = 'flex'; }
+      const setOpen = (open: boolean) => {
+        wrap.classList.toggle('open', open);
+        trigger?.setAttribute('aria-expanded', String(open));
+        if (submenu) setSurfaceVisible(submenu, open, 'popover');
+        if (open) this.syncSubmenuVerticalOffset(wrap);
+      };
       trigger?.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
         const willOpen = !wrap.classList.contains('open');
-        this.menuEl?.querySelectorAll('.ctx-submenu-wrap').forEach((other) => other.classList.remove('open'));
-        wrap.classList.toggle('open', willOpen);
-        if (willOpen) this.syncSubmenuVerticalOffset(wrap);
+        this.menuEl?.querySelectorAll<HTMLElement>('.ctx-submenu-wrap').forEach((other) => {
+          if (other === wrap) return;
+          other.classList.remove('open');
+          other.querySelector('.ctx-submenu-trigger')?.setAttribute('aria-expanded', 'false');
+          const panel = other.querySelector<HTMLElement>('.ctx-submenu');
+          if (panel) setSurfaceVisible(panel, false, 'popover');
+        });
+        setOpen(willOpen);
       });
-      wrap.addEventListener('mouseenter', () => this.syncSubmenuVerticalOffset(wrap));
+      wrap.addEventListener('mouseenter', () => setOpen(true));
+      wrap.addEventListener('mouseleave', () => setOpen(false));
     });
 
     void this.attachModerationEvents(user);
@@ -521,7 +540,9 @@ export class UserContextMenu {
     const handleOutsideClick = (e: MouseEvent | PointerEvent) => {
       if (this.menuEl && !this.menuEl.contains(e.target as Node)) this.close();
     };
-    const handleKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') this.close(); };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); this.close(); }
+    };
     const handleWindowResize = () => this.close();
 
     const listenerTimer = window.setTimeout(() => {
@@ -544,7 +565,7 @@ export class UserContextMenu {
     this.unbindGlobalListeners.forEach((u) => u());
     this.unbindGlobalListeners = [];
     if (this.menuEl) {
-      this.menuEl.remove();
+      removeWithMotion(this.menuEl);
       this.menuEl = null;
     }
   }

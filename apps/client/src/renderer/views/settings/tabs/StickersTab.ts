@@ -2,6 +2,7 @@ import { settingsStore } from '../../../stores/settingsStore';
 import { stickerService } from '../../../core/StickerService';
 import { t, tCount } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
+import { setButtonLoading } from '../../../utils/buttonLoading';
 
 /**
  * Sticker folder settings (#356). Mirrors SoundboardTab: the folder is picked
@@ -52,6 +53,7 @@ export class StickersTab {
     const inputPath = container.querySelector<HTMLInputElement>('#input-stickers-path');
     const btnSelectFolder = container.querySelector<HTMLButtonElement>('#btn-select-stickers-folder');
     const btnRefresh = container.querySelector<HTMLButtonElement>('#btn-refresh-stickers');
+    let pickingFolder = false;
 
     const updateInfo = () => {
       const info = container.querySelector<HTMLElement>('#stickers-folder-info');
@@ -59,14 +61,23 @@ export class StickersTab {
     };
 
     const handlePickFolder = async () => {
-      if (!window.api?.selectStickersFolder) return;
-      const folder = await window.api.selectStickersFolder();
-      if (!folder) return;
-      settingsStore.stickersFolderPath = folder;
-      settingsStore.save();
-      if (inputPath) inputPath.value = folder;
-      await stickerService.loadStickers(true);
-      updateInfo();
+      if (!window.api?.selectStickersFolder || pickingFolder) return;
+      pickingFolder = true;
+      setButtonLoading(btnSelectFolder, true);
+      if (inputPath) inputPath.disabled = true;
+      try {
+        const folder = await window.api.selectStickersFolder();
+        if (!folder) return;
+        settingsStore.stickersFolderPath = folder;
+        settingsStore.save();
+        if (inputPath) inputPath.value = folder;
+        await stickerService.loadStickers(true);
+        updateInfo();
+      } finally {
+        pickingFolder = false;
+        setButtonLoading(btnSelectFolder, false);
+        if (inputPath) inputPath.disabled = false;
+      }
     };
 
     btnSelectFolder?.addEventListener('click', handlePickFolder);

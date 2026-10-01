@@ -11,15 +11,15 @@ Assinaturas públicas completas do SDK de bots do Monky, geradas da entrada Type
 
 ## `BotCapability` {#botcapability}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botPermissions.ts#L17)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botPermissions.ts#L18)
 
 ```ts
-export type BotCapability = "commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps";
+export type BotCapability = "commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions";
 ```
 
 ## `BotChoice` {#botchoice}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L220)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L228)
 
 ```ts
 export interface BotChoice {
@@ -33,7 +33,7 @@ export interface BotChoice {
 
 ## `BotClient` {#botclient}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L363)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L375)
 
 ```ts
 export class BotClient extends EventEmitter {
@@ -55,11 +55,18 @@ export class BotClient extends EventEmitter {
     }) => void): () => void;
     onSelectorResponse(listener: (event: BotSelectorResponseEvent, context: BotSelectorResponseContext) => void): () => void;
     createSelector(serverId: string, input: BotSelectorCreate): Promise<BotSelector>;
+    createLiveAction(serverId: string, input: LiveActionCreate): Promise<LiveAction>;
+    updateLiveAction(serverId: string, input: LiveActionUpdate): Promise<LiveAction>;
+    closeLiveAction(serverId: string, id: string): Promise<void>;
+    listLiveActions(serverId: string): Promise<LiveAction[]>;
+    onLiveActionSubmission(listener: (event: LiveActionSubmission, context: {
+        serverId: string;
+    }) => void): () => void;
     listSelectors(serverId: string): Promise<BotSelector[]>;
     updateSelector(serverId: string, id: string, patch: BotSelectorPatch): Promise<BotSelector>;
     closeSelector(serverId: string, id: string): Promise<BotSelector>;
-    finalizeSelector(serverId: string, id: string, content: BotMessageContent): Promise<BotSelector>;
-    sendMessage(serverId: string, channelId: string, content: BotMessageContent, options?: Pick<ChatSendPayload, 'replyToMessageId'>): Promise<ChatMessage>;
+    finalizeSelector(serverId: string, id: string, content: BotPublishedMessageContent): Promise<BotSelector>;
+    sendMessage(serverId: string, channelId: string, content: BotPublishedMessageContent, options?: Pick<ChatSendPayload, 'replyToMessageId'>): Promise<ChatMessage>;
     addReaction(serverId: string, channelId: string, messageId: string, emoji: string): void;
     removeReaction(serverId: string, channelId: string, messageId: string, emoji: string): void;
     onReactionAdded(listener: (event: ChatReactionEventPayload, context: {
@@ -84,7 +91,7 @@ export class BotClient extends EventEmitter {
 
 ## `BotManifest` {#botmanifest}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1099)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1203)
 
 ```ts
 export interface BotManifest {
@@ -111,7 +118,7 @@ export interface BotManifest {
 
 ## `BotOptions` {#botoptions}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L114)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L121)
 
 ```ts
 export interface BotOptions {
@@ -133,13 +140,13 @@ export interface BotOptions {
 
 ## `BotPermissions` {#botpermissions}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botPermissions.ts#L37)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botPermissions.ts#L38)
 
 ```ts
 export type BotPermissions = {
-    requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[] | null;
-    granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[];
     revision: number;
+    requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[] | null;
+    granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[];
     reviewRequired: boolean;
     reviewedBy: string | null;
     reviewedAt: number | null;
@@ -148,7 +155,7 @@ export type BotPermissions = {
 
 ## `BotSelectorResponseContext` {#botselectorresponsecontext}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L230)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L238)
 
 ```ts
 export interface BotSelectorResponseContext {
@@ -159,7 +166,7 @@ export interface BotSelectorResponseContext {
 
 ## `BotSelectorResponseEvent` {#botselectorresponseevent}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L228)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L236)
 
 ```ts
 export type BotSelectorResponseEvent = {
@@ -172,7 +179,7 @@ export type BotSelectorResponseEvent = {
 
 ## `CommandAudioPreviewContext` {#commandaudiopreviewcontext}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L163)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L170)
 
 ```ts
 export interface CommandAudioPreviewContext {
@@ -189,10 +196,10 @@ export interface CommandAudioPreviewContext {
         serverRevision: number;
         user: Record<string, string | number | boolean | string[]>;
     };
+    channelId: string;
     botId: string;
     invokerId: string;
     invokerSessionId: string;
-    channelId: string;
     invokerNickname: string;
     invokerVoiceChannelId: string | null;
 }
@@ -200,7 +207,7 @@ export interface CommandAudioPreviewContext {
 
 ## `CommandAudioPreviewData` {#commandaudiopreviewdata}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L176)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L183)
 
 ```ts
 export interface CommandAudioPreviewData {
@@ -211,7 +218,7 @@ export interface CommandAudioPreviewData {
 
 ## `CommandAudioPreviewResponse` {#commandaudiopreviewresponse}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L181)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L188)
 
 ```ts
 export type CommandAudioPreviewResponse = {
@@ -225,7 +232,7 @@ export type CommandAudioPreviewResponse = {
 
 ## `CommandAutocompleteContext` {#commandautocompletecontext}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L147)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L154)
 
 ```ts
 export interface CommandAutocompleteContext {
@@ -245,10 +252,10 @@ export interface CommandAutocompleteContext {
         user: Record<string, string | number | boolean | string[]>;
     };
     signal: AbortSignal;
+    channelId: string;
     botId: string;
     invokerId: string;
     invokerSessionId: string;
-    channelId: string;
     invokerNickname: string;
     invokerVoiceChannelId: string | null;
 }
@@ -256,7 +263,7 @@ export interface CommandAutocompleteContext {
 
 ## `CommandContext` {#commandcontext}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L183)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L190)
 
 ```ts
 export interface CommandContext {
@@ -283,7 +290,7 @@ export interface CommandContext {
     reply: (content: BotMessageContent) => void;
     replyEphemeral: (content: BotMessageContent) => void;
     /** Explicitly publish a result to everyone allowed into the channel. */
-    publish: (content: BotMessageContent) => void;
+    publish: (content: BotPublishedMessageContent) => void;
     /** Wait for a private form. Returns null if the interaction ends/cancels. */
     prompt: (form: BotForm) => Promise<BotFormValues | null>;
     /** Ask one private choice; buttons submit immediately, dropdowns require confirmation. */
@@ -292,6 +299,7 @@ export interface CommandContext {
     downloadSound: (request: SoundDownloadRequest) => Promise<SoundDownloadResult | null>;
     /** Publish durable channel controls, independent of this invocation's lifetime. */
     createSelector: (input: Omit<BotSelectorCreate, 'channelId' | 'invokerId' | 'invocationId'>) => Promise<BotSelector>;
+    createLiveAction: (input: Omit<LiveActionCreate, 'channelId' | 'invocationId'>) => Promise<LiveAction>;
     /** Open a shared miniapp in the caller's current voice room, independent of this command's lifetime. */
     createScreen: (input: Omit<BotScreenCreate, 'channelId' | 'invocationId'>) => Promise<BotScreen>;
 }
@@ -299,7 +307,7 @@ export interface CommandContext {
 
 ## `CommandDefinition` {#commanddefinition}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L130)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L137)
 
 ```ts
 export interface CommandDefinition {
@@ -318,7 +326,7 @@ export interface CommandDefinition {
 
 ## `ServeOptions` {#serveoptions}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L1952)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L2015)
 
 ```ts
 export interface ServeOptions {

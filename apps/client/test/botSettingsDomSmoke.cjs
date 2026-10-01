@@ -25,7 +25,7 @@ async function runBotSettingsDomSmoke() {
   const equal = (actual, expected, message) => check(JSON.stringify(actual) === JSON.stringify(expected),
     message + ': ' + JSON.stringify(actual));
   const find = selector => {
-    const element = document.querySelector(selector);
+    const element = [...document.querySelectorAll(selector)].find(candidate => !candidate.closest('[data-ui-closing]'));
     if (!element) throw new Error('Missing settings control ' + selector + ': ' + document.body.innerText.slice(-600));
     return element;
   };
@@ -446,14 +446,14 @@ async function runBotSettingsDomSmoke() {
     userContextMenu.open(40, 40, { ...caller, id: 'audio-bot', nickname: 'Audio bot', isBot: true });
     find('[data-action="bot-settings"]').click();
     await settle(() => !!document.querySelector('#bot-settings-host-prompt'));
-    check(!document.querySelector('.user-context-menu'), 'Bot menu opens scoped settings and dismisses itself');
+    check(!document.querySelector('.user-context-menu:not([data-ui-closing])'), 'Bot menu opens scoped settings and dismisses itself');
     modal.close();
     userContextMenu.open(40, 40, { ...caller, id: 'human', nickname: 'Human', isBot: false });
-    check(!document.querySelector('[data-action="bot-settings"]'), 'Human context menus have no bot action');
+    check(!document.querySelector('.user-context-menu:not([data-ui-closing]) [data-action="bot-settings"]'), 'Human context menus have no bot action');
     userContextMenu.close();
     contextMenu.open(20, 20, [botSettingsMenuItem('audio-bot', client, server)]);
     appEvents.emit('session.changed');
-    check(!document.querySelector('.floating-context-menu'), 'Generic context menu closes on session switch');
+    check(!document.querySelector('.floating-context-menu:not([data-ui-closing])'), 'Generic context menu closes on session switch');
 
     const command = { botId: 'audio-bot', botName: 'Audio bot', name: 'query', description: 'Audio search', options: [] };
     chat.setCommands([command]);
@@ -509,16 +509,16 @@ async function runBotSettingsDomSmoke() {
     appEvents.emit('session.changed');
     completeRequest(snapshot('audio-bot'));
     await opening;
-    check(!document.querySelector('.bot-settings-modal'), 'Late reads cannot reopen a closed settings modal');
+    check(!document.querySelector('.bot-settings-modal:not([data-ui-closing])'), 'Late reads cannot reopen a closed settings modal');
     deferType = null;
     await modal.open('audio-bot');
     connectionId++;
     appEvents.emit('network.status');
-    check(!document.querySelector('.bot-settings-modal'), 'Connection replacement closes the pinned modal');
+    check(!document.querySelector('.bot-settings-modal:not([data-ui-closing])'), 'Connection replacement closes the pinned modal');
     await modal.open('audio-bot');
     server.currentUser = { ...caller, id: 'another-identity' };
     appEvents.emit('user.updated');
-    check(!document.querySelector('.bot-settings-modal'), 'Identity replacement invalidates scoped editing');
+    check(!document.querySelector('.bot-settings-modal:not([data-ui-closing])'), 'Identity replacement invalidates scoped editing');
     server.currentUser = caller;
 
     const staleAction = botSettingsMenuItem('audio-bot', client, server);
@@ -527,7 +527,7 @@ async function runBotSettingsDomSmoke() {
     const beforeStale = requests.length;
     staleAction.onClick();
     await tick();
-    check(requests.length === beforeStale && !document.querySelector('.bot-settings-modal'),
+    check(requests.length === beforeStale && !document.querySelector('.bot-settings-modal:not([data-ui-closing])'),
       'A stale context-menu action cannot target the newly selected server');
     find('.dialog-card button').click();
     networks.setActiveNetworkClient(client);
@@ -634,11 +634,11 @@ async function runBotSettingsDomSmoke() {
     equal(await review, ['commands'], 'Installation returns exactly the reviewed capability subset');
     const aborted = showBotPermissionReview(reviewPreview, reviewAbort.signal);
     reviewAbort.abort();
-    check(await aborted === null && !document.querySelector('.bot-permission-review'),
+    check(await aborted === null && !document.querySelector('.bot-permission-review:not([data-ui-closing])'),
       'Permission/session loss aborts the installation dialog and removes its listeners and DOM');
     const cancelled = showBotPermissionReview(reviewPreview, new AbortController().signal);
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-    check(await cancelled === null && !document.querySelector('.bot-permission-review'), 'Escape cancels a repeated review without stale dialogs');
+    check(await cancelled === null && !document.querySelector('.bot-permission-review:not([data-ui-closing])'), 'Escape cancels a repeated review without stale dialogs');
     server.myPermissions = 0;
     await modal.open('generic-bot');
     language.setLanguage('en');

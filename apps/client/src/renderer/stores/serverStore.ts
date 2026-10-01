@@ -2,6 +2,7 @@ import { AttachmentStorageInfo, ChannelSummary, DEFAULT_PERMISSIONS, Permission,
 import { appEvents, EventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { clientLog } from '../core/ClientLogService';
+import type { ChannelCategory } from '@monky/shared';
 
 export class ServerStore {
   /**
@@ -18,6 +19,7 @@ export class ServerStore {
   public userRoles: UserRoleSummary[] = [];
   public ownerId: string | null = null;
   public myPermissions: number = 0;
+  public communityEventsEnabled: boolean | null = null;
   // Everyone who has ever connected (keyed by userId), so offline users remain
   // mentionable in chat (#14). Kept separate from the live members list.
   public knownMembers: Map<string, UserSummary> = new Map();
@@ -95,7 +97,7 @@ export class ServerStore {
 
   public canUserReadChannel(userId: string, channelId: string): boolean {
     const channel = this.getChannel(channelId);
-    if (!channel || channel.type !== 'TEXT') return false;
+    if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE')) return false;
     const permissions = this.getUserPermissions(userId);
     return hasPermission(permissions, Permission.READ_MESSAGES)
       && canAccessChannel(channel, permissions, this.getUserRoleIds(userId));
@@ -132,6 +134,41 @@ export class ServerStore {
       this.sortChannels();
       this.bus.emit('server.updated');
     }
+  }
+
+  public setCategories(categories: ChannelCategory[]): void {
+    if (!this.serverDetails) return;
+    this.serverDetails.categories = [...categories].sort((a, b) => a.position - b.position || a.createdAt - b.createdAt);
+    this.bus.emit('server.updated');
+  }
+
+  private categoryCollapseKey(): string | null {
+    return this.serverDetails && this.currentUser
+      ? `monky.categories.collapsed.${this.serverDetails.id}.${this.currentUser.id}` : null;
+  }
+
+  public isCategoryCollapsed(categoryId: string): boolean {
+    const key = this.categoryCollapseKey();
+    if (!key) return false;
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem(key) ?? '[]');
+      return Array.isArray(stored) && stored.includes(categoryId);
+    } catch { return false; }
+  }
+
+  public toggleCategoryCollapsed(categoryId: string): void {
+    const key = this.categoryCollapseKey();
+    if (!key) return;
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem(key) ?? '[]');
+      const ids = new Set<string>(Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : []);
+      if (ids.has(categoryId)) ids.delete(categoryId);
+      else ids.add(categoryId);
+      localStorage.setItem(key, JSON.stringify([...ids]));
+    } catch {
+      clientLog.warn('SERVER_HOST', 'Could not persist category collapse state');
+    }
+    this.bus.emit('server.updated');
   }
 
   public removeChannel(channelId: string): void {
@@ -255,6 +292,8 @@ export class ServerStore {
     showRoleBadgesToEveryone?: boolean,
     maxMessageLength?: number,
     messageDeleteUndoSeconds?: number,
+    recentSoundCacheEnabled?: boolean,
+    recentSoundCacheLimit?: number,
   ): void {
     if (this.serverDetails) {
       if (maxMessageLength !== undefined) this.serverDetails.maxMessageLength = maxMessageLength;
@@ -282,6 +321,8 @@ export class ServerStore {
         this.serverDetails.allowMessageEdit = allowMessageEdit;
       }
       if (messageDeleteUndoSeconds !== undefined) this.serverDetails.messageDeleteUndoSeconds = messageDeleteUndoSeconds;
+      if (recentSoundCacheEnabled !== undefined) this.serverDetails.recentSoundCacheEnabled = recentSoundCacheEnabled;
+      if (recentSoundCacheLimit !== undefined) this.serverDetails.recentSoundCacheLimit = recentSoundCacheLimit;
       if (voiceMode !== undefined) {
         this.serverDetails.voiceMode = voiceMode;
       }
@@ -445,6 +486,7 @@ export class ServerStore {
   public recalculateMyPermissions(): number {
     if (!this.currentUser) {
       this.myPermissions = 0;
+      this.communityEventsEnabled = null;
       return this.myPermissions;
     }
     this.myPermissions = this.getUserPermissions(this.currentUser.id);

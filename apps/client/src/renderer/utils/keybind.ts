@@ -107,7 +107,10 @@ export function captureShortcut(
   const capture = new ShortcutCapture();
   let closed = false;
   let ready = !window.api?.setShortcutCapture;
+  const unavailable = () => !backdrop.isConnected || !owner.isConnected
+    || typeof HTMLElement !== 'undefined' && owner instanceof HTMLElement && !!owner.closest('[data-ui-closing]');
   const keyDown = (event: KeyboardEvent) => {
+    if (unavailable()) { onCancel(); return; }
     event.preventDefault();
     event.stopImmediatePropagation();
     if (event.key === 'Escape') { onCancel(); return; }
@@ -116,6 +119,7 @@ export function captureShortcut(
     if (preview) preview.textContent = combo?.display ?? t('keybinds.unsupportedKey');
   };
   const keyUp = (event: KeyboardEvent) => {
+    if (unavailable()) { onCancel(); return; }
     event.preventDefault();
     event.stopImmediatePropagation();
     if (!ready) return;
@@ -124,9 +128,9 @@ export function captureShortcut(
   };
   const blur = () => onCancel();
   const observer = new MutationObserver(() => {
-    if (!backdrop.isConnected || !owner.isConnected) onCancel();
+    if (unavailable()) onCancel();
   });
-  observer.observe(document.body, { childList: true, subtree: true });
+  observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-ui-closing'] });
   window.addEventListener('keydown', keyDown, true);
   window.addEventListener('keyup', keyUp, true);
   window.addEventListener('blur', blur);

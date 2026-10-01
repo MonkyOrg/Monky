@@ -29,6 +29,7 @@ import { bindBotChatEvents } from '../src/renderer/core/botChatEvents';
 import { routeSessionEvent, setSessionEventRouter } from '../src/renderer/core/sessionRouting';
 import { renderBotFields } from '../src/renderer/views/botFields';
 import { renderBotInvocation } from '../src/renderer/views/BotChatView';
+import { renderImageCarousel } from '../src/renderer/views/ImageCarousel';
 import { setLanguage } from '../src/renderer/i18n';
 import { translateProtocolError } from '../src/renderer/i18n/protocolErrors';
 import { RecentEmojis, sanitizeRecentEmojis } from '../src/renderer/emoji/recentEmojis';
@@ -620,6 +621,11 @@ test('bot response identity and private rows survive history without duplicates 
     invokerAvatarUrl: '/avatars/caller.png',
     createdAt: 100,
     content: 'Private response',
+    components: [{
+      type: 'carousel',
+      imageUrls: ['/avatars/one.png', '/avatars/two.png'],
+      presentation: { format: 'portrait', fit: 'contain', size: 'compact' },
+    }],
     ephemeral: true,
   });
   store.addMessage(message);
@@ -634,6 +640,13 @@ test('bot response identity and private rows survive history without duplicates 
   assert.equal(bot.isBot, true);
   assert.equal(bot.isEphemeral, true);
   assert.equal(bot.createdAt, 100);
+  assert.deepEqual(bot.botComponents, message.botComponents);
+  const carousel = renderImageCarousel(
+    bot.botComponents![0].imageUrls, '', 'Images', bot.botComponents![0].presentation,
+  );
+  assert.match(carousel, /image-carousel--format-portrait/);
+  assert.match(carousel, /image-carousel--fit-contain/);
+  assert.match(carousel, /image-carousel--size-compact/);
   assert.equal(store.getMessages('channel-one').length, 2);
 });
 

@@ -9,6 +9,7 @@ import {
 import type { NetworkClient } from '../../../core/NetworkClient';
 import { appEvents } from '../../../core/EventBus';
 import { escapeHtml } from '../../../utils/html';
+import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import { getAvatarUrl } from '../../../utils/avatar';
 import { getLanguage, t } from '../../../i18n';
 import { showAlert, showConfirm } from '../../Dialog';
@@ -208,7 +209,7 @@ export class ServerBotsTab {
     const icon = this.root?.querySelector<HTMLElement>('[data-manual-link-icon]');
     const label = this.root?.querySelector<HTMLElement>('[data-manual-link-label]');
     if (button) button.setAttribute('aria-expanded', String(expanded));
-    if (panel) panel.hidden = !expanded;
+    if (panel) setSurfaceVisible(panel, expanded);
     if (icon) icon.textContent = expanded ? 'expand_less' : 'expand_more';
     if (label) label.textContent = t(expanded ? 'bots.hideAdvanced' : 'bots.showAdvanced');
   }

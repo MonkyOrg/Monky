@@ -4,6 +4,7 @@ import { settingsStore } from '../../stores/settingsStore';
 import { t, type TranslationKey } from '../../i18n';
 import { NOISE_SUPPRESSION_MODES, isNoiseSuppressionMode, type NoiseSuppressionMode } from '../../utils/audioPreferences';
 import { escapeHtml } from '../../utils/html';
+import { smoothScrollIntoView } from '../../utils/scroll';
 
 const labels: Record<NoiseSuppressionMode, TranslationKey> = {
   rnnoise: 'audioNoise.rnnoise',
@@ -139,8 +140,8 @@ export class NoiseSuppressionControl {
       }
       if (next) {
         event.preventDefault();
-        next.focus();
-        next.scrollIntoView({ block: 'nearest' });
+        next.focus({ preventScroll: true });
+        smoothScrollIntoView(next, { block: 'nearest' });
       }
     };
     root.addEventListener('keydown', keyboard);

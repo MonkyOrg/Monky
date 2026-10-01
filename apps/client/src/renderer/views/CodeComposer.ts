@@ -2,6 +2,7 @@ import { CODE_LANGUAGE_OPTIONS, codeLineNumbers, highlightCode, resolveCodeLangu
 import { escapeHtml } from '../utils/html';
 import { indentCodeInput } from './CodeBlockModal';
 import { t } from '../i18n';
+import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 
 export interface CodeComposerValue { code: string; language: string }
 
@@ -28,9 +29,29 @@ export function bindCodeComposer(
   const highlight = element.querySelector<HTMLElement>('.chat-code-input code')!;
   const numbers = element.querySelector<HTMLElement>('.md-code-lines span')!;
   const details = element.querySelector('details')!;
+  const summary = details.querySelector('summary')!;
+  const editor = details.querySelector<HTMLElement>('.chat-code-editor')!;
   const lifetime = new AbortController();
   const options = { signal: lifetime.signal };
   let value = initial;
+  let expanded = details.open;
+  summary.setAttribute('aria-expanded', String(expanded));
+  summary.addEventListener('click', event => {
+    if (event.target instanceof Element && event.target.closest('button, select, input, a')) return;
+    event.preventDefault();
+    expanded = !details.open || editor.hidden || editor.hasAttribute('data-ui-closing');
+    summary.setAttribute('aria-expanded', String(expanded));
+    if (expanded) {
+      const closed = !details.open;
+      details.open = true;
+      if (closed) editor.hidden = true;
+      setSurfaceVisible(editor, true);
+    } else {
+      setSurfaceVisible(editor, false, 'panel', undefined, () => {
+        if (!expanded) details.open = false;
+      });
+    }
+  }, options);
   const scroll = () => {
     highlight.parentElement!.scrollTop = input.scrollTop;
     highlight.parentElement!.scrollLeft = input.scrollLeft;
@@ -54,7 +75,13 @@ export function bindCodeComposer(
   input.addEventListener('input', () => { value = { ...value, code: input.value }; changed(value); refresh(); }, options);
   select.addEventListener('change', () => { value = { ...value, language: select.value }; changed(value); refresh(); }, options);
   input.addEventListener('scroll', scroll, options);
-  details.addEventListener('toggle', () => { if (details.open) refresh(); }, options);
+  details.addEventListener('toggle', () => {
+    if (!editor.hasAttribute('data-ui-closing')) {
+      expanded = details.open;
+      summary.setAttribute('aria-expanded', String(expanded));
+    }
+    if (details.open) refresh();
+  }, options);
   input.addEventListener('keydown', event => {
     if (event.isComposing) return;
     if (event.key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.altKey) {
@@ -69,5 +96,5 @@ export function bindCodeComposer(
     }
   }, options);
   update(initial);
-  return { update, destroy: () => lifetime.abort() };
+  return { update, destroy: () => { lifetime.abort(); cancelVisibilityMotion(editor); } };
 }

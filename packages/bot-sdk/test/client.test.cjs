@@ -573,6 +573,75 @@ function registerAt(listener, registration) {
   });
 }
 
+test('native live actions bind invocation/channel and correlate updates, submissions and closure', { timeout: 10000 }, async t => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  let action;
+  bot.command({ name: 'live', description: 'Native interaction', handler: async ctx => {
+    action = await ctx.createLiveAction({
+      title: 'Form', description: '', content: { kind: 'form', form }, expiresAt: Date.now() + 60000,
+      imageAssetRefs: ['f2b47144-577a-4ea0-8d09-93e0d39a6b6e'],
+      audience: { visibility: 'private', userIds: ['audience-user'], roleIds: ['audience-role'] },
+    });
+  } });
+  const connected = once(bot, 'connected');
+  bot.connect({ serverId: 'live-server' });
+  await connected;
+  server.invoke('live-invocation', 'live');
+  const create = await server.next(MessageType.LIVE_ACTION_CREATE);
+  assert.equal(create.payload.channelId, 'channel-one');
+  assert.equal(create.payload.invocationId, 'live-invocation');
+  assert.deepEqual(create.payload.imageAssetRefs, ['f2b47144-577a-4ea0-8d09-93e0d39a6b6e']);
+  assert.deepEqual(create.payload.audience,
+    { visibility: 'private', userIds: ['audience-user'], roleIds: ['audience-role'] });
+  const { invocationId, imageAssetRefs: _imageAssetRefs, ...definition } = create.payload;
+  const snapshot = {
+    ...definition, imageUrls: [], id: 'live-one', botId: 'bot-one',
+    creatorUserId: 'live-invocation', createdAt: 1, revision: 0,
+  };
+  server.send(MessageType.LIVE_ACTION_SNAPSHOT, snapshot, create.requestId);
+  await server.next(MessageType.COMMAND_FINISH);
+  assert.equal(action.id, snapshot.id);
+  const listing = bot.listLiveActions('live-server');
+  const list = await server.next(MessageType.LIVE_ACTION_LIST);
+  server.send(MessageType.LIVE_ACTION_LIST_RESULT, { liveActions: [snapshot] }, list.requestId);
+  assert.deepEqual((await listing)[0].audience, snapshot.audience);
+  const updatePromise = bot.updateLiveAction('live-server', {
+    id: snapshot.id, expectedRevision: 0, title: 'Updated', audience: { visibility: 'public' },
+  });
+  const update = await server.next(MessageType.LIVE_ACTION_UPDATE);
+  assert.deepEqual(update.payload.audience, { visibility: 'public' });
+  server.send(MessageType.LIVE_ACTION_SNAPSHOT,
+    { ...snapshot, title: 'Updated', audience: { visibility: 'public' }, revision: 1 }, update.requestId);
+  assert.equal((await updatePromise).revision, 1);
+  await assert.rejects(bot.updateLiveAction('live-server', {
+    id: snapshot.id, expectedRevision: 1,
+    audience: { visibility: 'private', userIds: [], roleIds: [] },
+  }));
+  const publicCreation = bot.createLiveAction('live-server', {
+    channelId: 'channel-one', invocationId: 'public-invocation', title: 'Public',
+    description: '', content: { kind: 'form', form }, expiresAt: Date.now() + 60000,
+  });
+  const publicCreate = await server.next(MessageType.LIVE_ACTION_CREATE);
+  assert.deepEqual(publicCreate.payload.audience, { visibility: 'public' });
+  const { invocationId: _publicInvocationId, ...publicDefinition } = publicCreate.payload;
+  server.send(MessageType.LIVE_ACTION_SNAPSHOT, {
+    ...publicDefinition, id: 'live-public', botId: 'bot-one',
+    creatorUserId: 'human', imageUrls: [], createdAt: 2, revision: 0,
+  }, publicCreate.requestId);
+  assert.deepEqual((await publicCreation).audience, { visibility: 'public' });
+  const submitted = once(bot, 'liveActionSubmission');
+  const submission = { id: snapshot.id, expectedRevision: 1, values: { answer: 'hello' }, locale: 'en',
+    submissionId: 'submission-one', channelId: 'channel-one', userId: 'human', userNickname: 'Human' };
+  server.send(MessageType.LIVE_ACTION_SUBMITTED, submission);
+  assert.deepEqual((await submitted)[0], submission);
+  const closing = bot.closeLiveAction('live-server', snapshot.id);
+  const close = await server.next(MessageType.LIVE_ACTION_CLOSE);
+  server.send(MessageType.COMMUNITY_ACK, {}, close.requestId);
+  await closing;
+  assert.equal(errors.length, 0);
+});
+
 test('durable selectors correlate acknowledgements, emit updates and outlive invocations', { timeout: 10000 }, async (t) => {
   const server = await makeServer(t);
   const { bot, errors } = makeBot(t, server);
@@ -1355,8 +1424,8 @@ test('new SDK reconnects using the known legacy bot contract without an update w
   bot.command({ name: 'ping', description: 'Ping', handler() {} });
   bot.connect();
   await server.next(MessageType.COMMAND_REGISTER);
-  assert.deepEqual(offered.map(offer => offer.protocolVersion), [30, 24]);
-  assert.equal(PROTOCOL_VERSION, 30);
+  assert.deepEqual(offered.map(offer => offer.protocolVersion), [34, 24]);
+  assert.equal(PROTOCOL_VERSION, 34);
   assert.equal(offered[0].protocolOffer.minimumVersion, 24);
   assert.equal(offered[0].publicKey, offered[1].publicKey);
   assert.equal(offered[0].botToken, offered[1].botToken);
@@ -2034,7 +2103,7 @@ test('settings validate defaults, register cloned declarations and hydrate immut
   const declaration = settingsDefinition();
   const expected = structuredClone(declaration);
   const snapshot = serverSettings();
-  assert.equal(PROTOCOL_VERSION, 30);
+  assert.equal(PROTOCOL_VERSION, 34);
   assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
   assert.equal(bot.settings(declaration), bot);
   const invalid = settingsDefinition();

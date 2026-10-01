@@ -16,6 +16,8 @@ export enum Permission {
   USE_BOT_COMMANDS = 1 << 14,
   CONFIGURE_BOTS = 1 << 15,
   VIEW_SERVER_MONITOR = 1 << 16,
+  MANAGE_EVENTS = 1 << 17,
+  EMIT_LIVE_ACTIONS = 1 << 18,
 }
 
 export const DEFAULT_PERMISSIONS =
@@ -61,4 +63,18 @@ export function canAccessChannel(
   if (!channel.isPrivate) return true;
   if (hasPermission(userPermissions, Permission.MANAGE_CHANNELS)) return true;
   return channel.allowedRoleIds.some((roleId) => userRoleIds.includes(roleId));
+}
+
+/** Resolve once at the repository boundary so every access path sees the same ACL. */
+export function resolveChannelPermissions(
+  channel: { categoryId?: string | null; inheritCategoryPermissions?: boolean; isPrivate: boolean; allowedRoleIds: string[] },
+  category: { isPrivate: boolean; allowedRoleIds: string[] } | null,
+): { isPrivate: boolean; allowedRoleIds: string[] } {
+  if (!channel.categoryId || channel.inheritCategoryPermissions === false) {
+    return { isPrivate: channel.isPrivate, allowedRoleIds: channel.isPrivate ? [...channel.allowedRoleIds] : [] };
+  }
+  // A missing parent must fail closed, never silently publish inherited channels.
+  return category
+    ? { isPrivate: category.isPrivate, allowedRoleIds: category.isPrivate ? [...category.allowedRoleIds] : [] }
+    : { isPrivate: true, allowedRoleIds: [] };
 }
