@@ -37,7 +37,7 @@ const serverLoss = process.argv.includes('--server-loss');
 const windowLifecycle = process.argv.includes('--window-lifecycle');
 const windowed = process.argv.includes('--windowed');
 const idleSourceClose = process.argv.includes('--idle-source-close');
-const admissionRecovery = process.argv.includes('--admission-recovery');
+const duplicateTitle = process.argv.includes('--duplicate-title');
 assert.ok(!(process.argv.includes('--preserve-aspect-ratio') && process.argv.includes('--stretch')),
   'Choose either --preserve-aspect-ratio or --stretch, not both.');
 const preserveAspectRatio = !process.argv.includes('--stretch');
@@ -92,19 +92,19 @@ const minimumPresentationFps = fullHd60 ? 50 : minimum120Fps;
 const warmupSeconds = sampleSeconds >= 8 ? 3 : 0;
 assert.ok(!sourceQualityChanges || (!browserReceiver && (mode === 'sfu' || fourK) && audioEnabled
   && !sourceReplacement && !gameFallback && !unsupportedBrowserCodec && !incompatibleViewer
-  && !idleSourceClose && !admissionRecovery && !publisherStop && !windowLifecycle && !serverLoss
+  && !idleSourceClose && !duplicateTitle && !publisherStop && !windowLifecycle && !serverLoss
   && !sessionNavigation && !overlayEnabled && !sourceResize && !debugPublisher),
 'Source quality changes require an audio-enabled native SFU receiver and the owned Normal window, without other scenarios.');
 assert.ok(!clockFeedbackStall || sourceQualityChanges, 'Clock stall requires the owned native source-quality scenario.');
 assert.ok(!sourceReplacement || (browserReceiver && mode === 'sfu' && audioEnabled
   && !gameFallback && !unsupportedBrowserCodec && !incompatibleViewer && !idleSourceClose
-  && !admissionRecovery && !publisherStop && !windowLifecycle && !serverLoss && !sessionNavigation
+  && !duplicateTitle && !publisherStop && !windowLifecycle && !serverLoss && !sessionNavigation
   && !overlayEnabled && !sourceResize && !debugPublisher),
 'Source replacement requires an audio-enabled browser SFU receiver and two owned Normal windows, without other smoke scenarios.');
 assert.ok(!unsupportedBrowserCodec || (browserReceiver && mode === 'p2p'), 'The unsupported-codec case requires a browser P2P receiver.');
 assert.ok(!incompatibleViewer || (!browserReceiver && mode === 'p2p'), 'Mixed compatibility requires a native primary P2P receiver.');
 const debugSymbols = process.argv.find(value => value.startsWith('--debug-symbols='))?.slice('--debug-symbols='.length);
-const report = { mode, screenCodec, fourK, fourK60, fourK120, fullHd60, nativeFullHd60, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, windowed, admissionRecovery, preserveAspectRatio, gameFallback, publisherStop, sourceResize, sourceReplacement, sourceQualityChanges, clockFeedbackStall, cadenceDiagnostics, cadenceFollowup, chromiumReceiveLog, closeAppActive, sampleSeconds, warmupSeconds,
+const report = { mode, screenCodec, fourK, fourK60, fourK120, fullHd60, nativeFullHd60, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, windowed, duplicateTitle, preserveAspectRatio, gameFallback, publisherStop, sourceResize, sourceReplacement, sourceQualityChanges, clockFeedbackStall, cadenceDiagnostics, cadenceFollowup, chromiumReceiveLog, closeAppActive, sampleSeconds, warmupSeconds,
   normalMain: true, normalPreload: true, ownedSyntheticSource: true,
   qaFocusHooks: 'owned parent IPC only; normal Main and preload checks unchanged',
   receiverSelection: browserReceiver ? 'explicit Chromium preference (not a macOS hardware test)' : 'native',
@@ -947,7 +947,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         throw new Error('Live settings replaced the call or consent identity.');
       return { before, after, queuedChoices: profiles.length, callId: call.config.callId };
     },
-    async share(ownedHwnd, expectedFailure = false, replace = false) {
+    async share(ownedHwnd, replace = false) {
       const wait = async (condition, message) => {
         const deadline = performance.now() + 20000;
         while (!condition()) {
@@ -1062,19 +1062,6 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         throw new Error('The real Replace action is not selected.');
       confirm.click();
       const capture = () => videoService.getNativeScreenCaptures().find(value => value.desktopSourceId === desktopSourceId);
-      if (expectedFailure) {
-        await wait(() => document.querySelector('.dialog-card[role="dialog"] .dialog-message'),
-          'The deliberately ambiguous owned source did not show its native rejection.');
-        const error = document.querySelector('.dialog-card .dialog-message').textContent;
-        if (!error.includes('Stock title matching is ambiguous') || capture())
-          throw new Error('Source admission did not report the actual native ambiguity before starting capture.');
-        document.querySelector('.dialog-card button[data-action="confirm"]').click();
-        await wait(() => !document.querySelector('.dialog-card') && !confirm.disabled,
-          'Dismissing a source rejection did not re-enable the existing picker.');
-        if (card()?.getAttribute('aria-pressed') !== 'true')
-          throw new Error('A rejected source lost its picker selection.');
-        return { error, desktopSourceId, audio: audioEnabled };
-      }
       await wait(() => !document.querySelector('#share-sources-panel') && capture(), 'Picker confirmation did not announce its native source.');
       if (!automatic && capture().source.codec !== encoding.savedCodec)
         throw new Error('Main source admission did not preserve the explicit codec from app settings.');
@@ -1884,33 +1871,21 @@ async function run() {
 
   assert.equal(publisher.identity.previewPauseWhenUnfocused, true, 'A fresh profile must pause local preview on blur by default.');
   await focusOwned(publisher);
-  let rejectedCallId;
-  if (admissionRecovery) {
-    phase('rejecting-an-owned-ambiguous-source-without-losing-the-call');
+  if (duplicateTitle) {
+    phase('sharing-the-exact-owned-window-despite-a-duplicate-title');
     await sourceCommand('duplicate-title');
-    report.admissionRejected = await publisher.cdp.evaluate(`nativeAppSmoke.share(${JSON.stringify(sourceReady.hwnd)}, true)`);
-    const rejected = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
-    rejectedCallId = rejected.mainCall;
-    assert.ok(rejectedCallId, 'Native admission did not exercise a real Main call.');
-    assert.equal(rejected.channelId, publisher.identity.channelId);
-    assert.equal(rejected.localNativeSources, 0);
-    assert.deepEqual(rejected.errors, []);
-    assert.equal((await publisher.cdp.evaluate('nativeAppSmoke.stats()')).publishers.length, 0);
-    assert.equal((await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).sources.length, 0);
-    await sourceCommand('close-duplicate');
   }
 
   phase('previewing-an-owned-source-before-watch');
   report.published = await publisher.cdp.evaluate(`nativeAppSmoke.share(${JSON.stringify(sourceReady.hwnd)})`);
   if (screenCodec !== 'auto') assert.equal(report.published.source.codec, screenCodec, 'Explicit codec selection was not preserved.');
-  if (admissionRecovery) {
-    assert.equal(report.published.desktopSourceId, report.admissionRejected.desktopSourceId);
-    assert.equal((await publisher.cdp.evaluate('nativeAppSmoke.snapshot()')).mainCall, rejectedCallId,
-      'Retry replaced the Main call instead of retiring the rejected source selection.');
-    report.admissionRecoveredInSameCall = true;
-  }
   await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).watchButton, 'Normal Watch control did not appear.');
   await waitForLocalPreview();
+  if (duplicateTitle) {
+    assert.equal(report.published.picker.ownedHwnd, sourceReady.hwnd);
+    report.duplicateTitleCapturedExactWindow = true;
+    await sourceCommand('close-duplicate');
+  }
   const initial = await collectEvidence('initialLocalPreview', publisher, viewer);
   assert.equal(initial.publisherFocus.mainFocused, true);
   assert.equal(initial.publisherState.focused, true);
@@ -2088,7 +2063,7 @@ async function run() {
       assert.ok(before.watches.some(([sessionId, shares]) => sessionId === publisher.identity.sessionId
         && shares.includes(old.source.shareId)), 'The old share must still be watched when Replace is pressed.');
       await focusOwned(publisher);
-      current = await publisher.cdp.evaluate(`nativeAppSmoke.share(${JSON.stringify(next.ready.hwnd)}, false, true)`);
+      current = await publisher.cdp.evaluate(`nativeAppSmoke.share(${JSON.stringify(next.ready.hwnd)}, true)`);
       currentSource = next;
       assert.notEqual(current.source.shareId, old.source.shareId);
       assert.notEqual(current.source.instanceId, old.source.instanceId);

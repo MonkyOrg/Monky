@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { TLSSocket } from 'node:tls';
 import { WebSocket, WebSocketServer as WSServer } from 'ws';
 import {
+  hasChannelPermission,
+  type ChannelAccessRules,
   AdminDeafenUserPayload,
   AdminKickVoicePayload,
   AdminMoveUserPayload,
@@ -163,7 +165,7 @@ import {
 } from '@monky/shared';
 import { AuthService } from '../../application/services/AuthService';
 import { AttachmentService } from '../../application/services/AttachmentService';
-import { ChannelService } from '../../application/services/ChannelService';
+import { ChannelService, type ChannelAccessContext } from '../../application/services/ChannelService';
 import { ChatService } from '../../application/services/ChatService';
 import { PermissionService } from '../../application/services/PermissionService';
 import { RoleService } from '../../application/services/RoleService';
@@ -797,11 +799,11 @@ export class WebSocketServer {
           this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Reação inválida.', requestId);
           return;
         }
-        if (!(await this.requirePermission(session, Permission.SEND_MESSAGES, requestId))) return;
+        if (!(await this.requirePermission(session, Permission.SEND_MESSAGES, requestId, reaction.data.channelId))) return;
         if (!(await this.requireChannelAccess(session, reaction.data.channelId, requestId))) return;
         if (!this.isCurrentSession(session)) return;
         const result = await this.chatService.setReaction(session.user, reaction.data, type === MessageType.CHAT_REACTION_ADD,
-          () => this.isCurrentSession(session));
+          this.captureChannelOperation(session));
         if (!result.success) {
           this.sendError(session.ws, result.errorCode, result.errorMessage, requestId);
         } else if (result.event) {
@@ -814,13 +816,13 @@ export class WebSocketServer {
         return;
       }
       case MessageType.CHAT_SEND:
-        if (!(await this.requirePermission(session, Permission.SEND_MESSAGES, requestId))) return;
+        if (!(await this.requirePermission(session, Permission.SEND_MESSAGES, requestId, (payload as ChatSendPayload)?.channelId))) return;
         if (!(await this.requireChannelAccess(session, (payload as ChatSendPayload)?.channelId, requestId))) return;
         await this.handleChatSend(session, payload as ChatSendPayload, requestId);
         break;
 
       case MessageType.CHAT_LOAD_HISTORY:
-        if (!(await this.requireChannelAccess(session, (payload as ChatLoadHistoryPayload)?.channelId, requestId))) return;
+        if (!(await this.requirePermission(session, Permission.READ_MESSAGES, requestId, (payload as ChatLoadHistoryPayload)?.channelId))) return;
         await this.handleChatLoadHistory(session, payload as ChatLoadHistoryPayload, requestId);
         break;
 
@@ -871,7 +873,7 @@ export class WebSocketServer {
         break;
 
       case MessageType.CHAT_EDIT:
-        if (!(await this.requirePermission(session, Permission.SEND_MESSAGES, requestId))) return;
+        if (!(await this.requirePermission(session, Permission.SEND_MESSAGES, requestId, (payload as ChatEditPayload)?.channelId))) return;
         if (!(await this.requireChannelAccess(session, (payload as ChatEditPayload)?.channelId, requestId))) return;
         await this.handleChatEdit(session, payload as ChatEditPayload, requestId);
         break;
@@ -895,23 +897,26 @@ export class WebSocketServer {
         break;
 
       case MessageType.CHAT_REQUEST_UPLOAD_TOKEN:
-        if (!(await this.requirePermission(session, Permission.ATTACH_FILES, requestId))) return;
+        if (!(await this.requirePermission(session, Permission.ATTACH_FILES, requestId, (payload as ChatRequestUploadTokenPayload)?.channelId))) return;
+        if (!(await this.requirePermission(session, Permission.SEND_MESSAGES, requestId, (payload as ChatRequestUploadTokenPayload)?.channelId))) return;
         if (!(await this.requireChannelAccess(session, (payload as ChatRequestUploadTokenPayload)?.channelId, requestId))) return;
         this.handleRequestUploadToken(session, payload as ChatRequestUploadTokenPayload, requestId);
         break;
 
       case MessageType.CHANNEL_CREATE:
-        if (!(await this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId))) return;
+        if ((payload as ChannelCreatePayload)?.categoryId
+          ? !(await this.requireCategoryManagement(session, (payload as ChannelCreatePayload).categoryId!, requestId))
+          : !(await this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId))) return;
         await this.handleChannelCreate(session, payload as ChannelCreatePayload, requestId);
         break;
 
       case MessageType.CHANNEL_UPDATE:
-        if (!(await this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId))) return;
+        if (!(await this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId, (payload as ChannelUpdatePayload)?.channelId))) return;
         await this.handleChannelUpdate(session, payload as ChannelUpdatePayload, requestId);
         break;
 
       case MessageType.CHANNEL_DELETE:
-        if (!(await this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId))) return;
+        if (!(await this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId, (payload as ChannelDeletePayload)?.channelId))) return;
         await this.handleChannelDelete(session, payload as ChannelDeletePayload, requestId);
         break;
 
@@ -924,7 +929,9 @@ export class WebSocketServer {
       case MessageType.CATEGORY_UPDATE:
       case MessageType.CATEGORY_DELETE:
       case MessageType.CATEGORY_REORDER: {
-        if (!(await this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId))) return;
+        if (type === MessageType.CATEGORY_UPDATE || type === MessageType.CATEGORY_DELETE) {
+          if (!(await this.requireCategoryManagement(session, (payload as CategoryUpdatePayload)?.categoryId, requestId))) return;
+        } else if (!(await this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId))) return;
         const operation = type === MessageType.CATEGORY_CREATE ? 'create'
           : type === MessageType.CATEGORY_UPDATE ? 'update'
           : type === MessageType.CATEGORY_DELETE ? 'delete' : 'reorder';
@@ -1072,7 +1079,7 @@ export class WebSocketServer {
         break;
 
       case MessageType.SOUNDBOARD_PLAY:
-        if (!(await this.requirePermission(session, Permission.SPEAK, requestId))) return;
+        if (!(await this.requirePermission(session, Permission.SPEAK, requestId, (payload as SoundboardPlayPayload)?.channelId))) return;
         if (!(await this.requireChannelAccess(session, (payload as SoundboardPlayPayload)?.channelId, requestId))) return;
         await this.handleSoundboardPlay(session, payload as SoundboardPlayPayload, requestId);
         break;
@@ -1119,7 +1126,6 @@ export class WebSocketServer {
         break;
 
       case MessageType.ADMIN_MOVE_USER:
-        if (!(await this.requirePermission(session, Permission.MOVE_MEMBERS, requestId))) return;
         await this.handleAdminMoveUser(session, payload as AdminMoveUserPayload, requestId);
         break;
 
@@ -1678,7 +1684,7 @@ export class WebSocketServer {
     const server = await this.serverRepo.getServer();
     const channels = server ? await this.channelService.listChannels() : [];
     const access = await this.channelService.getAccessContext(botRecord.id);
-    const visibleChannels = channels.filter((channel) => canAccessChannel(channel, access.permissions, access.roleIds));
+    const visibleChannels = channels.filter((channel) => canAccessChannel(channel, access.permissions, access.roleIds, access.isBot, access.userId));
     const visibleChannelIds = new Set(visibleChannels.map((channel) => channel.id));
     const voiceStates = Object.fromEntries(Object.entries(this.signalingService.getAllVoiceStates())
       .filter(([, state]) => visibleChannelIds.has(state.channelId)));
@@ -1702,6 +1708,7 @@ export class WebSocketServer {
       maxBots: server?.maxBots ?? LIMITS.MAX_BOTS_DEFAULT,
       iconUrl: null,
       channels: visibleChannels.map((c) => ({
+        permissionOverwrites: c.permissionOverwrites,
         categoryId: c.categoryId ?? null,
         inheritCategoryPermissions: c.inheritCategoryPermissions ?? true,
         id: c.id, serverId: c.serverId, name: c.name, type: c.type,
@@ -1711,7 +1718,7 @@ export class WebSocketServer {
         allowedRoleIds: c.allowedRoleIds,
       })),
       categories: (await this.channelService.listCategories()).filter((category) =>
-        canAccessChannel(category, access.permissions, access.roleIds) || visibleChannels.some((channel) => channel.categoryId === category.id)),
+        canAccessChannel(category, access.permissions, access.roleIds, access.isBot, access.userId) || visibleChannels.some((channel) => channel.categoryId === category.id)),
       members: [botUser, ...Object.values(voiceStates).flatMap((state) => {
         const user = this.findSessionById(state.sessionId)?.user;
         return user && user.id !== botUser.id ? [this.voiceRosterUser(user)] : [];
@@ -2248,10 +2255,10 @@ export class WebSocketServer {
       this.channelService.getAccessContext(bot.user.id),
     ]);
     return this.isCurrentSession(origin) && this.isCurrentBotOperation(bot, 'local_execution', 'publish_voice') &&
-      channel?.type === 'VOICE' && hasPermission(callerAccess.permissions, Permission.SPEAK) &&
+      channel?.type === 'VOICE' && hasChannelPermission(channel, callerAccess.permissions, callerAccess.roleIds, Permission.SPEAK, false, callerAccess.userId) &&
       hasPermission(botAccess.permissions, Permission.SPEAK) &&
-      canAccessChannel(channel, callerAccess.permissions, callerAccess.roleIds) &&
-      (canAccessChannel(channel, botAccess.permissions, botAccess.roleIds) || this.hasBotVoiceGrant(currentBot, channelId));
+      (hasChannelPermission(channel, botAccess.permissions, botAccess.roleIds, Permission.SPEAK, true) &&
+        canAccessChannel(channel, botAccess.permissions, botAccess.roleIds, true) || this.hasBotVoiceGrant(currentBot, channelId));
   }
 
   private async mutateLocalAccess<T>(mutation: () => Promise<T>): Promise<T> {
@@ -2269,12 +2276,20 @@ export class WebSocketServer {
     return this.pendingLocalAccessMutations > 0 ? null : this.localAccessVersion + this.botSettingsPermissionVersion;
   }
 
+  private captureChannelOperation(session: ClientSession): () => boolean {
+    const channels = this.getChannelAccessVersion();
+    const roles = this.permissionService.getRoleAccessVersion();
+    return () => channels !== null && roles !== null && this.isCurrentSession(session) &&
+      channels === this.getChannelAccessVersion() && roles === this.permissionService.getRoleAccessVersion();
+  }
+
   private async handleChatSend(
     session: ClientSession,
     payload: ChatSendPayload,
     requestId?: string
   ): Promise<void> {
     if (!session.user) return;
+    const canSend = this.captureChannelOperation(session);
 
     const bot = session.isBot && session.botId ? await this.botService?.findById(session.botId) : undefined;
     if (payload.clientMessageId !== undefined && (session.isBot || !session.protocol?.features.includes('chat-delivery'))) {
@@ -2298,7 +2313,7 @@ export class WebSocketServer {
       return;
     }
     const result = bot
-      ? await this.chatService.sendBotMessage(bot, payload.channelId, payload.content, undefined, undefined, () => this.isCurrentSession(session), bot.id, payload.replyToMessageId, payload.localizations)
+      ? await this.chatService.sendBotMessage(bot, payload.channelId, payload.content, undefined, undefined, canSend, bot.id, payload.replyToMessageId, payload.localizations)
       : await this.chatService.sendMessage(
       session.user.id,
       payload.channelId,
@@ -2307,6 +2322,7 @@ export class WebSocketServer {
       payload.replyToMessageId,
       payload.blocks,
       payload.clientMessageId,
+      canSend,
     );
     if (!result.success) {
       this.sendError(
@@ -2322,17 +2338,15 @@ export class WebSocketServer {
       return;
     }
 
-    // A retry acknowledges the original commit without notifying recipients twice.
-    if ('replayed' in result && result.replayed) {
-      this.send(session.ws, { type: MessageType.CHAT_MESSAGE, requestId, payload: result.message });
-      return;
-    }
+    // Writers (including approved bots) may lack history access, but still need their own acknowledgement.
+    if (this.isCurrentSession(session)) this.send(session.ws, { type: MessageType.CHAT_MESSAGE, requestId, payload: result.message });
+    if ('replayed' in result && result.replayed) return;
     // Broadcast message to everyone allowed into this channel (#384).
     await this.broadcastToChannel(result.message.channelId, {
       type: MessageType.CHAT_MESSAGE,
       requestId,
       payload: result.message,
-    });
+    }, session.ws);
   }
 
   private async handlePollCreate(
@@ -2349,7 +2363,8 @@ export class WebSocketServer {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Invalid poll.', requestId);
       return;
     }
-    if (!(await this.requirePermission(session, Permission.SEND_MESSAGES, requestId)) ||
+    if (!(await this.requirePermission(session, Permission.SEND_MESSAGES, requestId, parsed.data.channelId)) ||
+        !(await this.requirePermission(session, Permission.READ_MESSAGES, requestId, parsed.data.channelId)) ||
         !(await this.requireChannelAccess(session, parsed.data.channelId, requestId))) return;
     const channel = await this.channelService.getChannelSummary(parsed.data.channelId);
     if (!channel || channel.forumId || (channel.type !== 'TEXT' && channel.type !== 'VOICE')) {
@@ -2357,7 +2372,7 @@ export class WebSocketServer {
       return;
     }
     if (parsed.data.liveAction &&
-        !(await this.requirePermission(session, Permission.EMIT_LIVE_ACTIONS, requestId))) return;
+        !(await this.requirePermission(session, Permission.EMIT_LIVE_ACTIONS, requestId, parsed.data.channelId))) return;
     if (parsed.data.liveAction && this.communityService && !this.communityService.settings().eventsEnabled) {
       this.sendError(session.ws, ProtocolErrorCode.COMMUNITY_INVALID, 'Live actions are disabled.', requestId);
       return;
@@ -2405,7 +2420,7 @@ export class WebSocketServer {
     }
     try {
       const existing = this.pollService.get(parsed.data.id);
-      if (!(await this.requirePermission(session, Permission.SEND_MESSAGES, requestId)) ||
+      if (!(await this.requirePermission(session, Permission.SEND_MESSAGES, requestId, existing.channelId)) ||
           !(await this.requireChannelAccess(session, existing.channelId, requestId))) return;
       if (!await this.pollService.canView(session.user.id, existing)) {
         throw new NativePollError('Poll not found.', ProtocolErrorCode.PERMISSION_DENIED);
@@ -2451,7 +2466,7 @@ export class WebSocketServer {
       const canManage = existing.creatorUserId === session.user.id ||
         await this.permissionService.checkPermission(session.user.id, Permission.MANAGE_SERVER) ||
         (await this.permissionService.isSelectedAudienceMember(session.user.id, existing.audience) &&
-          await this.permissionService.checkPermission(session.user.id, Permission.EMIT_LIVE_ACTIONS));
+          await this.channelService.canUserAccessChannel(session.user.id, existing.channelId, Permission.EMIT_LIVE_ACTIONS));
       if (!canManage) {
         this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Poll unavailable.', requestId);
         return;
@@ -2514,7 +2529,8 @@ export class WebSocketServer {
       session.user.id,
       payload.channelId,
       payload.messageId,
-      payload.content
+      payload.content,
+      this.captureChannelOperation(session),
     );
     if (!result.success || !result.message) {
       this.sendError(
@@ -2617,6 +2633,7 @@ export class WebSocketServer {
       messages,
     };
 
+    if (!(await this.requirePermission(session, Permission.READ_MESSAGES, requestId, parsed.data.channelId))) return;
     this.send(session.ws, {
       type: MessageType.CHAT_HISTORY,
       requestId,
@@ -2694,16 +2711,29 @@ export class WebSocketServer {
     payload: CategoryCreatePayload | CategoryUpdatePayload | CategoryDeletePayload | CategoryReorderPayload,
     requestId?: string,
   ): Promise<void> {
-    const result = await this.mutateLocalAccess(() => this.channelService.mutateCategory(operation, payload));
+    const result = await this.mutateLocalAccess(() => this.channelService.mutateCategory(operation, payload, session.user?.id));
     if (!result.success) {
       this.sendError(session.ws, result.errorCode ?? ProtocolErrorCode.BAD_REQUEST, result.errorMessage ?? 'Categoria inválida', requestId);
       return;
     }
     await this.reconcileChannelVisibility(true);
+    if (!session.user || !this.isCurrentSession(session)) return;
+    const canDeliver = this.captureChannelOperation(session);
+    const [categories, channels, context] = await Promise.all([
+      this.channelService.listCategories(), this.channelService.listChannels(),
+      this.channelService.getAccessContext(session.user.id),
+    ]);
+    if (!canDeliver()) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Access changed.', requestId);
+      return;
+    }
     this.send(session.ws, {
       type: MessageType.CATEGORIES_UPDATED,
       requestId,
-      payload: { categories: await this.channelService.listCategories() },
+      payload: { categories: categories.filter(category =>
+        canAccessChannel(category, context.permissions, context.roleIds, context.isBot, context.userId) ||
+        channels.some(channel => channel.categoryId === category.id &&
+          canAccessChannel(channel, context.permissions, context.roleIds, context.isBot, context.userId))) },
     });
   }
 
@@ -2712,6 +2742,14 @@ export class WebSocketServer {
     payload: ChannelUpdatePayload,
     requestId?: string
   ): Promise<void> {
+    if (payload?.categoryId !== undefined) {
+      const previous = await this.channelService.getChannelSummary(payload.channelId);
+      if (previous && payload.categoryId !== (previous.categoryId ?? null)) {
+        if (payload.categoryId
+          ? !(await this.requireCategoryManagement(session, payload.categoryId, requestId))
+          : !(await this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId))) return;
+      }
+    }
     const result = await this.mutateLocalAccess(() => this.channelService.updateChannel(payload));
     if (!result.success || !result.channel) {
       this.sendError(
@@ -2761,7 +2799,7 @@ export class WebSocketServer {
     payload: ChannelReorderPayload,
     requestId?: string
   ): Promise<void> {
-    const result = await this.channelService.reorderChannels(payload);
+    const result = await this.channelService.reorderChannels(payload, session.user?.id);
     if (!result.success || !result.positions) {
       this.sendError(
         session.ws,
@@ -3225,7 +3263,7 @@ export class WebSocketServer {
     grant.inFlight = true;
     let admitted = false;
     try {
-      if (!(await this.requirePermission(session, Permission.SPEAK, requestId))
+      if (!(await this.requirePermission(session, Permission.SPEAK, requestId, payload.channelId))
         || !(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
       if (!isCurrent() || (await this.serverRepo.getServer())?.voiceMode !== 'p2p') {
         this.sendError(session.ws, ProtocolErrorCode.VOICE_RECONNECT_EXPIRED, 'O modo de voz mudou novamente.', requestId);
@@ -3241,7 +3279,7 @@ export class WebSocketServer {
         return;
       }
       if (!isCurrent()) return;
-      if (!(await this.requirePermission(session, Permission.SPEAK, requestId))
+      if (!(await this.requirePermission(session, Permission.SPEAK, requestId, payload.channelId))
         || !(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
       if (!isCurrent()) return;
       const joined: VoiceUserJoinedPayload = {
@@ -3256,7 +3294,7 @@ export class WebSocketServer {
         payload: joined,
       });
       if (!isCurrent()
-        || !(await this.requirePermission(session, Permission.SPEAK, requestId))
+        || !(await this.requirePermission(session, Permission.SPEAK, requestId, payload.channelId))
         || !(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
       const state = this.signalingService.getVoiceState(session.sessionId);
       if (!isCurrent() || state?.channelId !== payload.channelId) return;
@@ -3328,7 +3366,7 @@ export class WebSocketServer {
 
     // Checked after the server-wide switch so the more specific "disabled here"
     // message wins when the whole feature is off (#359).
-    if (!(await this.requirePermission(session, Permission.USE_SOUNDBOARD, requestId))) return;
+    if (!(await this.requirePermission(session, Permission.USE_SOUNDBOARD, requestId, payload?.channelId))) return;
 
     if (!payload?.channelId) {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Dados de som inválidos', requestId);
@@ -3525,7 +3563,8 @@ export class WebSocketServer {
     const attempt = {};
     if (session.isBot) session.botVoiceJoinAttempt = attempt;
     const accessVersion = this.botSettingsPermissionVersion;
-    if (!(await this.requirePermission(session, Permission.SPEAK, requestId))) return;
+    if (!(await this.requirePermission(session, Permission.SPEAK, requestId,
+      session.isBot && payload.invocationId !== undefined ? undefined : payload.channelId))) return;
     let authorization: Awaited<ReturnType<BotInteractionHandler['authorizeVoiceJoin']>>;
     if (session.isBot && payload.invocationId !== undefined) {
       authorization = await this.botInteractions.authorizeVoiceJoin(session, payload.invocationId, payload.channelId);
@@ -3956,7 +3995,8 @@ export class WebSocketServer {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Join the voice channel before creating media.', requestId);
       return false;
     }
-    if (!(await this.requirePermission(session, Permission.SPEAK, requestId)) ||
+    if (!(await this.requirePermission(session, Permission.SPEAK, requestId,
+        this.hasBotVoiceGrant(session, parsed.data.channelId) ? undefined : parsed.data.channelId)) ||
         (!this.hasBotVoiceGrant(session, parsed.data.channelId) &&
           !(await this.requireChannelAccess(session, parsed.data.channelId, requestId)))) return false;
     const transport = transportId === undefined ? undefined : session.botVoiceTransports?.get(transportId);
@@ -4583,10 +4623,14 @@ export class WebSocketServer {
   private async requirePermission(
     session: ClientSession,
     permission: Permission,
-    requestId?: string
+    requestId?: string,
+    channelId?: string,
   ): Promise<boolean> {
     if (!session.user) return false;
-    const allowed = session.isBot
+    if (channelId && !await this.requireChannelAccess(session, channelId, requestId)) return false;
+    const allowed = channelId
+      ? await this.channelService.canUserAccessChannel(session.user.id, channelId, permission)
+      : session.isBot
       ? hasPermission((await this.channelService.getAccessContext(session.user.id)).permissions, permission)
       : await this.permissionService.checkPermission(session.user.id, permission);
     if (allowed) return true;
@@ -4599,6 +4643,7 @@ export class WebSocketServer {
     const state = await this.roleService.getRoleState();
     await this.refreshScreenRoles();
     const payload: RolesListPayload = {
+      everyonePermissions: state.everyonePermissions,
       roles: state.roles,
       userRoles: state.userRoles,
     };
@@ -4612,7 +4657,7 @@ export class WebSocketServer {
     // grant or revoke access. Reconciling here covers every role mutation at
     // once — create, update, delete, assign and unassign all end up in this
     // method (#384).
-    await this.reconcileChannelVisibility();
+    await this.reconcileChannelVisibility(true);
     await this.community?.refresh();
   }
 
@@ -4921,10 +4966,12 @@ export class WebSocketServer {
     if (previous.channelId === payload.channelId) {
       return;
     }
+    if (!(await this.requirePermission(session, Permission.MOVE_MEMBERS, requestId, previous.channelId)) ||
+        !(await this.requirePermission(session, Permission.MOVE_MEMBERS, requestId, payload.channelId))) return;
 
     // Moving someone into a private channel they cannot access would drop them
     // into a room that is not even in their channel list (#384).
-    if (!(await this.channelService.canUserAccessChannel(previous.userId, payload.channelId))) {
+    if (!(await this.channelService.canUserAccessChannel(previous.userId, payload.channelId, Permission.SPEAK))) {
       this.sendError(
         session.ws,
         ProtocolErrorCode.PERMISSION_DENIED,
@@ -5271,23 +5318,23 @@ export class WebSocketServer {
 
   /**
    * Broadcasts an event that belongs to a channel, reaching only the members
-   * allowed into it (#384). Public channels take the plain broadcast path, so
-   * the common case costs nothing extra.
+   * allowed to see its content. Even public channels may deny message reading.
    */
   private async broadcastToChannelAudience(
-    channel: { isPrivate: boolean; allowedRoleIds: string[] },
+    channel: ChannelAccessRules,
     message: ProtocolMessage,
     ignoreWs?: WebSocket,
     canSend?: () => boolean,
     voiceChannelId?: string
   ): Promise<void> {
-    if (!channel.isPrivate) {
-      if (!canSend || canSend()) this.broadcast(message, ignoreWs);
-      return;
-    }
-
-    const allowedUserIds = await this.resolveChannelAudience(channel);
-    if (canSend && !canSend()) return;
+    const version = this.getChannelAccessVersion();
+    const roleVersion = this.permissionService.getRoleAccessVersion();
+    if (version === null || roleVersion === null) return;
+    const permission = BOT_CHAT_EVENTS.has(message.type) || message.type === MessageType.POLL_UPDATED
+      ? Permission.READ_MESSAGES : Permission.VIEW_CHANNEL;
+    const allowedUserIds = await this.resolveChannelAudience(channel, permission);
+    if ((canSend && !canSend()) || version !== this.getChannelAccessVersion() ||
+        roleVersion !== this.permissionService.getRoleAccessVersion()) return;
     for (const [ws, session] of this.sessions.entries()) {
       if (ws !== ignoreWs && ws.readyState === WebSocket.OPEN && session.user && !session.replaced &&
           this.canDeliverBotEvent(session, message) &&
@@ -5303,10 +5350,7 @@ export class WebSocketServer {
    * connections (#309), and the whole set is settled before anything is sent so
    * the delivery loop itself stays synchronous.
    */
-  private async resolveChannelAudience(channel: {
-    isPrivate: boolean;
-    allowedRoleIds: string[];
-  }): Promise<Set<string>> {
+  private async resolveChannelAudience(channel: ChannelAccessRules, permission: Permission = Permission.VIEW_CHANNEL): Promise<Set<string>> {
     const userIds = new Set<string>();
     for (const session of this.sessions.values()) {
       if (session.user) userIds.add(session.user.id);
@@ -5316,7 +5360,8 @@ export class WebSocketServer {
     await Promise.all(
       Array.from(userIds).map(async (userId) => {
         const context = await this.channelService.getAccessContext(userId);
-        if (canAccessChannel(channel, context.permissions, context.roleIds)) {
+        if (canAccessChannel(channel, context.permissions, context.roleIds, context.isBot, context.userId) &&
+            hasChannelPermission(channel, context.permissions, context.roleIds, permission, context.isBot, context.userId)) {
           allowed.add(userId);
         }
       })
@@ -5372,6 +5417,13 @@ export class WebSocketServer {
     return false;
   }
 
+  private async requireCategoryManagement(session: ClientSession, categoryId: string, requestId?: string): Promise<boolean> {
+    if (session.user && categoryId &&
+        await this.channelService.canUserAccessCategory(session.user.id, categoryId, Permission.MANAGE_CHANNELS)) return true;
+    this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Categoria indisponível.', requestId);
+    return false;
+  }
+
   private hasBotVoiceGrant(session: ClientSession, channelId: string): boolean {
     return !!session.isBot && !!session.sessionId && this.isCurrentSession(session) &&
       session.botVoiceGrant?.channelId === channelId &&
@@ -5404,26 +5456,33 @@ export class WebSocketServer {
     ignoreWs?: WebSocket,
     canSend?: () => boolean
   ): Promise<void> {
+    const channelVersion = this.getChannelAccessVersion();
+    const roleVersion = this.permissionService.getRoleAccessVersion();
+    const isCurrent = () => channelVersion !== null && roleVersion !== null &&
+      channelVersion === this.getChannelAccessVersion() && roleVersion === this.permissionService.getRoleAccessVersion() &&
+      (!canSend || canSend());
+    if (!isCurrent()) return;
     const privatePoll = this.privatePollForMessage(message);
     if (privatePoll) {
       for (const session of this.sessions.values()) {
         if (!session.user || session.ws === ignoreWs || !this.isCurrentSession(session) ||
             session.ws.readyState !== WebSocket.OPEN || !this.canDeliverBotEvent(session, message) ||
             (canSend && !canSend())) continue;
-        if (await this.pollService?.canView(session.user.id, privatePoll)) this.send(session.ws, message);
+        if (await this.pollService?.canView(session.user.id, privatePoll) && isCurrent() &&
+            this.isCurrentSession(session)) this.send(session.ws, message);
       }
       return;
     }
     const channel = await this.channelService.getChannelSummary(channelId);
-    if (!channel) return;
+    if (!channel || !isCurrent()) return;
     if (channel.type === 'FORUM' || channel.forumId) {
-      await this.broadcastForumActivity(channelId, [message], ignoreWs, canSend);
+      await this.broadcastForumActivity(channelId, [message], ignoreWs, isCurrent);
       return;
     }
     const isVoiceEvent = message.type === MessageType.VOICE_USER_JOINED ||
       message.type === MessageType.VOICE_USER_LEFT || message.type === MessageType.VOICE_STATE_CHANGED ||
       message.type === MessageType.SFU_PRODUCER_CLOSED;
-    await this.broadcastToChannelAudience(channel, message, ignoreWs, canSend, isVoiceEvent ? channelId : undefined);
+    await this.broadcastToChannelAudience(channel, message, ignoreWs, isCurrent, isVoiceEvent ? channelId : undefined);
   }
 
   private privatePollForMessage(message: ProtocolMessage): import('../../domain/entities').NativePollRecord | undefined {
@@ -5468,7 +5527,7 @@ export class WebSocketServer {
     const categories = await this.channelService.listCategories();
     const channelsById = new Map(channels.map((channel) => [channel.id, channel]));
 
-    const contexts = new Map<string, { permissions: number; roleIds: string[] }>();
+    const contexts = new Map<string, ChannelAccessContext>();
     const userIds = new Set<string>();
     const grantCreators = new Set<string>();
     const members = new Set<string>();
@@ -5495,10 +5554,11 @@ export class WebSocketServer {
       const voice = channelsById.get(grant.channelId);
       const origin = channelsById.get(grant.originChannelId);
       const valid = members.has(grant.creatorUserId) && creator && bot &&
-        hasPermission(bot.permissions, Permission.SPEAK) && hasPermission(creator.permissions, Permission.SPEAK) &&
-        hasPermission(creator.permissions, Permission.SEND_MESSAGES) && hasPermission(creator.permissions, Permission.USE_BOT_COMMANDS) &&
-        voice?.type === 'VOICE' && origin?.type === 'TEXT' && origin.botCommandsEnabled &&
-        canAccessChannel(voice, creator.permissions, creator.roleIds) && canAccessChannel(origin, creator.permissions, creator.roleIds);
+        hasPermission(bot.permissions, Permission.SPEAK) &&
+        voice?.type === 'VOICE' && (origin?.type === 'TEXT' || origin?.type === 'VOICE') && origin.botCommandsEnabled &&
+        hasChannelPermission(voice, creator.permissions, creator.roleIds, Permission.SPEAK, false, creator.userId) &&
+        hasChannelPermission(origin, creator.permissions, creator.roleIds, Permission.SEND_MESSAGES, false, creator.userId) &&
+        hasChannelPermission(origin, creator.permissions, creator.roleIds, Permission.USE_BOT_COMMANDS, false, creator.userId);
       if (valid) grant.accessVersion = accessVersion;
       else {
         session.botVoiceGrant = undefined;
@@ -5516,14 +5576,14 @@ export class WebSocketServer {
       const previouslyVisible = session.visibleChannelIds ?? new Set<string>();
       const nowVisible = new Set(
         channels
-          .filter((channel) => canAccessChannel(channel, context.permissions, context.roleIds))
+          .filter((channel) => canAccessChannel(channel, context.permissions, context.roleIds, context.isBot, context.userId))
           .map((channel) => channel.id)
       );
 
       this.send(ws, {
         type: MessageType.CATEGORIES_UPDATED,
         payload: { categories: categories.filter((category) =>
-          canAccessChannel(category, context.permissions, context.roleIds) ||
+          canAccessChannel(category, context.permissions, context.roleIds, context.isBot, context.userId) ||
           channels.some((channel) => channel.categoryId === category.id && nowVisible.has(channel.id))) },
       });
 
@@ -5547,6 +5607,12 @@ export class WebSocketServer {
       }
 
       session.visibleChannelIds = nowVisible;
+      const voiceState = session.sessionId && this.signalingService.getVoiceState(session.sessionId);
+      const voiceChannel = voiceState && channelsById.get(voiceState.channelId);
+      if (voiceState && voiceChannel && !this.hasBotVoiceGrant(session, voiceState.channelId) &&
+          !hasChannelPermission(voiceChannel, context.permissions, context.roleIds, Permission.SPEAK, context.isBot, context.userId)) {
+        this.evictFromVoiceChannel(voiceState.sessionId, voiceState.channelId);
+      }
     }
   }
 

@@ -63,7 +63,8 @@ While enabled, every member can open **Recent audio** from the server-name
 menu. The list shows who played each clip, when it was played and its size;
 the play button provides a local-only preview without sending the clip to the
 call or creating another history entry. **Download** opens the operating
-system's safe save dialog.
+system's safe save dialog. A toast confirms when the file is saved; cancelling
+the dialog does not show a success message.
 
 ## Channels
 
@@ -207,19 +208,48 @@ New servers start with **Text channels** and **Voice channels** (named in the
 app's selected language). Existing servers migrate to these two groups;
 private channels retain their access as individual overrides.
 
-By default, **Inherit category permissions** applies the category's private
-access and allowed roles to the channel. Turn this switch off while editing
-a channel to configure an override. Moving an inherited channel adopts the
+**Edit channel** and **Edit category** open settings with **General** and
+**Permissions** in the left sidebar. Changes apply when you click **Save**;
+closing or cancelling discards the draft.
+
+New channels inherit all category rules, not just visibility.
+Under **Permissions**, controls are always editable without a customization step.
+An informational notice shows synchronization status. Rules differing from the
+category become local overrides when saved and reveal **Sync with category**,
+which asks for confirmation before replacing the draft. Matching rules use
+category synchronization, including when reverting an edit.
+Moving a synchronized channel adopts the
 destination's access; moving to **Uncategorized** preserves current effective
 access. Deleting a category **does not delete channels or history**: channels
 become uncategorized and retain their permissions. Revoking access also hides
 channels and disconnects voice participants; chat, attachment uploads and bots all
 enforce the same access.
 
+Each permission for **Everyone**, a role or an individual member has three states:
+**X — Deny**, **— — Inherit**, and **✓ — Allow**. Inherit neither grants nor
+denies access: it keeps the server-level result. Role and member rules override
+Everyone; between assigned roles and the individual rule, **Deny wins**,
+regardless of order.
+Owners and administrators retain full access.
+
+Use **Add roles and members** to search and select targets in the same dropdown
+used by private event audiences. Offline members can also be selected. Select
+a target in the list to edit or remove its rule; changes only take effect when saved.
+
+For an announcements channel, deny **Send messages** for Everyone while
+allowing **Read messages**, then allow sending for the roles that may publish.
+A second assigned role explicitly denying sending still blocks it.
+**View channel** is independent of **Read messages**: revoking only reading
+keeps the channel visible but removes history, search results and message
+notifications. Mute/deafen permissions remain server-wide because those
+restrictions apply to the member throughout the server.
+
 ### Private channel
 
-A private channel is visible only to the selected roles and people with
-applicable management access. It is not a separate server password.
+The private switch denies **View channel** for Everyone. Allow that permission
+for roles or members that may enter; owners and administrators always retain access.
+**Manage channels** alone cannot bypass a local denial.
+It is not a separate server password.
 Review roles before sharing sensitive content.
 
 ### Bot commands in a channel
@@ -230,14 +260,45 @@ When off, it also blocks administrators. This does not replace
 
 ## Roles and permissions
 
+**Everyone** is fixed at the top without a color. It is every member's automatic
+base, not an assignable role: it has no membership, reordering, rename or delete
+actions. Its server-level permissions, like ordinary role permissions, use
+on/off switches. Everyone opens the same editor as ordinary roles, with only
+the **Permissions** tab and no **General** or **Members** tabs.
+
+New servers do not create a Member role. Members without roles use Everyone;
+assigned roles replace that base. Among roles, an off switch wins over an on
+switch. Review every permission when creating a role, including **View channel**.
+The original unmodified Member role is converted to Everyone; customized roles
+and roles used in private event/action audiences are preserved.
+
+This change requires updated clients (protocol 35 or later). Older clients are
+asked to update before connecting so that cached content is also removed when
+reading permission is revoked.
+
 The **Members** tab lists everyone registered on the server, including offline
-people, just like the role editor. Disconnecting does not remove a person
+people. Disconnecting does not remove a person
 from the list; roles and access remain manageable according to your permissions.
 Bots are managed separately in the **Bots** tab.
 
-Open **Roles → Create role**, enter a name and choose a color. Use the
-editor's **Permissions** and **Members** tabs to review access. A role can
+**Roles → Create role** opens a dedicated dialog for its name, color and
+permissions. The **three-dot menu → Edit role** opens the same editor for an
+existing role instead of expanding the list. When creating one, **Create role**
+confirms the new role; use **X** or `Esc` to cancel.
+Changes to existing roles still apply immediately. A role can
 be automatically assigned to new members when that option is enabled.
+
+The **General** tab contains name, color, auto-assignment and a separate
+**Delete role** section. Deletion is also available in the three-dot menu and
+always asks for confirmation before removing the role from all members.
+
+The editor's **Members** tab lists only people who have the role, including
+offline members. Use **Remove from role** on a person's row to remove it.
+**Add to members** opens another searchable dialog containing only people who
+do not have the role; **Add** assigns it to the chosen person. The lists update
+after the server confirms each change, preserving the search.
+A toast confirms each completed addition or removal without loading text in
+the footer. Failures preserve the acknowledged state and allow a retry.
 
 <AppScreenshot src="/screenshots/cargos-en.png" alt="A demo server's role list, showing the default roles and a facilitators role." caption="Separate ordinary use from administration. Avoid granting Administrator when a specific permission is enough." />
 

@@ -1,4 +1,5 @@
 #include <obs-module.h>
+#include <util/windows/window-helpers.h>
 #include <string.h>
 #include "sourceBinding.h"
 
@@ -19,7 +20,7 @@ static uint64_t creation_time(HANDLE process)
 	return ((uint64_t)creation.dwHighDateTime << 32) | creation.dwLowDateTime;
 }
 
-bool monky_game_target_alive(void)
+bool monky_window_target_alive(void)
 {
 	DWORD process_id = 0;
 	return !binding_retired && selected_process && selected_thread && IsWindow(selected_window) &&
@@ -28,10 +29,11 @@ bool monky_game_target_alive(void)
 	       process_id == selected_pid && WaitForSingleObject(selected_process, 0) == WAIT_TIMEOUT &&
 	       WaitForSingleObject(selected_thread, 0) == WAIT_TIMEOUT &&
 	       GetProcessIdOfThread(selected_thread) == selected_pid &&
-	       creation_time(selected_process) == selected_creation;
+	       creation_time(selected_process) == selected_creation &&
+	       (!ms_is_uwp_window(selected_window) || !ms_get_uwp_actual_window(selected_window));
 }
 
-MODULE_EXPORT bool monky_bind_game_target(uint64_t window, uint32_t process_id, uint64_t creation)
+MODULE_EXPORT bool monky_bind_window_target(uint64_t window, uint32_t process_id, uint64_t creation)
 {
 	if (selected_process || selected_monitor || !window || !process_id || !creation ||
 	    process_id == GetCurrentProcessId())
@@ -46,33 +48,33 @@ MODULE_EXPORT bool monky_bind_game_target(uint64_t window, uint32_t process_id, 
 	selected_process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, false, process_id);
 	selected_thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, false, selected_thread_id);
 	/* Keep both objects alive until OBS teardown: PID/TID reuse must not redirect an inject-helper. */
-	return monky_game_target_alive();
+	return monky_window_target_alive();
 }
 
-HWND monky_game_window(void)
+HWND monky_selected_window(void)
 {
-	return monky_game_target_alive() && IsWindowVisible(selected_window) && !IsIconic(selected_window)
+	return monky_window_target_alive() && IsWindowVisible(selected_window) && !IsIconic(selected_window)
 		       ? selected_window
 		       : NULL;
 }
 
-uint64_t monky_game_creation(void)
+uint64_t monky_window_creation(void)
 {
 	return selected_creation;
 }
 
-bool monky_game_identity_matches(HWND window, DWORD process_id, HANDLE process)
+bool monky_window_identity_matches(HWND window, DWORD process_id, HANDLE process)
 {
-	return monky_game_target_alive() && window == selected_window && process_id == selected_pid &&
+	return monky_window_target_alive() && window == selected_window && process_id == selected_pid &&
 	       (!process || (GetProcessId(process) == selected_pid && creation_time(process) == selected_creation));
 }
 
 HANDLE monky_open_bound_game_process(monky_open_process_fn open_process, DWORD access, BOOL inherit, DWORD process_id)
 {
-	if (!monky_game_target_alive() || process_id != selected_pid || inherit || !open_process)
+	if (!monky_window_target_alive() || process_id != selected_pid || inherit || !open_process)
 		return NULL;
 	HANDLE process = open_process(access, false, process_id);
-	if (process && !monky_game_identity_matches(selected_window, process_id, process)) {
+	if (process && !monky_window_identity_matches(selected_window, process_id, process)) {
 		CloseHandle(process);
 		return NULL;
 	}

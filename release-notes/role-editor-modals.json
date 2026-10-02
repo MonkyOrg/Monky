@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Cargos têm editor em modal, menu de três pontos e exclusão na aba Geral. Membros podem ser removidos individualmente ou adicionados por uma busca separada, com confirmação em toast após cada alteração.",
+  "en": "Roles have a dedicated editor dialog, a three-dot menu and deletion in the General tab. Members can be removed individually or added through a separate search, with a confirmation toast after each change."
+}

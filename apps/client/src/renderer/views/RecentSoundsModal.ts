@@ -15,6 +15,7 @@ import { soundboardService } from '../core/SoundboardService';
 import { escapeHtml } from '../utils/html';
 import { openCommunityModal } from './CommunityModal';
 import { setButtonLoading } from '../utils/buttonLoading';
+import { showSuccessToast } from './CopyToast';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -201,7 +202,10 @@ export class RecentSoundsModal {
         mimeType: sound.mimeType,
         base64: sound.audioBase64,
       });
-      if (!signal.aborted && !result.success && !result.canceled) {
+      if (signal.aborted || sessionManager.getActive()?.key !== sessionKey) return;
+      if (result.success) {
+        showSuccessToast(t('recentSounds.saved'));
+      } else if (!result.canceled) {
         fail(result.error || t('recentSounds.downloadFailed'));
       }
     } catch (error) {

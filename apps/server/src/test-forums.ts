@@ -160,11 +160,11 @@ test('forum media stays owned and retries restore unattached files; previews and
 test('forum acknowledgement rechecks read permission after publishing the new channel', async t => {
   const f = await setup(t);
   const id = randomUUID();
-  const checkPermission = f.permissions.checkPermission.bind(f.permissions);
-  t.mock.method(f.permissions, 'checkPermission', async (userId: string, permission: number) => {
+  const canAccess = f.channelService.canUserAccessChannel.bind(f.channelService);
+  t.mock.method(f.channelService, 'canUserAccessChannel', async (userId: string, channelId: string, permission?: Permission) => {
     if (userId === f.member.id && permission === Permission.READ_MESSAGES &&
         f.database.getDb().prepare('SELECT 1 FROM channels WHERE id = ?').get(id)) return false;
-    return checkPermission(userId, permission);
+    return canAccess(userId, channelId, permission);
   });
   await f.member.peer.error(MessageType.FORUM_CREATE_POST, {
     id, channelId: f.forum.id, title: 'Changed access', content: 'Private content',

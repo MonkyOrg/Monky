@@ -399,11 +399,12 @@ export class AuthService {
     // Private channels are filtered out here rather than on the client, so a
     // channel the member cannot access never reaches them — not even its name (#384).
     const myRoleIds = roleState.userRoles.find((ur) => ur.userId === userRecord.id)?.roleIds ?? [];
-    const visibleChannels = channels.filter((c) => canAccessChannel(c, myPermissions, myRoleIds));
+    const visibleChannels = channels.filter((c) => canAccessChannel(c, myPermissions, myRoleIds, false, userRecord.id));
     const categories = (await this.categoryRepo?.listByServerId(server.id) ?? []).filter((category) =>
-      canAccessChannel(category, myPermissions, myRoleIds) || visibleChannels.some((channel) => channel.categoryId === category.id));
+      canAccessChannel(category, myPermissions, myRoleIds, false, userRecord.id) || visibleChannels.some((channel) => channel.categoryId === category.id));
 
     const serverDetails: ServerDetails = {
+      everyonePermissions: roleState.everyonePermissions,
       id: server.id,
       name: server.name,
       createdAt: server.createdAt,
@@ -423,6 +424,7 @@ export class AuthService {
       maxBots: server.maxBots ?? LIMITS.MAX_BOTS_DEFAULT,
       iconUrl: this.avatarStorage.getPublicUrl(server.iconPath),
       channels: visibleChannels.map((c) => ({
+        permissionOverwrites: c.permissionOverwrites,
         categoryId: c.categoryId ?? null,
         forumId: c.forumId ?? null,
         forumLocked: c.forumLocked ?? false,

@@ -153,14 +153,18 @@ export function renderChannelTypeFields(defaultType: ChannelType): string {
   `;
 }
 
-export function renderChannelCategoryFields(categoryId: string | null, inherit: boolean): string {
+export function renderChannelCategorySelect(categoryId: string | null): string {
   return `<div class="form-group">
     <label for="input-channel-category">${t('categories.category')}</label>
     <select id="input-channel-category">
       <option value="">${t('categories.uncategorized')}</option>
       ${(serverStore.serverDetails?.categories ?? []).map((category) => `<option value="${escapeHtml(category.id)}" ${category.id === categoryId ? 'selected' : ''}>${escapeHtml(category.name)}</option>`).join('')}
     </select>
-  </div>
+  </div>`;
+}
+
+export function renderChannelCategoryFields(categoryId: string | null, inherit: boolean): string {
+  return `${renderChannelCategorySelect(categoryId)}
   <div class="form-group" id="channel-inherit-group" ${categoryId ? '' : 'hidden'}>
     <div class="channel-privacy-row">
       <div class="channel-privacy-info">

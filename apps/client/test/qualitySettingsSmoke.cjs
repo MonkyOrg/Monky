@@ -57,6 +57,7 @@ async function runQualitySettingsSmoke() {
     screenEncodingMode: settingsStore.screenEncodingMode,
     screenEncodingStrategy: settingsStore.screenEncodingStrategy,
     screenSharePreviewPauseWhenUnfocused: settingsStore.screenSharePreviewPauseWhenUnfocused,
+    screenShareAutoPictureInPicture: settingsStore.screenShareAutoPictureInPicture,
     screenShareReceiver: settingsStore.screenShareReceiver,
   };
   let modal;
@@ -103,6 +104,7 @@ async function runQualitySettingsSmoke() {
       settingsStore.screenShareTelemetryPosition = 'top-right';
       settingsStore.screenShareTelemetryMode = 'simple';
       settingsStore.screenSharePreviewPauseWhenUnfocused = true;
+      settingsStore.screenShareAutoPictureInPicture = true;
       settingsStore.preferredVideoCodec = 'vp9';
       settingsStore.preferredScreenCodec = 'h264';
       settingsStore.screenEncodingMode = 'hardware';
@@ -364,6 +366,17 @@ async function runQualitySettingsSmoke() {
       const toggle = quality.querySelector('#checkbox-screen-telemetry');
       check(!!toggle.closest('.toggle-switch'), 'Telemetry must retain the switch component.');
       const preview = quality.querySelector('#checkbox-screen-preview-focus');
+      const autoPip = quality.querySelector('#checkbox-screen-auto-pip');
+      check(autoPip.checked && !!autoPip.closest('.toggle-switch')
+        && autoPip.getAttribute('aria-describedby') === 'screen-auto-pip-description',
+      'Automatic PiP defaults on and uses the accessible switch.');
+      check(root.querySelector('[data-section-target="screen-pip"]')?.textContent === language.t('settings.screenAutoPipLabel'),
+        'Automatic PiP has a localized section navigation entry.');
+      autoPip.checked = false;
+      autoPip.dispatchEvent(new Event('change', { bubbles: true }));
+      check(settingsStore.screenShareAutoPictureInPicture === false
+        && JSON.parse(localStorage.getItem('monky_settings')).screenShareAutoPictureInPicture === false,
+      'Disabling automatic PiP persists the explicit false preference.');
       check(preview.checked && !!preview.closest('.toggle-switch') &&
         preview.getAttribute('aria-describedby') === 'screen-preview-focus-description',
       'Preview focus must default on and use the existing accessible switch.');
@@ -580,6 +593,8 @@ async function runQualitySettingsSmoke() {
       'Reopening settings must restore the same telemetry choices in Quality.');
       check(reopened.querySelector('#checkbox-screen-preview-focus').checked === false,
         'Reopening settings must restore the preview focus preference.');
+      check(reopened.querySelector('#checkbox-screen-auto-pip').checked === false,
+        'Reopening settings must restore the automatic PiP preference.');
       check(reopened.querySelector('#screen-encoding-software').getAttribute('aria-pressed') === 'true'
         && reopened.querySelector('#screen-encoding-hardware').getAttribute('aria-pressed') === 'false'
         && reopened.querySelector('#select-video-codec').value === 'av1',

@@ -16,6 +16,30 @@ function createStore() {
   return store;
 }
 
+test('revoking reading clears cached content, composer state, delivery retries and unread badges', () => {
+  const store = createStore();
+  store.setReplyDraft('chat', message);
+  store.setBlockDraft('chat', [{ type: 'text', text: 'Private draft' }]);
+  store.setDraft('chat', 'Private text');
+  store.beginMessageEdit(message);
+  store.enqueueMessage({ clientMessageId: 'pending', channelId: 'chat', content: 'Pending' }, { ...message, id: 'pending' });
+  store.markMention('chat');
+  store.markUnread('chat');
+  store.setHistory('other', [{ ...message, channelId: 'other' }]);
+  let badgeChanges = 0;
+  store.bus.on('chat.mentions_updated', () => badgeChanges++);
+  store.bus.on('chat.unread_updated', () => badgeChanges++);
+  store.revokeChannel('chat');
+  assert.deepEqual(store.getMessages('chat'), []);
+  assert.equal(store.getReplyDraft('chat'), undefined);
+  assert.deepEqual(store.getBlockDraft('chat'), []);
+  assert.equal(store.getDraft('chat'), '');
+  assert.equal(store.getMessageEdit('chat'), undefined);
+  assert.equal(store.getOutgoing('pending'), undefined);
+  assert.equal(store.hasAnyUnread(), false);
+  assert.equal(badgeChanges, 2);
+  assert.equal(store.getMessages('other').length, 1);
+});
 test('restoration revisions refresh replies and cannot be rolled back by late edits or history', () => {
   const store = createStore();
   const original = { ...message, revision: 0 };

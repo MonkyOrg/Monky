@@ -113,6 +113,7 @@ export class SettingsStore {
   public screenShareTelemetryEnabled: boolean = false;
   public screenShareReceiver: ScreenShareReceiver = 'native';
   public screenSharePreviewPauseWhenUnfocused: boolean = true;
+  public screenShareAutoPictureInPicture: boolean = true;
   public screenShareTelemetryPosition: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' = 'top-right';
   public screenShareTelemetryMode: 'simple' | 'complete' = 'simple';
   public customSounds: Partial<Record<string, string>> = {}; // key → file path
@@ -244,6 +245,11 @@ export class SettingsStore {
           console.warn('[Settings] Invalid screen preview focus preference; enabling background pause.');
         }
         this.screenSharePreviewPauseWhenUnfocused = parsed.screenSharePreviewPauseWhenUnfocused !== false;
+        if (parsed.screenShareAutoPictureInPicture !== undefined
+          && typeof parsed.screenShareAutoPictureInPicture !== 'boolean') {
+          console.warn('[SettingsStore] Invalid automatic Picture-in-Picture preference; using the default.');
+        }
+        this.screenShareAutoPictureInPicture = parsed.screenShareAutoPictureInPicture !== false;
         if (!['top-left', 'top-right', 'bottom-left', 'bottom-right'].includes(this.screenShareTelemetryPosition)) {
           this.screenShareTelemetryPosition = 'top-right';
         }
@@ -701,6 +707,7 @@ export class SettingsStore {
         screenShareTelemetryEnabled: this.screenShareTelemetryEnabled,
         screenShareReceiver: this.getScreenShareReceiver(),
         screenSharePreviewPauseWhenUnfocused: this.screenSharePreviewPauseWhenUnfocused,
+        screenShareAutoPictureInPicture: this.screenShareAutoPictureInPicture,
         screenShareTelemetryPosition: this.screenShareTelemetryPosition,
         screenShareTelemetryMode: this.screenShareTelemetryMode,
         customProfile: this.customProfile,

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { WebSocket } from 'ws';
-import { BOT_CAPABILITIES, MessageType, Permission, PROTOCOL_VERSION, ProtocolErrorCode, type BotCapability, type UserSummary } from '@monky/shared';
+import { BOT_CAPABILITIES, MessageType, Permission, PROTOCOL_VERSION, ProtocolErrorCode, type BotCapability, type ProtocolOffer, type UserSummary } from '@monky/shared';
 import { AttachmentService } from '../application/services/AttachmentService';
 import { AuthService } from '../application/services/AuthService';
 import { BotService } from '../application/services/BotService';
@@ -187,15 +187,14 @@ export async function createFixture(options: {
   );
   const permissions = new PermissionService(serverRepo, roleRepo);
   const roleService = new RoleService(roleRepo, userRepo, permissions);
-  const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissions, botPermissions, channelRepo.categories);
+  const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissions, botPermissions, userRepo, channelRepo.categories);
   const pollService = new NativePollService(new SqliteNativePollRepository(db), {
     consume: (refs, userId, channelId) => communityService.consumeImageAssets(refs, userId, channelId)
       .map(url => url.split('/').pop()!),
     delete: paths => communityService.deleteImagePaths(paths),
   }, {
     canView: async (userId, poll) =>
-      await permissions.checkPermission(userId, Permission.READ_MESSAGES) &&
-      await channelService.canUserAccessChannel(userId, poll.channelId) &&
+      await channelService.canUserAccessChannel(userId, poll.channelId, Permission.READ_MESSAGES) &&
       await permissions.canAccessAudience(userId, poll.creatorUserId, poll.audience),
     canRevealAudience: (userId, poll) => permissions.canRevealAudience(userId, poll.creatorUserId),
   });
@@ -212,8 +211,8 @@ export async function createFixture(options: {
   let communityService!: CommunityService;
   const chatService = new ChatService(
     messageRepo, channelRepo, userRepo, mentionRepo, avatars, rateLimiter, attachmentService, serverRepo,
-    (userId, channelId) => channelService.canUserAccessChannel(userId, channelId),
-    userId => permissions.checkPermission(userId, Permission.READ_MESSAGES),
+    (userId, channelId, permission) => channelService.canUserAccessChannel(userId, channelId, permission),
+    (userId, channelId) => channelService.canUserAccessChannel(userId, channelId, Permission.READ_MESSAGES),
     pollService,
   );
   const signalingService = new SignalingService(channelRepo, new SqliteVoiceRestrictionRepository(db));
@@ -277,10 +276,11 @@ export async function createFixture(options: {
     deviceId = randomUUID(),
     appearOffline = false,
     protocolVersion = PROTOCOL_VERSION,
+    protocolOffer?: ProtocolOffer,
   ) => {
     const peer = await connect();
     const challenge = await peer.request(MessageType.AUTH_CONNECT, {
-      protocolVersion, nickname, publicKey: keys.publicKey, deviceId, appearOffline,
+      protocolVersion, protocolOffer, nickname, publicKey: keys.publicKey, deviceId, appearOffline,
     });
     assert.equal(challenge.type, MessageType.AUTH_CHALLENGE);
     const signature = sign(null, Buffer.from(text(challenge.payload.nonce), 'hex'), keys.privateKey).toString('hex');

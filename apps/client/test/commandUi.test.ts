@@ -601,10 +601,15 @@ test('bot user parameters include the human caller and exclude bot accounts with
     const channel: ChannelSummary = {
       id: 'private', serverId: 'server', name: 'Private', type: 'TEXT', position: 0,
       createdAt: 1, isPrivate: true, allowedRoleIds: ['reader'], botCommandsEnabled: true,
+      permissionOverwrites: [
+        { roleId: null, allow: 0, deny: Permission.VIEW_CHANNEL },
+        { roleId: 'reader', allow: Permission.VIEW_CHANNEL, deny: 0 },
+      ],
     };
     const role = (id: string, permissions: number) => ({ id, name: id, permissions, color: '#123456', position: 1, isDefault: false, createdAt: 1 });
-    const roles = [role('reader', Permission.READ_MESSAGES), role('admin', Permission.ADMINISTRATOR),
-      role('manager', Permission.MANAGE_CHANNELS | Permission.READ_MESSAGES), role('no-read', Permission.MANAGE_CHANNELS)];
+    const roles = [role('reader', Permission.READ_MESSAGES | Permission.VIEW_CHANNEL), role('admin', Permission.ADMINISTRATOR),
+      role('manager', Permission.MANAGE_CHANNELS | Permission.READ_MESSAGES | Permission.VIEW_CHANNEL),
+      role('no-read', Permission.MANAGE_CHANNELS | Permission.VIEW_CHANNEL)];
     const userRoles = [
       { userId: 'allowed', roleIds: ['reader'] }, { userId: 'offline', roleIds: ['reader'] },
       { userId: 'admin', roleIds: ['admin'] }, { userId: 'manager', roleIds: ['manager'] },
@@ -613,17 +618,23 @@ test('bot user parameters include the human caller and exclude bot accounts with
     server.setServerDetails({ id: 'server', name: 'Server', createdAt: 1, channels: [channel],
       members, knownMembers: members, maxUsers: 10, voiceStates: {}, roles, userRoles, ownerId: 'owner' }, member);
     const ids = () => server.getMentionableUsers(channel.id).map(user => user.id);
-    assert.deepEqual(ids(), ['admin', 'allowed', 'manager', 'owner', 'offline']);
+    assert.deepEqual(ids(), ['admin', 'allowed', 'owner', 'offline']);
+    server.updateChannel({ ...channel, permissionOverwrites: [
+      ...channel.permissionOverwrites!, { roleId: 'manager', allow: Permission.VIEW_CHANNEL, deny: 0 },
+    ] });
+    assert.equal(ids().includes('manager'), true, 'Managers need an explicit channel visibility grant');
+    server.updateChannel(channel);
     server.updateRoles(roles, userRoles.filter(entry => entry.userId !== 'allowed'));
     assert.equal(ids().includes('allowed'), false);
-    server.updateChannel({ ...channel, isPrivate: false, allowedRoleIds: [] });
+    server.updateChannel({ ...channel, isPrivate: false, allowedRoleIds: [], permissionOverwrites: [] });
     assert.equal(ids().includes('outsider'), true);
     assert.equal(ids().includes('no-read'), false);
-    server.updateChannel({ ...channel, allowedRoleIds: [] });
-    assert.deepEqual(ids(), ['admin', 'manager', 'owner']);
+    server.updateChannel({ ...channel, allowedRoleIds: [],
+      permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.VIEW_CHANNEL }] });
+    assert.deepEqual(ids(), ['admin', 'owner']);
     assert.deepEqual(server.getMentionableUsers('missing'), []);
     server.updateChannel({ ...channel, type: 'VOICE' });
-    assert.deepEqual(ids(), ['admin', 'manager', 'owner', 'offline']);
+    assert.deepEqual(ids(), ['admin', 'owner', 'offline']);
   });
   assert.equal(commandValuesFromInputs(command, { song: 'A song', count: '0', member: bot.id }, candidates).success, false);
 });

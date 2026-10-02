@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Ao abrir o chat, a animação começa perto da posição final em vez de percorrer todo o histórico. O movimento continua suave e respeita a preferência de reduzir animações.",
+  "en": "Opening chat now animates from near the destination instead of scrolling through the entire history. The short motion stays smooth and respects reduced-motion preferences."
+}

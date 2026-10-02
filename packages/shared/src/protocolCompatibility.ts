@@ -8,7 +8,8 @@ import { PROTOCOL_VERSION } from './constants.js';
 // Older clients cannot safely decode AV1 or accept those descriptors.
 // Protocol 29 adds private screen audiences and 1080p240/4K120 profile bounds.
 // Protocol 31 adds mixed categories and the FORUM channel kind.
-export const MIN_CLIENT_PROTOCOL = 31;
+// Channel permissions require clients to revoke cached content independently of visibility.
+export const MIN_CLIENT_PROTOCOL = 35;
 export const MIN_BOT_PROTOCOL = 24;
 export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];

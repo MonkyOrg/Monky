@@ -7,6 +7,7 @@ const { test } = require('node:test');
 const { ProcessEngine } = require('../runtime/nativeRtc/engine/node/process.cjs');
 const { LiveSenderFlow } = require('../runtime/encodedSender.cjs');
 const { NativeRtcCommands } = require('../runtime/nativeRtcCommands.cjs');
+const { NativeAudioOutputOwner } = require('../runtime/nativeAudioOutputOwner.cjs');
 
 function fixture(options = {}) {
   const events = [];
@@ -17,6 +18,36 @@ function fixture(options = {}) {
   });
   return { engine, events };
 }
+
+test('a burst of audio clock feedback retains only the latest observation without exhausting RTC IPC credits', async () => {
+  const { engine } = fixture({ feedbackDelayMs: 60, operationTimeoutMs: 2000 });
+  const commands = new NativeRtcCommands(engine), errors = [];
+  const owner = new NativeAudioOutputOwner(engine, commands, {
+    async start(config) { await owner.configureOutput(config); return config; },
+    async stop() {},
+    async enqueue() { assert.fail('This device-free test cannot receive PCM.'); },
+  }, error => errors.push(error));
+  try {
+    await engine.ready;
+    await owner.start('owned-output');
+    const feedback = [];
+    for (let index = 0; index < 1000; index++) {
+      const result = owner.feedback({ epoch: 1, available: false });
+      feedback.push(result);
+      void Promise.resolve(result).catch(() => {});
+    }
+    assert.equal(engine.snapshot().process.pendingCalls, 1);
+    const results = await Promise.all(feedback);
+    assert.equal(results.filter(result => result === true).length, 2);
+    assert.equal(results.filter(result => result === false).length, 998);
+    assert.equal(owner.getStats().coalescedFeedback, 998);
+    assert.equal(engine.snapshot().process.pendingCalls, 0);
+    assert.deepEqual(errors, []);
+    await owner.stop();
+  } finally {
+    await owner.finishAfterEngineClose(commands.closeEngine());
+  }
+});
 
 test('IOSurface IDs become Main-local leases and survive host death until external references retire', async () => {
   const surfaces = require('./fixtures/rtcProcessSurfaces.cjs');

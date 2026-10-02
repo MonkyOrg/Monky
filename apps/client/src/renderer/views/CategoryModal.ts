@@ -7,6 +7,7 @@ import { escapeHtml } from '../utils/html';
 import { enableBackdropClose } from '../utils/modal';
 import { attachInputEmojiPicker } from '../utils/inputEmojiPicker';
 import { attachChannelPrivacyFields, readChannelPrivacyFields, renderChannelPrivacyFields } from './channelFormFields';
+import { channelSettingsModal } from './ChannelSettingsModal';
 
 export class CategoryModal {
   private root: HTMLElement | null = null;
@@ -22,22 +23,23 @@ export class CategoryModal {
 
   open(category?: ChannelCategory): void {
     this.close();
+    if (category) { channelSettingsModal.open({ kind: 'category', value: category }); return; }
     const root = document.createElement('div');
     this.root = root;
     root.className = 'modal-backdrop';
     root.innerHTML = `<div class="modal-card category-modal" role="dialog" aria-modal="true" aria-labelledby="category-modal-title">
-      <div class="modal-header"><div class="modal-title" id="category-modal-title">${t(category ? 'categories.edit' : 'categories.create')}</div>
+      <div class="modal-header"><div class="modal-title" id="category-modal-title">${t('categories.create')}</div>
         <button type="button" class="modal-close-btn" aria-label="${t('common.cancel')}">&times;</button></div>
       <div class="error-banner" role="alert"></div>
       <form>
         <div class="form-group"><label for="input-category-name">${t('categories.name')}</label>
           <div class="input-with-emoji-container">
-            <input id="input-category-name" required minlength="2" maxlength="50" placeholder="${escapeHtml(t('categories.placeholder'))}" value="${escapeHtml(category?.name ?? '')}">
+            <input id="input-category-name" required minlength="2" maxlength="50" placeholder="${escapeHtml(t('categories.placeholder'))}">
             <button type="button" class="btn-input-emoji" data-category-emoji aria-label="${t('chat.emojiPickerTitle')}"><span class="material-symbols-outlined md-18">mood</span></button>
           </div></div>
-        ${renderChannelPrivacyFields(category ?? { isPrivate: false, allowedRoleIds: [] }, true)}
+        ${renderChannelPrivacyFields({ isPrivate: false, allowedRoleIds: [] }, true)}
         <div class="modal-footer"><button type="button" class="btn btn-secondary">${t('common.cancel')}</button>
-          <button type="submit" class="btn btn-primary">${t(category ? 'channelModal.saveSubmit' : 'categories.create')}</button></div>
+          <button type="submit" class="btn btn-primary">${t('categories.create')}</button></div>
       </form></div>`;
     document.body.appendChild(root);
     enterModal(root);
@@ -62,8 +64,8 @@ export class CategoryModal {
       if (!name) return;
       const submit = root.querySelector<HTMLButtonElement>('[type="submit"]');
       if (submit) submit.disabled = true;
-      void networkClient.sendRequest(category ? MessageType.CATEGORY_UPDATE : MessageType.CATEGORY_CREATE, {
-        ...(category ? { categoryId: category.id } : {}), name, ...readChannelPrivacyFields(root),
+      void networkClient.sendRequest(MessageType.CATEGORY_CREATE, {
+        name, ...readChannelPrivacyFields(root),
       }).then(() => { if (this.root === root) this.close(); }).catch((error: unknown) => {
         const banner = root.querySelector<HTMLElement>('.error-banner');
         if (banner) {
@@ -75,6 +77,7 @@ export class CategoryModal {
   }
 
   close(): void {
+    channelSettingsModal.close();
     this.unbind.forEach((off) => off());
     this.unbind = [];
     this.detachPrivacy?.();

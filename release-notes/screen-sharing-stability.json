@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Compartilhamento distingue janelas com títulos iguais. Feedback de áudio não acumula chamadas internas, e medições momentaneamente imprecisas do relógio não interrompem áudio contínuo. A telemetria mantém o histórico ao atualizar o palco ou a prévia.",
+  "en": "Sharing distinguishes windows with identical titles. Audio feedback no longer accumulates internal calls, and briefly uncertain clock observations do not interrupt continuous audio. Telemetry keeps its history when repainting the stage or preview."
+}

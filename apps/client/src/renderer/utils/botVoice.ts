@@ -20,7 +20,7 @@ export function getBotVoiceContext(): BotVoiceContext | null {
   if (session.participants.get(user.sessionId)?.voiceState?.channelId !== channelId) return null;
   const channel = session.serverStore.getChannel(channelId);
   if (!channel || channel.type !== 'VOICE' ||
-      !canAccessChannel(channel, session.serverStore.myPermissions, session.serverStore.getUserRoleIds(user.id))) return null;
+      !canAccessChannel(channel, session.serverStore.myPermissions, session.serverStore.getUserRoleIds(user.id), false, user.id)) return null;
   return { session, channelId, user };
 }
 

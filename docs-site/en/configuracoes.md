@@ -39,6 +39,11 @@ and previews. To show FPS, resolution and bitrate over camera/screen video,
 use **Quality & sharing → Video telemetry**: the switch, position and mode are saved
 and applied without restarting the stream.
 
+The copy button includes up to 20 recent video samples. Repainting the same
+stage or recreating only its local preview does not discard the stream's RTP
+measurements. Changing the source, channel or session, or disabling telemetry,
+resets the history. `null` values mean unavailable data, not zero.
+
 In the **Custom** profile, hover or use `Tab` to reach the question icon next to
 each **Bitrate**. The tooltip explains the effect and cost: higher bitrate can
 preserve detail; lower bitrate saves bandwidth but may reduce fidelity or produce
@@ -497,6 +502,22 @@ else's camera or screen resolution. This tab also groups codec, local sharing
 preview, screen reception and telemetry; profiles still include voice and camera settings.
 
 ### Screen reception
+
+**Automatic PiP** is enabled by default under **Quality & sharing**. Leaving
+the stage, switching apps (Alt+Tab) or minimizing Monky opens the focused
+broadcast you are watching in a floating window. With two focused broadcasts,
+it uses the one focused most recently. Cameras, your own preview and
+broadcasts you have not chosen to watch never open automatically.
+A notification explains the action and where to disable it. PiP survives app
+navigation, but closes when you stop watching, leave the call, lose access or
+the broadcast ends. Returning to the call's stage, including after restoring
+or reactivating the window, closes automatic PiP and keeps the same broadcast focused
+without restarting playback. Bringing Monky forward while viewing another
+channel or Home does not close PiP. The manual PiP button remains available.
+If you close automatic PiP while away, it stays closed for that absence and
+upon return; leaving again can open it again. Manually opened PiP remains
+open when switching apps, minimizing or restoring the window, including when
+moved to another monitor.
 
 Under **Settings → Quality & sharing → Screen reception**, choose **Native** or
 **Chromium**. On Windows and macOS, **Native is the default**, using the runtime included

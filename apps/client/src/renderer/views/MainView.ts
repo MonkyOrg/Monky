@@ -90,6 +90,7 @@ export class MainView {
 
   public setActiveContentView(view: 'chat' | 'stage'): void {
     const changed = this.activeContentView !== view;
+    if (changed && view === 'chat') this.voiceStageView?.openAutomaticPictureInPicture();
     this.activeContentView = view;
     const tools = this.container.querySelector<HTMLElement>('#server-tools');
     if (tools) tools.hidden = view !== 'chat';
@@ -154,6 +155,7 @@ export class MainView {
     const moderation = getVoiceControlModeration();
     const navigationKey = home ? 'home' : sessionManager.getActiveKey();
     const navigating = this.navigationKey !== navigationKey;
+    if (navigating && this.activeContentView === 'stage') this.voiceStageView?.openAutomaticPictureInPicture();
     this.navigationKey = navigationKey;
 
     const markup = `
@@ -274,7 +276,10 @@ export class MainView {
       </div>
     `;
     const preserved = preserve && replaceAroundLiveChild(this.container, markup, '.main-layout', '#main-center-stage');
-    if (!preserved) this.container.innerHTML = markup;
+    if (!preserved) {
+      this.voiceStageView?.destroy();
+      this.container.innerHTML = markup;
+    }
 
     if (!home) {
       this.renderChannels();
@@ -291,7 +296,6 @@ export class MainView {
     if (preserved) this.voiceStageView?.render();
     else {
       this.chatView?.destroy();
-      this.voiceStageView?.destroy();
       this.chatView = new ChatView(centerStageEl);
       this.chatInForum = false;
       this.chatView.onOpenForum = id => this.activateTextChannel(id);
@@ -354,12 +358,14 @@ export class MainView {
         this.activateTextChannel(channelId);
       });
       this.messageSearch = new MessageSearch(tools, center, {
-        channels: () => session.serverStore.serverDetails?.channels ?? [],
+        channels: () => session.serverStore.serverDetails?.channels.filter(channel =>
+          session.serverStore.hasPermission(Permission.READ_MESSAGES, channel.id)) ?? [],
         users: () => [...session.serverStore.knownMembers.values()],
         currentChannelId: () => this.activeContentView === 'chat'
           ? session.serverStore.activeTextChannelId
           : this.voiceChatChannelId,
-        canRead: () => session.serverStore.hasPermission(Permission.READ_MESSAGES),
+        canRead: () => !!session.serverStore.serverDetails?.channels.some(channel =>
+          session.serverStore.hasPermission(Permission.READ_MESSAGES, channel.id)),
         isCurrent: () => sessionManager.getActive() === session && !sessionManager.isHome() && session.client.getStatus() === 'CONNECTED',
         search: async (payload, signal) => {
           if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -866,7 +872,7 @@ export class MainView {
 
   private openVoiceChannelChat(channelId: string): void {
     const channel = serverStore.getChannel(channelId);
-    if (channel?.type !== 'VOICE' || !serverStore.hasPermission(Permission.READ_MESSAGES)) return;
+    if (channel?.type !== 'VOICE' || !serverStore.hasPermission(Permission.READ_MESSAGES, channelId)) return;
     this.viewedVoiceChannelId = channelId;
     this.viewedVoiceSessionKey = sessionManager.getActiveKey();
     this.voiceChatChannelId = channelId;
@@ -892,7 +898,7 @@ export class MainView {
     const layout = this.container.querySelector<HTMLElement>('.main-layout');
     const channel = serverStore.getChannel(channelId);
     if (!panel || !layout || channel?.type !== 'VOICE' ||
-        !serverStore.hasPermission(Permission.READ_MESSAGES)) {
+        !serverStore.hasPermission(Permission.READ_MESSAGES, channelId)) {
       this.closeVoiceChannelChat(false);
       return;
     }
@@ -1118,14 +1124,6 @@ export class MainView {
     return serverStore.myPermissions > 0 || serverStore.ownerId !== null;
   }
 
-  private canReadTextChannels(): boolean {
-    return !this.arePermissionsResolved() || serverStore.hasPermission(Permission.READ_MESSAGES);
-  }
-
-  private canSpeakInVoiceChannels(): boolean {
-    return !this.arePermissionsResolved() || serverStore.hasPermission(Permission.SPEAK);
-  }
-
   private showVoicePermissionDenied(): void {
     void showAlert({
       title: t('main.voicePermissionDeniedTitle'),
@@ -1156,14 +1154,10 @@ export class MainView {
 
     const textListEl = document.createElement('div');
     const voiceListEl = document.createElement('div');
-    const canReadTextChannels = this.canReadTextChannels();
-    const canSpeakInVoiceChannels = this.canSpeakInVoiceChannels();
     const canManageChannels = serverStore.hasPermission(Permission.MANAGE_CHANNELS);
     const permissionsResolved = this.arePermissionsResolved();
 
-    const textChannels = canReadTextChannels
-      ? serverStore.serverDetails.channels.filter((c) => (c.type === 'TEXT' || c.type === 'FORUM') && !c.forumId)
-      : [];
+    const textChannels = serverStore.serverDetails.channels.filter((c) => (c.type === 'TEXT' || c.type === 'FORUM') && !c.forumId);
     const voiceChannels = serverStore.serverDetails.channels.filter((c) => c.type === 'VOICE');
 
     if (textListEl) {
@@ -1191,7 +1185,7 @@ export class MainView {
         const isViewing = this.activeContentView === 'stage' &&
           this.viewedVoiceSessionKey === sessionManager.getActiveKey() &&
           this.viewedVoiceChannelId === c.id;
-        const showRestrictedIcon = permissionsResolved && !canSpeakInVoiceChannels;
+        const showRestrictedIcon = permissionsResolved && !serverStore.hasPermission(Permission.SPEAK, c.id);
         const isRestricted = showRestrictedIcon && !isActive;
         const hasMention = chatStore.hasMention(c.id);
         const hasUnread = chatStore.hasUnread(c.id);
@@ -1205,7 +1199,7 @@ export class MainView {
               ${showRestrictedIcon ? `<span class="material-symbols-outlined md-16 channel-restricted-icon" title="${t('main.voiceChannelRestricted')}">lock</span>` : ''}
               ${isActive ? `<span style="font-size: 11px; color: var(--success); font-weight: 600;">(${t('common.you')})</span>` : ''}
               <span class="voice-channel-actions">
-                ${canReadTextChannels ? `<button type="button" class="voice-chat-btn ${hasMention ? 'has-mention' : hasUnread ? 'has-unread' : ''}"
+                ${serverStore.hasPermission(Permission.READ_MESSAGES, c.id) ? `<button type="button" class="voice-chat-btn ${hasMention ? 'has-mention' : hasUnread ? 'has-unread' : ''}"
                   data-voice-chat-channel="${c.id}" title="${t('voiceChat.open')}" aria-label="${t('voiceChat.open')}">
                   <span class="material-symbols-outlined md-16" aria-hidden="true">chat_bubble</span>
                 </button>` : ''}
@@ -1259,13 +1253,13 @@ export class MainView {
         if (id) rows.set(id, row.outerHTML);
       }
       const categories = serverStore.serverDetails.categories ?? [];
-      const canManage = canManageChannels;
       const knownCategoryIds = new Set(categories.map((category) => category.id));
       const groups = [
         { id: '', name: t('categories.uncategorized') },
         ...categories.map((category) => ({ id: category.id, name: category.name })),
       ];
       categoryList.innerHTML = groups.map((group) => {
+        const canManage = group.id ? serverStore.hasCategoryPermission(Permission.MANAGE_CHANNELS, group.id) : canManageChannels;
         const channels = serverStore.serverDetails!.channels.filter((channel) =>
           group.id ? channel.categoryId === group.id : !channel.categoryId || !knownCategoryIds.has(channel.categoryId));
         const collapsed = !!group.id && serverStore.isCategoryCollapsed(group.id);
@@ -1322,7 +1316,8 @@ export class MainView {
       });
 
       // Drag-and-drop users between voice channels (#248)
-      if (serverStore.hasPermission(Permission.MOVE_MEMBERS)) {
+      const sourceId = participantManager.get(miniEl.getAttribute('data-session-id') ?? '')?.voiceState?.channelId;
+      if (sourceId && serverStore.hasPermission(Permission.MOVE_MEMBERS, sourceId)) {
         const el = miniEl as HTMLElement;
         el.draggable = true;
         el.addEventListener('dragstart', (e: Event) => {
@@ -1339,9 +1334,10 @@ export class MainView {
     });
 
     // Voice channel drop targets for user drag-and-drop (#248, #357)
-    if (serverStore.hasPermission(Permission.MOVE_MEMBERS)) {
+    if (voiceChannels.some(channel => serverStore.hasPermission(Permission.MOVE_MEMBERS, channel.id))) {
       this.container.querySelectorAll('.voice-channel-group').forEach((item) => {
         const el = item as HTMLElement;
+        if (!serverStore.hasPermission(Permission.MOVE_MEMBERS, el.dataset.channelId)) return;
         el.addEventListener('dragover', (e: Event) => {
           const de = e as DragEvent;
           if (de.dataTransfer?.types.includes('text/monky-session-id')) {
@@ -1365,6 +1361,9 @@ export class MainView {
           if (sessionId && channelId) {
             const currentParticipant = participantManager.get(sessionId);
             if (currentParticipant?.voiceState?.channelId !== channelId) {
+              const sourceId = currentParticipant?.voiceState?.channelId;
+              if (!sourceId || !serverStore.hasPermission(Permission.MOVE_MEMBERS, sourceId) ||
+                  !serverStore.hasPermission(Permission.MOVE_MEMBERS, channelId)) return;
               const targetUser = currentParticipant?.user;
               if (targetUser && warnIfMoveBlocked(targetUser.id, targetUser.nickname, channelId)) return;
               void networkClient.sendRequest(MessageType.ADMIN_MOVE_USER, {
@@ -1393,7 +1392,7 @@ export class MainView {
         if (type === 'TEXT' || type === 'FORUM') {
           this.activateTextChannel(channelId);
         } else if (type === 'VOICE') {
-          if (channelId !== voiceStore.currentVoiceChannelId && this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SPEAK)) {
+          if (channelId !== voiceStore.currentVoiceChannelId && this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SPEAK, channelId)) {
             item.classList.add('restricted-feedback');
             window.setTimeout(() => item.classList.remove('restricted-feedback'), 600);
             this.showVoicePermissionDenied();
@@ -1564,7 +1563,7 @@ export class MainView {
         const handle = (row.matches('.channel-item') ? row : row.querySelector('.channel-item')) as HTMLElement | null;
         if (!handle) continue;
         const channelId = handle.getAttribute('data-channel-id');
-        if (!channelId) continue;
+        if (!channelId || !serverStore.hasPermission(Permission.MANAGE_CHANNELS, channelId)) continue;
 
         handle.draggable = false;
         handle.classList.add('channel-reorder-handle');
@@ -1902,7 +1901,7 @@ export class MainView {
   }
 
   private openCategoryMenu(categoryId: string, x: number, y: number): void {
-    if (!serverStore.hasPermission(Permission.MANAGE_CHANNELS)) return;
+    if (!serverStore.hasCategoryPermission(Permission.MANAGE_CHANNELS, categoryId)) return;
     const categories = serverStore.serverDetails?.categories ?? [];
     const category = categories.find((item) => item.id === categoryId);
     if (!category) return;
@@ -1916,8 +1915,8 @@ export class MainView {
     contextMenu.open(x, y, [
       { label: t('categories.addChannel'), icon: 'add', onClick: () => createChannelModal.open('TEXT', categoryId) },
       { label: t('categories.edit'), icon: 'settings', onClick: () => categoryModal.open(category) },
-      { label: t('categories.moveUp'), icon: 'arrow_upward', disabled: position === 0, onClick: () => move(-1) },
-      { label: t('categories.moveDown'), icon: 'arrow_downward', disabled: position === categories.length - 1, onClick: () => move(1) },
+      { label: t('categories.moveUp'), icon: 'arrow_upward', disabled: position === 0 || !serverStore.hasPermission(Permission.MANAGE_CHANNELS), onClick: () => move(-1) },
+      { label: t('categories.moveDown'), icon: 'arrow_downward', disabled: position === categories.length - 1 || !serverStore.hasPermission(Permission.MANAGE_CHANNELS), onClick: () => move(1) },
       {
         label: t('categories.delete'), icon: 'delete', danger: true, onClick: () => {
           void showConfirm({ title: t('categories.delete'), message: t('categories.deleteConfirm'), variant: 'danger' })
@@ -1962,8 +1961,8 @@ export class MainView {
       }
     }
 
-    if (serverStore.hasPermission(Permission.MANAGE_CHANNELS)) {
-      if (channel) {
+    if (serverStore.hasPermission(Permission.MANAGE_CHANNELS, channelId)) {
+      if (channel && serverStore.hasPermission(Permission.MANAGE_CHANNELS)) {
         const siblings = serverStore.serverDetails?.channels.filter((item) => (item.categoryId ?? null) === (channel.categoryId ?? null)) ?? [];
         const at = siblings.findIndex((item) => item.id === channelId);
         items.push({
@@ -2025,7 +2024,7 @@ export class MainView {
       return !isVoiceAdmissionPending(session.key, channelId);
     }
 
-    if (this.arePermissionsResolved() && !session.serverStore.hasPermission(Permission.SPEAK)) {
+    if (this.arePermissionsResolved() && !session.serverStore.hasPermission(Permission.SPEAK, channelId)) {
       if (!silent) this.showVoicePermissionDenied();
       return false;
     }
@@ -2130,7 +2129,7 @@ export class MainView {
     const myPerms = serverStore.myPermissions;
     const visibleChannelIds = new Set(
       (serverStore.serverDetails.channels ?? [])
-        .filter((ch) => canAccessChannel(ch, myPerms, myRoleIds))
+        .filter((ch) => canAccessChannel(ch, myPerms, myRoleIds, false, serverStore.currentUser?.id))
         .map((ch) => ch.id)
     );
 

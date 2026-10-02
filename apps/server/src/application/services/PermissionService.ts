@@ -3,6 +3,8 @@ import {
   DEFAULT_PERMISSIONS,
   Permission,
   hasPermission,
+  resolveMemberPermissions,
+  stripAdministrator,
   type ResourceAudience,
 } from '@monky/shared';
 import { IRoleRepository, IServerRepository } from '../../domain/repositories';
@@ -67,10 +69,17 @@ export class PermissionService {
     }
 
     const roles = await this.roleRepo.listRolesForUser(userId);
-    if (roles.length === 0) {
-      return DEFAULT_PERMISSIONS;
-    }
-    return roles.reduce((bits, role) => bits | role.permissions, 0);
+    return resolveMemberPermissions(await this.getEveryonePermissions(), roles);
+  }
+
+  public async getEveryonePermissions(): Promise<number> {
+    return (await this.serverRepo.getServer())?.everyonePermissions ?? DEFAULT_PERMISSIONS;
+  }
+
+  public async updateEveryonePermissions(permissions: number): Promise<void> {
+    await this.withRoleMutation(() => this.serverRepo.updateServer({
+      everyonePermissions: stripAdministrator(permissions),
+    }));
   }
 
   public async checkPermission(userId: string, permission: Permission): Promise<boolean> {

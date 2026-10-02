@@ -92,7 +92,7 @@ export class CommunityHandler {
         if (type === MessageType.COMMUNITY_IMAGE_UPLOAD) {
           this.requireHuman(session);
           const input = communityImageUploadSchema.parse(payload);
-          await this.service.requirePermission(userId, Permission.SEND_MESSAGES);
+          await this.service.requirePermission(userId, Permission.SEND_MESSAGES, input.channelId);
           const channel = await this.channels.getChannelSummary(input.channelId);
           if ((channel?.type !== 'TEXT' && channel?.type !== 'VOICE') ||
               !await this.channels.canUserAccessChannel(userId, input.channelId)) {
@@ -156,7 +156,6 @@ export class CommunityHandler {
         } else if (type === MessageType.NATIVE_FORM_SUBMIT) {
           this.requireNativeForms(session);
           this.requireHuman(session);
-          await this.service.requirePermission(userId, Permission.SEND_MESSAGES);
           const form = await this.service.submitNativeForm(
             userId,
             nativeLiveFormSubmitSchema.parse(payload),
@@ -190,7 +189,7 @@ export class CommunityHandler {
           const input = liveActionCreateSchema.parse(payload);
           const authorization = await this.transport.authorizeInvocation(session, input.invocationId, input.channelId);
           if (!authorization) throw new CommunityError('A current command invocation is required.', ProtocolErrorCode.PERMISSION_DENIED);
-          await this.service.requirePermission(authorization.creatorUserId, Permission.EMIT_LIVE_ACTIONS);
+          await this.service.requirePermission(authorization.creatorUserId, Permission.EMIT_LIVE_ACTIONS, input.channelId);
           await this.requireChannel(session, input.channelId, authorization.creatorUserId);
           if (!authorization.isCurrent() || !this.transport.isCurrent(session)) {
             throw new CommunityError('The invocation has ended.', ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
@@ -231,8 +230,8 @@ export class CommunityHandler {
           if (!action || !await this.service.canViewLiveAction(userId, action)) {
             throw new CommunityError('Live action unavailable.', ProtocolErrorCode.PERMISSION_DENIED);
           }
-          await this.service.requirePermission(userId, Permission.USE_BOT_COMMANDS);
-          await this.service.requirePermission(userId, Permission.SEND_MESSAGES);
+          await this.service.requirePermission(userId, Permission.USE_BOT_COMMANDS, action.channelId);
+          await this.service.requirePermission(userId, Permission.SEND_MESSAGES, action.channelId);
           const channel = await this.channels.getChannelSummary(action.channelId);
           if (!channel?.botCommandsEnabled) throw new CommunityError('Commands are disabled.', ProtocolErrorCode.PERMISSION_DENIED);
           if (action.revision !== input.expectedRevision || action.content.kind !== 'form') {

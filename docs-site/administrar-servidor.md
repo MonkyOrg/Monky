@@ -66,7 +66,8 @@ Quando o cache está ativo, qualquer membro encontra **Áudios recentes** no
 menu do nome do servidor. A lista mostra quem tocou, quando e o tamanho do
 arquivo. O botão de reprodução oferece uma prévia somente local, sem reenviar
 o áudio para a chamada nem criar outra posição no histórico; **Baixar** abre o
-diálogo seguro do sistema operacional.
+diálogo seguro do sistema operacional. Um toast confirma quando o arquivo é
+salvo; cancelar o diálogo não mostra confirmação.
 
 ## Canais
 
@@ -214,18 +215,48 @@ Novos servidores começam com **Canais de texto** e **Canais de voz** (nomes no
 idioma escolhido no aplicativo). Servidores existentes migram para esses dois
 grupos; canais privados preservam seu acesso como exceções individuais.
 
-Por padrão, **Herdar permissões da categoria** aplica o acesso privado e os
-cargos da categoria ao canal. Desative o switch na edição do canal para
-configurar uma exceção. Mover um canal com herança adota o acesso do destino;
+**Editar canal** e **Editar categoria** abrem configurações com os menus
+**Geral** e **Permissões** na esquerda. As alterações são aplicadas ao clicar
+em **Salvar**; fechar ou cancelar descarta o rascunho.
+
+Novos canais herdam todas as regras da categoria, não apenas a visibilidade.
+Em **Permissões**, os controles ficam sempre editáveis, sem um passo de
+personalização. O aviso informa se as regras estão sincronizadas. Alterações
+que diferem da categoria viram regras próprias ao salvar e exibem
+**Sincronizar com categoria**; esse botão pede confirmação antes de substituir
+o rascunho. Regras iguais às da categoria usam a sincronização, inclusive ao
+desfazer uma alteração. Mover um canal sincronizado adota o acesso do destino;
 mover para **Sem categoria** preserva o acesso efetivo atual. Excluir uma
 categoria **não exclui canais nem histórico**: eles ficam sem categoria e
 mantêm suas permissões. Revogar acesso também remove o canal da lista e
 desconecta quem estava na voz; chat, envio de anexos e bots respeitam o mesmo acesso.
 
+Cada permissão de **Todos**, de um cargo ou de uma pessoa possui três estados:
+**X — Negar**, **— — Herdar** e **✓ — Permitir**. Herdar não concede nem nega;
+mantém o resultado das permissões gerais. Regras de cargos e pessoas
+prevalecem sobre Todos; entre os cargos atribuídos e a regra individual,
+**Negar vence**, independentemente da ordem.
+Donos e administradores mantêm acesso total.
+
+Use **Adicionar cargos e pessoas** para pesquisar e selecionar os alvos no mesmo
+dropdown usado pela audiência de eventos privados. Pessoas offline também podem
+ser selecionadas. Selecione um alvo na lista para editar suas permissões ou
+remover sua regra; as alterações só entram em vigor ao salvar.
+
+Por exemplo, negue **Enviar mensagens** para Todos e permita **Ler mensagens**
+para manter um canal de avisos. Adicione um cargo e permita o envio para que
+somente seus integrantes publiquem. Um segundo cargo com negação explícita
+impede o envio mesmo assim. **Ver canal** é independente de **Ler mensagens**:
+retirar apenas a leitura mantém o canal visível, mas remove histórico, resultados
+de busca e notificações de mensagens. Permissões de silenciar/ensurdecer membros
+continuam gerais, pois essas restrições valem para a pessoa em todo o servidor.
+
 ### Canal privado
 
-Um canal privado fica visível apenas para os cargos escolhidos e para quem
-tem acesso de gerenciamento aplicável. Não é uma senha separada do servidor.
+O switch privado configura a negação de **Ver canal** para Todos. Permita essa
+permissão nos cargos ou nas pessoas que devem entrar; dono e administradores sempre podem
+acessar. **Gerenciar canais**, sozinho, não ignora uma negação local.
+Não é uma senha separada do servidor.
 Revise os cargos antes de compartilhar conteúdo sensível.
 
 ### Comandos de bots no canal
@@ -236,14 +267,47 @@ Isso não substitui a [aprovação de capacidades de cada bot](/bots#preferencia
 
 ## Cargos e permissões
 
+**Todos** fica fixo no topo, sem cor. É a base automática de qualquer membro,
+não um cargo atribuível: não é possível adicionar/remover pessoas, reordenar,
+renomear ou excluir Todos. Seus controles gerais, assim como os dos cargos,
+são switches de liga/desliga. Todos abre o mesmo editor dos cargos comuns,
+somente com a aba **Permissões**, sem as abas **Geral** e **Membros**.
+
+Servidores novos não criam o cargo Membro. Sem cargo, a pessoa usa Todos;
+com cargos, os switches dos cargos substituem essa base. Entre cargos, um
+switch desligado prevalece sobre o ligado. Por isso, revise todas as permissões
+ao criar um cargo, inclusive **Ver canal**. O cargo Membro antigo sem
+personalizações é convertido em Todos; cargos personalizados ou utilizados
+em audiências privadas de eventos e ações são preservados.
+
+Essa mudança exige clientes atualizados (protocolo 35 ou posterior). Clientes
+antigos são orientados a atualizar antes de conectar, para que também removam
+conteúdo já carregado quando a leitura for revogada.
+
 A aba **Membros** lista todas as pessoas cadastradas no servidor, inclusive
-as offline, assim como o editor de cargos. Desconectar não remove ninguém
+as offline. Desconectar não remove ninguém
 da lista; cargos e acessos continuam administráveis conforme suas permissões.
 Bots são administrados separadamente na aba **Bots**.
 
-Abra **Cargos → Criar cargo**, dê um nome e escolha a cor. Use as abas do
-editor para revisar **Permissões** e **Membros**. Um cargo pode ser atribuído
+**Cargos → Criar cargo** abre um modal próprio para nome, cor e permissões.
+O menu de **três pontos → Editar cargo** abre o mesmo editor para um cargo
+existente, sem expandir a lista. Na criação, **Criar cargo** confirma o novo
+cargo; use o **X** ou `Esc` para cancelar.
+As alterações em cargos existentes continuam sendo aplicadas imediatamente.
+Um cargo pode ser atribuído
 automaticamente a novos membros quando essa opção estiver habilitada.
+
+A aba **Geral** reúne nome, cor, autoatribuição e uma seção separada para
+**Excluir cargo**. A exclusão também está no menu de três pontos e sempre pede
+confirmação antes de remover o cargo de todos os membros.
+
+Na aba **Membros** do editor aparecem apenas as pessoas que possuem o cargo,
+inclusive offline. Use **Remover do cargo** na linha da pessoa para retirá-lo.
+**Adicionar aos membros** abre outro modal com busca e somente pessoas que
+ainda não possuem o cargo; **Adicionar** aplica o cargo à pessoa escolhida.
+A lista é atualizada após a confirmação do servidor, preservando a busca.
+Um toast confirma cada adição ou remoção concluída, sem texto de carregamento
+no rodapé. Falhas mantêm o estado confirmado e permitem tentar novamente.
 
 <AppScreenshot src="/screenshots/cargos-pt.png" alt="Lista de cargos de um servidor demonstrativo, mostrando os cargos padrão e um cargo de facilitadores." caption="Separe permissões de uso e de administração. Evite conceder Administrador quando um acesso específico basta." />
 

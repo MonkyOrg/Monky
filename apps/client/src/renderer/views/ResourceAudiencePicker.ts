@@ -7,7 +7,7 @@ import { getAvatarUrl } from '../utils/avatar';
 import { isHexColor } from '../utils/colors';
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
-import { smoothScrollIntoView } from '../utils/scroll';
+import { scrollWithin, smoothScrollIntoView } from '../utils/scroll';
 
 export class ResourceAudiencePicker {
   private audience: ResourceAudience;
@@ -19,6 +19,7 @@ export class ResourceAudiencePicker {
     private readonly prefix: string,
     initial: ResourceAudience = PUBLIC_AUDIENCE,
     private readonly placement: 'adaptive' | 'below' = 'adaptive',
+    private readonly mode: 'audience' | 'permission-targets' = 'audience',
   ) {
     this.audience = initial.visibility === 'private'
       ? { visibility: 'private', userIds: [...initial.userIds], roleIds: [...initial.roleIds] }
@@ -31,22 +32,28 @@ export class ResourceAudiencePicker {
       : PUBLIC_AUDIENCE;
   }
 
+  setValue(value: ResourceAudience): void {
+    this.audience = value.visibility === 'private'
+      ? { visibility: 'private', userIds: [...value.userIds], roleIds: [...value.roleIds] }
+      : PUBLIC_AUDIENCE;
+  }
+
   isValid(): boolean {
-    return this.audience.visibility === 'public' ||
+    return this.mode === 'permission-targets' || this.audience.visibility === 'public' ||
       this.audience.userIds.length + this.audience.roleIds.length > 0;
   }
 
   render(disabled = false): string {
     return `<section class="resource-audience" data-resource-audience="${escapeHtml(this.prefix)}">
-      <div class="bot-permission-row resource-audience-mode">
+      ${this.mode === 'audience' ? `<div class="bot-permission-row resource-audience-mode">
         <div><label for="${escapeHtml(this.prefix)}-private">${t('audience.private')}</label>
           <p class="bot-settings-description">${t('audience.description')}</p></div>
         <label class="toggle-switch"><input id="${escapeHtml(this.prefix)}-private" data-audience-private
           type="checkbox" role="switch" ${this.audience.visibility === 'private' ? 'checked' : ''}
           ${disabled ? 'disabled' : ''}><span class="toggle-slider"></span></label>
-      </div>
+      </div>` : ''}
       <div class="share-audience" data-audience-selection ${this.audience.visibility === 'private' ? '' : 'hidden'}>
-        <label class="share-audience-label">${t('audience.who')}</label>
+        <label class="share-audience-label">${t(this.mode === 'audience' ? 'audience.who' : 'channelPermissions.targets')}</label>
         <div class="share-audience-picker">
           <button type="button" class="share-audience-trigger" data-audience-toggle aria-haspopup="listbox"
             aria-expanded="${this.open}" ${disabled ? 'disabled' : ''}>
@@ -65,7 +72,7 @@ export class ResourceAudiencePicker {
             <p data-audience-no-results role="status" hidden>${t('audience.noResults')}</p>
           </div>
         </div>
-        <p class="audio-device-status" data-audience-status role="status" aria-live="polite"></p>
+        ${this.mode === 'audience' ? '<p class="audio-device-status" data-audience-status role="status" aria-live="polite"></p>' : ''}
       </div>
     </section>`;
   }
@@ -73,8 +80,17 @@ export class ResourceAudiencePicker {
   bind(container: HTMLElement, signal: AbortSignal, onChange: () => void): void {
     let positioningScroll = false;
     let positioningScrollTimer: number | null = null;
+    const finishPositioningScroll = (cancel = false) => {
+      if (positioningScrollTimer !== null) window.clearTimeout(positioningScrollTimer);
+      positioningScrollTimer = null;
+      if (cancel && positioningScroll) {
+        container.scrollTo({ top: container.scrollTop, left: container.scrollLeft, behavior: 'instant' });
+      }
+      positioningScroll = false;
+    };
     const closePopup = () => {
       if (!this.open) return;
+      finishPositioningScroll(true);
       const root = container.querySelector<HTMLElement>(
         `[data-resource-audience="${CSS.escape(this.prefix)}"]`,
       );
@@ -84,15 +100,6 @@ export class ResourceAudiencePicker {
       this.open = false;
       this.sync(container);
       if (focusWasInside) trigger?.focus({ preventScroll: true });
-    };
-    const scrollableAncestor = (element: HTMLElement): HTMLElement | null => {
-      for (let current = element.parentElement; current; current = current.parentElement) {
-        const overflowY = getComputedStyle(current).overflowY;
-        if ((overflowY === 'auto' || overflowY === 'scroll') && current.scrollHeight > current.clientHeight) {
-          return current;
-        }
-      }
-      return null;
     };
     const positionPopup = () => {
       if (!this.open) return;
@@ -104,17 +111,7 @@ export class ResourceAudiencePicker {
       if (!trigger || !popup) return;
       const viewportPadding = 12;
       const gap = 8;
-      let triggerBox = trigger.getBoundingClientRect();
-      if (this.placement === 'below' && window.innerHeight - triggerBox.bottom < 240 && !positioningScroll) {
-        positioningScroll = true;
-        smoothScrollIntoView(trigger, { block: 'center', inline: 'nearest' });
-        triggerBox = trigger.getBoundingClientRect();
-        if (positioningScrollTimer !== null) window.clearTimeout(positioningScrollTimer);
-        positioningScrollTimer = window.setTimeout(() => {
-          positioningScroll = false;
-          positionPopup();
-        }, 500);
-      }
+      const triggerBox = trigger.getBoundingClientRect();
       const width = Math.min(
         Math.max(triggerBox.width, 280),
         window.innerWidth - viewportPadding * 2,
@@ -125,7 +122,6 @@ export class ResourceAudiencePicker {
       );
       const spaceBelow = window.innerHeight - triggerBox.bottom - viewportPadding - gap;
       const spaceAbove = triggerBox.top - viewportPadding - gap;
-      const desiredHeight = Math.min(360, Math.max(80, popup.scrollHeight));
       const openAbove = this.placement === 'adaptive' && spaceBelow < 240 && spaceAbove > spaceBelow;
       const availableHeight = Math.max(80, openAbove ? spaceAbove : spaceBelow);
       popup.style.left = `${left}px`;
@@ -138,13 +134,34 @@ export class ResourceAudiencePicker {
         : Math.min(Math.max(viewportPadding, idealTop), window.innerHeight - viewportPadding - height)}px`;
       popup.dataset.placement = openAbove ? 'above' : 'below';
     };
+    const revealTrigger = (trigger: HTMLElement) => {
+      const box = trigger.getBoundingClientRect();
+      if (this.placement !== 'below' || window.innerHeight - box.bottom >= 240) return;
+      const before = container.scrollTop;
+      positioningScroll = true;
+      const destination = scrollWithin(container, trigger, Math.max(0, (container.clientHeight - box.height) / 2));
+      if (Math.abs(destination - before) < 1) {
+        finishPositioningScroll();
+        return;
+      }
+      positioningScrollTimer = window.setTimeout(() => {
+        finishPositioningScroll();
+        positionPopup();
+      }, 500);
+    };
     this.positionOpenPopup = positionPopup;
     signal.addEventListener('abort', () => {
+      closePopup();
       if (this.positionOpenPopup === positionPopup) this.positionOpenPopup = null;
-      if (positioningScrollTimer !== null) window.clearTimeout(positioningScrollTimer);
+      finishPositioningScroll(true);
     }, { once: true });
     window.addEventListener('resize', positionPopup, { signal });
-    document.addEventListener('scroll', () => {
+    document.addEventListener('scroll', event => {
+      if (!this.open) return;
+      const root = container.querySelector<HTMLElement>(
+        `[data-resource-audience="${CSS.escape(this.prefix)}"]`,
+      );
+      if (!root || !(event.target instanceof Node) || !event.target.contains(root)) return;
       if (!positioningScroll) {
         closePopup();
         return;
@@ -152,7 +169,7 @@ export class ResourceAudiencePicker {
       positionPopup();
       if (positioningScrollTimer !== null) window.clearTimeout(positioningScrollTimer);
       positioningScrollTimer = window.setTimeout(() => {
-        positioningScroll = false;
+        finishPositioningScroll();
         positionPopup();
       }, 120);
     }, { capture: true, signal });
@@ -162,17 +179,35 @@ export class ResourceAudiencePicker {
         `[data-resource-audience="${CSS.escape(this.prefix)}"]`,
       );
       const popup = root?.querySelector<HTMLElement>('[data-audience-popup]');
-      const trigger = root?.querySelector<HTMLElement>('[data-audience-toggle]');
-      const insidePopup = event.target instanceof Node && !!popup?.contains(event.target);
+      if (!(event.target instanceof Node) || popup?.contains(event.target)) return;
+      const modal = container.closest('.community-modal, [role="dialog"]') ?? container;
+      if (!modal.contains(event.target)) return;
       closePopup();
-      if (!insidePopup || !trigger) return;
-      event.preventDefault();
-      const scroller = scrollableAncestor(trigger);
-      if (scroller) scroller.scrollTop += event.deltaY;
-    }, { capture: true, passive: false, signal });
+    }, { capture: true, passive: true, signal });
+    document.addEventListener('pointerdown', event => {
+      if (!this.open || !(event.target instanceof Node)) return;
+      const root = container.querySelector<HTMLElement>(
+        `[data-resource-audience="${CSS.escape(this.prefix)}"]`,
+      );
+      if (root?.querySelector('[data-audience-popup]')?.contains(event.target)
+        || root?.querySelector('[data-audience-toggle]')?.contains(event.target)) return;
+      const modal = container.closest('.community-modal, [role="dialog"]') ?? container;
+      if (modal.contains(event.target)) closePopup();
+    }, { capture: true, signal });
+    document.addEventListener('keydown', event => {
+      if (!this.open || !['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)
+        || !(event.target instanceof Node)) return;
+      if (event.key === ' ' && event.target instanceof Element && event.target.closest('button, input, textarea, select')) return;
+      const popup = container.querySelector(
+        `[data-resource-audience="${CSS.escape(this.prefix)}"] [data-audience-popup]`,
+      );
+      const modal = container.closest('.community-modal, [role="dialog"]') ?? container;
+      if (!popup?.contains(event.target) && modal.contains(event.target)) closePopup();
+    }, { capture: true, signal });
     container.addEventListener('change', event => {
       const input = event.target instanceof HTMLInputElement ? event.target : null;
       if (!input?.matches('[data-audience-private]')) return;
+      closePopup();
       this.audience = input.checked
         ? { visibility: 'private', userIds: [], roleIds: [] }
         : PUBLIC_AUDIENCE;
@@ -196,14 +231,16 @@ export class ResourceAudiencePicker {
     container.addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : null;
       const root = target?.closest<HTMLElement>(`[data-resource-audience="${CSS.escape(this.prefix)}"]`);
-      if (!root || !target) return;
+      if (!root || !target || target.closest('button')?.matches(':disabled')) return;
       if (target.closest('[data-audience-toggle]')) {
-        this.open = !this.open;
+        if (this.open) { closePopup(); return; }
+        root.querySelector<HTMLElement>('.share-audience-options')!.innerHTML = this.options();
+        this.open = true;
         this.sync(container);
-        if (this.open) {
-          positionPopup();
-          root.querySelector<HTMLInputElement>('[data-audience-search]')?.focus();
-        }
+        const trigger = root.querySelector<HTMLElement>('[data-audience-toggle]');
+        if (trigger) revealTrigger(trigger);
+        positionPopup();
+        root.querySelector<HTMLInputElement>('[data-audience-search]')?.focus({ preventScroll: true });
         return;
       }
       const option = target.closest<HTMLButtonElement>('[data-audience-id]');
@@ -220,13 +257,32 @@ export class ResourceAudiencePicker {
       onChange();
     }, { signal });
     container.addEventListener('keydown', event => {
-      if (event.key !== 'Escape' || !this.open) return;
+      if (!this.open) return;
       const target = event.target instanceof Element ? event.target : null;
       const root = target?.closest<HTMLElement>(`[data-resource-audience="${CSS.escape(this.prefix)}"]`);
       if (!root) return;
-      this.open = false;
-      this.sync(container);
-      root.querySelector<HTMLButtonElement>('[data-audience-toggle]')?.focus();
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closePopup();
+        root.querySelector<HTMLButtonElement>('[data-audience-toggle]')?.focus({ preventScroll: true });
+        return;
+      }
+      const searching = target?.matches('[data-audience-search]');
+      const current = target?.closest<HTMLButtonElement>('[data-audience-id]');
+      const choices = [...root.querySelectorAll<HTMLButtonElement>('[data-audience-id]:not([hidden])')];
+      if (searching && event.key === 'Enter') {
+        event.preventDefault();
+        choices[0]?.click();
+      } else if (['ArrowDown', 'ArrowUp'].includes(event.key) || current && ['Home', 'End'].includes(event.key)) {
+        event.preventDefault();
+        const index = current ? choices.indexOf(current) : -1;
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1
+          : event.key === 'ArrowDown' ? (index + 1) % choices.length
+            : index <= 0 ? choices.length - 1 : index - 1;
+        choices[next]?.focus({ preventScroll: true });
+        if (choices[next]) smoothScrollIntoView(choices[next], { block: 'nearest' });
+      }
     }, { signal });
     this.sync(container);
     positionPopup();
@@ -282,7 +338,7 @@ export class ResourceAudiencePicker {
     }
     const summary = root.querySelector<HTMLElement>('[data-audience-summary]');
     if (summary) {
-      summary.innerHTML = selectedOptions.length
+      summary.innerHTML = selectedOptions.length && this.mode === 'audience'
         ? selectedOptions.slice(0, 2).map(option =>
           `<span class="share-audience-chip">${option.querySelector('.share-audience-identity')?.innerHTML ?? ''}</span>`).join('')
           + (selectedOptions.length > 2 ? `<span class="share-audience-more">+${selectedOptions.length - 2}</span>` : '')
@@ -313,10 +369,10 @@ export class ResourceAudiencePicker {
         <span class="material-symbols-outlined md-18 share-audience-check" aria-hidden="true">check</span>
       </button>`).join('');
     const members = [...this.server.knownMembers.values()]
-      .filter(user => user.id !== this.server.currentUser?.id && !user.isBot)
+      .filter(user => (this.mode === 'permission-targets' || user.id !== this.server.currentUser?.id) && !user.isBot)
       .map(user => ({ id: user.id, name: user.nickname, avatarUrl: user.avatarUrl }));
     return `<div class="share-audience-group" role="group">
-      <h4>${t('audience.roles')}</h4>${render('role', this.server.roles)}
+      <h4>${t('audience.roles')}</h4>${render('role', this.mode === 'permission-targets' ? this.server.getVisibleRoles() : this.server.roles)}
     </div><div class="share-audience-group" role="group">
       <h4>${t('audience.members')}</h4>${render('user', members)}
     </div>`;

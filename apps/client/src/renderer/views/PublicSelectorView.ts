@@ -135,8 +135,8 @@ export class PublicSelectorView {
       if (!closed && selector.expiresAt !== undefined) nextExpiry = Math.min(nextExpiry, selector.expiresAt);
       const channel = this.server.serverDetails?.channels.find((entry) => entry.id === this.channelId);
       const permitted = this.client.getStatus() === 'CONNECTED' && channel?.botCommandsEnabled !== false &&
-        this.server.hasPermission(Permission.READ_MESSAGES) &&
-        this.server.hasPermission(Permission.SEND_MESSAGES) && this.server.hasPermission(Permission.USE_BOT_COMMANDS);
+        this.server.hasPermission(Permission.READ_MESSAGES, this.channelId) &&
+        this.server.hasPermission(Permission.SEND_MESSAGES, this.channelId) && this.server.hasPermission(Permission.USE_BOT_COMMANDS, this.channelId);
       const pending = this.pending.has(selector.id);
       const disabled = closed || !permitted || !selector.canRespond || pending;
       controls.setAttribute('aria-busy', String(pending));

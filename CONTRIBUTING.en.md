@@ -172,6 +172,7 @@ and the installed application are unchanged. No installed profile is copied.
 | Scenario | Preconfigured | Deliberately left to test |
 |---|---|---|
 | `connected` (default) | Fresh identity, real first-owner authentication, channels and sample message | The chat feature under test |
+| `empty-forum` | Empty forum and chat, 20 members including you, 10 roles including built-ins, and events enabled | Empty thread search and scrolling members/roles in private visibility |
 | `server-settings` | Connected owner and the real General settings panel | Editing/applying settings |
 | `voice` | Muted user, synthetic devices and a second SDK participant over real P2P | Voice behavior; the labeled fixture is not production music |
 | `voice-receive` | Listening-only SDK fixture, muted user and real room indicators | `/qa-listen` toggles reception; unmuting sends synthetic audio without physical capture or recording |
@@ -183,6 +184,7 @@ and the installed application are unchanged. No installed profile is copied.
 
 ```powershell
 npm run qa -- server-settings
+npm run qa -- empty-forum
 npm run qa -- voice
 npm run qa -- voice-receive
 npm run qa -- bot-install --bot=fixture

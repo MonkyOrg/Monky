@@ -238,6 +238,13 @@ de 64 créditos/64 KiB para `releaseFrame`, `close`, `resource.close` e
 operações comuns não pode impedir a liberação de uma textura já possuída.
 Os créditos retornam somente com a conclusão real ou saída do processo.
 
+Observações do relógio de áudio mantêm no máximo uma chamada em voo e a
+observação pendente mais recente. Substituir uma observação resolve sua
+promessa como `false`, não como aplicação nativa. Stop e troca de época
+cancelam a pendência; calibrações substituídas não são reaplicadas.
+`coalescedFeedback` e `supersededCalibrationFeedback` registram esses casos.
+Créditos de PCM e seus comprovantes não são coalescidos.
+
 As cópias comprimidas do pipe de captura continuam limitadas a 16 itens/8 MiB,
 incluindo o item em escrita. A espera agora usa o prazo existente de 15 segundos
 do proprietário nativo, em vez de confundir entrega local com frescor de mídia.
@@ -310,8 +317,10 @@ janela/processo encerra o anúncio mesmo sem espectadores.
 
 Janelas WinUI (por exemplo, WhatsApp) não são bloqueadas apenas pela classe
 `WinUIDesktopWin32WindowClass`/`ApplicationFrameWindow`. A admissão exige que
-a lista de propriedades e o finder do OBS correspondam à janela selecionada,
-com título único e identidade HWND/PID/criação preservada. Se a enumeração
+a lista de propriedades corresponda à janela selecionada e que o backend
+seja vinculado diretamente ao HWND, PID, criação do processo e thread retidos.
+Janelas com títulos iguais são admitidas sem busca por título nem troca de alvo.
+O backend confirma essa identidade antes de capturar/renderizar. Se a enumeração
 redirecionar para um filho de outro processo, a seleção é recusada em vez de
 compartilhar esse filho implicitamente.
 
@@ -551,6 +560,13 @@ de processamento anteriores antes de ativar a nova época; nenhum crédito em
 trânsito é revogado. Falhas de dispositivo continuam explícitas e fatais.
 O timer de diagnóstico RTC é suspenso antes de iniciar o fechamento nativo,
 para não consultar estado já desmontado enquanto os recursos ainda encerram.
+
+Uma coleta pareada QPC/RTC que leva mais de 2 ms
+não invalida, por si só, PCM contínuo. Somente nesse caso o bloco segue sem
+timestamp absoluto, com `clockObservationsUnavailable` incrementado no
+diagnóstico da fonte. A próxima observação válida retoma os timestamps sem
+reiniciar a época. Não se amplia o limite do relógio, inventa timestamp ou
+descarta PCM; descontinuidade, retrocesso e outros erros continuam explícitos.
 
 Na reprodução, `currentFrame` é uma observação do relógio do grafo, não do
 alto-falante. O Chromium 152.0.7977.130 [avança o grafo antes de atualizar o
@@ -967,8 +983,9 @@ A entrega real continua dependendo da cadência da fonte e da carga do sistema.
 `test\nativeWindowIdentitySmoke.cjs --artifacts=<caminho_absoluto>` usa o
 `capture-contract-test.exe` gerado pelo build para criar janelas próprias
 WinUI/ApplicationFrameWindow. Verifica captura WGC real com filhos do mesmo
-processo e recusa títulos duplicados, remapeamento para filhos de outro
-processo e identidade de processo alterada. Não captura janelas pessoais
+processo e distingue as duas janelas com títulos duplicados, recusando
+remapeamento para filhos de outro processo e identidade de processo alterada.
+Não captura janelas pessoais
 nem grava vídeo; `--contracts=<executável_absoluto>` permite outro diretório
 de build.
 

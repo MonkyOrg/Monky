@@ -154,19 +154,6 @@ export async function ensureServerSeedData(
     });
   }
 
-  const memberRole = await roleRepo.findByName('Membro');
-  if (!memberRole) {
-    await roleRepo.create({
-      id: uuidv4(),
-      name: 'Membro',
-      color: '#5865f2',
-      position: 0,
-      permissions: DEFAULT_PERMISSIONS,
-      isDefault: true,
-      createdAt: now,
-    });
-  }
-
   await migrateAdministratorRoles(roleRepo);
 }
 
@@ -291,15 +278,14 @@ export class MonkyServer {
 
     const signalingService = new SignalingService(channelRepo, new SqliteVoiceRestrictionRepository(db));
     const botPermissions = new BotPermissionService(new SqliteBotPermissionRepository(db));
-    const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissionService, botPermissions, channelRepo.categories);
+    const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissionService, botPermissions, userRepo, channelRepo.categories);
     const pollService = new NativePollService(new SqliteNativePollRepository(db), {
       consume: (refs, userId, channelId) => communityService.consumeImageAssets(refs, userId, channelId)
         .map(url => url.split('/').pop()!),
       delete: paths => communityService.deleteImagePaths(paths),
     }, {
       canView: async (userId, poll) =>
-        await permissionService.checkPermission(userId, Permission.READ_MESSAGES) &&
-        await channelService.canUserAccessChannel(userId, poll.channelId) &&
+        await channelService.canUserAccessChannel(userId, poll.channelId, Permission.READ_MESSAGES) &&
         await permissionService.canAccessAudience(userId, poll.creatorUserId, poll.audience),
       canRevealAudience: (userId, poll) => permissionService.canRevealAudience(userId, poll.creatorUserId),
     });
@@ -312,8 +298,8 @@ export class MonkyServer {
       rateLimiter,
       attachmentService,
       serverRepo,
-      (userId, channelId) => channelService.canUserAccessChannel(userId, channelId),
-      userId => permissionService.checkPermission(userId, Permission.READ_MESSAGES),
+      (userId, channelId, permission) => channelService.canUserAccessChannel(userId, channelId, permission),
+      (userId, channelId) => channelService.canUserAccessChannel(userId, channelId, Permission.READ_MESSAGES),
       pollService,
     );
 
@@ -470,8 +456,8 @@ export class MonkyServer {
       }
       if (req.url && req.url.split('?')[0] === '/attachments' && req.method === 'POST') {
         void MonkyServer.handleAttachmentUpload(req, res, attachmentService, attachmentStorage, async (userId, channelId) =>
-          await permissionService.checkPermission(userId, Permission.ATTACH_FILES) &&
-          await channelService.canUserAccessChannel(userId, channelId));
+          await channelService.canUserAccessChannel(userId, channelId, Permission.ATTACH_FILES) &&
+          await channelService.canUserAccessChannel(userId, channelId, Permission.SEND_MESSAGES));
         return;
       }
       if (req.url && req.url.startsWith('/attachments/') && (req.method === 'GET' || req.method === 'HEAD')) {

@@ -64,6 +64,7 @@ export interface UserSummary {
 }
 
 export interface ChannelCategory {
+  permissionOverwrites?: import('./permissions.js').ChannelPermissionOverwrite[];
   id: string;
   serverId: string;
   name: string;
@@ -74,6 +75,8 @@ export interface ChannelCategory {
 }
 
 export interface ChannelSummary {
+  /** Effective rules, resolved from the category or forum parent by the server. */
+  permissionOverwrites?: import('./permissions.js').ChannelPermissionOverwrite[];
   forumId?: string | null;
   forumLocked?: boolean;
   forumClosed?: boolean;
@@ -90,7 +93,9 @@ export interface ChannelSummary {
   maxParticipants?: number;
   /**
    * Effective access: inherited from the category unless overridden.
-   * Restricts the channel to members holding one of `allowedRoleIds` (#384).
+   * Canonical access is governed by `permissionOverwrites`; allowedRoleIds is
+   * the legacy visibility projection. Migrated private channels can allow
+   * Everyone while retaining this flag to exclude bots.
    * The server never sends a channel the recipient cannot access, so receiving
    * one already means it is visible to you — this flag only drives the UI badge
    * and the editing form.
@@ -98,7 +103,7 @@ export interface ChannelSummary {
   isPrivate: boolean;
   /**
    * Roles allowed into a private channel. Empty on public channels, and also
-   * valid on a private one, where it means "managers only".
+   * valid on a private one. Owners and administrators always bypass its rules.
    */
   allowedRoleIds: string[];
 }
@@ -335,6 +340,7 @@ export interface BotCompatibilitySummary {
 // ── End bot types ─────────────────────────────────────────────────────────
 
 export interface ServerDetails {
+  everyonePermissions?: number;
   protocol?: import('./protocolCompatibility.js').ProtocolAgreement;
   maxMessageLength?: number;
   id: string;

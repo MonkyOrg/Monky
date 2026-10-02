@@ -31,6 +31,7 @@ class PcmTrackSource : public webrtc::Notifier<webrtc::AudioSourceInterface> {
   void SetEnabled(bool enabled);
   void End();
   NormalizerSnapshot Snapshot() const;
+  std::uint64_t ClockObservationsUnavailable() const { return unavailable_clock_observations_.load(); }
 
   SourceState state() const override { return state_.load(); }
   bool remote() const override { return false; }
@@ -50,6 +51,7 @@ class PcmTrackSource : public webrtc::Notifier<webrtc::AudioSourceInterface> {
   PcmNormalizer normalizer_;
   std::vector<webrtc::AudioTrackSinkInterface*> sinks_;
   std::atomic<SourceState> state_{kInitializing};
+  std::atomic<std::uint64_t> unavailable_clock_observations_{0};
   bool enabled_ = false;
   std::optional<std::int64_t> last_rtc_capture_ms_;
 };

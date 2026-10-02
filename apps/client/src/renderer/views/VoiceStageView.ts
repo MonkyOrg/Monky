@@ -3,6 +3,8 @@ import { escapeHtml } from '../utils/html';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
 import { appEvents } from '../core/EventBus';
+import { sessionManager } from '../core/SessionManager';
+import { screenPictureInPicture, type ScreenPictureInPictureSource } from '../core/ScreenPictureInPicture';
 import { networkClient } from '../core/NetworkClient';
 import { callClient, leaveCurrentCall } from '../core/serverConnection';
 import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
@@ -39,7 +41,7 @@ import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { BotScreenView } from './BotScreenView';
 import { ScreenViewersView } from './ScreenViewersView';
 import type { VoiceBotScreensUpdated } from '../stores/botScreenStore';
-import { showInfoToast } from './CopyToast';
+import { showInfoToast, showErrorToast } from './CopyToast';
 
 /**
  * A single renderable tile on the stage. A participant contributes one tile per
@@ -92,8 +94,10 @@ export class VoiceStageView {
   public onJoinChannel?: (channelId: string) => Promise<void>;
   private container: HTMLElement;
   private currentChannelId: string | null = null;
+  private renderedSessionKey: string | null = null;
   private chatOpen = false;
   private renderedJoined = false;
+  private windowInactive = false;
   private unbindEvents: Array<() => void> = [];
   private focusedTileKeys: string[] = [];
   private focusEpoch = 0;
@@ -110,6 +114,7 @@ export class VoiceStageView {
   private telemetryRefreshInFlight = false;
   private telemetrySnapshots = new Map<string, VideoTelemetrySnapshot>();
   private telemetryHistory = new Map<string, VideoTelemetrySnapshot[]>();
+  private telemetryHistorySources = new Map<string, string>();
   private telemetrySampler = new VideoDiagnosticsSampler();
   private nativeDecoderSampler = new NativeDecoderDiagnosticsSampler();
   private nativeTelemetryTargets = new Map<string, object>();
@@ -155,8 +160,10 @@ export class VoiceStageView {
         && this.container.querySelector('.voice-stage-container')) {
       this.refreshBotScreens();
       this.setChatOpen(this.chatOpen);
+      this.restorePictureInPicture();
       return;
     }
+    if (channelId !== this.currentChannelId) this.openAutomaticPictureInPicture();
     this.focusEpoch++;
     this.pendingScreenFocus.clear();
     this.clearFocusError();
@@ -168,6 +175,7 @@ export class VoiceStageView {
       this.stopTelemetryMonitor();
     }
     this.render();
+    this.restorePictureInPicture();
   }
 
   public hasOpenBotScreen(): boolean { return [...this.botScreens.values()].some((view) => view.isWatching); }
@@ -338,11 +346,15 @@ export class VoiceStageView {
   }
 
   public render(): void {
+    const sessionKey = sessionManager.getActiveKey();
+    const retainTelemetry = this.renderedSessionKey === sessionKey && !!this.currentChannelId && !!serverStore.serverDetails;
+    this.renderedSessionKey = sessionKey;
     this.participantStructure = null;
     this.releaseStageVideos(this.container);
     if (this.focusError) this.focusError.textContent = t('stage.fullscreenExitError');
     this.stopPingMonitor();
-    this.stopTelemetryMonitor();
+    if (retainTelemetry) this.pauseTelemetryMonitor();
+    else this.stopTelemetryMonitor();
     this.unbindListeners();
 
     if (!this.currentChannelId || !serverStore.serverDetails) {
@@ -604,6 +616,7 @@ export class VoiceStageView {
   private releaseStageVideos(root: HTMLElement): void {
     for (const video of root.querySelectorAll<HTMLVideoElement>('video.stage-video-element')) {
       this.videoLoadingListeners.get(video)?.();
+      if (screenPictureInPicture.retain(video)) continue;
       video.pause();
       video.srcObject = null;
     }
@@ -1450,6 +1463,56 @@ export class VoiceStageView {
       && typeof HTMLVideoElement.prototype.requestPictureInPicture === 'function';
   }
 
+  private pictureInPictureSource(video: HTMLVideoElement): ScreenPictureInPictureSource | null {
+    const card = video.closest<HTMLElement>('[data-kind="screen"][data-session-id]');
+    const publisherSessionId = card?.dataset.sessionId;
+    const prefix = `${publisherSessionId}:screen:`;
+    const key = card?.dataset.tileKey;
+    if (!publisherSessionId || !key?.startsWith(prefix) || !this.renderedSessionKey
+      || !this.currentChannelId || !(video.srcObject instanceof MediaStream)) return null;
+    return {
+      sessionKey: this.renderedSessionKey, channelId: this.currentChannelId,
+      publisherSessionId, shareId: key.slice(prefix.length), stream: video.srcObject,
+    };
+  }
+
+  public openAutomaticPictureInPicture(reason: 'navigation' | 'window-inactive' = 'navigation'): void {
+    screenPictureInPicture.markStageLeft(this.renderedSessionKey, this.currentChannelId, reason);
+    if (!settingsStore.screenShareAutoPictureInPicture || !this.isPictureInPictureAvailable()) return;
+    for (const key of [...this.focusedTileKeys].reverse()) {
+      const card = this.container.querySelector<HTMLElement>(`[data-tile-key="${CSS.escape(key)}"]`);
+      const video = card?.querySelector<HTMLVideoElement>('video.stage-video-element');
+      if (!video || !card?.querySelector('.stage-pip-btn')) continue;
+      const source = this.pictureInPictureSource(video);
+      if (!source) continue;
+      void screenPictureInPicture.open(video, source, reason, this.focusedTileKeys).catch(error => {
+        console.warn('[VoiceStageView] Automatic Picture-in-Picture failed:', error);
+        showErrorToast(t('stage.pictureInPictureErrorMessage'));
+      });
+      return;
+    }
+  }
+
+  private restorePictureInPicture(): void {
+    if (!this.isJoinedHere()) return;
+    const entry = screenPictureInPicture.getStageReturn(this.renderedSessionKey, this.currentChannelId);
+    if (!entry) return;
+    const key = `${entry.source.publisherSessionId}:screen:${entry.source.shareId}`;
+    const keys = [...entry.focusedTileKeys];
+    if (!keys.includes(key)) keys.push(key);
+    this.setFocusedTiles(keys.slice(-2), {
+      isCurrent: () => screenPictureInPicture.getStageReturn(this.renderedSessionKey, this.currentChannelId) === entry,
+      afterRender: () => {
+        const target = this.container.querySelector<HTMLVideoElement>(`[data-video-tile-key="${CSS.escape(key)}"]`);
+        if (!target) return;
+        this.videoLoadingListeners.get(target)?.();
+        if (screenPictureInPicture.restoreToStage(entry.video, target)) {
+          this.hideVideoLoadingWhenReady(entry.video, entry.video.id);
+        }
+      },
+    });
+  }
+
   private async openPictureInPicture(videoId: string, button: HTMLButtonElement): Promise<void> {
     const video = document.getElementById(videoId) as HTMLVideoElement | null;
     if (!video || !this.isPictureInPictureAvailable()
@@ -1462,7 +1525,9 @@ export class VoiceStageView {
     button.disabled = true;
     button.setAttribute('aria-busy', 'true');
     try {
-      await video.requestPictureInPicture();
+      const source = this.pictureInPictureSource(video);
+      if (!source) throw new Error('The screen Picture-in-Picture source is unavailable.');
+      await screenPictureInPicture.open(video, source, undefined, this.focusedTileKeys);
     } catch (error: unknown) {
       console.warn('[VoiceStageView] Picture-in-Picture request failed:', error);
       if (button.isConnected) {
@@ -1729,22 +1794,28 @@ export class VoiceStageView {
       const targets = new Set<object>();
       const samples = await Promise.all(videoTiles.map(async tile => ({
         key: tile.key,
+        sourceKey: this.nativeTelemetrySource(tile)?.instanceId ?? this.getTelemetryTrack(tile)?.id,
         snapshot: await this.collectTelemetrySnapshot(tile, epoch, targets),
       })));
       if (epoch !== this.telemetryEpoch) return;
 
       const nextSnapshots = new Map<string, VideoTelemetrySnapshot>();
       for (const sample of samples) {
-        if (sample.snapshot) {
+        if (sample.snapshot && sample.sourceKey) {
           nextSnapshots.set(sample.key, sample.snapshot);
-          const history = this.telemetryHistory.get(sample.key) ?? [];
+          const history = this.telemetryHistorySources.get(sample.key) === sample.sourceKey
+            ? this.telemetryHistory.get(sample.key) ?? [] : [];
           history.push(sample.snapshot);
           if (history.length > MAX_TELEMETRY_SAMPLES) history.shift();
           this.telemetryHistory.set(sample.key, history);
+          this.telemetryHistorySources.set(sample.key, sample.sourceKey);
         }
       }
       for (const key of this.telemetryHistory.keys()) {
-        if (!nextSnapshots.has(key)) this.telemetryHistory.delete(key);
+        if (!nextSnapshots.has(key)) {
+          this.telemetryHistory.delete(key);
+          this.telemetryHistorySources.delete(key);
+        }
       }
       this.telemetrySnapshots = nextSnapshots;
       this.telemetrySampler.retainTargets(targets);
@@ -1853,8 +1924,8 @@ export class VoiceStageView {
     if (nativeSource && tile.shareId) {
       try {
         const diagnostics = await webRtcManager.getScreenVideoDiagnostics(sidOf(tile.p), tile.shareId);
-        if (epoch !== this.telemetryEpoch || this.nativeTelemetrySource(tile)?.instanceId !== nativeSource.instanceId
-          || this.getTelemetryTrack(tile) !== track) return null;
+        if (epoch !== this.telemetryEpoch || this.nativeTelemetrySource(tile)?.instanceId !== nativeSource.instanceId) return null;
+        if (this.getTelemetryTrack(tile) !== track) snapshot.playback = null;
         if (!diagnostics) return snapshot;
         if (diagnostics.source.instanceId !== nativeSource.instanceId) return null;
         snapshot.nativeScreen = { receiver: isLocal ? null : diagnostics.backend,
@@ -1893,8 +1964,9 @@ export class VoiceStageView {
           console.warn('[VoiceStageView] Could not read native screen diagnostics', error);
         }
       }
+      if (this.getTelemetryTrack(tile) !== track) snapshot.playback = null;
       return epoch === this.telemetryEpoch && this.nativeTelemetrySource(tile)?.instanceId === nativeSource.instanceId
-        && this.getTelemetryTrack(tile) === track ? snapshot : null;
+        ? snapshot : null;
     }
 
     if (!track) return null;
@@ -1943,23 +2015,28 @@ export class VoiceStageView {
     return epoch === this.telemetryEpoch && this.getTelemetryTrack(tile) === track ? snapshot : null;
   }
 
-  private stopTelemetryMonitor(): void {
+  private pauseTelemetryMonitor(): void {
     this.telemetryEpoch++;
     this.telemetryRefreshInFlight = false;
     if (this.telemetryInterval !== null) {
       clearInterval(this.telemetryInterval);
       this.telemetryInterval = null;
     }
+    this.telemetryCopyRequest++;
+    this.clearTelemetryToast?.();
+    this.clearTelemetryToast = null;
+  }
+
+  private stopTelemetryMonitor(): void {
+    this.pauseTelemetryMonitor();
     this.telemetrySnapshots.clear();
     this.telemetryHistory.clear();
+    this.telemetryHistorySources.clear();
     this.telemetrySampler.clear();
     this.nativeDecoderSampler.clear();
     this.nativeTelemetryTargets.clear();
     this.telemetryEndpoints.clear();
     this.nextTelemetryEndpoint = 1;
-    this.telemetryCopyRequest++;
-    this.clearTelemetryToast?.();
-    this.clearTelemetryToast = null;
   }
 
   private startPingMonitor(): void {
@@ -2282,7 +2359,19 @@ export class VoiceStageView {
     const u23 = appEvents.on('native_screen.updated', () => this.refreshNativeScreenState());
     const u24 = appEvents.on('local.screen_started', (start: { shareId: string; stream: MediaStream }) => this.queueScreenStartFocus(start));
     const u25 = appEvents.on('local.screen_stopped', (shareId: string) => this.pendingScreenFocus.delete(shareId));
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22, u23, u24, u25);
+    const u26 = appEvents.on('screen_pip.stage_return', () => this.restorePictureInPicture());
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22, u23, u24, u25, u26);
+    const inactive = () => {
+      if (this.windowInactive) return;
+      this.windowInactive = true;
+      this.openAutomaticPictureInPicture('window-inactive');
+    };
+    const unbindInactive = window.api?.onWindowInactive?.(inactive);
+    const unbindActive = window.api?.onWindowActive?.(() => { this.windowInactive = false; });
+    this.unbindEvents.push(() => {
+      unbindInactive?.();
+      unbindActive?.();
+    });
     const area = this.container.querySelector('#stage-content-area');
     const position = () => {
       this.positionBotScreens();

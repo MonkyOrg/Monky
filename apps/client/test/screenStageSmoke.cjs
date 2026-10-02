@@ -19,6 +19,13 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
     restore.push(() => descriptor ? Object.defineProperty(object, key, descriptor) : Reflect.deleteProperty(object, key));
   };
   let mediaRequests = 0;
+  let copiedTelemetry = '';
+  replace(navigator.clipboard, 'writeText', async text => { copiedTelemetry = text; });
+  replace(window, 'api', {
+    ...window.api,
+    onWindowInactive: () => () => {},
+    onWindowActive: () => () => {},
+  });
   const denyMedia = async () => { mediaRequests++; throw new Error('The screen stage UI smoke cannot capture media.'); };
   replace(navigator.mediaDevices, 'getUserMedia', denyMedia);
   replace(navigator.mediaDevices, 'getDisplayMedia', denyMedia);
@@ -326,6 +333,21 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       const remoteStream = remoteVideo.srcObject;
       const remoteCard = card(remote.sessionId, remoteSource.shareId);
       const pipButton = remoteCard.querySelector('.stage-pip-btn');
+      const pipStyle = getComputedStyle(pipButton);
+      const fullscreenButton = remoteCard.querySelector('.stage-fullscreen-btn');
+      const fullscreenStyle = getComputedStyle(fullscreenButton);
+      check(['width', 'height', 'backgroundColor', 'color', 'borderRadius', 'borderWidth', 'cursor', 'backdropFilter']
+        .every(property => pipStyle[property] === fullscreenStyle[property])
+        && pipStyle.width === '32px' && pipStyle.height === '32px' && pipStyle.cursor === 'pointer',
+      'Picture-in-Picture matches the size, dark background and clickable cursor of the other screen controls');
+      const pipIcon = pipButton.querySelector('.material-symbols-outlined');
+      const pipBounds = pipButton.getBoundingClientRect();
+      const iconBounds = pipIcon.getBoundingClientRect();
+      check(getComputedStyle(pipIcon).fontSize === getComputedStyle(fullscreenButton.querySelector('.material-symbols-outlined')).fontSize
+        && getComputedStyle(pipIcon).cursor === 'pointer'
+        && Math.abs(pipBounds.x + pipBounds.width / 2 - iconBounds.x - iconBounds.width / 2) < 1
+        && Math.abs(pipBounds.y + pipBounds.height / 2 - iconBounds.y - iconBounds.height / 2) < 1,
+      'The Picture-in-Picture glyph is centered, full-sized and retains the clickable cursor');
       pipButton.click();
       await settle();
       check(pipRequests.at(-1) === remoteVideo && remoteVideo.srcObject === remoteStream
@@ -566,6 +588,75 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
         'Later updates must not retry a previously refused automatic focus');
       stage.setFocusedTiles([]);
       clearShares();
+
+      const telemetrySource = start();
+      voice.addScreenShare(telemetrySource.id);
+      const telemetryKey = focusKey(telemetrySource.id);
+      const originalDiagnostics = rtc.getScreenVideoDiagnostics;
+      const originalTelemetryTrack = stage.getTelemetryTrack;
+      let telemetryTime = 0;
+      let replacePreview = false;
+      rtc.getScreenVideoDiagnostics = async (sessionId, shareId) => {
+        if (sessionId !== local.sessionId || shareId !== telemetrySource.id) return null;
+        if (replacePreview) {
+          const preview = { id: crypto.randomUUID(), readyState: 'live' };
+          stage.getTelemetryTrack = tile => tile.key === telemetryKey ? preview
+            : originalTelemetryTrack.call(stage, tile);
+          replacePreview = false;
+        }
+        telemetryTime += 1500;
+        return { backend: 'native', source: captures.get(shareId).source, viewers: 1, endpoints: [{
+          pipelineId: 'stable-native-publisher', profile, readErrors: 0, decoders: [], rtp: [{
+            id: 'publisher', reports: [
+              { id: 'video', type: 'outbound-rtp', kind: 'video', timestamp: telemetryTime,
+                bytesSent: telemetryTime * 250, framesEncoded: telemetryTime * .06,
+                framesSent: telemetryTime * .06, frameWidth: profile.width, frameHeight: profile.height,
+                framesPerSecond: profile.fps, codecId: 'codec' },
+              { id: 'codec', type: 'codec', mimeType: 'video/H264' },
+            ],
+          }],
+        }] };
+      };
+      try {
+        settings.screenShareTelemetryEnabled = true;
+        stage.syncTelemetryMonitor();
+        await settle();
+        await stage.refreshTelemetry();
+        const samplesBeforeRender = stage.telemetryHistory.get(telemetryKey)?.length;
+        check(samplesBeforeRender >= 2, 'The native sender must collect multiple actual diagnostic samples');
+        stage.render();
+        await settle();
+        check(stage.telemetryHistory.get(telemetryKey)?.length > samplesBeforeRender,
+          'Repainting the same stage must not reset native sender telemetry to a single sample');
+        const sample = stage.telemetrySnapshots.get(telemetryKey)?.streams[0]?.data;
+        check(sample?.intervalMs === 1500 && sample.bitrateKbps === 2000,
+          'Native RTP deltas must survive a DOM repaint of the unchanged publisher');
+        replacePreview = true;
+        await stage.refreshTelemetry();
+        check(stage.telemetryHistory.get(telemetryKey)?.length > samplesBeforeRender + 1,
+          'Replacing only the native local preview during an RTP read must not erase sender diagnostics');
+        stage.getTelemetryTrack = originalTelemetryTrack;
+        for (let i = 0; i < 22; i++) await stage.refreshTelemetry();
+        await stage.copyTelemetry(telemetryKey, card(local.sessionId, telemetrySource.id).querySelector('.stage-diagnostics-btn'));
+        const report = JSON.parse(copiedTelemetry);
+        check(report.history.length === 20 && report.history.every(entry => entry.streams[0].data.bitrateKbps === 2000),
+          'Copy must export the bounded 20-sample history with real RTP deltas, not only the last reading');
+        const capture = captures.get(telemetrySource.id);
+        capture.source = { ...capture.source, instanceId: crypto.randomUUID() };
+        await stage.refreshTelemetry();
+        check(stage.telemetryHistory.get(telemetryKey)?.length === 1,
+          'A replaced native source must not inherit the previous source telemetry history');
+        stage.setChannel('other-channel');
+        check(stage.telemetryHistory.size === 0, 'Changing the displayed channel must clear diagnostic history');
+        stage.setChannel(channel.id);
+      } finally {
+        settings.screenShareTelemetryEnabled = false;
+        stage.syncTelemetryMonitor();
+        check(stage.telemetryHistory.size === 0, 'Disabling telemetry must discard its diagnostic history');
+        stage.getTelemetryTrack = originalTelemetryTrack;
+        rtc.getScreenVideoDiagnostics = originalDiagnostics;
+        clearShares();
+      }
 
       const oldChannel = start();
       stage.setChannel('other-channel');

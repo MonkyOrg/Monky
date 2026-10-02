@@ -38,7 +38,7 @@ export function openNativeLiveFormWizard(
   server: ServerStore,
   channelId: string,
 ): ReturnType<typeof openCommunityModal> | undefined {
-  if (!server.hasPermission(Permission.EMIT_LIVE_ACTIONS) ||
+  if (!server.hasPermission(Permission.EMIT_LIVE_ACTIONS, channelId) ||
       !server.serverDetails?.protocol?.features.includes('native-live-forms')) return;
   const modal = openCommunityModal(t('liveForm.create'));
   modal.element.querySelector('.community-modal')?.classList.add(

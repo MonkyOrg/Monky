@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
-import { MessageType, ProtocolErrorCode, nativeScreenSignalSchema, type NativeScreenSource } from '@monky/shared';
+import { DEFAULT_PERMISSIONS, MessageType, ProtocolErrorCode, nativeScreenSignalSchema, type NativeScreenSource } from '@monky/shared';
 import { createApprovedBotFixture, record, records, text, type Received } from './testFixtures/bots';
 
 function assertHidden(state: Record<string, unknown>): void {
@@ -90,7 +90,7 @@ test('role grants refresh visibility; removal/deletion and withdrawal revoke exa
   const pub = text(record(publisher.auth.payload.currentUser).sessionId);
   const view = text(record(viewer.auth.payload.currentUser).sessionId);
   for (const user of [owner, publisher, viewer]) await user.peer.request(MessageType.VOICE_JOIN, { channelId: room });
-  const created = await owner.peer.request(MessageType.ROLE_CREATE, { name: 'Screen viewers', permissions: 0 });
+  const created = await owner.peer.request(MessageType.ROLE_CREATE, { name: 'Screen viewers', permissions: DEFAULT_PERMISSIONS });
   const roleId = text(records(created.payload.roles).find(role => role.name === 'Screen viewers')?.id);
   const source = {
     shareId: 'role-live', instanceId: randomUUID(), audio: true,

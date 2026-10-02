@@ -113,7 +113,7 @@ export class ServerCommunityView {
     const liveActionCount = snapshot.liveActions.length + (snapshot.polls?.length ?? 0) +
       (snapshot.nativeForms?.length ?? 0);
     const canCreateLiveAction = snapshot.settings.eventsEnabled &&
-      this.feed.server.hasPermission(Permission.EMIT_LIVE_ACTIONS) &&
+      this.liveActionChannels().length > 0 &&
       (this.feed.server.serverDetails?.protocol?.features.includes('native-polls') ||
         this.feed.server.serverDetails?.protocol?.features.includes('native-live-forms'));
     const showToolbar = snapshot.settings.eventsEnabled || liveActionCount > 0 || canCreateLiveAction;
@@ -262,7 +262,7 @@ export class ServerCommunityView {
   private canManageEvent(event: ServerEventPublic): boolean {
     return event.creatorUserId === this.feed.server.currentUser?.id ||
       this.feed.server.hasPermission(Permission.MANAGE_SERVER) ||
-      this.feed.server.hasPermission(Permission.MANAGE_EVENTS);
+      this.feed.server.hasPermission(Permission.MANAGE_EVENTS, event.location.kind === 'external' ? undefined : event.location.channelId);
   }
 
   private bindEventActions(modal: ReturnType<typeof openCommunityModal>, events: () => ServerEventPublic[]): void {
@@ -359,7 +359,9 @@ export class ServerCommunityView {
     const modal = this.modal(t('community.events'));
     modal.element.querySelector('.community-modal')?.classList.add('event-list-modal');
     const header = modal.element.querySelector('.modal-header');
-    if (this.feed.server.hasPermission(Permission.MANAGE_EVENTS)) {
+    if (this.feed.server.hasPermission(Permission.MANAGE_EVENTS) ||
+        this.feed.server.serverDetails?.channels.some(channel => !channel.forumId &&
+          (channel.type === 'TEXT' || channel.type === 'VOICE') && this.feed.server.hasPermission(Permission.MANAGE_EVENTS, channel.id))) {
       const create = document.createElement('button');
       create.className = 'btn btn-primary';
       create.dataset.createEvent = '';
@@ -547,7 +549,7 @@ export class ServerCommunityView {
     const modal = this.modal(t('community.liveActions'));
     modal.element.querySelector('.community-modal')?.classList.add('event-list-modal', 'live-action-list-modal');
     const header = modal.element.querySelector('.modal-header');
-    const canCreate = this.feed.server.hasPermission(Permission.EMIT_LIVE_ACTIONS) &&
+    const canCreate = this.liveActionChannels().length > 0 &&
       (this.feed.server.serverDetails?.protocol?.features.includes('native-polls') ||
         this.feed.server.serverDetails?.protocol?.features.includes('native-live-forms'));
     if (canCreate && header) {
@@ -591,7 +593,7 @@ export class ServerCommunityView {
         const channel = this.feed.server.getChannel(poll.channelId);
         const canManage = this.feed.server.currentUser?.id === poll.creatorUserId ||
           this.feed.server.hasPermission(Permission.MANAGE_SERVER) ||
-          this.feed.server.hasPermission(Permission.EMIT_LIVE_ACTIONS);
+          this.feed.server.hasPermission(Permission.EMIT_LIVE_ACTIONS, poll.channelId);
         return `<article class="community-event-row live-action-card" data-live-poll-card="${escapeHtml(poll.id)}">
           ${poll.imageUrls[0] ? `<img class="live-action-card-image" src="${escapeHtml(this.feed.client.getHttpBaseUrl() + poll.imageUrls[0])}" alt="">` : ''}
           <div class="community-event-content">
@@ -686,12 +688,17 @@ export class ServerCommunityView {
     render();
   }
 
+  private liveActionChannels() {
+    return this.feed.server.serverDetails?.channels.filter(channel =>
+      !channel.forumId && (channel.type === 'TEXT' || channel.type === 'VOICE') &&
+      this.feed.server.hasPermission(Permission.EMIT_LIVE_ACTIONS, channel.id)) ?? [];
+  }
+
   private openCreateLiveAction(): void {
     const modal = this.modal(t('liveAction.create'));
     modal.element.querySelector('.community-modal')?.classList.add('live-action-create-modal');
-    const channels = this.feed.server.serverDetails?.channels.filter(channel =>
-      !channel.forumId && (channel.type === 'TEXT' || channel.type === 'VOICE')) ?? [];
-    const canPoll = this.feed.server.hasPermission(Permission.SEND_MESSAGES) &&
+    const channels = this.liveActionChannels();
+    const canPoll = channels.some(channel => this.feed.server.hasPermission(Permission.SEND_MESSAGES, channel.id)) &&
       !!this.feed.server.serverDetails?.protocol?.features.includes('native-polls');
     const canForm = !!this.feed.server.serverDetails?.protocol?.features.includes('native-live-forms');
     modal.content.innerHTML = `<p class="event-wizard-hint">${t('liveAction.createHint')}</p>
@@ -713,6 +720,11 @@ export class ServerCommunityView {
       if (!type) return;
       const channelId = modal.content.querySelector<HTMLSelectElement>('[data-live-action-channel]')?.value;
       if (!channelId) { modal.fail(t('liveAction.noChannels')); return; }
+      if (!this.feed.server.hasPermission(Permission.EMIT_LIVE_ACTIONS, channelId) ||
+          type === 'poll' && !this.feed.server.hasPermission(Permission.SEND_MESSAGES, channelId)) {
+        modal.fail(t('protocolError.permissionDenied'));
+        return;
+      }
       modal.close(true);
       queueMicrotask(() => {
         if (type === 'poll') {
@@ -738,7 +750,7 @@ export class ServerCommunityView {
     const render = () => {
       modal.content.innerHTML = `${renderNativePoll(
         poll,
-        !pending && this.feed.server.hasPermission(Permission.SEND_MESSAGES),
+        !pending && this.feed.server.hasPermission(Permission.SEND_MESSAGES, poll.channelId),
         formatTime,
         this.feed.client.getHttpBaseUrl(),
       )}`;
@@ -832,7 +844,7 @@ export class ServerCommunityView {
   private canManageNativeForm(form: NativeLiveForm): boolean {
     return this.feed.server.currentUser?.id === form.creatorUserId ||
       this.feed.server.hasPermission(Permission.MANAGE_SERVER) ||
-      this.feed.server.hasPermission(Permission.EMIT_LIVE_ACTIONS);
+      this.feed.server.hasPermission(Permission.EMIT_LIVE_ACTIONS, form.channelId);
   }
 
   private runCloseNativeForm(
@@ -1390,7 +1402,7 @@ export class ServerCommunityView {
   private canCloseLiveAction(action: LiveAction): boolean {
     return this.feed.server.currentUser?.id === action.creatorUserId ||
       this.feed.server.hasPermission(Permission.MANAGE_SERVER) ||
-      this.feed.server.hasPermission(Permission.EMIT_LIVE_ACTIONS);
+      this.feed.server.hasPermission(Permission.EMIT_LIVE_ACTIONS, action.channelId);
   }
 
   private runCloseLiveAction(

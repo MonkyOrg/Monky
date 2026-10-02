@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { botPermissionsSchema } from './botPermissions.js';
 
-export const DEVELOPMENT_QA_SCENARIOS = ['connected', 'server-settings', 'voice', 'voice-receive', 'music', 'home', 'login', 'bot-install', 'tool-consent'] as const;
+export const DEVELOPMENT_QA_SCENARIOS = ['connected', 'empty-forum', 'server-settings', 'voice', 'voice-receive', 'music', 'home', 'login', 'bot-install', 'tool-consent'] as const;
 export type DevelopmentQaScenario = typeof DEVELOPMENT_QA_SCENARIOS[number];
 
 const loopbackManifest = z.string().max(2048).refine((value) => {

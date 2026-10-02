@@ -7324,7 +7324,17 @@ input:focus, textarea:focus, select:focus {
   accent-color: var(--accent-primary);
 }
 
+.screen-pip-host {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .stage-fullscreen-btn,
+.stage-pip-btn,
 .stage-diagnostics-btn {
   position: relative;
   bottom: auto;
@@ -7351,6 +7361,7 @@ input:focus, textarea:focus, select:focus {
 }
 
 .stage-fullscreen-btn:hover,
+.stage-pip-btn:hover,
 .stage-diagnostics-btn:hover {
   background-color: rgba(0, 0, 0, 0.85);
 }
@@ -7953,11 +7964,6 @@ button[data-loading="1"]::after {
 .role-members-search:focus {
   outline: none;
   border-color: var(--accent-primary);
-}
-
-.role-members-bulk {
-  font-size: 11px;
-  padding: 6px 10px;
 }
 
 .member-role-tags {
@@ -9114,8 +9120,8 @@ button[data-loading="1"]::after {
   outline: none;
 }
 
-.share-audience-search:focus-within { border-bottom-color: var(--accent-primary); }
 .share-audience-search input::placeholder { color: var(--text-muted); }
+.share-audience-search input::-webkit-search-cancel-button { cursor: pointer; }
 .share-audience-options { max-height: min(280px, 35vh); overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
 .share-audience-options h4 { margin: 0; padding: 10px 8px 5px; font-size: 0.75rem; font-weight: 600; color: var(--text-muted); }
 
@@ -9144,7 +9150,15 @@ button[data-loading="1"]::after {
 .share-audience-role { width: 12px; height: 12px; margin: 6px; flex-shrink: 0; border-radius: 50%; background: var(--role-color); }
 .share-audience-chip .share-audience-avatar { width: 20px; height: 20px; }
 .share-audience-chip .share-audience-role { margin: 4px; }
-#share-audience-no-results { padding: 12px 8px; margin: 0; font-size: 0.85rem; color: var(--text-muted); }
+#share-audience-no-results,
+[data-audience-no-results] {
+  padding: 16px 12px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  text-align: center;
+}
 .share-audience-popup[hidden], .share-audience-option[hidden], .share-audience-group[hidden] { display: none; }
 .share-audience-trigger:disabled, .share-audience-option:disabled { opacity: 0.5; cursor: not-allowed; }
 .share-audience-trigger:focus-visible, .share-audience-option:focus-visible {

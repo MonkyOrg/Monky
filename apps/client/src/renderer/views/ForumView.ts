@@ -32,7 +32,8 @@ export class ForumView {
   private next = 0;
   private more = false;
   private disposed = false;
-  private loading = false;
+  private loaded = false;
+  private loading: 'initial' | 'refresh' | 'append' | null = null;
   private lazyObserver: IntersectionObserver | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   private composerClose: ((immediate?: boolean) => void) | null = null;
@@ -79,7 +80,7 @@ export class ForumView {
       this.refreshTimer = setTimeout(() => { void this.load(); }, 300);
     }, { signal: this.lifetime.signal });
     root.querySelector<HTMLInputElement>('[data-forum-search]')?.addEventListener('keydown', event => {
-      if (event.key !== 'Enter' || !event.shiftKey || !this.server.hasPermission(Permission.SEND_MESSAGES)) return;
+      if (event.key !== 'Enter' || !event.shiftKey || !this.server.hasPermission(Permission.SEND_MESSAGES, this.channelId)) return;
       event.preventDefault();
       this.edit(undefined, true);
     }, { signal: this.lifetime.signal });
@@ -101,10 +102,15 @@ export class ForumView {
       if ([MessageType.CHANNEL_DELETED, MessageType.CHANNEL_UPDATED, MessageType.CATEGORIES_UPDATED, MessageType.ROLES_LIST]
         .some(type => event === `message.${type}`)) {
         this.generation++;
+        this.loaded = false;
+        this.loading = null;
+        this.next = 0;
+        this.more = false;
         this.posts = [];
         this.renderPosts();
+        this.syncLazyState();
         for (const close of [...this.modals]) close(true);
-        if (!server.getChannel(channelId) || !server.hasPermission(Permission.READ_MESSAGES)) return;
+        if (!server.getChannel(channelId) || !server.hasPermission(Permission.READ_MESSAGES, channelId)) return;
       }
       if ([MessageType.FORUM_POST_SAVED, MessageType.CHAT_MESSAGE, MessageType.CHAT_MESSAGE_UPDATED,
         MessageType.CHAT_REACTION_ADDED, MessageType.CHAT_REACTION_REMOVED,
@@ -119,8 +125,12 @@ export class ForumView {
 
   private async load(append = false, animateReorder = false): Promise<void> {
     if (this.disposed || (append && (this.loading || !this.more))) return;
+    if (!this.server.hasPermission(Permission.READ_MESSAGES, this.channelId)) {
+      this.renderPosts();
+      return;
+    }
     const generation = ++this.generation;
-    this.loading = true;
+    this.loading = append ? 'append' : this.loaded ? 'refresh' : 'initial';
     this.syncLazyState();
     try {
       const response = await this.client.sendRequest<ForumListResult>(MessageType.FORUM_LIST, {
@@ -130,6 +140,7 @@ export class ForumView {
       this.posts = append ? [...new Map([...this.posts, ...response.posts].map(post => [post.channelId, post])).values()] : response.posts;
       this.next = response.nextOffset;
       this.more = response.hasMore;
+      this.loaded = true;
       this.renderPosts(animateReorder);
     } catch (failure) {
       if (this.disposed || generation !== this.generation) return;
@@ -137,7 +148,7 @@ export class ForumView {
       showErrorToast(failure instanceof Error ? failure.message : t('community.actionFailed'));
     } finally {
       if (!this.disposed && generation === this.generation) {
-        this.loading = false;
+        this.loading = null;
         this.syncLazyState();
       }
     }
@@ -147,14 +158,20 @@ export class ForumView {
     const container = this.root.querySelector<HTMLElement>('[data-forum-posts]');
     const loading = this.root.querySelector<HTMLElement>('[data-forum-loading]');
     const sentinel = this.root.querySelector<HTMLElement>('[data-forum-sentinel]');
-    container?.setAttribute('aria-busy', String(this.loading));
-    if (loading) loading.hidden = !this.loading;
-    if (sentinel) sentinel.hidden = this.loading || !this.more;
+    container?.setAttribute('aria-busy', String(this.loading !== null));
+    const empty = container?.querySelector<HTMLElement>('.forum-empty-state');
+    if (empty) empty.hidden = this.loading === 'initial';
+    if (loading) loading.hidden = this.loading !== 'initial' && this.loading !== 'append';
+    if (sentinel) sentinel.hidden = this.loading !== null || !this.more;
   }
 
   private renderPosts(animateReorder = false): void {
     const container = this.root.querySelector('[data-forum-posts]');
     if (!container) return;
+    if (!this.server.hasPermission(Permission.READ_MESSAGES, this.channelId)) {
+      container.innerHTML = `<div class="forum-empty" role="status">${t('channelPermissions.readDenied')}</div>`;
+      return;
+    }
     const reorderMotion = animateReorder && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const previous = reorderMotion
       ? new Map([...container.querySelectorAll<HTMLElement>('[data-forum-id]')]
@@ -210,7 +227,7 @@ export class ForumView {
       }
     }
     const create = this.root.querySelector<HTMLButtonElement>('[data-forum-create]');
-    if (create) create.disabled = !this.server.hasPermission(Permission.SEND_MESSAGES);
+    if (create) create.disabled = !this.server.hasPermission(Permission.SEND_MESSAGES, this.channelId);
   }
 
   private click = (event: MouseEvent): void => {
@@ -229,7 +246,7 @@ export class ForumView {
 
   private openPostMenu(post: ForumPost, anchor: HTMLElement, x: number, y: number): void {
     const items: ContextMenuEntry[] = [{ label: t('community.open'), icon: 'forum', onClick: () => this.openPost(post.channelId) }];
-    const manager = this.server.hasPermission(Permission.MANAGE_CHANNELS);
+    const manager = this.server.hasPermission(Permission.MANAGE_CHANNELS, this.channelId);
     if (manager || post.authorId === this.server.currentUser?.id) items.push({
       label: t('forum.rename'), icon: 'edit', onClick: () => this.rename(post),
     });
@@ -360,7 +377,7 @@ export class ForumView {
       <div class="forum-composer-title"><input class="input-field" aria-label="${t('forum.postTitle')}" placeholder="${t('forum.postTitle')}" name="title" required maxlength="100" value="${escapeHtml(this.query)}">
         <button type="button" class="btn btn-secondary" data-post-close aria-label="${t('common.close')}"><span class="material-symbols-outlined md-20">close</span></button></div>
       <textarea class="input-field" aria-label="${t('forum.message')}" placeholder="${t('forum.message')}" name="content" required rows="3" ${this.server.serverDetails?.maxMessageLength ? `maxlength="${this.server.serverDetails.maxMessageLength}"` : ''}></textarea>
-      ${this.server.hasPermission(Permission.ATTACH_FILES) ? `
+      ${this.server.hasPermission(Permission.ATTACH_FILES, this.channelId) ? `
         <input type="file" data-post-media-input aria-label="${t('forum.addMedia')}" accept="image/*,video/*" multiple hidden>
         <input type="file" data-post-file-input aria-label="${t('forum.addFiles')}" multiple hidden>
         <section class="forum-attachment-preview" data-forum-media-preview hidden></section>
@@ -368,7 +385,7 @@ export class ForumView {
         <p class="forum-upload-progress" data-upload-progress role="status"></p>` : ''}
       <footer class="forum-composer-footer">
         <button type="button" class="btn btn-secondary" data-post-emoji aria-label="${t('chat.emojiPickerTitle')}"><span class="material-symbols-outlined md-20">mood</span></button>
-        ${this.server.hasPermission(Permission.ATTACH_FILES) ? `
+        ${this.server.hasPermission(Permission.ATTACH_FILES, this.channelId) ? `
           <button type="button" class="btn btn-secondary forum-attachment-action" data-post-media>
             <span class="material-symbols-outlined md-20">perm_media</span><span>${t('forum.addMedia')}</span>
           </button>

@@ -62,11 +62,13 @@ if (!process.versions.electron) {
     if (process.argv.includes('--stage-only')) {
       const { runScreenStageSmoke } = require('./screenStageSmoke.cjs');
       const { runScreenViewersSmoke } = require('./screenViewersSmoke.cjs');
+      const { runAutomaticScreenPipSmoke } = require('./automaticScreenPipSmoke.cjs');
       const { appEventHandlerSource } = require('./fixtures/screenSharingUiModel.cjs');
       const source = appEventHandlerSource('native_screen.capture_fallback');
       const stage = await evaluate(`(${runScreenStageSmoke.toString()})(${JSON.stringify(source)})`);
       const viewers = await evaluate(`(${runScreenViewersSmoke.toString()})()`);
-      console.log(`Hidden stage surfaces: ${stage} stage and ${viewers} viewer checks passed`);
+      const pip = await evaluate(`(${runAutomaticScreenPipSmoke.toString()})()`);
+      console.log(`Hidden stage surfaces: ${stage} stage, ${viewers} viewer and ${pip} automatic PiP checks passed`);
       await finish(0);
       return;
     }

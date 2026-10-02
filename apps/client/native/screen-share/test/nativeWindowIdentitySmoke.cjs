@@ -99,7 +99,8 @@ async function main() {
       const selected = await fixture(className);
       await probe(runtime, selected.target, `${className}:same-process-child`, undefined, true);
       const duplicate = await fixture(className, selected.nonce);
-      await probe(runtime, selected.target, `${className}:duplicate-title`, 'ERR_SCREEN_CAPTURE_SOURCE_AMBIGUOUS');
+      await probe(runtime, selected.target, `${className}:duplicate-title`, undefined, true);
+      await probe(runtime, duplicate.target, `${className}:duplicate-title-second-window`, undefined, true);
       await duplicate.close();
       const foreign = await fixture(className, undefined, selected.target.hwnd);
       await probe(runtime, selected.target, `${className}:foreign-child-remapping`, 'ERR_SCREEN_CAPTURE_SOURCE_IDENTITY');

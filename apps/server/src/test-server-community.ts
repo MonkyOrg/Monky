@@ -638,7 +638,7 @@ test('native live forms enforce creation, editable responses, results and close 
   assert.equal(created.type, MessageType.NATIVE_FORM_SNAPSHOT);
   const formId = text(created.payload.id);
   assert.equal(records((await member.peer.request(MessageType.COMMUNITY_GET)).payload.nativeForms).length, 1);
-  const legacy = await f.human('Legacy form client', undefined, undefined, false, 32);
+  const legacy = await f.human('Client without forms', undefined, undefined, false, undefined, { minimumVersion: 35, features: ['server-community'] });
   const legacySnapshot = record((await legacy.peer.request(MessageType.COMMUNITY_GET)).payload);
   assert.equal(Object.hasOwn(legacySnapshot, 'nativeForms'), false);
   await legacy.peer.error(MessageType.NATIVE_FORM_SUBMIT, {

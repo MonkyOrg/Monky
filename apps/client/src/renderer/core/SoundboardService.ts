@@ -407,7 +407,7 @@ export class SoundboardService {
       return false;
     }
 
-    if (!voiceServerStore.hasPermission(Permission.USE_SOUNDBOARD)) {
+    if (!voiceServerStore.hasPermission(Permission.USE_SOUNDBOARD, voiceStore.currentVoiceChannelId)) {
       console.warn('[SoundboardService] Missing USE_SOUNDBOARD permission on voice server');
       return false;
     }

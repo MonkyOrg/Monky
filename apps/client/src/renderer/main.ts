@@ -101,7 +101,7 @@ class App {
       const session = sessionManager.get(call.sessionKey);
       return session?.client.getStatus() === 'CONNECTED'
         && session.serverStore.getChannel(call.channelId)?.type === 'VOICE'
-        && session.serverStore.hasPermission(Permission.SPEAK);
+        && session.serverStore.hasPermission(Permission.SPEAK, call.channelId);
     },
     notify: () => {
       void showAlert({ title: t('voiceReconnect.title'), message: t('voiceReconnect.notice'), variant: 'info' });
@@ -729,8 +729,12 @@ class App {
     });
 
     appEvents.on(`message.${MessageType.ROLES_LIST}`, (payload: RolesListPayload) => {
-      serverStore.updateRoles(payload.roles, payload.userRoles);
-      if (!serverStore.hasPermission(Permission.SEND_MESSAGES)) chatStore.finishAllInvocations('cancelled');
+      serverStore.updateRoles(payload.roles, payload.userRoles, payload.everyonePermissions);
+      for (const channel of serverStore.serverDetails?.channels ?? []) {
+        if (!serverStore.hasPermission(Permission.READ_MESSAGES, channel.id)) chatStore.revokeChannel(channel.id);
+        else if (!serverStore.hasPermission(Permission.SEND_MESSAGES, channel.id) ||
+            !serverStore.hasPermission(Permission.USE_BOT_COMMANDS, channel.id)) chatStore.finishChannelInvocations(channel.id);
+      }
     });
 
     appEvents.on(`message.${MessageType.USER_LEFT}`, (payload: UserLeftPayload) => {
@@ -794,12 +798,15 @@ class App {
     });
 
     appEvents.on(`message.${MessageType.CHANNEL_DELETED}`, (payload: ChannelDeletedPayload) => {
-      chatStore.finishChannelInvocations(payload.channelId);
       serverStore.removeChannel(payload.channelId);
+      chatStore.revokeChannel(payload.channelId);
     });
 
     appEvents.on(`message.${MessageType.CHANNEL_UPDATED}`, (payload: ChannelUpdatedPayload) => {
       serverStore.updateChannel(payload.channel);
+      if (!serverStore.hasPermission(Permission.READ_MESSAGES, payload.channel.id)) chatStore.revokeChannel(payload.channel.id);
+      else if (!serverStore.hasPermission(Permission.SEND_MESSAGES, payload.channel.id) ||
+          !serverStore.hasPermission(Permission.USE_BOT_COMMANDS, payload.channel.id)) chatStore.finishChannelInvocations(payload.channel.id);
     });
 
     appEvents.on(`message.${MessageType.CHANNELS_REORDERED}`, (payload: ChannelsReorderedPayload) => {
@@ -808,9 +815,15 @@ class App {
 
     appEvents.on(`message.${MessageType.CATEGORIES_UPDATED}`, (payload: import('@monky/shared').CategoriesUpdatedPayload) => {
       serverStore.setCategories(payload.categories);
+      for (const channel of serverStore.serverDetails?.channels ?? []) {
+        if (!serverStore.hasPermission(Permission.READ_MESSAGES, channel.id)) chatStore.revokeChannel(channel.id);
+        else if (!serverStore.hasPermission(Permission.SEND_MESSAGES, channel.id) ||
+            !serverStore.hasPermission(Permission.USE_BOT_COMMANDS, channel.id)) chatStore.finishChannelInvocations(channel.id);
+      }
     });
 
     appEvents.on(`message.${MessageType.CHAT_MESSAGE}`, (message: ChatMessage) => {
+      if (!serverStore.hasPermission(Permission.READ_MESSAGES, message.channelId)) return;
       chatStore.addMessage(message);
       // Incoming chat cue (#152), honoring the mute / mentions-only settings
       // (#153). Own and system messages are ignored. A mention is "@<nickname>"
@@ -863,6 +876,7 @@ class App {
     });
 
     appEvents.on(`message.${MessageType.CHAT_HISTORY}`, (payload: ChatHistoryPayload) => {
+      if (!serverStore.hasPermission(Permission.READ_MESSAGES, payload.channelId)) return;
       chatStore.setHistory(payload.channelId, payload.messages, payload.aroundMessageId);
     });
 
@@ -876,11 +890,11 @@ class App {
     // An existing message was edited or deleted (#504). No sound and no unread
     // marker: nothing new was said, so nothing should call attention to it.
     appEvents.on(`message.${MessageType.CHAT_MESSAGE_UPDATED}`, (payload: ChatMessageUpdatedPayload) => {
-      if (payload?.message) chatStore.updateMessage(payload.message);
+      if (payload?.message && serverStore.hasPermission(Permission.READ_MESSAGES, payload.message.channelId)) chatStore.updateMessage(payload.message);
     });
     appEvents.on(`message.${MessageType.POLL_UPDATED}`, (payload: unknown) => {
       const poll = nativePollSchema.safeParse(payload);
-      if (poll.success) chatStore.updatePoll(poll.data);
+      if (poll.success && serverStore.hasPermission(Permission.READ_MESSAGES, poll.data.channelId)) chatStore.updatePoll(poll.data);
     });
 
     appEvents.on(`message.${MessageType.VOICE_USER_JOINED}`, (payload: VoiceUserJoinedPayload) => {

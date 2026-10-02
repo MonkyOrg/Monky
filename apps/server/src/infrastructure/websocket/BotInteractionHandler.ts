@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { WebSocket } from 'ws';
 import {
+  hasChannelPermission,
   BotCommandMessagePayload,
   BotForm,
   BotSettingsContext,
@@ -889,9 +890,9 @@ export class BotInteractionHandler {
       const context = contexts.get(invokerId);
       return !!channel && (channel.type === 'TEXT' || channel.type === 'VOICE') && !!context &&
         channel.botCommandsEnabled &&
-        hasPermission(context.permissions, Permission.USE_BOT_COMMANDS) &&
-        hasPermission(context.permissions, Permission.SEND_MESSAGES) &&
-        canAccessChannel(channel, context.permissions, context.roleIds);
+        hasChannelPermission(channel, context.permissions, context.roleIds, Permission.USE_BOT_COMMANDS, false, context.userId) &&
+        hasChannelPermission(channel, context.permissions, context.roleIds, Permission.SEND_MESSAGES, false, context.userId) &&
+        canAccessChannel(channel, context.permissions, context.roleIds, false, context.userId);
     };
     for (const pending of this.autocompletes.values()) {
       if (!canContinue(pending.invokerId, pending.channelId)) {
@@ -1001,10 +1002,10 @@ export class BotInteractionHandler {
     if (await this.getAccessError(invocation.invokerId, invocation.channelId)) return undefined;
     const [channel, context] = await Promise.all([
       this.channelService.getChannelSummary(channelId),
-      this.channelService.getAccessContext(invocation.invokerId),
+      this.channelService.getAccessContext(invocation.invokerId, channelId),
     ]);
     if (!channel || channel.type !== 'VOICE' || (requireSpeak && !hasPermission(context.permissions, Permission.SPEAK)) ||
-        !canAccessChannel(channel, context.permissions, context.roleIds)) return undefined;
+        !canAccessChannel(channel, context.permissions, context.roleIds, false, context.userId)) return undefined;
     const isCurrent = () => this.isActive(invocation) &&
       this.transport.getVoiceChannelId?.(originSessionId) === channelId;
     return isCurrent() ? { creatorUserId: invocation.invokerId, originChannelId: invocation.channelId, isCurrent } : undefined;
@@ -1247,15 +1248,15 @@ export class BotInteractionHandler {
   private async getAccessError(userId: string, channelId: string): Promise<ProtocolErrorCode | undefined> {
     const [channel, context, isMember] = await Promise.all([
       this.channelService.getChannelSummary(channelId),
-      this.channelService.getAccessContext(userId),
+      this.channelService.getAccessContext(userId, channelId),
       this.userService.isMember(userId),
     ]);
     if (!isMember) return ProtocolErrorCode.UNAUTHORIZED;
-    if (!hasPermission(context.permissions, Permission.SEND_MESSAGES)) return ProtocolErrorCode.PERMISSION_DENIED;
     if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE') ||
-        !canAccessChannel(channel, context.permissions, context.roleIds)) {
+        !canAccessChannel(channel, context.permissions, context.roleIds, false, context.userId)) {
       return ProtocolErrorCode.CHANNEL_NOT_FOUND;
     }
+    if (!hasPermission(context.permissions, Permission.SEND_MESSAGES)) return ProtocolErrorCode.PERMISSION_DENIED;
     if (!channel.botCommandsEnabled || !hasPermission(context.permissions, Permission.USE_BOT_COMMANDS)) {
       return ProtocolErrorCode.PERMISSION_DENIED;
     }

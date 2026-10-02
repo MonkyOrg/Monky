@@ -342,8 +342,8 @@ export class BotChatView {
   private canSend(): boolean {
     const channel = this.server.serverDetails?.channels.find((candidate) => candidate.id === this.channelId);
     return (channel?.type === 'TEXT' || channel?.type === 'VOICE') && channel.botCommandsEnabled &&
-      this.server.hasPermission(Permission.USE_BOT_COMMANDS) &&
-      this.server.hasPermission(Permission.SEND_MESSAGES) && this.client.getStatus() === 'CONNECTED';
+      this.server.hasPermission(Permission.USE_BOT_COMMANDS, this.channelId) &&
+      this.server.hasPermission(Permission.SEND_MESSAGES, this.channelId) && this.client.getStatus() === 'CONNECTED';
   }
 
   private voiceError(command: Pick<SlashCommand, 'botId' | 'voiceRequirement'>): string | undefined {

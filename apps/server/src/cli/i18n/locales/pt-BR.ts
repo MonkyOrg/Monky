@@ -392,6 +392,7 @@ export const ptBR = {
   'validation.roleColor': 'Cor inválida. Use o formato #RRGGBB.',
   'validation.voiceMode': 'Modo de voz inválido: {value}. Use p2p ou sfu.',
   'permission.MANAGE_CHANNELS': 'Gerenciar canais',
+  'permission.VIEW_CHANNEL': 'Ver canais',
   'permission.MANAGE_SERVER': 'Gerenciar servidor',
   'permission.MANAGE_ROLES': 'Gerenciar cargos',
   'permission.KICK_MEMBERS': 'Expulsar membros',

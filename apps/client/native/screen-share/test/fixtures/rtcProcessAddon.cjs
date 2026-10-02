@@ -15,6 +15,9 @@ function createEngine(options, emit) {
       if (operation === 'crash') { process.abort(); return; }
       if (operation === 'exit') { process.exit(37); return; }
       if (operation === 'reject') throw Object.assign(new Error('Fixture rejection'), { code: 'ERR_FIXTURE', status: 6 });
+      if (operation === 'audio.configureOutput')
+        return Promise.resolve({ epoch: data.epoch, sampleRate: 48000, channels: 2 });
+      if (operation === 'audio.stopOutput') return Promise.resolve({});
       if (operation === 'surface') {
         const id = Buffer.alloc(8);
         id.writeBigUInt64LE(7n);
@@ -50,6 +53,12 @@ function createEngine(options, emit) {
         frameIndex: packet.frameIndex, frames: packet.frames, ok: true });
     },
     audioClockProbe() { throw new Error('No synthetic clock observations are permitted.'); },
+    setAudioOutputFeedback() {
+      return new Promise(resolve => {
+        const timer = setTimeout(() => { timers.delete(timer); resolve(); }, options.feedbackDelayMs ?? 0);
+        timers.add(timer);
+      });
+    },
     snapshot: () => {
       if (closing && options.rejectSnapshotDuringClose) throw new Error('Fixture native snapshot is unavailable during close.');
       return { fixture: true, copied, pid: process.pid, ...(options.hangNative ? {

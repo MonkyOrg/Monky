@@ -178,6 +178,9 @@ export interface ElectronApi {
   onPttStateChanged: (cb: (active: boolean) => void) => () => void;
   onPttCaptured: (cb: (binding: PttKeyBinding) => void) => () => void;
   minimize: () => Promise<void>;
+  openScreenPictureInPicture: (requestId: string, requireInactive: boolean) => Promise<boolean>;
+  onWindowInactive: (cb: () => void) => () => void;
+  onWindowActive: (cb: () => void) => () => void;
   maximize: () => Promise<void>;
   toggleMaximize: () => Promise<void>;
   setWindowInServer: (inServer: boolean) => Promise<void>;
@@ -448,6 +451,17 @@ const api: ElectronApi = {
     };
   },
   minimize: () => ipcRenderer.invoke('window:minimize'),
+  openScreenPictureInPicture: (requestId, requireInactive) => ipcRenderer.invoke('screen-pip:open', requestId, requireInactive),
+  onWindowInactive: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('window:inactive', listener);
+    return () => ipcRenderer.removeListener('window:inactive', listener);
+  },
+  onWindowActive: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('window:active', listener);
+    return () => ipcRenderer.removeListener('window:active', listener);
+  },
   maximize: () => ipcRenderer.invoke('window:maximize'),
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
   setWindowInServer: (inServer) => ipcRenderer.invoke('window:set-in-server', inServer),

@@ -39,6 +39,11 @@ de áudio e prévias. Para ver FPS, resolução e bitrate sobre câmera/tela, us
 **Qualidade e compartilhamento → Telemetria de vídeo**: o switch, a posição e o modo ficam salvos
 e são aplicados sem reiniciar a transmissão.
 
+O botão de copiar inclui até 20 amostras recentes do vídeo. Atualizar o layout
+do mesmo palco ou recriar somente a prévia local não apaga as medições RTP da
+transmissão. Trocar a fonte, o canal ou a sessão, ou desativar a telemetria,
+reinicia o histórico. Valores `null` indicam dados indisponíveis, não zero.
+
 No perfil **Personalizado**, passe o mouse ou navegue com `Tab` até a
 interrogação ao lado de cada **Bitrate**. A dica explica o efeito e o custo:
 mais bitrate pode preservar detalhes; menos economiza banda, mas pode reduzir
@@ -506,6 +511,22 @@ ou da tela de outra pessoa. A mesma aba reúne codec, prévia local do
 compartilhamento, recepção de tela e telemetria; os perfis continuam incluindo voz e câmera.
 
 ### Recepção de tela
+
+**PiP automático** vem ativado em **Qualidade e compartilhamento**. Ao sair do
+palco, trocar de aplicativo (Alt+Tab) ou minimizar o Monky, a transmissão que
+você está assistindo em foco abre numa janela flutuante. Com duas transmissões
+em foco, entra a colocada em foco mais recentemente. Câmeras, sua própria
+prévia e transmissões ainda não assistidas não são abertas automaticamente.
+Um aviso explica a ação e onde desativá-la. O PiP continua ao navegar pelo
+app, mas fecha ao parar de assistir, sair da chamada, perder acesso ou quando
+a transmissão termina. Ao voltar ao palco da chamada, inclusive após restaurar
+ou reativar a janela, o PiP automático fecha e a mesma transmissão continua em foco, sem
+reiniciar a reprodução. Trazer o Monky para frente enquanto estiver em outro
+canal ou na Home não fecha o PiP. O botão manual de PiP continua disponível.
+Se você fechar o PiP automático enquanto estiver fora, ele não reabre no mesmo
+período de ausência nem ao retornar; uma nova saída pode abri-lo novamente.
+O PiP aberto manualmente permanece ao trocar de aplicativo, minimizar e
+restaurar a janela, inclusive quando movido para outro monitor.
 
 Em **Configurações → Qualidade e compartilhamento → Recepção de tela**, escolha
 **Nativo** ou **Chromium**. No Windows e macOS, **Nativo é o padrão**, usando o runtime

@@ -3,6 +3,7 @@ import { ChannelType, UserStatus, VoiceMode } from '@monky/shared';
 export type { VoiceRestrictions } from '@monky/shared';
 
 export interface ServerRecord {
+  everyonePermissions?: number;
   maxMessageLength?: number;
   id: string;
   name: string;
@@ -52,6 +53,7 @@ export interface UserRecord {
 }
 
 export interface ChannelRecord {
+  permissionOverwrites?: import('@monky/shared').ChannelPermissionOverwrite[];
   forumId?: string | null;
   forumLocked?: boolean;
   forumClosed?: boolean;

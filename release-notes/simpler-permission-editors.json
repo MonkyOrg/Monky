@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Permissões de canais têm edição direta, status de sincronização e botão compacto com ícone para sincronizar com a categoria quando houver diferenças. Todos usa o mesmo editor de cargos, apenas com a aba Permissões.",
+  "en": "Channel permissions have direct editing, synchronization status and a compact sync button with an icon when rules differ from the category. Everyone uses the same role editor with only the Permissions tab."
+}
