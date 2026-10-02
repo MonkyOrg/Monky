@@ -2276,7 +2276,10 @@ async function* regression(locale, inviteModule) {
     scrollTo.call(longFeed, { top: 0, behavior: 'instant' });
     check(longFeed.scrollTop === 0, 'The long-history reveal starts away from its destination');
     longFeed.scrollTo = function (options) {
-      scrollCalls.push({ ...options, before: this.scrollTop, max: this.scrollHeight - this.clientHeight });
+      const max = this.scrollHeight - this.clientHeight;
+      // scrollToBottom may request scrollHeight; Chromium clamps it to the last visible viewport.
+      scrollCalls.push({ ...options, requestedTop: options.top,
+        top: Math.max(0, Math.min(options.top, max)), before: this.scrollTop, max });
       scrollTo.call(this, options);
     };
     main.chatView.renderMessages({ forceScroll: true });
@@ -2294,8 +2297,11 @@ async function* regression(locale, inviteModule) {
       };
       requestAnimationFrame(settle);
     });
+    // Exercise a normal bottom pin too: a clamped no-op is not another viewport of travel.
+    main.chatView.scrollToBottom();
     check(scrollCalls.filter(call => call.behavior === 'smooth').every(call => Math.abs(call.top - call.before) <= 161),
-      'Every smooth leg of the history reveal stays within the distance limit, including the layout frame');
+      'Every smooth leg of the history reveal stays within the distance limit, including the layout frame: ' +
+        JSON.stringify(scrollCalls));
     scrollCalls.length = 0;
     main.chatView.renderMessages({ forceScroll: true });
     await flush();
