@@ -117,7 +117,6 @@ if (!process.versions.electron) {
     if (screenAudienceOnly) {
       const { runScreenAudienceSmoke } = require('./screenAudienceSmoke.cjs');
       // Give the hidden fixture DOM focus without focusing a desktop window.
-      window.webContents.debugger.attach('1.3');
       await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
       let checks = 0;
       for (const [width, height] of [[1100, 850], [640, 440]]) {
@@ -161,7 +160,6 @@ if (!process.versions.electron) {
           }
         }
       }
-      window.webContents.debugger.detach();
       console.log(`Screen audience: ${checks} checks passed, 500 members/20 roles, software rendering only, no capture`);
       await finish(0);
       return;
@@ -171,7 +169,6 @@ if (!process.versions.electron) {
       const { runScreenViewersSmoke } = require('./screenViewersSmoke.cjs');
       const { appEventHandlerSource } = require('./fixtures/screenSharingUiModel.cjs');
       const fallbackHandler = appEventHandlerSource('native_screen.capture_fallback');
-      window.webContents.debugger.attach('1.3');
       await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
       let checks = 0;
       for (const [width, height] of [[1100, 850], [640, 440]]) {
@@ -421,7 +418,6 @@ async function runVersionCopyKeyboardSmoke(window) {
       throw new Error(`${surface}: version copy needs a visible keyboard focus indicator: ${JSON.stringify(focused)}`);
     }
   }
-  window.webContents.debugger.attach('1.3');
   try {
     await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
       features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
@@ -430,7 +426,9 @@ async function runVersionCopyKeyboardSmoke(window) {
       throw new Error('Version hover must respect reduced motion');
     }
   } finally {
-    window.webContents.debugger.detach();
+    await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+    });
   }
 }
 
