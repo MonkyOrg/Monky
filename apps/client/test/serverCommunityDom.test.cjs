@@ -2272,6 +2272,9 @@ async function* regression(locale, inviteModule) {
     const longFeed = mainRoot.querySelector('#chat-messages-feed');
     const scrollCalls = [];
     const scrollTo = longFeed.scrollTo;
+    // History hydration may already have pinned the feed; explicitly start this reveal at the top.
+    scrollTo.call(longFeed, { top: 0, behavior: 'instant' });
+    check(longFeed.scrollTop === 0, 'The long-history reveal starts away from its destination');
     longFeed.scrollTo = function (options) {
       scrollCalls.push({ ...options, before: this.scrollTop, max: this.scrollHeight - this.clientHeight });
       scrollTo.call(this, options);
@@ -2280,7 +2283,8 @@ async function* regression(locale, inviteModule) {
     check(longFeed.scrollHeight > longFeed.clientHeight * 20 &&
       longFeed.scrollHeight - longFeed.clientHeight - longFeed.scrollTop <= 161 &&
       scrollCalls.some(call => call.behavior === 'smooth' && call.top > call.before),
-    'A long chat begins its entry animation near the bottom, with no more than 160px left to travel');
+    'A long chat begins its entry animation near the bottom, with no more than 160px left to travel: ' +
+      JSON.stringify({ height: longFeed.scrollHeight, viewport: longFeed.clientHeight, top: longFeed.scrollTop, scrollCalls }));
     await new Promise((resolve, reject) => {
       const start = performance.now();
       const settle = () => {
@@ -2292,6 +2296,12 @@ async function* regression(locale, inviteModule) {
     });
     check(scrollCalls.filter(call => call.behavior === 'smooth').every(call => Math.abs(call.top - call.before) <= 161),
       'Every smooth leg of the history reveal stays within the distance limit, including the layout frame');
+    scrollCalls.length = 0;
+    main.chatView.renderMessages({ forceScroll: true });
+    await flush();
+    check(Math.abs(longFeed.scrollHeight - longFeed.clientHeight - longFeed.scrollTop) <= 1 &&
+      scrollCalls.length > 0 && scrollCalls.every(call => Math.abs(call.top - call.before) <= 1),
+    'An already hydrated history remains at the bottom without introducing artificial entry movement');
     yield 'chat-entry-reduced-motion';
     scrollTo.call(longFeed, { top: 0, behavior: 'instant' });
     scrollCalls.length = 0;
