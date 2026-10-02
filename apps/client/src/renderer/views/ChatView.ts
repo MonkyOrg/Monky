@@ -2,6 +2,8 @@ import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, 
   hasEveryoneMention, messageBlocksContent, messageBlocksInput, parseFencedMessageBlocks } from '@monky/shared';
 import type { AttachmentMeta, BotLocale, ChatMessageUpdatedPayload, ChatSendPayload, CommandPresentation, MessageReply, ResolvedMessageBlock, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
+import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
+import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
 import { formatMessageTime, renderReplyPreview } from '../utils/messageReply';
 import { appEvents } from '../core/EventBus';
 import { networkClient, getActiveNetworkClient } from '../core/NetworkClient';
@@ -22,7 +24,7 @@ import { showCopyToast } from './CopyToast';
 import { ImageClipboard } from '../utils/imageClipboard';
 import { downloadLightboxFile, lightboxModal, LightboxMedia } from './LightboxModal';
 import { linkPreviewService } from '../core/LinkPreviewService';
-import { initializeCustomVideoPlayers } from '../utils/videoPlayer';
+import { initializeCustomMediaPlayers } from '../utils/videoPlayer';
 import { EmojiPicker } from './EmojiPicker';
 import { buildCodeMessage, codeBlockModal } from './CodeBlockModal';
 import { renderMessageBlockComposer } from './MessageBlockComposer';
@@ -31,6 +33,7 @@ import { bindFormattingToolbar, renderFormattingToolbar } from './FormattingTool
 import { bindEditorContextMenu } from './EditorContextMenu';
 import { bindChatComposerMotion } from './FooterControlsMotion';
 import { stickerService } from '../core/StickerService';
+import { openFileInputPicker } from '../utils/buttonLoading';
 import { settingsStore } from '../stores/settingsStore';
 import { extractStickerIds, stickerToken, stripStickerTokens } from '../utils/stickers';
 import { formatCommandContext, parseTypedCommand } from '../utils/botInputs';
@@ -38,11 +41,16 @@ import { BotChatView, renderBotInvocation } from './BotChatView';
 import { filterCommands, findCommandsByInputName, groupCommands, type CommandGroup } from '../utils/commandCatalog';
 import { renderCommandCatalog, renderEmptyCommandCatalog } from './commandCatalog';
 import { renderBotCommandContext } from './botResponse';
+import { renderNativePoll, submitNativePollVote } from './nativePoll';
+import { openNativePollWizard } from './NativePollWizard';
 import { PublicSelectorView } from './PublicSelectorView';
 import { botSettingsModal, botSettingsMenuItem } from './BotSettingsModal';
 import { commandVoiceError } from '../utils/botVoice';
 import { botLocaleFor } from '../utils/botLocale';
 import { translateProtocolError } from '../i18n/protocolErrors';
+import { highlightMessageJump } from '../utils/messageJumpHighlight';
+import { smoothScrollIntoView, smoothScrollTo } from '../utils/scroll';
+import { imageCarouselNavigationButton, moveImageCarousel, renderImageCarousel } from './ImageCarousel';
 
 /** How close to the end the feed must be to keep following new messages (#270). */
 const BOTTOM_SCROLL_THRESHOLD_PX = 48;
@@ -67,6 +75,7 @@ type MentionCandidate =
   | { kind: 'everyone'; token: string };
 
 export class ChatView {
+  public onOpenForum?: (channelId: string) => void;
   private blockSendPending = false;
   private get messageLengthLimit(): number {
     return this.server.serverDetails?.maxMessageLength ?? (this.server.serverDetails ? 2000 : LIMITS.MAX_MESSAGE_LENGTH);
@@ -162,6 +171,7 @@ export class ChatView {
     }
     const channel = serverDetails.channels.find((c) => c.id === this.currentChannelId);
     const channelName = channel ? channel.name : 'geral';
+    const isVoiceChannel = channel?.type === 'VOICE';
 
     const markup = `
       <div class="chat-container">
@@ -174,10 +184,11 @@ export class ChatView {
         </div>
         <div class="content-header">
           <div class="channel-title-container">
-            <span class="material-symbols-outlined md-18" style="color: var(--text-muted);">tag</span>
+            ${channel?.forumId ? `<button type="button" class="btn btn-secondary" id="chat-forum-back" aria-label="${t('forum.back')}" title="${t('forum.back')}"><span class="material-symbols-outlined md-20">close</span></button>` : ''}
+            <span class="material-symbols-outlined md-18" style="color: var(--text-muted);">${isVoiceChannel ? 'volume_up' : 'tag'}</span>
             <span class="channel-title">${escapeHtml(channelName)}</span>
           </div>
-          <div class="header-status-badge">${t('chat.textChannelBadge')}</div>
+          <div class="header-status-badge">${t(isVoiceChannel ? 'chat.voiceChannelBadge' : 'chat.textChannelBadge')}</div>
         </div>
 
         <div id="chat-messages-feed" class="chat-messages-feed"></div>
@@ -205,9 +216,19 @@ export class ChatView {
           <div id="chat-reply-composer" class="chat-reply-composer" hidden></div>
           <div id="chat-composer-blocks" aria-label="${t('chat.composerBlocks')}" hidden></div>
           <div class="chat-input-wrapper">
-            <button id="btn-attach" type="button" class="chat-attach-btn" title="${t('chat.attachFile')}">
-              <span class="material-symbols-outlined md-22">attach_file</span>
+            <div class="chat-create-wrap">
+            <button id="btn-attach" type="button" class="chat-attach-btn" title="${t('chat.moreActions')}"
+              aria-label="${t('chat.moreActions')}" aria-expanded="false" aria-controls="chat-create-menu">
+              <span class="material-symbols-outlined md-22">add</span>
             </button>
+            <div id="chat-create-menu" class="chat-create-menu" role="menu" hidden>
+              <button type="button" role="menuitem" data-chat-create="attachment">
+                <span class="material-symbols-outlined md-20">attach_file</span><span>${t('chat.attachFile')}</span>
+              </button>
+              <button type="button" role="menuitem" data-chat-create="poll">
+                <span class="material-symbols-outlined md-20">poll</span><span>${t('poll.create')}</span>
+              </button>
+            </div></div>
             <input id="chat-file-input" type="file" multiple style="display: none;">
             <button id="btn-emoji" type="button" class="chat-attach-btn" title="${t('chat.emojiPickerTitle')}">
               <span class="material-symbols-outlined md-22">mood</span>
@@ -215,7 +236,7 @@ export class ChatView {
             <button id="btn-format" type="button" class="chat-attach-btn" title="${t('chat.formatting')}" aria-label="${t('chat.formatting')}" aria-expanded="false" aria-controls="chat-format-toolbar">
               <span class="material-symbols-outlined md-22">format_size</span>
             </button>
-            <monky-markdown-input id="chat-message-input" class="chat-input-field" placeholder="${t('chat.inputPlaceholder', { channel: escapeHtml(channelName) })}" ${this.messageLengthLimit > 0 ? `maxlength="${this.messageLengthLimit}"` : ''}></monky-markdown-input>
+            <monky-markdown-input id="chat-message-input" class="chat-input-field" placeholder="${t(isVoiceChannel ? 'chat.voiceInputPlaceholder' : 'chat.inputPlaceholder', { channel: escapeHtml(channelName) })}" ${this.messageLengthLimit > 0 ? `maxlength="${this.messageLengthLimit}"` : ''}></monky-markdown-input>
             <span id="chat-char-counter" class="chat-char-count">0/${this.messageLimitLabel}</span>
             <button type="button" id="btn-send-message" class="btn btn-primary chat-send-btn">
               <span class="material-symbols-outlined md-16" aria-hidden="true">send</span>
@@ -230,6 +251,8 @@ export class ChatView {
 
     this.renderMessages({ forceScroll: true });
     this.attachEvents();
+    const forumId = channel?.forumId;
+    if (forumId) this.container.querySelector('#chat-forum-back')?.addEventListener('click', () => this.onOpenForum?.(forumId));
   }
 
   private loadHistory(): void {
@@ -256,7 +279,10 @@ export class ChatView {
       feed.innerHTML = `
         <div id="chat-empty-placeholder" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); gap: 10px;">
           <span class="material-symbols-outlined" style="color: var(--text-dim); font-size: 44px;">forum</span>
-          <div style="font-size: 15px; font-weight: 600; color: var(--text-secondary);">${t('chat.emptyTitle', { channel: escapeHtml(serverStore.serverDetails?.channels.find((c) => c.id === this.currentChannelId)?.name || 'geral') })}</div>
+          <div style="font-size: 15px; font-weight: 600; color: var(--text-secondary);">${t(
+            serverStore.getChannel(this.currentChannelId)?.type === 'VOICE' ? 'chat.voiceEmptyTitle' : 'chat.emptyTitle',
+            { channel: escapeHtml(serverStore.serverDetails?.channels.find((c) => c.id === this.currentChannelId)?.name || 'geral') },
+          )}</div>
           <div style="font-size: 13px;">${t('chat.emptySubtitle')}</div>
         </div>
       `;
@@ -476,7 +502,7 @@ export class ChatView {
     });
 
     this.bindMediaInteractions(container);
-    initializeCustomVideoPlayers(container);
+    initializeCustomMediaPlayers(container);
   }
 
   /**
@@ -640,7 +666,8 @@ export class ChatView {
     if (this.client.getStatus() !== 'CONNECTED') return t('chat.editDisconnected');
     const message = edit.message;
     if (message.deletedAt || message.isSystem || message.isEphemeral ||
-        !this.server.serverDetails?.channels.some((channel) => channel.id === message.channelId && channel.type === 'TEXT')) {
+        !this.server.serverDetails?.channels.some((channel) => channel.id === message.channelId &&
+          (channel.type === 'TEXT' || channel.type === 'VOICE'))) {
       return t('chat.editUnavailable');
     }
     if (message.userId !== this.server.currentUser?.id || this.server.serverDetails.allowMessageEdit === false) {
@@ -737,7 +764,7 @@ export class ChatView {
   private repinWhileMediaLoads(target: HTMLElement): void {
     const repin = () => {
       const feed = document.getElementById('chat-messages-feed');
-      if (feed && this.pinnedToBottom) feed.scrollTop = feed.scrollHeight;
+      if (feed && this.pinnedToBottom) smoothScrollTo(feed, { top: feed.scrollHeight });
     };
     target.querySelectorAll('img, iframe').forEach((el) => {
       el.addEventListener('load', repin, { once: true });
@@ -847,7 +874,11 @@ export class ChatView {
 
     const channelName = serverStore.serverDetails?.channels.find((c) => c.id === this.currentChannelId)?.name || 'geral';
     const permissionsResolved = this.arePermissionsResolved();
-    const canSendMessages = !permissionsResolved || serverStore.hasPermission(Permission.SEND_MESSAGES);
+    const forumChannel = serverStore.getChannel(this.currentChannelId ?? '');
+    const forumLocked = forumChannel?.forumLocked === true;
+    const forumClosed = forumChannel?.forumClosed === true;
+    const forumBlocked = forumLocked || forumClosed;
+    const canSendMessages = !forumBlocked && (!permissionsResolved || serverStore.hasPermission(Permission.SEND_MESSAGES));
     this.container.querySelectorAll<HTMLButtonElement>('.chat-reaction, .chat-reaction-add, [data-message-action="reply"]').forEach((button) => {
       button.disabled = !canSendMessages || (!!edit && button.dataset.messageAction === 'reply');
     });
@@ -856,18 +887,18 @@ export class ChatView {
     const locked = !edit && permissionsResolved && !canSendMessages;
     const readOnly = locked || !!edit?.pending || this.blockSendPending;
     const commandSelected = !!this.currentChannelId && !!chatStore.getCommandDraft(this.currentChannelId);
-    inputWrapper.style.display = commandSelected && !edit ? 'none' : '';
     const surface = this.container.querySelector<HTMLElement>('.chat-composer-surface');
-    if (surface) surface.hidden = commandSelected && !edit;
+    if (surface) setSurfaceVisible(surface, !commandSelected || !!edit);
+    else inputWrapper.style.display = commandSelected && !edit ? 'none' : '';
     const commandComposer = this.container.querySelector<HTMLElement>('#chat-command-composer');
     if (commandComposer) {
-      commandComposer.hidden = !!edit || !commandSelected;
-      commandComposer.inert = !!edit;
+      if (!commandComposer.hasAttribute('data-ui-closing')) commandComposer.inert = !!edit;
+      setSurfaceVisible(commandComposer, !edit && commandSelected);
     }
 
     input.readOnly = readOnly;
     input.placeholder = locked
-      ? t('chat.sendPermissionDenied')
+      ? t(forumLocked ? 'forum.lockedPlaceholder' : forumClosed ? 'forum.closedPlaceholder' : 'chat.sendPermissionDenied')
       : edit ? t('chat.editingMessage') : t('chat.inputPlaceholder', { channel: channelName });
     input.setAttribute('aria-label', input.placeholder);
     input.setAttribute('aria-readonly', String(readOnly));
@@ -877,8 +908,8 @@ export class ChatView {
     input.classList.toggle('chat-input-field--readonly', readOnly);
 
     if (permissionBanner) {
-      permissionBanner.textContent = locked ? t('chat.sendPermissionDenied') : '';
-      permissionBanner.style.display = locked ? 'flex' : 'none';
+      permissionBanner.textContent = locked && !forumBlocked ? t('chat.sendPermissionDenied') : '';
+      permissionBanner.style.display = locked && !forumBlocked ? 'flex' : 'none';
     }
 
     if (btnSend) {
@@ -897,8 +928,16 @@ export class ChatView {
 
     if (btnAttach) {
       btnAttach.style.display = edit ? 'none' : '';
-      btnAttach.disabled = !!edit || !canAttachFiles;
+      btnAttach.disabled = !!edit || !canSendMessages;
       btnAttach.setAttribute('aria-disabled', btnAttach.disabled ? 'true' : 'false');
+      const attachmentAction = this.container.querySelector<HTMLButtonElement>('[data-chat-create="attachment"]');
+      const pollAction = this.container.querySelector<HTMLButtonElement>('[data-chat-create="poll"]');
+      if (attachmentAction) attachmentAction.disabled = !canAttachFiles;
+      if (pollAction) {
+        pollAction.hidden = !!forumChannel?.forumId;
+        pollAction.disabled = !canSendMessages || !!forumChannel?.forumId ||
+          !serverStore.serverDetails?.protocol?.features.includes('native-polls');
+      }
     }
 
     if (btnEmoji) {
@@ -1021,7 +1060,7 @@ export class ChatView {
     const otherAttachments =
       stickerIds.length > 0 ? m.attachments?.filter((a) => !stickerIds.includes(a.id)) : m.attachments;
 
-    const textHtml = m.blocks?.length
+    const textHtml = m.poll ? '' : m.blocks?.length
       ? `<div class="chat-message-text">${m.blocks.map(block => block.type === 'reply'
         ? this.renderReplyReference(block.reply) : block.type === 'code'
           ? renderCodeBlock(block.language, block.code)
@@ -1036,6 +1075,23 @@ export class ChatView {
         : '';
     const stickersHtml = this.renderStickers(stickers);
     const attachmentsHtml = this.renderAttachments(otherAttachments, m);
+    const pollHtml = m.poll
+      ? renderNativePoll(
+          m.poll,
+          serverStore.hasPermission(Permission.SEND_MESSAGES),
+          value => this.formatDateTime(value),
+          this.client.getHttpBaseUrl(),
+        )
+      : '';
+    const botComponentsHtml = m.botComponents?.length
+      ? `<div class="bot-message-components">${m.botComponents.map(component =>
+        renderImageCarousel(
+          component.imageUrls,
+          this.client.getHttpBaseUrl(),
+          component.label ?? t('community.images'),
+          component.presentation,
+        )).join('')}</div>`
+      : '';
     const rowClass = `chat-message-row${isMentioned ? ' chat-message-mentioned' : ''}${m.isEphemeral ? ' chat-message-private' : ''}${isBot ? ' chat-bot-response' : ''}`;
 
     return `
@@ -1054,6 +1110,8 @@ export class ChatView {
           </div>
           ${m.reply && !m.blocks?.length ? this.renderReplyReference(m.reply) : ''}
           ${textHtml}
+          ${pollHtml}
+          ${botComponentsHtml}
           ${stickersHtml}
           <div class="chat-link-previews" data-message-id="${escapeHtml(m.id)}"></div>
           ${attachmentsHtml}
@@ -1178,13 +1236,17 @@ export class ChatView {
     const el = this.container.querySelector<HTMLElement>('#chat-reply-composer');
     if (!el) return;
     const reply = this.currentChannelId ? chatStore.getReplyDraft(this.currentChannelId) : undefined;
-    el.hidden = !!this.messageEdit || !reply;
+    if (this.messageEdit || !reply) {
+      setSurfaceVisible(el, false, 'panel', undefined, () => el.replaceChildren());
+      return;
+    }
     el.innerHTML = reply ? `<div class="chat-quote">${renderReplyPreview(reply)}
       <button type="button" aria-label="${t('chat.cancelReply')}" title="${t('chat.cancelReply')}"><span class="material-symbols-outlined md-18" aria-hidden="true">close</span></button></div>` : '';
     el.querySelector('button')?.addEventListener('click', () => {
       this.clearReply();
       this.focusChatInput();
     });
+    setSurfaceVisible(el, true);
   }
 
   private clearReply(): void {
@@ -1278,13 +1340,14 @@ export class ChatView {
       ?.querySelector<HTMLImageElement>('.chat-sticker img, img.chat-sticker, .chat-attachment-image img, img.chat-attachment-image, .chat-sticker-image') ?? null;
   }
 
-  private jumpToMessage(messageId: string): void {
+  public jumpToMessage(messageId: string): void {
     if (!this.currentChannelId) return;
     const row = this.container.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(messageId)}"].chat-message-row`);
     if (row) {
-      row.scrollIntoView({ block: 'center' });
+      smoothScrollIntoView(row, { block: 'center' });
       row.tabIndex = -1;
       row.focus({ preventScroll: true });
+      highlightMessageJump(row);
       this.pinnedToBottom = false;
       return;
     }
@@ -1376,8 +1439,31 @@ export class ChatView {
   /** Renders the attachment grid below a message body (#11). */
   private renderAttachments(attachments?: AttachmentMeta[], message?: ChatMessage): string {
     if (!attachments || attachments.length === 0) return '';
-    const items = attachments.map((a) => this.renderAttachment(a, message)).join('');
-    return `<div class="chat-attachments">${items}</div>`;
+    const media = attachments.filter(attachment =>
+      !!attachment.url && (attachment.kind === 'image' || attachment.kind === 'video'));
+    const separate = media.length > 1
+      ? attachments.filter(attachment => !media.includes(attachment))
+      : attachments;
+    const carousel = media.length > 1 ? `
+      <section class="image-carousel chat-attachment-carousel" data-image-carousel data-carousel-index="0"
+        aria-label="${escapeHtml(t('community.images'))}">
+        <div class="image-carousel-track">${media.map(attachment => `
+          <div class="image-carousel-slide chat-attachment-carousel-slide">
+            ${this.renderAttachment(attachment, message)}
+          </div>`).join('')}</div>
+        <button type="button" class="image-carousel-arrow image-carousel-arrow--previous" data-carousel-move="-1"
+          aria-label="${escapeHtml(t('community.previous'))}"><span class="material-symbols-outlined">chevron_left</span></button>
+        <button type="button" class="image-carousel-arrow image-carousel-arrow--next" data-carousel-move="1"
+          aria-label="${escapeHtml(t('community.next'))}"><span class="material-symbols-outlined">chevron_right</span></button>
+        <div class="image-carousel-dots" role="group" aria-label="${escapeHtml(t('community.images'))}">
+          ${media.map((_, index) => `<button type="button" class="image-carousel-dot${index === 0 ? ' is-active' : ''}"
+            data-carousel-index="${index}" aria-label="${escapeHtml(t('community.imagePosition', {
+              current: index + 1, total: media.length,
+            }))}" aria-current="${index === 0 ? 'true' : 'false'}"></button>`).join('')}
+        </div>
+      </section>` : '';
+    const items = separate.map(attachment => this.renderAttachment(attachment, message)).join('');
+    return `<div class="chat-attachments">${carousel}${items}</div>`;
   }
 
   private renderAttachment(a: AttachmentMeta, message?: ChatMessage): string {
@@ -1455,6 +1541,31 @@ export class ChatView {
           <div class="chat-video-player">
             <video class="chat-attachment-video" preload="metadata" src="${src}" playsinline></video>
             ${inlineActions}
+          </div>
+        </div>
+      `;
+    }
+
+    if (a.mimeType.startsWith('audio/')) {
+      return `
+        <div class="chat-audio-player">
+          <audio class="chat-attachment-audio" preload="metadata" src="${src}"></audio>
+          <div class="chat-audio-meta">
+            <span class="material-symbols-outlined md-24 chat-audio-icon" aria-hidden="true">audio_file</span>
+            <span class="chat-audio-copy">
+              <strong title="${name}">${name}</strong>
+              <small>${formatBytes(a.sizeBytes)}</small>
+            </span>
+            <button
+              type="button"
+              class="chat-audio-download chat-attachment-download"
+              data-download-url="${src}"
+              data-file-name="${name}"
+              title="${t('common.download')}"
+              aria-label="${t('common.download')} ${name}"
+            >
+              <span class="material-symbols-outlined md-20" aria-hidden="true">download</span>
+            </button>
           </div>
         </div>
       `;
@@ -1622,6 +1733,57 @@ export class ChatView {
       if (button?.dataset.restoreMessageId) { event.stopPropagation(); void this.undoDeletion(button.dataset.restoreMessageId, button); }
     };
     messagesFeed?.addEventListener('click', restoreClick);
+    const pollClick = (event: Event) => {
+      const carouselButton = imageCarouselNavigationButton(event.target);
+      if (carouselButton && !carouselButton.closest('[data-field-type="image-list"]')
+          && moveImageCarousel(carouselButton)) {
+        event.stopPropagation();
+        return;
+      }
+      const button = event.target instanceof Element
+        ? event.target.closest<HTMLButtonElement>('[data-native-poll][data-native-poll-option]') : null;
+      const confirm = event.target instanceof Element
+        ? event.target.closest<HTMLButtonElement>('[data-native-poll-confirm]') : null;
+      if (confirm && !confirm.disabled) {
+        const card = confirm.closest<HTMLElement>('[data-native-poll-card]');
+        const optionIds = [...card?.querySelectorAll<HTMLButtonElement>('[data-native-poll-option][aria-pressed="true"]') ?? []]
+          .map(option => option.dataset.nativePollOption).filter((id): id is string => !!id);
+        if (confirm.dataset.nativePollConfirm && optionIds.length > 0) {
+          confirm.disabled = true;
+          void submitNativePollVote(this.client, confirm.dataset.nativePollConfirm, optionIds)
+            .then(poll => this.store.updatePoll(poll))
+            .catch(error => {
+              if (confirm.isConnected) confirm.disabled = false;
+              const failure = card?.querySelector<HTMLElement>('[data-native-poll-error]');
+              if (failure) { failure.hidden = false; failure.textContent = error instanceof Error ? error.message : t('poll.voteFailed'); }
+            });
+        }
+        return;
+      }
+      const pollId = button?.dataset.nativePoll;
+      const optionId = button?.dataset.nativePollOption;
+      if (!button || !pollId || !optionId || button.disabled) return;
+      event.stopPropagation();
+      const card = button.closest<HTMLElement>('[data-native-poll-card]');
+      if (card?.dataset.pollMultiple === 'true') {
+        const selected = button.getAttribute('aria-pressed') !== 'true';
+        button.setAttribute('aria-pressed', String(selected));
+        button.classList.toggle('native-poll-option--selected', selected);
+        const selectedCount = card.querySelectorAll('[data-native-poll-option][aria-pressed="true"]').length;
+        const submit = card.querySelector<HTMLButtonElement>('[data-native-poll-confirm]');
+        if (submit) submit.disabled = selectedCount === 0;
+        return;
+      }
+      for (const option of card?.querySelectorAll<HTMLButtonElement>('[data-native-poll-option]') ?? []) option.disabled = true;
+      void submitNativePollVote(this.client, pollId, [optionId])
+        .then(poll => this.store.updatePoll(poll))
+        .catch(error => {
+          for (const option of card?.querySelectorAll<HTMLButtonElement>('[data-native-poll-option]') ?? []) option.disabled = false;
+          const failure = card?.querySelector<HTMLElement>('[data-native-poll-error]');
+          if (failure) { failure.hidden = false; failure.textContent = error instanceof Error ? error.message : t('poll.voteFailed'); }
+        });
+    };
+    messagesFeed?.addEventListener('click', pollClick);
     const undoTimer = setInterval(() => {
       for (const button of this.container.querySelectorAll<HTMLButtonElement>('[data-undo-until]')) {
         const remaining = Math.ceil((Number(button.dataset.undoUntil) - Date.now()) / 1000);
@@ -1629,7 +1791,11 @@ export class ChatView {
         else button.textContent = t('chat.undoDeleteCountdown', { seconds: remaining });
       }
     }, 250);
-    this.unbindEvents.push(() => { clearInterval(undoTimer); messagesFeed?.removeEventListener('click', restoreClick); });
+    this.unbindEvents.push(() => {
+      clearInterval(undoTimer);
+      messagesFeed?.removeEventListener('click', restoreClick);
+      messagesFeed?.removeEventListener('click', pollClick);
+    });
     const onCopyKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing || event.altKey ||
           !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'c') return;
@@ -1703,7 +1869,7 @@ export class ChatView {
     const updateComposeLinkPreview = () => {
       if (!input || !composeLinkPreviewEl || !input.isConnected) return;
       if (!this.messageEdit && this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId)) {
-        composeLinkPreviewEl.style.display = 'none';
+        setSurfaceVisible(composeLinkPreviewEl, false);
         return;
       }
       const urlMatch = input.value.match(/(https?:\/\/[^\s<]+)/);
@@ -1711,13 +1877,11 @@ export class ChatView {
       if (url === lastComposeUrl) return;
       lastComposeUrl = url;
       if (!url) {
-        composeLinkPreviewEl.style.display = 'none';
-        composeLinkPreviewEl.innerHTML = '';
+        setSurfaceVisible(composeLinkPreviewEl, false, 'panel', undefined, () => composeLinkPreviewEl.replaceChildren());
         return;
       }
       linkPreviewService.fetch(url).then((data) => {
         if (!data || lastComposeUrl !== url) return;
-        composeLinkPreviewEl.style.display = 'block';
         const imgHtml = data.image ? `<img class="compose-link-preview-img" src="${escapeHtml(data.image)}" alt="">` : '';
         composeLinkPreviewEl.innerHTML = `
           <div class="compose-link-preview-card" data-external-link="${escapeHtml(url)}" role="button" tabindex="0">
@@ -1737,6 +1901,7 @@ export class ChatView {
             window.api.openExternal(url);
           }
         };
+        setSurfaceVisible(composeLinkPreviewEl, true, 'panel', 'block');
         composeLinkPreviewEl.querySelector('.compose-link-preview-card')?.addEventListener('click', openPreviewLink);
         composeLinkPreviewEl.querySelector('.compose-link-preview-card')?.addEventListener('keydown', (event) => {
           const keyEvent = event as KeyboardEvent;
@@ -1747,8 +1912,7 @@ export class ChatView {
         });
         composeLinkPreviewEl.querySelector('.compose-link-preview-dismiss')?.addEventListener('click', (event) => {
           event.stopPropagation();
-          composeLinkPreviewEl.style.display = 'none';
-          composeLinkPreviewEl.innerHTML = '';
+          setSurfaceVisible(composeLinkPreviewEl, false, 'panel', undefined, () => composeLinkPreviewEl.replaceChildren());
           lastComposeUrl = '__dismissed__';
         });
       }).catch(() => { /* silent */ });
@@ -1850,8 +2014,7 @@ export class ChatView {
         this.botChat?.renderComposer();
         lastComposeUrl = '';
         if (composeLinkPreviewEl) {
-          composeLinkPreviewEl.style.display = 'none';
-          composeLinkPreviewEl.innerHTML = '';
+          setSurfaceVisible(composeLinkPreviewEl, false, 'panel', undefined, () => composeLinkPreviewEl.replaceChildren());
         }
         updateComposeLinkPreview();
       }
@@ -1980,8 +2143,7 @@ export class ChatView {
       this.closeMentionDropup();
       // Clear compose link preview
       if (composeLinkPreviewEl) {
-        composeLinkPreviewEl.style.display = 'none';
-        composeLinkPreviewEl.innerHTML = '';
+        setSurfaceVisible(composeLinkPreviewEl, false, 'panel', undefined, () => composeLinkPreviewEl.replaceChildren());
         lastComposeUrl = '';
       }
     };
@@ -1990,10 +2152,37 @@ export class ChatView {
     const btnAttach = document.getElementById('btn-attach');
     const fileInput = document.getElementById('chat-file-input') as HTMLInputElement | null;
 
-    btnAttach?.addEventListener('click', () => {
-      if (!isCurrentInput() || this.messageEdit || !serverStore.hasPermission(Permission.ATTACH_FILES)) return;
-      fileInput?.click();
+    const createMenu = this.container.querySelector<HTMLElement>('#chat-create-menu');
+    const closeCreateMenu = () => {
+      if (!createMenu || createMenu.hidden) return;
+      btnAttach?.setAttribute('aria-expanded', 'false');
+      setSurfaceVisible(createMenu, false, 'popover');
+    };
+    btnAttach?.addEventListener('click', event => {
+      event.stopPropagation();
+      if (!isCurrentInput() || this.messageEdit || !createMenu) return;
+      const open = createMenu.hidden || createMenu.hasAttribute('data-ui-closing');
+      btnAttach.setAttribute('aria-expanded', String(open));
+      setSurfaceVisible(createMenu, open, 'popover', 'grid');
+      if (open) requestAnimationFrame(() => createMenu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus());
     });
+    createMenu?.addEventListener('click', event => {
+      const action = event.target instanceof Element
+        ? event.target.closest<HTMLButtonElement>('[data-chat-create]')?.dataset.chatCreate : undefined;
+      if (!action) return;
+      closeCreateMenu();
+      if (action === 'attachment') {
+        if (serverStore.hasPermission(Permission.ATTACH_FILES)) openFileInputPicker(fileInput, btnAttach);
+      } else if (action === 'poll' && this.currentChannelId &&
+        !serverStore.getChannel(this.currentChannelId)?.forumId) {
+        openNativePollWizard(this.client, this.server, this.currentChannelId);
+      }
+    });
+    const closeCreateOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !createMenu?.contains(event.target) && !btnAttach?.contains(event.target)) closeCreateMenu();
+    };
+    document.addEventListener('pointerdown', closeCreateOutside);
+    this.unbindEvents.push(() => document.removeEventListener('pointerdown', closeCreateOutside));
     fileInput?.addEventListener('change', () => {
       if (fileInput.files && fileInput.files.length > 0) {
         if (!serverStore.hasPermission(Permission.ATTACH_FILES)) return;
@@ -2256,7 +2445,10 @@ export class ChatView {
       if (input && (this.mentionActive || input.hasFocus)) this.updateMentionDropup(input);
     };
     const u1 = appEvents.on('server.updated', refreshComposerSettings);
-    const u2 = appEvents.on('server.roles_updated', refreshComposerSettings);
+    const u2 = appEvents.on('server.roles_updated', () => {
+      refreshComposerSettings();
+      this.loadHistory();
+    });
     const u3 = appEvents.on('chat.message_added', (msg: ChatMessage) => {
       if (msg.channelId === this.currentChannelId) {
         // Sending a message always brings the author back to the end (#270).
@@ -2354,7 +2546,7 @@ export class ChatView {
             if (charCounter) charCounter.textContent = `${input.value.length}/${this.messageLimitLabel}`;
             if (!selected) autoResize();
           }
-          if (selected && !this.messageEdit && composeLinkPreviewEl) composeLinkPreviewEl.style.display = 'none';
+          if (selected && !this.messageEdit && composeLinkPreviewEl) setSurfaceVisible(composeLinkPreviewEl, false);
           if (selected && !this.messageEdit && this.pending.length > 0) this.showCommandNotice(t('botChat.attachmentsKept'));
           if (!selected && wasSelected && !this.messageEdit) {
             this.showCommandNotice('');
@@ -2419,10 +2611,10 @@ export class ChatView {
   private scrollToBottom(): void {
     const feed = document.getElementById('chat-messages-feed');
     if (feed) {
-      feed.scrollTop = feed.scrollHeight;
+      smoothScrollTo(feed, { top: feed.scrollHeight });
       // The feed height is still settling right after the markup swap.
       requestAnimationFrame(() => {
-        if (this.pinnedToBottom) feed.scrollTop = feed.scrollHeight;
+        if (this.pinnedToBottom) smoothScrollTo(feed, { top: feed.scrollHeight });
       });
     }
   }
@@ -2484,7 +2676,7 @@ export class ChatView {
   }
 
   private renderMentionDropup(): void {
-    const el = document.getElementById('mention-dropup');
+    const el = this.container.querySelector<HTMLElement>('#mention-dropup');
     if (!el) return;
     el.innerHTML = this.mentionMatches
       .map((candidate, i) => {
@@ -2509,7 +2701,7 @@ export class ChatView {
         `;
       })
       .join('');
-    el.style.display = 'block';
+    setSurfaceVisible(el, true, 'popover', 'block');
 
     el.querySelectorAll('.mention-item').forEach((item) => {
       item.addEventListener('mouseenter', () => {
@@ -2569,10 +2761,9 @@ export class ChatView {
     this.mentionMatches = [];
     this.mentionActiveIndex = 0;
     this.mentionAtIndex = -1;
-    const el = document.getElementById('mention-dropup');
+    const el = this.container.querySelector<HTMLElement>('#mention-dropup');
     if (el) {
-      el.style.display = 'none';
-      el.innerHTML = '';
+      setSurfaceVisible(el, false, 'popover', undefined, () => el.replaceChildren());
     }
   }
 
@@ -2608,10 +2799,12 @@ export class ChatView {
 
   private getBotCommandDeniedReason(command?: SlashCommand): string | undefined {
     const channel = serverStore.serverDetails?.channels.find((candidate) => candidate.id === this.currentChannelId);
-    if (!channel || channel.type !== 'TEXT' || !channel.botCommandsEnabled) {
+    if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE') || !channel.botCommandsEnabled) {
       return t('botChat.commandsDisabledInChannel');
     }
     if (!serverStore.hasPermission(Permission.USE_BOT_COMMANDS)) return t('botChat.commandsPermissionDenied');
+    if (channel.forumLocked) return t('forum.lockedPlaceholder');
+    if (channel.forumClosed) return t('forum.closedPlaceholder');
     if (!serverStore.hasPermission(Permission.SEND_MESSAGES)) return t('chat.sendPermissionDenied');
     return command ? this.getVoiceCommandDeniedReason(command) : undefined;
   }
@@ -2658,14 +2851,14 @@ export class ChatView {
       this.closeCommandDropup();
       return;
     }
-    const el = document.getElementById('command-dropup');
+    const el = this.container.querySelector<HTMLElement>('#command-dropup');
     if (!el) return;
     const denied = this.getBotCommandDeniedReason();
     if (denied) {
       const input = this.container.querySelector('#chat-message-input');
       for (const attribute of ['role', 'aria-expanded', 'aria-controls', 'aria-autocomplete', 'aria-activedescendant']) input?.removeAttribute(attribute);
       el.innerHTML = `<div class="command-empty-frequency" role="status">${escapeHtml(denied)}</div>`;
-      el.style.display = 'block';
+      setSurfaceVisible(el, true, 'popover', 'block');
       return;
     }
     el.innerHTML = renderCommandCatalog(
@@ -2676,7 +2869,7 @@ export class ChatView {
         ? renderEmptyCommandCatalog(this.store.getCommandBots(), this.commandQuery.length > 0 && this.store.getCommands().length > 0)
         : undefined,
     );
-    el.style.display = 'block';
+    setSurfaceVisible(el, true, 'popover', 'block');
     el.querySelectorAll<HTMLButtonElement>('[data-command-bot-configure]').forEach(button => {
       button.addEventListener('click', () => {
         const botId = button.dataset.commandBotConfigure;
@@ -2710,7 +2903,7 @@ export class ChatView {
       button.addEventListener('click', () => {
         const section = [...el.querySelectorAll<HTMLElement>('[data-command-section]')]
           .find((element) => element.dataset.commandSection === button.dataset.commandGroup);
-        section?.scrollIntoView({ block: 'start', inline: 'nearest' });
+        if (section) smoothScrollIntoView(section, { block: 'start', inline: 'nearest' });
         const first = section?.querySelector<HTMLElement>('[data-cmd-index]');
         if (first) this.setActiveCommand(Number(first.dataset.cmdIndex), false);
       });
@@ -2747,7 +2940,7 @@ export class ChatView {
       button.classList.toggle('active', button.dataset.commandGroup === groupId);
     });
     this.container.querySelector('#chat-message-input')?.setAttribute('aria-activedescendant', `command-option-${index}`);
-    if (scroll) active?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    if (scroll && active) smoothScrollIntoView(active, { block: 'nearest', inline: 'nearest' });
   }
 
   private applyCommand(index: number, userGesture = false, autoInvoke = true): void {
@@ -2846,10 +3039,9 @@ export class ChatView {
     this.commandQuery = '';
     const input = this.container.querySelector('#chat-message-input');
     for (const attribute of ['role', 'aria-expanded', 'aria-controls', 'aria-autocomplete', 'aria-activedescendant']) input?.removeAttribute(attribute);
-    const el = document.getElementById('command-dropup');
+    const el = this.container.querySelector<HTMLElement>('#command-dropup');
     if (el) {
-      el.style.display = 'none';
-      el.innerHTML = '';
+      setSurfaceVisible(el, false, 'popover', undefined, () => el.replaceChildren());
     }
   }
 
@@ -2910,7 +3102,7 @@ export class ChatView {
   private renderComposerBlocks(): void {
     const root = this.container.querySelector<HTMLElement>('#chat-composer-blocks');
     if (!root || !this.currentChannelId) return;
-    if (this.messageEdit) { root.hidden = true; return; }
+    if (this.messageEdit) { setSurfaceVisible(root, false); return; }
     renderMessageBlockComposer(root, this.store, this.currentChannelId, () => this.updateComposerCounter(),
       this.blockSendPending || !this.isCurrentComposer() || !this.server.hasPermission(Permission.SEND_MESSAGES));
     this.updateComposerCounter();
@@ -3058,12 +3250,11 @@ export class ChatView {
     const tray = this.container.querySelector<HTMLElement>('#chat-attachment-tray');
     if (!tray) return;
     if (this.pending.length === 0) {
-      tray.style.display = 'none';
-      tray.innerHTML = '';
+      setSurfaceVisible(tray, false, 'panel', undefined, () => tray.replaceChildren());
       return;
     }
-    tray.style.display = this.messageEdit ? 'none' : 'flex';
     tray.innerHTML = this.pending.map((p) => this.renderTrayItem(p)).join('');
+    setSurfaceVisible(tray, !this.messageEdit, 'panel', 'flex');
     tray.querySelectorAll('[data-remove-id]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const id = btn.getAttribute('data-remove-id');
@@ -3149,7 +3340,9 @@ export class ChatView {
     notice.className = 'tray-notice';
     notice.innerText = message;
     tray.appendChild(notice);
-    setTimeout(() => notice.remove(), 3000);
+    animateEnter(notice, 'notice');
+    const timeout = setTimeout(() => removeWithMotion(notice, 'notice'), 3000);
+    this.unbindEvents.push(() => { clearTimeout(timeout); cancelSurfaceMotion(notice); notice.remove(); });
   }
 
   private async downloadAttachment(url: string, fileName: string): Promise<void> {
@@ -3169,8 +3362,14 @@ export class ChatView {
     this.botChat?.destroy();
     this.botChat = null;
     this.closeCommandDropup();
+    for (const element of this.container.querySelectorAll<HTMLElement>('#mention-dropup, #command-dropup')) {
+      cancelSurfaceMotion(element);
+      element.hidden = true;
+      element.replaceChildren();
+    }
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
+    this.container.querySelectorAll<HTMLElement>('[data-ui-motion]').forEach(cancelVisibilityMotion);
     this.container.querySelectorAll<MarkdownInput>('monky-markdown-input').forEach(input => input.destroy());
     this.composerInput = null;
     this.composerChannelId = null;

@@ -5,8 +5,9 @@ import { stickerService } from '../core/StickerService';
 import { settingsStore } from '../stores/settingsStore';
 import { t, tCount, TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { animateEnter, ownSurface, removeWithMotion } from '../utils/surfaceMotion';
 import { normalizeSearchString } from '../utils/search';
-import { scrollWithin } from '../utils/scroll';
+import { scrollWithin, smoothScrollTo } from '../utils/scroll';
 
 type PickerTab = 'emojis' | 'stickers';
 
@@ -111,8 +112,10 @@ export class EmojiPicker {
 
     this.bindShell();
     this.renderBody();
+    this.unbind.push(ownSurface(root, this.options.anchor));
+    animateEnter(root);
 
-    root.querySelector<HTMLInputElement>('.emoji-picker-search-input')?.focus();
+    root.querySelector<HTMLInputElement>('.emoji-picker-search-input')?.focus({ preventScroll: true });
   }
 
   private positionFloating(root: HTMLElement): void {
@@ -148,7 +151,7 @@ export class EmojiPicker {
     this.imageObserver = null;
     this.unbind.forEach((off) => off());
     this.unbind = [];
-    this.root.remove();
+    removeWithMotion(this.root);
     this.root = null;
   }
 
@@ -409,7 +412,7 @@ export class EmojiPicker {
     }
 
     body.innerHTML = html;
-    body.scrollTop = 0;
+    smoothScrollTo(body, { top: 0 });
   }
 
   private renderEmojiButton(char: string, name: string): string {

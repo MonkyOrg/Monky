@@ -7,9 +7,10 @@ import { PROTOCOL_VERSION } from './constants.js';
 // Protocol 28 adds screen codec metadata to strict source/signaling schemas.
 // Older clients cannot safely decode AV1 or accept those descriptors.
 // Protocol 29 adds private screen audiences and 1080p240/4K120 profile bounds.
-export const MIN_CLIENT_PROTOCOL = 29;
+// Protocol 31 adds mixed categories and the FORUM channel kind.
+export const MIN_CLIENT_PROTOCOL = 31;
 export const MIN_BOT_PROTOCOL = 24;
-export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers'] as const;
+export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];
 export const protocolOfferSchema = z.object({
   minimumVersion: z.number().int().positive(),
@@ -19,7 +20,10 @@ export interface ProtocolOffer { minimumVersion: number; features: string[] }
 export interface ProtocolAgreement extends ProtocolOffer { version: number }
 export function createProtocolOffer(kind: 'client' | 'bot'): ProtocolOffer {
   return { minimumVersion: kind === 'bot' ? MIN_BOT_PROTOCOL : MIN_CLIENT_PROTOCOL,
-    features: PROTOCOL_FEATURES.filter(feature => kind !== 'bot' || (feature !== 'chat-blocks' && feature !== 'chat-delivery' && feature !== 'message-delete-undo' && feature !== 'screen-viewers')) };
+    features: PROTOCOL_FEATURES.filter(feature => kind !== 'bot' || (feature !== 'chat-blocks' &&
+      feature !== 'chat-delivery' && feature !== 'message-delete-undo' && feature !== 'screen-viewers' &&
+      feature !== 'message-search' && feature !== 'forums' && feature !== 'native-polls' &&
+      feature !== 'native-live-forms' && feature !== 'recent-sounds')) };
 }
 export function negotiateProtocol(version: unknown, offer: unknown, kind: 'client' | 'bot'): ProtocolAgreement | null {
   const minimumVersion = kind === 'bot' ? MIN_BOT_PROTOCOL : MIN_CLIENT_PROTOCOL;

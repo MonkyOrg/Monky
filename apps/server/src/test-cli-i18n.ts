@@ -752,6 +752,26 @@ test('successful start and restart print persistent bot warnings from the effect
   }
 });
 
+test('start, restart and post-update restart retry while the server preview is still starting', async (context) => {
+  for (const command of ['start', 'restart', 'after-update'] as const) {
+    await context.test(command, async (subtest) => {
+      const f = lifecycleFixture(subtest);
+      const readPreview = onlineUsers.readLocalServerPreview;
+      let attempts = 0;
+      const probe = subtest.mock.method(onlineUsers, 'readLocalServerPreview', async (port: number) => {
+        if (++attempts === 1) return null;
+        return readPreview(port);
+      });
+      if (command === 'start') await startServerCommand(commandArgs(['start'], f.dataDir), ['--port', '4100']);
+      else await restartServerCommand(commandArgs(['restart'], f.dataDir), command === 'after-update' ? ['--after-update'] : []);
+      const expectedPort = command === 'start' ? 4100 : 3200;
+      assert.deepEqual(probe.mock.calls.map((call) => call.arguments[0]), [expectedPort, expectedPort]);
+      assert.ok(!f.output.includes(t('botCompatibility.unavailable')));
+      assert.ok(f.output.includes(t('botCompatibility.incompatible', { count: 1, protocol: PROTOCOL_VERSION })));
+    });
+  }
+});
+
 test('failed start or restart never claims that a running server was checked for bot compatibility', async (context) => {
   const f = lifecycleFixture(context);
   f.state.exitCode = 1;
@@ -827,9 +847,11 @@ test('detailed status checks bot compatibility only for a process that is runnin
   assert.deepEqual(f.commands, []);
 });
 
-test('startup reports unavailable preview diagnostics explicitly instead of claiming bots are compatible', async (context) => {
+test('startup reports missing compatibility diagnostics explicitly instead of claiming bots are compatible', async (context) => {
   const f = lifecycleFixture(context);
-  context.mock.method(onlineUsers, 'readLocalServerPreview', async () => null);
+  context.mock.method(onlineUsers, 'readLocalServerPreview', async () => ({
+    userCount: 0, voiceUserCount: 0, botCompatibility: null,
+  }));
   await startServerCommand(commandArgs(['start'], f.dataDir), []);
   assert.ok(f.output.includes(t('botCompatibility.unavailable')));
   assert.ok(f.output.includes(t('lifecycle.started')));

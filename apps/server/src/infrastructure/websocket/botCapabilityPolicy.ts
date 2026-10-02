@@ -60,6 +60,12 @@ export function botMessageCapabilities(type: MessageType, payload: unknown): Bot
     case MessageType.BOT_SCREEN_CLOSE:
     case MessageType.BOT_SCREEN_LIST:
       return ['miniapps'];
+    case MessageType.LIVE_ACTION_CREATE:
+    case MessageType.LIVE_ACTION_UPDATE:
+    case MessageType.LIVE_ACTION_LIST:
+      return ['live_actions', 'commands'];
+    case MessageType.LIVE_ACTION_CLOSE:
+      return [];
     case MessageType.BOT_LOCAL_SOURCE_REQUEST:
     case MessageType.BOT_LOCAL_TASK_REQUEST:
     case MessageType.BOT_LOCAL_TASK_CONTROL:
@@ -74,5 +80,5 @@ export function botMessageCapabilities(type: MessageType, payload: unknown): Bot
 export const BOT_CHAT_EVENTS = new Set<MessageType>([
   MessageType.CHAT_MESSAGE, MessageType.CHAT_HISTORY, MessageType.CHAT_MESSAGE_UPDATED,
   MessageType.CHAT_REACTION_ADDED, MessageType.CHAT_REACTION_REMOVED,
-  MessageType.COMMAND_RESPONSE,
+  MessageType.COMMAND_RESPONSE, MessageType.FORUM_POST_SAVED,
 ]);

@@ -8,6 +8,7 @@ import {
   type BotFormValues,
   type BotInputError,
   type BotInputResult,
+  type NativeLiveFormField,
   type ChatMessage,
   type CommandValues,
   type CommandPresentation,
@@ -17,7 +18,7 @@ import {
 import { getLanguage, t, type TranslationKey } from '../i18n';
 import type { AutocompleteInputs } from './commandAutocomplete';
 import { findCommandsByInputName, type CommandLocaleResolver } from './commandCatalog';
-export type BotInputField = BotFormField | {
+export type BotInputField = BotFormField | NativeLiveFormField | {
   type: 'user' | 'autocomplete';
   name: string;
   label: string;
@@ -196,6 +197,7 @@ export function botCommandMessage(payload: BotCommandMessagePayload): ChatMessag
     userAvatarUrl: payload.botAvatarUrl,
     content: payload.content,
     localizations: payload.localizations,
+    botComponents: payload.components,
     createdAt: payload.createdAt,
     isBot: true,
     isEphemeral: payload.ephemeral,

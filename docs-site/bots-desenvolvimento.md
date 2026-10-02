@@ -137,10 +137,19 @@ monky-bot-sdk add form cadastro --field nome:text --field idade:integer --field 
 monky-bot-sdk add selector votacao --public --choice "Opção A" --choice "Opção B" --non-interactive
 ```
 
-Os campos aceitam `text`, `integer`, `boolean`, `string-list` e
+Os campos aceitam `text`, `integer`, `boolean`, `string-list`, `image-list` e
 `select:EscolhaA,EscolhaB`. O formulário de exemplo apenas confirma o envio;
 implemente sua regra usando `values`. Traduza os títulos e rótulos escritos
 por você no módulo, conforme `ctx.locale`; o gerador não inventa traduções.
+`image-list` permite selecionar de uma só vez, recortar, pré-visualizar,
+reordenar e enviar até cinco imagens em um carrossel. Use `presentation` para
+escolher `format` (`banner`, `landscape`, `square` ou `portrait`), `fit`
+(`cover` ou `contain`) e `size` (`compact`, `regular` ou `wide`). Os tamanhos
+são sugestões responsivas limitadas pelo cliente; bots não fornecem CSS nem
+dimensões arbitrárias. O campo devolve referências temporárias opacas. Use-as
+em um componente de `ctx.reply()` ou em `imageAssetRefs` de uma Ação ao vivo;
+nesse último caso o servidor promove as imagens para `imageUrls` persistentes.
+Esse campo não é aceito em configurações persistentes.
 O módulo de configurações declara as opções e seus valores padrão; implemente
 os efeitos nos handlers usando `ctx.settings.server` e `ctx.settings.user`.
 

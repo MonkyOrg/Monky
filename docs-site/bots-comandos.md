@@ -167,7 +167,7 @@ O contrato exige cliente, servidor e SDK de bots compatíveis com o protocolo 21
 
 Ao digitar `/`, o menu mostra os comandos utilizados com mais frequência e os agrupa por bot. Cada item identifica o comando, sua descrição e o bot responsável. Ao navegar, os parâmetros obrigatórios e a quantidade de opcionais ajudam a escolher o comando. Pressionar **Espaço** seleciona o comando destacado no menu e abre seu compositor, sem executá-lo. Espaços no texto comum ou nos parâmetros continuam sendo texto.
 
-Ao selecionar um comando com parâmetros, o compositor compacto identifica **qual bot e comando** estão selecionados e apresenta campos nomeados com descrição e placeholder. Parâmetros opcionais podem ser adicionados quando necessários. O envio usa os nomes declarados em `options`; não é necessário juntar valores com vírgulas. Comandos sem parâmetros que não solicitam download local, como `/ping` e `/enquete`, iniciam a interação imediatamente ao serem selecionados por clique, Enter ou Tab; a seleção com Espaço aguarda uma confirmação de envio.
+Ao selecionar um comando com parâmetros, o compositor compacto identifica **qual bot e comando** estão selecionados e apresenta campos nomeados com descrição e placeholder. Parâmetros opcionais podem ser adicionados quando necessários. O envio usa os nomes declarados em `options`; não é necessário juntar valores com vírgulas. Comandos sem parâmetros que não solicitam download local, como `/ping` e `/ajuda`, iniciam a interação imediatamente ao serem selecionados por clique, Enter ou Tab; a seleção com Espaço aguarda uma confirmação de envio.
 
 A frequência de uso é local e separada por servidor e identidade. Apenas contagens e recência são guardadas, nunca os valores preenchidos nos parâmetros.
 

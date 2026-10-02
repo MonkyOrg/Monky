@@ -69,13 +69,14 @@ async function runScreenAudienceSmoke() {
       privacy.dispatchEvent(new Event('change', { bubbles: true }));
       const trigger = document.querySelector('#share-audience-toggle');
       const popup = document.querySelector('#share-audience-popup');
+      const popupOpen = () => popup.checkVisibility() && !popup.hasAttribute('data-ui-closing');
       const list = document.querySelector('#share-audience-options');
       const search = document.querySelector('#share-audience-search');
       const card = document.querySelector('.screen-share-picker-card');
       trigger.scrollIntoView({ block: 'nearest' });
       await settle();
       const closedHeight = card.getBoundingClientRect().height;
-      check(!popup.checkVisibility(), 'Closed dropdown must hide all 520 choices.');
+      check(!popupOpen(), 'Closed dropdown must hide all 520 choices.');
       check(trigger.textContent.includes(language.t('screenShare.privateChoose')), 'Localized placeholder.');
       trigger.click();
       await settle();
@@ -85,14 +86,17 @@ async function runScreenAudienceSmoke() {
       check(Math.abs(card.getBoundingClientRect().height - closedHeight) <= 1, 'Opening the dropdown never expands the modal.');
       const bounds = popup.getBoundingClientRect(), cardBounds = card.getBoundingClientRect();
       check(bounds.top >= cardBounds.top && bounds.bottom <= cardBounds.bottom
-        && bounds.left >= 0 && bounds.right <= innerWidth, 'Popup remains inside the scrollable modal and viewport.');
+        && bounds.left >= 0 && bounds.right <= innerWidth,
+      `Popup remains inside the scrollable modal and viewport: ${JSON.stringify({
+        popup: bounds.toJSON(), card: cardBounds.toJSON(), viewport: { width: innerWidth, height: innerHeight },
+      })}`);
       const role = list.querySelector('[data-audience-id="role-0"]');
       const roleBounds = role.getBoundingClientRect();
       check(role.contains(document.elementFromPoint(roleBounds.left + 30, roleBounds.top + 18)),
         'The popup is not clipped or covered by underlying source controls.');
       check(getComputedStyle(role.querySelector('.share-audience-role')).backgroundColor === 'rgb(237, 66, 69)', 'Role color is actually painted.');
       role.click();
-      check(popup.checkVisibility() && role.getAttribute('aria-selected') === 'true', 'Selection keeps dropdown open.');
+      check(popupOpen() && role.getAttribute('aria-selected') === 'true', 'Selection keeps dropdown open.');
       search.value = 'member 499';
       search.dispatchEvent(new Event('input', { bubbles: true }));
       await settle();
@@ -110,12 +114,12 @@ async function runScreenAudienceSmoke() {
       search.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
       check(document.activeElement.dataset.audienceId === 'user-0', 'Arrow navigation skips hidden rows.');
       document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-      check(!popup.checkVisibility() && document.activeElement === trigger && !!document.querySelector('#share-picker-title'),
+      check(!popupOpen() && document.activeElement === trigger && !!document.querySelector('#share-picker-title'),
         'Escape restores trigger focus without closing the modal.');
       trigger.click();
       check(list.querySelector('[data-audience-id="user-499"]').getAttribute('aria-selected') === 'true', 'Selections survive closing/searching.');
       document.querySelector('#share-picker-title').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-      check(!popup.checkVisibility(), 'Outside click closes only the popup.');
+      check(!popupOpen(), 'Outside click closes only the popup.');
       trigger.click();
       search.value = '';
       search.dispatchEvent(new Event('input', { bubbles: true }));
@@ -124,7 +128,7 @@ async function runScreenAudienceSmoke() {
       preview = document.body.innerHTML;
       previewScroll = card.scrollTop;
       picker.close();
-      check(!document.querySelector('#share-audience-popup'), 'Closing modal retires the dropdown.');
+      check(!document.querySelector('.modal-backdrop:not([data-ui-closing]) #share-audience-popup'), 'Closing modal retires the dropdown.');
 
       overlay = new OverlayConfigModal();
       overlay.open();

@@ -1,8 +1,10 @@
 import { t } from '../i18n';
+import { animateEnter, removeWithMotion } from '../utils/surfaceMotion';
 import { initializeCustomVideoPlayers } from '../utils/videoPlayer';
 import { showAlert } from './Dialog';
 import { playChatMedia } from '../core/ChatMediaOutput';
 import { ImageClipboard } from '../utils/imageClipboard';
+import { withButtonLoading } from '../utils/buttonLoading';
 
 /**
  * Handler de download que o lightbox espera. Fica aqui porque todo mundo que
@@ -369,7 +371,7 @@ export class LightboxModal {
       document.removeEventListener('keydown', onKey, true);
       resizeObserver.disconnect();
       currentImage = null;
-      overlay.remove();
+      removeWithMotion(overlay, 'modal');
       if (this.closeCurrent === close) this.closeCurrent = null;
     };
 
@@ -389,7 +391,7 @@ export class LightboxModal {
       e.preventDefault();
       e.stopPropagation();
       const current = items[currentIndex];
-      void onDownload(current.url, current.fileName);
+      void withButtonLoading(downloadButton, () => onDownload(current.url, current.fileName));
     });
     prevButton.addEventListener('click', (e) => {
       e.preventDefault();
@@ -407,6 +409,7 @@ export class LightboxModal {
     document.addEventListener('keydown', onKey, true);
     document.body.appendChild(overlay);
     renderCurrent();
+    animateEnter(overlay, 'modal');
 
     return close;
   }

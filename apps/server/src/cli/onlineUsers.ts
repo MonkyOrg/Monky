@@ -39,14 +39,15 @@ export function readLocalServerPreview(port: number, timeoutMs = 1500): Promise<
     const finish = (value: LocalServerPreview | null) => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
+      if (value === null) request.destroy();
       resolve(value);
     };
 
     const request = http.get(
-      { host: '127.0.0.1', port, path: '/preview', timeout: timeoutMs },
+      { host: '127.0.0.1', port, path: '/preview' },
       (response) => {
         if (response.statusCode !== 200) {
-          response.resume();
           finish(null);
           return;
         }
@@ -57,7 +58,7 @@ export function readLocalServerPreview(port: number, timeoutMs = 1500): Promise<
           body += chunk;
           // The endpoint answers with a small object; anything larger means we
           // are talking to something that is not a Monky server.
-          if (body.length > 64_000) request.destroy();
+          if (body.length > 64_000) finish(null);
         });
         response.on('aborted', () => finish(null));
         response.on('error', () => finish(null));
@@ -76,7 +77,8 @@ export function readLocalServerPreview(port: number, timeoutMs = 1500): Promise<
       }
     );
 
-    request.on('timeout', () => request.destroy());
+    // Socket inactivity timeouts alone let a trickling response outlive startup's budget.
+    const deadline = setTimeout(() => finish(null), timeoutMs);
     request.on('error', () => finish(null));
   });
 }

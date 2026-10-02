@@ -1,4 +1,6 @@
 import { t } from '../i18n';
+import { enterModal, exitModal } from '../utils/modalSurface';
+import { replaceModalStep } from '../utils/modalSteps';
 import { settingsStore } from '../stores/settingsStore';
 import { enableBackdropClose } from '../utils/modal';
 import { tutorialViewer } from '../tutorials/TutorialViewer';
@@ -23,6 +25,7 @@ const CONTRIBUTE_URL = 'https://github.com/MonkyOrg/Monky';
 export class OnboardingWizard {
   private modalEl: HTMLElement | null = null;
   private screen: WizardScreen = 'welcome';
+  private renderedScreen: WizardScreen = 'welcome';
   private onFinish: ((action: 'join' | 'host' | null) => void) | null = null;
 
   /**
@@ -39,7 +42,7 @@ export class OnboardingWizard {
 
   public close(action: 'join' | 'host' | null = null, silent = false): void {
     if (this.modalEl) {
-      this.modalEl.remove();
+      exitModal(this.modalEl);
       this.modalEl = null;
     }
     if (!silent && this.onFinish) {
@@ -55,6 +58,7 @@ export class OnboardingWizard {
   /* ─── screens ───────────────────────────────────────────────────────── */
 
   private render(): void {
+    const opening = !this.modalEl;
     if (!this.modalEl) {
       this.modalEl = document.createElement('div');
       this.modalEl.className = 'modal-backdrop';
@@ -62,30 +66,35 @@ export class OnboardingWizard {
       enableBackdropClose(this.modalEl, () => this.close());
     }
 
+    const next = document.createElement('div');
     switch (this.screen) {
       case 'welcome':
-        this.renderWelcome();
+        this.renderWelcome(next);
         break;
       case 'host-method':
-        this.renderHostMethod();
+        this.renderHostMethod(next);
         break;
       case 'vpn-select':
-        this.renderVpnSelect();
+        this.renderVpnSelect(next);
         break;
       case 'vps-select':
-        this.renderVpsSelect();
+        this.renderVpsSelect(next);
         break;
     }
 
-    this.attachEvents();
+    const order: WizardScreen[] = ['welcome', 'host-method', 'vpn-select', 'vps-select'];
+    const content = replaceModalStep(this.modalEl!, next.firstElementChild as HTMLElement,
+      order.indexOf(this.screen) - order.indexOf(this.renderedScreen));
+    this.renderedScreen = this.screen;
+    this.attachEvents(content);
+    if (opening) enterModal(this.modalEl!);
+    else content.querySelector<HTMLElement>('button')?.focus({ preventScroll: true });
   }
 
   /* ── Step 1: Welcome ── */
 
-  private renderWelcome(): void {
-    if (!this.modalEl) return;
-
-    this.modalEl.innerHTML = `
+  private renderWelcome(target: HTMLElement): void {
+    target.innerHTML = `
       <div class="modal-card onboarding-card" style="max-width: 480px;">
         <div style="text-align: center; margin-bottom: 4px;">
           <span class="material-symbols-outlined" style="font-size: 40px; color: var(--accent-primary);">explore</span>
@@ -134,10 +143,8 @@ export class OnboardingWizard {
 
   /* ── Step 2: Host method ── */
 
-  private renderHostMethod(): void {
-    if (!this.modalEl) return;
-
-    this.modalEl.innerHTML = `
+  private renderHostMethod(target: HTMLElement): void {
+    target.innerHTML = `
       <div class="modal-card onboarding-card" style="max-width: 520px;">
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
           <span class="material-symbols-outlined" style="color: var(--accent-primary);">dns</span>
@@ -208,9 +215,7 @@ export class OnboardingWizard {
 
   /* ── VPN selection ── */
 
-  private renderVpnSelect(): void {
-    if (!this.modalEl) return;
-
+  private renderVpnSelect(target: HTMLElement): void {
     const vpns = [
       { id: 'radmin', name: 'Radmin VPN', icon: 'vpn_lock' },
       { id: 'tailscale', name: 'Tailscale', icon: 'vpn_lock' },
@@ -218,7 +223,7 @@ export class OnboardingWizard {
       { id: 'zerotier', name: 'ZeroTier', icon: 'vpn_lock' },
     ];
 
-    this.modalEl.innerHTML = `
+    target.innerHTML = `
       <div class="modal-card onboarding-card" style="max-width: 480px;">
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
           <span class="material-symbols-outlined" style="color: var(--accent-primary);">vpn_lock</span>
@@ -277,15 +282,13 @@ export class OnboardingWizard {
 
   /* ── VPS selection ── */
 
-  private renderVpsSelect(): void {
-    if (!this.modalEl) return;
-
+  private renderVpsSelect(target: HTMLElement): void {
     const providers = [
       { id: 'oracle', name: 'Oracle Cloud (Free Tier)', icon: 'cloud' },
       { id: 'generic', name: t('onboarding.vpsGenericProvider'), icon: 'cloud' },
     ];
 
-    this.modalEl.innerHTML = `
+    target.innerHTML = `
       <div class="modal-card onboarding-card" style="max-width: 480px;">
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
           <span class="material-symbols-outlined" style="color: var(--accent-primary);">cloud</span>
@@ -344,51 +347,51 @@ export class OnboardingWizard {
 
   /* ─── events ────────────────────────────────────────────────────────── */
 
-  private attachEvents(): void {
+  private attachEvents(content: HTMLElement): void {
     // Welcome screen
-    this.modalEl?.querySelector('#onboarding-join')?.addEventListener('click', () => {
+    content.querySelector('#onboarding-join')?.addEventListener('click', () => {
       this.markCompleted();
       this.close('join');
     });
-    this.modalEl?.querySelector('#onboarding-host')?.addEventListener('click', () => {
+    content.querySelector('#onboarding-host')?.addEventListener('click', () => {
       this.screen = 'host-method';
       this.render();
     });
-    this.modalEl?.querySelector('#onboarding-skip')?.addEventListener('click', () => {
+    content.querySelector('#onboarding-skip')?.addEventListener('click', () => {
       this.markCompleted();
       this.close();
     });
 
     // Host method screen
-    this.modalEl?.querySelector('#onboarding-lan')?.addEventListener('click', () => {
+    content.querySelector('#onboarding-lan')?.addEventListener('click', () => {
       this.markCompleted();
       this.close('host');
       tutorialViewer.open(lanTutorial);
     });
-    this.modalEl?.querySelector('#onboarding-vpn')?.addEventListener('click', () => {
+    content.querySelector('#onboarding-vpn')?.addEventListener('click', () => {
       this.screen = 'vpn-select';
       this.render();
     });
-    this.modalEl?.querySelector('#onboarding-port')?.addEventListener('click', () => {
+    content.querySelector('#onboarding-port')?.addEventListener('click', () => {
       this.markCompleted();
       this.close('host');
       tutorialViewer.open(portForwardTutorial);
     });
-    this.modalEl?.querySelector('#onboarding-vps')?.addEventListener('click', () => {
+    content.querySelector('#onboarding-vps')?.addEventListener('click', () => {
       this.screen = 'vps-select';
       this.render();
     });
-    this.modalEl?.querySelector('#onboarding-back')?.addEventListener('click', () => {
+    content.querySelector('#onboarding-back')?.addEventListener('click', () => {
       this.screen = 'welcome';
       this.render();
     });
-    this.modalEl?.querySelector('#onboarding-skip2')?.addEventListener('click', () => {
+    content.querySelector('#onboarding-skip2')?.addEventListener('click', () => {
       this.markCompleted();
       this.close();
     });
 
     // VPN selection
-    this.modalEl?.querySelectorAll('[data-vpn]').forEach((el) => {
+    content.querySelectorAll('[data-vpn]').forEach((el) => {
       el.addEventListener('click', () => {
         const vpnId = el.getAttribute('data-vpn');
         this.markCompleted();
@@ -397,19 +400,19 @@ export class OnboardingWizard {
         if (tutorial) tutorialViewer.open(tutorial);
       });
     });
-    this.modalEl?.querySelector('#onboarding-vpn-back')?.addEventListener('click', () => {
+    content.querySelector('#onboarding-vpn-back')?.addEventListener('click', () => {
       this.screen = 'host-method';
       this.render();
     });
-    this.modalEl?.querySelector('#onboarding-contribute')?.addEventListener('click', () => {
+    content.querySelector('#onboarding-contribute')?.addEventListener('click', () => {
       window.api?.openExternal?.(CONTRIBUTE_URL);
     });
-    this.modalEl?.querySelector('#onboarding-suggest')?.addEventListener('click', () => {
+    content.querySelector('#onboarding-suggest')?.addEventListener('click', () => {
       window.api?.openExternal?.(SUGGEST_URL);
     });
 
     // VPS selection
-    this.modalEl?.querySelectorAll('[data-vps]').forEach((el) => {
+    content.querySelectorAll('[data-vps]').forEach((el) => {
       el.addEventListener('click', () => {
         const vpsId = el.getAttribute('data-vps');
         this.markCompleted();
@@ -418,11 +421,11 @@ export class OnboardingWizard {
         if (tutorial) tutorialViewer.open(tutorial);
       });
     });
-    this.modalEl?.querySelector('#onboarding-vps-back')?.addEventListener('click', () => {
+    content.querySelector('#onboarding-vps-back')?.addEventListener('click', () => {
       this.screen = 'host-method';
       this.render();
     });
-    this.modalEl?.querySelector('#onboarding-contribute-vps')?.addEventListener('click', () => {
+    content.querySelector('#onboarding-contribute-vps')?.addEventListener('click', () => {
       window.api?.openExternal?.(CONTRIBUTE_URL);
     });
     this.modalEl?.querySelector('#onboarding-suggest-vps')?.addEventListener('click', () => {

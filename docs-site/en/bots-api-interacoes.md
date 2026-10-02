@@ -110,6 +110,15 @@ export type BotForm = {
         required?: boolean | undefined;
         minItems?: number | undefined;
         maxItems?: number | undefined;
+    } | {
+        type: "image-list";
+        name: string;
+        label: string;
+        description?: string | undefined;
+        required?: boolean | undefined;
+        minItems?: number | undefined;
+        maxItems?: number | undefined;
+        presentation?: BotCarouselPresentation | undefined;
     })[];
     description?: string | undefined;
     submitLabel?: string | undefined;
@@ -183,6 +192,15 @@ export type BotFormField = {
     required?: boolean | undefined;
     minItems?: number | undefined;
     maxItems?: number | undefined;
+} | {
+    type: "image-list";
+    name: string;
+    label: string;
+    description?: string | undefined;
+    required?: boolean | undefined;
+    minItems?: number | undefined;
+    maxItems?: number | undefined;
+    presentation?: BotCarouselPresentation | undefined;
 };
 ```
 
@@ -241,6 +259,7 @@ export type BotLocalizedMessage = {
         'pt-BR'?: string | undefined;
         en?: string | undefined;
     } | undefined;
+    components?: BotMessageComponentInput[] | undefined;
 };
 ```
 
@@ -255,7 +274,47 @@ export type BotMessageContent = string | {
         'pt-BR'?: string | undefined;
         en?: string | undefined;
     } | undefined;
+    components?: BotMessageComponentInput[] | undefined;
 };
+```
+
+## `BotPublishedMessageContent` {#botpublishedmessagecontent}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botMessages.ts)
+
+```ts
+export type BotPublishedMessageContent = string | {
+    content: string;
+    localizations?: BotMessageLocalizations | undefined;
+    components?: never;
+};
+```
+
+## `BotCarouselPresentation` {#botcarouselpresentation}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botCarousels.ts)
+
+```ts
+export type BotCarouselPresentation = {
+    format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+    fit?: "cover" | "contain" | undefined;
+    size?: "compact" | "regular" | "wide" | undefined;
+};
+```
+
+## `BotCarouselInput` {#botcarouselinput}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botCarousels.ts)
+
+```ts
+export type BotCarouselInput = {
+    type: "carousel";
+    imageAssetRefs: string[];
+    label?: string | undefined;
+    presentation?: BotCarouselPresentation | undefined;
+};
+
+export type BotMessageComponentInput = BotCarouselInput;
 ```
 
 ## `BotMessageLocalizations` {#botmessagelocalizations}
@@ -286,9 +345,6 @@ export interface BotSelector {
     creatorUserId?: string | undefined;
     sourceInvocationId?: string | undefined;
     title: string;
-    invokerId?: string | undefined;
-    expiresAt?: number | undefined;
-    channelId: string;
     choices: {
         value: string;
         label: string;
@@ -304,6 +360,9 @@ export interface BotSelector {
         } | undefined;
     }[];
     presentation: "dropdown" | "buttons";
+    expiresAt?: number | undefined;
+    channelId: string;
+    invokerId?: string | undefined;
     responder: "any" | "invoker";
     allowChange: boolean;
     maxResponders?: number | undefined;
@@ -318,7 +377,6 @@ export interface BotSelector {
 ```ts
 export type BotSelectorCreate = {
     title: string;
-    channelId: string;
     choices: {
         value: string;
         label: string;
@@ -334,12 +392,13 @@ export type BotSelectorCreate = {
         } | undefined;
     }[];
     presentation: "dropdown" | "buttons";
+    channelId: string;
     responder: "any" | "invoker";
     allowChange: boolean;
-    invocationId?: string | undefined;
-    id?: string | undefined;
-    invokerId?: string | undefined;
     expiresAt?: number | undefined;
+    id?: string | undefined;
+    invocationId?: string | undefined;
+    invokerId?: string | undefined;
     maxResponders?: number | undefined;
     metadata?: Record<string, string> | undefined;
 };
@@ -367,11 +426,7 @@ export interface BotSelectorPublic {
     responseCount: number;
     ownResponse?: string | undefined;
     canRespond: boolean;
-    id: string;
     title: string;
-    botId: string;
-    expiresAt?: number | undefined;
-    channelId: string;
     choices: {
         value: string;
         label: string;
@@ -387,11 +442,15 @@ export interface BotSelectorPublic {
         } | undefined;
     }[];
     presentation: "dropdown" | "buttons";
+    expiresAt?: number | undefined;
+    id: string;
+    channelId: string;
+    botId: string;
+    createdAt: number;
     responder: "any" | "invoker";
     allowChange: boolean;
     maxResponders?: number | undefined;
     messageId: string;
-    createdAt: number;
     closedAt: number | null;
     resultMessageId: string | null;
     messagePublished?: boolean | undefined;
@@ -1138,10 +1197,10 @@ type Output = {
 ```ts
 export type BotSettingsSnapshot = {
     bot: {
-        revision: number;
-        botId: string;
-        schemaRevision: number;
         name: string;
+        botId: string;
+        revision: number;
+        schemaRevision: number;
         online: boolean;
         capabilities: {
             downloadsSound: boolean;
@@ -1151,9 +1210,9 @@ export type BotSettingsSnapshot = {
         canConfigure: boolean;
         avatarUrl?: string | null | undefined;
         permissions?: {
-            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[] | null;
-            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[];
             revision: number;
+            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[] | null;
+            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[];
             reviewRequired: boolean;
             reviewedBy: string | null;
             reviewedAt: number | null;
@@ -1377,10 +1436,10 @@ This is a Zod validator. `parse(value)` returns `Output` or throws; `safeParse(v
 ```ts
 type Input = {
     bot: {
-        revision: number;
-        botId: string;
-        schemaRevision: number;
         name: string;
+        botId: string;
+        revision: number;
+        schemaRevision: number;
         online: boolean;
         capabilities: {
             downloadsSound: boolean;
@@ -1390,9 +1449,9 @@ type Input = {
         canConfigure: boolean;
         avatarUrl?: string | null | undefined;
         permissions?: {
-            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[] | null;
-            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[];
             revision: number;
+            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[] | null;
+            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[];
             reviewRequired: boolean;
             reviewedBy: string | null;
             reviewedAt: number | null;
@@ -1607,10 +1666,10 @@ type Input = {
 };
 type Output = {
     bot: {
-        revision: number;
-        botId: string;
-        schemaRevision: number;
         name: string;
+        botId: string;
+        revision: number;
+        schemaRevision: number;
         online: boolean;
         capabilities: {
             downloadsSound: boolean;
@@ -1620,9 +1679,9 @@ type Output = {
         canConfigure: boolean;
         avatarUrl?: string | null | undefined;
         permissions?: {
-            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[] | null;
-            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[];
             revision: number;
+            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[] | null;
+            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[];
             reviewRequired: boolean;
             reviewedBy: string | null;
             reviewedAt: number | null;
@@ -1843,10 +1902,10 @@ type Output = {
 
 ```ts
 export type BotSettingsSummary = {
-    revision: number;
-    botId: string;
-    schemaRevision: number;
     name: string;
+    botId: string;
+    revision: number;
+    schemaRevision: number;
     online: boolean;
     capabilities: {
         downloadsSound: boolean;
@@ -1856,9 +1915,9 @@ export type BotSettingsSummary = {
     canConfigure: boolean;
     avatarUrl?: string | null | undefined;
     permissions?: {
-        requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[] | null;
-        granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[];
         revision: number;
+        requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[] | null;
+        granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[];
         reviewRequired: boolean;
         reviewedBy: string | null;
         reviewedAt: number | null;
@@ -1884,10 +1943,11 @@ type Output = {
 
 ## `ChatMessage` {#chatmessage}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L138)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L156)
 
 ```ts
 export interface ChatMessage {
+    blocks?: import('./messageBlocks.js').ResolvedMessageBlock[];
     localizations?: import('./botMessages.js').BotMessageLocalizations;
     reply?: MessageReply;
     reactions?: import('./reactions.js').MessageReaction[];
@@ -1910,6 +1970,10 @@ export interface ChatMessage {
      * would silently rewrite the conversation for everyone reading it.
      */
     deletedAt?: number | null;
+    /** Monotonic server revision prevents delayed edit/delete events undoing a restoration. */
+    revision?: number;
+    deletedByUserId?: string | null;
+    deleteUndoUntil?: number | null;
     /**
      * True when this message is only visible to the invoking user (#569).
      * Ephemeral messages are not persisted and disappear on reconnect.
@@ -1929,9 +1993,9 @@ export interface ChatMessage {
 export type ChatReactionEventPayload = {
     channelId: string;
     userId: string;
+    userNickname: string;
     emoji: string;
     messageId: string;
-    userNickname: string;
 };
 ```
 
@@ -1995,6 +2059,7 @@ export type CommandAutocompletePage = {
 
 ```ts
 export type CommandLocalization = {
+    description?: string | undefined;
     options?: Record<string, {
         description?: string | undefined;
         placeholder?: string | undefined;
@@ -2004,7 +2069,6 @@ export type CommandLocalization = {
             label?: string | undefined;
         }> | undefined;
     }> | undefined;
-    description?: string | undefined;
     name?: string | undefined;
     aliases?: string[] | undefined;
 };
@@ -2017,6 +2081,7 @@ export type CommandLocalization = {
 ```ts
 export type CommandLocalizations = {
     'pt-BR'?: {
+        description?: string | undefined;
         options?: Record<string, {
             description?: string | undefined;
             placeholder?: string | undefined;
@@ -2026,11 +2091,11 @@ export type CommandLocalizations = {
                 label?: string | undefined;
             }> | undefined;
         }> | undefined;
-        description?: string | undefined;
         name?: string | undefined;
         aliases?: string[] | undefined;
     } | undefined;
     en?: {
+        description?: string | undefined;
         options?: Record<string, {
             description?: string | undefined;
             placeholder?: string | undefined;
@@ -2040,7 +2105,6 @@ export type CommandLocalizations = {
                 label?: string | undefined;
             }> | undefined;
         }> | undefined;
-        description?: string | undefined;
         name?: string | undefined;
         aliases?: string[] | undefined;
     } | undefined;
@@ -2049,7 +2113,7 @@ export type CommandLocalizations = {
 
 ## `CommandOption` {#commandoption}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L241)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L266)
 
 ```ts
 export interface CommandOption {
@@ -2082,7 +2146,7 @@ export interface CommandPresentation {
 
 ## `CommandResponsePayload` {#commandresponsepayload}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1002)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1106)
 
 ```ts
 export interface CommandResponsePayload {
@@ -2114,7 +2178,7 @@ export type CommandValues = {
 
 ## `CommandVoiceRequirement` {#commandvoicerequirement}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L256)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L281)
 
 ```ts
 export type CommandVoiceRequirement = "joined" | "same-bot-channel";
@@ -2129,6 +2193,294 @@ export function getCommandPresentation(command: {
     name: string;
     localizations?: CommandLocalizations;
 }, requested: unknown): CommandPresentation;
+```
+
+## `LiveAction` {#liveaction}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L116)
+
+```ts
+export type LiveAction = {
+    title: string;
+    description: string;
+    content: {
+        kind: "selector";
+        selectorId: string;
+    } | {
+        kind: "form";
+        form: {
+            title: string;
+            fields: ({
+                type: "text";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                placeholder?: string | undefined;
+                multiline?: boolean | undefined;
+                minLength?: number | undefined;
+                maxLength?: number | undefined;
+                defaultValue?: string | undefined;
+                required?: boolean | undefined;
+            } | {
+                type: "integer";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                placeholder?: string | undefined;
+                defaultValue?: number | undefined;
+                required?: boolean | undefined;
+                min?: number | undefined;
+                max?: number | undefined;
+            } | {
+                type: "select";
+                name: string;
+                label: string;
+                choices: {
+                    value: string;
+                    label: string;
+                    description?: string | undefined;
+                    audio?: {
+                        url: string;
+                        fileName?: string | undefined;
+                        durationMs?: number | undefined;
+                    } | {
+                        resourceId: string;
+                        fileName?: string | undefined;
+                        durationMs?: number | undefined;
+                    } | undefined;
+                }[];
+                description?: string | undefined;
+                placeholder?: string | undefined;
+                defaultValue?: string | undefined;
+                required?: boolean | undefined;
+                presentation?: "dropdown" | "buttons" | undefined;
+            } | {
+                type: "boolean";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                defaultValue?: boolean | undefined;
+                required?: boolean | undefined;
+            } | {
+                type: "string-list";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                placeholder?: string | undefined;
+                maxLength?: number | undefined;
+                defaultValue?: string[] | undefined;
+                required?: boolean | undefined;
+                minItems?: number | undefined;
+                maxItems?: number | undefined;
+            })[];
+            description?: string | undefined;
+            submitLabel?: string | undefined;
+        };
+    };
+    expiresAt: number;
+    id: string;
+    channelId: string;
+    botId: string;
+    creatorUserId: string;
+    createdAt: number;
+    revision: number;
+};
+```
+
+## `LiveActionCreate` {#liveactioncreate}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L117)
+
+```ts
+export type LiveActionCreate = {
+    title: string;
+    description: string;
+    content: {
+        kind: "selector";
+        selectorId: string;
+    } | {
+        kind: "form";
+        form: {
+            title: string;
+            fields: ({
+                type: "text";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                placeholder?: string | undefined;
+                multiline?: boolean | undefined;
+                minLength?: number | undefined;
+                maxLength?: number | undefined;
+                defaultValue?: string | undefined;
+                required?: boolean | undefined;
+            } | {
+                type: "integer";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                placeholder?: string | undefined;
+                defaultValue?: number | undefined;
+                required?: boolean | undefined;
+                min?: number | undefined;
+                max?: number | undefined;
+            } | {
+                type: "select";
+                name: string;
+                label: string;
+                choices: {
+                    value: string;
+                    label: string;
+                    description?: string | undefined;
+                    audio?: {
+                        url: string;
+                        fileName?: string | undefined;
+                        durationMs?: number | undefined;
+                    } | {
+                        resourceId: string;
+                        fileName?: string | undefined;
+                        durationMs?: number | undefined;
+                    } | undefined;
+                }[];
+                description?: string | undefined;
+                placeholder?: string | undefined;
+                defaultValue?: string | undefined;
+                required?: boolean | undefined;
+                presentation?: "dropdown" | "buttons" | undefined;
+            } | {
+                type: "boolean";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                defaultValue?: boolean | undefined;
+                required?: boolean | undefined;
+            } | {
+                type: "string-list";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                placeholder?: string | undefined;
+                maxLength?: number | undefined;
+                defaultValue?: string[] | undefined;
+                required?: boolean | undefined;
+                minItems?: number | undefined;
+                maxItems?: number | undefined;
+            })[];
+            description?: string | undefined;
+            submitLabel?: string | undefined;
+        };
+    };
+    expiresAt: number;
+    imagePresentation?: BotCarouselPresentation | undefined;
+    channelId: string;
+    invocationId: string;
+    id?: string | undefined;
+    imageAssetRefs?: string[] | undefined;
+};
+```
+
+## `LiveActionSubmission` {#liveactionsubmission}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L119)
+
+```ts
+export type LiveActionSubmission = {
+    values: Record<string, string | number | boolean | string[]>;
+    id: string;
+    channelId: string;
+    expectedRevision: number;
+    locale: "pt-BR" | "en";
+    submissionId: string;
+    userId: string;
+    userNickname: string;
+};
+```
+
+## `LiveActionUpdate` {#liveactionupdate}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L118)
+
+```ts
+export type LiveActionUpdate = {
+    id: string;
+    expectedRevision: number;
+    title?: string | undefined;
+    description?: string | undefined;
+    content?: {
+        kind: "selector";
+        selectorId: string;
+    } | {
+        kind: "form";
+        form: {
+            title: string;
+            fields: ({
+                type: "text";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                placeholder?: string | undefined;
+                multiline?: boolean | undefined;
+                minLength?: number | undefined;
+                maxLength?: number | undefined;
+                defaultValue?: string | undefined;
+                required?: boolean | undefined;
+            } | {
+                type: "integer";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                placeholder?: string | undefined;
+                defaultValue?: number | undefined;
+                required?: boolean | undefined;
+                min?: number | undefined;
+                max?: number | undefined;
+            } | {
+                type: "select";
+                name: string;
+                label: string;
+                choices: {
+                    value: string;
+                    label: string;
+                    description?: string | undefined;
+                    audio?: {
+                        url: string;
+                        fileName?: string | undefined;
+                        durationMs?: number | undefined;
+                    } | {
+                        resourceId: string;
+                        fileName?: string | undefined;
+                        durationMs?: number | undefined;
+                    } | undefined;
+                }[];
+                description?: string | undefined;
+                placeholder?: string | undefined;
+                defaultValue?: string | undefined;
+                required?: boolean | undefined;
+                presentation?: "dropdown" | "buttons" | undefined;
+            } | {
+                type: "boolean";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                defaultValue?: boolean | undefined;
+                required?: boolean | undefined;
+            } | {
+                type: "string-list";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                placeholder?: string | undefined;
+                maxLength?: number | undefined;
+                defaultValue?: string[] | undefined;
+                required?: boolean | undefined;
+                minItems?: number | undefined;
+                maxItems?: number | undefined;
+            })[];
+            description?: string | undefined;
+            submitLabel?: string | undefined;
+        };
+    } | undefined;
+    expiresAt?: number | undefined;
+};
 ```
 
 ## `localizeCommand` {#localizecommand}
@@ -2201,7 +2553,7 @@ export type SelectionChoice = {
 
 ## `SlashCommand` {#slashcommand}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L259)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L284)
 
 ```ts
 export interface SlashCommand {

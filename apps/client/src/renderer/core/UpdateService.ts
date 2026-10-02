@@ -1,6 +1,8 @@
 import { releaseRequiresProtocolUpdate, type ReleaseCompatibilityResult } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
+import { animateEnter, removeWithMotion } from '../utils/surfaceMotion';
+import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { settingsStore } from '../stores/settingsStore';
 import { changelogModal } from '../views/ChangelogModal';
 import { showConfirm } from '../views/Dialog';
@@ -229,7 +231,7 @@ class UpdateService {
       const warning = this.compatibilityWarning(compatibility);
       if (warning) {
         const banner = this.banner;
-        if (banner) banner.hidden = true;
+        if (banner) setSurfaceVisible(banner, false, 'notice');
         let confirmed = false;
         try {
           confirmed = await showConfirm({
@@ -237,7 +239,7 @@ class UpdateService {
           });
         } finally {
           if (banner?.isConnected) {
-            banner.hidden = false;
+            setSurfaceVisible(banner, true, 'notice');
             banner.querySelector<HTMLButtonElement>('.update-banner__download')?.focus();
           }
         }
@@ -267,7 +269,7 @@ class UpdateService {
     }
     this.bannerKind = '';
     this.availableCompatibility = undefined;
-    this.banner?.remove();
+    if (this.banner) removeWithMotion(this.banner, 'notice');
     this.banner = null;
     this.textEl = null;
     this.actionsEl = null;
@@ -288,6 +290,7 @@ class UpdateService {
     banner.appendChild(text);
     banner.appendChild(actions);
     document.body.appendChild(banner);
+    animateEnter(banner, 'notice');
 
     this.banner = banner;
     this.textEl = text;

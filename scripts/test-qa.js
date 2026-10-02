@@ -297,7 +297,7 @@ test('real prepared Electron scenarios authenticate, seed, install or deliberate
           paths.add(state.root);
           const unauthenticated = ['home', 'login'].includes(state.scenario);
           assert.equal(state.ready.connected, !unauthenticated);
-          assert.equal(state.stats.members, unauthenticated ? 0 : 1);
+          assert.equal(state.stats.members, unauthenticated ? 0 : state.scenario === 'connected' ? 101 : 1);
           assert.equal(state.stats.messages, unauthenticated ? 0 : 1);
           if (state.ready.userId) { assert.equal(ids.has(state.ready.userId), false); ids.add(state.ready.userId); }
           if (state.scenario === 'bot-install') {

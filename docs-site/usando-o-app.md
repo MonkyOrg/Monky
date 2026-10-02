@@ -6,9 +6,55 @@ Conectar ao servidor e entrar em uma chamada são ações separadas.
 
 <AppScreenshot src="/screenshots/conversa-pt.png" alt="Conversa demonstrativa com servidores e canais à esquerda, mensagens ao centro e membros à direita." caption="Captura do cliente para Windows com dados demonstrativos. Nomes, conversas e bot foram criados para este guia." />
 
+## Canais e categorias
+
+Quem possui permissão para gerenciar canais pode arrastar canais para reordenar
+ou mover entre categorias e arrastar o cabeçalho das próprias categorias para
+reordená-las. Durante o arraste, a categoria de destino recebe o mesmo destaque
+tracejado usado ao mover participantes entre canais de voz. Esse contorno
+aparece somente sobre o nome da categoria; sobre os canais, uma linha indica a
+posição exata. Categorias recolhidas também aceitam o canal. Para removê-lo de
+uma categoria, arraste até **Sem categoria**, que aparece no topo e empurra as
+categorias para baixo.
+
+## Fóruns
+
+Fóruns organizam conversas em threads. Use a busca e o seletor de ordenação para
+encontrar discussões por atividade recente, data de criação mais recente ou
+mais antiga. Quando ainda não houver nenhuma thread, o fórum mostra apenas o
+convite para começar a primeira conversa.
+
+O campo no topo pesquisa threads enquanto você digita. Com ele em foco,
+**Shift + Enter** abre uma nova postagem e reaproveita o texto como título. Na
+criação, fotos e vídeos possuem um seletor próprio, que bloqueia outros
+formatos, aceita até cinco mídias e mostra uma prévia compacta em carrossel. O
+foco segue diretamente para a mensagem, sem ampliar o campo de busca. O seletor
+de arquivos aceita qualquer anexo, inclusive fotos e vídeos, e os apresenta em
+cards compactos com nome, formato e tamanho antes da publicação. Ao publicar
+várias mídias, a primeira mensagem preserva o
+carrossel em vez de exibir cada item isoladamente.
+Fóruns extensos carregam as threads em lotes conforme você se aproxima do fim
+da lista e mostram cards de skeleton durante cada carregamento.
+
+O autor pode renomear, fechar, reabrir ou apagar a própria thread. Fechar impede
+novas respostas, mas permanece uma ação do autor. Pessoas com permissão para
+gerenciar canais podem fixar, trancar, destrancar, renomear ou apagar threads;
+o trancamento é um estado administrativo separado do fechamento. Nos dois
+estados, o compositor fica somente leitura e explica o motivo no placeholder,
+sem exibir um alerta adicional.
+
 ## Voz
 
 Clique em um **canal de voz** para entrar na chamada. Quem fala ganha um anel verde no avatar. A barra inferior tem microfone, fone/ensurdecer e desconectar. O painel mostra ping médio e permite sair só da chamada.
+
+Cada canal de voz também possui um chat persistente. Passe o mouse sobre a linha
+do canal e use o botão redondo de balão, ao lado dos três pontos, para abrir o
+palco e o chat na lateral direita sem entrar na chamada. No palco, o mesmo balão
+preenchido no canto superior direito mostra ou oculta o painel. Arraste a borda
+esquerda do chat para ajustar sua largura; o tamanho escolhido é lembrado.
+Mensagens, anexos, reações,
+enquetes, menções e busca continuam disponíveis mesmo quando você não está
+conectado à voz.
 
 Use clique direito em um participante para ajustar o volume individual dele. O ajuste vale só neste computador e para aquele dispositivo: se a mesma pessoa estiver conectada de duas máquinas, cada uma tem seu próprio volume.
 
@@ -91,6 +137,69 @@ aparecem separadamente. A atualização ocorre aproximadamente a cada dois
 segundos; se a consulta falhar, o card informa a indisponibilidade em vez de
 mostrar uma contagem desatualizada. A prévia local não conta como espectador.
 
+## Eventos
+
+Ao criar ou editar um evento, você pode clicar ou arrastar até **5 imagens** de
+uma vez. Cada imagem passa pelo recorte 5:2 e pode ser navegada, reordenada ou
+removida no mesmo editor. A primeira funciona como capa compacta nas listas; o
+carrossel completo aparece somente nos detalhes. O atalho lateral informa o
+estado do evento sem repetir banners ou imagens. Na lista, clique em qualquer
+área livre do card para abrir os detalhes; o menu de três pontos reúne edição,
+encerramento e as demais ações administrativas.
+
+Início e término são obrigatórios e aparecem juntos; o fuso horário permanece
+nas opções secundárias. Ao avançar com um valor inválido, o aplicativo mostra
+um toast, destaca o campo correspondente e leva o foco até ele. Fóruns podem
+receber eventos, mas threads não aparecem como canais de localização. Ao ativar
+a visibilidade privada, o formulário rola até **Quem pode acessar** sem abrir a
+lista automaticamente.
+
+## Ações ao vivo
+
+Eventos representam compromissos com data, horário, local e interessados.
+**Ações ao vivo** são interações temporárias que estão acontecendo agora. Os
+dois atalhos são independentes e aparecem somente para quem pode visualizar ou
+gerenciar seu conteúdo.
+
+Quem possui **Emitir ações ao vivo** pode abrir **Ações ao vivo → Criar ação ao
+vivo** e escolher:
+
+- **Enquete**, usando o mesmo fluxo de enquetes nativas e publicada
+  obrigatoriamente como ação ao vivo;
+- **Formulário**, com texto curto, texto longo, número, switch de sim/não,
+  escolha única, escolha múltipla, dropdown e classificação de 1 a 5. Cada
+  pergunta aparece em um bloco próprio; escolhas usam listas de rádio ou caixas.
+  As opções são adicionadas ou removidas em linhas individuais.
+
+O formulário pertence a um canal de texto e aceita uma resposta por pessoa.
+Threads de fórum não são canais de publicação e, por isso, não oferecem criação
+de enquete, evento ou formulário.
+Antes de publicar, o criador pode ativar **Respostas anônimas**. Nesse modo,
+nome, avatar e horário nunca são enviados para as telas de resultado nem para o
+CSV; o servidor mantém o vínculo interno somente para impedir uma segunda
+resposta e permitir que a própria pessoa edite seu envio. A configuração não
+pode ser alterada depois da publicação.
+Na escolha múltipla, a pessoa pode marcar várias opções válidas sem duplicatas.
+Enquanto estiver aberto, cada participante pode reabri-lo e editar a própria
+resposta. Somente quem criou ou possui **Emitir ações ao vivo** pode ver os
+resultados e encerrar a ação. Esses controles ficam no menu de três pontos do
+card da ação, sem ocupar o formulário de resposta; quando o formulário não é
+anônimo, a visualização dos resultados também identifica os participantes. A
+tela de respostas oferece as
+visões **Resumo**, **Pergunta** e **Individual**. Resumo e Pergunta usam gráficos
+de rosca ou barras quando o tipo de resposta permite uma distribuição; a última
+visão reutiliza o formulário em modo somente leitura. Respostas textuais no
+Resumo usam uma lista rolável com carregamento progressivo. Todas as respostas
+também podem ser exportadas em CSV. Em **Pergunta**, as respostas são paginadas e podem
+abrir o envio individual correspondente; valores repetidos oferecem um seletor
+para escolher qual envio abrir.
+Formulários encerrados deixam de
+aparecer na lista e seus dados são removidos do servidor após 30 dias.
+
+Enquetes, formulários e ações de bots usam a lista agregada de Ações ao vivo.
+Imagens e carrosséis aparecem nos detalhes, nunca na barra lateral. O sorteio
+continua sendo uma ação oferecida por bot, não um tipo nativo do criador.
+
 ## Chat
 
 Cada canal de texto tem histórico salvo no servidor, avatares, horários, formatação básica e limite anti-flood de 10 mensagens a cada 5 segundos.
@@ -112,6 +221,21 @@ indicam que é preciso atualizar.
 
 Uma mensagem começada e não enviada fica guardada no canal onde você estava digitando. Ir para o palco de voz, abrir outro canal e voltar não apaga o texto — cada canal guarda o seu rascunho, que só some quando você envia a mensagem ou sai do servidor.
 
+O botão **+** abre as ações do compositor. **Anexar arquivo** mantém o fluxo de
+upload existente; **Criar enquete** abre um fluxo em três etapas para a pergunta,
+de 2 a 10 respostas — cada uma com emoji opcional —, até 5 imagens em carrossel
+selecionáveis de uma só vez, com prévia, navegação animada e reordenação,
+duração e/ou limite de votantes. A enquete pode aceitar uma resposta ou várias;
+nesse caso, cada pessoa confirma em conjunto quantas respostas quiser, inclusive
+todas. O voto pode ser alterado até o encerramento. A enquete fecha no primeiro
+limite atingido e a mensagem permanece com as contagens e percentuais finais.
+
+Quem possui **Emitir ações ao vivo** também pode destacar a mesma enquete acima
+dos canais. A mensagem e a ação ao vivo são duas superfícies do mesmo recurso:
+um voto feito em qualquer uma aparece na outra, sem duplicação. Sem a permissão,
+o switch continua visível com a explicação e a enquete normal pode ser enviada.
+As imagens aparecem na mensagem mesmo sem ação ao vivo.
+
 Ao passar o mouse sobre uma mensagem (ou chegar aos botões com `Tab`), uma barra flutuante oferece **Emoji**, **Responder**, **Copiar mensagem** e **Mais opções**. O menu de três pontos mostra os nomes completos; **Editar mensagem** aparece apenas para o autor, se o servidor permitir, e **Apagar mensagem** para o autor ou moderadores. Use as setas para navegar no menu e `Escape` para fechá-lo.
 
 Depois de apagar, **Desfazer** restaura a mesma mensagem, com seus blocos, anexos e reações, durante **60 segundos** por padrão. O prazo continua ao trocar de canal ou reconectar e é controlado pelo servidor. Só quem apagou pode desfazer; para mensagens de outra pessoa, essa pessoa ainda precisa ter permissão de moderação. O autor não pode reverter uma exclusão feita por um moderador. As referências de respostas voltam a mostrar a mensagem restaurada, sem enviar uma nova mensagem nem repetir notificações de menção.
@@ -130,7 +254,7 @@ No campo de mensagem, o botão direito abre **Recortar**, **Copiar**, **Colar**,
 
 Clicar fora fecha o menu, inclusive no próprio campo de mensagem ou de código. **Recortar**, **Copiar** e **Copiar link** exibem uma confirmação breve. No formulário de link, endereços como `www.google.com` ou `exemplo.com` usam HTTPS automaticamente quando o protocolo é omitido; `http://` explícito é preservado.
 
-O botão **Opções de formatação**, ao lado do emoji, abre uma barra dentro do campo. **Negrito**, **itálico** e **tachado** funcionam como toggles: sem seleção, ligam ou desligam o efeito para o que você digitar; com seleção, alteram a formatação sem inserir texto de exemplo. `Ctrl+B` e `Ctrl+I` também funcionam. Separadores agrupam esses controles e as listas. Listas e citações podem formatar linhas existentes ou começar no campo vazio, com o cursor após o marcador. O botão de link abre um formulário acima do botão, sem modal, com os campos **Texto para exibir** e **Endereço**, preenchendo o primeiro com a seleção. Erros aparecem apenas depois de tentar inserir; `Escape` ou clicar fora fecha o formulário. `Escape` recolhe a barra. O clipe abre os anexos. `Enter` envia ou salva; `Shift+Enter` cria uma linha e continua listas. No editor de código, `Enter` cria uma linha e `Ctrl+Enter` (`Cmd+Enter` no macOS) envia ou salva. As linhas em branco entre trechos são preservadas na mensagem enviada e na cópia, como na prévia.
+O botão **Opções de formatação**, ao lado do emoji, abre uma barra dentro do campo. **Negrito**, **itálico** e **tachado** funcionam como toggles: sem seleção, ligam ou desligam o efeito para o que você digitar; com seleção, alteram a formatação sem inserir texto de exemplo. `Ctrl+B` e `Ctrl+I` também funcionam. Separadores agrupam esses controles e as listas. Listas e citações podem formatar linhas existentes ou começar no campo vazio, com o cursor após o marcador. O botão de link abre um formulário acima do botão, sem modal, com os campos **Texto para exibir** e **Endereço**, preenchendo o primeiro com a seleção. Erros aparecem apenas depois de tentar inserir; `Escape` ou clicar fora fecha o formulário. `Escape` recolhe a barra. O menu **+** reúne anexos e enquetes. `Enter` envia ou salva; `Shift+Enter` cria uma linha e continua listas. No editor de código, `Enter` cria uma linha e `Ctrl+Enter` (`Cmd+Enter` no macOS) envia ou salva. As linhas em branco entre trechos são preservadas na mensagem enviada e na cópia, como na prévia.
 
 Para copiar a **imagem**, e não o nome ou endereço do arquivo, use **Copiar imagem**
 nos controles do anexo ou no menu do botão direito. Isso também funciona no menu

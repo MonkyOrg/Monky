@@ -24,6 +24,7 @@ const labels = computed(() => english.value ? {
   download: 'Download or update Monky',
   fallback: 'If Monky did not open, use the button above. Your browser may ask for permission to open the installed app. You can also paste the link under Join with an invitation in Monky.',
   review: 'The app asks for confirmation before connecting. Review the server address; an invitation is not a verified server identity.',
+  event: 'This link opens an event after joining. Channel access rules still apply.',
   password: 'This invitation includes a password. Anyone with the link can use it. Only share it with people you trust.',
   noPassword: 'This invitation does not include a password. Enter one in Monky if the server requires it.',
   privacy: 'The invitation is decoded locally from the part after #, which is not sent to this website. Encoding is not encryption. HTTPS protects this page; it does not configure TLS or open ports on the Monky server.',
@@ -40,6 +41,7 @@ const labels = computed(() => english.value ? {
   download: 'Baixar ou atualizar o Monky',
   fallback: 'Se o Monky não abriu, use o botão acima. O navegador pode pedir permissão para abrir o aplicativo instalado. Você também pode colar o link em Entrar por convite no Monky.',
   review: 'O aplicativo pede confirmação antes de conectar. Confira o endereço; um convite não é uma identidade verificada do servidor.',
+  event: 'Este link abre um evento após entrar. As permissões do canal continuam valendo.',
   password: 'Este convite inclui uma senha. Qualquer pessoa com o link poderá usá-la. Compartilhe apenas com quem você confia.',
   noPassword: 'Este convite não inclui senha. Informe-a no Monky se o servidor exigir.',
   privacy: 'O convite é decodificado localmente a partir do trecho após #, que não é enviado a este site. Codificação não é criptografia. O HTTPS protege esta página; não configura TLS nem abre portas no servidor Monky.',
@@ -94,6 +96,7 @@ onBeforeUnmount(() => {
         <dt>{{ labels.port }}</dt><dd data-invite-port>{{ invite.port }}</dd>
       </dl>
       <p>{{ labels.review }}</p>
+      <p v-if="invite.eventId">{{ labels.event }}</p>
       <p :class="{ 'invite-password-warning': invite.password }">{{ invite.password ? labels.password : labels.noPassword }}</p>
       <div class="invite-actions">
         <a :href="appLink" class="invite-primary">{{ labels.open }}</a>

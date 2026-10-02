@@ -1,5 +1,5 @@
 import { AttachmentMeta, ChatUploadTokenPayload, MessageType } from '@monky/shared';
-import { networkClient } from './NetworkClient';
+import { getActiveNetworkClient, type NetworkClient } from './NetworkClient';
 import { t } from '../i18n';
 
 export interface UploadHandle {
@@ -21,16 +21,17 @@ export interface UploadHandle {
 export function uploadAttachment(
   channelId: string,
   file: File,
-  onProgress?: (fraction: number) => void
+  onProgress?: (fraction: number) => void,
+  client: NetworkClient = getActiveNetworkClient(),
 ): UploadHandle {
   let xhr: XMLHttpRequest | null = null;
   let cancelled = false;
 
   const promise = (async (): Promise<AttachmentMeta> => {
-    const token = await requestUploadToken(channelId);
+    const token = await requestUploadToken(client, channelId);
     if (cancelled) throw new Error(t('upload.cancelled'));
 
-    const base = networkClient.getHttpBaseUrl();
+    const base = client.getHttpBaseUrl();
     if (!base) throw new Error(t('upload.noConnection'));
 
     const url = `${base}/attachments?token=${encodeURIComponent(token)}&name=${encodeURIComponent(file.name)}`;
@@ -93,8 +94,8 @@ export function uploadAttachment(
   };
 }
 
-async function requestUploadToken(channelId: string): Promise<string> {
-  const reply = await networkClient.sendRequest<ChatUploadTokenPayload>(
+async function requestUploadToken(client: NetworkClient, channelId: string): Promise<string> {
+  const reply = await client.sendRequest<ChatUploadTokenPayload>(
     MessageType.CHAT_REQUEST_UPLOAD_TOKEN,
     { channelId }
   );

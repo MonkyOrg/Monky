@@ -1,6 +1,7 @@
 import { LIMITS } from '@monky/shared';
 import { serverStore } from '../stores/serverStore';
 import { t } from '../i18n';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { escapeHtml } from '../utils/html';
 import { enableBackdropClose } from '../utils/modal';
 import { CODE_LANGUAGE_OPTIONS } from '../utils/codeHighlight';
@@ -67,6 +68,7 @@ export class CodeBlockModal {
     `;
 
     document.body.appendChild(this.modalEl);
+    enterModal(this.modalEl);
     this.attachEvents(options);
   }
 
@@ -113,7 +115,7 @@ export class CodeBlockModal {
     textarea?.addEventListener('keydown', onTab);
 
     const onKeyDown = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && handlesModalKey(this.modalEl, e)) {
         this.close();
         return;
       }
@@ -152,7 +154,7 @@ export class CodeBlockModal {
     this.unbind.forEach((fn) => fn());
     this.unbind = [];
     if (this.modalEl) {
-      this.modalEl.remove();
+      exitModal(this.modalEl);
       this.modalEl = null;
     }
   }

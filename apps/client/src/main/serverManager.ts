@@ -24,6 +24,7 @@ export class ServerManager {
     if (
       !options || !Number.isInteger(options.port) || options.port < LIMITS.MIN_PORT || options.port > LIMITS.MAX_PORT ||
       typeof options.serverName !== 'string' ||
+      (options.categoryLocale !== undefined && options.categoryLocale !== 'pt-BR' && options.categoryLocale !== 'en') ||
       (options.serverId !== undefined && (typeof options.serverId !== 'string' || !isSafeServerId(options.serverId))) ||
       [options.password, options.initialVoiceChannel, options.initialTextChannel].some(value => value !== undefined && typeof value !== 'string') ||
       (options.maxUsers !== undefined && (!Number.isSafeInteger(options.maxUsers) || options.maxUsers < 0)) ||
@@ -64,6 +65,7 @@ export class ServerManager {
       password: options.password || '',
       initialVoiceChannel: options.initialVoiceChannel || 'Geral',
       initialTextChannel: options.initialTextChannel || 'geral',
+      categoryLocale: options.categoryLocale,
       maxUsers: options.maxUsers,
       voiceMode: options.voiceMode,
     };

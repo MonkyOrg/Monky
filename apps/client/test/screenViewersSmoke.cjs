@@ -67,7 +67,7 @@ async function runScreenViewersSmoke() {
       button.click();
       check(cardClicks === 0 && popup.matches(':popover-open'), 'Click pins hover without toggling card focus');
       popup.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      check(!popup.matches(':popover-open'), 'Escape closes the list');
+      check(popup.hasAttribute('data-ui-closing') || !popup.matches(':popover-open'), 'Escape closes the list logically immediately');
       button.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
       check(popup.matches(':popover-open'), 'Keyboard can open the list');
       const bounds = popup.getBoundingClientRect();
@@ -88,11 +88,11 @@ async function runScreenViewersSmoke() {
       deferred = true;
       clearTimeout(view.timer);
       const pending = view.refresh();
-      const markup = root.innerHTML;
       view.destroy();
+      const markup = root.innerHTML;
       resolvePending(['late']);
       await pending;
-      check(root.innerHTML === markup.replace('aria-expanded="true"', 'aria-expanded="false"'),
+      check(root.innerHTML === markup,
         'Destroyed widget ignores late responses');
       check(!popup.matches(':popover-open'), 'Destroy closes top-layer popover');
       deferred = false;

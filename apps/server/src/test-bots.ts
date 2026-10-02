@@ -494,9 +494,11 @@ test('bot voice rejects inaccessible/full rooms but approved publishing does not
   const created = await owner.peer.request(MessageType.BOT_CREATE, {});
   const botId = text(record(created.payload.bot).id);
   const bot = await f.bot(text(created.payload.token));
-  await f.channelRepo.update(voiceId, { isPrivate: true, allowedRoleIds: [] });
+  await owner.peer.request(MessageType.CHANNEL_UPDATE, {
+    channelId: voiceId, inheritCategoryPermissions: false, isPrivate: true, allowedRoleIds: [],
+  });
   await bot.peer.error(MessageType.VOICE_JOIN, { channelId: voiceId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
-  await f.channelRepo.update(voiceId, { isPrivate: false, maxParticipants: 1 });
+  await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: voiceId, isPrivate: false, maxParticipants: 1 });
   await owner.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId });
   await bot.peer.error(MessageType.VOICE_JOIN, { channelId: voiceId }, ProtocolErrorCode.CHANNEL_FULL);
   const original = f.permissions.getUserPermissions.bind(f.permissions);
@@ -1888,7 +1890,7 @@ test('persistent text reactions support bot events and enforce privacy', async (
   await alice.peer.error(MessageType.CHAT_REACTION_ADD, { ...reaction, userId: botId }, ProtocolErrorCode.BAD_REQUEST);
   await alice.peer.error(MessageType.CHAT_REACTION_ADD, { ...reaction, emoji: 'not emoji' }, ProtocolErrorCode.BAD_REQUEST);
   await alice.peer.error(MessageType.CHAT_REACTION_ADD, { ...reaction, messageId: randomUUID() }, ProtocolErrorCode.BAD_REQUEST);
-  await alice.peer.error(MessageType.CHAT_REACTION_ADD, { ...reaction, channelId: voiceChannelId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await alice.peer.error(MessageType.CHAT_REACTION_ADD, { ...reaction, channelId: voiceChannelId }, ProtocolErrorCode.BAD_REQUEST);
   const privateChannel = await owner.peer.request(MessageType.CHANNEL_CREATE, {
     name: 'reaction-private', type: 'TEXT', isPrivate: true, allowedRoleIds: [],
   });
@@ -2225,6 +2227,8 @@ test('bot interactions over authenticated WebSockets', async (t) => {
 
   await t.test('rejects unauthorized, missing, malformed or mistyped options before dispatch', async () => {
     const valid = { topic: 'news', count: 3, notify: false, target: bob.id };
+    const voiceInvocation = await invoke(alice.peer, voiceChannel, undefined, 'ping');
+    await finish(voiceInvocation.id);
     const before = bot.peer.messages.length;
     for (const options of [
       {}, { ...valid, topic: undefined }, { ...valid, topic: 'other' }, { ...valid, count: '3' },
@@ -2234,7 +2238,6 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       await alice.peer.error(MessageType.COMMAND_INVOKE, { commandName: 'survey', botId, channelId: textChannel, options }, ProtocolErrorCode.BOT_INVALID_OPTIONS);
     }
     await alice.peer.error(MessageType.COMMAND_INVOKE, { commandName: 'ping', botId, channelId: textChannel, args: 'stale args' }, ProtocolErrorCode.BOT_INVALID_OPTIONS);
-    await alice.peer.error(MessageType.COMMAND_INVOKE, { commandName: 'ping', botId, channelId: voiceChannel }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
     await alice.peer.error(MessageType.COMMAND_INVOKE, { commandName: 'ping', botId, channelId: 'missing' }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
     await bob.peer.error(MessageType.COMMAND_INVOKE, { commandName: 'ping', botId, channelId: privateChannel }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
     await alice.peer.error(MessageType.COMMAND_INVOKE, { commandName: 'missing', botId, channelId: textChannel }, ProtocolErrorCode.BOT_COMMAND_NOT_FOUND);
@@ -2289,6 +2292,28 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     assert.ok(!alice.peer.messages.some((m) => hasInvocation(m, MessageType.COMMAND_RESPONSE, second.id)));
     assert.ok(!otherDevice.peer.messages.some((m) => hasInvocation(m, MessageType.COMMAND_RESPONSE, first.id)));
     assert.ok(!owner.peer.messages.some((m) => hasInvocation(m, MessageType.COMMAND_RESPONSE, first.id)));
+    const carouselInvocation = await invoke();
+    const uploaded = await alice.peer.request(MessageType.COMMUNITY_IMAGE_UPLOAD, {
+      channelId: textChannel, imageData: PNG,
+    });
+    const imageRef = text(uploaded.payload.ref);
+    const carousel = {
+      type: 'carousel', imageAssetRefs: [imageRef], label: 'Command images',
+      presentation: { format: 'square', fit: 'contain', size: 'compact' },
+    };
+    bot.peer.send(MessageType.COMMAND_RESPONSE, {
+      invocationId: carouselInvocation.id, content: 'Private carousel', components: [carousel],
+    });
+    const carouselMessage = await alice.peer.wait((m) =>
+      hasInvocation(m, MessageType.COMMAND_RESPONSE, carouselInvocation.id) && Array.isArray(m.payload.components));
+    const resolvedCarousel = records(carouselMessage.payload.components)[0];
+    assert.deepEqual(resolvedCarousel.presentation, carousel.presentation);
+    assert.ok(Array.isArray(resolvedCarousel.imageUrls));
+    assert.match(text(resolvedCarousel.imageUrls[0]), /^\/avatars\/community-stage-/);
+    assert.equal(resolvedCarousel.imageAssetRefs, undefined);
+    await bot.peer.error(MessageType.COMMAND_RESPONSE, {
+      invocationId: carouselInvocation.id, content: 'Persistent carousel', components: [carousel], ephemeral: false,
+    }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
     await bot.peer.error(MessageType.COMMAND_RESPONSE, { invocationId: first.id, content: 'Forged', userId: bob.id, channelId: textChannel }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
     await bot.peer.error(MessageType.COMMAND_RESPONSE, {
       invocationId: first.id, content: 'Forged attribution', commandName: 'other',
@@ -2328,6 +2353,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     await finish(first.id);
     await finish(second.id);
     await finish(secret.id);
+    await finish(carouselInvocation.id);
     await bob.peer.request(MessageType.CHAT_REACTION_ADD, { channelId: textChannel, messageId: text(publicMessage.payload.messageId), emoji: '👍' });
     await bot.peer.wait((message) => message.type === MessageType.CHAT_REACTION_ADDED && message.payload.messageId === publicMessage.payload.messageId);
     await owner.peer.request(MessageType.CHAT_DELETE, { channelId: textChannel, messageId: publicMessage.payload.messageId });
@@ -3148,7 +3174,11 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
       await alice.peer.error(MessageType.COMMAND_AUTOCOMPLETE, { ...searchInput(), ...invalid }, ProtocolErrorCode.BOT_INVALID_OPTIONS);
     }
     now += LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS;
-    await alice.peer.error(MessageType.COMMAND_AUTOCOMPLETE, searchInput({ channelId: voiceChannelId }), ProtocolErrorCode.CHANNEL_NOT_FOUND);
+    const voiceSearch = await search(alice.peer, { channelId: voiceChannelId });
+    bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, result, voiceSearch.botRequestId);
+    assert.deepEqual((await alice.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT &&
+      message.requestId === voiceSearch.requestId)).payload, result);
     await bot.peer.error(MessageType.COMMAND_AUTOCOMPLETE, searchInput(), ProtocolErrorCode.PERMISSION_DENIED);
     const old = await search();
     await otherDevice.peer.error(MessageType.COMMAND_AUTOCOMPLETE, searchInput(), ProtocolErrorCode.RATE_LIMITED);

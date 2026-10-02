@@ -9,7 +9,8 @@ const screenStageOnly = process.argv.includes('--screen-stage');
 const screenAudienceOnly = process.argv.includes('--screen-audience');
 const overlayWindowOnly = process.argv.includes('--overlay-window');
 const displayPlacementOnly = process.argv.includes('--verify-display-placement');
-if ([releaseNotesOnly, qualitySettingsOnly, screenStageOnly, screenAudienceOnly, overlayWindowOnly, displayPlacementOnly].filter(Boolean).length > 1)
+const navigationOnly = process.argv.includes('--navigation-only');
+if ([releaseNotesOnly, qualitySettingsOnly, screenStageOnly, screenAudienceOnly, overlayWindowOnly, displayPlacementOnly, navigationOnly].filter(Boolean).length > 1)
   throw new Error('Choose one targeted UI smoke.');
 
 if (!process.versions.electron) {
@@ -33,6 +34,7 @@ if (!process.versions.electron) {
   let timeout;
   const finish = async code => {
     clearTimeout(timeout);
+    if (window?.webContents.debugger.isAttached()) window.webContents.debugger.detach();
     if (window && !window.isDestroyed()) window.destroy();
     if (vite) await vite.close();
     app.exit(code);
@@ -44,7 +46,9 @@ if (!process.versions.electron) {
       await finish(0);
       return;
     }
-    const placement = require('./fixtures/testDisplay.cjs').installTestDisplay({ app, screen, BrowserWindow });
+    const placement = navigationOnly
+      ? null
+      : require('./fixtures/testDisplay.cjs').installTestDisplay({ app, screen, BrowserWindow });
     const { createServer } = await import('vite');
     vite = await createServer({
       configFile: path.join(clientRoot, 'vite.config.ts'), logLevel: 'error',
@@ -77,6 +81,10 @@ if (!process.versions.electron) {
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     timeout = setTimeout(() => { console.error('Settings navigation smoke timed out'); void finish(1); }, 90_000);
     await window.loadURL(`http://127.0.0.1:${address.port}/__settings_navigation__`);
+    window.webContents.debugger.attach('1.3');
+    await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+    });
     if (!qualitySettingsOnly && !screenStageOnly && !screenAudienceOnly && !overlayWindowOnly) {
       window.focus();
       window.webContents.focus();
@@ -109,7 +117,6 @@ if (!process.versions.electron) {
     if (screenAudienceOnly) {
       const { runScreenAudienceSmoke } = require('./screenAudienceSmoke.cjs');
       // Give the hidden fixture DOM focus without focusing a desktop window.
-      window.webContents.debugger.attach('1.3');
       await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
       let checks = 0;
       for (const [width, height] of [[1100, 850], [640, 440]]) {
@@ -153,7 +160,6 @@ if (!process.versions.electron) {
           }
         }
       }
-      window.webContents.debugger.detach();
       console.log(`Screen audience: ${checks} checks passed, 500 members/20 roles, software rendering only, no capture`);
       await finish(0);
       return;
@@ -163,7 +169,6 @@ if (!process.versions.electron) {
       const { runScreenViewersSmoke } = require('./screenViewersSmoke.cjs');
       const { appEventHandlerSource } = require('./fixtures/screenSharingUiModel.cjs');
       const fallbackHandler = appEventHandlerSource('native_screen.capture_fallback');
-      window.webContents.debugger.attach('1.3');
       await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
       let checks = 0;
       for (const [width, height] of [[1100, 850], [640, 440]]) {
@@ -187,7 +192,8 @@ if (!process.versions.electron) {
           window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
           window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
           if (!await evaluate(`new Promise(resolve => requestAnimationFrame(() =>
-            resolve(!document.querySelector('.stage-viewers-popup').matches(':popover-open')
+            resolve((document.querySelector('.stage-viewers-popup').hasAttribute('data-ui-closing')
+              || !document.querySelector('.stage-viewers-popup').matches(':popover-open'))
               && document.activeElement.matches('.stage-viewers-button'))))`))
             throw new Error('Escape must close the viewer list and restore trigger focus');
           checks += 2;
@@ -231,6 +237,10 @@ if (!process.versions.electron) {
     }
     const checks = await evaluate(`(${runSettingsNavigationSmoke.toString()})()`);
     console.log(`Settings navigation and emoji scrolling: ${checks} checks passed`);
+    if (navigationOnly) {
+      await finish(0);
+      return;
+    }
     for (const kind of ['app', 'server']) {
       await evaluate(`(() => {
         const preview = window.settingsPreviews.${kind};
@@ -374,7 +384,7 @@ async function runVersionCopyKeyboardSmoke(window) {
         })`);
         throw new Error(`${surface}/${keyCode}: native keyboard activation must copy exactly the displayed version once: ${JSON.stringify({ before, copied, focus })}`);
       }
-      if (!await evaluate(`document.querySelector('.chat-copy-toast-label')?.textContent === 'Versão copiada!'`)) {
+      if (!await evaluate(`document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label')?.textContent === 'Versão copiada!'`)) {
         throw new Error(`${surface}/${keyCode}: keyboard copy must use the shared toast`);
       }
     }
@@ -408,7 +418,6 @@ async function runVersionCopyKeyboardSmoke(window) {
       throw new Error(`${surface}: version copy needs a visible keyboard focus indicator: ${JSON.stringify(focused)}`);
     }
   }
-  window.webContents.debugger.attach('1.3');
   try {
     await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
       features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
@@ -417,7 +426,9 @@ async function runVersionCopyKeyboardSmoke(window) {
       throw new Error('Version hover must respect reduced motion');
     }
   } finally {
-    window.webContents.debugger.detach();
+    await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+    });
   }
 }
 
@@ -551,13 +562,13 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     clipboardWork = () => pendingCopy.promise;
     button.click();
     await wait();
-    check(copies.at(-1) === `v${version}` && !document.querySelector('.chat-copy-toast'),
+    check(copies.at(-1) === `v${version}` && !document.querySelector('.chat-copy-toast:not([data-ui-closing])'),
       'Clipboard gets the displayed text, without a premature success toast');
     pendingCopy.resolve();
     await wait();
-    check(document.querySelector('.chat-copy-toast')?.getAttribute('role') === 'status' &&
-      document.querySelector('.chat-copy-toast-label')?.textContent === language.t('versionCopy.copied') &&
-      document.querySelector('.chat-copy-toast .material-symbols-outlined')?.textContent === 'check_circle',
+    check(document.querySelector('.chat-copy-toast:not([data-ui-closing])')?.getAttribute('role') === 'status' &&
+      document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label')?.textContent === language.t('versionCopy.copied') &&
+      document.querySelector('.chat-copy-toast:not([data-ui-closing]) .material-symbols-outlined')?.textContent === 'check_circle',
     'Version copy reuses the exact message copy toast and live-region semantics');
     clipboardWork = async () => {};
     about.attachEvents(root);
@@ -565,10 +576,10 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     const beforeRebindCopy = copies.length;
     button.click();
     await wait();
-    check(copies.length === beforeRebindCopy + 1 && document.querySelectorAll('.chat-copy-toast').length === 1,
+    check(copies.length === beforeRebindCopy + 1 && document.querySelectorAll('.chat-copy-toast:not([data-ui-closing])').length === 1,
       'Rebinding does not duplicate clipboard calls or stack toasts');
     await wait(1650);
-    check(!document.querySelector('.chat-copy-toast'), 'Shared copy toast expires after 1600ms');
+    check(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'Shared copy toast expires after 1600ms');
 
     const superseded = deferred();
     clipboardWork = () => superseded.promise;
@@ -576,13 +587,13 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     clipboardWork = async () => { throw new Error('Clipboard denied'); };
     button.click();
     await wait();
-    check(!document.querySelector('.chat-copy-toast') &&
-      document.querySelector('.dialog-message')?.textContent === language.t('versionCopy.failed'),
+    check(!document.querySelector('.chat-copy-toast:not([data-ui-closing])') &&
+    document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-message')?.textContent === language.t('versionCopy.failed'),
     'Clipboard rejection reports a localized error, never success');
     superseded.resolve();
     await wait();
-    check(!document.querySelector('.chat-copy-toast'), 'An older clipboard completion cannot replace a newer failure with success');
-    document.querySelector('.dialog-card [data-action="confirm"]').click();
+    check(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'An older clipboard completion cannot replace a newer failure with success');
+    document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card [data-action="confirm"]').click();
 
     const closingCopy = deferred();
     clipboardWork = () => closingCopy.promise;
@@ -591,7 +602,7 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     root.remove();
     closingCopy.resolve();
     await wait();
-    check(!document.querySelector('.chat-copy-toast'), 'Closing settings discards late clipboard confirmation');
+    check(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'Closing settings discards late clipboard confirmation');
     clipboardWork = async () => {};
     button = mountAbout();
     window.api.getAppVersion = async () => { throw new Error('No version bridge'); };
@@ -630,7 +641,7 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     const releaseVersion = document.querySelector('#changelog-version');
     releaseVersion.click();
     await wait();
-    check(copies.at(-1) === `v${version}` && document.querySelector('.chat-copy-toast-label').textContent === 'Version copied!',
+    check(copies.at(-1) === `v${version}` && document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label').textContent === 'Version copied!',
       'Release-notes version copies with the same localized toast');
     document.querySelector('#changelog-github').click();
     await wait();

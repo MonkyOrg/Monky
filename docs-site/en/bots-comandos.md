@@ -167,7 +167,7 @@ client, server and bot SDK versions compatible with protocol 21.
 
 Typing `/` opens a menu with frequently used commands and sections grouped by bot. Each item identifies the command, its description, and its bot. While browsing, required parameter chips and the optional parameter count help choose a command. Pressing **Space** selects the highlighted command and opens its composer without executing it. Spaces in ordinary messages or parameter fields remain text.
 
-Selecting a command with parameters identifies **which bot and command** are selected in a compact composer with named fields, descriptions, and placeholders. Optional parameters can be added when needed. Submission uses the names declared in `options`; there is no need to join values with commas. Commands without parameters that do not request local downloads, such as `/ping` and `/enquete`, start their interaction immediately when selected with a click, Enter or Tab; selecting with Space waits for an explicit submission.
+Selecting a command with parameters identifies **which bot and command** are selected in a compact composer with named fields, descriptions, and placeholders. Optional parameters can be added when needed. Submission uses the names declared in `options`; there is no need to join values with commas. Commands without parameters that do not request local downloads, such as `/ping` and `/help`, start their interaction immediately when selected with a click, Enter or Tab; selecting with Space waits for an explicit submission.
 
 Usage frequency stays local and is scoped by server and identity. Only counts and recency are stored, never the values entered in parameters.
 

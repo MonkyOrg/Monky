@@ -2,12 +2,14 @@ import { Permission, MessageType, type Role, type RoleUpdatePayload, type RolesL
 import { serverStore } from '../../../stores/serverStore';
 import { getAvatarUrl } from '../../../utils/avatar';
 import { escapeHtml } from '../../../utils/html';
+import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import { showAlert, showConfirm } from '../../Dialog';
 import { t } from '../../../i18n';
 import type { ServerSettingsContext } from '../ServerSettingsContext';
 import { ServerMembersTab } from './ServerMembersTab';
 import { ColorPicker } from '../../ColorPicker';
 import { COLOR_PRESETS } from '../../../utils/colors';
+import { smoothScrollIntoView } from '../../../utils/scroll';
 
 export class ServerRolesTab {
   private draggedRoleId: string | null = null;
@@ -140,6 +142,8 @@ export class ServerRolesTab {
     }
     const labels: string[] = [];
     if (role.permissions & Permission.MANAGE_SERVER) labels.push(t('permissions.manageServer'));
+    if (role.permissions & Permission.MANAGE_EVENTS) labels.push(t('permissions.manageEvents'));
+    if (role.permissions & Permission.EMIT_LIVE_ACTIONS) labels.push(t('permissions.emitLiveActions'));
     if (role.permissions & Permission.VIEW_SERVER_MONITOR) labels.push(t('permissions.viewServerMonitor'));
     if (role.permissions & Permission.MANAGE_CHANNELS) labels.push(t('permissions.manageChannels'));
     if (role.permissions & Permission.MANAGE_ROLES) labels.push(t('permissions.manageRoles'));
@@ -154,6 +158,8 @@ export class ServerRolesTab {
     const items: Array<{ key: Permission; label: string; description: string }> = [
       { key: Permission.MANAGE_CHANNELS, label: t('permissions.manageChannels'), description: t('permissions.manageChannelsDesc') },
       { key: Permission.MANAGE_SERVER, label: t('permissions.manageServer'), description: t('permissions.manageServerDesc') },
+      { key: Permission.MANAGE_EVENTS, label: t('permissions.manageEvents'), description: t('permissions.manageEventsDesc') },
+      { key: Permission.EMIT_LIVE_ACTIONS, label: t('permissions.emitLiveActions'), description: t('permissions.emitLiveActionsDesc') },
       { key: Permission.VIEW_SERVER_MONITOR, label: t('permissions.viewServerMonitor'), description: t('permissions.viewServerMonitorDesc') },
       { key: Permission.MANAGE_ROLES, label: t('permissions.manageRoles'), description: t('permissions.manageRolesDesc') },
       { key: Permission.KICK_MEMBERS, label: t('permissions.kickMembers'), description: t('permissions.kickMembersDesc') },
@@ -437,7 +443,7 @@ export class ServerRolesTab {
   private hideEditor(): void {
     this.colorPicker.close(false, false);
     const editor = this.root?.querySelector<HTMLElement>('#role-editor-section');
-    if (editor) editor.style.display = 'none';
+    if (editor) setSurfaceVisible(editor, false);
     const id = this.root?.querySelector<HTMLInputElement>('#role-editor-id');
     if (id) id.value = '';
     this.dirtyName = false;
@@ -451,7 +457,7 @@ export class ServerRolesTab {
     const name = root.querySelector<HTMLInputElement>('#role-editor-name');
     if (!editor || !id || !name) return;
     this.colorPicker.close(false, false);
-    editor.style.display = 'flex';
+    setSurfaceVisible(editor, true, 'panel', 'flex');
     id.value = role?.id ?? '';
     name.value = role?.name ?? '';
     this.submittedName = name.value;
@@ -469,8 +475,8 @@ export class ServerRolesTab {
     if (title) title.textContent = role ? t('roles.editorEditTitle', { name: role.name }) : t('roles.editorNewTitle');
     root.querySelector<HTMLButtonElement>('[data-role-editor-tab="display"]')?.click();
     this.refreshState();
-    editor.scrollIntoView({ block: 'nearest' });
-    name.focus();
+    smoothScrollIntoView(editor, { block: 'nearest' });
+    name.focus({ preventScroll: true });
   }
 
   private syncColor(color: string): void {

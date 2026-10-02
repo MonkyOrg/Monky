@@ -107,6 +107,7 @@ select optgroup {
   overflow-wrap: anywhere;
   white-space: normal;
 }
+.monky-select-option.has-icon { display: flex; align-items: center; gap: 8px; }
 
 .monky-select-option.is-active:not([aria-disabled="true"]) {
   background: var(--bg-card-hover);

@@ -103,7 +103,7 @@ if (!process.versions.electron) {
       }
       throw new Error('Invitation page did not reach the expected state');
     })()`);
-    const invite = { v: 1, host: 'invite-fixture.test', port: 4321, name: '\ufeffSala <em> & teste', password: '\ufefffixture-only-password' };
+    const invite = { v: 1, host: 'invite-fixture.test', port: 4321, name: '\ufeffSala <em> & teste', password: '\ufefffixture-only-password', eventId: 'calendar-event-123' };
     const link = createServerInviteLink(invite);
     for (const language of ['pt-BR', 'en']) {
       const prefix = language === 'en' ? '/Monky/en/' : '/Monky/';

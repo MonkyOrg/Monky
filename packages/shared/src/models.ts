@@ -3,7 +3,7 @@ import type { CommandLocalizations } from './botLocales.js';
 import type { LocalCapabilityId } from './localExecution.js';
 import type { NativeScreenSource } from './screenSharing.js';
 
-export type ChannelType = 'VOICE' | 'TEXT';
+export type ChannelType = 'VOICE' | 'TEXT' | 'FORUM';
 
 export type VoiceMode = 'p2p' | 'sfu';
 
@@ -63,7 +63,23 @@ export interface UserSummary {
   isBot?: boolean;
 }
 
+export interface ChannelCategory {
+  id: string;
+  serverId: string;
+  name: string;
+  position: number;
+  createdAt: number;
+  isPrivate: boolean;
+  allowedRoleIds: string[];
+}
+
 export interface ChannelSummary {
+  forumId?: string | null;
+  forumLocked?: boolean;
+  forumClosed?: boolean;
+  /** No category means this channel uses its own access rules. */
+  categoryId?: string | null;
+  inheritCategoryPermissions?: boolean;
   botCommandsEnabled: boolean;
   id: string;
   serverId: string;
@@ -73,6 +89,7 @@ export interface ChannelSummary {
   createdAt: number;
   maxParticipants?: number;
   /**
+   * Effective access: inherited from the category unless overridden.
    * Restricts the channel to members holding one of `allowedRoleIds` (#384).
    * The server never sends a channel the recipient cannot access, so receiving
    * one already means it is visible to you — this flag only drives the UI badge
@@ -138,6 +155,7 @@ export interface MessageReply {
 }
 
 export interface ChatMessage {
+  botComponents?: import('./botCarousels.js').BotMessageComponent[];
   blocks?: import('./messageBlocks.js').ResolvedMessageBlock[];
   localizations?: import('./botMessages.js').BotMessageLocalizations;
   reply?: MessageReply;
@@ -173,6 +191,8 @@ export interface ChatMessage {
   isBot?: boolean;
   /** Server-authenticated attribution; private argument values are never included. */
   botCommand?: BotCommandContext;
+  /** Native poll attached to this message, personalized with the current member's vote. */
+  poll?: import('./nativePolls.js').NativePoll;
 }
 
 export interface Role {
@@ -325,6 +345,8 @@ export interface ServerDetails {
   maxUsers: number;
   hasPassword?: boolean;
   allowSoundboard?: boolean;
+  recentSoundCacheEnabled?: boolean;
+  recentSoundCacheLimit?: number;
   /** Whether `@todos` / `@everyone` mentions the whole channel (#464). */
   allowEveryoneMention?: boolean;
   /**
@@ -358,6 +380,7 @@ export interface ServerDetails {
   hostSpecs?: HostSpecs;
   iconUrl?: string | null;
   channels: ChannelSummary[];
+  categories?: ChannelCategory[];
   /** One entry per live connection: a user signed in from two devices appears twice (#309). */
   members: UserSummary[];
   // All users who have ever connected (online + offline), used to allow

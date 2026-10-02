@@ -3,7 +3,7 @@
   z-index: 2147483647;
   width: max-content;
   max-width: min(300px, calc(100vw - 16px));
-  max-height: calc(100vh - 16px);
+  max-height: calc(100vh - 24px);
   box-sizing: border-box;
   padding: 7px 10px;
   border: 1px solid rgba(255, 255, 255, 0.09);
@@ -30,7 +30,7 @@
 
 .monky-tooltip__content {
   display: block;
-  max-height: calc(100vh - 32px);
+  max-height: calc(100vh - 40px);
   overflow: hidden;
 }
 

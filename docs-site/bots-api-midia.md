@@ -15,13 +15,13 @@ Assinaturas públicas completas do SDK de bots do Monky, geradas da entrada Type
 
 ```ts
 export type BotScreen = {
-    revision: number;
-    id: string;
     title: string;
-    botId: string;
-    state: BotScreenJson;
+    id: string;
     channelId: string;
+    botId: string;
     createdAt: number;
+    revision: number;
+    state: BotScreenJson;
     html: string;
     instanceId: string;
     creatorUserId?: string | undefined;
@@ -34,15 +34,15 @@ export type BotScreen = {
 
 ```ts
 export type BotScreenActionEvent = {
-    revision: number;
     channelId: string;
+    revision: number;
     userId: string;
+    userNickname: string;
     instanceId: string;
     action: string;
     payload: BotScreenJson;
     actionId: string;
     screenId: string;
-    userNickname: string;
 };
 ```
 
@@ -68,11 +68,11 @@ export class BotScreenClient {
 ```ts
 export type BotScreenCreate = {
     title: string;
-    state: BotScreenJson;
     channelId: string;
+    state: BotScreenJson;
     html: string;
-    invocationId?: string | undefined;
     id?: string | undefined;
+    invocationId?: string | undefined;
 };
 ```
 
@@ -92,8 +92,8 @@ export type BotScreenJson = string | number | boolean | BotScreenJson[] | {
 
 ```ts
 export type BotScreenPatch = {
-    state: BotScreenJson;
     expectedRevision: number;
+    state: BotScreenJson;
 };
 ```
 
@@ -115,29 +115,29 @@ export type BotScreenRef = {
 ```ts
 export type BotScreenRemoved = {
     id: string;
-    reason: "ended";
     channelId: string;
+    reason: "ended";
     instanceId: string;
     endedByUserId: string;
 } | {
     id: string;
+    channelId: string;
     reason: "closed";
-    channelId: string;
     instanceId: string;
 } | {
     id: string;
+    channelId: string;
     reason: "access_revoked";
-    channelId: string;
     instanceId: string;
 } | {
     id: string;
+    channelId: string;
     reason: "bot_disconnected";
-    channelId: string;
     instanceId: string;
 } | {
     id: string;
-    reason: "view_revoked";
     channelId: string;
+    reason: "view_revoked";
     instanceId: string;
 };
 ```
@@ -151,11 +151,11 @@ export interface BotVoiceAudioReceiver {
     readonly droppedPackets: number;
     return: () => Promise<IteratorResult<BotVoicePacket, undefined>>;
     throw: (error: unknown) => Promise<IteratorResult<BotVoicePacket, undefined>>;
-    [Symbol.asyncIterator]: () => AsyncIterableIterator<import("C:/Projetos/Monky-batch-670-682/packages/bot-sdk/src/index").BotVoicePacket, undefined, undefined>;
+    [Symbol.asyncIterator]: () => AsyncIterableIterator<import("C:/Projetos/Monky/packages/bot-sdk/src/index").BotVoicePacket, undefined, undefined>;
     next: (...[value]: [
     ] | [
         undefined
-    ]) => Promise<IteratorResult<import("C:/Projetos/Monky-batch-670-682/packages/bot-sdk/src/index").BotVoicePacket, undefined>>;
+    ]) => Promise<IteratorResult<import("C:/Projetos/Monky/packages/bot-sdk/src/index").BotVoicePacket, undefined>>;
 }
 ```
 
@@ -345,9 +345,9 @@ export interface LocalExecutor {
 
 ```ts
 export type LocalMediaTrack = {
-    id: string;
     title: string;
     url: string;
+    id: string;
     duration: number;
 };
 ```
@@ -360,17 +360,17 @@ export type LocalMediaTrack = {
 export type LocalMetadataTaskResult = {
     operation: "youtube.search";
     tracks: {
-        id: string;
         title: string;
         url: string;
+        id: string;
         duration: number;
     }[];
 } | {
     operation: "youtube.resolve";
     track: {
-        id: string;
         title: string;
         url: string;
+        id: string;
         duration: number;
     };
 } | {
@@ -445,14 +445,14 @@ export type LocalPreviewReference = {
 
 ```ts
 export type LocalRequestContext = {
-    invocationId: string;
     kind: "invocation";
+    invocationId: string;
 } | {
-    requestId: string;
     kind: "autocomplete";
-} | {
     requestId: string;
+} | {
     kind: "audio-preview";
+    requestId: string;
 } | {
     kind: "source";
     sourceContextId: string;
@@ -466,15 +466,15 @@ export type LocalRequestContext = {
 ```ts
 export type LocalSourceContext = {
     url: string;
-    sourceContextId: string;
+    expiresAt: number;
     botId: string;
+    sourceContextId: string;
     botPublicKey: string;
     invokerId: string;
     invokerSessionId: string;
     originChannelId: string;
     capability: "youtube-audio";
     provider: "youtube-local";
-    expiresAt: number;
 };
 ```
 
@@ -521,17 +521,17 @@ export type LocalTaskEvent = {
     result: {
         operation: "youtube.search";
         tracks: {
-            id: string;
             title: string;
             url: string;
+            id: string;
             duration: number;
         }[];
     } | {
         operation: "youtube.resolve";
         track: {
-            id: string;
             title: string;
             url: string;
+            id: string;
             duration: number;
         };
     } | {
@@ -543,9 +543,9 @@ export type LocalTaskEvent = {
     } | {
         operation: "youtube.stream";
         track: {
-            id: string;
             title: string;
             url: string;
+            id: string;
             duration: number;
         };
     };
@@ -642,17 +642,17 @@ export type LocalWirePreviewResult = {
 export type LocalWireTaskResult = {
     operation: "youtube.search";
     tracks: {
-        id: string;
         title: string;
         url: string;
+        id: string;
         duration: number;
     }[];
 } | {
     operation: "youtube.resolve";
     track: {
-        id: string;
         title: string;
         url: string;
+        id: string;
         duration: number;
     };
 } | {
@@ -664,9 +664,9 @@ export type LocalWireTaskResult = {
 } | {
     operation: "youtube.stream";
     track: {
-        id: string;
         title: string;
         url: string;
+        id: string;
         duration: number;
     };
 };

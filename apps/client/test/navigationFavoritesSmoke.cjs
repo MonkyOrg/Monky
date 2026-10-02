@@ -445,8 +445,10 @@ async function setupNavigationFavoritesSmoke() {
     return { call, visible, before: snapshotVoice() };
   };
   const settleDialog = async (confirm = true) => {
-    await until(() => document.querySelector('.dialog-card'), 'Expected a navigation dialog');
-    click(`.dialog-card [data-action="${confirm ? 'confirm' : 'cancel'}"]`);
+    const selector = '.modal-backdrop:not([data-ui-closing]) .dialog-card';
+    await until(() => document.querySelector(selector), 'Expected a navigation dialog');
+    click(`${selector} [data-action="${confirm ? 'confirm' : 'cancel'}"]`);
+    await until(() => !document.querySelector(selector), 'Expected the navigation dialog to close');
   };
 
   window.navigationFavoritesSmoke = {
@@ -508,10 +510,10 @@ async function setupNavigationFavoritesSmoke() {
       };
       try {
         click('#sb-sounds-container .favorite-toggle');
-        await until(() => document.querySelector('.dialog-card'), 'Favorite persistence error');
+        await until(() => document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card'), 'Favorite persistence error');
         equal(document.querySelector('#sb-sounds-container .favorite-toggle').getAttribute('aria-pressed'), 'false',
           'A failed favorite write does not falsely display a saved star');
-        equal(document.querySelector('.dialog-message').textContent, t('favorites.saveFailed'),
+        equal(document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-message').textContent, t('favorites.saveFailed'),
           'Storage errors show localized, actionable guidance');
         await settleDialog();
       } finally {
@@ -556,8 +558,8 @@ async function setupNavigationFavoritesSmoke() {
       };
       try {
         click('#sb-btn-change-folder');
-        await until(() => document.querySelector('.dialog-message'), 'Folder persistence error');
-        equal(document.querySelector('.dialog-message').textContent, t('soundboard.chooseFolderFailed'),
+        await until(() => document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-message'), 'Folder persistence error');
+        equal(document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-message').textContent, t('soundboard.chooseFolderFailed'),
           'Folder persistence failures show the localized folder error');
         equal(settings.soundboardFolderPath, firstFolder, 'Failed persistence restores the previously configured download folder');
         equal(JSON.stringify(soundboard.getSounds()), loadedSounds, 'Failed folder selection preserves the loaded sound library');
@@ -596,7 +598,7 @@ async function setupNavigationFavoritesSmoke() {
       load.resolve([]);
       await opening;
       soundboard.loadSounds = originalLoad;
-      check(!document.getElementById('sb-search-input'), 'A late load cannot reopen a closed modal');
+      check(!document.querySelector('.modal-backdrop:not([data-ui-closing]) #sb-search-input'), 'A late load cannot reopen a closed modal');
 
       const originalSounds = folderSounds.get(firstFolder);
       folderSounds.set(firstFolder, [...originalSounds, sound(firstFolder, 'Drum')]);
@@ -650,7 +652,7 @@ async function setupNavigationFavoritesSmoke() {
       click('#home-saved-servers .btn-edit-saved-srv');
       document.getElementById('edit-srv-host').value = 'edited.test';
       document.getElementById('edit-srv-port').value = '4000';
-      click('.modal-backdrop [data-action="save"]');
+      click('.modal-backdrop:not([data-ui-closing]) [data-action="save"]');
       check(favorites.isServerFavorite({ host: 'edited.test', port: 4000 }), 'Home edits transfer the favorite to the new address');
       equal(visibleRows(), ['edited.test'], 'An edited favorite remains visible');
       click('#home-saved-servers .btn-delete-saved-srv');
@@ -1190,8 +1192,8 @@ async function setupNavigationFavoritesSmoke() {
         for (const mode of ['p2p', 'sfu']) {
           const { call, before } = await prepareCall(host, mode);
           const opening = rail.connectToSavedServer(target);
-          await until(() => document.querySelector('.dialog-card'), 'Owned-server start confirmation');
-          equal(document.querySelector('.dialog-card [data-action="confirm"]').textContent,
+          await until(() => document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card'), 'Owned-server start confirmation');
+          equal(document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card [data-action="confirm"]').textContent,
             t('main.serverOfflineStartConfirm'), 'Confirmation uses the start-only translation');
           await settleDialog();
           await opening;
@@ -1395,7 +1397,7 @@ async function setupNavigationFavoritesSmoke() {
         await tick();
         check(sessions.isHome() && document.querySelector('.main-layout--home .connection-layout'),
           `${mode}: actual Home control opens Home inside the connected layout`);
-        check(!document.querySelector('.dialog-card'), `${mode}: Home does not ask to disconnect`);
+        check(!document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card'), `${mode}: Home does not ask to disconnect`);
         equal(sessions.getAll().length, 2, `${mode}: Home preserves every connection`);
         check(document.querySelector('#server-rail-home').getAttribute('aria-current') === 'page',
           `${mode}: Home is the selected rail destination`);
@@ -1473,7 +1475,9 @@ async function setupNavigationFavoritesSmoke() {
           copied = value;
         },
       } });
-      const submit = () => document.getElementById('join-invite-form').requestSubmit();
+      const inviteForm = () => document.querySelector('.modal-backdrop:not([data-ui-closing]) #join-invite-form');
+      const inviteControl = selector => inviteForm()?.querySelector(selector);
+      const submit = () => inviteForm().requestSubmit();
       try {
         const { call, visible, before } = await prepareCall();
         connection.saveUserProfile('Identity <Owner>');
@@ -1499,13 +1503,13 @@ async function setupNavigationFavoritesSmoke() {
             `${language}: feedback follows the selected language`);
           inviteModal.close();
           const reviewing = joinInviteModal.open(parsed.invite);
-          await until(() => document.getElementById('join-invite-form'), 'Known identity review');
-          check(!document.getElementById('invite-join-nickname'), `${language}: configured identities do not get a nickname field`);
-          equal(document.querySelector('[data-invite-identity]').textContent,
+          await until(inviteForm, 'Known identity review');
+          check(!inviteControl('#invite-join-nickname'), `${language}: configured identities do not get a nickname field`);
+          equal(inviteControl('[data-invite-identity]').textContent,
             t('invite.identityNickname', { name: connection.savedNickname }), `${language}: the current identity is shown in the chosen language`);
-          check(!document.querySelector('[data-invite-nickname] owner'), 'Identity names are escaped rather than interpreted as HTML');
-          equal(document.activeElement, document.querySelector('[data-invite-join]'), 'Configured identities can confirm immediately');
-          click('[data-invite-cancel]');
+          check(!inviteControl('[data-invite-nickname] owner'), 'Identity names are escaped rather than interpreted as HTML');
+          equal(document.activeElement, inviteControl('[data-invite-join]'), 'Configured identities can confirm immediately');
+          click('.modal-backdrop:not([data-ui-closing]) [data-invite-cancel]');
           check(!(await reviewing), 'Review can be cancelled without changing identity');
         }
         visible.password = undefined;
@@ -1513,8 +1517,8 @@ async function setupNavigationFavoritesSmoke() {
         check(document.getElementById('chk-invite-password').disabled, 'Unknown passwords cannot be embedded');
         clipboardFailure = true;
         click('#btn-copy-invite');
-        await until(() => document.querySelector('.dialog-card'), 'Clipboard failure is reported');
-        check(document.querySelector('.dialog-message').textContent.includes(t('invite.copyFailed')),
+        await until(() => document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card'), 'Clipboard failure is reported');
+        check(document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-message').textContent.includes(t('invite.copyFailed')),
           'Clipboard failure is localized and not success-shaped');
         await settleDialog();
         clipboardFailure = false;
@@ -1524,27 +1528,28 @@ async function setupNavigationFavoritesSmoke() {
         const input = document.getElementById('join-invite');
         input.value = createServerInviteLink({ v: 1, host: 'invited.test', port: 4600, name: 'Invited fixture' });
         click('#btn-review-invite');
-        await until(() => document.getElementById('join-invite-form'), 'Pasting a link opens review without manual address fields');
+        await until(inviteForm, 'Pasting a link opens review without manual address fields');
         equal(connects.length, 0, 'Opening an invitation never connects automatically');
         check(document.querySelector('[data-invite-host]').textContent === 'invited.test',
           'Review shows the actual destination rather than only the supplied name');
-        click('[data-invite-cancel]');
+        click('.modal-backdrop:not([data-ui-closing]) [data-invite-cancel]');
         await tick();
         check(sessions.isHome(), 'Cancelling review leaves Home and existing sessions untouched');
         preserveVoice(before, call, 'Cancelled invitation');
-        const invite = { v: 1, host: 'invited.test', port: 4600, name: '\ufeff<Fixture name>', password: '\ufeff Exact 🐵 password ' };
+        const invite = { v: 1, host: 'invited.test', port: 4600, name: '\ufeff<Fixture name>', password: '\ufeff Exact 🐵 password ', eventId: 'shared-event' };
         const decodedInvite = parseServerInviteLink(createServerInviteLink(invite));
         check(decodedInvite.ok, 'The compact link retains the complete invitation');
         const opening = joinInviteModal.open(decodedInvite.invite);
-        await until(() => document.getElementById('join-invite-form'), 'Direct invitation review');
+        await until(inviteForm, 'Direct invitation review');
         check(!document.querySelector('fixture'), 'Untrusted invitation names stay text');
-        check(!document.getElementById('invite-join-nickname'), 'Joining does not ask to retype a configured identity name');
+        check(!inviteControl('#invite-join-nickname'), 'Joining does not ask to retype a configured identity name');
         connection.saveUserProfile('Renamed identity');
         const savesBeforeJoin = profileSaves;
-        check(document.getElementById('invite-join-password').type === 'password', 'Included password stays masked');
+        check(inviteControl('#invite-join-password').type === 'password', 'Included password stays masked');
         submit();
         check(await opening, 'Explicit confirmation joins the invited server');
         const added = sessions.get(sessionKeyFor(invite.host, invite.port));
+        equal(added.community.takeEventRequest(), invite.eventId, 'Event destination is queued only on the invited session after confirmation');
         equal(added.client.fixtureNickname, 'Renamed identity', 'Authentication uses the current profile name, not an old field or another server alias');
         equal(profileSaves, savesBeforeJoin, 'An invitation does not rewrite a configured identity profile');
         equal(added.password, invite.password, 'Connection receives the exact invitation password');
@@ -1552,9 +1557,9 @@ async function setupNavigationFavoritesSmoke() {
 
         connection.setIdentity(null);
         const missingIdentity = joinInviteModal.open({ v: 1, host: 'missing-identity.test', port: 4603 });
-        await until(() => document.getElementById('join-invite-form'), 'Missing identity review');
-        check(!!document.getElementById('invite-join-nickname'), 'A cached name without an identity can still be configured');
-        click('[data-invite-cancel]');
+        await until(inviteForm, 'Missing identity review');
+        check(!!inviteControl('#invite-join-nickname'), 'A cached name without an identity can still be configured');
+        click('.modal-backdrop:not([data-ui-closing]) [data-invite-cancel]');
         check(!(await missingIdentity), 'Missing identity setup can be cancelled');
         connection.setIdentity(identity);
 
@@ -1563,8 +1568,8 @@ async function setupNavigationFavoritesSmoke() {
         const firstNameGate = deferred();
         connectGates.set(firstNameKey, firstNameGate);
         const firstName = joinInviteModal.open({ v: 1, host: 'first-name.test', port: 4604 });
-        await until(() => document.getElementById('invite-join-nickname'), 'First identity name setup');
-        const nickname = document.getElementById('invite-join-nickname');
+        await until(() => inviteControl('#invite-join-nickname'), 'First identity name setup');
+        const nickname = inviteControl('#invite-join-nickname');
         equal(document.activeElement, nickname, 'Only missing profile names focus the nickname input');
         nickname.value = '  ';
         const connectsBeforeName = connects.length;
@@ -1589,8 +1594,8 @@ async function setupNavigationFavoritesSmoke() {
           'Authentication receives the explicitly configured first nickname');
         const savedNickname = connection.savedNickname;
         const duplicate = joinInviteModal.open({ ...invite, password: 'Do not replace existing credentials' });
-        await until(() => document.getElementById('join-invite-form'), 'Review an already-connected invitation');
-        check(!document.getElementById('invite-join-nickname'), 'Subsequent invitations reuse the configured identity name');
+        await until(inviteForm, 'Review an already-connected invitation');
+        check(!inviteControl('#invite-join-nickname'), 'Subsequent invitations reuse the configured identity name');
         const countBefore = connects.length;
         const savesBeforeReuse = profileSaves;
         submit();
@@ -1605,37 +1610,37 @@ async function setupNavigationFavoritesSmoke() {
         const failedKey = sessionKeyFor('failed-invite.test', 4601);
         connectGates.set(failedKey, gate);
         const failing = joinInviteModal.open({ v: 1, host: 'failed-invite.test', port: 4601 });
-        await until(() => document.getElementById('join-invite-form'), 'Review an invitation without a password');
-        equal(document.getElementById('invite-join-password').value, '', 'Passwordless invitations allow entry-time credentials');
-        document.getElementById('invite-join-password').value = 'entered-at-join';
+        await until(inviteForm, 'Review an invitation without a password');
+        equal(inviteControl('#invite-join-password').value, '', 'Passwordless invitations allow entry-time credentials');
+        inviteControl('#invite-join-password').value = 'entered-at-join';
         submit();
         await until(() => connects.includes(failedKey), 'Authentication was attempted');
         gate.reject(new Error('Fixture authentication rejected'));
-        await until(() => !document.querySelector('[data-invite-error]').hidden, 'Authentication failure stays in the dialog');
-        check(!document.getElementById('invite-join-nickname'), 'An authentication failure does not reintroduce a redundant nickname field');
-        check(document.querySelector('[data-invite-error]').textContent.includes('Fixture authentication rejected'),
+        await until(() => !inviteControl('[data-invite-error]').hidden, 'Authentication failure stays in the dialog');
+        check(!inviteControl('#invite-join-nickname'), 'An authentication failure does not reintroduce a redundant nickname field');
+        check(inviteControl('[data-invite-error]').textContent.includes('Fixture authentication rejected'),
           'The concrete connection error is visible');
         check(sessions.isHome() && !sessions.has(failedKey), 'Failed invitation restores Home without keeping a dead socket');
-        click('[data-invite-cancel]');
+        click('.modal-backdrop:not([data-ui-closing]) [data-invite-cancel]');
         check(!(await failing), 'Failed invitation can be dismissed');
         preserveVoice(before, call, 'Failed invitation');
 
         const pending = [{ ok: true, invite }, { ok: false, reason: 'invalid' }];
         window.api.takeServerInvite = async () => pending.shift() ?? null;
         const consuming = app.consumeServerInvites();
-        await until(() => document.getElementById('join-invite-form'), 'Warm/cold inbox delivery waits for confirmation');
-        click('[data-invite-cancel]');
-        await until(() => document.querySelector('.dialog-card'), 'Invalid pending invitation is shown explicitly');
+        await until(inviteForm, 'Warm/cold inbox delivery waits for confirmation');
+        click('.modal-backdrop:not([data-ui-closing]) [data-invite-cancel]');
+        await until(() => document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card'), 'Invalid pending invitation is shown explicitly');
         await settleDialog();
         check(await consuming, 'Receiving an invitation suppresses automatic server entry even after cancellation');
-        check(!document.querySelector('#join-invite-form'), 'Inbox delivers sequential dialogs and releases them');
+        check(!inviteForm(), 'Inbox delivers sequential dialogs and releases them');
         delete window.api.takeServerInvite;
 
         const identityGate = deferred();
         const originalIdentity = window.api.getIdentity;
         window.api.getIdentity = () => identityGate.promise;
         const closing = joinInviteModal.open({ v: 1, host: 'cancelled-invite.test', port: 4602 });
-        await until(() => document.getElementById('join-invite-form'), 'Review before asynchronous identity load');
+        await until(inviteForm, 'Review before asynchronous identity load');
         const beforeClose = connects.length;
         submit();
         joinInviteModal.close();
@@ -1667,7 +1672,7 @@ async function setupNavigationFavoritesSmoke() {
         if (homeVisible) navigation.showHome();
         await tick();
         const assertCovered = label => {
-          const backdrop = document.querySelector('.modal-backdrop');
+          const backdrop = document.querySelector('.modal-backdrop:not([data-ui-closing])');
           check(!!backdrop, `${label}: real modal is open`);
           for (const selector of ['#bar-btn-mic', '#bar-btn-settings', '#bar-btn-disconnect']) {
             const bounds = document.querySelector(selector).getBoundingClientRect();
@@ -1853,8 +1858,8 @@ async function setupNavigationFavoritesSmoke() {
         gate = deferred();
         button.click();
         gate.reject(new Error('Fixture noise engine rejected'));
-        await until(() => document.querySelector('.dialog-card'), 'Noise selection failure alert');
-        equal(document.querySelector('.dialog-message').textContent, t('audioNoise.selectionFailed'),
+        await until(() => document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card'), 'Noise selection failure alert');
+        equal(document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-message').textContent, t('audioNoise.selectionFailed'),
           `${mode}: noise selection failures are actionable and localized`);
         equal(settings.noiseSuppressionMode, mode, `${mode}: failed selection restores the previous mode`);
         equal(settings.lastNoiseSuppressionMode, last, `${mode}: failed selection preserves the remembered engine`);

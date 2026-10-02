@@ -4,6 +4,7 @@ import { serverStore } from '../stores/serverStore';
 import { t } from '../i18n';
 import { getAvatarUrl } from '../utils/avatar';
 import { escapeHtml } from '../utils/html';
+import { animateEnter, cancelSurfaceMotion, hideWithMotion } from '../utils/surfaceMotion';
 
 /** Refreshes only the audience badge, never the live video or its card. */
 export class ScreenViewersView {
@@ -65,15 +66,22 @@ export class ScreenViewersView {
 
   private open(): void {
     if (!this.root.isConnected || this.events.signal.aborted) return;
+    if (this.button.getAttribute('aria-expanded') === 'true') return;
+    cancelSurfaceMotion(this.popup);
+    this.popup.hidden = false;
     this.popup.showPopover();
     this.button.setAttribute('aria-expanded', 'true');
     this.position();
+    animateEnter(this.popup);
   }
 
   private close(): void {
     this.pinned = false;
-    this.popup.hidePopover();
+    if (this.button.getAttribute('aria-expanded') !== 'true') return;
     this.button.setAttribute('aria-expanded', 'false');
+    hideWithMotion(this.popup, 'popover', () => {
+      if (this.popup.matches(':popover-open')) this.popup.hidePopover();
+    });
   }
 
   private position(): void {
@@ -136,6 +144,10 @@ export class ScreenViewersView {
     this.events.abort();
     window.clearTimeout(this.timer);
     window.clearTimeout(this.hoverTimer);
-    this.close();
+    cancelSurfaceMotion(this.popup);
+    this.popup.hidePopover();
+    this.popup.hidden = true;
+    this.pinned = false;
+    this.button.setAttribute('aria-expanded', 'false');
   }
 }

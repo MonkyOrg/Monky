@@ -9,9 +9,18 @@ import {
   channelCreateSchema,
   channelReorderSchema,
   channelUpdateSchema,
+  ChannelCategory,
+  CategoryCreatePayload,
+  CategoryUpdatePayload,
+  CategoryDeletePayload,
+  CategoryReorderPayload,
+  categoryCreateSchema,
+  categoryUpdateSchema,
+  categoryDeleteSchema,
+  categoryReorderSchema,
 } from '@monky/shared';
 import { ChannelRecord } from '../../domain/entities';
-import { IChannelRepository, IRoleRepository, IServerRepository } from '../../domain/repositories';
+import { ICategoryRepository, IChannelRepository, IRoleRepository, IServerRepository } from '../../domain/repositories';
 import { PermissionService } from './PermissionService';
 import { BotPermissionService } from './BotPermissionService';
 
@@ -28,10 +37,16 @@ export class ChannelService {
     private roleRepo: IRoleRepository,
     private permissionService: PermissionService,
     private botPermissions: BotPermissionService,
+    private categoryRepo?: ICategoryRepository,
   ) {}
 
   private toSummary(record: ChannelRecord): ChannelSummary {
     return {
+      forumId: record.forumId ?? null,
+      forumLocked: record.forumLocked ?? false,
+      forumClosed: record.forumClosed ?? false,
+      categoryId: record.categoryId ?? null,
+      inheritCategoryPermissions: record.inheritCategoryPermissions ?? true,
       id: record.id,
       serverId: record.serverId,
       name: record.name,
@@ -114,17 +129,23 @@ export class ChannelService {
     }
 
     const existingChannels = await this.channelRepo.listByServerId(server.id);
+    const { categoryId, inheritCategoryPermissions } = parseResult.data;
+    if (categoryId && (await this.categoryRepo?.findById(categoryId))?.serverId !== server.id) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Categoria não encontrada' };
+    }
     const isPrivate = parseResult.data.isPrivate;
     const channelRecord: ChannelRecord = {
+      categoryId,
+      inheritCategoryPermissions,
       id: uuidv4(),
       serverId: server.id,
       name: parseResult.data.name,
       type: parseResult.data.type,
-      position: existingChannels.length,
+      position: Math.max(-1, ...existingChannels.filter((channel) => (channel.categoryId ?? null) === categoryId).map((channel) => channel.position)) + 1,
       createdAt: Date.now(),
       maxParticipants: parseResult.data.maxParticipants || 10,
       isPrivate,
-      botCommandsEnabled: parseResult.data.type === 'TEXT' ? parseResult.data.botCommandsEnabled : true,
+      botCommandsEnabled: parseResult.data.botCommandsEnabled,
       // Links are meaningless on a public channel and would resurface if it were
       // later made private, so they are only stored while privacy is on.
       allowedRoleIds: isPrivate ? await this.sanitizeRoleIds(parseResult.data.allowedRoleIds) : [],
@@ -134,7 +155,7 @@ export class ChannelService {
 
     return {
       success: true,
-      channel: this.toSummary(channelRecord),
+      channel: this.toSummary(await this.channelRepo.findById(channelRecord.id) ?? channelRecord),
     };
   }
 
@@ -150,7 +171,7 @@ export class ChannelService {
       };
     }
 
-    const { channelId, name, maxParticipants, isPrivate, allowedRoleIds, botCommandsEnabled } = parseResult.data;
+    const { channelId, name, maxParticipants, isPrivate, allowedRoleIds, botCommandsEnabled, categoryId, inheritCategoryPermissions } = parseResult.data;
     const existing = await this.channelRepo.findById(channelId);
     if (!existing) {
       return {
@@ -160,10 +181,19 @@ export class ChannelService {
       };
     }
 
+    if (categoryId && (await this.categoryRepo?.findById(categoryId))?.serverId !== existing.serverId) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Categoria não encontrada' };
+    }
+    if (existing.forumId) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Use forum post controls.' };
+    }
+    const nextCategoryId = categoryId === undefined ? existing.categoryId ?? null : categoryId;
+    const changesAccess = isPrivate !== undefined || allowedRoleIds !== undefined;
+    const nextInherit = nextCategoryId
+      ? inheritCategoryPermissions ?? (changesAccess ? false : existing.inheritCategoryPermissions ?? true)
+      : false;
     const nextIsPrivate = isPrivate ?? existing.isPrivate;
-    const nextBotCommandsEnabled = existing.type === 'TEXT'
-      ? botCommandsEnabled ?? existing.botCommandsEnabled
-      : existing.botCommandsEnabled;
+    const nextBotCommandsEnabled = botCommandsEnabled ?? existing.botCommandsEnabled;
     // Turning privacy off clears the role list, so switching it back on later
     // starts from a blank slate instead of silently restoring the old audience.
     const nextRoleIds = !nextIsPrivate
@@ -173,6 +203,8 @@ export class ChannelService {
         : existing.allowedRoleIds;
 
     await this.channelRepo.update(channelId, {
+      categoryId: nextCategoryId,
+      inheritCategoryPermissions: nextInherit,
       ...(name !== undefined ? { name } : {}),
       ...(maxParticipants !== undefined ? { maxParticipants } : {}),
       isPrivate: nextIsPrivate,
@@ -182,7 +214,7 @@ export class ChannelService {
 
     return {
       success: true,
-      channel: this.toSummary({
+      channel: this.toSummary(await this.channelRepo.findById(channelId) ?? {
         ...existing,
         name: name ?? existing.name,
         maxParticipants: maxParticipants ?? existing.maxParticipants,
@@ -194,17 +226,9 @@ export class ChannelService {
   }
 
   /**
-   * Reorders the channels of one type (#471).
-   *
-   * The client sends the whole list in the order it should appear, and the
-   * positions are rewritten as 0..n-1 for that type. Both types share the same
-   * numeric range, which is harmless: the sidebar lists text and voice
-   * separately, so only the order *within* a type is ever compared.
-   *
-   * Ids that do not exist, belong to the other type or repeat are dropped, and
-   * any channel of that type the client failed to mention keeps its place at
-   * the end — an out-of-date client must not be able to make channels vanish
-   * from the ordering.
+   * Reorders one mixed category (or a legacy type-scoped request). Unknown,
+   * duplicate and out-of-scope ids are ignored; omitted channels stay at the
+   * end so an out-of-date client cannot remove them from the ordering.
    */
   public async reorderChannels(
     payload: ChannelReorderPayload
@@ -227,8 +251,9 @@ export class ChannelService {
       };
     }
 
-    const { type, orderedIds } = parseResult.data;
-    const ofType = (await this.channelRepo.listByServerId(server.id)).filter((c) => c.type === type);
+    const { type, categoryId, orderedIds } = parseResult.data;
+    const ofType = (await this.channelRepo.listByServerId(server.id)).filter((c) =>
+      !c.forumId && (categoryId !== undefined ? (c.categoryId ?? null) === categoryId : c.type === type));
     const byId = new Map(ofType.map((c) => [c.id, c]));
 
     const seen = new Set<string>();
@@ -243,9 +268,8 @@ export class ChannelService {
     }
 
     const positions = ordered.map((channelId, index) => ({ channelId, position: index }));
-    for (const { channelId, position } of positions) {
-      await this.channelRepo.updatePosition(channelId, position);
-    }
+    if (this.channelRepo.updatePositions) await this.channelRepo.updatePositions(positions);
+    else for (const { channelId, position } of positions) await this.channelRepo.updatePosition(channelId, position);
 
     return { success: true, positions };
   }
@@ -263,6 +287,55 @@ export class ChannelService {
     }
 
     await this.channelRepo.delete(channelId);
+    return { success: true };
+  }
+
+  public async listCategories(): Promise<ChannelCategory[]> {
+    const server = await this.serverRepo.getServer();
+    return server && this.categoryRepo ? this.categoryRepo.listByServerId(server.id) : [];
+  }
+
+  public async mutateCategory(
+    operation: 'create' | 'update' | 'delete' | 'reorder',
+    payload: CategoryCreatePayload | CategoryUpdatePayload | CategoryDeletePayload | CategoryReorderPayload,
+  ): Promise<{ success: boolean; errorCode?: ProtocolErrorCode; errorMessage?: string }> {
+    const repo = this.categoryRepo;
+    const server = await this.serverRepo.getServer();
+    if (!repo || !server) return { success: false, errorCode: ProtocolErrorCode.INTERNAL_ERROR };
+    const invalid = { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Categoria inválida' };
+    if (operation === 'create') {
+      const parsed = categoryCreateSchema.safeParse(payload);
+      if (!parsed.success) return invalid;
+      const categories = await repo.listByServerId(server.id);
+      if (categories.length >= 200) return invalid;
+      await repo.create({
+        ...parsed.data, id: uuidv4(), serverId: server.id, createdAt: Date.now(),
+        position: Math.max(-1, ...categories.map((category) => category.position)) + 1,
+        allowedRoleIds: parsed.data.isPrivate ? await this.sanitizeRoleIds(parsed.data.allowedRoleIds) : [],
+      });
+    } else if (operation === 'update') {
+      const parsed = categoryUpdateSchema.safeParse(payload);
+      if (!parsed.success) return invalid;
+      const existing = await repo.findById(parsed.data.categoryId);
+      if (!existing || existing.serverId !== server.id) return invalid;
+      const isPrivate = parsed.data.isPrivate ?? existing.isPrivate;
+      await repo.update(existing.id, {
+        name: parsed.data.name,
+        isPrivate,
+        allowedRoleIds: isPrivate ? await this.sanitizeRoleIds(parsed.data.allowedRoleIds ?? existing.allowedRoleIds) : [],
+      });
+    } else if (operation === 'delete') {
+      const parsed = categoryDeleteSchema.safeParse(payload);
+      if (!parsed.success || (await repo.findById(parsed.data.categoryId))?.serverId !== server.id) return invalid;
+      await repo.deletePreservingAccess(parsed.data.categoryId);
+    } else {
+      const parsed = categoryReorderSchema.safeParse(payload);
+      if (!parsed.success) return invalid;
+      const categories = await repo.listByServerId(server.id);
+      const known = new Set(categories.map((category) => category.id));
+      const ordered = [...new Set(parsed.data.orderedIds)].filter((id) => known.has(id));
+      await repo.reorder([...ordered, ...categories.map((category) => category.id).filter((id) => !ordered.includes(id))]);
+    }
     return { success: true };
   }
 }

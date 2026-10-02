@@ -1,4 +1,10 @@
-import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, Permission, hasPermission } from '@monky/shared';
+import {
+  ADMIN_PERMISSIONS,
+  DEFAULT_PERMISSIONS,
+  Permission,
+  hasPermission,
+  type ResourceAudience,
+} from '@monky/shared';
 import { IRoleRepository, IServerRepository } from '../../domain/repositories';
 
 interface ScreenRoleRevocation { roleId?: string; userId?: string }
@@ -70,5 +76,29 @@ export class PermissionService {
   public async checkPermission(userId: string, permission: Permission): Promise<boolean> {
     const permissions = await this.getUserPermissions(userId);
     return hasPermission(permissions, permission);
+  }
+
+  public async getUserRoleIds(userId: string): Promise<string[]> {
+    return (await this.roleRepo.listRolesForUser(userId)).map(role => role.id);
+  }
+
+  public async isSelectedAudienceMember(userId: string, audience: ResourceAudience): Promise<boolean> {
+    if (audience.visibility === 'public' || audience.userIds.includes(userId)) return true;
+    const roles = new Set(await this.getUserRoleIds(userId));
+    return audience.roleIds.some(roleId => roles.has(roleId));
+  }
+
+  public async canAccessAudience(
+    userId: string,
+    creatorUserId: string,
+    audience: ResourceAudience,
+  ): Promise<boolean> {
+    return userId === creatorUserId ||
+      await this.checkPermission(userId, Permission.MANAGE_SERVER) ||
+      await this.isSelectedAudienceMember(userId, audience);
+  }
+
+  public async canRevealAudience(userId: string, creatorUserId: string): Promise<boolean> {
+    return userId === creatorUserId || await this.checkPermission(userId, Permission.MANAGE_SERVER);
   }
 }

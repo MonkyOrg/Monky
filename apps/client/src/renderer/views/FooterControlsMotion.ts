@@ -333,6 +333,9 @@ function playHover(glyph: HTMLElement, play: Play, decorate: Decorate): Animatio
         'translateY(3px) rotate(0)', 'translateY(0) rotate(0)'], 620);
     case 'logout':
       return transform(['translateX(0)', 'translateX(3px)', 'translateX(0)'], 520);
+    case 'chat_bubble':
+      return transform(['translateY(0) scale(1)', 'translateY(-2px) scale(1.08)',
+        'translateY(1px) scale(0.98)', 'translateY(0) scale(1)'], 620);
     default:
       return transform(['translateY(0)', 'translateY(-3px)', 'translateY(0)'], 480);
   }

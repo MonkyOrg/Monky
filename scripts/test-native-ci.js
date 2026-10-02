@@ -42,6 +42,12 @@ test('the cross-platform lock retains macOS DMG dependencies and packaging check
   }
 });
 
+test('macOS corresponding-source manifests preserve their Monky commit URL for release rebinding', () => {
+  const packer = fs.readFileSync(path.join(root, 'apps', 'client', 'native', 'screen-share',
+    'scripts', 'packMacSources.cjs'), 'utf8');
+  assert.match(packer, /monkySource: `https:\/\/github\.com\/MonkyOrg\/Monky\/tree\/\$\{sourceCommit\}`/);
+});
+
 test('beta publication requires main and cannot use a manual working-branch dispatch', () => {
   const guard = step(release.jobs.version, 'Require merged-main release flow');
   assert.equal(release.jobs.version.steps[0], guard);

@@ -317,9 +317,9 @@ async function runQualitySettingsSmoke() {
           && settingsStore.preferredScreenCodec === 'h264' && settingsStore.screenEncodingMode === 'hardware'
           && settingsStore.screenEncodingStrategy === 'manual',
         `${description} must show the confirmed 60 FPS without changing the selected codec, mode, resolution or bitrate.`);
-        check(document.querySelector('.chat-copy-toast-label')?.textContent === language.t('settings.screenEncodingFpsAdjusted', {
+        check(document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label')?.textContent === language.t('settings.screenEncodingFpsAdjusted', {
           codec: 'H264', mode: language.t('settings.screenEncodingHardwareShort'), previous: 120, fps: 60,
-        }), `${description} must explain the automatic change using the selected language: ${document.querySelector('.chat-copy-toast-label')?.textContent}`);
+        }), `${description} must explain the automatic change using the selected language: ${document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label')?.textContent}`);
         check(JSON.stringify(nonScreenQuality()) === unchangedQuality,
           `${description} must preserve camera and audio settings.`);
       };
@@ -502,7 +502,7 @@ async function runQualitySettingsSmoke() {
         check(settingsStore.customProfile.screenFps === Number(frameRate.max) && Number(frameRate.value) === Number(frameRate.max),
           'Typed FPS above the ceiling must clamp both the saved profile and visible value.');
         check(!quality.querySelector('#quality-custom-status')
-          && document.querySelector('.chat-copy-toast[role="status"] .chat-copy-toast-label')?.textContent === language.t('settings.qualityValueAdjusted'),
+          && document.querySelector('.chat-copy-toast:not([data-ui-closing])[role="status"] .chat-copy-toast-label')?.textContent === language.t('settings.qualityValueAdjusted'),
           'The adjusted limit must use the localized accessible toast, not a persistent paragraph.');
         const helpStyle = getComputedStyle(quality.querySelector('.quality-custom-help'));
         check(helpStyle.fontSize === '11px' && helpStyle.fontWeight === '400',
@@ -548,8 +548,8 @@ async function runQualitySettingsSmoke() {
               'Custom fields keep native numeric validity and keyboard access without visible number spinners.');
           }
           await change(`custom-${kind}Fps`, '');
-          check(fps.value === String(fourKLimit) && document.querySelector('.chat-copy-toast-label')?.textContent === language.t('settings.qualityValueInvalid')
-            && document.querySelectorAll('.chat-copy-toast').length === 1,
+          check(fps.value === String(fourKLimit) && document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label')?.textContent === language.t('settings.qualityValueInvalid')
+            && document.querySelectorAll('.chat-copy-toast:not([data-ui-closing])').length === 1,
             'An empty custom value must restore the previous value and replace, not stack, feedback toasts.');
           await change(`custom-${kind}Width`, '1920');
           await change(`custom-${kind}Height`, '1080');
@@ -561,7 +561,7 @@ async function runQualitySettingsSmoke() {
           && settingsStore.customProfile.screenFps === 240, 'Normalized custom values must persist across reloads.');
       } finally { videoService.stopScreenShare(metadataOnly.id); }
       modal.close();
-      check(!document.querySelector('.chat-copy-toast'), 'Closing quality settings must retire its toast and timer.');
+      check(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'Closing quality settings must retire its toast and timer.');
       const storedAfterClose = localStorage.getItem('monky_settings');
       chromiumReceiver.click();
       hardware.click();
@@ -727,6 +727,8 @@ async function runQualitySettingsSmoke() {
         guideTrigger.click();
         const guide = document.querySelector('#game-capture-guide');
         const guideBackdrop = guide.closest('.modal-backdrop');
+        await settled(() => guideBackdrop.getAnimations({ subtree: true }).every(animation => animation.playState !== 'running'),
+          `${locale}/game capture guide entrance`);
         const guideSearch = guide.querySelector('#game-capture-guide-search');
         const guideClose = guide.querySelector('#game-capture-guide-close');
         const guideFirst = guide.querySelector('[data-game-guide-close]');
@@ -801,6 +803,7 @@ async function runQualitySettingsSmoke() {
         guideSearch.focus();
         const guideEscape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
         guideSearch.dispatchEvent(guideEscape);
+        await settled(() => !guide.isConnected, `${locale}/game capture guide escape`);
         check(guideEscape.defaultPrevented && !guide.isConnected && pickerBackdrop.isConnected &&
           !pickerBackdrop.inert && document.activeElement === guideTrigger && guideTrigger.getAttribute('aria-expanded') === 'false',
         'Escape closes only the guide and restores the picker opener and interactivity.');
@@ -821,6 +824,7 @@ async function runQualitySettingsSmoke() {
           sourceOpens.length === externalCallsAfterClose && guideBackdrop.querySelector('#game-capture-guide-results'),
         'Retired guide controls must not search, close or navigate from a replacement modal.');
         freshGuide.closest('.modal-backdrop').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        await settled(() => !freshGuide.isConnected, `${locale}/game capture guide backdrop`);
         check(!freshGuide.isConnected && document.activeElement === guideTrigger && !pickerBackdrop.inert,
           'Backdrop dismissal also restores the picker without changing its selection.');
         windowCards[0].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));

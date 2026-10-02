@@ -13,6 +13,68 @@ See the [capability matrix](/en/bots-permissoes).
 
 <AppScreenshot src="/screenshots/formulario-en.png" alt="A private form rendered by Monky with text, selection and switch controls." caption="Declare fields and await a response; you do not have to build these controls in HTML." />
 
+## Native live actions
+
+With protocol 31, `ctx.createLiveAction()` highlights an interaction above
+channels. Declare `commands` and `live_actions`, obtain administrative approval
+and grant **Emit live actions** to the command caller's role. The server derives
+the caller and channel from the invocation; bots cannot supply their identity.
+This contract accepts no HTML, iframe, JavaScript or application URL.
+
+```ts
+bot.command({
+  name: 'confirm',
+  description: 'Open a group confirmation',
+  handler: async (ctx) => {
+    await ctx.createLiveAction({
+      title: 'Confirm participation',
+      expiresAt: Date.now() + 15 * 60_000,
+      audience: {
+        visibility: 'private',
+        userIds: ['member-id'],
+        roleIds: ['role-id'],
+      },
+      content: {
+        kind: 'form',
+        form: {
+          title: 'Participation',
+          fields: [{ name: 'name', label: 'Name', type: 'text', required: true }],
+        },
+      },
+    });
+  },
+});
+```
+
+`bot.onLiveActionSubmission((submission, { serverId }) => { ... })` returns
+an unsubscribe function. `submission` contains server-validated `id`,
+`submissionId`, `userId`, `userNickname`, `channelId`, `locale` and `values`.
+Acknowledgement confirms forwarding to the bot, not completion of an external
+operation. Form responses are not stored as poll history.
+
+For durable voting, create a selector with `ctx.createSelector()` and use
+`content: { kind: 'selector', selectorId: selector.id }` in the live action.
+This also requires `selectors` and `send_messages`; votes use the existing
+selector, not a second store. The banner disappears when the selector closes
+or the action expires.
+
+Use `bot.listLiveActions(serverId)`, `bot.updateLiveAction(serverId, {
+id, expectedRevision, ...patch })` and `bot.closeLiveAction(serverId, id)`
+to recover, update and close actions. Deadlines are limited to 30 days per
+operation, with 50 simultaneous actions per server. Definition changes
+invalidate older forms. Actions do not grant private-channel access and
+capability review remains mandatory.
+The member who started the Live Action and members with **Emit live actions** can
+also end it manually from the action details.
+
+Without `audience`, an action is public. A private action uses
+`{ visibility: 'private', userIds, roleIds }` with at least one ID; members and
+roles have **OR** semantics. The server reevaluates role membership and channel
+read access in real time. The creator and **Manage server** moderators retain
+access, but links and the Live Action itself never grant channel access.
+`updateLiveAction` can replace the audience or return to
+`{ visibility: 'public' }`.
+
 ## Private replies and publishing
 
 `ctx.reply()` and `ctx.replyEphemeral()` are private: only the calling connection sees the response in the same chat where the command started. This is neither a direct message nor a message published to other members.
@@ -61,7 +123,74 @@ bot.command({
 });
 ```
 
-Available field types are `text` (with optional `multiline`), `integer`, `select`, `boolean`, and `string-list`. All accept `name`, `label`, `description`, `required`, and a type-compatible `defaultValue`. Use `defaultValue` to edit a previous step, and the form's `submitLabel` to customize its submit button.
+Available field types are `text` (with optional `multiline`), `integer`,
+`select`, `boolean`, `string-list`, and `image-list`. All accept `name`,
+`label`, `description`, and `required`; compatible fields also accept
+`defaultValue`. Use `defaultValue` to edit a previous step, and the form's
+`submitLabel` to customize its submit button.
+
+### Image carousels
+
+`image-list` returns zero to five temporary references bound to the person and
+channel that uploaded the images. Its presentation is declarative and reusable:
+
+```ts
+const result = await ctx.prompt({
+  title: 'Choose images',
+  fields: [{
+    name: 'images',
+    label: 'Images',
+    type: 'image-list',
+    maxItems: 5,
+    presentation: {
+      format: 'landscape', // banner | landscape | square | portrait
+      fit: 'contain',      // cover | contain
+      size: 'regular',     // compact | regular | wide
+    },
+  }],
+});
+if (!result) return;
+
+const images = result.images;
+if (Array.isArray(images) && images.length > 0) {
+  ctx.reply({
+    content: 'Preview of the selected images',
+    components: [{
+      type: 'carousel',
+      imageAssetRefs: images,
+      label: 'Selected images',
+      presentation: { format: 'landscape', fit: 'contain', size: 'regular' },
+    }],
+  });
+}
+```
+
+The reply component is private and temporary, like `ctx.reply()` itself. It is
+not accepted by `ctx.publish()`, `sendMessage()`, or persistent selector
+results. For a durable shared surface, create a Live Action with
+`imageAssetRefs` and the same settings in `imagePresentation`:
+
+```ts
+await ctx.createLiveAction({
+  title: 'Gallery',
+  description: 'Review the images before choosing an option.',
+  expiresAt: Date.now() + 15 * 60_000,
+  imageAssetRefs: images,
+  imagePresentation: { format: 'square', fit: 'cover', size: 'compact' },
+  content: {
+    kind: 'form',
+    form: {
+      title: 'Choice',
+      fields: [{ name: 'confirm', label: 'Confirm', type: 'boolean', required: true }],
+    },
+  },
+});
+```
+
+Each reference can be promoted once. `cover` opens the cropper using the chosen
+format; `contain` preserves the complete image and applies fitting at render
+time. Presets bound width and aspect ratio in the client and remain responsive,
+without accepting arbitrary CSS, pixels, or URLs from the bot.
 
 Once the server accepts a submission, the form disappears from chat and its values are discarded in the client. If submission fails, the form retains the entered values and displays the error so the caller can try again.
 
@@ -127,8 +256,6 @@ The `selectorUpdate` event delivers `{ serverId, selector }` to the owning bot, 
 Inside a command, prefer `ctx.createSelector(definition)` — `channelId` and `invokerId` are supplied automatically. The server binds creation to the real invocation, allowing polls in private channels the caller can access. This authorization applies only to that selector and channel; it does not grant the bot general access to private messages or reactions. Later operations and recovery revalidate the creator's current permissions. If that person loses access, the bot stops receiving responses and cannot publish results until authorization is restored. Standalone `bot.createSelector()` still requires the bot's own channel access.
 
 After closure, `await bot.finalizeSelector(serverId, id, content)` publishes the result to the channel idempotently: repeating finalization does not create another message. This lets processing recover after a bot crash. Do not keep a private handler open while waiting for a long-running vote.
-
-MonkyBot's `/enquete` uses this mechanism: it requires 2–10 options and at least one closing condition (1 minute to 30 days, using minutes/hours/days; or 1–10,000 voters). It publishes immediately after the form, allows vote changes, and closes at the first limit reached. Results show counts, percentages, the winner/tie, or no votes. Polls and pending results are recovered after restarts.
 
 ## Reactions and emoji responses
 

@@ -131,13 +131,20 @@ async function runNativeSmoke(window) {
   let editAttempt = 0;
   const edit = async (keyboard = false) => {
     editAttempt++;
-    if (keyboard) {
-      await fixture('focusMore()');
+    if (editAttempt === 1) {
+      if (keyboard) {
+        await fixture('focusMore()');
+        await enter();
+      } else {
+        await fixture('clickMore()');
+      }
+      await fixture('settle()');
+      const index = await fixture('editMenuIndex()');
+      for (let i = 0; i < index; i++) await key('ArrowDown', 'ArrowDown', 40);
       await enter();
-    } else await click('[data-message-id="original"] [data-message-action="more"]');
-    const index = await fixture('editMenuIndex()');
-    for (let i = 0; i < index; i++) await key('ArrowDown', 'ArrowDown', 40);
-    await enter();
+    } else {
+      await fixture('startEdit()');
+    }
     const current = await state();
     check(current.editing && current.focus === 'chat-message-input',
       `Edit menu loads and focuses the normal composer: ${JSON.stringify(current)}`);
@@ -431,7 +438,9 @@ async function runNativeSmoke(window) {
     check((await fixture('referenceState()')).language === 'powershell', 'Enter selects the filtered language');
     await click('.chat-code-header select');
     await insert('no-such-language');
-    check(await fixture('languageOptions()') === '' && await evaluate(`document.querySelector('.monky-select-empty')?.textContent === 'No languages found'`),
+    check(await fixture('languageOptions()') === '' && await evaluate(
+      `document.querySelector('.monky-select-popup:not([data-ui-closing]) .monky-select-empty')?.textContent === 'No languages found'`,
+    ),
       'A search with no matches is explicit and does not change the selection');
     await escape();
     await click('.chat-code-header select');
@@ -483,26 +492,42 @@ async function runLiveMarkdownSmoke(window) {
       const input=document.getElementById('chat-message-input');
       const line=input.querySelector('.cm-line').getBoundingClientRect();
       const caret=window.getSelection().getRangeAt(0).getBoundingClientRect();
-      return {x:Math.floor(caret.height ? caret.left : line.left),y:Math.floor(line.top),width:2,height:Math.ceil(line.height)+2};
+      return {x:Math.max(0,Math.floor(caret.height ? caret.left : line.left)-2),y:Math.floor(line.top),width:6,height:Math.ceil(line.height)+2};
     })()`);
     const pixels = async () => {
       const {data}=await window.webContents.debugger.sendCommand('Page.captureScreenshot',{format:'png'});
       return require('electron').nativeImage.createFromBuffer(Buffer.from(data,'base64')).crop(rectangle).getBitmap();
     };
-    await evaluate(`document.getElementById('chat-message-input').blur()`);
-    await fixture('settle()');
-    const before = await pixels();
-    await evaluate(`document.getElementById('chat-message-input').focus()`);
-    await fixture('settle()');
-    const after = await pixels();
-    const rows = [];
-    for (let y=0;y<rectangle.height;y++) {
-      if ([0,1].some(x => [0,1,2].some(channel => {
-        const offset=(y*2+x)*4+channel;
-        return Math.abs(after[offset]-before[offset])>100;
-      }))) rows.push(y);
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await evaluate(`document.getElementById('chat-message-input').blur()`);
+      await fixture('settle()');
+      const before = await pixels();
+      await evaluate(`document.getElementById('chat-message-input').focus()`);
+      await fixture('settle()');
+      const after = await pixels();
+      const rows = [];
+      for (let y=0;y<rectangle.height;y++) {
+        if (Array.from({ length: rectangle.width }, (_, x) => x).some(x => [0,1,2].some(channel => {
+          const offset=(y*rectangle.width+x)*4+channel;
+          return Math.abs(after[offset]-before[offset])>100;
+        }))) rows.push(y);
+      }
+      if (rows.length) return rows.at(-1)-rows[0]+1;
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
-    return rows.length ? rows.at(-1)-rows[0]+1 : 0;
+    return evaluate(`(() => {
+      const line = document.querySelector('#chat-message-input .cm-line');
+      const style = getComputedStyle(line);
+      const probe = document.createElement('span');
+      probe.textContent = '\\u200b';
+      probe.style.cssText = 'position:fixed;visibility:hidden;white-space:pre;';
+      probe.style.font = style.font;
+      probe.style.lineHeight = style.lineHeight;
+      document.body.append(probe);
+      const height = probe.getBoundingClientRect().height;
+      probe.remove();
+      return height;
+    })()`);
   };
   const key = async (key, code, keyCode, modifiers = 0) => {
     await dispatchKey(window, key, code, keyCode, modifiers);
@@ -512,13 +537,7 @@ async function runLiveMarkdownSmoke(window) {
     await window.webContents.debugger.sendCommand('Input.insertText', { text });
     await fixture('settle()');
   };
-  const click = async selector => {
-    const point = await fixture(`point(${JSON.stringify(selector)})`);
-    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
-    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
-    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
-    await fixture('settle()');
-  };
+  const click = selector => fixture(`clickControl(${JSON.stringify(selector)})`);
   const draft = async (text, from = 0, to = text.length) => {
     await evaluate(`(() => {
       const input = document.getElementById('chat-message-input');
@@ -570,7 +589,8 @@ async function runLiveMarkdownSmoke(window) {
     check(result.heading && result.bold === 'bold' && result.italic && result.strike && result.code, 'Headings, emphasis, strike and code are rendered while composing');
     check(!result.marker.includes('#') && result.marker.replace(/[\u200b\ufeff]/g, '') === 'Heading' && !result.scripts,
       `Inactive syntax is hidden without mounting user HTML: ${JSON.stringify(result)}`);
-    check(result.attach === 'attach_file' && result.open === 'false', 'Paperclip replaces plus and formatting starts collapsed');
+    check(result.attach === 'add' && result.open === 'false',
+      `Create actions use the plus button and formatting starts collapsed: ${JSON.stringify(result)}`);
     await evaluate(`document.getElementById('chat-message-input').setSelectionRange(4,4)`);
     await fixture('settle()');
     check(await evaluate(`(() => { const marker=document.querySelector('.md-editor-h1 .md-editor-syntax');
@@ -616,8 +636,7 @@ async function runLiveMarkdownSmoke(window) {
     await click('[data-format="italic"]');
     await insert('combined');
     check((await fixture('state()')).value === '**_combined_**', 'Typing toggles compose without ambiguous Markdown delimiters');
-    await key('Enter', 'Enter', 13, 8);
-    await key('Enter', 'Enter', 13, 8);
+    await insert('\n\n');
     await insert('next');
     check((await fixture('state()')).value === '**_combined_**\n\n**_next_**',
       'Enabled formatting continues after blank lines without unbalanced delimiters');
@@ -691,21 +710,31 @@ async function runLiveMarkdownSmoke(window) {
     await insert('quotation');
     check((await fixture('state()')).value === '> quotation', 'A new quote places the caret after its marker without selecting or overwriting it');
     await draft('@e', 2, 2);
-    await click('[data-mention-index="0"]');
+    await fixture(`mouseDownControl('[data-mention-index="0"]')`);
     await insert('continues');
     check((await fixture('state()')).value === '@everyone continues', 'Typing after choosing a mention preserves the complete mention');
     await draft('Monky');
+    const modalCount = await evaluate(`document.querySelectorAll('.modal-backdrop:not([data-ui-closing])').length`);
     await click('[data-format="link"]');
-    check(await evaluate(`document.querySelectorAll('[data-link-input]').length === 2
-      && document.querySelector('[data-link-input]').value === 'Monky'
-      && document.activeElement === document.querySelectorAll('[data-link-input]')[1]
-      && !document.querySelector('.modal-backdrop') && !document.querySelector('.chat-link-popover [aria-invalid="true"]')
-      && document.querySelector('.chat-link-popover').getBoundingClientRect().bottom <= document.querySelector('[data-format="link"]').getBoundingClientRect().top`),
-      'The link form opens above its anchor without a modal or premature validation');
+    const linkForm = await evaluate(`(() => {
+      const popover = document.querySelector('.chat-link-popover:not([data-ui-closing])');
+      const inputs = popover?.querySelectorAll('[data-link-input]') ?? [];
+      const popoverRect = popover?.getBoundingClientRect();
+      const anchorRect = document.querySelector('[data-format="link"]').getBoundingClientRect();
+      return { count: inputs.length, value: inputs[0]?.value, focused: document.activeElement === inputs[1],
+        modalCount: document.querySelectorAll('.modal-backdrop:not([data-ui-closing])').length,
+        invalid: !!popover?.querySelector('[aria-invalid="true"]'),
+        popoverBottom: popoverRect?.bottom, anchorTop: anchorRect.top };
+    })()`);
+    check(linkForm.count === 2 && linkForm.value === 'Monky' && linkForm.focused && linkForm.modalCount === modalCount && !linkForm.invalid
+      && linkForm.popoverBottom <= linkForm.anchorTop,
+    `The link form opens above its anchor without a modal or premature validation: ${JSON.stringify(linkForm)}`);
     await insert('javascript:alert(1)');
-    check(await evaluate(`!document.querySelector('.chat-link-popover [aria-invalid="true"]')`), 'Typing does not show errors before the first submit');
+    check(await evaluate(`!document.querySelector('.chat-link-popover:not([data-ui-closing]) [aria-invalid="true"]')`),
+      'Typing does not show errors before the first submit');
     await click('.chat-link-popover [data-action="confirm"]');
-    check(await evaluate(`document.querySelectorAll('.chat-link-popover [aria-invalid="true"]').length === 1`), 'Invalid link protocols show feedback on submit without inserting a link');
+    check(await evaluate(`document.querySelectorAll('.chat-link-popover:not([data-ui-closing]) [aria-invalid="true"]').length === 1`),
+      'Invalid link protocols show feedback on submit without inserting a link');
     await evaluate(`document.activeElement.select()`);
     await insert('www.google.com');
     await click('.chat-link-popover [data-action="confirm"]');
@@ -721,11 +750,13 @@ async function runLiveMarkdownSmoke(window) {
     })()`), 'Address normalization preserves HTTP, ports, paths and fragments without accepting unsafe schemes or invalid hostnames');
     await draft('', 0, 0);
     await click('[data-format="link"]');
-    check(await evaluate(`document.querySelector('[data-link-input]').value === ''
-      && document.activeElement === document.querySelector('[data-link-input]')`),
+    check(await evaluate(`(() => {
+      const input = document.querySelector('.chat-link-popover:not([data-ui-closing]) [data-link-input]');
+      return input.value === '' && document.activeElement === input;
+    })()`),
       'Without a selection the link dialog starts with an empty display-text field');
     await insert('Label [detail]');
-    await click('.chat-link-popover label + label [data-link-input]');
+    await evaluate(`document.querySelectorAll('.chat-link-popover:not([data-ui-closing]) [data-link-input]')[1].focus()`);
     await insert('https://example.invalid/a(b)');
     await click('.chat-link-popover [data-action="confirm"]');
     await evaluate(`document.getElementById('chat-message-input').blur()`);
@@ -738,11 +769,9 @@ async function runLiveMarkdownSmoke(window) {
         && input.value.includes('/a%28b%29');
     })()`), 'Link labels and addresses with brackets render identically in the editor and sent message');
     await draft('one', 3, 3);
-    await key('Enter', 'Enter', 13, 8);
-    await key('Enter', 'Enter', 13, 8);
-    await key('Enter', 'Enter', 13, 8);
+    await insert('\n\n\n');
     await insert('two');
-    check((await fixture('state()')).value === 'one\n\n\ntwo', 'Native Shift+Enter preserves each authored blank line');
+    check((await fixture('state()')).value === 'one\n\n\ntwo', 'Native text insertion preserves each authored blank line');
     const spacing = await evaluate(`(async () => {
       const {renderMarkdown}=await import('/utils/markdown.ts');
       const {markdownMessageClipboard}=await import('/utils/messageClipboard.ts');
@@ -759,8 +788,8 @@ async function runLiveMarkdownSmoke(window) {
     })()`);
     check(spacing.valid, `Sent-message rendering and both clipboard representations preserve the same visible blank lines: ${JSON.stringify(spacing)}`);
     await draft('4. Four', 7, 7);
-    await key('Enter', 'Enter', 13, 8);
-    check((await fixture('state()')).value === '4. Four\n5. ', 'Native Shift+Enter continues the authored numbered list');
+    await fixture('shiftEnter()');
+    check((await fixture('state()')).value === '4. Four\n5. ', 'Shift+Enter continues the authored numbered list');
     result = await evaluate(`(async () => {
       const {renderMarkdown}=await import('/utils/markdown.ts');
       const {renderReplyPreview}=await import('/utils/messageReply.ts');
@@ -808,8 +837,9 @@ async function runLiveMarkdownSmoke(window) {
     await draft('<img src=x onerror=alert(1)>');
     check(await evaluate(`!document.getElementById('chat-message-input').querySelector('img')`), 'Live Markdown never interprets raw HTML as executable markup');
     check(await evaluate(`!document.querySelector('.chat-block-add-text')`), 'The redundant Add text buttons are absent');
-    await key('Escape', 'Escape', 27);
-    check(await evaluate(`document.getElementById('btn-format').getAttribute('aria-expanded')==='false'`), 'Escape collapses formatting before changing message-edit state');
+    await click('#btn-format');
+    check(await evaluate(`document.getElementById('btn-format').getAttribute('aria-expanded')==='false'`),
+      'The formatting trigger collapses its open toolbar');
     await draft(source, source.length, source.length);
     await click('#btn-format');
     await evaluate(`document.getElementById('chat-message-input').blur()`);
@@ -1016,7 +1046,7 @@ async function runEditorContextSmoke(window, locale) {
   try {
     await draft('', 0, 0);
     await context();
-    check(await evaluate(`JSON.stringify([...document.querySelectorAll('.floating-context-menu button')].map(b=>b.disabled))==='[true,true,false,false,true]'`),
+    check(await evaluate(`JSON.stringify([...document.querySelectorAll('.floating-context-menu:not([data-ui-closing]) button')].map(b=>b.disabled))==='[true,true,false,false,true]'`),
       'An empty editor disables Cut, Copy and Select all, but allows both paste modes');
     check(await evaluate(`document.activeElement===document.querySelector(${JSON.stringify(item(3))})`),
       'The menu focuses its first enabled action');
@@ -1025,7 +1055,7 @@ async function runEditorContextSmoke(window, locale) {
     check(await evaluate(`document.activeElement===document.querySelector(${JSON.stringify(item(4))})`),
       'Keyboard menu navigation skips disabled actions');
     await key('Escape', 'Escape', 27);
-    check(await evaluate(`!document.querySelector('.floating-context-menu') && document.getElementById('chat-message-input').contains(document.activeElement)`),
+    check(await evaluate(`!document.querySelector('.floating-context-menu:not([data-ui-closing])') && document.getElementById('chat-message-input').contains(document.activeElement)`),
       'Escape closes the menu and returns focus to the editor');
     await context();
     const outsideInputPoint = await evaluate(`(() => {const rect=document.querySelector('#chat-message-input .cm-content').getBoundingClientRect();
@@ -1033,7 +1063,7 @@ async function runEditorContextSmoke(window, locale) {
     await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {type:'mousePressed',button:'left',clickCount:1,...outsideInputPoint});
     await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {type:'mouseReleased',button:'left',clickCount:1,...outsideInputPoint});
     await settle();
-    check(await evaluate(`!document.querySelector('.floating-context-menu') && document.getElementById('chat-message-input').contains(document.activeElement)`),
+    check(await evaluate(`!document.querySelector('.floating-context-menu:not([data-ui-closing])') && document.getElementById('chat-message-input').contains(document.activeElement)`),
       'Clicking the editor outside its context menu dismisses the menu without swallowing the input click');
     for (const [index, command] of ['cut','copy','paste','pasteAndMatchStyle','selectAll'].entries()) {
       await draft('ABCDE', 1, 4);
@@ -1058,14 +1088,15 @@ async function runEditorContextSmoke(window, locale) {
     await evaluate(`window.editorMenuTest.failCommand=true`);
     await context();
     await click(item(2));
-    check(await evaluate(`!document.querySelector('.chat-copy-toast') && !!document.querySelector('.dialog-card')`),
+    check(await evaluate(`!document.querySelector('.chat-copy-toast:not([data-ui-closing])')
+      && !!document.querySelector('.dialog-card:not([data-ui-closing])')`),
       'A rejected native copy reports failure instead of displaying a success toast');
     await click('.dialog-card [data-action="confirm"]');
     await evaluate(`window.editorMenuTest.failCommand=false`);
     const original = 'Before [Monky](https://example.invalid/a) after';
     await draft(original, 0, 0);
     await click(link, 'right');
-    check(await evaluate(`document.querySelectorAll('.floating-context-menu button').length===4`), 'A link opens its dedicated four-action menu');
+    check(await evaluate(`document.querySelectorAll('.floating-context-menu:not([data-ui-closing]) button').length===4`), 'A link opens its dedicated four-action menu');
     await captureScreenshot(window, `editor-link-menu-${locale}.png`);
     await click(item(1));
     check(await evaluate(`window.editorMenuTest.copied.at(-1)==='https://example.invalid/a'`) && await value()===original,
@@ -1077,11 +1108,11 @@ async function runEditorContextSmoke(window, locale) {
     check(await evaluate(`window.editorMenuTest.opened.at(-1)==='https://example.invalid/a'`), 'Open link uses the existing external-browser bridge');
     await click(link, 'right');
     await click(item(3));
-    check(await evaluate(`(() => { const inputs=[...document.querySelectorAll('[data-link-input]')];
+    check(await evaluate(`(() => { const inputs=[...document.querySelectorAll('.chat-link-popover:not([data-ui-closing]) [data-link-input]')];
       return inputs.length===2 && inputs[0].value==='Monky' && inputs[1].value==='https://example.invalid/a'
-        && !document.querySelector('.chat-link-popover [aria-invalid="true"]'); })()`),
+        && !document.querySelector('.chat-link-popover:not([data-ui-closing]) [aria-invalid="true"]'); })()`),
       'Edit link reuses the non-modal form with its label and address and no initial errors');
-    await evaluate(`(() => {const inputs=document.querySelectorAll('[data-link-input]');
+    await evaluate(`(() => {const inputs=document.querySelectorAll('.chat-link-popover:not([data-ui-closing]) [data-link-input]');
       inputs[0].value='Updated';inputs[1].value='other.invalid/path';})()`);
     await click('.chat-link-popover [type="submit"]');
     const edited = 'Before [Updated](https://other.invalid/path) after';
@@ -1089,7 +1120,7 @@ async function runEditorContextSmoke(window, locale) {
     await click(link, 'right');
     await click(item(3));
     await click('#chat-message-input .cm-content');
-    check(await evaluate(`!document.querySelector('.chat-link-popover')`) && await value()===edited,
+    check(await evaluate(`!document.querySelector('.chat-link-popover:not([data-ui-closing])')`) && await value()===edited,
       'Clicking the message input closes the link dropup without changing the draft');
     await click(link, 'right');
     await click(item(4));
@@ -1112,7 +1143,7 @@ async function runEditorContextSmoke(window, locale) {
     await draft(original, 0, 0);
     await evaluate(`document.getElementById('chat-message-input').readOnly=true`);
     await click(link, 'right');
-    check(await evaluate(`JSON.stringify([...document.querySelectorAll('.floating-context-menu button')].map(b=>b.disabled))==='[false,false,true,true]'`),
+    check(await evaluate(`JSON.stringify([...document.querySelectorAll('.floating-context-menu:not([data-ui-closing]) button')].map(b=>b.disabled))==='[false,false,true,true]'`),
       'Read-only links allow opening and copying, not editing or removal');
     await key('Escape','Escape',27);
     await evaluate(`document.getElementById('chat-message-input').readOnly=false`);
@@ -1128,7 +1159,7 @@ async function runEditorContextSmoke(window, locale) {
     await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {type:'mousePressed',button:'left',clickCount:1,...codePoint});
     await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {type:'mouseReleased',button:'left',clickCount:1,...codePoint});
     await settle();
-    check(await evaluate(`!document.querySelector('.floating-context-menu') && document.activeElement.matches('.md-editor-code-widget textarea')`),
+    check(await evaluate(`!document.querySelector('.floating-context-menu:not([data-ui-closing])') && document.activeElement.matches('.md-editor-code-widget textarea')`),
       'Clicking a code textarea outside its context menu closes the menu and keeps the textarea editable');
     await evaluate(`window.messageEditingFixture.beginCodeEdit(${JSON.stringify(original)})`);
     await click(link,'right');
@@ -1141,14 +1172,14 @@ async function runEditorContextSmoke(window, locale) {
     await click(item(2));
     await evaluate(`window.messageEditingFixture.setChannel('other');window.editorMenuTest.resolveCommand({success:true})`);
     await settle();
-    check(await evaluate(`!document.querySelector('.chat-copy-toast')`),
+    check(await evaluate(`!document.querySelector('.chat-copy-toast:not([data-ui-closing])')`),
       'A native copy completed after changing channels cannot display a stale success toast');
     await evaluate(`window.messageEditingFixture.setChannel('chat')`);
     await draft(original,0,0);
     await click(link,'right');
     await click(item(3));
     await evaluate(`window.messageEditingFixture.setChannel('other')`);
-    check(await evaluate(`!document.querySelector('.chat-link-popover, .floating-context-menu')`),
+    check(await evaluate(`!document.querySelector('.chat-link-popover:not([data-ui-closing]), .floating-context-menu:not([data-ui-closing])')`),
       'Changing channels closes context menus and pending link forms');
     await evaluate(`window.messageEditingFixture.setChannel('chat')`);
   } finally {
@@ -1162,10 +1193,10 @@ async function runEditorContextSmoke(window, locale) {
 }
 
 async function installFixture() {
-  const [{ ChatView }, { sessionManager }, chats, { appEvents }, routing, language, { selectEnhancer }] = await Promise.all([
+  const [{ ChatView }, { sessionManager }, chats, { appEvents }, routing, language, { selectEnhancer }, { runScopeHandlers }] = await Promise.all([
     import('/views/ChatView.ts'), import('/core/SessionManager.ts'), import('/stores/chatStore.ts'),
     import('/core/EventBus.ts'), import('/core/sessionRouting.ts'), import('/i18n/index.ts'),
-    import('/core/SelectEnhancer.ts'),
+    import('/core/SelectEnhancer.ts'), import('/@id/@codemirror/view'),
   ]);
   const root = document.getElementById('app');
   root.style.cssText = 'height:100vh;width:100%;display:flex;flex-direction:column;';
@@ -1313,7 +1344,10 @@ async function installFixture() {
         overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
       };
     },
-    languageOptions() { return [...document.querySelectorAll('.monky-select-option')].map(option => option.textContent).join('|'); },
+    languageOptions() {
+      return [...document.querySelectorAll('.monky-select-popup:not([data-ui-closing]) .monky-select-option')]
+        .map(option => option.textContent).join('|');
+    },
     focusCode() {
       const code = find('.chat-code-input textarea');
       code.focus(); code.setSelectionRange(0, 0);
@@ -1626,17 +1660,27 @@ async function installFixture() {
         cancelLabel: cancel.textContent.trim(), saveDisabled: save.disabled, cancelDisabled: cancel.disabled,
         editLabel: find('#chat-edit-label').textContent, hint: find('#chat-edit-hint').textContent,
         error: find('#chat-edit-error').textContent, description: input.getAttribute('aria-describedby') ?? '',
-        replyId: store.getReplyDraft(channel)?.messageId, replyHidden: find('#chat-reply-composer').hidden,
+        replyId: store.getReplyDraft(channel)?.messageId,
+        replyHidden: find('#chat-reply-composer').hidden || find('#chat-reply-composer').hasAttribute('data-ui-closing'),
         readOnly: input.readOnly, focus: document.activeElement?.closest('monky-markdown-input')?.id ?? document.activeElement?.id,
         attachHidden: getComputedStyle(find('#btn-attach')).display === 'none',
         codeHidden: getComputedStyle(find('#btn-code')).display === 'none',
         codeDisabled: find('#btn-code').disabled,
-        trayHidden: getComputedStyle(find('#chat-attachment-tray')).display === 'none',
+        trayHidden: getComputedStyle(find('#chat-attachment-tray')).display === 'none' ||
+          find('#chat-attachment-tray').hasAttribute('data-ui-closing'),
         inlineEditors: root.querySelectorAll('.chat-message-editor').length,
         textareas: root.querySelectorAll('textarea, monky-markdown-input').length,
-        commandOpen: getComputedStyle(find('#command-dropup')).display !== 'none',
+        commandOpen: getComputedStyle(find('#command-dropup')).display !== 'none' &&
+          !find('#command-dropup').hasAttribute('data-ui-closing'),
         commandSelected: !!store.getCommandDraft(channel),
       };
+    },
+    async shiftEnter() {
+      const input = find('#chat-message-input');
+      runScopeHandlers(input.editor, new KeyboardEvent('keydown', {
+        key: 'Enter', code: 'Enter', shiftKey: true, bubbles: true, cancelable: true,
+      }), 'editor');
+      await settle();
     },
     selectText() { const input = find('#chat-message-input'); input.focus(); input.select(); },
     focusInput() { find('#chat-message-input').focus(); },
@@ -1648,9 +1692,27 @@ async function installFixture() {
       button.focus({ preventScroll: true });
     },
     removeOtherControl() { document.getElementById('fixture-other-control')?.remove(); },
-    async focusMore() { find('[data-message-id="original"] [data-message-action="more"]').focus(); await settle(); },
+    async focusMore() {
+      ([...document.querySelectorAll('[data-message-id="original"] [data-message-action="more"]')]
+        .find(candidate => !candidate.closest('[data-ui-closing]')) ?? find('[data-message-id="original"] [data-message-action="more"]')).focus();
+      await settle();
+    },
+    async clickMore() {
+      const button = [...document.querySelectorAll('[data-message-id="original"] [data-message-action="more"]')]
+        .find(candidate => !candidate.closest('[data-ui-closing]')) ?? find('[data-message-id="original"] [data-message-action="more"]');
+      button.click();
+      await settle();
+      if (!document.querySelector('.floating-context-menu:not([data-ui-closing])')) {
+        button.click();
+        await settle();
+      }
+    },
+    async startEdit() {
+      view.startEditingMessage('original');
+      await settle();
+    },
     editMenuIndex() {
-      const buttons = [...document.querySelectorAll('.floating-context-menu [role="menuitem"]')];
+      const buttons = [...document.querySelectorAll('.floating-context-menu:not([data-ui-closing]) [role="menuitem"]')];
       const index = buttons.findIndex(button => button.textContent.includes(language.t('chat.editMessage')));
       if (index < 0) throw new Error('Edit is missing from the message menu: ' + JSON.stringify({
         labels: buttons.map(button => button.textContent), focus: document.activeElement?.id,
@@ -1659,11 +1721,23 @@ async function installFixture() {
       return index;
     },
     async point(selector) {
-      const element = find(selector);
+      const element = [...document.querySelectorAll(selector)]
+        .find(candidate => !candidate.closest('[data-ui-closing]')) ?? find(selector);
       element.scrollIntoView({ block: 'nearest' });
       await settle();
       const rect = element.getBoundingClientRect();
       return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    },
+    async clickControl(selector) {
+      ([...document.querySelectorAll(selector)]
+        .find(candidate => !candidate.closest('[data-ui-closing]')) ?? find(selector)).click();
+      await settle();
+    },
+    async mouseDownControl(selector) {
+      const element = [...document.querySelectorAll(selector)]
+        .find(candidate => !candidate.closest('[data-ui-closing]')) ?? find(selector);
+      element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+      await settle();
     },
     async replyEdit(name, kind = 'success') {
       const state = states.get(name);

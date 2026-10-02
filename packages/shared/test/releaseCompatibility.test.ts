@@ -12,28 +12,29 @@ const version = '18.0.0-beta';
 const manifest = { schemaVersion: 1, version, protocolVersion: 16, botSdkVersion: version } as const;
 
 test('release warnings follow the affected protocol floor, not every additive bump', () => {
-  const additive = parseReleaseCompatibility({ ...manifest, protocolVersion: 31, minimumClientProtocol: 29, minimumBotProtocol: 24 }, version);
+  const additive = parseReleaseCompatibility({ ...manifest, protocolVersion: 32, minimumClientProtocol: 31, minimumBotProtocol: 24 }, version);
   assert.ok(additive);
   assert.equal(releaseRequiresProtocolUpdate(additive, 'client'), false);
   assert.equal(releaseRequiresProtocolUpdate(additive, 'bot'), false);
-  assert.equal(releaseRequiresProtocolUpdate({ ...additive, minimumBotProtocol: 31 }, 'bot'), true);
-  assert.equal(releaseRequiresProtocolUpdate({ ...additive, minimumBotProtocol: 31 }, 'client'), false);
-  assert.equal(releaseRequiresProtocolUpdate({ ...additive, minimumClientProtocol: 31 }, 'client'), true);
-  assert.equal(releaseRequiresProtocolUpdate({ ...additive, minimumClientProtocol: 31 }, 'bot'), false);
-  for (const floor of [0, -1, 32, 1.2, '24', null]) {
+  const future = { ...additive, protocolVersion: 35, minimumBotProtocol: 35, minimumClientProtocol: 35 };
+  assert.equal(releaseRequiresProtocolUpdate(future, 'bot'), true);
+  assert.equal(releaseRequiresProtocolUpdate({ ...future, minimumBotProtocol: 24 }, 'bot'), false);
+  assert.equal(releaseRequiresProtocolUpdate(future, 'client'), true);
+  assert.equal(releaseRequiresProtocolUpdate({ ...future, minimumClientProtocol: 31 }, 'client'), false);
+  for (const floor of [0, -1, 34, 1.2, '24', null]) {
     assert.equal(parseReleaseCompatibility({ ...additive, minimumBotProtocol: floor }, version), null);
   }
 });
 
-test('screen privacy protocol 29 rejects old client contracts without requiring bot updates', () => {
-  for (const protocolVersion of [24, 25, 26, 27, 28]) {
+test('forum protocol 31 rejects old client contracts without requiring bot updates', () => {
+  for (const protocolVersion of [24, 25, 26, 27, 28, 29, 30]) {
     const old = parseReleaseCompatibility({ ...manifest, protocolVersion, minimumClientProtocol: 24, minimumBotProtocol: 24 }, version);
     assert.ok(old);
     assert.equal(releaseRequiresProtocolUpdate(old, 'client'), true);
     assert.equal(releaseRequiresProtocolUpdate(old, 'bot'), false);
     assert.equal(releaseRequiresProtocolUpdate({ ...manifest, protocolVersion }, 'client'), true);
   }
-  const current = parseReleaseCompatibility({ ...manifest, protocolVersion: 29, minimumClientProtocol: 29, minimumBotProtocol: 24 }, version);
+  const current = parseReleaseCompatibility({ ...manifest, protocolVersion: 31, minimumClientProtocol: 31, minimumBotProtocol: 24 }, version);
   assert.ok(current);
   assert.equal(releaseRequiresProtocolUpdate(current, 'client'), false);
   assert.equal(releaseRequiresProtocolUpdate(current, 'bot'), false);

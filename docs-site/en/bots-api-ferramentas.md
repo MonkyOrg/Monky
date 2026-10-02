@@ -54,6 +54,7 @@ export const BOT_CAPABILITIES = [
     'sound_download',
     'selectors',
     'miniapps',
+    'live_actions',
 ] as const;
 ```
 
@@ -227,10 +228,12 @@ export interface HttpsUpdateSource {
 
 ## `LIMITS` {#limits}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/constants.ts#L11)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/constants.ts#L13)
 
 ```ts
 export const LIMITS = {
+    MESSAGE_DELETE_UNDO_SECONDS: 60,
+    MAX_MESSAGE_DELETE_UNDO_SECONDS: 86400,
     MAX_MESSAGE_LENGTH: 16000,
     MAX_AVATAR_SIZE: 5 * 1024 * 1024, // 5 MB
     MAX_USERS_DEFAULT: 20,
@@ -267,6 +270,15 @@ export const LIMITS = {
     MAX_HISTORY_MESSAGES_INITIAL: 100,
     RATE_LIMIT_MAX_MESSAGES: 10,
     RATE_LIMIT_WINDOW_MS: 5000,
+    /** Tentativas de autenticação por IP antes de o servidor parar de responder (#372). */
+    RATE_LIMIT_MAX_AUTH_ATTEMPTS: 8,
+    RATE_LIMIT_AUTH_WINDOW_MS: 60000,
+    /**
+     * Teto de um frame de WebSocket. O maior payload legítimo é um avatar em
+     * base64 (MAX_AVATAR_SIZE cresce ~33% na codificação), e o padrão da lib ws
+     * são 100 MiB, que qualquer cliente não autenticado podia mandar (#372).
+     */
+    WS_MAX_PAYLOAD_BYTES: 8 * 1024 * 1024,
     HEARTBEAT_INTERVAL_MS: 5000,
     HEARTBEAT_TIMEOUT_MS: 35000,
     RECONNECT_GRACE_MS: 20000,
@@ -431,10 +443,34 @@ export type ManagedToolRepository = "yt-dlp/yt-dlp" | "yt-dlp/FFmpeg-Builds" | "
 
 ## `MessageType` {#messagetype}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L62)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L74)
 
 ```ts
 export enum MessageType {
+    COMMUNITY_GET = 'COMMUNITY_GET',
+    COMMUNITY_UPDATE_SETTINGS = 'COMMUNITY_UPDATE_SETTINGS',
+    COMMUNITY_SNAPSHOT = 'COMMUNITY_SNAPSHOT',
+    COMMUNITY_ACK = 'COMMUNITY_ACK',
+    EVENT_SAVE = 'EVENT_SAVE',
+    EVENT_SAVED = 'EVENT_SAVED',
+    EVENT_CONTROL = 'EVENT_CONTROL',
+    EVENT_INTEREST = 'EVENT_INTEREST',
+    EVENT_STARTED = 'EVENT_STARTED',
+    LIVE_ACTION_CREATE = 'LIVE_ACTION_CREATE',
+    LIVE_ACTION_UPDATE = 'LIVE_ACTION_UPDATE',
+    LIVE_ACTION_CLOSE = 'LIVE_ACTION_CLOSE',
+    LIVE_ACTION_LIST = 'LIVE_ACTION_LIST',
+    LIVE_ACTION_LIST_RESULT = 'LIVE_ACTION_LIST_RESULT',
+    LIVE_ACTION_SNAPSHOT = 'LIVE_ACTION_SNAPSHOT',
+    LIVE_ACTION_SUBMIT = 'LIVE_ACTION_SUBMIT',
+    LIVE_ACTION_SUBMITTED = 'LIVE_ACTION_SUBMITTED',
+    FORUM_LIST = 'FORUM_LIST',
+    FORUM_LIST_RESULT = 'FORUM_LIST_RESULT',
+    FORUM_CREATE_POST = 'FORUM_CREATE_POST',
+    FORUM_UPDATE_POST = 'FORUM_UPDATE_POST',
+    FORUM_POST_SAVED = 'FORUM_POST_SAVED',
+    CHAT_SEARCH = 'CHAT_SEARCH',
+    CHAT_SEARCH_RESULTS = 'CHAT_SEARCH_RESULTS',
     SELECTOR_CREATE = 'SELECTOR_CREATE',
     SELECTOR_LIST = 'SELECTOR_LIST',
     SELECTOR_UPDATE = 'SELECTOR_UPDATE',
@@ -478,11 +514,17 @@ export enum MessageType {
     CHAT_EDIT = 'CHAT_EDIT',
     /** Client -> server: delete a message (own, or anyone's with MANAGE_SERVER) (#504). */
     CHAT_DELETE = 'CHAT_DELETE',
+    CHAT_RESTORE = 'CHAT_RESTORE',
     CHAT_REQUEST_UPLOAD_TOKEN = 'CHAT_REQUEST_UPLOAD_TOKEN',
     CHANNEL_CREATE = 'CHANNEL_CREATE',
     CHANNEL_UPDATE = 'CHANNEL_UPDATE',
     CHANNEL_DELETE = 'CHANNEL_DELETE',
     CHANNEL_REORDER = 'CHANNEL_REORDER',
+    CATEGORY_CREATE = 'CATEGORY_CREATE',
+    CATEGORY_UPDATE = 'CATEGORY_UPDATE',
+    CATEGORY_DELETE = 'CATEGORY_DELETE',
+    CATEGORY_REORDER = 'CATEGORY_REORDER',
+    CATEGORIES_UPDATED = 'CATEGORIES_UPDATED',
     USER_CHANGE_NICKNAME = 'USER_CHANGE_NICKNAME',
     USER_UPDATE_AVATAR = 'USER_UPDATE_AVATAR',
     SERVER_UPDATE_SETTINGS = 'SERVER_UPDATE_SETTINGS',
@@ -503,6 +545,10 @@ export enum MessageType {
     ADMIN_MOVE_USER = 'ADMIN_MOVE_USER',
     MEMBER_KICK = 'MEMBER_KICK',
     RTC_SIGNAL = 'RTC_SIGNAL',
+    NATIVE_SCREEN_SIGNAL = 'NATIVE_SCREEN_SIGNAL',
+    NATIVE_SCREEN_SIGNAL_ACK = 'NATIVE_SCREEN_SIGNAL_ACK',
+    SCREEN_VIEWERS_GET = 'SCREEN_VIEWERS_GET',
+    SCREEN_VIEWERS_RESULT = 'SCREEN_VIEWERS_RESULT',
     RTC_DIAGNOSTICS_REPORT = 'RTC_DIAGNOSTICS_REPORT',
     PING = 'PING',
     USER_LOGOUT = 'USER_LOGOUT',
@@ -523,11 +569,14 @@ export enum MessageType {
     SFU_WEBRTC_TRANSPORT_CREATED = 'SFU_WEBRTC_TRANSPORT_CREATED',
     SFU_CONNECT_WEBRTC_TRANSPORT = 'SFU_CONNECT_WEBRTC_TRANSPORT',
     SFU_WEBRTC_TRANSPORT_CONNECTED = 'SFU_WEBRTC_TRANSPORT_CONNECTED',
+    SFU_CLOSE_WEBRTC_TRANSPORT = 'SFU_CLOSE_WEBRTC_TRANSPORT',
+    SFU_WEBRTC_TRANSPORT_CLOSED = 'SFU_WEBRTC_TRANSPORT_CLOSED',
     SFU_PRODUCE = 'SFU_PRODUCE',
     SFU_PRODUCED = 'SFU_PRODUCED',
     SFU_CONSUME = 'SFU_CONSUME',
     SFU_CONSUMED = 'SFU_CONSUMED',
     SFU_PRODUCER_CLOSED = 'SFU_PRODUCER_CLOSED',
+    SFU_PRODUCER_SET_PAUSED = 'SFU_PRODUCER_SET_PAUSED',
     SFU_CONSUMER_CLOSED = 'SFU_CONSUMER_CLOSED',
     SFU_CONSUMER_SET_PAUSED = 'SFU_CONSUMER_SET_PAUSED',
     SFU_NEW_PRODUCER = 'SFU_NEW_PRODUCER',
@@ -637,12 +686,12 @@ export enum MessageType {
 [Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/constants.ts#L1)
 
 ```ts
-export const PROTOCOL_VERSION = 22;
+export const PROTOCOL_VERSION = 31;
 ```
 
 ## `ProtocolErrorCode` {#protocolerrorcode}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L11)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L12)
 
 ```ts
 export enum ProtocolErrorCode {
@@ -653,6 +702,12 @@ export enum ProtocolErrorCode {
     CHANNEL_FULL = 'CHANNEL_FULL',
     MESSAGE_TOO_LONG = 'MESSAGE_TOO_LONG',
     RATE_LIMITED = 'RATE_LIMITED',
+    /**
+     * Tentativas de conexão limitadas por IP (#372). Separado de RATE_LIMITED
+     * porque o cliente traduz por código: reusar aquele mostraria "você está
+     * enviando mensagens rápido demais" para quem nem entrou no servidor.
+     */
+    AUTH_RATE_LIMITED = 'AUTH_RATE_LIMITED',
     AVATAR_TOO_LARGE = 'AVATAR_TOO_LARGE',
     AVATAR_INVALID_TYPE = 'AVATAR_INVALID_TYPE',
     ATTACHMENT_TOO_LARGE = 'ATTACHMENT_TOO_LARGE',
@@ -660,10 +715,15 @@ export enum ProtocolErrorCode {
     STORAGE_FULL = 'STORAGE_FULL',
     SERVER_FULL = 'SERVER_FULL',
     PROTOCOL_VERSION_UNSUPPORTED = 'PROTOCOL_VERSION_UNSUPPORTED',
+    FEATURE_REQUIRES_UPDATE = 'FEATURE_REQUIRES_UPDATE',
     INTERNAL_ERROR = 'INTERNAL_ERROR',
     UNAUTHORIZED = 'UNAUTHORIZED',
     PERMISSION_DENIED = 'PERMISSION_DENIED',
     BAD_REQUEST = 'BAD_REQUEST',
+    COMMUNITY_INVALID = 'COMMUNITY_INVALID',
+    COMMUNITY_CONFLICT = 'COMMUNITY_CONFLICT',
+    FORUM_INVALID = 'FORUM_INVALID',
+    MESSAGE_SEARCH_INVALID = 'MESSAGE_SEARCH_INVALID',
     BOT_OFFLINE = 'BOT_OFFLINE',
     BOT_COMMAND_NOT_FOUND = 'BOT_COMMAND_NOT_FOUND',
     BOT_INVALID_OPTIONS = 'BOT_INVALID_OPTIONS',

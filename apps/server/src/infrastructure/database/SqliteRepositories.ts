@@ -1,5 +1,6 @@
 import { IDatabaseDriver } from './SqliteWrapper';
-import { messageBlocksSchema, type MessageBlock } from '@monky/shared';
+import { messageBlocksSchema, resolveChannelPermissions, type ChannelCategory, type MessageBlock } from '@monky/shared';
+import { SqliteCategoryRepository } from './SqliteCategoryRepository';
 import { ChannelType, LIMITS, REACTION_LIMITS, botCommandContextSchema, botMessageLocalizationsSchema } from '@monky/shared';
 import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from '../../domain/entities';
 import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepository, IMessageRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
@@ -33,7 +34,7 @@ export class SqliteServerRepository implements IServerRepository {
   }
 
   async getServer(): Promise<ServerRecord | null> {
-    const row = this.db.prepare('SELECT id, name, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, max_message_length as maxMessageLength, message_delete_undo_seconds as messageDeleteUndoSeconds, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots FROM server_meta LIMIT 1').get() as ServerRecord | undefined;
+    const row = this.db.prepare('SELECT id, name, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, max_message_length as maxMessageLength, message_delete_undo_seconds as messageDeleteUndoSeconds, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, recent_sound_cache_enabled as recentSoundCacheEnabled, recent_sound_cache_limit as recentSoundCacheLimit, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots FROM server_meta LIMIT 1').get() as ServerRecord | undefined;
     if (!row) return null;
     return {
       id: row.id,
@@ -45,6 +46,8 @@ export class SqliteServerRepository implements IServerRepository {
       messageDeleteUndoSeconds: row.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,
       ownerUserId: row.ownerUserId ?? null,
       allowSoundboard: row.allowSoundboard !== undefined ? Boolean(row.allowSoundboard) : true,
+      recentSoundCacheEnabled: Boolean(row.recentSoundCacheEnabled),
+      recentSoundCacheLimit: row.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT,
       allowEveryoneMention: row.allowEveryoneMention !== undefined ? Boolean(row.allowEveryoneMention) : true,
       allowMessageEdit: row.allowMessageEdit !== undefined ? Boolean(row.allowMessageEdit) : true,
       showRoleBadgesToEveryone: row.showRoleBadgesToEveryone !== undefined ? Boolean(row.showRoleBadgesToEveryone) : true,
@@ -109,6 +112,14 @@ export class SqliteServerRepository implements IServerRepository {
     if (server.allowSoundboard !== undefined) {
       fields.push('allow_soundboard = ?');
       values.push(server.allowSoundboard ? 1 : 0);
+    }
+    if (server.recentSoundCacheEnabled !== undefined) {
+      fields.push('recent_sound_cache_enabled = ?');
+      values.push(server.recentSoundCacheEnabled ? 1 : 0);
+    }
+    if (server.recentSoundCacheLimit !== undefined) {
+      fields.push('recent_sound_cache_limit = ?');
+      values.push(server.recentSoundCacheLimit);
     }
     if (server.allowEveryoneMention !== undefined) {
       fields.push('allow_everyone_mention = ?');
@@ -252,6 +263,11 @@ export class SqliteUserRepository implements IUserRepository {
 }
 
 interface SqliteChannelRow {
+  forumId: string | null;
+  forumLocked: number | null;
+  forumClosed: number | null;
+  categoryId: string | null;
+  inheritCategoryPermissions: number;
   botCommandsEnabled: number;
   id: string;
   serverId: string;
@@ -264,10 +280,13 @@ interface SqliteChannelRow {
 }
 
 export class SqliteChannelRepository implements IChannelRepository {
-  constructor(private db: IDatabaseDriver) {}
+  public readonly categories: SqliteCategoryRepository;
+  constructor(private db: IDatabaseDriver) {
+    this.categories = new SqliteCategoryRepository(db);
+  }
 
   private static readonly SELECT_COLUMNS =
-    'id, server_id as serverId, name, type, position, created_at as createdAt, max_participants as maxParticipants, is_private as isPrivate, bot_commands_enabled as botCommandsEnabled';
+    'id, server_id as serverId, name, type, position, created_at as createdAt, max_participants as maxParticipants, is_private as isPrivate, bot_commands_enabled as botCommandsEnabled, category_id as categoryId, inherit_category_permissions as inheritCategoryPermissions, forum_parent_id as forumId, (SELECT locked FROM forum_posts WHERE channel_id = channels.id) as forumLocked, (SELECT closed FROM forum_posts WHERE channel_id = channels.id) as forumClosed';
 
   /** Allowed roles for a set of channels, in one query, to avoid N+1 (#384). */
   private loadAllowedRoles(channelIds: string[]): Map<string, string[]> {
@@ -287,8 +306,19 @@ export class SqliteChannelRepository implements IChannelRepository {
     return byChannel;
   }
 
-  private toRecord(row: SqliteChannelRow, allowedRoleIds: string[]): ChannelRecord {
+  private toRecord(row: SqliteChannelRow, allowedRoleIds: string[], categories: Map<string, ChannelCategory>): ChannelRecord {
+    const access = resolveChannelPermissions({
+      categoryId: row.categoryId,
+      inheritCategoryPermissions: row.inheritCategoryPermissions === 1,
+      isPrivate: row.isPrivate === 1,
+      allowedRoleIds,
+    }, categories.get(row.categoryId ?? '') ?? null);
     return {
+      forumId: row.forumId,
+      forumLocked: row.forumLocked === 1,
+      forumClosed: row.forumClosed === 1,
+      categoryId: row.categoryId,
+      inheritCategoryPermissions: row.inheritCategoryPermissions === 1,
       id: row.id,
       serverId: row.serverId,
       name: row.name,
@@ -296,9 +326,9 @@ export class SqliteChannelRepository implements IChannelRepository {
       position: row.position,
       createdAt: row.createdAt,
       maxParticipants: row.maxParticipants,
-      isPrivate: row.isPrivate === 1,
+      isPrivate: access.isPrivate,
       botCommandsEnabled: row.botCommandsEnabled === 1,
-      allowedRoleIds,
+      allowedRoleIds: access.allowedRoleIds,
     };
   }
 
@@ -308,7 +338,14 @@ export class SqliteChannelRepository implements IChannelRepository {
     ).get(id) as SqliteChannelRow | undefined;
     if (!row) return null;
 
-    return this.toRecord(row, this.loadAllowedRoles([row.id]).get(row.id) ?? []);
+    const categories = new Map(this.categories.readByServerId(row.serverId).map((category) => [category.id, category]));
+    const record = this.toRecord(row, this.loadAllowedRoles([row.id]).get(row.id) ?? [], categories);
+    if (!record.forumId) return record;
+    const parentRow: SqliteChannelRow | undefined = this.db.prepare(
+      `SELECT ${SqliteChannelRepository.SELECT_COLUMNS} FROM channels WHERE id = ?`
+    ).get(record.forumId);
+    const parent = parentRow ? this.toRecord(parentRow, this.loadAllowedRoles([parentRow.id]).get(parentRow.id) ?? [], categories) : null;
+    return this.withForumAccess(record, parent);
   }
 
   async listByServerId(serverId: string): Promise<ChannelRecord[]> {
@@ -317,13 +354,22 @@ export class SqliteChannelRepository implements IChannelRepository {
     ).all(serverId) as SqliteChannelRow[];
 
     const allowedRoles = this.loadAllowedRoles(rows.map((row) => row.id));
-    return rows.map((row) => this.toRecord(row, allowedRoles.get(row.id) ?? []));
+    const categories = new Map(this.categories.readByServerId(serverId).map((category) => [category.id, category]));
+    const records = rows.map((row) => this.toRecord(row, allowedRoles.get(row.id) ?? [], categories));
+    const byId = new Map(records.map(record => [record.id, record]));
+    return records.map(record => record.forumId ? this.withForumAccess(record, byId.get(record.forumId) ?? null) : record);
+  }
+
+  private withForumAccess(record: ChannelRecord, parent: ChannelRecord | null): ChannelRecord {
+    const valid = parent?.type === 'FORUM' && !parent.forumId && parent.serverId === record.serverId;
+    return { ...record, isPrivate: valid ? parent.isPrivate : true,
+      allowedRoleIds: valid ? [...parent.allowedRoleIds] : [], botCommandsEnabled: valid && parent.botCommandsEnabled };
   }
 
   async create(channel: ChannelRecord): Promise<void> {
     this.db.transaction(() => {
       this.db.prepare(
-        'INSERT INTO channels (id, server_id, name, type, position, created_at, max_participants, is_private, bot_commands_enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO channels (id, server_id, name, type, position, created_at, max_participants, is_private, bot_commands_enabled, category_id, inherit_category_permissions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(
         channel.id,
         channel.serverId,
@@ -333,7 +379,9 @@ export class SqliteChannelRepository implements IChannelRepository {
         channel.createdAt,
         channel.maxParticipants,
         channel.isPrivate ? 1 : 0,
-        channel.botCommandsEnabled ? 1 : 0
+        channel.botCommandsEnabled ? 1 : 0,
+        channel.categoryId ?? null,
+        channel.inheritCategoryPermissions === false ? 0 : 1
       );
       this.replaceAllowedRoles(channel.id, channel.allowedRoleIds);
     })();
@@ -343,6 +391,15 @@ export class SqliteChannelRepository implements IChannelRepository {
     this.db.transaction(() => {
       const assignments: string[] = [];
       const values: unknown[] = [];
+
+      if (updates.categoryId !== undefined) {
+        assignments.push('category_id = ?');
+        values.push(updates.categoryId);
+      }
+      if (updates.inheritCategoryPermissions !== undefined) {
+        assignments.push('inherit_category_permissions = ?');
+        values.push(updates.inheritCategoryPermissions ? 1 : 0);
+      }
 
       if (updates.name !== undefined) {
         assignments.push('name = ?');
@@ -394,6 +451,13 @@ export class SqliteChannelRepository implements IChannelRepository {
 
   async updatePosition(id: string, position: number): Promise<void> {
     this.db.prepare('UPDATE channels SET position = ? WHERE id = ?').run(position, id);
+  }
+
+  async updatePositions(positions: Array<{ channelId: string; position: number }>): Promise<void> {
+    this.db.transaction(() => {
+      const statement = this.db.prepare('UPDATE channels SET position = ? WHERE id = ?');
+      for (const { channelId, position } of positions) statement.run(position, channelId);
+    })();
   }
 }
 
@@ -455,7 +519,8 @@ export class SqliteMessageRepository implements IMessageRepository {
       // Check again inside the transaction: a message may have been deleted
       // while the service was resolving channel permissions.
       const message = this.db.prepare(`SELECT m.id FROM messages m JOIN channels c ON c.id = m.channel_id
-        WHERE m.id = ? AND m.deleted_at IS NULL AND m.is_system = 0 AND c.type = 'TEXT'`).get(messageId);
+        WHERE m.id = ? AND m.deleted_at IS NULL AND m.is_system = 0
+          AND c.type IN ('TEXT', 'VOICE')`).get(messageId);
       if (!message) return 'invalid';
       const actor = this.db.prepare('SELECT id FROM users WHERE id = ? UNION ALL SELECT id FROM bots WHERE id = ?').get(userId, userId);
       if (!actor) return 'invalid';
@@ -600,10 +665,18 @@ export class SqliteMessageRepository implements IMessageRepository {
     })();
   }
 
+  async listExpiredDeletionMessageIds(now: number): Promise<string[]> {
+    const rows = this.db.prepare(`SELECT id FROM messages
+      WHERE delete_undo_until IS NOT NULL AND delete_undo_until <= ?`).all(now) as Array<{ id: string }>;
+    return rows.map(row => row.id);
+  }
+
   async purgeExpiredDeletions(now: number): Promise<void> {
     this.db.transaction(() => {
       this.db.prepare('DELETE FROM message_reactions WHERE message_id IN (SELECT message_id FROM message_deletion_backups WHERE expires_at <= ?)').run(now);
       this.db.prepare('DELETE FROM message_deletion_backups WHERE expires_at <= ?').run(now);
+      this.db.prepare(`UPDATE messages SET deleted_by_user_id = NULL, delete_undo_until = NULL
+        WHERE delete_undo_until IS NOT NULL AND delete_undo_until <= ?`).run(now);
     })();
   }
 

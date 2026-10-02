@@ -2,10 +2,12 @@ import { LOG_LEVELS, SERVER_MONITOR_LIMITS, type LogEntry, type LogLevel, type S
 import { escapeHtml } from '../utils/html';
 import { renderLoadingSkeleton } from '../utils/loadingSkeleton';
 import { t, type TranslationKey } from '../i18n';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { appEvents } from '../core/EventBus';
 import { RequestTimeoutError } from '../core/NetworkClient';
 import { sessionManager, type ServerSession } from '../core/SessionManager';
 import { currentEventOrigin } from '../core/sessionRouting';
+import { smoothScrollTo } from '../utils/scroll';
 import {
   LocalServerMonitorSource, RemoteServerMonitorSource, ServerMonitorError, ServerMonitorFeed,
   type MonitorUpdate, type ServerMonitorFailure, type ServerMonitorSource,
@@ -138,6 +140,7 @@ export class ServerMonitorModal {
     `;
 
     document.body.appendChild(this.modalEl);
+    enterModal(this.modalEl);
     this.attachEvents();
     this.updateLevelButtons();
     this.modalEl.querySelector<HTMLButtonElement>('#modal-close')?.focus();
@@ -316,7 +319,7 @@ export class ServerMonitorModal {
       .join('');
 
     if (this.autoScroll) {
-      container.scrollTop = container.scrollHeight;
+      smoothScrollTo(container, { top: container.scrollHeight });
     } else container.scrollTop = scrollTop;
   }
 
@@ -347,7 +350,7 @@ export class ServerMonitorModal {
       if (event.target === modal) this.close();
     }, options);
     document.addEventListener('keydown', (event) => {
-      if (Array.from(document.querySelectorAll('.modal-backdrop')).at(-1) !== modal) return;
+      if (!handlesModalKey(modal, event)) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
@@ -424,7 +427,7 @@ export class ServerMonitorModal {
     this.events?.abort();
     this.events = null;
     if (this.modalEl) {
-      this.modalEl.remove();
+      exitModal(this.modalEl);
       this.modalEl = null;
     }
     this.entries = [];

@@ -42,6 +42,7 @@ export const serverInviteSchema = z.object({
   port: z.number().int().min(1).max(65535),
   name: z.string().min(1).max(100).refine(validUnicode).optional(),
   password: z.string().min(1).max(1024).refine(validUnicode).refine(value => !/[\x00-\x1f\x7f]/.test(value)).optional(),
+  eventId: z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/).optional(),
 }).strict();
 
 export type ServerInvite = z.infer<typeof serverInviteSchema>;
@@ -124,7 +125,7 @@ function inviteToken(value: ServerInvite): string {
     keepShorter(encode(host, passwordMode));
     if (host !== 0) keepShorter(encode(0, passwordMode));
   }
-  const token = SERVER_INVITE_FRAGMENT_PREFIX + base64Url(bytes);
+  const token = SERVER_INVITE_FRAGMENT_PREFIX + base64Url(bytes) + (invite.eventId ? `.event.${invite.eventId}` : '');
   if (token.length > MAX_SERVER_INVITE_LENGTH - SERVER_INVITE_WEB_URL.length - 1) {
     throw new Error('Server invitation is too large');
   }
@@ -215,7 +216,9 @@ function readInvite(header: number, body: Uint8Array): ServerInvite {
 export function decodeServerInviteToken(token: unknown): ServerInviteResult {
   if (typeof token !== 'string' || !token.startsWith(SERVER_INVITE_FRAGMENT_PREFIX)) return { ok: false, reason: 'invalid' };
   if (token.length > MAX_SERVER_INVITE_LENGTH) return { ok: false, reason: 'too_long' };
-  const encoded = token.slice(SERVER_INVITE_FRAGMENT_PREFIX.length);
+  const [base, marker, eventId, ...extra] = token.split('.');
+  if (extra.length || (marker !== undefined && (marker !== 'event' || !eventId))) return { ok: false, reason: 'invalid' };
+  const encoded = base.slice(SERVER_INVITE_FRAGMENT_PREFIX.length);
   if (!/^[A-Za-z0-9_-]+$/.test(encoded)) return { ok: false, reason: 'invalid' };
   try {
     const binary = atob(encoded.replace(/-/g, '+').replace(/_/g, '/'));
@@ -223,7 +226,8 @@ export function decodeServerInviteToken(token: unknown): ServerInviteResult {
     if (bytes.length > MAX_INVITE_BYTES) return { ok: false, reason: 'too_long' };
     if (base64Url(bytes) !== encoded) return { ok: false, reason: 'invalid' };
     const body = bytes[0] & 128 ? inflateBody(bytes.subarray(1)) : bytes.subarray(1);
-    return { ok: true, invite: readInvite(bytes[0], body) };
+    const invite = readInvite(bytes[0], body);
+    return { ok: true, invite: serverInviteSchema.parse({ ...invite, ...(eventId !== undefined ? { eventId } : {}) }) };
   } catch (error: unknown) {
     return { ok: false, reason: error instanceof InviteSizeError ? 'too_long' : 'invalid' };
   }

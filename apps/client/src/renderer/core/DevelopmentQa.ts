@@ -1,5 +1,6 @@
 import {
-  LOCAL_CAPABILITY_TOOLS, MessageType, Permission, type BotInstalledPayload, type BotInstallPreview,
+  LOCAL_CAPABILITY_TOOLS, MessageType, Permission, recentSoundsListSchema,
+  type BotInstalledPayload, type BotInstallPreview,
   type BotPermissionsSnapshot, type DevelopmentQaConfig, type DevelopmentQaReport,
 } from '@monky/shared';
 import { connectionStore } from '../stores/connectionStore';
@@ -20,6 +21,35 @@ async function until(check: () => boolean, description: string, signal: AbortSig
     if (performance.now() > deadline) throw new Error(`Prepared QA timed out: ${description}`);
     await new Promise<void>((resolve) => window.setTimeout(resolve, 40));
   }
+
+}
+
+function qaToneBase64(frequency: number): string {
+  const sampleRate = 8000;
+  const sampleCount = 800;
+  const bytes = new Uint8Array(44 + sampleCount * 2);
+  const view = new DataView(bytes.buffer);
+  const text = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index++) bytes[offset + index] = value.charCodeAt(index);
+  };
+  text(0, 'RIFF');
+  view.setUint32(4, bytes.length - 8, true);
+  text(8, 'WAVEfmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  text(36, 'data');
+  view.setUint32(40, sampleCount * 2, true);
+  for (let index = 0; index < sampleCount; index++) {
+    view.setInt16(44 + index * 2, Math.round(Math.sin(2 * Math.PI * frequency * index / sampleRate) * 5000), true);
+  }
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
 
 export async function prepareDevelopmentQaProfile(config: DevelopmentQaConfig): Promise<void> {
@@ -75,6 +105,62 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
     const seed = '**QA preparado / Prepared QA**\nPerfil, servidor e dados isolados / Isolated profile, server and data.';
     session.client.send(MessageType.CHAT_SEND, { channelId: text.id, content: seed });
     await until(() => session.chatStore.getMessages(text.id).some((message) => message.content === seed), 'authenticated seeded message acknowledgement', owner.signal);
+
+    if (config.scenario === 'connected' && !config.smoke) {
+      session.client.send(MessageType.SOUNDBOARD_PLAY, {
+        channelId: voice.id, soundName: 'QA Bell', mimeType: 'audio/wav', audioBase64: qaToneBase64(660),
+      });
+      session.client.send(MessageType.SOUNDBOARD_PLAY, {
+        channelId: voice.id, soundName: 'QA Chime', mimeType: 'audio/wav', audioBase64: qaToneBase64(880),
+      });
+      const recent = recentSoundsListSchema.parse(await session.client.sendRequest<unknown>(
+        MessageType.RECENT_SOUNDS_LIST, {},
+      ));
+      if (!recent.enabled || recent.limit !== 5 || recent.items.length !== 2) {
+        throw new Error('The connected QA recent-audio fixture was not prepared through the authenticated protocol.');
+      }
+      const serverMenu = document.querySelector<HTMLButtonElement>('#server-dropdown-toggle');
+      if (!serverMenu) throw new Error('The real server menu is unavailable.');
+      serverMenu.click();
+      const recentButton = document.querySelector<HTMLButtonElement>('#btn-recent-sounds');
+      if (!recentButton || recentButton.hidden || recentButton.style.display === 'none') {
+        throw new Error('The recent-audio menu action is unavailable.');
+      }
+      recentButton.click();
+      await until(() => document.querySelectorAll('.recent-sound-item').length === 2,
+        'recent audio list with the played QA clips', owner.signal);
+      if (!document.querySelector('.recent-sounds-overview') ||
+          document.querySelectorAll('[data-preview-recent]').length !== 2 ||
+          document.querySelector('.recent-sounds-section-heading')?.textContent?.includes('2') !== true) {
+        throw new Error('The recent-audio list is missing its guidance, capacity or local preview controls.');
+      }
+      session.client.send(MessageType.RECENT_SOUND_RECORD, {
+        soundName: 'QA Local Preview', mimeType: 'audio/wav', audioBase64: qaToneBase64(440),
+      });
+      await until(() => document.querySelectorAll('.recent-sound-item').length === 3 &&
+        document.querySelector('.recent-sound-item')?.textContent?.includes('QA Local Preview') === true,
+      'live recent-audio update after a local Soundboard use', owner.signal);
+      const localPreviewId = document.querySelector<HTMLElement>('.recent-sound-item')?.dataset.recentSound;
+      session.client.send(MessageType.RECENT_SOUND_RECORD, {
+        soundName: 'QA Local Preview Again', mimeType: 'audio/wav', audioBase64: qaToneBase64(440),
+      });
+      await until(() => document.querySelectorAll('.recent-sound-item').length === 3 &&
+        document.querySelector<HTMLElement>('.recent-sound-item')?.dataset.recentSound === localPreviewId &&
+        document.querySelector('.recent-sound-item')?.textContent?.includes('QA Local Preview Again') === true,
+      'deduplicated recent audio moved to the top without another row', owner.signal);
+      document.querySelector<HTMLButtonElement>('.recent-sounds-modal [data-community-close]')?.click();
+      await until(() => !document.querySelector('.recent-sounds-modal'),
+        'close recent audio list', owner.signal);
+      const forum = auth.server.channels.find(channel => channel.type === 'FORUM');
+      if (!forum) throw new Error('The connected QA forum fixture was not created.');
+      const forumButton = () => document.querySelector<HTMLButtonElement>(
+        `[data-channel-id="${CSS.escape(forum.id)}"][data-channel-type="FORUM"]`,
+      );
+      await until(() => !!forumButton(), 'example forum control', owner.signal);
+      forumButton()?.click();
+      await until(() => document.querySelectorAll('.forum-view [data-forum-id]').length === 25,
+        'open example forum with its first lazy page', owner.signal);
+    }
 
     if (config.scenario === 'bot-install') {
       serverSettingsModal.open('bots');

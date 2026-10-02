@@ -1,5 +1,6 @@
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
+import { animateEnter, ownSurface, removeWithMotion } from '../utils/surfaceMotion';
 import { showAlert } from './Dialog';
 
 let nextId = 0;
@@ -66,7 +67,7 @@ export function showLinkPopover(
       lifetime.abort();
       observer.disconnect();
       signal.removeEventListener('abort', abort);
-      panel.remove();
+      removeWithMotion(panel);
       trigger.setAttribute('aria-expanded', 'false');
       trigger.removeAttribute('aria-controls');
       if (focus && trigger.isConnected) trigger.focus();
@@ -110,6 +111,8 @@ export function showLinkPopover(
     window.addEventListener('scroll', position, { ...options, capture: true });
     signal.addEventListener('abort', abort, { once: true });
     document.body.append(panel);
+    ownSurface(panel, trigger);
+    animateEnter(panel);
     trigger.setAttribute('aria-haspopup', 'dialog');
     trigger.setAttribute('aria-expanded', 'true');
     trigger.setAttribute('aria-controls', id);

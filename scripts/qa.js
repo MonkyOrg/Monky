@@ -58,7 +58,7 @@ export function isolatedEnvironment(root, extra = {}, { useSystemKeychain = fals
 }
 
 export const scenarioPreparation = {
-  connected: 'Fresh identity, authenticated owner, seeded chat; no voice or local consent.',
+  connected: 'Fresh identity, authenticated owner, 100 QA respondents, seeded chat, and identified plus anonymous all-field QA forms with 100 varied responses each; no voice or local consent.',
   'server-settings': 'Connected owner and real General settings; no setting is edited for the test.',
   voice: 'Connected owner, muted synthetic input and real P2P SDK peer. The SDK fixture is not production music.',
   'voice-receive': 'Listening-only SDK fixture, muted synthetic input and a listening indicator without a block for unrequested publication. /qa-listen toggles reception; no audio is recorded.',
@@ -120,11 +120,22 @@ export async function runQa(options, hooks = {}) {
       }
     }
     const serviceEnv = role => isolatedEnvironment(path.join(root, role), {
-      MONKY_QA_SERVICE: JSON.stringify({ root, role, runId, scenario: options.scenario, password, botRoot: options.botRoot ?? undefined }),
+      MONKY_QA_SERVICE: JSON.stringify({
+        root, role, runId, scenario: options.scenario, smoke: options.smoke,
+        password, botRoot: options.botRoot ?? undefined,
+      }),
     });
     const server = spawn('QA server', process.execPath, [serviceFile], path.join(root, 'server'), serviceEnv('server'));
     const serverReady = await startup(server.ready);
     if (serverReady.protocol !== PROTOCOL_VERSION) throw new Error('QA server/client build protocol mismatch.');
+    if (options.scenario === 'connected') {
+      const seeded = await startup(server.call('qa-seed-members', ['QA Ana', 'QA Bruno', 'QA Carla']));
+      if (seeded.members !== 3) throw new Error('Connected QA member fixtures were not prepared.');
+      if (!options.smoke) {
+        const forum = await startup(server.call('qa-seed-forum', { count: 200 }));
+        if (!forum.id || forum.threads !== 200) throw new Error('Connected QA forum fixture was not prepared.');
+      }
+    }
     const healthUrl = `http://127.0.0.1:${serverReady.port}/health`;
     if (!(await fetch(healthUrl, { signal: AbortSignal.timeout(5000), redirect: 'error' })).ok) throw new Error('The QA server health endpoint is not responsive.');
     let bot, botReady, joining = Promise.resolve();
@@ -168,6 +179,15 @@ export async function runQa(options, hooks = {}) {
     }, options.smoke === true);
     const ready = await startup(client.ready);
     await startup(joining);
+    if (options.scenario === 'connected') {
+      const form = await startup(server.call('qa-seed-live-form', {
+        userId: ready.userId,
+        channelId: ready.textChannelId,
+      }));
+      if (!form.id || !form.anonymousId || form.forms !== 2 || form.fields !== 8 || form.responses !== 100) {
+        throw new Error('Connected QA live-form fixture was not prepared.');
+      }
+    }
     let windowVisible;
     for (const child of children) {
       const state = await startup(child.call('qa-ping'));
@@ -179,7 +199,9 @@ export async function runQa(options, hooks = {}) {
     }
     const stats = await startup(server.call('qa-snapshot'));
     const expectsLogin = !['home', 'login'].includes(options.scenario);
-    if (ready.connected !== expectsLogin || (expectsLogin && (stats.onlineUsers !== 1 || stats.messages < 1)) ||
+    const expectedMembers = options.scenario === 'connected' ? 101 : 1;
+    if (ready.connected !== expectsLogin || (expectsLogin &&
+        (stats.onlineUsers !== 1 || stats.members !== expectedMembers || stats.messages < 1)) ||
         (!expectsLogin && (stats.members !== 0 || stats.messages !== 0))) throw new Error('QA readiness disagrees with the real authenticated server state.');
     if (bot) {
       const state = await startup(bot.call('qa-snapshot'));
@@ -198,9 +220,12 @@ export async function runQa(options, hooks = {}) {
     }
     result = { scenario: options.scenario, root, runId, serverUrl: `ws://127.0.0.1:${serverReady.port}`,
       botManifestUrl: botReady?.manifestUrl, botKind: botReady?.kind, pids: children.map(child => child.child.pid),
-      prepared: options.realMedia
+      prepared: (options.realMedia
         ? `${scenarioPreparation[options.scenario].replace('synthetic input', 'real input')} Real capture devices enabled explicitly; camera starts only on user action.`
-        : scenarioPreparation[options.scenario],
+        : scenarioPreparation[options.scenario]) +
+        (options.scenario === 'connected' && !options.smoke
+          ? ' Example forum opened with 200 seeded threads for lazy-loading checks.'
+          : ''),
       mediaDevices: options.realMedia ? 'real' : 'synthetic', windowVisible, ready, stats, reports };
     await hooks.onReady?.(result);
     hooks.log?.(`QA_READY ${JSON.stringify(result)}`);

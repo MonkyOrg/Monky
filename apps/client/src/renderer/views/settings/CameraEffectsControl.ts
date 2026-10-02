@@ -11,6 +11,7 @@ import { t, type TranslationKey } from '../../i18n';
 import licenseUrl from '../../assets/camera-effects/LICENSE?url';
 import rvmLicenseUrl from '../../assets/camera-effects/RVM-LICENSE?url';
 import sourcesUrl from '../../assets/camera-effects/SOURCES.json?url&no-inline';
+import { openFileInputPicker } from '../../utils/buttonLoading';
 import './cameraEffects.css';
 
 const modeLabels: Record<CameraEffectMode, TranslationKey> = {
@@ -264,7 +265,8 @@ export class CameraEffectsControl {
     onClick('[data-camera-quality-limit]', () => {
       void this.apply(() => videoService.setCameraEffects({ limitQuality: !cameraEffectsStore.snapshot.settings.limitQuality }));
     });
-    onClick('[data-camera-pick-image]', () => fileInput?.click());
+    const imagePicker = root.querySelector<HTMLButtonElement>('[data-camera-pick-image]');
+    onClick('[data-camera-pick-image]', () => openFileInputPicker(fileInput, imagePicker));
     onClick('[data-camera-remove-image]', () => { void this.apply(() => videoService.removeCameraBackgroundImage()); });
     onClick('[data-camera-preview-toggle]', () => {
       if (this.previewEnabled) this.stopPreview();

@@ -87,6 +87,7 @@ if (require.main === module || process.argv[1] === __filename) {
       await window.loadURL(`http://127.0.0.1:${address.port}/__tooltips__`);
       const checks = await window.webContents.executeJavaScript(`(${runTooltipSmoke.toString()})()`, true);
       console.log(`Tooltip smoke: ${checks} checks passed`);
+      if (process.argv.includes('--dom-only')) { await finish(0); return; }
       await window.webContents.executeJavaScript(`(${renderTooltipPreview.toString()})()`, true);
       await focusTooltipPreview(window);
       const point = await window.webContents.executeJavaScript(`new Promise((resolve, reject) => {
@@ -256,6 +257,7 @@ async function runTooltipSmoke() {
   const icon = root.querySelector('#tip-icon');
   const parent = root.querySelector('#tip-parent');
   const tip = () => document.querySelector('.monky-tooltip');
+  const closed = () => tip().hidden || tip().hasAttribute('data-ui-closing');
   const over = (element) => element.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, pointerType: 'mouse' }));
   const out = (element, relatedTarget = null) => element.dispatchEvent(new PointerEvent('pointerout', { bubbles: true, relatedTarget }));
   const dispose = initTooltips();
@@ -285,15 +287,15 @@ async function runTooltipSmoke() {
     check(tip().textContent === 'Immediate read', 'Immediate read must not consume the UI update');
     button.setAttribute('title', '');
     await wait();
-    check(tip().hidden && button.title === '', 'Explicit empty title must clear tooltip');
+    check(closed() && button.title === '', 'Explicit empty title must clear tooltip');
     button.title = 'Restored dynamically';
     await wait(180);
     check(!tip().hidden && tip().textContent === button.title, 'Dynamic title should revive hovered tooltip');
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    check(tip().hidden && button.getAttribute('title') === '', 'Escape must dismiss without re-enabling native duplicate');
+    check(closed() && button.getAttribute('title') === '', 'Escape must dismiss without re-enabling native duplicate');
     button.title = 'No resurrection';
     await wait(180);
-    check(tip().hidden, 'Mutations after Escape must not resurrect a dismissed tooltip');
+    check(closed(), 'Mutations after Escape must not resurrect a dismissed tooltip');
     out(icon);
     check(button.getAttribute('title') === 'No resurrection' && parent.getAttribute('title') === 'Parent', 'Pointer exit must restore native source attributes');
     check(button.getAttribute('aria-describedby') === 'existing-description', 'Dismissal must remove only its own description');
@@ -301,7 +303,7 @@ async function runTooltipSmoke() {
     await wait(40);
     out(icon);
     await wait(180);
-    check(tip().hidden, 'Leaving during delay must cancel tooltip');
+    check(closed(), 'Leaving during delay must cancel tooltip');
     const disabled = root.querySelector('#tip-disabled');
     over(disabled);
     await wait(180);
@@ -313,7 +315,7 @@ async function runTooltipSmoke() {
     out(icon);
     over(root.querySelector('#tip-empty i'));
     await wait(180);
-    check(tip().hidden, 'Empty title must block ancestor inheritance');
+    check(closed(), 'Empty title must block ancestor inheritance');
     out(root.querySelector('#tip-empty i'));
     const svg = root.querySelector('#tip-svg');
     over(svg.querySelector('circle'));
@@ -348,7 +350,7 @@ async function runTooltipSmoke() {
     check(tip().textContent.startsWith('Updated latency:'), 'Character-data updates must refresh referenced sources');
     pingSource.id = 'tooltip-ping-moved';
     await wait();
-    check(tip().hidden, 'Renaming a referenced source must hide stale content');
+    check(closed(), 'Renaming a referenced source must hide stale content');
     ping.dataset.tooltipSource = 'tooltip-ping-moved';
     await wait(180);
     check(!tip().hidden && tip().textContent.startsWith('Updated latency:'), 'Changing source reference must resolve the new label');
@@ -375,13 +377,13 @@ async function runTooltipSmoke() {
     over(icon);
     await wait(180);
     root.dispatchEvent(new Event('scroll'));
-    check(tip().hidden, 'Scrolling a nested viewport must dismiss stale positioning');
+    check(closed(), 'Scrolling a nested viewport must dismiss stale positioning');
     out(icon);
     over(icon);
     await wait(180);
     root.hidden = true;
     await wait();
-    check(tip().hidden, 'Hiding an ancestor must dismiss the tooltip');
+    check(closed(), 'Hiding an ancestor must dismiss the tooltip');
     root.hidden = false;
     out(icon);
     const menu = document.createElement('div');
@@ -399,16 +401,16 @@ async function runTooltipSmoke() {
     check(tip().getBoundingClientRect().bottom <= innerHeight - 7, 'Very long text must remain bounded');
     menu.remove();
     await wait();
-    check(tip().hidden && menuItem.getAttribute('title') === menuItem.title, 'Unmounted menus must hide and restore titles');
+    check(closed() && menuItem.getAttribute('title') === menuItem.title, 'Unmounted menus must hide and restore titles');
     over(icon);
     await wait(180);
     window.dispatchEvent(new Event('resize'));
-    check(tip().hidden, 'Resize must dismiss positioning');
+    check(closed(), 'Resize must dismiss positioning');
     out(icon);
     over(icon);
     await wait(180);
     window.dispatchEvent(new Event('blur'));
-    check(tip().hidden && button.getAttribute('title') === button.title, 'Window blur must release active titles');
+    check(closed() && button.getAttribute('title') === button.title, 'Window blur must release active titles');
     over(icon);
     button.setAttribute('title', 'Pending title at disposal');
     disposeTooltips();

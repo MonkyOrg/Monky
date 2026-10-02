@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import http from 'node:http';
 import path from 'node:path';
@@ -76,6 +77,15 @@ test('manual and legacy bots receive no grant until a human manager reviews an e
   await f.caller.peer.request(MessageType.CHAT_SEND, { channelId: f.textId, content: 'Not shared with unreviewed bots' });
   await bot.peer.barrier();
   assert.equal(bot.peer.messages.slice(before).some((message) => message.type === MessageType.CHAT_MESSAGE), false);
+  const forum = await f.channelService.createChannel({ name: 'Forum', type: 'FORUM' });
+  assert.ok(forum.channel);
+  const post = await f.owner.peer.request(MessageType.FORUM_CREATE_POST, {
+    id: randomUUID(), channelId: forum.channel.id, title: 'Human topic', content: 'Not shared with unreviewed bots',
+  });
+  assert.equal(post.type, MessageType.FORUM_POST_SAVED);
+  await bot.peer.barrier();
+  assert.equal(bot.peer.messages.slice(before).some(message =>
+    message.type === MessageType.FORUM_POST_SAVED || message.type === MessageType.CHAT_MESSAGE), false);
 });
 
 test('unlink notifies the affected bot before closing its connection, unlike a capability review', async t => {

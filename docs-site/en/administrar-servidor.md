@@ -14,9 +14,9 @@ depend on your access.
 
 | Tab | Purpose |
 | --- | --- |
-| General | Name and image, member limit, voice mode and server process information |
+| General | Name, image and banner, event activation, limits, voice mode and server process information |
 | Security | Entry password |
-| Voice & Video | Soundboard access and the integrated TURN relay |
+| Voice & Video | Soundboard access, recent audio cache and the integrated TURN relay |
 | Storage | Attachment limits and usage |
 | Notifications | Mentions, message editing and notices published in chat |
 | Members | Inspect members and manage access according to your permissions |
@@ -46,13 +46,175 @@ When a server restarts for an update, clients receive a specific notice,
 including when viewing another server. Wait, then reconnect. An update
 notice does not mean the new version has already finished starting.
 
+### Recent Soundboard audio
+
+Under **Voice & Video**, an administrator can enable the **Recent audio cache**
+and retain between 1 and 100 plays. The option is available only while the
+server Soundboard is enabled and starts disabled on existing servers.
+
+Each Soundboard audio clip occupies one history entry, including when different
+people use the exact same file. Using it again updates who played it and when,
+and moves the entry to the top, including audio heard as a local preview outside
+a call. The server removes the oldest clips first when the configured limit is
+reached and also applies a defensive 256 MB cap. Disabling the cache or the
+server Soundboard immediately deletes its history and stored files.
+
+While enabled, every member can open **Recent audio** from the server-name
+menu. The list shows who played each clip, when it was played and its size;
+the play button provides a local-only preview without sending the clip to the
+call or creating another history entry. **Download** opens the operating
+system's safe save dialog.
+
 ## Channels
 
-Use the **+** beside **Text Channels** or **Voice Channels**. Choose a type,
-enter a name and review the switches before creating it.
+Right-click an empty area of the channel list to **Create Channel**,
+**Create category** or **Invite Friends**. Creation options require
+**Manage channels**; there is no permanent create-category button in the list.
+
+Use the **+** beside a category. Choose any channel type,
+enter a name and review the switches before creating it. Categories can mix
+text, voice and forums; uncategorized channels appear directly in the list
+without an artificial category heading.
 
 To edit or delete, open the channel's **More options** menu. Deletion is
 destructive: check the name and its effect on history before confirming.
+
+### Forums
+
+Choose **Forum** when creating a channel. Each post has a title, initial message
+and optional attachments; replies use normal chat, including editing, reactions,
+attachments and search. Topics always inherit their forum's access, including
+category and role changes. They do not appear as loose sidebar channels.
+
+Search by title and sort by activity, newest or oldest. Rows show previews,
+thumbnails, replies and reactions. Authors can rename their posts;
+**Manage channels** permits pinning and locking replies through the post's
+context menu. **New post** expands the composer inline. Discussions open to
+the right while the list remains on the left; **X** closes only the discussion,
+preserving search and the post draft.
+
+## Events, banners and live actions
+
+The **Allow events and Live Actions** switch under **Server Settings → General**
+controls both features and requires **Manage server**.
+**Manage events** controls event creation, editing, manual start/end,
+cancellation and deletion. Members do not receive this permission automatically;
+owners and administrators remain authorized. Disabling the switch hides and
+blocks both features. Event schedules remain paused across server restarts and
+their times move forward by the pause duration when re-enabled. Active Live
+Actions close immediately; ordinary polls that are not Live Actions remain open.
+
+Under **Events → Create event**, select **In a voice or text channel**, choose
+the type, then use the searchable dropdown in the same form. Only channels
+of that type are listed.
+**Somewhere else** accepts a link or physical location as free text.
+The wizard visually replaces the list; steps slide without closing the window,
+and going back or cancelling restores the previous screen.
+Fill in the title, description, date, timezone, end time and up to five optional
+images; review before saving. When selecting multiple images, adjust all of them
+in one modal and move between them without losing each crop. The form carousel
+also lets you readjust its active image later. External locations require an end time. Daily, weekly and monthly
+recurrence preserves the local time in the selected timezone. Channel events
+without an end time must be ended manually. Date and time share a row, with an
+app-themed calendar. The time dropdown suggests 15-minute intervals while
+allowing any valid typed time without rounding.
+**End time and time zone** contains the additional scheduling options.
+**View details** opens every scheduled, active, or ended event. Each event's
+**More options** menu contains editing, ending, cancellation and
+deletion. Starting an event manually requires confirmation.
+For text-channel events, **Open channel** opens the corresponding conversation.
+
+The **interested members** tab in event details lists names and avatars,
+including offline members, with **Load more** for larger lists. The event's
+access rules also protect this list.
+
+**More options** offers **Copy event link** and **Export to calendar (.ics)**
+to every member who can view the event. Links do not include the server
+password: recipients confirm the connection and enter a password if needed.
+They can also paste links under **Join with an invitation**. After joining,
+the event opens on the correct server, including historical events.
+Links never grant access to private channels.
+
+For recurring events, **Export series to calendar (.ics)** includes the full
+series, preserving its timezone and daily, weekly or monthly recurrence.
+Monthly dates that do not exist use that month's last day. Choose a file
+location and import the saved file into your calendar application.
+The file is a snapshot of the schedule; future changes in Monky are not
+automatically synchronized.
+Calendar applications can interpret nonexistent or repeated local times during
+daylight-saving transitions differently; review those occurrences after import.
+
+The server starts and ends events automatically according to their schedule.
+Connected people marked **Interested** receive a start notice and sound,
+respecting app sound preferences. Private-room events are visible only to
+people with room access. The join button uses the event's voice room.
+
+Events can be **Public** or **Private**. Private mode requires at least one
+member or role, and both lists are combined. Audience selection never replaces
+channel permissions: members must still be able to read the channel, and losing
+a selected role removes access immediately. The creator and members with
+**Manage server** retain management access. Event links never grant audience
+access.
+
+The banner is under **General**, alongside the server name and photo.
+**Manage server** permits uploading a banner cropped to 1000 × 400.
+It occupies the top of the sidebar behind the server name. Cropping supports
+zoom, dragging, rotation, and reset. **Events** and **Live Actions** shortcuts
+show status and counts, while banners and carousels appear only in details.
+
+Events and Live Actions use separate permissions. **Manage events** controls the
+calendar; **Emit live actions** allows people to create polls and forms, inspect
+responses, and close those interactions. Participants still need channel
+access. Bot Live Actions also require approval of the bot's `live_actions`
+capability; the initiator, the bot itself, or a manager with **Emit live
+actions** can close them.
+
+Polls, forms, and bot Live Actions can also use a private member-and-role
+audience. A private poll is completely absent for non-audience members: its
+message, history, replies, search results, totals, and pagination do not reveal
+that it exists. The creator and **Manage server** moderators retain access,
+always subject to current channel read permission.
+
+## Search messages
+
+Use top-right search or `Ctrl+F` inside a chat to start with its current channel.
+The field opens shortcuts for choosing users and channels. **More search options**
+opens a filter modal with **Clear filters**, **Cancel** and **Apply filters**.
+Combine text, authors, channels, mentions, human/bot authors, image, video,
+audio, file, link and before/after/on-date filters. Whole-day dates use UTC.
+Results are paginated; clicking a result opens its historical message,
+including forum replies.
+
+Search excludes inaccessible channels, deleted messages and undo backups.
+Access changes invalidate open results.
+
+::: warning Compatibility
+Mixed categories and forums require client and server protocol 31.
+Use both builds from this delivery for local validation; do not connect this
+client to an older server. The SDK preserves the bot floor for existing
+features, but live actions require a compatible server.
+:::
+
+### Categories and inherited access
+
+**Create category** is in the empty channel area's right-click menu.
+Right-click a category name to edit its name and access, move it up/down, or delete it.
+Use **Move to category** in a channel's menu to move it, or drag channels to
+move and reorder them. Category arrows collapse their lists; the choice is
+remembered per server and identity on this device.
+
+New servers start with **Text channels** and **Voice channels** (named in the
+app's selected language). Existing servers migrate to these two groups;
+private channels retain their access as individual overrides.
+
+By default, **Inherit category permissions** applies the category's private
+access and allowed roles to the channel. Turn this switch off while editing
+a channel to configure an override. Moving an inherited channel adopts the
+destination's access; moving to **Uncategorized** preserves current effective
+access. Deleting a category **does not delete channels or history**: channels
+become uncategorized and retain their permissions. Revoking access also hides
+channels and disconnects voice participants; chat, attachment uploads and bots all
+enforce the same access.
 
 ### Private channel
 

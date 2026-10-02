@@ -424,12 +424,14 @@ export class VideoService {
   }
 
   private failCamera(error: CameraEffectError): void {
+    const publishing = this.cameraRequested;
     clientLog.error('VIDEO', 'Camera stopped without an unprocessed fallback', { code: error.code, error: String(error.cause ?? error) });
     this.stopCamera();
     this.cameraStatus = 'error';
     this.cameraError = error;
     this.notifyCameraState();
-    appEvents.emit('camera.effects_error', error);
+    // Preview owners already display state.error inline; only publication needs a global notice.
+    if (publishing) appEvents.emit('camera.effects_error', error);
   }
 
   private releaseCameraCapture(): void {

@@ -429,7 +429,8 @@ async function runPreflight(language, audioBase64) {
     primary.chatStore.selectCommand('text', search);
     type('first');
     await waitFor(() => preparations.length === 1);
-    check(sent.length === 0 && deadlines.length === 0, 'installation does not start autocomplete or preview deadlines');
+    check(!sent.some(request => ['COMMAND_AUTOCOMPLETE', 'COMMAND_AUDIO_PREVIEW', 'COMMAND_INVOKE'].includes(request.type))
+      && deadlines.length === 0, 'installation does not start autocomplete or preview deadlines');
     check(composer.textContent.includes(t('botChat.autocompleteLoading'))
       && !composer.textContent.includes(t('localExecution.preparing')),
     'the composer waits without duplicating the Main-owned preparation dialog');

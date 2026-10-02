@@ -3,6 +3,7 @@ import { settingsStore } from '../../../stores/settingsStore';
 import { webRtcManager } from '../../../core/WebRtcManager';
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
+import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import {
   CUSTOM_QUALITY_FIELDS, customQualityBounds, normalizeCustomQualityProfile, type QualityNumberKey,
 } from '../../../utils/qualityProfileLimits';
@@ -472,7 +473,7 @@ export class QualityTab {
             + `<option value="${CUSTOM_OPTION}">${escapeHtml(t('settings.optionCustom'))}</option>`;
           select.value = custom || !FPS_OPTIONS.includes(value) ? CUSTOM_OPTION : String(value);
           const row = container.querySelector<HTMLElement>(`#q-custom-${id}`);
-          if (row) row.hidden = select.value !== CUSTOM_OPTION;
+          if (row) setSurfaceVisible(row, select.value === CUSTOM_OPTION);
         }
       }
     };
@@ -513,11 +514,11 @@ export class QualityTab {
       const input = container.querySelector<HTMLInputElement>(`#custom-${id}`);
       select?.addEventListener('change', () => {
         if (select.value === CUSTOM_OPTION) {
-          if (customRow) customRow.hidden = false;
+          if (customRow) setSurfaceVisible(customRow, true);
           input?.focus();
           return;
         }
-        if (customRow) customRow.hidden = true;
+        if (customRow) setSurfaceVisible(customRow, false);
         const val = Number(select.value);
         if (!Number.isFinite(val) || val <= 0) {
           syncInputs();
@@ -538,10 +539,10 @@ export class QualityTab {
 
       resSelect?.addEventListener('change', () => {
         if (resSelect.value === CUSTOM_OPTION) {
-          if (customRow) customRow.hidden = false;
+          if (customRow) setSurfaceVisible(customRow, true);
           return;
         }
-        if (customRow) customRow.hidden = true;
+        if (customRow) setSurfaceVisible(customRow, false);
         const [width, height] = resSelect.value.split('x').map((part) => parseInt(part, 10));
         if (!Number.isFinite(width) || !Number.isFinite(height)) {
           notify('settings.qualityValueInvalid');
@@ -562,7 +563,7 @@ export class QualityTab {
         if (resSelect) {
           resSelect.innerHTML = this.renderResolutionOptions(group, target.width, target.height);
         }
-        if (customRow) customRow.hidden = true;
+        if (customRow) setSurfaceVisible(customRow, false);
         setValue(widthKey, target.width);
         setValue(heightKey, target.height);
         apply();

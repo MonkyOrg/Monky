@@ -852,7 +852,8 @@ async function setupStageSmoke() {
   const finishAnimations = window.footerSmoke.finishAnimations;
   const enter = (control) => control.dispatchEvent(new PointerEvent('pointerenter', { pointerType: 'mouse' }));
   const leave = (control) => control.dispatchEvent(new PointerEvent('pointerleave', { pointerType: 'mouse' }));
-  const buttons = () => [...root.querySelectorAll('.voice-stage-container button')];
+  const buttons = () => [...root.querySelectorAll('.voice-stage-container button')]
+    .filter(control => !control.closest('[data-ui-closing]'));
   const motionCount = () => buttons().reduce((count, control) => count + animations(control).length, 0);
   const rect = (element) => JSON.stringify(element.getBoundingClientRect().toJSON());
   check(motionCount() === 0, 'Actual stage has no autoplay motion');
@@ -1069,7 +1070,8 @@ async function setupStageSmoke() {
       await delay();
       check(animations(stop).length === 0 && !stop.querySelector('.control-motion-decoration'),
         'Hiding the stop button cancels its motion');
-      check(!button('#btn-stage-quick-stop'), 'Broadcast banner is removed when sharing stops');
+      check(!button('#stage-broadcast-banner-wrapper:not([data-ui-closing]) #btn-stage-quick-stop'),
+        'Broadcast banner is removed when sharing stops');
       check(getComputedStyle(badge).display === 'none', 'Screen-audio badge hides without replacing the main glyph');
 
       button('.stage-stopwatch-btn').click();
@@ -1105,7 +1107,8 @@ async function setupStageSmoke() {
         enter(control);
         const animation = animations(control)[0];
         check(animation && animation.effect.getTiming().iterations === 1
-          && animation.effect.getTiming().duration > 480, 'Every visible stage control has a finite, semantic hover');
+          && animation.effect.getTiming().duration > 480,
+        `Every visible stage control has a finite, semantic hover: ${control.id || control.className}`);
       }
       await finishAnimations(buttons().flatMap(control => animations(control)));
       check(motionCount() === 0 && !root.querySelector('.control-motion-decoration'), 'All stage hovers finish and remove artwork');

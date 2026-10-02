@@ -1,5 +1,7 @@
 import { t } from '../i18n';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { applyBackup, BACKUP_FILE_EXTENSION, BackupScope, collectBackup, parseBackup } from '../utils/backup';
+import { withButtonLoading } from '../utils/buttonLoading';
 import { showAlert, showConfirm } from './Dialog';
 
 /**
@@ -71,7 +73,7 @@ function buildScopeDialog(params: {
 
     const cleanup = () => {
       document.removeEventListener('keydown', onKeyDown, true);
-      backdrop.remove();
+      exitModal(backdrop);
     };
 
     const settle = (result: ScopeDialogResult | null) => {
@@ -103,6 +105,7 @@ function buildScopeDialog(params: {
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (!handlesModalKey(backdrop, event)) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         settle(null);
@@ -125,11 +128,12 @@ function buildScopeDialog(params: {
     });
     document.addEventListener('keydown', onKeyDown, true);
     document.body.appendChild(backdrop);
+    enterModal(backdrop);
     passwordInput.focus();
   });
 }
 
-export async function showBackupExportDialog(): Promise<void> {
+export async function showBackupExportDialog(trigger?: HTMLElement): Promise<void> {
   const choice = await buildScopeDialog({
     title: t('backup.exportTitle'),
     icon: 'download',
@@ -149,7 +153,9 @@ export async function showBackupExportDialog(): Promise<void> {
     return;
   }
 
-  const result = await window.api.saveBackupFile(sealed.payload, `monky-backup.${BACKUP_FILE_EXTENSION}`);
+  const save = () => window.api.saveBackupFile(sealed.payload!, `monky-backup.${BACKUP_FILE_EXTENSION}`);
+  const result = trigger ? await withButtonLoading(trigger, save) : await save();
+  if (!result) return;
   if (result.success) {
     await showAlert({ title: t('backup.exportTitle'), message: t('backup.exportSuccess'), variant: 'success' });
   } else if (result.error) {
@@ -157,8 +163,10 @@ export async function showBackupExportDialog(): Promise<void> {
   }
 }
 
-export async function showBackupImportDialog(): Promise<BackupScope[] | null> {
-  const file = await window.api.openBackupFile();
+export async function showBackupImportDialog(trigger?: HTMLElement): Promise<BackupScope[] | null> {
+  const open = () => window.api.openBackupFile();
+  const file = trigger ? await withButtonLoading(trigger, open) : await open();
+  if (!file) return null;
   if (!file.success) {
     if (file.error) await showAlert({ title: t('common.error'), message: file.error, variant: 'danger' });
     return null;

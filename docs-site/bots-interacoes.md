@@ -13,6 +13,67 @@ Veja a [matriz de capacidades](/bots-permissoes).
 
 <AppScreenshot src="/screenshots/formulario-pt.png" alt="Formulário privado renderizado pelo Monky com texto, seleção e switch." caption="Você declara os campos e aguarda a resposta; não precisa montar esses controles em HTML." />
 
+## Ações ao vivo nativas
+
+Com protocolo 31, `ctx.createLiveAction()` destaca uma interação acima dos
+canais. Declare `commands` e `live_actions`, obtenha aprovação administrativa
+e conceda **Emitir ações ao vivo** ao cargo de quem chama o comando. O servidor
+deriva a pessoa e o canal da invocação; não aceite identidades enviadas pelo bot.
+Não há HTML, iframe, JavaScript ou URL de aplicativo nesse contrato.
+
+```ts
+bot.command({
+  name: 'confirmar',
+  description: 'Abre uma confirmação para o grupo',
+  handler: async (ctx) => {
+    await ctx.createLiveAction({
+      title: 'Confirme sua participação',
+      expiresAt: Date.now() + 15 * 60_000,
+      audience: {
+        visibility: 'private',
+        userIds: ['id-do-membro'],
+        roleIds: ['id-do-cargo'],
+      },
+      content: {
+        kind: 'form',
+        form: {
+          title: 'Participação',
+          fields: [{ name: 'nome', label: 'Nome', type: 'text', required: true }],
+        },
+      },
+    });
+  },
+});
+```
+
+`bot.onLiveActionSubmission((submission, { serverId }) => { ... })` retorna
+uma função para remover o listener. `submission` traz `id`, `submissionId`,
+`userId`, `userNickname`, `channelId`, `locale` e `values` validados pelo servidor.
+O recebimento confirma o encaminhamento ao bot, não a conclusão de uma operação
+externa. Respostas de formulário não são guardadas como histórico de enquete.
+
+Para votações duráveis, crie o seletor com `ctx.createSelector()` e use
+`content: { kind: 'selector', selectorId: selector.id }` na ação ao vivo.
+Isso exige também `selectors` e `send_messages`; os votos usam o seletor
+existente, não um segundo armazenamento. O banner desaparece ao encerrar
+o seletor ou expirar.
+
+Use `bot.listLiveActions(serverId)`, `bot.updateLiveAction(serverId, {
+id, expectedRevision, ...patch })` e `bot.closeLiveAction(serverId, id)`
+para recuperação, atualização e encerramento. O prazo máximo é de 30 dias
+por operação; há limite de 50 ações simultâneas por servidor. Alterar a
+definição invalida formulários antigos. Ações não concedem acesso a canais
+privados e a revisão de capacidades continua obrigatória.
+Quem iniciou a Ação ao vivo e membros com **Emitir ações ao vivo** também podem
+encerrá-la manualmente pelo detalhe da ação.
+
+Sem `audience`, a ação é pública. Para uma ação privada, envie
+`{ visibility: 'private', userIds, roleIds }` com pelo menos um ID; membro e
+cargo têm semântica **OU**. O servidor reavalia cargos e leitura do canal em
+tempo real. O criador e gestores com **Gerenciar servidor** mantêm acesso, mas
+links e a própria Ação ao vivo nunca concedem acesso ao canal. `updateLiveAction`
+pode substituir o público ou voltar para `{ visibility: 'public' }`.
+
 ## Respostas privadas e publicação
 
 `ctx.reply()` e `ctx.replyEphemeral()` são privados: somente a conexão de quem chamou vê a resposta, no mesmo chat em que iniciou o comando. Não é uma mensagem direta nem uma mensagem publicada para os demais membros.
@@ -61,7 +122,75 @@ bot.command({
 });
 ```
 
-Os tipos de campo disponíveis são `text` (com `multiline` opcional), `integer`, `select`, `boolean` e `string-list`. Todos aceitam `name`, `label`, `description`, `required` e um `defaultValue` compatível com seu tipo. Use `defaultValue` para permitir editar uma etapa anterior, e `submitLabel` no formulário para personalizar o botão de envio.
+Os tipos de campo disponíveis são `text` (com `multiline` opcional), `integer`,
+`select`, `boolean`, `string-list` e `image-list`. Todos aceitam `name`,
+`label`, `description` e `required`; campos compatíveis também aceitam
+`defaultValue`. Use `defaultValue` para permitir editar uma etapa anterior, e
+`submitLabel` no formulário para personalizar o botão de envio.
+
+### Carrosséis de imagem
+
+`image-list` retorna de zero a cinco referências temporárias, vinculadas à
+pessoa e ao canal que enviaram as imagens. A apresentação é declarativa e
+reutilizável:
+
+```ts
+const result = await ctx.prompt({
+  title: 'Escolha as imagens',
+  fields: [{
+    name: 'imagens',
+    label: 'Imagens',
+    type: 'image-list',
+    maxItems: 5,
+    presentation: {
+      format: 'landscape', // banner | landscape | square | portrait
+      fit: 'contain',      // cover | contain
+      size: 'regular',     // compact | regular | wide
+    },
+  }],
+});
+if (!result) return;
+
+const imagens = result.imagens;
+if (Array.isArray(imagens) && imagens.length > 0) {
+  ctx.reply({
+    content: 'Prévia das imagens selecionadas',
+    components: [{
+      type: 'carousel',
+      imageAssetRefs: imagens,
+      label: 'Imagens selecionadas',
+      presentation: { format: 'landscape', fit: 'contain', size: 'regular' },
+    }],
+  });
+}
+```
+
+O componente de resposta é privado e temporário, como `ctx.reply()`; ele não é
+aceito por `ctx.publish()`, `sendMessage()` ou resultados persistentes de
+seletores. Para uma superfície durável e compartilhada, crie uma Ação ao vivo
+com `imageAssetRefs` e a mesma configuração em `imagePresentation`:
+
+```ts
+await ctx.createLiveAction({
+  title: 'Galeria',
+  description: 'Escolha uma opção depois de conferir as imagens.',
+  expiresAt: Date.now() + 15 * 60_000,
+  imageAssetRefs: imagens,
+  imagePresentation: { format: 'square', fit: 'cover', size: 'compact' },
+  content: {
+    kind: 'form',
+    form: {
+      title: 'Escolha',
+      fields: [{ name: 'confirmar', label: 'Confirmar', type: 'boolean', required: true }],
+    },
+  },
+});
+```
+
+Cada referência pode ser promovida uma única vez. `cover` abre o recorte no
+formato escolhido; `contain` preserva a imagem inteira e aplica o encaixe na
+exibição. Os presets limitam largura e proporção no cliente e respeitam telas
+estreitas, sem aceitar CSS, pixels ou URLs arbitrárias fornecidas pelo bot.
 
 Após o servidor aceitar o envio, o formulário desaparece do chat e seus valores são descartados no cliente. Se o envio falhar, o formulário permanece com os valores preenchidos e a mensagem de erro, permitindo tentar novamente.
 
@@ -127,8 +256,6 @@ O evento `selectorUpdate` entrega `{ serverId, selector }` ao bot proprietário,
 Dentro de um comando, prefira `ctx.createSelector(definição)` — não é necessário informar `channelId` nem `invokerId`. O servidor vincula a criação à invocação real, permitindo enquetes também em canais privados aos quais a pessoa tem acesso. Esse vínculo vale somente para o seletor e seu canal; não concede ao bot acesso geral às mensagens ou reações privadas. Operações posteriores e recuperação revalidam as permissões atuais de quem criou a enquete. Se essa pessoa perder acesso, o bot deixa de receber as respostas e não pode publicar resultados até recuperar a autorização. A API avulsa `bot.createSelector()` continua exigindo acesso do próprio bot ao canal.
 
 Após o encerramento, `await bot.finalizeSelector(serverId, id, conteúdo)` publica o resultado no canal de forma idempotente: repetir a finalização não cria outra mensagem. Isso permite recuperar o processamento depois de uma queda do bot. Não mantenha um handler privado aberto enquanto aguarda uma votação longa.
-
-O `/enquete` do MonkyBot usa esse mecanismo: exige de 2 a 10 opções e pelo menos uma condição de encerramento (1 minuto a 30 dias, em minutos/horas/dias; ou 1 a 10.000 votantes). Publica imediatamente após o formulário, aceita troca de voto e encerra no primeiro limite atingido. O resultado mostra contagens, percentuais, vencedor/empate ou ausência de votos. Enquetes e resultados pendentes são recuperados após reinícios.
 
 ## Reações e respostas por emoji
 

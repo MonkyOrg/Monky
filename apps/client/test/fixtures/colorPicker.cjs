@@ -8,6 +8,10 @@ async function runColorPickerSmoke() {
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
   const wait = () => new Promise(resolve => setTimeout(resolve, 30));
+  const finishMotion = async element => {
+    await Promise.allSettled(element.getAnimations().map(animation => animation.finished));
+    await new Promise(resolve => requestAnimationFrame(resolve));
+  };
   const previousLanguage = language.getLanguage();
   const root = document.createElement('div');
   root.style.cssText = 'position:fixed;left:20px;top:20px;width:340px;height:160px;overflow:hidden;padding:12px';
@@ -35,7 +39,7 @@ async function runColorPickerSmoke() {
   second.attachEvents(root, color => second.setValue(color));
   unavailable.attachEvents(root, color => unavailable.setValue(color));
   const trigger = () => root.querySelector('#color-fixture-first');
-  const popup = () => root.querySelector('.color-picker-popover');
+  const popup = () => root.querySelector('.color-picker-popover:not([data-ui-closing])');
   const field = name => popup().querySelector(`[data-color-${name}]`);
   const open = () => { trigger().click(); return popup(); };
   const typeHex = value => { field('hex').value = value; field('hex').dispatchEvent(new Event('input', { bubbles: true })); };
@@ -63,12 +67,18 @@ async function runColorPickerSmoke() {
       'The nested top-layer picker is not clipped by its scrolling owner');
     typeHex('0f0');
     check(selections.length === 0, 'Typing a draft does not send intermediate colors');
+    const firstExit = popup();
     outside();
     check(!first.isOpen && trigger().value === '#00ff00',
       'An outside click commits the current draft before an owner can refresh or close');
+    check(firstExit.isConnected && firstExit.inert && firstExit.hasAttribute('data-ui-closing')
+      && firstExit.getAnimations().length > 0, 'Logical close retains the actual noninteractive popup for its visual exit');
     await wait();
     check(saved === '#00ff00' && selections.at(-1) === '#00ff00',
       'The immutable selected color survives a synchronous stale owner refresh');
+    await finishMotion(firstExit);
+    check(!firstExit.isConnected && !firstExit.matches(':popover-open'),
+      'Completed exit removes the popup and releases the top layer');
     open();
     check(field('hex').value === '#00FF00', 'Reopening retains the selected color');
     typeHex('#broken');
@@ -135,11 +145,17 @@ async function runColorPickerSmoke() {
       'Closing a picker cancels sampling and prevents late changes to its former owner');
     open();
     typeHex('#456789');
+    const replaced = popup();
     root.querySelector('#color-fixture-second').click();
+    check(replaced.inert && replaced.hasAttribute('data-ui-closing'),
+      'Switching controls immediately disables the outgoing picker without skipping its exit');
     await wait();
     check(saved === '#456789' && !first.isOpen && second.isOpen
-      && document.querySelectorAll('.color-picker-popover').length === 1,
-      'Opening another picker commits the first valid selection and keeps only one popup');
+      && document.querySelectorAll('.color-picker-popover:not([data-ui-closing])').length === 1,
+      'Opening another picker commits the first valid selection and keeps only one active popup');
+    await finishMotion(replaced);
+    check(!replaced.isConnected && document.querySelectorAll('.color-picker-popover').length === 1,
+      'The old picker is removed after its real exit while the new picker remains open');
     second.close();
     root.querySelector('#color-fixture-unavailable').click();
     check(popup().querySelector('[data-color-eyedropper]').disabled
@@ -201,4 +217,7 @@ async function renderColorPickerPreview() {
     delete window.cleanupColorPickerPreview;
   };
   await document.fonts.ready;
+  const panel = root.querySelector('.color-picker-popover:not([data-ui-closing])');
+  await Promise.allSettled(panel.getAnimations().map(animation => animation.finished));
+  await new Promise(resolve => requestAnimationFrame(resolve));
 }

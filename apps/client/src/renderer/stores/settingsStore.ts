@@ -405,6 +405,18 @@ export class SettingsStore {
     this.saveAutoEntryServerKeys(next);
   }
 
+  public setInputMode(mode: 'voice_activity' | 'push_to_talk'): void {
+    if (this.inputMode === mode) return;
+    const previous = this.inputMode;
+    this.inputMode = mode;
+    try {
+      this.save();
+    } catch (error) {
+      this.inputMode = previous;
+      throw error;
+    }
+  }
+
   public clearServerAutoEntry(): void {
     this.saveAutoEntryServerKeys([]);
   }

@@ -1,6 +1,8 @@
-import { MessageType, Permission, UserSummary, canAccessChannel } from '@monky/shared';
-import type { ChannelType } from '@monky/shared';
+import { MessageType, Permission, UserSummary, canAccessChannel, type ChannelDeletedPayload } from '@monky/shared';
+import { categoryModal } from './CategoryModal';
+import './channelCategories.css';
 import { escapeHtml } from '../utils/html';
+import { animateEnter, cancelSurfaceMotion, hideWithMotion, positionAnchoredSurface, showWithMotion } from '../utils/surfaceMotion';
 import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { appEvents } from '../core/EventBus';
 import { networkClient } from '../core/NetworkClient';
@@ -32,9 +34,10 @@ import { settingsModal } from './SettingsModal';
 import { noiseSuppressionToggleTitle } from './settings/NoiseSuppressionControl';
 import { serverSettingsModal } from './ServerSettingsModal';
 import { serverMonitorModal } from './ServerMonitorModal';
+import { recentSoundsModal } from './RecentSoundsModal';
 import '../styles/connectionTransition.css';
 import { inviteModal } from './InviteModal';
-import { contextMenu, ContextMenuItem } from './ContextMenu';
+import { contextMenu, type ContextMenuEntry } from './ContextMenu';
 import { showConfirm, showAlert } from './Dialog';
 import { setButtonLoading, withButtonLoading } from '../utils/buttonLoading';
 import { checkServerOnline } from '../utils/serverStatus';
@@ -52,10 +55,23 @@ import { overlayBridgeService } from '../core/OverlayBridgeService';
 import logoUrl from '../assets/Logo.png';
 import { t, tCount } from '../i18n';
 import { getBotVoiceContext } from '../utils/botVoice';
+import { ServerCommunityView } from './ServerCommunityView';
+import { MessageSearch } from './MessageSearch';
+import { ForumView } from './ForumView';
+import type { MessageSearchResultPayload } from '@monky/shared';
 
 export class MainView {
   private container: HTMLElement;
   private chatView: ChatView | null = null;
+  private communityView: ServerCommunityView | null = null;
+  private messageSearch: MessageSearch | null = null;
+  private forumView: ForumView | null = null;
+  private chatInForum = false;
+  private voiceChatView: ChatView | null = null;
+  private voiceChatChannelId: string | null = null;
+  private voiceChatResizeCleanup: (() => void) | null = null;
+  private viewedVoiceChannelId: string | null = null;
+  private viewedVoiceSessionKey: string | null = null;
   public voiceStageView: VoiceStageView | null = null;
   private unbindEvents: Array<() => void> = [];
   private activeContentView: 'chat' | 'stage' = 'chat';
@@ -66,6 +82,8 @@ export class MainView {
   private screenShareNoticeSignature: string | null = null;
   private textChannelDragHoverTimer: number | null = null;
   private textChannelDragHoverId: string | null = null;
+  private displayedChannelId: string | null = null;
+  private navigationKey: string | null = null;
   // Measures the floating user card so the server rail can reserve room for it
   // (#473).
   private userCardObserver: ResizeObserver | null = null;
@@ -73,9 +91,19 @@ export class MainView {
   public setActiveContentView(view: 'chat' | 'stage'): void {
     const changed = this.activeContentView !== view;
     this.activeContentView = view;
+    const tools = this.container.querySelector<HTMLElement>('#server-tools');
+    if (tools) tools.hidden = view !== 'chat';
+    if (view === 'stage') this.messageSearch?.close();
     if (changed) {
-      if (view === 'chat') this.voiceStageView?.destroy();
+      if (view === 'chat') {
+        this.voiceStageView?.destroy();
+        this.closeVoiceChannelChat(false);
+      }
       else this.chatView?.destroy();
+      this.forumView?.destroy();
+      this.forumView = null;
+      const stage = this.container.querySelector<HTMLElement>('#main-center-stage');
+      if (stage) animateEnter(stage, 'view');
       appEvents.emit('stage.visibility_changed', view === 'stage');
     }
   }
@@ -89,20 +117,44 @@ export class MainView {
     const preserve = !home && preserveBotScreen && this.activeContentView === 'stage' && this.callIsHere() && this.voiceStageView?.hasOpenBotScreen();
     this.homeView?.suspend();
     this.unbindListeners();
+    this.communityView?.destroy();
+    this.forumView?.destroy();
+    this.forumView = null;
+    this.voiceChatView?.destroy();
+    this.voiceChatView = null;
+    this.messageSearch?.destroy();
+    this.communityView = this.messageSearch = null;
     this.stopSidebarPing();
 
     if (!serverStore.serverDetails || !serverStore.currentUser) {
       return;
     }
+    const activeSessionKey = sessionManager.getActiveKey();
+    if (this.viewedVoiceSessionKey !== activeSessionKey) {
+      this.viewedVoiceSessionKey = null;
+      this.viewedVoiceChannelId = null;
+      this.voiceChatChannelId = null;
+    }
+    if (this.viewedVoiceChannelId &&
+        serverStore.getChannel(this.viewedVoiceChannelId)?.type !== 'VOICE') {
+      this.viewedVoiceChannelId = null;
+      this.viewedVoiceSessionKey = null;
+      this.voiceChatChannelId = null;
+    }
+    if (this.activeContentView === 'stage' && !this.viewedVoiceChannelId && this.callIsHere()) {
+      this.viewedVoiceChannelId = voiceStore.currentVoiceChannelId;
+      this.viewedVoiceSessionKey = activeSessionKey;
+    }
 
     const s = serverStore.serverDetails;
     const u = serverStore.currentUser;
-    const canManageChannels = serverStore.hasPermission(Permission.MANAGE_CHANNELS);
     const canManageServer = serverStore.hasPermission(Permission.MANAGE_SERVER);
     const canManageRoles = serverStore.hasPermission(Permission.MANAGE_ROLES);
     const canManageBots = serverStore.hasPermission(Permission.MANAGE_BOTS);
     const moderation = getVoiceControlModeration();
-    const enteringFromHome = this.container.querySelector('.connection-layout') !== null;
+    const navigationKey = home ? 'home' : sessionManager.getActiveKey();
+    const navigating = this.navigationKey !== navigationKey;
+    this.navigationKey = navigationKey;
 
     const markup = `
       <div class="main-layout${home ? ' main-layout--home' : ''}">
@@ -118,14 +170,19 @@ export class MainView {
               <span id="server-name-title" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 700;">${escapeHtml(s.name)}</span>
               <span class="material-symbols-outlined md-18 server-dropdown-caret">expand_more</span>
             </button>
-            <div id="server-dropdown-menu" class="server-dropdown-menu" style="display: none;">
-              <button id="btn-server-settings" class="server-dropdown-item" title="${t('main.serverSettingsTitle')}" style="${canManageServer || canManageRoles || canManageBots ? '' : 'display: none;'}">
+            <div id="server-dropdown-menu" class="server-dropdown-menu" role="menu" aria-labelledby="server-dropdown-toggle" hidden>
+              <button id="btn-server-settings" class="server-dropdown-item" title="${t('main.serverSettingsTitle')}" style="${canManageServer || canManageRoles || canManageBots || serverStore.hasPermission(Permission.MANAGE_EVENTS) ? '' : 'display: none;'}">
                 <span class="material-symbols-outlined md-18">settings</span>
                 <span>${t('serverSettings.title')}</span>
               </button>
               <button id="btn-server-monitor" class="server-dropdown-item" title="${t('serverMonitor.title')}" style="display: none;">
                 <span class="material-symbols-outlined md-18">monitoring</span>
                 <span>${t('serverMonitor.title')}</span>
+              </button>
+              <button id="btn-recent-sounds" class="server-dropdown-item" title="${t('recentSounds.title')}"
+                style="${s.recentSoundCacheEnabled && s.protocol?.features.includes('recent-sounds') ? '' : 'display: none;'}">
+                <span class="material-symbols-outlined md-18">history</span>
+                <span>${t('recentSounds.title')}</span>
               </button>
               <button id="btn-invite-friends" class="server-dropdown-item" title="${t('main.inviteTitle')}">
                 <span class="material-symbols-outlined md-18">person_add</span>
@@ -134,28 +191,9 @@ export class MainView {
             </div>
           </div>
 
-          <div class="channels-list-container">
-            <!-- Text Channels -->
-            <div class="channel-category">
-              <div class="category-title">
-                <span>${t('main.textChannels')}</span>
-                ${canManageChannels ? `<button id="btn-add-text-channel" class="category-add-btn" title="${t('main.createTextChannel')}">
-                  <span class="material-symbols-outlined md-14">add</span>
-                </button>` : ''}
-              </div>
-              <div id="text-channels-list"></div>
-            </div>
-
-            <!-- Voice Channels -->
-            <div class="channel-category">
-              <div class="category-title">
-                <span>${t('main.voiceChannels')}</span>
-                ${canManageChannels ? `<button id="btn-add-voice-channel" class="category-add-btn" title="${t('main.createVoiceChannel')}">
-                  <span class="material-symbols-outlined md-14">add</span>
-                </button>` : ''}
-              </div>
-              <div id="voice-channels-list"></div>
-            </div>
+          <div class="channels-list-container" tabindex="0">
+            <div id="server-community" hidden></div>
+            <div id="channel-categories-list"></div>
           </div>
 
           <!-- Bottom User Bar -->
@@ -220,9 +258,13 @@ export class MainView {
         </div>
 
         <!-- Center: Chat Feed or Voice Stage -->
-        <div id="main-center-stage" class="main-content-area"></div>
+        <div class="main-center-column">
+          <div id="server-tools" class="server-tools" ${this.activeContentView === 'stage' ? 'hidden' : ''}></div>
+          <div id="main-center-stage" class="main-content-area"></div>
+        </div>
 
         <!-- Right Sidebar: Connected Members -->
+        <aside id="voice-channel-chat-panel" class="voice-channel-chat-panel" aria-label="${t('chat.voiceChannelBadge')}" hidden></aside>
         <div class="members-sidebar">
           <div class="members-header">
             <span id="members-count-label">${t('main.membersCount', { count: 0 })}</span>
@@ -251,8 +293,24 @@ export class MainView {
       this.chatView?.destroy();
       this.voiceStageView?.destroy();
       this.chatView = new ChatView(centerStageEl);
+      this.chatInForum = false;
+      this.chatView.onOpenForum = id => this.activateTextChannel(id);
       this.voiceStageView = new VoiceStageView(centerStageEl);
     }
+    const voiceStageView = this.voiceStageView;
+    if (!voiceStageView) throw new Error('The voice stage view was not initialized');
+    voiceStageView.onToggleChat = channelId => this.toggleVoiceChannelChat(channelId);
+    voiceStageView.onJoinChannel = async channelId => {
+      if (!await this.handleJoinVoiceChannel(channelId)) return;
+      if (voiceStore.currentVoiceChannelId !== channelId ||
+          voiceStore.voiceSessionKey !== sessionManager.getActiveKey()) return;
+      this.viewedVoiceChannelId = channelId;
+      this.viewedVoiceSessionKey = sessionManager.getActiveKey();
+      this.setActiveContentView('stage');
+      this.voiceStageView?.setChannel(channelId);
+      this.renderChannels();
+      this.updateScreenShareNotice();
+    };
 
     // A re-render (e.g. after switching languages, #16) must not drop someone
     // who is watching the voice stage back into the text channel. The session
@@ -262,14 +320,80 @@ export class MainView {
       if (!this.homeView) throw new Error('The Home view was not provided to the connected layout');
       appEvents.emit('stage.visibility_changed', false);
       this.homeView.render(centerStageEl);
-    } else if (this.activeContentView === 'stage' && this.callIsHere()) {
-      this.voiceStageView?.setChannel(voiceStore.currentVoiceChannelId);
+    } else if (this.activeContentView === 'stage' &&
+        (this.viewedVoiceChannelId || this.callIsHere())) {
+      const channelId = this.viewedVoiceChannelId ?? voiceStore.currentVoiceChannelId;
+      this.viewedVoiceChannelId = channelId;
+      this.viewedVoiceSessionKey = sessionManager.getActiveKey();
+      this.voiceStageView?.setChannel(channelId);
     } else if (serverStore.activeTextChannelId) {
       this.setActiveContentView('chat');
-      this.chatView?.setChannel(serverStore.activeTextChannelId);
+      this.showSelectedChannel(serverStore.activeTextChannelId);
     }
 
     this.attachEvents();
+    if (this.activeContentView === 'stage' && this.voiceChatChannelId &&
+        this.viewedVoiceSessionKey === sessionManager.getActiveKey()) {
+      this.mountVoiceChannelChat(this.voiceChatChannelId, false);
+    }
+    const session = sessionManager.getActive();
+    const communityRoot = this.container.querySelector<HTMLElement>('#server-community');
+    const tools = this.container.querySelector<HTMLElement>('#server-tools');
+    const center = this.container.querySelector<HTMLElement>('.main-center-column');
+    if (!home && session && communityRoot && tools && center) {
+      this.communityView = new ServerCommunityView(communityRoot, session.community, async channelId => {
+        if (sessionManager.getActive() !== session) return;
+        if (await this.handleJoinVoiceChannel(channelId)) {
+          this.viewedVoiceChannelId = channelId;
+          this.viewedVoiceSessionKey = session.key;
+          this.setActiveContentView('stage');
+          this.voiceStageView?.setChannel(channelId);
+        }
+      }, this.container.querySelector<HTMLElement>('.server-header') ?? undefined, channelId => {
+        if (sessionManager.getActive() !== session) throw new Error(t('community.changed'));
+        this.activateTextChannel(channelId);
+      });
+      this.messageSearch = new MessageSearch(tools, center, {
+        channels: () => session.serverStore.serverDetails?.channels ?? [],
+        users: () => [...session.serverStore.knownMembers.values()],
+        currentChannelId: () => this.activeContentView === 'chat'
+          ? session.serverStore.activeTextChannelId
+          : this.voiceChatChannelId,
+        canRead: () => session.serverStore.hasPermission(Permission.READ_MESSAGES),
+        isCurrent: () => sessionManager.getActive() === session && !sessionManager.isHome() && session.client.getStatus() === 'CONNECTED',
+        search: async (payload, signal) => {
+          if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+          const id = crypto.randomUUID();
+          const cancel = () => session.client.cancelRequest(id);
+          signal.addEventListener('abort', cancel, { once: true });
+          try { return await session.client.sendRequest<MessageSearchResultPayload>(MessageType.CHAT_SEARCH, payload, id); }
+          finally { signal.removeEventListener('abort', cancel); }
+        },
+        navigate: (channelId, messageId) => {
+          const channel = session.serverStore.getChannel(channelId);
+          if (channel?.type === 'VOICE') {
+            this.openVoiceChannelChat(channelId);
+            void this.voiceChatView?.jumpToMessage(messageId);
+          } else {
+            this.activateTextChannel(channelId);
+            void this.chatView?.jumpToMessage(messageId);
+          }
+        },
+        setExpanded: expanded => {
+          this.container.querySelector('.main-layout')?.classList.toggle('main-layout--search-open', expanded);
+        },
+        watch: invalidate => {
+          const detach = session.client.onEvent(event => {
+            if (event === 'network.status' || [
+              MessageType.CHANNEL_UPDATED, MessageType.CHANNEL_CREATED, MessageType.CHANNEL_DELETED,
+              MessageType.CATEGORIES_UPDATED, MessageType.ROLES_LIST, MessageType.CHAT_MESSAGE_UPDATED,
+            ].some(type => event === `message.${type}`)) invalidate();
+          });
+          const locale = appEvents.on('i18n.language_changed', invalidate);
+          return () => { detach(); locale(); };
+        },
+      });
+    }
     this.updateVoiceConnectionRow();
     // Fresh DOM below means the (empty) slot must be repopulated, so drop the
     // cached signature (#282).
@@ -279,24 +403,16 @@ export class MainView {
 
     const soundboardSlot = document.getElementById('soundboard-players-slot');
     if (soundboardSlot) soundboardPlayersBar.mount(soundboardSlot);
-    if (!home && enteringFromHome) this.animateServerEntry();
+    if (navigating) this.animateServerEntry();
   }
 
   private animateServerEntry(): void {
     const layout = this.container.querySelector<HTMLElement>('.main-layout');
-    if (!layout || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    const stop = () => {
-      layout.removeEventListener('animationend', finish);
-      layout.removeEventListener('animationcancel', finish);
-      layout.classList.remove('main-layout--entering');
-    };
-    const finish = (event: AnimationEvent) => {
-      if (event.target === layout && event.animationName === 'monky-server-entry') stop();
-    };
-    layout.addEventListener('animationend', finish);
-    layout.addEventListener('animationcancel', finish);
-    layout.classList.add('main-layout--entering');
-    this.unbindEvents.push(stop);
+    if (!layout) return;
+    const stage = this.container.querySelector<HTMLElement>('#main-center-stage');
+    if (stage) cancelSurfaceMotion(stage);
+    animateEnter(layout, 'view');
+    this.unbindEvents.push(() => cancelSurfaceMotion(layout));
   }
 
   /**
@@ -451,6 +567,18 @@ export class MainView {
       }));
   }
 
+  private getWatchedRemoteScreens(): Array<{ sessionId: string; shareId: string }> {
+    const channelId = voiceStore.currentVoiceChannelId;
+    const session = voiceStore.voiceSessionKey ? sessionManager.get(voiceStore.voiceSessionKey) : undefined;
+    if (!channelId || !session) return [];
+    return voiceStore.getScreenWatchers().flatMap(([sessionId, shareIds]) => {
+      const participant = session.participants.get(sessionId);
+      if (!participant || participant.voiceState?.channelId !== channelId
+        || session.serverStore.isMySession(participant.user.sessionId)) return [];
+      return shareIds.map(shareId => ({ sessionId, shareId }));
+    });
+  }
+
   /**
    * Sidebar notice shown while someone in the call is sharing their screen and
    * the user is looking at a text channel instead of the stage (#282). With a
@@ -461,7 +589,9 @@ export class MainView {
     const slot = document.getElementById('screenshare-notice-slot');
     if (!slot) return;
 
-    const sharers = this.getRemoteScreenSharers();
+    const watchedScreens = this.getWatchedRemoteScreens();
+    const watchedSessions = new Set(watchedScreens.map(screen => screen.sessionId));
+    const sharers = this.getRemoteScreenSharers().filter(sharer => !watchedSessions.has(sharer.id));
     const isSelfSharing = voiceStore.isScreenSharing;
     const voice = getBotVoiceContext();
     const screens = voice ? voice.session.botScreenStore.list(voice.channelId)
@@ -469,13 +599,15 @@ export class MainView {
         && !voice.session.botScreenStore.isInvitationDismissed(screen.id)) : [];
     const loadFailed = voice?.session.botScreenStore.loadFailed ?? false;
     const signature = JSON.stringify([
-      this.activeContentView, isSelfSharing, sharers, voice?.session.key, voice?.channelId,
+      this.activeContentView, isSelfSharing, watchedScreens, sharers, voice?.session.key, voice?.channelId,
       screens.map((screen) => [screen.id, screen.instanceId, screen.title]), loadFailed,
     ]);
     if (signature === this.screenShareNoticeSignature) return;
     this.screenShareNoticeSignature = signature;
 
-    if ((this.activeContentView === 'stage' || (sharers.length === 0 && !isSelfSharing)) && screens.length === 0 && !loadFailed) {
+    if ((this.activeContentView === 'stage'
+      || (watchedScreens.length === 0 && sharers.length === 0 && !isSelfSharing))
+      && screens.length === 0 && !loadFailed) {
       slot.innerHTML = '';
       return;
     }
@@ -489,6 +621,16 @@ export class MainView {
           <span class="material-symbols-outlined md-16 screenshare-notice-icon">screen_share</span>
           <span class="screenshare-notice-text">${t('main.screenShareSelfNotice')}</span>
           <button id="screenshare-self-stop-btn" class="screenshare-notice-btn screenshare-notice-btn--danger">${t('screenShare.stopSharing')}</button>
+        </div>
+      `);
+    }
+
+    if (watchedScreens.length > 0 && this.activeContentView !== 'stage') {
+      parts.push(`
+        <div class="screenshare-notice screenshare-notice--self">
+          <span class="material-symbols-outlined md-16 screenshare-notice-icon">visibility</span>
+          <span class="screenshare-notice-text">${t('main.screenShareWatchingNotice')}</span>
+          <button type="button" id="screenshare-viewer-stop-btn" class="screenshare-notice-btn screenshare-notice-btn--danger">${t('stage.stopWatching')}</button>
         </div>
       `);
     }
@@ -563,6 +705,13 @@ export class MainView {
       this.updateScreenShareNotice();
     });
 
+    document.getElementById('screenshare-viewer-stop-btn')?.addEventListener('click', () => {
+      for (const [sessionId, shareIds] of voiceStore.getScreenWatchers()) {
+        for (const shareId of shareIds) webRtcManager.setRemoteScreenWatching(sessionId, shareId, false);
+      }
+      this.updateScreenShareNotice();
+    });
+
     // Watch remote sharer handler
     if (sharers.length > 0) {
       const single = sharers.length === 1;
@@ -611,6 +760,8 @@ export class MainView {
     if (!channelId || !sessionKey || !sessionManager.get(sessionKey)) return;
     // A notice can belong to the background call, never to the current text tab.
     if (sessionManager.isHome() || sessionManager.getActiveKey() !== sessionKey) sessionManager.activate(sessionKey);
+    this.viewedVoiceChannelId = channelId;
+    this.viewedVoiceSessionKey = sessionKey;
     this.setActiveContentView('stage');
     this.voiceStageView?.setChannel(channelId);
     if (watchSessionId) this.voiceStageView?.watchScreenShare(watchSessionId);
@@ -622,8 +773,9 @@ export class MainView {
   private closeServerDropdown(): void {
     const menu = document.getElementById('server-dropdown-menu');
     const toggle = document.getElementById('server-dropdown-toggle');
-    if (menu) menu.style.display = 'none';
+    if (menu && !menu.hidden) hideWithMotion(menu, 'popover');
     toggle?.classList.remove('open');
+    toggle?.setAttribute('aria-expanded', 'false');
   }
 
   private ensureInVoiceChannel(): boolean {
@@ -684,17 +836,261 @@ export class MainView {
 
   private clampSidebarWidth(width: number): number {
     const min = 280;
-    const max = Math.max(min, Math.floor(window.innerWidth * 0.35));
+    const max = Math.max(min, Math.floor(window.innerWidth * 0.175));
     return Math.min(max, Math.max(min, width));
+  }
+
+  private clampVoiceChatWidth(width: number): number {
+    const min = 480;
+    const layout = this.container.querySelector<HTMLElement>('.main-layout');
+    const channels = layout?.querySelector<HTMLElement>(':scope > .channels-sidebar');
+    const rail = layout?.querySelector<HTMLElement>(':scope > .server-rail');
+    const layoutWidth = layout?.getBoundingClientRect().width || window.innerWidth;
+    const reservedWidth = (channels?.getBoundingClientRect().width ?? 0) +
+      (rail?.getBoundingClientRect().width ?? 0) + 320;
+    const max = Math.max(min, Math.min(720, Math.floor(layoutWidth - reservedWidth)));
+    return Math.min(max, Math.max(min, Math.round(width)));
   }
 
   private activateTextChannel(channelId: string): void {
     this.clearTextChannelDragHover();
+    this.viewedVoiceChannelId = null;
+    this.viewedVoiceSessionKey = null;
+    this.closeVoiceChannelChat(false);
     serverStore.setActiveTextChannel(channelId);
     this.setActiveContentView('chat');
-    this.chatView?.setChannel(channelId);
+    this.showSelectedChannel(channelId);
     this.renderChannels();
     this.updateScreenShareNotice();
+  }
+
+  private openVoiceChannelChat(channelId: string): void {
+    const channel = serverStore.getChannel(channelId);
+    if (channel?.type !== 'VOICE' || !serverStore.hasPermission(Permission.READ_MESSAGES)) return;
+    this.viewedVoiceChannelId = channelId;
+    this.viewedVoiceSessionKey = sessionManager.getActiveKey();
+    this.voiceChatChannelId = channelId;
+    this.setActiveContentView('stage');
+    this.voiceStageView?.setChannel(channelId);
+    this.mountVoiceChannelChat(channelId, true);
+    this.renderChannels();
+    this.updateScreenShareNotice();
+  }
+
+  private toggleVoiceChannelChat(channelId: string): void {
+    const panel = this.container.querySelector<HTMLElement>('#voice-channel-chat-panel');
+    if (this.voiceChatChannelId === channelId && panel && !panel.hidden) {
+      this.closeVoiceChannelChat(true);
+      this.renderChannels();
+      return;
+    }
+    this.openVoiceChannelChat(channelId);
+  }
+
+  private mountVoiceChannelChat(channelId: string, animate: boolean): void {
+    const panel = this.container.querySelector<HTMLElement>('#voice-channel-chat-panel');
+    const layout = this.container.querySelector<HTMLElement>('.main-layout');
+    const channel = serverStore.getChannel(channelId);
+    if (!panel || !layout || channel?.type !== 'VOICE' ||
+        !serverStore.hasPermission(Permission.READ_MESSAGES)) {
+      this.closeVoiceChannelChat(false);
+      return;
+    }
+    this.voiceChatView?.destroy();
+    panel.innerHTML = `
+      <div class="voice-chat-resizer" role="separator" aria-orientation="vertical" tabindex="0"
+        aria-label="${t('main.resizeHandle')}" title="${t('main.resizeHandle')}"></div>
+      <button type="button" class="voice-chat-close" aria-label="${t('voiceChat.close')}" title="${t('voiceChat.close')}">
+        <span class="material-symbols-outlined md-20" aria-hidden="true">close</span>
+      </button>
+      <div class="voice-chat-content"></div>
+    `;
+    this.voiceChatChannelId = channelId;
+    layout.classList.add('main-layout--voice-chat-open');
+    const content = panel.querySelector<HTMLElement>('.voice-chat-content')!;
+    this.voiceChatView = new ChatView(content);
+    this.voiceChatView.setChannel(channelId);
+    panel.querySelector<HTMLButtonElement>('.voice-chat-close')?.addEventListener('click', () => {
+      this.closeVoiceChannelChat(true);
+      this.renderChannels();
+    });
+    this.setupVoiceChatResizer(panel);
+    if (animate) showWithMotion(panel, 'panel');
+    else panel.hidden = false;
+    this.voiceStageView?.setChatOpen(true);
+  }
+
+  private setupVoiceChatResizer(panel: HTMLElement): void {
+    this.voiceChatResizeCleanup?.();
+    const resizer = panel.querySelector<HTMLElement>('.voice-chat-resizer');
+    if (!resizer) return;
+
+    const persist = () => {
+      try {
+        localStorage.setItem('monky_voice_chat_width', String(Math.round(panel.getBoundingClientRect().width)));
+      } catch {}
+    };
+    const applyWidth = (width: number, save: boolean) => {
+      const next = this.clampVoiceChatWidth(width);
+      panel.style.width = `${next}px`;
+      resizer.setAttribute('aria-valuenow', String(next));
+      if (save) persist();
+    };
+    resizer.setAttribute('aria-valuemin', '480');
+    resizer.setAttribute('aria-valuemax', String(this.clampVoiceChatWidth(Number.MAX_SAFE_INTEGER)));
+    resizer.setAttribute('aria-valuenow', String(
+      this.clampVoiceChatWidth(Number.parseFloat(getComputedStyle(panel).width) || 480),
+    ));
+    try {
+      const saved = Number.parseInt(localStorage.getItem('monky_voice_chat_width') ?? '', 10);
+      if (Number.isFinite(saved)) applyWidth(saved, false);
+    } catch {}
+
+    let startX = 0;
+    let startWidth = 0;
+    let dragging = false;
+    const stopDragging = (save: boolean) => {
+      if (!dragging) return;
+      dragging = false;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      resizer.classList.remove('is-resizing');
+      if (save) persist();
+    };
+    const onMove = (event: MouseEvent) => {
+      applyWidth(startWidth + startX - event.clientX, false);
+    };
+    const onUp = () => stopDragging(true);
+    const onMouseDown = (event: MouseEvent) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      dragging = true;
+      startX = event.clientX;
+      startWidth = panel.getBoundingClientRect().width;
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      resizer.classList.add('is-resizing');
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      const current = panel.getBoundingClientRect().width;
+      let next: number | null = null;
+      if (event.key === 'ArrowLeft') next = current + 24;
+      else if (event.key === 'ArrowRight') next = current - 24;
+      else if (event.key === 'Home') next = 480;
+      else if (event.key === 'End') next = Number.MAX_SAFE_INTEGER;
+      if (next === null) return;
+      event.preventDefault();
+      applyWidth(next, true);
+    };
+    const onWindowResize = () => {
+      if (panel.style.width) applyWidth(panel.getBoundingClientRect().width, false);
+    };
+    resizer.addEventListener('mousedown', onMouseDown);
+    resizer.addEventListener('keydown', onKeyDown);
+    window.addEventListener('resize', onWindowResize);
+    this.voiceChatResizeCleanup = () => {
+      stopDragging(false);
+      resizer.removeEventListener('mousedown', onMouseDown);
+      resizer.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('resize', onWindowResize);
+      this.voiceChatResizeCleanup = null;
+    };
+  }
+
+  private closeVoiceChannelChat(animate: boolean): void {
+    this.voiceChatResizeCleanup?.();
+    this.voiceChatView?.destroy();
+    this.voiceChatView = null;
+    this.voiceChatChannelId = null;
+    this.container.querySelector('.main-layout')?.classList.remove('main-layout--voice-chat-open');
+    this.voiceStageView?.setChatOpen(false);
+    const panel = this.container.querySelector<HTMLElement>('#voice-channel-chat-panel');
+    if (!panel) return;
+    if (animate) hideWithMotion(panel, 'panel', () => panel.replaceChildren());
+    else {
+      cancelSurfaceMotion(panel);
+      panel.hidden = true;
+      panel.replaceChildren();
+    }
+  }
+
+  private showSelectedChannel(channelId: string): void {
+    const channel = serverStore.getChannel(channelId);
+    const session = sessionManager.getActive();
+    const root = this.container.querySelector<HTMLElement>('#main-center-stage');
+    const forumId = channel?.type === 'FORUM' ? channel.id : channel?.forumId;
+    const entering = this.displayedChannelId !== channelId && (!forumId || this.forumView?.channelId !== forumId);
+    this.displayedChannelId = channelId;
+    if (forumId && session && root) {
+      if (this.forumView?.channelId !== forumId || !root.querySelector('.forum-layout')) {
+        this.chatView?.destroy();
+        this.forumView?.destroy();
+        root.innerHTML = '<div class="forum-layout"><div class="forum-header"></div><div class="forum-list-pane"></div><aside class="forum-discussion-pane" hidden></aside></div>';
+        this.forumView = new ForumView(root.querySelector<HTMLElement>('.forum-list-pane')!, session.client, session.serverStore,
+          forumId, id => this.activateTextChannel(id), root.querySelector<HTMLElement>('.forum-header')!);
+        this.chatView = new ChatView(root.querySelector<HTMLElement>('.forum-discussion-pane')!);
+        this.chatView.onOpenForum = id => this.activateTextChannel(id);
+        this.chatInForum = true;
+      }
+      const discussion = root.querySelector<HTMLElement>('.forum-discussion-pane')!;
+      if (channel?.type === 'FORUM') {
+        this.chatView?.destroy();
+        hideWithMotion(discussion, 'panel', () => discussion.replaceChildren());
+      } else {
+        if (discussion.hidden || discussion.hasAttribute('data-ui-closing')) showWithMotion(discussion, 'panel');
+        this.chatView?.setChannel(channelId);
+      }
+      if (entering && root) animateEnter(root, 'view');
+    } else {
+      this.forumView?.destroy();
+      this.forumView = null;
+      if (this.chatInForum && root) {
+        this.chatView?.destroy();
+        this.chatView = new ChatView(root);
+        this.chatView.onOpenForum = id => this.activateTextChannel(id);
+        this.chatInForum = false;
+      }
+      this.chatView?.setChannel(channelId);
+    }
+  }
+
+  private handleChannelDeleted(payload: ChannelDeletedPayload): void {
+    if (this.viewedVoiceChannelId && !serverStore.getChannel(this.viewedVoiceChannelId)) {
+      this.viewedVoiceChannelId = null;
+      this.viewedVoiceSessionKey = null;
+      this.closeVoiceChannelChat(false);
+      if (this.activeContentView === 'stage') {
+        if (this.callIsHere()) {
+          this.viewedVoiceChannelId = voiceStore.currentVoiceChannelId;
+          this.viewedVoiceSessionKey = sessionManager.getActiveKey();
+          this.voiceStageView?.setChannel(voiceStore.currentVoiceChannelId);
+        } else if (serverStore.activeTextChannelId) {
+          this.activateTextChannel(serverStore.activeTextChannelId);
+        }
+      }
+    }
+    if (
+      isForegroundEvent() &&
+      this.activeContentView === 'chat' &&
+      payload.channelId === this.displayedChannelId &&
+      this.forumView &&
+      serverStore.getChannel(this.forumView.channelId)
+    ) {
+      this.activateTextChannel(this.forumView.channelId);
+      return;
+    }
+    if (
+      isForegroundEvent() && !sessionManager.isHome() &&
+      this.activeContentView === 'chat' &&
+      serverStore.activeTextChannelId &&
+      this.chatView
+    ) {
+      this.showSelectedChannel(serverStore.activeTextChannelId);
+    }
   }
 
   private isFileDrag(event: DragEvent): boolean {
@@ -758,21 +1154,22 @@ export class MainView {
   private renderChannels(): void {
     if (!serverStore.serverDetails) return;
 
-    const textListEl = document.getElementById('text-channels-list');
-    const voiceListEl = document.getElementById('voice-channels-list');
+    const textListEl = document.createElement('div');
+    const voiceListEl = document.createElement('div');
     const canReadTextChannels = this.canReadTextChannels();
     const canSpeakInVoiceChannels = this.canSpeakInVoiceChannels();
+    const canManageChannels = serverStore.hasPermission(Permission.MANAGE_CHANNELS);
     const permissionsResolved = this.arePermissionsResolved();
 
     const textChannels = canReadTextChannels
-      ? serverStore.serverDetails.channels.filter((c) => c.type === 'TEXT')
+      ? serverStore.serverDetails.channels.filter((c) => (c.type === 'TEXT' || c.type === 'FORUM') && !c.forumId)
       : [];
     const voiceChannels = serverStore.serverDetails.channels.filter((c) => c.type === 'VOICE');
 
     if (textListEl) {
       textListEl.innerHTML = textChannels.map((c) => `
-        <div class="channel-item ${c.id === serverStore.activeTextChannelId && this.activeContentView === 'chat' ? 'active' : ''}" data-channel-id="${c.id}" data-channel-type="TEXT">
-          <span class="material-symbols-outlined md-16 channel-icon" style="color: var(--text-muted);">tag</span>
+        <div class="channel-item ${(c.id === serverStore.activeTextChannelId || c.id === serverStore.getChannel(serverStore.activeTextChannelId ?? '')?.forumId) && this.activeContentView === 'chat' ? 'active' : ''}" data-channel-id="${c.id}" data-channel-type="${c.type}">
+          <span class="material-symbols-outlined md-16 channel-icon" style="color: var(--text-muted);">${c.type === 'FORUM' ? 'forum' : 'tag'}</span>
           <span class="channel-name">${escapeHtml(c.name)}</span>
           ${c.isPrivate ? `<span class="material-symbols-outlined md-16 channel-private-icon" title="${t('main.privateChannelBadge')}">lock_person</span>` : ''}
           ${chatStore.hasMention(c.id)
@@ -791,20 +1188,31 @@ export class MainView {
       voiceListEl.innerHTML = voiceChannels.map((c) => {
         const inVoice = participantManager.getInVoiceChannel(c.id);
         const isActive = isViewingCallServer() && c.id === voiceStore.currentVoiceChannelId;
+        const isViewing = this.activeContentView === 'stage' &&
+          this.viewedVoiceSessionKey === sessionManager.getActiveKey() &&
+          this.viewedVoiceChannelId === c.id;
         const showRestrictedIcon = permissionsResolved && !canSpeakInVoiceChannels;
         const isRestricted = showRestrictedIcon && !isActive;
+        const hasMention = chatStore.hasMention(c.id);
+        const hasUnread = chatStore.hasUnread(c.id);
 
         return `
           <div class="voice-channel-group" data-channel-id="${c.id}" style="display: flex; flex-direction: column;">
-            <div class="channel-item ${isActive ? 'active' : ''} ${isRestricted ? 'restricted' : ''}" data-channel-id="${c.id}" data-channel-type="VOICE">
+            <div class="channel-item ${isViewing ? 'active' : ''} ${isRestricted ? 'restricted' : ''}" data-channel-id="${c.id}" data-channel-type="VOICE">
               <span class="material-symbols-outlined md-16 channel-icon" style="color: ${isActive ? 'var(--success)' : 'var(--text-muted)'};">volume_up</span>
               <span class="channel-name">${escapeHtml(c.name)}</span>
               ${c.isPrivate ? `<span class="material-symbols-outlined md-16 channel-private-icon" title="${t('main.privateChannelBadge')}">lock_person</span>` : ''}
               ${showRestrictedIcon ? `<span class="material-symbols-outlined md-16 channel-restricted-icon" title="${t('main.voiceChannelRestricted')}">lock</span>` : ''}
-              ${isActive ? `<span style="font-size: 11px; color: var(--success); font-weight: 600; margin-left: auto;">(${t('common.you')})</span>` : ''}
-              <button class="channel-menu-btn" data-menu-channel="${c.id}" title="${t('common.moreOptions')}">
-                <span class="material-symbols-outlined md-16">more_vert</span>
-              </button>
+              ${isActive ? `<span style="font-size: 11px; color: var(--success); font-weight: 600;">(${t('common.you')})</span>` : ''}
+              <span class="voice-channel-actions">
+                ${canReadTextChannels ? `<button type="button" class="voice-chat-btn ${hasMention ? 'has-mention' : hasUnread ? 'has-unread' : ''}"
+                  data-voice-chat-channel="${c.id}" title="${t('voiceChat.open')}" aria-label="${t('voiceChat.open')}">
+                  <span class="material-symbols-outlined md-16" aria-hidden="true">chat_bubble</span>
+                </button>` : ''}
+                <button class="channel-menu-btn" data-menu-channel="${c.id}" title="${t('common.moreOptions')}">
+                  <span class="material-symbols-outlined md-16">more_vert</span>
+                </button>
+              </span>
             </div>
 
             ${inVoice.length > 0 ? `
@@ -841,6 +1249,63 @@ export class MainView {
           </div>
         `;
       }).join('');
+    }
+
+    const categoryList = this.container.querySelector<HTMLElement>('#channel-categories-list');
+    if (categoryList) {
+      const rows = new Map<string, string>();
+      for (const row of [...textListEl.children, ...voiceListEl.children]) {
+        const id = row.getAttribute('data-channel-id');
+        if (id) rows.set(id, row.outerHTML);
+      }
+      const categories = serverStore.serverDetails.categories ?? [];
+      const canManage = canManageChannels;
+      const knownCategoryIds = new Set(categories.map((category) => category.id));
+      const groups = [
+        { id: '', name: t('categories.uncategorized') },
+        ...categories.map((category) => ({ id: category.id, name: category.name })),
+      ];
+      categoryList.innerHTML = groups.map((group) => {
+        const channels = serverStore.serverDetails!.channels.filter((channel) =>
+          group.id ? channel.categoryId === group.id : !channel.categoryId || !knownCategoryIds.has(channel.categoryId));
+        const collapsed = !!group.id && serverStore.isCategoryCollapsed(group.id);
+        return `<section class="channel-category${group.id ? '' : ' channel-category--uncategorized'}${channels.length ? '' : ' channel-category--empty'}" data-category-id="${escapeHtml(group.id)}">
+          ${group.id ? `<div class="category-title" data-category-dropzone="${escapeHtml(group.id)}">
+            <button class="category-collapse-btn" data-collapse-category="${escapeHtml(group.id)}" aria-expanded="${!collapsed}">
+              <span class="material-symbols-outlined md-16">${collapsed ? 'chevron_right' : 'expand_more'}</span>
+              <span>${escapeHtml(group.name)}</span>
+            </button>
+            ${canManage ? `<button class="category-add-btn" data-add-category="${escapeHtml(group.id)}" title="${t('categories.addChannel')}">
+              <span class="material-symbols-outlined md-14">add</span></button>` : ''}
+          </div>` : canManage ? `<div class="category-uncategorized-dropzone" data-category-dropzone="">
+            <span class="material-symbols-outlined md-16">drive_file_move</span>
+            <span>${escapeHtml(group.name)}</span>
+          </div>` : ''}
+          <div class="category-channels" data-category-channels="${escapeHtml(group.id)}" ${collapsed ? 'hidden' : ''}>
+            ${channels.map((channel) => rows.get(channel.id) ?? '').join('')}
+          </div>
+        </section>`;
+      }).join('');
+      categoryList.querySelectorAll<HTMLButtonElement>('[data-collapse-category]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const id = button.dataset.collapseCategory ?? '';
+          serverStore.toggleCategoryCollapsed(id);
+          this.container.querySelectorAll<HTMLButtonElement>('[data-collapse-category]').forEach((next) => {
+            if (next.dataset.collapseCategory === id) next.focus();
+          });
+        });
+      });
+      categoryList.querySelectorAll<HTMLButtonElement>('[data-add-category]').forEach((button) => {
+        button.addEventListener('click', () => createChannelModal.open('TEXT', button.dataset.addCategory || null));
+      });
+      categoryList.querySelectorAll<HTMLElement>('.channel-category').forEach((section) => {
+        section.querySelector('.category-title')?.addEventListener('contextmenu', (event) => {
+          event.preventDefault();
+          if (!section.dataset.categoryId) return;
+          const mouse = event as MouseEvent;
+          this.openCategoryMenu(section.dataset.categoryId, mouse.clientX, mouse.clientY);
+        });
+      });
     }
 
     // Attach right-click context menu listeners to voice mini participant items
@@ -921,11 +1386,11 @@ export class MainView {
     // Attach click listeners to channel items
     this.container.querySelectorAll('.channel-item').forEach((item) => {
       item.addEventListener('click', async (e) => {
-        if ((e.target as HTMLElement).closest('.channel-menu-btn')) return;
+        if ((e.target as HTMLElement).closest('.channel-menu-btn, .voice-chat-btn')) return;
         const channelId = item.getAttribute('data-channel-id')!;
         const type = item.getAttribute('data-channel-type')!;
 
-        if (type === 'TEXT') {
+        if (type === 'TEXT' || type === 'FORUM') {
           this.activateTextChannel(channelId);
         } else if (type === 'VOICE') {
           if (channelId !== voiceStore.currentVoiceChannelId && this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SPEAK)) {
@@ -946,6 +1411,8 @@ export class MainView {
             if (!await this.handleJoinVoiceChannel(channelId)) return;
             if (voiceStore.currentVoiceChannelId !== channelId || voiceStore.voiceSessionKey !== sessionKey
               || sessionManager.getActiveKey() !== sessionKey) return;
+            this.viewedVoiceChannelId = channelId;
+            this.viewedVoiceSessionKey = sessionKey;
             this.setActiveContentView('stage');
             this.voiceStageView?.setChannel(channelId);
             this.updateScreenShareNotice();
@@ -953,6 +1420,14 @@ export class MainView {
             this.renderChannels();
           }
         }
+      });
+    });
+
+    this.container.querySelectorAll<HTMLButtonElement>('[data-voice-chat-channel]').forEach((button) => {
+      button.addEventListener('click', event => {
+        event.stopPropagation();
+        const channelId = button.dataset.voiceChatChannel;
+        if (channelId) this.openVoiceChannelChat(channelId);
       });
     });
 
@@ -1008,29 +1483,78 @@ export class MainView {
     });
 
     this.setupChannelReorder();
+    this.setupCategoryReorder();
   }
 
   /**
-   * Lets managers drag channels into a new order (#471).
-   *
-   * Text and voice are reordered independently, so a drag only ever finds drop
-   * targets inside its own list. The dragged element carries its type in the
-   * drag data, which is what keeps a voice channel from landing among the text
-   * ones — the check has to happen on `dragover` (there is no way to reject a
-   * drop after the fact) and the payload itself is unreadable there, so the type
-   * travels as part of the MIME type.
+   * A single channel drag kind supports mixed categories without interfering
+   * with voice-member dragging or attachment drops.
    */
   private setupChannelReorder(): void {
     if (!serverStore.hasPermission(Permission.MANAGE_CHANNELS)) return;
 
-    const lists: Array<{ el: HTMLElement | null; type: ChannelType }> = [
-      { el: document.getElementById('text-channels-list'), type: 'TEXT' },
-      { el: document.getElementById('voice-channels-list'), type: 'VOICE' },
-    ];
+    const categoryList = this.container.querySelector<HTMLElement>('#channel-categories-list');
+    const lists = Array.from(this.container.querySelectorAll<HTMLElement>('[data-category-channels]'))
+      .map((el) => ({ el, categoryId: el.dataset.categoryChannels || null }));
+    const mime = 'text/monky-channel';
+    const clearDropTargets = () => {
+      categoryList?.classList.remove('channel-reorder-active');
+      this.container.querySelectorAll('.channel-category-drop-target').forEach((element) => {
+        element.classList.remove('channel-category-drop-target');
+      });
+      this.container.querySelectorAll('.channel-drop-before, .channel-drop-after').forEach((element) => {
+        element.classList.remove('channel-drop-before', 'channel-drop-after');
+      });
+    };
+    const pointerDropTarget = (clientX: number, clientY: number) => {
+      const element = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+      const targetHandle = element?.closest<HTMLElement>('.channel-item[data-channel-id]');
+      const targetList = targetHandle?.closest<HTMLElement>('[data-category-channels]');
+      if (targetHandle && targetList) {
+        let targetRow = targetHandle;
+        while (targetRow.parentElement && targetRow.parentElement !== targetList) targetRow = targetRow.parentElement;
+        const rect = targetRow.getBoundingClientRect();
+        return {
+          categoryId: targetList.dataset.categoryChannels || null,
+          targetId: targetHandle.dataset.channelId ?? null,
+          after: clientY > rect.top + rect.height / 2,
+          targetList,
+          targetRow,
+          dropzone: null as HTMLElement | null,
+        };
+      }
+      const dropzone = element?.closest<HTMLElement>('[data-category-dropzone]');
+      if (dropzone) {
+        return {
+          categoryId: dropzone.dataset.categoryDropzone || null,
+          targetId: null,
+          after: true,
+          targetList: null as HTMLElement | null,
+          targetRow: null as HTMLElement | null,
+          dropzone,
+        };
+      }
+      const emptyList = element?.closest<HTMLElement>('[data-category-channels]');
+      if (!emptyList) return null;
+      return {
+        categoryId: emptyList.dataset.categoryChannels || null,
+        targetId: null,
+        after: true,
+        targetList: emptyList,
+        targetRow: null as HTMLElement | null,
+        dropzone: null as HTMLElement | null,
+      };
+    };
+    const showPointerDropTarget = (target: ReturnType<typeof pointerDropTarget>) => {
+      clearDropTargets();
+      categoryList?.classList.add('channel-reorder-active');
+      if (!target) return;
+      target.dropzone?.classList.add('channel-category-drop-target');
+      target.targetRow?.classList.add(target.after ? 'channel-drop-after' : 'channel-drop-before');
+    };
 
-    for (const { el: listEl, type } of lists) {
+    for (const { el: listEl, categoryId } of lists) {
       if (!listEl) continue;
-      const mime = `text/monky-channel-${type.toLowerCase()}`;
       // A voice channel and its participants live in a wrapper; a text channel
       // is the item itself. Dragging and dropping act on whichever is the direct
       // child of the list, so the participants travel with their channel.
@@ -1042,21 +1566,86 @@ export class MainView {
         const channelId = handle.getAttribute('data-channel-id');
         if (!channelId) continue;
 
-        handle.draggable = true;
+        handle.draggable = false;
+        handle.classList.add('channel-reorder-handle');
         // Dragging is invisible without a hint, and the row has no title of its
         // own to lose.
         if (!handle.title) handle.title = t('main.channelReorderHint');
         handle.addEventListener('dragstart', (e: Event) => {
           const de = e as DragEvent;
+          if ((de.target as Element | null)?.closest('button')) {
+            de.preventDefault();
+            return;
+          }
           de.dataTransfer?.setData(mime, channelId);
           de.dataTransfer!.effectAllowed = 'move';
           row.classList.add('channel-dragging');
+          categoryList?.classList.add('channel-reorder-active');
         });
         handle.addEventListener('dragend', () => {
           row.classList.remove('channel-dragging');
           listEl.querySelectorAll('.channel-drop-before, .channel-drop-after').forEach((n) => {
             n.classList.remove('channel-drop-before', 'channel-drop-after');
           });
+          clearDropTargets();
+        });
+
+        let pointer: { startX: number; startY: number; active: boolean } | null = null;
+        let suppressClick = false;
+        handle.addEventListener('click', event => {
+          if (!suppressClick) return;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          suppressClick = false;
+        }, true);
+        const movePointer = (event: MouseEvent) => {
+          if (!pointer) return;
+          if (!pointer.active &&
+              Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) < 6) return;
+          if (!pointer.active) {
+            pointer.active = true;
+            row.classList.add('channel-dragging');
+            categoryList?.classList.add('channel-reorder-active');
+          }
+          event.preventDefault();
+          showPointerDropTarget(pointerDropTarget(event.clientX, event.clientY));
+        };
+        const finishPointer = (event: MouseEvent, commit: boolean) => {
+          if (!pointer) return;
+          const wasActive = pointer.active;
+          const target = wasActive ? pointerDropTarget(event.clientX, event.clientY) : null;
+          pointer = null;
+          window.removeEventListener('mousemove', movePointer);
+          window.removeEventListener('mouseup', stopPointer);
+          window.removeEventListener('blur', cancelPointer);
+          row.classList.remove('channel-dragging');
+          clearDropTargets();
+          if (!wasActive) return;
+          suppressClick = true;
+          window.setTimeout(() => { suppressClick = false; }, 0);
+          if (commit && target && target.targetId !== channelId) {
+            void this.commitChannelOrder(
+              target.categoryId,
+              channelId,
+              target.targetId,
+              target.after
+            );
+          }
+        };
+        const stopPointer = (event: MouseEvent) => finishPointer(event, true);
+        const cancelPointer = () => {
+          if (!pointer) return;
+          finishPointer(new MouseEvent('mouseup', {
+            clientX: pointer.startX,
+            clientY: pointer.startY,
+          }), false);
+        };
+        handle.addEventListener('mousedown', event => {
+          if (event.button !== 0 || (event.target as Element | null)?.closest('button')) return;
+          pointer = { startX: event.clientX, startY: event.clientY, active: false };
+          window.addEventListener('mousemove', movePointer);
+          window.addEventListener('mouseup', stopPointer);
+          window.addEventListener('blur', cancelPointer);
         });
 
         row.addEventListener('dragover', (e: Event) => {
@@ -1080,11 +1669,12 @@ export class MainView {
           const draggedId = de.dataTransfer?.getData(mime);
           const after = row.classList.contains('channel-drop-after');
           row.classList.remove('channel-drop-before', 'channel-drop-after');
+          listEl.classList.remove('channel-category-drop-target');
           if (!draggedId) return;
           de.preventDefault();
           de.stopPropagation();
           if (draggedId === channelId) return;
-          this.commitChannelOrder(type, draggedId, channelId, after);
+          void this.commitChannelOrder(categoryId, draggedId, channelId, after);
         });
       }
 
@@ -1095,32 +1685,198 @@ export class MainView {
         de.preventDefault();
         de.dataTransfer.dropEffect = 'move';
       });
+      listEl.addEventListener('dragleave', (e: Event) => {
+        const next = (e as DragEvent).relatedTarget as Node | null;
+        if (next && listEl.contains(next)) return;
+        listEl.classList.remove('channel-category-drop-target');
+      });
       listEl.addEventListener('drop', (e: Event) => {
         const de = e as DragEvent;
         const draggedId = de.dataTransfer?.getData(mime);
+        listEl.classList.remove('channel-category-drop-target');
         if (!draggedId) return;
         de.preventDefault();
-        this.commitChannelOrder(type, draggedId, null, true);
+        de.stopPropagation();
+        void this.commitChannelOrder(categoryId, draggedId, null, true);
       });
     }
+
+    this.container.querySelectorAll<HTMLElement>('[data-category-dropzone]').forEach((dropzone) => {
+      const categoryId = dropzone.dataset.categoryDropzone || null;
+      dropzone.addEventListener('dragover', (e: Event) => {
+        const de = e as DragEvent;
+        if (!de.dataTransfer?.types.includes(mime)) return;
+        de.preventDefault();
+        de.stopPropagation();
+        de.dataTransfer.dropEffect = 'move';
+        dropzone.classList.add('channel-category-drop-target');
+      });
+      dropzone.addEventListener('dragleave', (e: Event) => {
+        const next = (e as DragEvent).relatedTarget as Node | null;
+        if (next && dropzone.contains(next)) return;
+        dropzone.classList.remove('channel-category-drop-target');
+      });
+      dropzone.addEventListener('drop', (e: Event) => {
+        const de = e as DragEvent;
+        const draggedId = de.dataTransfer?.getData(mime);
+        dropzone.classList.remove('channel-category-drop-target');
+        if (!draggedId) return;
+        de.preventDefault();
+        de.stopPropagation();
+        void this.commitChannelOrder(categoryId, draggedId, null, true);
+      });
+    });
+  }
+
+  private setupCategoryReorder(): void {
+    if (!serverStore.hasPermission(Permission.MANAGE_CHANNELS)) return;
+    const categoryList = this.container.querySelector<HTMLElement>('#channel-categories-list');
+    if (!categoryList) return;
+    const mime = 'text/monky-category';
+    const sections = Array.from(categoryList.querySelectorAll<HTMLElement>(
+      '.channel-category[data-category-id]:not(.channel-category--uncategorized)'
+    ));
+    const clearIndicators = () => {
+      sections.forEach(section => section.classList.remove('category-drop-before', 'category-drop-after'));
+    };
+    const clear = () => {
+      categoryList.classList.remove('category-reorder-active');
+      sections.forEach(section => section.classList.remove('category-dragging'));
+      clearIndicators();
+    };
+    const pointerTarget = (clientX: number, clientY: number) => {
+      const title = (document.elementFromPoint(clientX, clientY) as HTMLElement | null)
+        ?.closest<HTMLElement>('.category-title[data-category-dropzone]');
+      const section = title?.closest<HTMLElement>('.channel-category[data-category-id]');
+      const categoryId = section?.dataset.categoryId;
+      if (!title || !section || !categoryId) return null;
+      const rect = title.getBoundingClientRect();
+      return { categoryId, section, after: clientY > rect.top + rect.height / 2 };
+    };
+
+    for (const section of sections) {
+      const categoryId = section.dataset.categoryId;
+      const title = section.querySelector<HTMLElement>(':scope > .category-title');
+      if (!categoryId || !title) continue;
+      title.draggable = false;
+      title.classList.add('category-reorder-handle');
+      title.addEventListener('dragstart', event => {
+        if ((event.target as Element | null)?.closest('.category-add-btn')) {
+          event.preventDefault();
+          return;
+        }
+        event.dataTransfer?.setData(mime, categoryId);
+        if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+        section.classList.add('category-dragging');
+        categoryList.classList.add('category-reorder-active');
+      });
+      title.addEventListener('dragend', clear);
+      let pointer: { startX: number; startY: number; active: boolean } | null = null;
+      let suppressClick = false;
+      title.addEventListener('click', event => {
+        if (!suppressClick) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        suppressClick = false;
+      }, true);
+      const movePointer = (event: MouseEvent) => {
+        if (!pointer) return;
+        if (!pointer.active &&
+            Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) < 6) return;
+        if (!pointer.active) {
+          pointer.active = true;
+          section.classList.add('category-dragging');
+          categoryList.classList.add('category-reorder-active');
+        }
+        event.preventDefault();
+        clearIndicators();
+        const target = pointerTarget(event.clientX, event.clientY);
+        target?.section.classList.add(target.after ? 'category-drop-after' : 'category-drop-before');
+      };
+      const finishPointer = (event: MouseEvent, commit: boolean) => {
+        if (!pointer) return;
+        const wasActive = pointer.active;
+        const target = wasActive ? pointerTarget(event.clientX, event.clientY) : null;
+        pointer = null;
+        window.removeEventListener('mousemove', movePointer);
+        window.removeEventListener('mouseup', stopPointer);
+        window.removeEventListener('blur', cancelPointer);
+        clear();
+        if (!wasActive) return;
+        suppressClick = true;
+        window.setTimeout(() => { suppressClick = false; }, 0);
+        if (commit && target && target.categoryId !== categoryId) {
+          this.commitCategoryOrder(categoryId, target.categoryId, target.after);
+        }
+      };
+      const stopPointer = (event: MouseEvent) => finishPointer(event, true);
+      const cancelPointer = () => {
+        if (!pointer) return;
+        finishPointer(new MouseEvent('mouseup', {
+          clientX: pointer.startX,
+          clientY: pointer.startY,
+        }), false);
+      };
+      title.addEventListener('mousedown', event => {
+        if (event.button !== 0 || (event.target as Element | null)?.closest('.category-add-btn')) return;
+        pointer = { startX: event.clientX, startY: event.clientY, active: false };
+        window.addEventListener('mousemove', movePointer);
+        window.addEventListener('mouseup', stopPointer);
+        window.addEventListener('blur', cancelPointer);
+      });
+      title.addEventListener('dragover', event => {
+        if (!event.dataTransfer?.types.includes(mime)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = 'move';
+        const rect = title.getBoundingClientRect();
+        const after = event.clientY > rect.top + rect.height / 2;
+        section.classList.toggle('category-drop-before', !after);
+        section.classList.toggle('category-drop-after', after);
+      });
+      title.addEventListener('dragleave', event => {
+        const next = event.relatedTarget as Node | null;
+        if (next && title.contains(next)) return;
+        section.classList.remove('category-drop-before', 'category-drop-after');
+      });
+      title.addEventListener('drop', event => {
+        const draggedId = event.dataTransfer?.getData(mime);
+        const after = section.classList.contains('category-drop-after');
+        section.classList.remove('category-drop-before', 'category-drop-after');
+        if (!draggedId) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (draggedId !== categoryId) this.commitCategoryOrder(draggedId, categoryId, after);
+      });
+    }
+  }
+
+  private commitCategoryOrder(draggedId: string, targetId: string, after: boolean): void {
+    const ids = (serverStore.serverDetails?.categories ?? []).map(category => category.id)
+      .filter(categoryId => categoryId !== draggedId);
+    const targetIndex = ids.indexOf(targetId);
+    if (targetIndex < 0) return;
+    ids.splice(after ? targetIndex + 1 : targetIndex, 0, draggedId);
+    this.requestCategoryChange(MessageType.CATEGORY_REORDER, { orderedIds: ids });
   }
 
   /**
    * Sends the reordered list to the server (#471).
    *
-   * The new order is applied locally right away so the drop feels instant, and
-   * the broadcast that comes back simply confirms it. A failure re-renders from
-   * the store, which still holds the order the server knows about.
+   * Moving first preserves an override, or adopts the destination's ACL for
+   * inherited channels. The server confirms each step before the next is sent.
    */
-  private commitChannelOrder(
-    type: ChannelType,
+  private async commitChannelOrder(
+    categoryId: string | null,
     draggedId: string,
     targetId: string | null,
     after: boolean
-  ): void {
-    const channels = serverStore.serverDetails?.channels.filter((c) => c.type === type) ?? [];
+  ): Promise<void> {
+    const dragged = serverStore.getChannel(draggedId);
+    if (!dragged) return;
+    const channels = serverStore.serverDetails?.channels.filter((c) =>
+      !c.forumId && (c.categoryId ?? null) === categoryId) ?? [];
     const ids = channels.map((c) => c.id).filter((id) => id !== draggedId);
-    if (ids.length === channels.length) return;
 
     let index = ids.length;
     if (targetId) {
@@ -1130,27 +1886,60 @@ export class MainView {
     }
     ids.splice(index, 0, draggedId);
 
-    serverStore.applyChannelPositions(ids.map((channelId, position) => ({ channelId, position })));
-
-    void networkClient
-      .sendRequest(MessageType.CHANNEL_REORDER, { type, orderedIds: ids })
-      .catch((err: unknown) => {
-        void showAlert({
-          title: t('common.error'),
-          message: (err as Error)?.message || t('main.channelReorderFailed'),
-          variant: 'danger',
-        });
-        this.renderChannels();
+    try {
+      if ((dragged.categoryId ?? null) !== categoryId) {
+        await networkClient.sendRequest(MessageType.CHANNEL_UPDATE, { channelId: draggedId, categoryId });
+      }
+      await networkClient.sendRequest(MessageType.CHANNEL_REORDER, { categoryId, orderedIds: ids });
+    } catch (err: unknown) {
+      void showAlert({
+        title: t('common.error'),
+        message: err instanceof Error ? err.message : t('main.channelReorderFailed'),
+        variant: 'danger',
       });
+      this.renderChannels();
+    }
+  }
+
+  private openCategoryMenu(categoryId: string, x: number, y: number): void {
+    if (!serverStore.hasPermission(Permission.MANAGE_CHANNELS)) return;
+    const categories = serverStore.serverDetails?.categories ?? [];
+    const category = categories.find((item) => item.id === categoryId);
+    if (!category) return;
+    const position = categories.indexOf(category);
+    const move = (delta: number) => {
+      const ids = categories.map((item) => item.id);
+      ids.splice(position, 1);
+      ids.splice(position + delta, 0, categoryId);
+      this.requestCategoryChange(MessageType.CATEGORY_REORDER, { orderedIds: ids });
+    };
+    contextMenu.open(x, y, [
+      { label: t('categories.addChannel'), icon: 'add', onClick: () => createChannelModal.open('TEXT', categoryId) },
+      { label: t('categories.edit'), icon: 'settings', onClick: () => categoryModal.open(category) },
+      { label: t('categories.moveUp'), icon: 'arrow_upward', disabled: position === 0, onClick: () => move(-1) },
+      { label: t('categories.moveDown'), icon: 'arrow_downward', disabled: position === categories.length - 1, onClick: () => move(1) },
+      {
+        label: t('categories.delete'), icon: 'delete', danger: true, onClick: () => {
+          void showConfirm({ title: t('categories.delete'), message: t('categories.deleteConfirm'), variant: 'danger' })
+            .then((confirmed) => { if (confirmed) this.requestCategoryChange(MessageType.CATEGORY_DELETE, { categoryId }); });
+        },
+      },
+    ]);
+  }
+
+  private requestCategoryChange(type: MessageType, payload: object): void {
+    void networkClient.sendRequest(type, payload).catch((error: unknown) => {
+      void showAlert({ title: t('common.error'), message: error instanceof Error ? error.message : t('categories.error'), variant: 'danger' });
+    });
   }
 
   /** Opens the per-channel options menu at the given screen coordinates (#151). */
   private openChannelMenu(channelId: string, x: number, y: number): void {
     const channel = serverStore.serverDetails?.channels.find((c) => c.id === channelId);
-    const items: ContextMenuItem[] = [];
+    const items: ContextMenuEntry[] = [];
 
-    // Chat-sound notifications only apply to text channels (#153).
-    if (channel?.type === 'TEXT') {
+    // Notification controls apply to every channel that carries messages.
+    if (channel?.type === 'TEXT' || channel?.type === 'VOICE') {
       items.push({
         label: t('channelMenu.notifications'),
         icon: 'notifications',
@@ -1174,6 +1963,25 @@ export class MainView {
     }
 
     if (serverStore.hasPermission(Permission.MANAGE_CHANNELS)) {
+      if (channel) {
+        const siblings = serverStore.serverDetails?.channels.filter((item) => (item.categoryId ?? null) === (channel.categoryId ?? null)) ?? [];
+        const at = siblings.findIndex((item) => item.id === channelId);
+        items.push({
+          label: t('categories.moveTo'), icon: 'drive_file_move',
+          submenu: [
+            { id: null, name: t('categories.uncategorized') },
+            ...(serverStore.serverDetails?.categories ?? []),
+          ].map((category) => ({
+            label: category.name,
+            disabled: category.id === (channel.categoryId ?? null),
+            onClick: () => { void this.commitChannelOrder(category.id, channelId, null, true); },
+          })),
+        });
+        items.push(
+          { label: t('categories.moveUp'), icon: 'arrow_upward', disabled: at <= 0, onClick: () => { void this.commitChannelOrder(channel.categoryId ?? null, channelId, siblings[at - 1]?.id ?? null, false); } },
+          { label: t('categories.moveDown'), icon: 'arrow_downward', disabled: at >= siblings.length - 1, onClick: () => { void this.commitChannelOrder(channel.categoryId ?? null, channelId, siblings[at + 1]?.id ?? null, true); } },
+        );
+      }
       items.push({
         label: t('main.editChannel'),
         icon: 'settings',
@@ -1244,6 +2052,8 @@ export class MainView {
     await rejoinCallOnSession(session.key, channelId);
     if (sessionManager.getActive() !== session || voiceStore.voiceSessionKey !== session.key
       || voiceStore.currentVoiceChannelId !== channelId) return;
+    this.viewedVoiceChannelId = channelId;
+    this.viewedVoiceSessionKey = session.key;
     this.setActiveContentView('stage');
     this.voiceStageView?.setChannel(channelId);
     this.renderChannels();
@@ -1277,6 +2087,12 @@ export class MainView {
       this.voiceStageView?.setChannel(null);
       this.setActiveContentView('chat');
     }
+    if (channel.type === 'VOICE' && this.viewedVoiceChannelId === channelId) {
+      this.viewedVoiceChannelId = null;
+      this.viewedVoiceSessionKey = null;
+      this.closeVoiceChannelChat(false);
+      this.setActiveContentView('chat');
+    }
 
     networkClient.send(MessageType.CHANNEL_DELETE, { channelId });
   }
@@ -1288,7 +2104,12 @@ export class MainView {
     const canManageBots = serverStore.hasPermission(Permission.MANAGE_BOTS);
     const btnSettings = document.getElementById('btn-server-settings');
     if (btnSettings) {
-      (btnSettings as HTMLElement).style.display = (canManageServer || canManageRoles || canManageBots) ? '' : 'none';
+      (btnSettings as HTMLElement).style.display = (canManageServer || canManageRoles || canManageBots || serverStore.hasPermission(Permission.MANAGE_EVENTS)) ? '' : 'none';
+    }
+    const recentSounds = document.getElementById('btn-recent-sounds');
+    if (recentSounds) {
+      recentSounds.style.display = serverStore.serverDetails?.recentSoundCacheEnabled
+        && serverStore.serverDetails.protocol?.features.includes('recent-sounds') ? '' : 'none';
     }
     this.refreshServerMonitorVisibility();
   }
@@ -1419,26 +2240,45 @@ export class MainView {
     btn.style.display = allowed ? '' : 'none';
   }
 
+  private attachChannelListMenu(): void {
+    const list = this.container.querySelector<HTMLElement>('.channels-list-container');
+    if (!list) return;
+    const open = (event: MouseEvent) => {
+      if (event.defaultPrevented || !(event.target instanceof Element) ||
+          event.target.closest('.channel-item, .category-title, #server-community')) return;
+      event.preventDefault();
+      const items: ContextMenuEntry[] = [];
+      if (serverStore.hasPermission(Permission.MANAGE_CHANNELS)) {
+        items.push(
+          { label: t('channelModal.title'), icon: 'add', onClick: () => createChannelModal.open('TEXT', null) },
+          { label: t('categories.create'), icon: 'create_new_folder', onClick: () => categoryModal.open() },
+        );
+      }
+      const rect = list.getBoundingClientRect();
+      contextMenu.open(event.clientX || rect.left, event.clientY || rect.top, items, list);
+    };
+    list.addEventListener('contextmenu', open);
+    this.unbindEvents.push(() => list.removeEventListener('contextmenu', open));
+  }
+
   private attachEvents(): void {
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
     this.unbindEvents.push(bindPttIndicators(this.container));
     this.unbindEvents.push(bindAudioDevicePopovers(this.container));
     this.unbindEvents.push(bindFooterControlsMotion(this.container));
+    this.attachChannelListMenu();
 
-    const btnAddText = document.getElementById('btn-add-text-channel');
-    const btnAddVoice = document.getElementById('btn-add-voice-channel');
     const btnInvite = document.getElementById('btn-invite-friends');
     const btnServerSettings = document.getElementById('btn-server-settings');
     const btnServerMonitor = document.getElementById('btn-server-monitor');
+    const btnRecentSounds = document.getElementById('btn-recent-sounds');
     const btnProfile = document.getElementById('user-profile-btn');
     const btnSettings = document.getElementById('bar-btn-settings');
     const btnMic = document.getElementById('bar-btn-mic');
     const btnDeafen = document.getElementById('bar-btn-deafen');
     const btnDisconnect = document.getElementById('bar-btn-disconnect');
 
-    btnAddText?.addEventListener('click', (e) => withButtonLoading(e.currentTarget as HTMLElement, () => createChannelModal.open('TEXT')));
-    btnAddVoice?.addEventListener('click', (e) => withButtonLoading(e.currentTarget as HTMLElement, () => createChannelModal.open('VOICE')));
     btnInvite?.addEventListener('click', (e) => { this.closeServerDropdown(); withButtonLoading(e.currentTarget as HTMLElement, () => inviteModal.open()); });
     btnServerSettings?.addEventListener('click', (e) => { this.closeServerDropdown(); withButtonLoading(e.currentTarget as HTMLElement, () => serverSettingsModal.open()); });
     btnServerMonitor?.addEventListener('click', (e) => {
@@ -1447,6 +2287,10 @@ export class MainView {
       withButtonLoading(e.currentTarget as HTMLElement, () => session
         ? serverMonitorModal.openRemote(session)
         : showAlert({ title: t('serverMonitor.title'), message: t('serverMonitor.disconnected'), variant: 'warning' }));
+    });
+    btnRecentSounds?.addEventListener('click', (event) => {
+      this.closeServerDropdown();
+      withButtonLoading(event.currentTarget as HTMLElement, () => recentSoundsModal.open());
     });
     this.refreshServerMonitorVisibility();
     btnProfile?.addEventListener('click', (e) => withButtonLoading(e.currentTarget as HTMLElement, () => settingsModal.open()));
@@ -1461,18 +2305,74 @@ export class MainView {
     btnSettings?.addEventListener('click', (e) => withButtonLoading(e.currentTarget as HTMLElement, () => settingsModal.open()));
 
     const dropdownToggle = document.getElementById('server-dropdown-toggle');
+    const positionServerMenu = () => {
+      const menu = document.getElementById('server-dropdown-menu');
+      if (!menu || menu.hidden || !dropdownToggle) return;
+      menu.style.width = `${dropdownToggle.getBoundingClientRect().width}px`;
+      positionAnchoredSurface(menu, dropdownToggle);
+    };
+    const menuSize = new ResizeObserver(positionServerMenu);
+    if (dropdownToggle) {
+      menuSize.observe(dropdownToggle);
+      if (dropdownToggle.parentElement) menuSize.observe(dropdownToggle.parentElement);
+      dropdownToggle.setAttribute('aria-expanded', 'false');
+      dropdownToggle.setAttribute('aria-controls', 'server-dropdown-menu');
+      dropdownToggle.setAttribute('aria-haspopup', 'menu');
+    }
+    window.addEventListener('resize', positionServerMenu);
+    window.addEventListener('scroll', positionServerMenu, true);
+    this.unbindEvents.push(() => {
+      menuSize.disconnect();
+      window.removeEventListener('resize', positionServerMenu);
+      window.removeEventListener('scroll', positionServerMenu, true);
+    });
     dropdownToggle?.addEventListener('click', (e) => {
       e.stopPropagation();
       const menu = document.getElementById('server-dropdown-menu');
       if (!menu) return;
-      const isOpen = menu.style.display !== 'none';
-      menu.style.display = isOpen ? 'none' : 'flex';
-      dropdownToggle.classList.toggle('open', !isOpen);
+      if (dropdownToggle.classList.contains('open')) this.closeServerDropdown();
+      else {
+        showWithMotion(menu, 'popover');
+        positionServerMenu();
+        dropdownToggle.classList.add('open');
+        dropdownToggle.setAttribute('aria-expanded', 'true');
+      }
     });
+    document.querySelectorAll<HTMLElement>('#server-dropdown-menu button').forEach(button => button.setAttribute('role', 'menuitem'));
+    const menuKeyboard = (event: KeyboardEvent) => {
+      const menu = document.getElementById('server-dropdown-menu');
+      if (!menu || !dropdownToggle) return;
+      const menuItems = () => [...menu.querySelectorAll<HTMLElement>('button:not(:disabled)')].filter(item => !item.hidden && item.getClientRects().length);
+      if (event.target === dropdownToggle && event.key === 'ArrowDown' && !dropdownToggle.classList.contains('open')) {
+        event.preventDefault();
+        dropdownToggle.click();
+        menuItems()[0]?.focus();
+        return;
+      }
+      if (!dropdownToggle.classList.contains('open')) return;
+      if (event.key === 'Tab') {
+        this.closeServerDropdown();
+        dropdownToggle.focus();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        this.closeServerDropdown();
+        dropdownToggle.focus();
+      } else if (menu.contains(event.target as Node) && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+        event.preventDefault();
+        const items = menuItems();
+        const index = items.indexOf(document.activeElement as HTMLElement);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+          : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+        items[next]?.focus();
+      }
+    };
+    document.addEventListener('keydown', menuKeyboard);
+    this.unbindEvents.push(() => document.removeEventListener('keydown', menuKeyboard));
     const outsideClickHandler = (e: MouseEvent) => {
       const menu = document.getElementById('server-dropdown-menu');
       const toggle = document.getElementById('server-dropdown-toggle');
-      if (!menu || menu.style.display === 'none') return;
+      if (!menu || menu.hidden || menu.hasAttribute('data-ui-closing')) return;
       if (!menu.contains(e.target as Node) && !toggle?.contains(e.target as Node)) {
         this.closeServerDropdown();
       }
@@ -1689,18 +2589,8 @@ export class MainView {
 
     const u7d = appEvents.on('session.changed', () => this.refreshServerMonitorVisibility());
 
-    const u8 = appEvents.on(`message.${MessageType.CHANNEL_DELETED}`, () => {
-      // If the text channel currently shown was removed, fall back to the
-      // remaining active channel so the chat view is never left orphaned.
-      if (
-        isForegroundEvent() && !sessionManager.isHome() &&
-        this.activeContentView === 'chat' &&
-        serverStore.activeTextChannelId &&
-        this.chatView
-      ) {
-        this.chatView.setChannel(serverStore.activeTextChannelId);
-      }
-    });
+    const u8 = appEvents.on(`message.${MessageType.CHANNEL_DELETED}`,
+      (payload: ChannelDeletedPayload) => this.handleChannelDeleted(payload));
 
     // Joining/leaving a voice channel emits `voice.channel_changed` (not
     // `voice.state_updated`), so update the sidebar voice-connection row and the
@@ -1768,16 +2658,17 @@ export class MainView {
       this.updateParticipantSpeaking();
     });
     const u21 = appEvents.on('network.status', () => this.refreshServerMonitorVisibility());
+    const u22 = appEvents.on('voice.screen_watch_changed', () => this.updateScreenShareNotice());
 
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u7b, u7c, u7d, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21);
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u7b, u7c, u7d, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22);
   }
 
-  /** True when the given text channel is the one currently visible on screen (#14). */
+  /** True when the channel's conversation is currently visible on screen (#14). */
   public isViewingTextChannel(channelId: string): boolean {
     return (
       !sessionManager.isHome() &&
-      this.activeContentView === 'chat' &&
-      serverStore.activeTextChannelId === channelId
+      ((this.activeContentView === 'chat' && serverStore.activeTextChannelId === channelId) ||
+        (this.activeContentView === 'stage' && this.voiceChatChannelId === channelId))
     );
   }
 
@@ -1808,11 +2699,18 @@ export class MainView {
   }
 
   private unbindListeners(): void {
+    const stage = this.container.querySelector<HTMLElement>('#main-center-stage');
+    if (stage) cancelSurfaceMotion(stage);
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
   }
 
   public destroy(): void {
+    this.displayedChannelId = this.navigationKey = null;
+    this.forumView?.destroy();
+    this.communityView?.destroy();
+    this.messageSearch?.destroy();
+    categoryModal.close();
     this.homeView?.suspend();
     this.stopSidebarPing();
     this.clearTextChannelDragHover();

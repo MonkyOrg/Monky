@@ -2,6 +2,7 @@ import { settingsStore } from '../../../stores/settingsStore';
 import { audioProcessor } from '../../../core/AudioProcessor';
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
+import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import { bindPttIndicators, renderPttIndicator } from '../../PttIndicator';
 import { bindMicrophoneLevelMeter } from '../../../core/MicrophoneLevelMeter';
 import { audioDeviceError, populateAudioDeviceSelect, selectAudioDevice, selectedAudioDevice } from '../../../core/AudioDeviceService';
@@ -46,7 +47,7 @@ export class VoiceVideoTab {
           ${t('settings.microphone')}
         </label>
         <div data-device-loading>${renderLoadingSkeleton('lines', 1)}</div>
-        <div data-device-control hidden><select id="select-mic">
+        <div class="voice-video-device-control" data-device-control hidden><select id="select-mic">
           <option value="">${t('settings.loadingMics')}</option>
         </select></div>
         <div id="mic-device-status" class="audio-device-status" role="status"></div>
@@ -171,7 +172,7 @@ export class VoiceVideoTab {
           ${t('audioOutputs.general')}
         </label>
         <div data-device-loading>${renderLoadingSkeleton('lines', 1)}</div>
-        <div data-device-control hidden><select id="select-speaker">
+        <div class="voice-video-device-control" data-device-control hidden><select id="select-speaker">
           <option value="">${t('settings.loadingOutputs')}</option>
         </select></div>
         <div id="speaker-device-status" class="audio-device-status" role="status"></div>
@@ -185,7 +186,7 @@ export class VoiceVideoTab {
           ${t('settings.camera')}
         </label>
         <div data-device-loading>${renderLoadingSkeleton('lines', 1)}</div>
-        <div data-device-control hidden><select id="select-cam">
+        <div class="voice-video-device-control" data-device-control hidden><select id="select-cam">
           <option value="">${t('settings.loadingCameras')}</option>
         </select></div>
         <div id="camera-device-status" class="audio-device-status" role="status"></div>
@@ -243,10 +244,9 @@ export class VoiceVideoTab {
     for (const [mode, card] of [['voice_activity', modeCardVad], ['push_to_talk', modeCardPtt]] as const) {
       const selectMode = () => {
         if (settingsStore.inputMode === mode) return;
-        settingsStore.inputMode = mode;
-        settingsStore.save();
-        if (containerVad) containerVad.style.display = mode === 'voice_activity' ? 'block' : 'none';
-        if (containerPtt) containerPtt.style.display = mode === 'push_to_talk' ? 'block' : 'none';
+        settingsStore.setInputMode(mode);
+        if (containerVad) setSurfaceVisible(containerVad, mode === 'voice_activity', 'panel', 'block');
+        if (containerPtt) setSurfaceVisible(containerPtt, mode === 'push_to_talk', 'panel', 'block');
         modeCardVad?.setAttribute('aria-pressed', String(mode === 'voice_activity'));
         modeCardPtt?.setAttribute('aria-pressed', String(mode === 'push_to_talk'));
       };

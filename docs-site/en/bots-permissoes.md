@@ -29,6 +29,7 @@ When creating or editing a text channel, the **Allow bot commands** switch start
 | `sound_download` | Requesting a Soundboard audio save on the caller's device, without general filesystem access |
 | `selectors` | Persistent public choice controls and their responses; publication also requires `send_messages` |
 | `miniapps` | Shared voice-room miniapps, including authorized participant actions |
+| `live_actions` | Native form/selector banners; also requires `commands` and the caller's `EMIT_LIVE_ACTIONS` permission |
 
 Registering commands requires `commands`; commands with `downloadsSound` also declare `sound_download`, and those with `localCapabilities` declare `local_execution`. Public replies require `send_messages`; default private replies require only `commands`. Role, channel, and initiating-user permissions still apply.
 

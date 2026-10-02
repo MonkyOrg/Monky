@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { LIMITS } from './constants.js';
 import { resolveBotLocale } from './botLocales.js';
+import { botMessageComponentInputSchema } from './botCarousels.js';
 
 const text = z.string().trim().min(1).max(LIMITS.WS_MAX_PAYLOAD_BYTES);
 export const botMessageLocalizationsSchema = z.object({
@@ -12,9 +13,11 @@ export type BotMessageLocalizations = z.infer<typeof botMessageLocalizationsSche
 export const botLocalizedMessageSchema = z.object({
   content: text,
   localizations: botMessageLocalizationsSchema.optional(),
+  components: z.array(botMessageComponentInputSchema).min(1).max(1).optional(),
 }).strict();
 export type BotLocalizedMessage = z.infer<typeof botLocalizedMessageSchema>;
 export type BotMessageContent = string | BotLocalizedMessage;
+export type BotPublishedMessageContent = string | Omit<BotLocalizedMessage, 'components'> & { components?: never };
 
 export function normalizeBotMessageContent(value: BotMessageContent): BotLocalizedMessage {
   return botLocalizedMessageSchema.parse(typeof value === 'string' ? { content: value } : value);

@@ -218,9 +218,11 @@ export const channelAllowedRoleIdsSchema = z
   .transform((ids) => Array.from(new Set(ids)));
 
 export const channelCreateSchema = z.object({
+  categoryId: z.string().min(1).nullable().optional().default(null),
+  inheritCategoryPermissions: z.boolean().optional().default(true),
   botCommandsEnabled: z.boolean().optional().default(true),
   name: channelNameSchema,
-  type: z.enum(['VOICE', 'TEXT']),
+  type: z.enum(['VOICE', 'TEXT', 'FORUM']),
   maxParticipants: z.number().int().min(1).max(50).optional().default(LIMITS.MAX_PARTICIPANTS_PER_CHANNEL_DEFAULT),
   isPrivate: z.boolean().optional().default(false),
   allowedRoleIds: channelAllowedRoleIdsSchema.optional().default([]),
@@ -229,6 +231,8 @@ export const channelCreateSchema = z.object({
 // Editing a channel (#384). Only the fields present are changed, so `name` and
 // `isPrivate` are optional here even though they are required on creation.
 export const channelUpdateSchema = z.object({
+  categoryId: z.string().min(1).nullable().optional(),
+  inheritCategoryPermissions: z.boolean().optional(),
   botCommandsEnabled: z.boolean().optional(),
   channelId: z.string().min(1, 'Canal inválido'),
   name: channelNameSchema.optional(),
@@ -237,15 +241,27 @@ export const channelUpdateSchema = z.object({
   allowedRoleIds: channelAllowedRoleIdsSchema.optional(),
 });
 
-// Reordenar os canais de um tipo (#471). A lista chega inteira, na ordem
-// desejada; o limite acompanha o de canais por servidor e o `min(1)` recusa uma
-// reordenação vazia, que só poderia vir de um payload malformado.
+// A category takes precedence over legacy type-scoped ordering.
 export const channelReorderSchema = z.object({
-  type: z.enum(['VOICE', 'TEXT']),
+  type: z.enum(['VOICE', 'TEXT', 'FORUM']).optional(),
+  categoryId: z.string().min(1).nullable().optional(),
   orderedIds: z
     .array(z.string().min(1, 'Canal inválido'))
     .min(1, 'Nenhum canal informado')
     .max(200, 'Canais demais'),
+}).refine((value) => value.type !== undefined || value.categoryId !== undefined, 'Informe uma categoria ou tipo');
+
+export const categoryCreateSchema = z.object({
+  name: channelNameSchema,
+  isPrivate: z.boolean().optional().default(false),
+  allowedRoleIds: channelAllowedRoleIdsSchema.optional().default([]),
+});
+export const categoryUpdateSchema = categoryCreateSchema.partial().extend({
+  categoryId: z.string().min(1),
+});
+export const categoryDeleteSchema = z.object({ categoryId: z.string().min(1) });
+export const categoryReorderSchema = z.object({
+  orderedIds: z.array(z.string().min(1)).min(1).max(200),
 });
 
 export const roleNameSchema = z
