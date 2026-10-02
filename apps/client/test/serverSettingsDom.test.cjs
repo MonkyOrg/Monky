@@ -679,6 +679,13 @@ async function* runRegression(language, sharedModule) {
   const normalPanelStyle = getComputedStyle(field('#role-editor-tab-permissions'));
   check(normalPanelStyle.display === everyoneDisplay && normalPanelStyle.gap === everyoneGap,
     'Normal roles and Everyone use the same permission panel layout and spacing');
+  for (const permission of [Permission.MANAGE_BOTS, Permission.USE_BOT_COMMANDS, Permission.VIEW_SERVER_MONITOR]) {
+    check(!!field(`[data-role-editor] .role-permission-switch[data-permission="${permission}"]`)?.closest('.permission-switch'),
+      `The opened role editor exposes permission ${permission} as a themed switch`);
+  }
+  check(field(`[data-role-editor] .role-permission-switch[data-permission="${Permission.VIEW_SERVER_MONITOR}"]`)
+    .closest('label').getAttribute('aria-label') === t('permissions.viewServerMonitor'),
+    'The monitor permission in the actual role dialog has a localized accessible label');
   const managementCopy = field('.role-permission-switch[data-permission="8192"]').closest('div').textContent;
   check(managementCopy.includes(t('permissions.manageBotsDesc')) && managementCopy.includes('token') &&
     !/editar o perfil|editing their profiles/i.test(managementCopy),
