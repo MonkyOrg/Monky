@@ -56,9 +56,11 @@ if (!process.versions.electron) {
       vite.httpServer.once('error', reject);
       vite.httpServer.listen(0, '127.0.0.1', resolve);
     });
-    browser = new BrowserWindow({ show: false, width: 1100, height: 850, webPreferences: {
+    browser = new BrowserWindow({ show: false, width: 800, height: 600, webPreferences: {
       contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true,
     } });
+    browser.webContents.debugger.attach('1.3');
+    const selectAllModifier = process.platform === 'darwin' ? 'meta' : 'control';
     const drag = async (from, to) => {
       browser.webContents.sendInputEvent({ type: 'mouseMove', ...from });
       await new Promise(resolve => setTimeout(resolve, 20));
@@ -75,13 +77,39 @@ if (!process.versions.electron) {
       browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...to });
       await new Promise(resolve => setTimeout(resolve, 80));
     };
-    const key = async (keyCode, modifiers = []) => {
-      browser.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers });
-      browser.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers });
+    const key = async (keyCode, modifiers = [], deliveryDelay = 0) => {
+      const inputKeyCode = { ArrowDown: 'Down', ArrowUp: 'Up', ArrowLeft: 'Left', ArrowRight: 'Right' }[keyCode] ?? keyCode;
+      await browser.webContents.executeJavaScript(`window.categoryKeyDelivery = new Promise((resolve, reject) => {
+        const events = [];
+        const received = event => {
+          events.push({ key: event.key, code: event.code, trusted: event.isTrusted });
+          if (!event.isTrusted || event.key.toLowerCase() !== ${JSON.stringify(keyCode.toLowerCase())}) return;
+          clearTimeout(timer);
+          window.removeEventListener('keyup', received, true);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          window.removeEventListener('keyup', received, true);
+          reject(new Error('Native key was not delivered: ' + ${JSON.stringify(keyCode)} + '; ' + JSON.stringify({
+            events, active: document.activeElement?.outerHTML, query: document.querySelector('[data-audience-search]')?.value,
+          })));
+        }, 5000);
+        window.addEventListener('keyup', received, true);
+      }); void 0`);
+      const send = () => {
+        browser.webContents.sendInputEvent({ type: 'keyDown', keyCode: inputKeyCode, modifiers });
+        if (keyCode === 'Enter') browser.webContents.sendInputEvent({ type: 'char', keyCode: '\r', modifiers });
+        browser.webContents.sendInputEvent({ type: 'keyUp', keyCode: inputKeyCode, modifiers });
+      };
+      if (deliveryDelay) setTimeout(send, deliveryDelay);
+      else send();
+      await browser.webContents.executeJavaScript('window.categoryKeyDelivery');
       await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     };
     const resize = async (width) => {
-      browser.setSize(width, 850);
+      await browser.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', {
+        width, height: 850, deviceScaleFactor: 1, mobile: false,
+      });
       await browser.webContents.executeJavaScript(`new Promise((resolve, reject) => {
         let frames = 0;
         const ready = () => {
@@ -146,6 +174,11 @@ if (!process.versions.electron) {
     timeout = setTimeout(() => { console.error('Category DOM timeout'); void finish(1); }, 90000);
     for (const locale of ['pt-BR', 'en']) {
       await browser.loadURL(`http://127.0.0.1:${vite.httpServer.address().port}/__categories__`);
+      await resize(1100);
+      await browser.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
+      await browser.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+        features: [{ name: 'prefers-reduced-motion', value: locale === 'pt-BR' ? 'reduce' : 'no-preference' }],
+      });
       const initial = await browser.webContents.executeJavaScript(`(${regression.toString()})(${JSON.stringify(locale)})
         .then(() => null).catch(error => ({ failure: error.stack || String(error) }))`, true);
       if (initial?.failure) throw new Error(initial.failure);
@@ -220,18 +253,31 @@ if (!process.versions.electron) {
       await click('[data-audience-toggle]');
       await browser.webContents.insertText('Additional');
       await key('ArrowDown');
+      if (!await browser.webContents.executeJavaScript(`document.activeElement?.matches('[data-audience-kind="role"][data-audience-id="additional"]')`)) {
+        throw new Error('Native ArrowDown did not focus the filtered role');
+      }
       await key('Enter');
       if (!await browser.webContents.executeJavaScript(`!!document.querySelector('[data-permission-target="role:additional"].active')`)) {
         throw new Error('Keyboard selection did not add the extra role override');
       }
       await key('Escape');
       await click('[data-audience-toggle]');
-      await key('A', ['control']);
+      // Delivery can lag behind two animation frames; text insertion must await the native key.
+      await key('A', [selectAllModifier], 120);
       await browser.webContents.insertText('ana');
       await key('ArrowDown');
+      if (!await browser.webContents.executeJavaScript(`document.querySelector('[data-audience-search]')?.value === 'ana' && document.activeElement?.matches('[data-audience-kind="user"][data-audience-id="member"]')`)) {
+        throw new Error('Native select-all and ArrowDown did not focus the filtered member');
+      }
       await key('Enter');
       if (!await browser.webContents.executeJavaScript(`!!document.querySelector('[data-permission-target="user:member"].active') && !document.querySelector('[data-audience-id="bot"]')`)) {
-        throw new Error('Searching and selecting a person did not add a member rule or exposed bots');
+        const state = await browser.webContents.executeJavaScript(`({
+          active: document.activeElement?.outerHTML, query: document.querySelector('[data-audience-search]')?.value,
+          popup: !!document.querySelector('[data-audience-popup]:popover-open'),
+          targets: [...document.querySelectorAll('[data-permission-target]')].map(element => element.dataset.permissionTarget),
+          options: [...document.querySelectorAll('[data-audience-id]:not([hidden])')].map(element => element.dataset.audienceId),
+        })`);
+        throw new Error('Searching and selecting a person did not add a member rule or exposed bots: ' + JSON.stringify(state));
       }
       await key('Escape');
       await browser.webContents.executeJavaScript('Promise.allSettled(document.getAnimations({ subtree: true }).map(animation => animation.finished))');
@@ -263,7 +309,7 @@ if (!process.versions.electron) {
           throw new Error(`Settings overflow or unloaded icons at ${width}px: ${JSON.stringify(bounds)}`);
         }
         await click('[data-audience-toggle]');
-        await key('A', ['control']);
+        await key('A', [selectAllModifier]);
         await key('Backspace');
         const popup = await browser.webContents.executeJavaScript(`(() => {
           const popup = document.querySelector('[data-audience-popup]');

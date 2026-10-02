@@ -56,17 +56,30 @@ if (!process.versions.electron) {
       http.listen(0, '127.0.0.1', () => { http.removeListener('error', reject); resolve(); });
     });
     browser = new BrowserWindow({
-      show: false, width: 1100, height: 1000,
+      show: false, width: 800, height: 600,
       webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true },
     });
+    browser.webContents.debugger.attach('1.3');
     browser.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     timeout = setTimeout(() => { console.error('Message search DOM timed out'); void finish(1); }, 90000);
     for (const language of ['pt-BR', 'en']) {
       await browser.loadURL(`http://127.0.0.1:${http.address().port}/__search__`);
+      await browser.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', {
+        width: 1100, height: 1000, deviceScaleFactor: 1, mobile: false,
+      });
+      await browser.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+        features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+      });
       await browser.webContents.executeJavaScript(`window.searchRegression = (${regression.toString()})(${JSON.stringify(language)}); void 0`);
       for (;;) {
         const step = await browser.webContents.executeJavaScript('window.searchRegression.next()', true);
         if (step.done) { console.log(`Message search DOM (${language}): ${step.value} checks passed`); break; }
+        if (['message-jump-reduced-motion', 'message-jump-motion-enabled'].includes(step.value)) {
+          await browser.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+            features: [{ name: 'prefers-reduced-motion', value: step.value.endsWith('reduced-motion') ? 'reduce' : 'no-preference' }],
+          });
+          await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+        }
         if (step.value === 'search-calendar') {
           const point = await browser.webContents.executeJavaScript(`(() => {
             const input = document.querySelector('.message-search-modal [name=start]');
@@ -186,6 +199,10 @@ async function* regression(language) {
   repeatedHighlight.cancel();
   await flush();
   check(!jumpRow.querySelector('.chat-message-jump-highlight'), 'Cancelling a jump highlight cleans up its overlay');
+  yield 'message-jump-reduced-motion';
+  check(highlightMessageJump(jumpRow) === null && !jumpRow.querySelector('.chat-message-jump-highlight'),
+    'Reduced motion does not animate or retain a message jump highlight');
+  yield 'message-jump-motion-enabled';
   jumpRow.remove();
   check(keyboard('f').defaultPrevented, 'Ctrl+F intercepted in text channel');
   check(expanded, 'Opening search requests the members sidebar to collapse');

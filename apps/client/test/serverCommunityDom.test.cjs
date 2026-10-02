@@ -56,12 +56,15 @@ if (!process.versions.electron) {
       vite.httpServer.once('error', reject);
       vite.httpServer.listen(0, '127.0.0.1', resolve);
     });
-    browser = new BrowserWindow({ show: false, width: 1200, height: 1000,
+    browser = new BrowserWindow({ show: false, width: 800, height: 600,
       webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true } });
     browser.webContents.debugger.attach('1.3');
     timeout = setTimeout(() => { console.error('Community DOM timeout'); void finish(1); }, 90000);
     for (const locale of ['pt-BR', 'en']) {
       await browser.loadURL(`http://127.0.0.1:${vite.httpServer.address().port}/__community__`);
+      await browser.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', {
+        width: 1200, height: 1000, deviceScaleFactor: 1, mobile: false,
+      });
       await browser.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
         features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
       });
@@ -2162,7 +2165,9 @@ async function* regression(locale, inviteModule) {
     const listBox = listNode.getBoundingClientRect(), paneBox = pane.getBoundingClientRect();
     const headerBox = mainRoot.querySelector('.forum-header').getBoundingClientRect();
     check(paneBox.left >= listBox.right && Math.abs(paneBox.top - headerBox.top) < 2 && listBox.width >= 240,
-      'Forum and discussion occupy adjacent columns with aligned headers');
+      'Forum and discussion occupy adjacent columns with aligned headers: ' + JSON.stringify({
+        viewport: innerWidth, list: listBox.toJSON(), pane: paneBox.toJSON(), header: headerBox.toJSON(),
+      }));
     check(Math.abs(pane.querySelector('.chat-input-container').getBoundingClientRect().bottom - paneBox.bottom) < 2,
       'The real discussion fills its column and anchors its composer at the bottom');
     check(mainRoot.querySelector('#server-tools').getBoundingClientRect().right <= headerBox.right,
