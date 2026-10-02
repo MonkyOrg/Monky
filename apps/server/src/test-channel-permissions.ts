@@ -253,46 +253,46 @@ test('category managers can manage inherited channels but cannot move them into 
   await owner.peer.request(MessageType.CATEGORY_UPDATE, {
     categoryId, permissionOverwrites: [{ roleId: 'local-manager', allow: 0, deny: Permission.MANAGE_CHANNELS }],
   });
-
-  test('voice uses scoped speaking and revocation removes the physical membership', async t => {
-    const f = await createApprovedBotFixture();
-    t.after(() => f.dispose());
-    const owner = await f.human('Voice owner');
-    const member = await f.human('Voice member');
-    const created = await owner.peer.request(MessageType.CHANNEL_CREATE, {
-      name: 'Controlled voice', type: 'VOICE', permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.SPEAK }],
-    });
-
-    test('global channel management cannot reorder channels with an explicit local denial', async t => {
-      const f = await createApprovedBotFixture();
-      t.after(() => f.dispose());
-      const owner = await f.human('Reorder owner');
-      const manager = await f.human('Reorder manager');
-      await f.roleRepo.create({ id: 'global-manager', name: 'Global manager', permissions: DEFAULT_PERMISSIONS | Permission.MANAGE_CHANNELS,
-        color: null, position: 1, isDefault: false, createdAt: 1 });
-      await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: manager.id, roleId: 'global-manager' });
-      const first = await owner.peer.request(MessageType.CHANNEL_CREATE, {
-        name: 'Protected order', type: 'TEXT', permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.MANAGE_CHANNELS }],
-      });
-      const second = await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'Other order', type: 'TEXT' });
-      await manager.peer.error(MessageType.CHANNEL_REORDER, {
-        categoryId: null, orderedIds: [text(record(second.payload.channel).id), text(record(first.payload.channel).id)],
-      }, ProtocolErrorCode.PERMISSION_DENIED);
-    });
-    const channelId = text(record(created.payload.channel).id);
-    await member.peer.error(MessageType.VOICE_JOIN, { channelId }, ProtocolErrorCode.PERMISSION_DENIED);
-    await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId, permissionOverwrites: [] });
-    assert.equal((await member.peer.request(MessageType.VOICE_JOIN, { channelId })).type, MessageType.VOICE_USER_JOINED);
-    const marker = member.peer.messages.length;
-    await owner.peer.request(MessageType.CHANNEL_UPDATE, {
-      channelId, permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.SPEAK }],
-    });
-    await member.peer.barrier();
-    assert.equal(member.peer.messages.slice(marker).some(message => message.type === MessageType.VOICE_USER_LEFT), true);
-    await member.peer.error(MessageType.VOICE_JOIN, { channelId }, ProtocolErrorCode.PERMISSION_DENIED);
-  });
   await manager.peer.error(MessageType.CATEGORY_UPDATE, { categoryId, name: 'Denied rename' }, ProtocolErrorCode.PERMISSION_DENIED);
   await manager.peer.error(MessageType.CHANNEL_UPDATE, { channelId, name: 'Denied rename' }, ProtocolErrorCode.PERMISSION_DENIED);
+});
+
+test('voice uses scoped speaking and revocation removes the physical membership', async t => {
+  const f = await createApprovedBotFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Voice owner');
+  const member = await f.human('Voice member');
+  const created = await owner.peer.request(MessageType.CHANNEL_CREATE, {
+    name: 'Controlled voice', type: 'VOICE', permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.SPEAK }],
+  });
+  const channelId = text(record(created.payload.channel).id);
+  await member.peer.error(MessageType.VOICE_JOIN, { channelId }, ProtocolErrorCode.PERMISSION_DENIED);
+  await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId, permissionOverwrites: [] });
+  assert.equal((await member.peer.request(MessageType.VOICE_JOIN, { channelId })).type, MessageType.VOICE_USER_JOINED);
+  const marker = member.peer.messages.length;
+  await owner.peer.request(MessageType.CHANNEL_UPDATE, {
+    channelId, permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.SPEAK }],
+  });
+  await member.peer.barrier();
+  assert.equal(member.peer.messages.slice(marker).some(message => message.type === MessageType.VOICE_USER_LEFT), true);
+  await member.peer.error(MessageType.VOICE_JOIN, { channelId }, ProtocolErrorCode.PERMISSION_DENIED);
+});
+
+test('global channel management cannot reorder channels with an explicit local denial', async t => {
+  const f = await createApprovedBotFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Reorder owner');
+  const manager = await f.human('Reorder manager');
+  await f.roleRepo.create({ id: 'global-manager', name: 'Global manager', permissions: DEFAULT_PERMISSIONS | Permission.MANAGE_CHANNELS,
+    color: null, position: 1, isDefault: false, createdAt: 1 });
+  await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: manager.id, roleId: 'global-manager' });
+  const first = await owner.peer.request(MessageType.CHANNEL_CREATE, {
+    name: 'Protected order', type: 'TEXT', permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.MANAGE_CHANNELS }],
+  });
+  const second = await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'Other order', type: 'TEXT' });
+  await manager.peer.error(MessageType.CHANNEL_REORDER, {
+    categoryId: null, orderedIds: [text(record(second.payload.channel).id), text(record(first.payload.channel).id)],
+  }, ProtocolErrorCode.PERMISSION_DENIED);
 });
 
 test('live read revocation, scoped reading grants, and direct service sending use the same rules', async t => {

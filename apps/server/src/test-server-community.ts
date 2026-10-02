@@ -658,7 +658,7 @@ test('native live forms enforce creation, editable responses, results and close 
     id: formId, expectedRevision: 0, values: firstValues,
   });
 
-  test('private bot actions and native forms enforce audience OR semantics, manager bypass and role revocation', async t => {
+  await t.test('private bot actions and native forms enforce audience OR semantics, manager bypass and role revocation', async t => {
     const f = await setup(t);
     const outsider = await f.human('Private action outsider');
     const manager = await f.human('Private action manager');
@@ -757,7 +757,7 @@ test('native live forms enforce creation, editable responses, results and close 
     await f.service.closeNativeForm(manager.id, form.id, f.now + 3);
   });
 
-  test('private poll messages are non-disclosing in realtime, history, jumps, replies, search totals and cursors', async t => {
+  await t.test('private poll messages are non-disclosing in realtime, history, jumps, replies, search totals and cursors', async t => {
     const f = await setup(t);
     const outsider = await f.human('Private poll outsider');
     const manager = await f.human('Private poll manager');
