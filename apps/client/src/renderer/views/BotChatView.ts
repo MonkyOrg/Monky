@@ -1231,7 +1231,7 @@ export class BotChatView {
       const binding = this.fieldBinding(button);
       if (!binding) return;
       const error = button.closest('form')?.querySelector<HTMLElement>('.bot-error');
-      if ((button.dataset.carouselEdit ?? button.dataset.fieldAction?.replace('image-', '')) === 'add') {
+      if (button.dataset.carouselEdit === 'add' || button.dataset.fieldAction === 'image-add') {
         button.disabled = true;
         void addBotFieldImage(button, binding.fields, binding.values, binding.context)
           .then(values => { if (values) binding.save(values); })

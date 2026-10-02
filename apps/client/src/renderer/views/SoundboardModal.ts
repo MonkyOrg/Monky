@@ -19,7 +19,6 @@ import { enableBackdropClose } from '../utils/modal';
 import { matchesSearch as matchesSoundSearch } from '../utils/search';
 import { sortFavoritesFirst } from '../utils/favoriteOrder';
 import { setButtonLoading } from '../utils/buttonLoading';
-import { smoothScrollIntoView } from '../utils/scroll';
 import { FavoriteListMotion, type FavoriteMotionKind } from '../utils/favoriteMotion';
 import { renderFavoriteToggle, renderFavoritesFilter, updateFavoritesFilter } from './FavoritesControls';
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
@@ -430,7 +429,7 @@ export class SoundboardModal {
           ?? nextButtons[Math.min(focusedIndex, nextButtons.length - 1)]
           ?? modal.querySelector<HTMLButtonElement>('#sb-filter-favorites');
         next?.focus({ preventScroll: true });
-        if (next) smoothScrollIntoView(next, { block: 'nearest', inline: 'nearest' });
+        next?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
       }
     }, animate);
   }

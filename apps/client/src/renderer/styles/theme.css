@@ -9074,8 +9074,10 @@ button[data-loading="1"]::after {
 .share-audience-trigger[aria-expanded="true"] .share-audience-chevron { transform: rotate(180deg); }
 
 .share-audience-popup {
-  position: fixed;
-  inset: auto;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
   z-index: 5;
   display: flex;
   flex-direction: column;

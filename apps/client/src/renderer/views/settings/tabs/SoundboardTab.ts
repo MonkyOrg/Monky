@@ -13,7 +13,6 @@ import { clientLog } from '../../../core/ClientLogService';
 import { renderFavoriteToggle, renderFavoritesFilter } from '../../FavoritesControls';
 import { showAlert } from '../../Dialog';
 import { setButtonLoading } from '../../../utils/buttonLoading';
-import { smoothScrollIntoView } from '../../../utils/scroll';
 import type { SoundboardDownloadAvailability } from '@monky/shared';
 import { renderLoadingError, renderLoadingSkeleton } from '../../../utils/loadingSkeleton';
 import { bindSoundboardLimiterControls, renderSoundboardLimiterControls } from '../../SoundboardLimiterControls';
@@ -453,11 +452,11 @@ export class SoundboardTab {
           ?? nextButtons[Math.min(favoriteIndex, nextButtons.length - 1)]
           ?? table.querySelector<HTMLButtonElement>('#sb-settings-filter-favorites');
         next?.focus({ preventScroll: true });
-        if (next) smoothScrollIntoView(next, { block: 'nearest', inline: 'nearest' });
+        next?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
       } else if (filterId) {
         const next = table.querySelector<HTMLButtonElement>(`#${filterId}`);
         next?.focus({ preventScroll: true });
-        if (next) smoothScrollIntoView(next, { block: 'nearest', inline: 'nearest' });
+        next?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
       } else if (selection) {
         const input = table.querySelector<HTMLInputElement>(`#${selection.id}`);
         input?.focus({ preventScroll: true });

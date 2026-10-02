@@ -118,7 +118,10 @@ export function bindSoundboardLimiterControls(container: HTMLElement): () => voi
     if (mounted()) await showAlert({ message, variant: 'danger' });
   };
   const restoreFocus = (control: HTMLInputElement, wasFocused: boolean) => {
-    if (mounted() && wasFocused && document.activeElement === document.body && !control.disabled) {
+    const active = document.activeElement;
+    const focusWasRetired = active === document.body
+      || (active instanceof HTMLElement && !!active.closest('[inert], [hidden], [data-ui-closing]'));
+    if (mounted() && wasFocused && focusWasRetired && !control.disabled) {
       control.focus({ preventScroll: true });
     }
   };

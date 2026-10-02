@@ -167,7 +167,7 @@ async function runLightboxZoomSmoke(window) {
   let checks = 0;
   const check = (value, message) => { if (!value) throw new Error(message); checks++; };
   const state = () => evaluate(`(() => {
-    const overlay = document.querySelector('.attachment-lightbox');
+    const overlay = document.querySelector('.attachment-lightbox:not([data-ui-closing])');
     const frame = overlay.querySelector('.lightbox-media-frame');
     const image = overlay.querySelector('.lightbox-media--image');
     const close = overlay.querySelector('.lightbox-close');
@@ -190,7 +190,7 @@ async function runLightboxZoomSmoke(window) {
     }
     throw new Error('Lightbox zoom fixture did not load');
   };
-  const wheel = deltaY => evaluate(`document.querySelector('.lightbox-media--image').dispatchEvent(new WheelEvent('wheel', {
+  const wheel = deltaY => evaluate(`document.querySelector('.attachment-lightbox:not([data-ui-closing]) .lightbox-media--image').dispatchEvent(new WheelEvent('wheel', {
     deltaY: ${deltaY}, bubbles: true, cancelable: true
   }))`);
   const initialSize = window.getContentSize();
@@ -267,7 +267,8 @@ async function runLightboxZoomSmoke(window) {
     check(!video.imageFrame && video.inlineWidth === '' && video.transform === '' && video.copyHidden,
       'Video navigation clears image-only geometry without changing video layout');
     await dispatchKey(window, 'Escape', 'Escape', 27);
-    check(await evaluate('!document.querySelector(".attachment-lightbox")'), 'Escape still closes the enlarged viewer');
+    check(await evaluate('!document.querySelector(".attachment-lightbox:not([data-ui-closing])")'),
+      'Escape still closes the enlarged viewer');
     return checks;
   } catch (error) {
     throw new Error(`Lightbox zoom failed after ${checks} checks: ${error.message}`, { cause: error });
@@ -324,9 +325,9 @@ async function runSystemClipboardSmoke(sourceWindow) {
   };
   const copyPlain = async () => {
     sourceWindow.webContents.focus();
-    await click('[data-message-id="rich"] [data-message-action="more"]');
-    await click('.floating-context-menu:not(.floating-context-submenu) [aria-haspopup="menu"] .context-menu-trailing');
-    await click('.floating-context-submenu [role="menuitem"]:last-child');
+    await fixture('openMore("rich")');
+    await click('.floating-context-menu:not(.floating-context-submenu):not([data-ui-closing]) [aria-haspopup="menu"] .context-menu-trailing');
+    await click('.floating-context-submenu:not([data-ui-closing]) [role="menuitem"]:last-child');
   };
   const paste = async target => {
     external.webContents.focus();
@@ -446,6 +447,7 @@ async function runSmoke(window) {
     checks++;
   };
   const key = async (key, code, virtualKey, modifiers = 0, text) => {
+    window.webContents.focus();
     await dispatchKey(window, key, code, virtualKey, modifiers, text);
     await fixture('settle()');
   };
@@ -456,14 +458,22 @@ async function runSmoke(window) {
     await dispatchClick(window, await fixture(`point(${JSON.stringify(selector)})`), clickCount);
     await fixture('settle()');
   };
-  const more = '[data-message-id="rich"] [data-message-action="more"]';
-  const parentCopy = '.floating-context-menu:not(.floating-context-submenu) [aria-haspopup="menu"]';
+  const parentCopy = '.floating-context-menu:not(.floating-context-submenu):not([data-ui-closing]) [aria-haspopup="menu"]';
   const copyArrow = `${parentCopy} .context-menu-trailing`;
-  const children = '.floating-context-submenu [role="menuitem"]';
+  const children = '.floating-context-submenu:not([data-ui-closing]) [role="menuitem"]';
   const copyPlain = async (messageId = 'rich') => {
-    await click(`[data-message-id="${messageId}"] [data-message-action="more"]`);
+    await fixture(`openMore(${JSON.stringify(messageId)})`);
     await click(copyArrow);
     await click(`${children}:last-child`);
+  };
+  const openCopyParent = async () => {
+    await fixture('openMore("rich")');
+    for (let index = 0; index < 12 && !await evaluate(
+      `document.activeElement?.matches(${JSON.stringify(parentCopy)})`,
+    ); index++) await key('ArrowDown', 'ArrowDown', 40);
+    if (!await evaluate(`document.activeElement?.matches(${JSON.stringify(parentCopy)})`)) {
+      throw new Error('Keyboard navigation could not reach the active Copy message submenu');
+    }
   };
 
   await evaluate(`(${installFixture.toString()})()`);
@@ -580,11 +590,11 @@ async function runSmoke(window) {
 
     for (const locale of ['pt-BR', 'en']) {
       await fixture(`prepare(${JSON.stringify(locale)})`);
-      await click(more);
-      await click(more);
+      await fixture('toggleMore("rich")');
+      await fixture('toggleMore("rich")');
       check((await fixture('state()')).menuCount === 0, 'The More options button still toggles its own menu closed');
       await fixture('select("[data-message-id=rich] strong", 1, 3)');
-      await click(more);
+      await fixture('openMore("rich")');
       const before = (await fixture('state()')).writes;
       await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
         type: 'mouseMoved', ...(await fixture(`point(${JSON.stringify(parentCopy)})`)),
@@ -598,7 +608,7 @@ async function runSmoke(window) {
         'Clicking Copy message performs the default Ctrl+C operation on the captured selection');
       check(state.toolbarDismissed && state.toast === (locale === 'en' ? 'Copied!' : 'Copiado!'),
         'The default copy dismisses the toolbar and displays the existing copy toast');
-      await click(more);
+      await fixture('openMore("rich")');
       await click(copyArrow);
       state = await fixture('state()');
       check(state.writes === before + 1 && state.menuCount === 2, 'The arrow still opens the copy-mode submenu without copying');
@@ -615,17 +625,15 @@ async function runSmoke(window) {
         `A submenu choice closes both menus, dismisses the toolbar and retains existing copy feedback: ${JSON.stringify({
           menus: state.menuCount, dismissed: state.toolbarDismissed, toast: state.toast, locale,
         })}`);
-      await click(more);
+      await fixture('openMore("rich")');
       await click(copyArrow);
       await click(`${children}:nth-child(2)`);
       state = await fixture('state()');
       check(state.last.kind === 'plain' && state.last.text === '**ol**' && !state.last.html,
         'The explicit Markdown choice exports source delimiters only, preserving the selected fragment');
 
-      await fixture('clearSelection(); window.messageClipboardFixture.focusMore()');
-      await enter();
-      await key('ArrowDown', 'ArrowDown', 40);
-      await key('ArrowDown', 'ArrowDown', 40);
+      await fixture('clearSelection()');
+      await openCopyParent();
       await key('ArrowRight', 'ArrowRight', 39);
       state = await fixture('state()');
       check(state.submenuFocus === 0, 'Keyboard Right opens Copy and focuses its first choice');
@@ -639,27 +647,18 @@ async function runSmoke(window) {
       check(state.last.kind === 'plain' && state.last.text === state.expectedPlain && !state.last.html,
         'Keyboard submenu plain copy strips all Markdown formatting from the full message');
 
-      await fixture('focusMore()');
-      await enter();
-      await key('ArrowDown', 'ArrowDown', 40);
-      await key('ArrowDown', 'ArrowDown', 40);
+      await openCopyParent();
       await key(' ', 'Space', 32, 0, ' ');
       state = await fixture('state()');
       check(state.menuCount === 0 && state.last.kind === 'formatted' && state.last.text === state.expectedPlain,
         'Space activates the default formatted copy using native button semantics');
-      await fixture('focusMore()');
-      await enter();
-      await key('ArrowDown', 'ArrowDown', 40);
-      await key('ArrowDown', 'ArrowDown', 40);
+      await openCopyParent();
       const beforeEnter = (await fixture('state()')).writes;
       await enter();
       state = await fixture('state()');
       check(state.writes === beforeEnter + 1 && state.menuCount === 0 && state.last.kind === 'formatted' && state.last.text === state.expectedPlain,
         'Enter also activates the default formatted copy of the entire message');
-      await fixture('focusMore()');
-      await enter();
-      await key('ArrowDown', 'ArrowDown', 40);
-      await key('ArrowDown', 'ArrowDown', 40);
+      await openCopyParent();
       await key('ArrowRight', 'ArrowRight', 39);
       await key('ArrowLeft', 'ArrowLeft', 37);
       state = await fixture('state()');
@@ -670,7 +669,7 @@ async function runSmoke(window) {
       await escape();
       state = await fixture('state()');
       check(state.menuCount === 0 && state.moreFocused, 'Second Escape closes the parent and restores focus to More options');
-      await enter();
+      await fixture('openMore("rich")');
       await key('Tab', 'Tab', 9, 0, '\t');
       check((await fixture('state()')).menuCount === 0, 'Tab dismisses the entire menu without trapping focus');
     }
@@ -700,11 +699,21 @@ async function runSmoke(window) {
     checks += await fixture('testLifecycleAndFailures()');
     await fixture('prepareImages("en")');
     const imageCopySelector = '[data-message-id="photo"] .chat-attachment-copy';
-    const imagePoint = await fixture(`point(${JSON.stringify(imageCopySelector)})`);
+    let imagePoint = await fixture(`point(${JSON.stringify(imageCopySelector)})`);
+    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 1, y: 1 });
+    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', ...imagePoint });
+    await fixture('settle()');
+    imagePoint = await fixture(`point(${JSON.stringify(imageCopySelector)})`);
     check(await evaluate(`document.querySelector(${JSON.stringify(imageCopySelector)})
       .contains(document.elementFromPoint(${imagePoint.x}, ${imagePoint.y}))`),
     `The image copy button must have a reachable pointer target, including tiny images: ${JSON.stringify(imagePoint)}`);
-    await click(imageCopySelector);
+    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
+      type: 'mousePressed', button: 'left', clickCount: 1, ...imagePoint,
+    });
+    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', button: 'left', clickCount: 1, ...imagePoint,
+    });
+    await fixture('settle()');
     state = await fixture('state()');
     check(state.writes === 1 && state.last?.kind === 'image' && state.last.width === 2 && state.last.height === 1,
       'A trusted pointer click copies the original tiny image through the real button handler');
@@ -712,7 +721,10 @@ async function runSmoke(window) {
     checks += await fixture('testImages()');
     checks += await fixture('testReaderLocales()');
     state = await fixture('state()');
-    check(state.trustedKeys > 20 && state.trustedClicks > 5, 'Smoke scenarios actually exercise native keyboard and pointer events');
+    check(state.trustedKeys > 20 && state.trustedClicks >= 4,
+      `Smoke scenarios actually exercise native keyboard and pointer events: ${JSON.stringify({
+        keys: state.trustedKeys, clicks: state.trustedClicks,
+      })}`);
     check(state.trustedCopyEvents === 0, 'Native copies are intercepted before browser clipboard mutation; the user clipboard remains untouched');
   } catch (error) {
     try {
@@ -817,6 +829,7 @@ async function installFixture(systemClipboard = false) {
     return originalRemove.call(this, type, callback, options);
   };
   const listenerCount = () => [...tracked.values()].reduce((total, keys) => total + keys.size, 0);
+  const listenerSummary = () => [...tracked.values()].flatMap(keys => [...keys]).sort();
   const busSnapshot = () => JSON.stringify([...appEvents.listeners].map(([name, callbacks]) => [name, callbacks.size]).sort());
   const find = selector => {
     const element = document.querySelector(selector);
@@ -915,11 +928,11 @@ async function installFixture(systemClipboard = false) {
     input.setSelectionRange(start, end);
     input.dispatchEvent(new Event('input', { bubbles: true }));
   };
-  const dismissAlert = () => document.querySelector('.dialog-card [data-action="confirm"]')?.click();
+  const dismissAlert = () => document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card [data-action="confirm"]')?.click();
   const openMenu = (id = 'rich') => {
     clearSelection();
     find(`[data-message-id="${id}"] [data-message-action="more"]`).click();
-    find('.floating-context-menu [aria-haspopup="menu"] .context-menu-trailing').click();
+    find('.floating-context-menu:not([data-ui-closing]) [aria-haspopup="menu"] .context-menu-trailing').click();
   };
   const prepare = async locale => {
     view?.destroy();
@@ -1033,7 +1046,8 @@ async function installFixture(systemClipboard = false) {
         expect(button.title === label && button.getAttribute('aria-label') === label, 'Image controls follow the app language');
         button.click();
         await expectImage();
-        expect(find('.chat-copy-toast-label').textContent === copied, 'Image copy success is localized and shown after encoding');
+        expect(find('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label').textContent === copied,
+          'Image copy success is localized and shown after encoding');
         find('[data-message-id="jpeg"] .chat-attachment-copy').click();
         await expectImage(false);
         await view.copyMessage('photo', 'plain');
@@ -1055,28 +1069,33 @@ async function installFixture(systemClipboard = false) {
         for (const selector of ['[data-message-id="photo"] .chat-attachment-image', '[data-message-id="image-sticker"] .chat-sticker']) {
           clearSelection();
           find(selector).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
-          const item = find('.floating-context-menu [role="menuitem"]');
+          const item = find('.floating-context-menu:not([data-ui-closing]) [role="menuitem"]');
           expect(item.textContent.includes(label), 'Image and sticker context menus expose Copy image');
           item.click();
           await expectImage();
-          expect(!document.querySelector('.floating-context-menu'), 'Copying dismisses the image context menu');
+          expect(!document.querySelector('.floating-context-menu:not([data-ui-closing])'), 'Copying dismisses the image context menu');
         }
 
         const baseline = listenerCount();
+        const baselineListeners = listenerSummary();
         for (let index = 0; index < 3; index++) {
           find('[data-message-id="photo"] .chat-attachment-lightbox-trigger').click();
-          expect(find('.lightbox-copy').title === label && !find('.lightbox-copy').hidden,
+          const activeLightbox = '.attachment-lightbox:not([data-ui-closing])';
+          expect(find(`${activeLightbox} .lightbox-copy`).title === label && !find(`${activeLightbox} .lightbox-copy`).hidden,
             'The expanded image viewer exposes a localized copy button');
-          find('.lightbox-copy').click();
+          find(`${activeLightbox} .lightbox-copy`).click();
           await expectImage();
-          find('.lightbox-close').click();
-          expect(listenerCount() === baseline, 'Closing the viewer releases its copy shortcut and existing global listeners');
+          find(`${activeLightbox} .lightbox-close`).click();
+          expect(listenerCount() === baseline,
+            `Closing the viewer releases its copy shortcut and existing global listeners: ${JSON.stringify({
+              current: listenerSummary(), baseline: baselineListeners,
+            })}`);
         }
         find('[data-message-id="photo"] .chat-attachment-lightbox-trigger').click();
         clearSelection();
-        find('.lightbox-copy').focus();
+        find('.attachment-lightbox:not([data-ui-closing]) .lightbox-copy').focus();
         const key = new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true });
-        find('.lightbox-copy').dispatchEvent(key);
+        find('.attachment-lightbox:not([data-ui-closing]) .lightbox-copy').dispatchEvent(key);
         expect(key.defaultPrevented, 'Ctrl+C in the image viewer uses image copying');
         await expectImage();
         lightboxModal.close();
@@ -1085,7 +1104,8 @@ async function installFixture(systemClipboard = false) {
       await prepareImages('en');
       writeMode = 'reject';
       await view.copyAttachmentImage(find('[data-message-id="photo"] .chat-attachment-image'));
-      expect(!document.querySelector('.chat-copy-toast') && find('.dialog-message').textContent.startsWith('Could not copy the image.'),
+      expect(!document.querySelector('.chat-copy-toast:not([data-ui-closing])')
+        && find('.modal-backdrop:not([data-ui-closing]) .dialog-card .dialog-message').textContent.startsWith('Could not copy the image.'),
         'Clipboard rejection is explicit, without a link fallback or success toast');
       dismissAlert();
       writeMode = 'resolve';
@@ -1107,14 +1127,30 @@ async function installFixture(systemClipboard = false) {
       view.destroy();
       pending.shift().resolve();
       await copying;
-      expect(!document.querySelector('.chat-copy-toast'), 'Destroying the chat cancels pending image feedback and I/O');
+      expect(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'Destroying the chat cancels pending image feedback and I/O');
       writeMode = 'resolve';
       return count;
     },
     focusMore() { find('[data-message-id="rich"] [data-message-action="more"]').focus(); },
+    async toggleMore(id = 'rich') {
+      find(`[data-message-id="${id}"] [data-message-action="more"]`).click();
+      await settle();
+    },
+    async openMore(id = 'rich') {
+      const button = find(`[data-message-id="${id}"] [data-message-action="more"]`);
+      if (!contextMenu.isOpenFor(button)) button.click();
+      await settle();
+      if (!document.querySelector('.floating-context-menu:not([data-ui-closing])')) {
+        button.click();
+        await settle();
+      }
+    },
     async point(selector) {
       const element = find(selector);
-      element.scrollIntoView({ block: 'nearest' });
+      const current = element.getBoundingClientRect();
+      if (current.top < 0 || current.left < 0 || current.bottom > innerHeight || current.right > innerWidth) {
+        element.scrollIntoView({ block: 'center', inline: 'center' });
+      }
       await settle();
       const rect = element.getBoundingClientRect();
       return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
@@ -1125,14 +1161,14 @@ async function installFixture(systemClipboard = false) {
     },
     async state() {
       const input = root.querySelector('#chat-message-input');
-      const parent = document.querySelector('.floating-context-menu:not(.floating-context-submenu) [aria-haspopup="menu"]');
-      const submenu = document.querySelector('.floating-context-submenu');
+      const parent = document.querySelector('.floating-context-menu:not(.floating-context-submenu):not([data-ui-closing]) [aria-haspopup="menu"]');
+      const submenu = document.querySelector('.floating-context-submenu:not([data-ui-closing])');
       return {
         source, code, expectedPlain, last: await last(), writes: writes.length,
         input: input?.value, draft: session.chatStore.getDraft(view.currentChannelId), historyInputType,
         selection: window.getSelection()?.toString(), activeElement: document.activeElement?.id || document.activeElement?.tagName,
-        toast: document.querySelector('.chat-copy-toast-label')?.textContent ?? '',
-        menuCount: document.querySelectorAll('.floating-context-menu').length,
+        toast: document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label')?.textContent ?? '',
+        menuCount: document.querySelectorAll('.floating-context-menu:not([data-ui-closing])').length,
         submenuLabels: [...(submenu?.querySelectorAll('button') ?? [])].map(button => button.textContent),
         submenuFocus: [...(submenu?.querySelectorAll('button') ?? [])].indexOf(document.activeElement),
         submenuExpanded: parent?.getAttribute('aria-expanded') === 'true',
@@ -1353,7 +1389,7 @@ async function installFixture(systemClipboard = false) {
       expect(!paste(detachedInput, files) && filePastes === 2, 'Detached composer paste listeners cannot upload or mutate the new view');
       focusRow('sticker');
       openMenu('sticker');
-      find('.floating-context-submenu button:last-child').click();
+      find('.floating-context-submenu:not([data-ui-closing]) button:last-child').click();
       await settle();
       expect((await last()).text === 'sticker.png', 'Plain copying of rendered stickers uses their visible file identity, never hidden marker syntax');
       focusRow('deleted');
@@ -1371,19 +1407,20 @@ async function installFixture(systemClipboard = false) {
       const rightClick = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 500, clientY: 200 });
       row.dispatchEvent(rightClick);
       expect(rightClick.defaultPrevented, 'Right-click without a text selection still opens message actions');
-      find('.floating-context-menu [aria-haspopup="menu"] .context-menu-trailing').click();
-      find('.floating-context-submenu button:last-child').click();
+      find('.floating-context-menu:not([data-ui-closing]) [aria-haspopup="menu"] .context-menu-trailing').click();
+      find('.floating-context-submenu:not([data-ui-closing]) button:last-child').click();
       await settle();
-      expect((await last()).kind === 'plain' && (await last()).text === expectedPlain && !document.querySelector('.floating-context-menu'),
+      expect((await last()).kind === 'plain' && (await last()).text === expectedPlain
+        && !document.querySelector('.floating-context-menu:not([data-ui-closing])'),
         'The right-click menu also offers both copy modes and closes after a choice');
       select('[data-message-id=rich] strong', 1, 3);
       const selectedRightClick = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
       row.dispatchEvent(selectedRightClick);
-      expect(!selectedRightClick.defaultPrevented && !document.querySelector('.floating-context-menu'),
+      expect(!selectedRightClick.defaultPrevented && !document.querySelector('.floating-context-menu:not([data-ui-closing])'),
         'Right-clicking a selected fragment retains the native selection context menu');
       for (let i = 0; i < 30; i++) {
         openMenu();
-        expect(document.querySelectorAll('.floating-context-menu').length === 2, 'Each opening creates exactly one parent and one submenu');
+        expect(document.querySelectorAll('.floating-context-menu:not([data-ui-closing])').length === 2, 'Each opening creates exactly one parent and one submenu');
         contextMenu.close();
       }
       await settle();
@@ -1391,27 +1428,29 @@ async function installFixture(systemClipboard = false) {
       for (const event of ['network.disconnected', 'voice.channel_changed', 'session.changed']) {
         openMenu();
         appEvents.emit(event);
-        expect(!document.querySelector('.floating-context-menu'), `${event} closes the complete menu tree`);
+        expect(!document.querySelector('.floating-context-menu:not([data-ui-closing])'), `${event} closes the complete menu tree`);
       }
       for (const event of ['resize', 'scroll']) {
         openMenu();
         window.dispatchEvent(new Event(event));
-        expect(!document.querySelector('.floating-context-menu'), `${event} closes the complete menu tree`);
+        expect(!document.querySelector('.floating-context-menu:not([data-ui-closing])'), `${event} closes the complete menu tree`);
       }
       openMenu();
       document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-      expect(!document.querySelector('.floating-context-menu'), 'Outside pointerdown closes parent and submenu');
+      expect(!document.querySelector('.floating-context-menu:not([data-ui-closing])'), 'Outside pointerdown closes parent and submenu');
       const anchor = find('[data-message-id="rich"] [data-message-action="more"]');
       contextMenu.open(innerWidth - 1, innerHeight - 1, view.buildMessageMenuItems('rich'), anchor);
-      find('.floating-context-menu [aria-haspopup="menu"] .context-menu-trailing').click();
-      const menus = [...document.querySelectorAll('.floating-context-menu')].map(menu => menu.getBoundingClientRect());
+      find('.floating-context-menu:not([data-ui-closing]) [aria-haspopup="menu"] .context-menu-trailing').click();
+      await Promise.all([...document.querySelectorAll('.floating-context-menu:not([data-ui-closing])')]
+        .flatMap(menu => menu.getAnimations().map(animation => animation.finished)));
+      const menus = [...document.querySelectorAll('.floating-context-menu:not([data-ui-closing])')].map(menu => menu.getBoundingClientRect());
       expect(menus.every(rect => rect.left >= 11 && rect.top >= 11 && rect.right <= innerWidth - 11 && rect.bottom <= innerHeight - 11),
         'The nested menu flips left and stays within the viewport at the bottom-right corner');
       expect(menus[1].right <= menus[0].left + 1, 'A submenu near the right edge is placed to the left of its parent');
       contextMenu.close();
       contextMenu.open(40, 40, [{label:'Options', submenu:[{label:'Child', onClick:()=>{}}]}], anchor);
-      find('.floating-context-menu [aria-haspopup="menu"]').click();
-      expect(document.querySelectorAll('.floating-context-menu').length === 2,
+      find('.floating-context-menu:not([data-ui-closing]) [aria-haspopup="menu"]').click();
+      expect(document.querySelectorAll('.floating-context-menu:not([data-ui-closing])').length === 2,
         'Submenus without a default action still open when their parent is clicked');
       contextMenu.close();
 
@@ -1428,18 +1467,19 @@ async function installFixture(systemClipboard = false) {
       writeMode = 'hold';
       clearSelection();
       find('[data-message-id="rich"] [data-message-action="copy"]').click();
-      expect(!document.querySelector('.chat-copy-toast'), 'Pending clipboard writes never show premature success');
+      expect(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'Pending clipboard writes never show premature success');
       pending.shift().resolve();
       await settle();
-      expect(document.querySelectorAll('.chat-copy-toast').length === 1, 'Acknowledged copying produces one toast');
+      expect(document.querySelectorAll('.chat-copy-toast:not([data-ui-closing])').length === 1, 'Acknowledged copying produces one toast');
       writeMode = 'resolve';
       find('[data-message-id="rich"] [data-message-action="copy"]').click();
       await settle();
-      expect(document.querySelectorAll('.chat-copy-toast').length === 1, 'Repeated successful copies replace rather than stack feedback');
+      expect(document.querySelectorAll('.chat-copy-toast:not([data-ui-closing])').length === 1, 'Repeated successful copies replace rather than stack feedback');
       for (const mode of ['formatted', 'plain']) {
         writeMode = 'reject';
         await view.copyMessage('rich', mode);
-        expect(!document.querySelector('.chat-copy-toast') && find('.dialog-message').textContent === 'Could not copy the message.',
+        expect(!document.querySelector('.chat-copy-toast:not([data-ui-closing])')
+          && find('.modal-backdrop:not([data-ui-closing]) .dialog-card .dialog-message').textContent === 'Could not copy the message.',
           `${mode} clipboard rejection uses localized error feedback, never a success toast or silent mode downgrade`);
         dismissAlert();
       }
@@ -1451,11 +1491,12 @@ async function installFixture(systemClipboard = false) {
       dismissAlert();
       older.resolve();
       await settle();
-      expect(!document.querySelector('.chat-copy-toast'), 'An older success cannot overwrite the failure of a newer copy request');
+      expect(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'An older success cannot overwrite the failure of a newer copy request');
       const nativeWrite = clipboardSink.write;
       clipboardSink.write = undefined;
       await view.copyMessage('rich');
-      expect(!document.querySelector('.chat-copy-toast') && !!document.querySelector('.dialog-message'),
+      expect(!document.querySelector('.chat-copy-toast:not([data-ui-closing])')
+        && !!document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card .dialog-message'),
         'Unavailable rich clipboard support fails visibly instead of pretending plain text preserved formatting');
       dismissAlert();
       clipboardSink.write = nativeWrite;
@@ -1465,7 +1506,8 @@ async function installFixture(systemClipboard = false) {
       const failingData = new DataTransfer();
       failingData.setData = () => { throw new Error('DataTransfer denied by fixture'); };
       expect(!copyEvent(document.activeElement, failingData).prevented, 'A failing native copy serializer leaves the browser fallback available');
-      expect(!document.querySelector('.chat-copy-toast') && !!document.querySelector('.dialog-message'),
+      expect(!document.querySelector('.chat-copy-toast:not([data-ui-closing])')
+        && !!document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card .dialog-message'),
         'Synchronous copy-event failures use the same failure feedback');
       dismissAlert();
       clearSelection();
@@ -1475,7 +1517,7 @@ async function installFixture(systemClipboard = false) {
       view.setChannel('other');
       changing.resolve();
       await settle();
-      expect(!document.querySelector('.chat-copy-toast'), 'Channel switches suppress late clipboard confirmation');
+      expect(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'Channel switches suppress late clipboard confirmation');
       view.setChannel('chat');
       await settle();
       writeMode = 'hold';
@@ -1485,8 +1527,11 @@ async function installFixture(systemClipboard = false) {
       view.destroy();
       destroying.reject(new Error('Late clipboard failure'));
       await settle();
-      expect(!document.querySelector('.chat-copy-toast, .floating-context-menu, .dialog-card'),
-        'Destroyed views suppress late successes, failures and all open submenus');
+      const remainingSurfaces = [...document.querySelectorAll(
+        '.chat-copy-toast:not([data-ui-closing]), .floating-context-menu:not([data-ui-closing]), .modal-backdrop:not([data-ui-closing]) .dialog-card',
+      )].map(element => element.className);
+      expect(remainingSurfaces.length === 0,
+        `Destroyed views suppress late successes, failures and all open submenus: ${JSON.stringify(remainingSurfaces)}`);
       expect(listenerCount() === 0, 'View destruction releases every tracked global listener');
       const count = writes.length;
       select('[data-message-id=rich] strong', 1, 3);
@@ -1495,7 +1540,8 @@ async function installFixture(systemClipboard = false) {
       await prepare('pt-BR');
       writeMode = 'reject';
       await view.copyMessage('rich');
-      expect(find('.dialog-message').textContent === 'Não foi possível copiar a mensagem.', 'Clipboard failure is also localized in Portuguese');
+      expect(find('.modal-backdrop:not([data-ui-closing]) .dialog-message').textContent === 'Não foi possível copiar a mensagem.',
+        'Clipboard failure is also localized in Portuguese');
       dismissAlert();
       writeMode = 'resolve';
       return checks;

@@ -382,7 +382,7 @@ async function runVersionCopyKeyboardSmoke(window) {
         })`);
         throw new Error(`${surface}/${keyCode}: native keyboard activation must copy exactly the displayed version once: ${JSON.stringify({ before, copied, focus })}`);
       }
-      if (!await evaluate(`document.querySelector('.chat-copy-toast-label')?.textContent === 'Versão copiada!'`)) {
+      if (!await evaluate(`document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label')?.textContent === 'Versão copiada!'`)) {
         throw new Error(`${surface}/${keyCode}: keyboard copy must use the shared toast`);
       }
     }
@@ -559,13 +559,13 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     clipboardWork = () => pendingCopy.promise;
     button.click();
     await wait();
-    check(copies.at(-1) === `v${version}` && !document.querySelector('.chat-copy-toast'),
+    check(copies.at(-1) === `v${version}` && !document.querySelector('.chat-copy-toast:not([data-ui-closing])'),
       'Clipboard gets the displayed text, without a premature success toast');
     pendingCopy.resolve();
     await wait();
-    check(document.querySelector('.chat-copy-toast')?.getAttribute('role') === 'status' &&
-      document.querySelector('.chat-copy-toast-label')?.textContent === language.t('versionCopy.copied') &&
-      document.querySelector('.chat-copy-toast .material-symbols-outlined')?.textContent === 'check_circle',
+    check(document.querySelector('.chat-copy-toast:not([data-ui-closing])')?.getAttribute('role') === 'status' &&
+      document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label')?.textContent === language.t('versionCopy.copied') &&
+      document.querySelector('.chat-copy-toast:not([data-ui-closing]) .material-symbols-outlined')?.textContent === 'check_circle',
     'Version copy reuses the exact message copy toast and live-region semantics');
     clipboardWork = async () => {};
     about.attachEvents(root);
@@ -573,10 +573,10 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     const beforeRebindCopy = copies.length;
     button.click();
     await wait();
-    check(copies.length === beforeRebindCopy + 1 && document.querySelectorAll('.chat-copy-toast').length === 1,
+    check(copies.length === beforeRebindCopy + 1 && document.querySelectorAll('.chat-copy-toast:not([data-ui-closing])').length === 1,
       'Rebinding does not duplicate clipboard calls or stack toasts');
     await wait(1650);
-    check(!document.querySelector('.chat-copy-toast'), 'Shared copy toast expires after 1600ms');
+    check(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'Shared copy toast expires after 1600ms');
 
     const superseded = deferred();
     clipboardWork = () => superseded.promise;
@@ -584,13 +584,13 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     clipboardWork = async () => { throw new Error('Clipboard denied'); };
     button.click();
     await wait();
-    check(!document.querySelector('.chat-copy-toast') &&
-      document.querySelector('.dialog-message')?.textContent === language.t('versionCopy.failed'),
+    check(!document.querySelector('.chat-copy-toast:not([data-ui-closing])') &&
+    document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-message')?.textContent === language.t('versionCopy.failed'),
     'Clipboard rejection reports a localized error, never success');
     superseded.resolve();
     await wait();
-    check(!document.querySelector('.chat-copy-toast'), 'An older clipboard completion cannot replace a newer failure with success');
-    document.querySelector('.dialog-card [data-action="confirm"]').click();
+    check(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'An older clipboard completion cannot replace a newer failure with success');
+    document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card [data-action="confirm"]').click();
 
     const closingCopy = deferred();
     clipboardWork = () => closingCopy.promise;
@@ -599,7 +599,7 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     root.remove();
     closingCopy.resolve();
     await wait();
-    check(!document.querySelector('.chat-copy-toast'), 'Closing settings discards late clipboard confirmation');
+    check(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'Closing settings discards late clipboard confirmation');
     clipboardWork = async () => {};
     button = mountAbout();
     window.api.getAppVersion = async () => { throw new Error('No version bridge'); };
@@ -638,7 +638,7 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     const releaseVersion = document.querySelector('#changelog-version');
     releaseVersion.click();
     await wait();
-    check(copies.at(-1) === `v${version}` && document.querySelector('.chat-copy-toast-label').textContent === 'Version copied!',
+    check(copies.at(-1) === `v${version}` && document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label').textContent === 'Version copied!',
       'Release-notes version copies with the same localized toast');
     document.querySelector('#changelog-github').click();
     await wait();

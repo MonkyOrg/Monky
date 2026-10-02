@@ -1595,8 +1595,9 @@ async function runAutocompleteDomSmoke() {
   await waitFor(() => queries.length === 6);
   key(input(), 'Escape');
   response(queries[5], choices);
-  await new Promise(resolve => setTimeout(resolve, 30));
-  check(find('#bot-parameter-options').hidden, 'A late response must not reopen an escaped menu');
+  await waitFor(() => find('#bot-parameter-options').hidden,
+    'A late response must not reopen an escaped menu');
+  checks++;
   type(input(), 'channel');
   await waitFor(() => queries.length === 7);
   view.setChannel('two');
@@ -1790,6 +1791,7 @@ async function runAutocompleteDomSmoke() {
   });
   window.autocompleteNativeCancelled = async () => {
     await waitFor(() => store.getInvocation(receivedDownload.invocationId)?.soundDownload?.result?.status === 'cancelled');
+    await waitFor(() => !document.querySelector('.dialog-card'));
     check(!downloadInput && !document.querySelector('.dialog-card') && pickerCalls === 0,
       'Cancelling or ending a pending confirmation closes it without a transfer or folder picker');
     check(settingsStore.botDownloadConfirmationExceptions.length === 0, 'A cancelled confirmation cannot remember approval');
@@ -1911,8 +1913,10 @@ async function runAutocompleteDomSmoke() {
     await play(0);
     const invalidated = lazyRequests.at(-1);
     client.handleIncomingMessage({ type: 'COMMAND_AUTOCOMPLETE_CANCEL', payload: { requestId: queries.at(-1).requestId } });
-    check(find('#bot-parameter-options').hidden && lazyCancels.some(cancel => cancel.requestId === invalidated.requestId),
-      'Server expiry, disconnect, or access invalidation closes the choice and aborts its provider');
+    await waitFor(() => find('#bot-parameter-options').hidden &&
+      lazyCancels.some(cancel => cancel.requestId === invalidated.requestId),
+    'Server expiry, disconnect, or access invalidation closes the choice and aborts its provider');
+    checks++;
     await prepare('lazy close');
     await play(0);
     const closing = lazyRequests.at(-1);
@@ -2202,9 +2206,9 @@ async function runLocalDownloadGestureSmoke(window) {
     if (synthetic.downloadInput || !synthetic.confirmation) throw new Error('Synthetic acceptance must not authorize a transfer');
     if (remember) await click('.dialog-card .toggle-switch');
     await click('.dialog-card [data-action="confirm"]');
-    const accepted = await waitFor(state => !!state.downloadInput);
+    const accepted = await waitFor(state => !!state.downloadInput && !state.confirmation);
     if (accepted.invokes !== invokes || accepted.confirmation || accepted.pickerCalls !== 0) {
-      throw new Error('Acceptance must start exactly the correlated native download');
+      throw new Error(`Acceptance must start exactly the correlated native download: ${JSON.stringify(accepted)}`);
     }
     if (accepted.downloadInput.fileName !== `${baseName}.mp3` || accepted.fileName !== `${baseName}.mp3`) {
       throw new Error('The chosen filename must reach the native writer and download card with its extension preserved');
@@ -2518,7 +2522,7 @@ async function runSettingsNavigationSmoke() {
     check(!!document.querySelector('.monky-select-popup') && select.title === 'Device choice',
       'Themed select opens inside settings while tooltip handling preserves its title API');
     select.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-    check(!document.querySelector('.monky-select-popup') && !!document.querySelector('.modal-backdrop--settings'),
+    check(!document.querySelector('.monky-select-popup:not([data-ui-closing])') && !!document.querySelector('.modal-backdrop--settings'),
       'Escape closes the dropdown without also closing its settings modal');
     const priorCleanup = cleanups;
     modal.switchTab('account');
@@ -2539,7 +2543,7 @@ async function runSettingsNavigationSmoke() {
     resolveRefresh();
     await opening;
     check(starts === priorStarts && cameraActivations === pendingCameraActivations
-      && versions === priorVersions + 1 && !document.querySelector('.modal-backdrop--settings'),
+      && versions === priorVersions + 1 && !document.querySelector('.modal-backdrop--settings:not([data-ui-closing])'),
       'Closing during async settings setup cannot start a late media preview');
     return checks;
   } finally {
@@ -2569,7 +2573,7 @@ async function runSidebarPttSmoke() {
   const root = document.getElementById('app');
   root.innerHTML = '<div class="user-quick-actions">' + ptt.renderMicrophoneButton()
     + '<button id="bar-btn-deafen" class="btn btn-icon">' + audioIcons.renderAudioStateIcon('headphones') + '</button></div>'
-    + '<img id="main-user-avatar"><div id="voice-channels-list" style="width:250px"></div><div id="members-list-items"></div>';
+    + '<img id="main-user-avatar"><div id="channel-categories-list" style="width:250px"></div><div id="members-list-items"></div>';
   const view = new MainView(root);
   const stage = new VoiceStageView(document.getElementById('ptt-stage-fixture'));
   const fixtureSession = sessionManager.create('ptt-controls.example', 3001, 'Local');
@@ -2623,10 +2627,11 @@ async function runSidebarPttSmoke() {
       manager.updateVoiceState(botState);
       manager.updateVoiceState({ ...botState, sessionId: quietBot.sessionId, userId: quietBot.id, isSpeaking: false });
       manager.updateVoiceState({ ...remoteState, isMuted: true, isSpeaking: true });
+      view.renderChannels();
       stage.setChannel(channelId);
       await frame();
       const speaking = (id, expected, reason) => {
-        const row = root.querySelector(`#voice-mini-user-${CSS.escape(id)}`);
+        const row = root.querySelector(`.voice-participant-mini[data-session-id="${CSS.escape(id)}"]`);
         const card = document.querySelector(`#ptt-stage-fixture [data-session-id="${CSS.escape(id)}"][data-kind="voice"]`);
         check(!!row && row.classList.contains('speaking') === expected, `Sidebar: ${reason}`);
         check(!!card && card.classList.contains('speaking') === expected, `Stage: ${reason}`);
@@ -3014,6 +3019,7 @@ async function runSidebarPttSmoke() {
     check(icon() === 'mic' && button.dataset.state === 'idle', 'Unmuted VAD keeps the normal microphone icon');
     settings.inputMode = 'push_to_talk';
     appEvents.emit('settings.updated');
+    voice.setChannel('ptt-sidebar-fixture', fixtureSession.key);
     stage.setChannel('ptt-sidebar-fixture');
     check(!!document.querySelector('.stage-call-controls') && !document.querySelector('#ptt-stage-fixture [data-ptt-indicator]'), 'The actual stage must retain its controls without a separate PTT indicator');
     const pingBadge = document.getElementById('stage-ping-badge');
@@ -3170,6 +3176,9 @@ async function runSidebarPttSmoke() {
       'Actual footer device panel must open upward');
     window.mainAudioControlsPreviewMarkup = root.innerHTML + outputPanel.outerHTML;
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    for (let attempt = 0; attempt < 80 && document.querySelector('.audio-device-popover'); attempt++) {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    }
     check(!document.querySelector('.audio-device-popover') && document.activeElement === outputTrigger,
       'Escape closes actual footer panel and restores arrow focus');
     for (const element of [
@@ -3264,7 +3273,8 @@ async function runSidebarPttSmoke() {
     const ownProfile = root.querySelector('#user-profile-btn');
     view.destroy();
     ownProfile.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
-    check(!document.querySelector('.user-context-menu'), 'Destroy must release the own-profile context menu listener');
+    check(!document.querySelector('.user-context-menu:not([data-ui-closing])'),
+      'Destroy must release the own-profile context menu listener');
     return checks;
   } finally {
     routing.setForegroundContext(true);
@@ -3578,8 +3588,9 @@ async function runDomSmoke() {
   key(document.activeElement, 'Escape');
   check(recentEmojis.get()[0] === selectedEmoji, 'Actual composer selection must persist recency');
   find('.chat-reaction-add').click();
-  await frame();
-  check(!!active('[data-goto-group="recent"]') && !active('.emoji-picker-tabs'), 'Reaction picker must have Recent in its category bar, without redundant tabs');
+  await waitFor(() => !!active('[data-goto-group="recent"]') && !active('.emoji-picker-tabs'),
+    'Reaction picker must have Recent in its category bar, without redundant tabs');
+  checks++;
   checkPickerSearch();
   find('[data-goto-group="recent"]').click();
   check(find('[data-emoji-group="recent"] [data-emoji]').dataset.emoji === selectedEmoji, 'Reaction picker must share composer recency');
@@ -3777,7 +3788,8 @@ async function runDomSmoke() {
     check(!!find('#input-channel-bot-commands').closest('.toggle-switch'), 'Channel bot setting must use the established toggle switch');
     find('#input-channel-bot-commands').checked = false;
     find('input[name="channel-type"][value="VOICE"]').click();
-    check(find('#channel-bot-commands-group').hidden || find('#channel-bot-commands-group').hasAttribute('data-ui-closing'), 'Voice channels must hide the text-only bot setting');
+    check(!find('#channel-bot-commands-group').hidden && !find('#channel-bot-commands-group').hasAttribute('data-ui-closing'),
+      'Voice channels with persistent chat must expose the bot setting');
     find('input[name="channel-type"][value="TEXT"]').click();
     check(!find('#channel-bot-commands-group').hidden && !find('#input-channel-bot-commands').checked, 'Switching channel type must preserve the chosen bot setting');
     type(find('#input-channel-name'), 'channel-test');
@@ -3792,11 +3804,13 @@ async function runDomSmoke() {
     await frame();
     check(channelRequests.at(-1)?.type === 'CHANNEL_UPDATE' && channelRequests.at(-1)?.payload.botCommandsEnabled === false, 'Editing a disabled channel must preserve its bot setting');
     createChannel.open('VOICE');
-    check(find('#channel-bot-commands-group').hidden, 'Voice creation must initially hide bot controls');
+    check(!find('#channel-bot-commands-group').hidden && find('#input-channel-bot-commands').checked,
+      'Voice creation must expose the enabled bot default for its persistent chat');
     type(find('#input-channel-name'), 'voice-test');
     find('#form-create-channel').requestSubmit();
     await frame();
-    check(channelRequests.at(-1)?.payload.botCommandsEnabled === undefined, 'Voice creation must leave bot defaults untouched');
+    check(channelRequests.at(-1)?.payload.botCommandsEnabled === true,
+      'Voice creation must send its explicit bot command setting');
     const rolesMarkup = document.createElement('div');
     rolesMarkup.innerHTML = new ServerRolesTab().renderHtml();
     check(!!rolesMarkup.querySelector('.role-permission-switch[data-permission="8192"]'), 'Role editor must expose MANAGE_BOTS as a switch');

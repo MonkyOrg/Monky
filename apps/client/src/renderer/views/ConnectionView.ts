@@ -23,7 +23,6 @@ import { confirmStopHostedServer } from '../utils/hostedServer';
 import { checkServerOnline } from '../utils/serverStatus';
 import { sortFavoritesFirst, type FavoriteOrderEntry } from '../utils/favoriteOrder';
 import { FavoriteListMotion, type FavoriteMotionKind } from '../utils/favoriteMotion';
-import { smoothScrollIntoView } from '../utils/scroll';
 import { renderFavoriteToggle, renderFavoritesFilter, updateFavoritesFilter } from './FavoritesControls';
 import { renderServerAutoEntryToggle } from './ServerAutoEntryControls';
 import { parseHomeVoicePreview } from '../utils/voicePreview';
@@ -742,10 +741,10 @@ export class ConnectionView {
       if (hiddenFocus) {
         const next = visibleButtons[0] ?? section.querySelector<HTMLButtonElement>('#home-saved-filter-favorites');
         next?.focus({ preventScroll: true });
-        if (next) smoothScrollIntoView(next, { block: 'nearest', inline: 'nearest' });
+        next?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
       } else if (focused instanceof HTMLElement && list.contains(focused)) {
         if (document.activeElement !== focused) focused.focus({ preventScroll: true });
-        smoothScrollIntoView(focused, { block: 'nearest', inline: 'nearest' });
+        focused.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
       }
     }, animate);
   }

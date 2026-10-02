@@ -431,14 +431,16 @@ async function setupModalSmoke() {
     }), 'Both limiter disclosures must finish at their expected height');
   };
   const dismiss = async key => {
-    await until(() => document.querySelector('.dialog-card'), 'Expected limiter error dialog');
-    check(document.querySelector('.dialog-message').textContent === language.t(key), 'Failures use the selected language');
+    const selector = '.modal-backdrop:not([data-ui-closing]) .dialog-card';
+    await until(() => document.querySelector(selector), 'Expected limiter error dialog');
+    check(document.querySelector(`${selector} .dialog-message`).textContent === language.t(key), 'Failures use the selected language');
     await new Promise(resolve => setTimeout(resolve, 200));
-    const button = document.querySelector('.dialog-card [data-action="confirm"]');
+    const button = document.querySelector(`${selector} [data-action="confirm"]`);
     const rect = button.getBoundingClientRect();
     check(button.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)),
       'Error dialogs stay above quick settings and can be acknowledged with a pointer');
-    document.querySelector('.dialog-card [data-action="confirm"]').click();
+    button.click();
+    await until(() => !document.querySelector(selector), 'Limiter error dialog remained active after acknowledgement');
     await until(() => !toggle().disabled, 'Limiter remained busy after acknowledging the error');
   };
   window.limiterModalSmoke = {
@@ -665,7 +667,8 @@ async function setupModalSmoke() {
         await dismiss('soundboard.limiterSaveFailed');
         check(settingsStore.soundboardLimiterEnabled && toggle().checked,
           'A failed switch save restores the previous state');
-        check(document.activeElement === toggle(), 'Acknowledging an error restores focus in the still-open soundboard');
+        check(document.activeElement === toggle(),
+          `Acknowledging an error restores focus in the still-open soundboard: ${document.activeElement?.outerHTML}`);
       } finally { Storage.prototype.setItem = setItem; }
       settingsStore.soundboardLimiterEnabled = false;
       settingsStore.save();

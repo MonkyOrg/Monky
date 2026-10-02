@@ -130,7 +130,9 @@ async function runRegression(language, currentProtocol) {
   updateButton().click();
   await settle(() => document.querySelector('[role="dialog"]'), 'Compatibility confirmation did not open');
   check(downloads.length === 0, 'No package may download before confirmation');
-  check(document.querySelector('.update-banner').hidden, 'The high-z-index update banner must not cover its confirmation');
+  check(document.querySelector('.update-banner').hidden ||
+    document.querySelector('.update-banner').hasAttribute('data-ui-closing'),
+  'The high-z-index update banner must not cover its confirmation');
   document.querySelector('[role="dialog"] [data-action="cancel"]').click();
   await settle(() => !document.querySelector('[role="dialog"]') && !document.querySelector('.update-banner').hidden,
     'Cancelled update did not restore its banner');

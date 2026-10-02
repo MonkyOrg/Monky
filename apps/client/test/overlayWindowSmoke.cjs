@@ -231,7 +231,7 @@ async function runOverlayConfigPositionSmoke() {
   overlayBridgeService.open = async config => { opens.push(structuredClone(config)); return true; };
   window.api = { setOverlayConfig: async config => { updates.push(structuredClone(config)); } };
   const modal = new OverlayConfigModal();
-  const find = id => document.getElementById(id);
+  const find = id => document.querySelector(`.modal-backdrop:not([data-ui-closing]) #${id}`);
   const preserve = expected => {
     check(settingsStore.getOverlayConfig().position === 'custom', 'Unrelated changes retain custom placement.');
     check(JSON.stringify(settingsStore.getOverlayConfig().bounds) === JSON.stringify(expected),

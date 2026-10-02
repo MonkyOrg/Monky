@@ -767,7 +767,7 @@ async function setupHomeAutoEntrySmoke() {
       app.mainView.render = () => {
         renderRealMain();
         layout = root.querySelector('.main-layout');
-        entry = layout?.getAnimations().find(animation => animation.animationName === 'monky-server-entry');
+        entry = layout?.getAnimations()[0];
         initialOpacity = layout ? Number(getComputedStyle(layout).opacity) : null;
       };
       app.mainView.destroy = destroyRealMain;
@@ -782,12 +782,16 @@ async function setupHomeAutoEntrySmoke() {
           check(!entry, 'reduced motion disables the entry animation');
           equal(initialOpacity, 1, 'reduced motion presents the server immediately');
         } else {
-          check(!!entry && initialOpacity < 1, 'normal entry starts with a real fade instead of an abrupt replacement');
+          const keyframes = entry?.effect?.getKeyframes() ?? [];
+          check(!!entry && Number(keyframes[0]?.opacity) === 0 && Number(keyframes.at(-1)?.opacity) === 1,
+            `normal entry starts with a real fade instead of an abrupt replacement: ${JSON.stringify({
+              animation: entry?.animationName, initialOpacity, keyframes,
+            })}`);
           await entry.finished;
           equal(getComputedStyle(layout).opacity, '1', 'the transition reaches full opacity');
           equal(getComputedStyle(layout).transform, 'none', 'no transform remains after entry');
           await until(() => !layout.classList.contains('main-layout--entering'), 'finished entry retained its animation class');
-          check(!layout.getAnimations().some(animation => animation.animationName === 'monky-server-entry'), 'completed entry cannot replay when system motion preferences change');
+          check(layout.getAnimations().length === 0, 'completed entry cannot replay when system motion preferences change');
         }
         app.mainView.render();
         check(!layout.classList.contains('main-layout--entering') && !entry, 'in-server rerenders do not replay the connection animation');

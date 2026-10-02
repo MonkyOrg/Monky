@@ -369,7 +369,7 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       }
       watchState = { state: 'unavailable', reason: 'unsupported', receiver: 'chromium' };
       appEvents.emit('native_screen.updated');
-      const unsupported = card(remote.sessionId, remoteSource.shareId).querySelector('.stage-native-error');
+      const unsupported = card(remote.sessionId, remoteSource.shareId).querySelector('.stage-native-error:not([data-ui-closing])');
       check(unsupported?.textContent.includes(language.t('screenShare.chromiumReceiverSettingsHint')),
         'Chromium codec rejections must point the viewer at the native receiver, not only the publisher.');
       check(!unsupported.textContent.includes(language.t('screenShare.nativeReceiverSettingsHint')),
