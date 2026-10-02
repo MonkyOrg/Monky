@@ -149,15 +149,23 @@ if (!process.versions.electron) {
       const initial = await browser.webContents.executeJavaScript(`(${runDom.toString()})(${JSON.stringify({ folder, language, sharedUrl })})`, true);
       console.log(`Soundboard DOM ${language}: initial ${initial} exact checks passed`);
       browser.webContents.focus();
-      await browser.webContents.executeJavaScript('window.soundboardFilesQa.menuNativePrepare()', true);
-      browser.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
-      browser.webContents.sendInputEvent({ type: 'char', keyCode: ' ' });
-      browser.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
-      await browser.webContents.executeJavaScript('window.soundboardFilesQa.menuNativeOpened()', true);
-      fs.writeFileSync(path.join(artifacts, `soundboard-actions-${language}.png`), (await browser.webContents.capturePage()).toPNG());
-      browser.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
-      browser.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
-      await browser.webContents.executeJavaScript('window.soundboardFilesQa.menuNativeClosed()', true);
+      for (const [height, motion] of [[650, 'reduce'], [850, 'no-preference']]) {
+        browser.setContentSize(1000, height);
+        await browser.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+          features: [{ name: 'prefers-reduced-motion', value: motion }],
+        });
+        await browser.webContents.executeJavaScript('window.soundboardFilesQa.menuNativePrepare()', true);
+        browser.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+        browser.webContents.sendInputEvent({ type: 'char', keyCode: ' ' });
+        browser.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+        await browser.webContents.executeJavaScript('window.soundboardFilesQa.menuNativeOpened()', true);
+        const suffix = motion === 'reduce' ? '-compact-reduced' : '';
+        fs.writeFileSync(path.join(artifacts, `soundboard-actions-${language}${suffix}.png`), (await browser.webContents.capturePage()).toPNG());
+        await browser.webContents.executeJavaScript('window.soundboardFilesQa.menuNativeBeforeEscape()', true);
+        browser.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+        browser.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+        await browser.webContents.executeJavaScript('window.soundboardFilesQa.menuNativeClosed()', true);
+      }
       await browser.webContents.executeJavaScript('window.soundboardFilesQa.openEditor()', true);
       await browser.webContents.executeJavaScript('window.soundboardFilesQa.waveformChecks()', true);
       for (const [handle, fraction] of [['start', 0.1], ['end', 0.9], ['fadeIn', 0.2], ['fadeOut', 0.8]]) {
@@ -506,6 +514,11 @@ async function runDom(fixture) {
   window.soundboardFilesQa = {
     waveformState,
     async menuNativePrepare() {
+      await soundboardService.playSound(name('tone.wav').filePath);
+      soundboardService.stopSound();
+      check(!!root().querySelector('.sb-notice-bar.is-leaving'), 'Native menu fixture exercises pending playback-bar teardown');
+      // Removing playback bars can scroll the compact library and intentionally dismiss its menu.
+      await until(() => !document.querySelector('.sb-notice-bar'), 'Playback bars must finish leaving before native menu input');
       const trigger = menuTrigger('tone.wav');
       trigger.scrollIntoView({ block: 'center', behavior: 'instant' });
       trigger.focus({ preventScroll: true });
@@ -518,6 +531,11 @@ async function runDom(fixture) {
       check(!!popup(), 'Native dropdown remains open after layout and painting');
       check(document.activeElement === popup().querySelector('button'), 'Native menu opening focuses first item');
       check(soundboardService.getActivePlaybacks(true).length === 0, 'Native menu activation never starts sound');
+    },
+    async menuNativeBeforeEscape() {
+      await until(() => !document.querySelector('.sb-notice-bar'), 'Playback bars must finish leaving');
+      check(!!popup(), 'Native dropdown remains open until Escape, after playback teardown and capture');
+      check(document.activeElement === popup().querySelector('button'), 'Native dropdown retains focus until Escape');
     },
     async menuNativeClosed() {
       await until(() => !popup(), 'Native Escape must dismiss dropdown');
