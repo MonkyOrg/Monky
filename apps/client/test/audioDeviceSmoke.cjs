@@ -26,6 +26,7 @@ if (require.main === module || process.argv[1] === __filename) {
     let timeout;
     const finish = async (code) => {
       clearTimeout(timeout);
+      if (window?.webContents.debugger.isAttached()) window.webContents.debugger.detach();
       if (window && !window.isDestroyed()) window.destroy();
       if (vite) await vite.close();
       app.exit(code);
@@ -76,6 +77,10 @@ if (require.main === module || process.argv[1] === __filename) {
       });
       timeout = setTimeout(() => { console.error('Audio/media controls smoke timed out'); void finish(1); }, 150_000);
       await window.loadURL(`${origin}/__audio_devices__`);
+      window.webContents.debugger.attach('1.3');
+      await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+        features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+      });
       if (!process.argv.includes('--color-picker-only')) {
         const checks = await window.webContents.executeJavaScript(`(${runAudioDeviceSmoke.toString()})()`, true);
         console.log(`Audio device smoke: ${checks} checks passed`);
@@ -86,7 +91,6 @@ if (require.main === module || process.argv[1] === __filename) {
       console.log(`Shared color picker: ${colorChecks} checks passed`);
       if (process.argv.includes('--color-picker-only') || process.argv.includes('--color-native')) {
         await window.webContents.executeJavaScript(`(${renderColorPickerPreview.toString()})()`, true);
-        window.webContents.debugger.attach('1.3');
         try {
           await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
           await new Promise(resolve => setTimeout(resolve, 220));

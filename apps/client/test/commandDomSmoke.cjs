@@ -3550,7 +3550,7 @@ async function runDomSmoke() {
   find('#chat-return-latest').click();
   check(sent.at(-1).type === 'CHAT_LOAD_HISTORY' && !sent.at(-1).payload.aroundMessageId, 'Return to latest must request normal history');
   find('#btn-emoji').click();
-  await frame();
+  await waitFor(() => !!active('[data-goto-group="recent"]'));
   check(!document.querySelector('[data-picker-tab="recent"]'), 'Recent must not be a top-level picker tab');
   check(document.querySelectorAll('[data-picker-tab]').length === 2, 'Composer picker must keep only emoji and sticker tabs');
   check(find('.emoji-picker-nav').firstElementChild.dataset.gotoGroup === 'recent', 'Clock must be the first bottom category');
@@ -3599,7 +3599,7 @@ async function runDomSmoke() {
   check(recentEmojis.get().filter((emoji) => emoji === selectedEmoji).length === 1, 'Repeated selections must stay distinct');
   language.setLanguage('en');
   find('.chat-reaction-add').click();
-  await frame();
+  await waitFor(() => active('[data-goto-group="recent"]')?.getAttribute('aria-label') === 'Recent');
   check(find('[data-goto-group="recent"]').getAttribute('aria-label') === 'Recent', 'Recent clock must be localized in English');
   check(find('[data-emoji-group="recent"] .emoji-picker-section-title').textContent === 'Recent', 'Recent category heading must be localized in English');
   key(document.activeElement, 'Escape');
