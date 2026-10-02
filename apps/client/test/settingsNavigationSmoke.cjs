@@ -34,6 +34,7 @@ if (!process.versions.electron) {
   let timeout;
   const finish = async code => {
     clearTimeout(timeout);
+    if (window?.webContents.debugger.isAttached()) window.webContents.debugger.detach();
     if (window && !window.isDestroyed()) window.destroy();
     if (vite) await vite.close();
     app.exit(code);
@@ -80,6 +81,10 @@ if (!process.versions.electron) {
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     timeout = setTimeout(() => { console.error('Settings navigation smoke timed out'); void finish(1); }, 90_000);
     await window.loadURL(`http://127.0.0.1:${address.port}/__settings_navigation__`);
+    window.webContents.debugger.attach('1.3');
+    await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+    });
     if (!qualitySettingsOnly && !screenStageOnly && !screenAudienceOnly && !overlayWindowOnly) {
       window.focus();
       window.webContents.focus();
