@@ -150,6 +150,43 @@ test('upgrading role-only overwrite tables preserves rules and member targets su
   }
 });
 
+test('migration strips server-only bits from channel and category overwrites', async () => {
+  const folder = path.resolve('.qa', `server-only-overwrites-${randomUUID()}`);
+  const filename = path.join(folder, 'server.db');
+  const migrations = path.join(__dirname, 'infrastructure', 'database', 'migrations');
+  let legacy: SqlJsDriver | undefined;
+  let connection: DatabaseConnection | undefined;
+  try {
+    legacy = await SqlJsDriver.create(filename);
+    legacy.exec('CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)');
+    for (const file of fs.readdirSync(migrations).filter(file => file.endsWith('.sql') && file < '044_').sort()) {
+      legacy.exec(fs.readFileSync(path.join(migrations, file), 'utf8'));
+      legacy.prepare('INSERT INTO schema_migrations VALUES (?, ?)').run(file, 1);
+    }
+    legacy.exec("INSERT INTO server_meta (id, name, password_hash, created_at) VALUES ('server', 'Server-only', '', 1)");
+    legacy.exec("INSERT INTO roles (id, name, color, position, permissions, is_default, created_at) VALUES ('manager', 'Manager', NULL, 1, 546576, 0, 1)");
+    legacy.exec("INSERT INTO channels (id, server_id, name, type, position, created_at) VALUES ('chat', 'server', 'Chat', 'TEXT', 0, 1)");
+    legacy.exec("INSERT INTO channel_categories (id, server_id, name, position, created_at) VALUES ('category', 'server', 'Category', 0, 1)");
+    legacy.prepare(`INSERT INTO channel_permission_overwrites
+      (channel_id, target_id, role_id, user_id, allow_bits, deny_bits) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run('chat', '@everyone', null, null, Permission.MANAGE_CHANNELS | Permission.READ_MESSAGES, Permission.MOVE_MEMBERS);
+    legacy.prepare(`INSERT INTO category_permission_overwrites
+      (category_id, target_id, role_id, user_id, allow_bits, deny_bits) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run('category', 'role:manager', 'manager', null, Permission.MOVE_MEMBERS, Permission.MANAGE_CHANNELS);
+    legacy.close();
+    legacy = undefined;
+    connection = await DatabaseConnection.create(filename);
+    const channels = new SqliteChannelRepository(connection.getDb());
+    assert.deepEqual((await channels.findById('chat'))?.permissionOverwrites, [{ roleId: null, allow: Permission.READ_MESSAGES, deny: 0 }]);
+    assert.deepEqual((await channels.categories.findById('category'))?.permissionOverwrites, []);
+    assert.equal(record(connection.getDb().prepare('SELECT count(*) AS count FROM category_permission_overwrites').get()).count, 0);
+  } finally {
+    legacy?.close();
+    connection?.close();
+    fs.rmSync(folder, { recursive: true, force: true });
+  }
+});
+
 test('channel Everyone denial is overridden by a role grant, but a second role denial wins; reading stays available', async t => {
   const f = await createApprovedBotFixture();
   t.after(() => f.dispose());
@@ -230,7 +267,7 @@ test('visible channels do not broadcast messages to members without read permiss
   assert.deepEqual(await f.chatService.loadHistory(channelId, 50, undefined, undefined, member.id), []);
 });
 
-test('category managers can manage inherited channels but cannot move them into an unauthorized category', async t => {
+test('channel management is server-level and cannot be delegated by overwrites', async t => {
   const f = await createApprovedBotFixture();
   t.after(() => f.dispose());
   const owner = await f.human('Scoped owner');
@@ -238,47 +275,65 @@ test('category managers can manage inherited channels but cannot move them into 
   await owner.peer.request(MessageType.CATEGORY_CREATE, { name: 'Hidden category', isPrivate: true });
   await f.roleRepo.create({ id: 'local-manager', name: 'Local manager', permissions: DEFAULT_PERMISSIONS, color: null, position: 1, isDefault: false, createdAt: 1 });
   await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: manager.id, roleId: 'local-manager' });
-  const saved = await owner.peer.request(MessageType.CATEGORY_CREATE, {
+  await owner.peer.error(MessageType.CATEGORY_CREATE, {
     name: 'Managed category', permissionOverwrites: [{ roleId: 'local-manager', allow: Permission.MANAGE_CHANNELS, deny: 0 }],
-  });
+  }, ProtocolErrorCode.BAD_REQUEST);
+  const saved = await owner.peer.request(MessageType.CATEGORY_CREATE, { name: 'Managed category' });
   const categoryId = text(records(saved.payload.categories).find(category => category.name === 'Managed category')!.id);
   assert.equal(await f.permissions.checkPermission(manager.id, Permission.MANAGE_CHANNELS), false);
+  await manager.peer.error(MessageType.CATEGORY_UPDATE, { categoryId, name: 'Denied category' }, ProtocolErrorCode.PERMISSION_DENIED);
+  await owner.peer.request(MessageType.ROLE_UNASSIGN, { userId: manager.id, roleId: 'local-manager' });
+  await f.roleRepo.create({ id: 'global-manager', name: 'Global manager', permissions: DEFAULT_PERMISSIONS | Permission.MANAGE_CHANNELS,
+    color: null, position: 2, isDefault: false, createdAt: 1 });
+  await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: manager.id, roleId: 'global-manager' });
   const renamed = await manager.peer.request(MessageType.CATEGORY_UPDATE, { categoryId, name: 'Renamed category' });
-  assert.equal(records(renamed.payload.categories).some(category => category.name === 'Hidden category'), false);
+  assert.equal(records(renamed.payload.categories).some(category => category.name === 'Renamed category'), true);
   const created = await manager.peer.request(MessageType.CHANNEL_CREATE, { name: 'Managed room', type: 'TEXT', categoryId });
   const channelId = text(record(created.payload.channel).id);
   await manager.peer.request(MessageType.CHANNEL_UPDATE, { channelId, name: 'Renamed room' });
-  await manager.peer.error(MessageType.CHANNEL_UPDATE, { channelId, categoryId: null }, ProtocolErrorCode.PERMISSION_DENIED);
-  await manager.peer.error(MessageType.CHANNEL_CREATE, { name: 'Outside category', type: 'TEXT' }, ProtocolErrorCode.PERMISSION_DENIED);
-  await owner.peer.request(MessageType.CATEGORY_UPDATE, {
-    categoryId, permissionOverwrites: [{ roleId: 'local-manager', allow: 0, deny: Permission.MANAGE_CHANNELS }],
-  });
-  await manager.peer.error(MessageType.CATEGORY_UPDATE, { categoryId, name: 'Denied rename' }, ProtocolErrorCode.PERMISSION_DENIED);
-  await manager.peer.error(MessageType.CHANNEL_UPDATE, { channelId, name: 'Denied rename' }, ProtocolErrorCode.PERMISSION_DENIED);
+  await manager.peer.request(MessageType.CHANNEL_UPDATE, { channelId, categoryId: null });
+  await manager.peer.request(MessageType.CHANNEL_CREATE, { name: 'Outside category', type: 'TEXT' });
 });
 
-test('voice uses scoped speaking and revocation removes the physical membership', async t => {
+test('voice admission uses visibility and missing speaking applies a live permission mute', async t => {
   const f = await createApprovedBotFixture();
   t.after(() => f.dispose());
   const owner = await f.human('Voice owner');
   const member = await f.human('Voice member');
+  const memberSessionId = text(record(member.auth.payload.currentUser).sessionId);
   const created = await owner.peer.request(MessageType.CHANNEL_CREATE, {
     name: 'Controlled voice', type: 'VOICE', permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.SPEAK }],
   });
   const channelId = text(record(created.payload.channel).id);
-  await member.peer.error(MessageType.VOICE_JOIN, { channelId }, ProtocolErrorCode.PERMISSION_DENIED);
+  const joined = await member.peer.request(MessageType.VOICE_JOIN, { channelId });
+  assert.equal(record(joined.payload.voiceState).permissionMuted, true);
+  await owner.peer.request(MessageType.ADMIN_MUTE_USER, { targetUserId: member.id, muted: true });
+  await owner.peer.request(MessageType.ADMIN_MUTE_USER, { targetUserId: member.id, muted: false });
+  assert.equal(f.wsServer['signalingService'].getVoiceState(memberSessionId)?.permissionMuted, true,
+    'administrative unmute does not clear a permission mute');
   await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId, permissionOverwrites: [] });
+  await member.peer.wait(message => message.type === MessageType.VOICE_STATE_CHANGED &&
+    record(record(message.payload).voiceState).sessionId === memberSessionId &&
+    record(record(message.payload).voiceState).permissionMuted === false);
+  assert.equal(f.wsServer['signalingService'].getVoiceState(memberSessionId)?.permissionMuted, false);
   assert.equal((await member.peer.request(MessageType.VOICE_JOIN, { channelId })).type, MessageType.VOICE_USER_JOINED);
   const marker = member.peer.messages.length;
   await owner.peer.request(MessageType.CHANNEL_UPDATE, {
     channelId, permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.SPEAK }],
   });
   await member.peer.barrier();
-  assert.equal(member.peer.messages.slice(marker).some(message => message.type === MessageType.VOICE_USER_LEFT), true);
-  await member.peer.error(MessageType.VOICE_JOIN, { channelId }, ProtocolErrorCode.PERMISSION_DENIED);
+  assert.equal(member.peer.messages.slice(marker).some(message => message.type === MessageType.VOICE_USER_LEFT), false);
+  assert.equal(member.peer.messages.slice(marker).some(message =>
+    message.type === MessageType.VOICE_STATE_CHANGED &&
+    record(record(message.payload).voiceState).permissionMuted === true), true);
+  await owner.peer.request(MessageType.CHANNEL_UPDATE, {
+    channelId, permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.VIEW_CHANNEL }],
+  });
+  await member.peer.wait(message => message.type === MessageType.VOICE_USER_LEFT && message.payload.sessionId === memberSessionId);
+  await member.peer.error(MessageType.VOICE_JOIN, { channelId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
 });
 
-test('global channel management cannot reorder channels with an explicit local denial', async t => {
+test('global channel management reorders channels at server level', async t => {
   const f = await createApprovedBotFixture();
   t.after(() => f.dispose());
   const owner = await f.human('Reorder owner');
@@ -286,13 +341,38 @@ test('global channel management cannot reorder channels with an explicit local d
   await f.roleRepo.create({ id: 'global-manager', name: 'Global manager', permissions: DEFAULT_PERMISSIONS | Permission.MANAGE_CHANNELS,
     color: null, position: 1, isDefault: false, createdAt: 1 });
   await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: manager.id, roleId: 'global-manager' });
-  const first = await owner.peer.request(MessageType.CHANNEL_CREATE, {
-    name: 'Protected order', type: 'TEXT', permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.MANAGE_CHANNELS }],
-  });
+  const first = await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'Protected order', type: 'TEXT' });
   const second = await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'Other order', type: 'TEXT' });
-  await manager.peer.error(MessageType.CHANNEL_REORDER, {
+  const reordered = await manager.peer.request(MessageType.CHANNEL_REORDER, {
     categoryId: null, orderedIds: [text(record(second.payload.channel).id), text(record(first.payload.channel).id)],
-  }, ProtocolErrorCode.PERMISSION_DENIED);
+  });
+  assert.equal(reordered.type, MessageType.CHANNELS_REORDERED);
+});
+
+test('moving voice members requires target visibility and applies speaking mute in destination', async t => {
+  const f = await createApprovedBotFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Move owner');
+  const member = await f.human('Move member');
+  const memberSessionId = text(record(member.auth.payload.currentUser).sessionId);
+  const source = await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'Source voice', type: 'VOICE' });
+  const destination = await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'Destination voice', type: 'VOICE' });
+  const sourceId = text(record(source.payload.channel).id);
+  const destinationId = text(record(destination.payload.channel).id);
+  await member.peer.request(MessageType.VOICE_JOIN, { channelId: sourceId });
+  await owner.peer.request(MessageType.CHANNEL_UPDATE, {
+    channelId: destinationId, permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.VIEW_CHANNEL }],
+  });
+  await owner.peer.error(MessageType.ADMIN_MOVE_USER, { targetSessionId: memberSessionId, channelId: destinationId }, ProtocolErrorCode.PERMISSION_DENIED);
+  assert.equal(f.wsServer['signalingService'].getVoiceState(memberSessionId)?.channelId, sourceId);
+  await owner.peer.request(MessageType.CHANNEL_UPDATE, {
+    channelId: destinationId, permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.SPEAK }],
+  });
+  const moved = await owner.peer.request(MessageType.ADMIN_MOVE_USER, { targetSessionId: memberSessionId, channelId: destinationId });
+  assert.equal(moved.type, MessageType.ADMIN_MOVE_USER);
+  const state = f.wsServer['signalingService'].getVoiceState(memberSessionId);
+  assert.equal(state?.channelId, destinationId);
+  assert.equal(state?.permissionMuted, true);
 });
 
 test('live read revocation, scoped reading grants, and direct service sending use the same rules', async t => {
@@ -388,11 +468,12 @@ test('individual category rules filter login, preserve history access, and deny 
   await rejoined.peer.error(MessageType.CHAT_LOAD_HISTORY, { channelId }, ProtocolErrorCode.PERMISSION_DENIED);
 });
 
-test('individual voice denial evicts only its member and individual rules cascade when the member is deleted', async t => {
+test('individual voice speaking denial mutes only its member and individual rules cascade when the member is deleted', async t => {
   const f = await createApprovedBotFixture();
   t.after(() => f.dispose());
   const owner = await f.human('Voice rule owner');
   const member = await f.human('Voice rule member');
+  const memberSessionId = text(record(member.auth.payload.currentUser).sessionId);
   const created = await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'Personal voice', type: 'VOICE' });
   const channelId = text(record(created.payload.channel).id);
   await member.peer.request(MessageType.VOICE_JOIN, { channelId });
@@ -401,8 +482,11 @@ test('individual voice denial evicts only its member and individual rules cascad
     channelId, permissionOverwrites: [{ userId: member.id, allow: 0, deny: Permission.SPEAK }],
   });
   await member.peer.barrier();
-  assert.equal(member.peer.messages.slice(marker).some(message => message.type === MessageType.VOICE_USER_LEFT), true);
-  await member.peer.error(MessageType.VOICE_JOIN, { channelId }, ProtocolErrorCode.PERMISSION_DENIED);
+  assert.equal(member.peer.messages.slice(marker).some(message => message.type === MessageType.VOICE_USER_LEFT), false);
+  assert.equal(f.wsServer['signalingService'].getVoiceState(memberSessionId)?.permissionMuted, true);
+  assert.equal(member.peer.messages.slice(marker).some(message =>
+    message.type === MessageType.VOICE_STATE_CHANGED &&
+    record(record(message.payload).voiceState).permissionMuted === true), true);
   assert.equal(await f.channelService.canUserAccessChannel(owner.id, channelId, Permission.SPEAK), true);
   await f.userRepo.delete(member.id);
   assert.deepEqual((await f.channelRepo.findById(channelId))?.permissionOverwrites, []);

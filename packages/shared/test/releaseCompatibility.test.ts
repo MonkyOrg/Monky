@@ -34,7 +34,7 @@ test('channel permission protocol 35 rejects old client contracts without requir
     assert.equal(releaseRequiresProtocolUpdate(old, 'bot'), false);
     assert.equal(releaseRequiresProtocolUpdate({ ...manifest, protocolVersion }, 'client'), true);
   }
-  const current = parseReleaseCompatibility({ ...manifest, protocolVersion: 35, minimumClientProtocol: 35, minimumBotProtocol: 24 }, version);
+  const current = parseReleaseCompatibility({ ...manifest, protocolVersion: 36, minimumClientProtocol: 35, minimumBotProtocol: 24 }, version);
   assert.ok(current);
   assert.equal(releaseRequiresProtocolUpdate(current, 'client'), false);
   assert.equal(releaseRequiresProtocolUpdate(current, 'bot'), false);

@@ -256,7 +256,7 @@ export class ForumView {
 
   private openPostMenu(post: ForumPost, anchor: HTMLElement, x: number, y: number): void {
     const items: ContextMenuEntry[] = [{ label: t('community.open'), icon: 'forum', onClick: () => this.openPost(post.channelId) }];
-    const manager = this.server.hasPermission(Permission.MANAGE_CHANNELS, this.channelId);
+    const manager = this.server.hasPermission(Permission.MANAGE_CHANNELS);
     if (manager || post.authorId === this.server.currentUser?.id) items.push({
       label: t('forum.rename'), icon: 'edit', onClick: () => this.rename(post),
     });

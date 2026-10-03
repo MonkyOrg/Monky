@@ -309,7 +309,7 @@ export class RemoteMediaRouter {
     this.ensurePlaybackPipeline(sessionId, audioEl, pipelineMap, track);
     const pipeline = pipelineMap.get(sessionId);
     const state = isScreenAudio ? undefined : this.getVoiceParticipants().get(sessionId)?.voiceState;
-    const senderMuted = state?.isMuted || state?.isDeafened || state?.serverMuted || state?.serverDeafened;
+    const senderMuted = state?.isMuted || state?.isDeafened || state?.serverMuted || state?.serverDeafened || state?.permissionMuted;
     if (pipeline) pipeline.gain.gain.value = audioEl.muted || senderMuted ? 0 : clamped / 100;
   }
 

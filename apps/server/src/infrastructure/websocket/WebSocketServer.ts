@@ -65,6 +65,7 @@ import {
   ServerShutdownReason,
   ServerUpdateSettingsPayload,
   SoundboardPlayPayload,
+  DmRelaySendPayload,
   RecentSoundRecordPayload,
   SoundboardStopPayload,
   SoundboardStoppedPayload,
@@ -95,7 +96,6 @@ import {
   VoiceLeavePayload,
   VoiceStateChangedPayload,
   VoiceRestrictionsUpdatedPayload,
-  VoiceRestrictions,
   VoiceStateUpdatePayload,
   VoiceUserJoinedPayload,
   VoiceUserLeftPayload,
@@ -183,6 +183,7 @@ import { CommandRegistry } from '../../application/services/CommandRegistry';
 import { BotLocalExecutionService } from '../../application/services/BotLocalExecutionService';
 import { SignalingService } from '../../application/services/SignalingService';
 import { UserService } from '../../application/services/UserService';
+import { DmRelayService } from '../../application/services/DmRelayService';
 import { NativePollError, NativePollService } from '../../application/services/NativePollService';
 import { IServerRepository } from '../../domain/repositories';
 import { scanServerNetworkInterfaces } from '../discovery/ServerIpScanner';
@@ -296,6 +297,7 @@ export class WebSocketServer {
   private localAccessVersion = 0;
   private pendingLocalAccessMutations = 0;
   private shutdownReason: ServerShutdownReason = 'stopped';
+  private dmRelay: DmRelayService<ClientSession>;
 
   constructor(
     private server: http.Server,
@@ -326,6 +328,10 @@ export class WebSocketServer {
     private readonly pollService?: NativePollService,
     private readonly recentSoundCache?: RecentSoundCacheService,
   ) {
+    this.dmRelay = new DmRelayService<ClientSession>({
+      isCurrent: (session) => this.isCurrentSession(session),
+      send: (session, message) => this.send(session.ws, message),
+    });
     if (communityService) this.community = new CommunityHandler(communityService, channelService, rateLimiter, {
       sessions: () => this.sessions.values(),
       isCurrent: session => this.isCurrentSession(session),
@@ -585,6 +591,7 @@ export class WebSocketServer {
       this.botLocalExecution.disconnect(target);
       this.botInteractions.disconnect(target);
       this.disconnectBotScreens(target);
+      this.dmRelay.unregister(target);
       if (target.sessionId) this.sessionSockets.delete(target.sessionId);
       try {
         target.ws.close();
@@ -772,6 +779,11 @@ export class WebSocketServer {
       return;
     }
 
+    if (type === MessageType.DM_RELAY_SEND) {
+      await this.handleDmRelaySend(session, payload as DmRelaySendPayload, requestId);
+      return;
+    }
+
     if (session.isBot) {
       const capabilities = botMessageCapabilities(type, payload);
       if (!capabilities || !this.isCurrentBotOperation(session, ...capabilities)) {
@@ -911,12 +923,12 @@ export class WebSocketServer {
         break;
 
       case MessageType.CHANNEL_UPDATE:
-        if (!(await this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId, (payload as ChannelUpdatePayload)?.channelId))) return;
+        if (!(await this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId))) return;
         await this.handleChannelUpdate(session, payload as ChannelUpdatePayload, requestId);
         break;
 
       case MessageType.CHANNEL_DELETE:
-        if (!(await this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId, (payload as ChannelDeletePayload)?.channelId))) return;
+        if (!(await this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId))) return;
         await this.handleChannelDelete(session, payload as ChannelDeletePayload, requestId);
         break;
 
@@ -1395,6 +1407,7 @@ export class WebSocketServer {
         this.botInteractions.disconnect(staleSession);
         this.disconnectBotScreens(staleSession);
         this.authService.clearChallenge(existingWs);
+        this.dmRelay.unregister(staleSession);
         staleSession.replaced = true;
         this.sessions.delete(existingWs);
       }
@@ -1407,6 +1420,7 @@ export class WebSocketServer {
     }
 
     this.sessionSockets.set(sessionId, session.ws);
+    this.dmRelay.register(session);
 
     // If this session had a pending "reconnecting" grace timer (from a recent
     // ungraceful drop), cancel it and tell everyone they are back online (#44).
@@ -1671,6 +1685,7 @@ export class WebSocketServer {
         this.botInteractions.disconnect(stale);
         this.disconnectBotScreens(stale);
         this.authService.clearChallenge(existingWs);
+        this.dmRelay.unregister(stale);
         stale.replaced = true;
         this.sessions.delete(existingWs);
       }
@@ -1699,6 +1714,7 @@ export class WebSocketServer {
       maxUsers: server?.maxUsers ?? 0,
       hasPassword: false,
       allowSoundboard: false,
+      dmRelayEnabled: false,
       allowEveryoneMention: false,
       allowMessageEdit: false,
       showRoleBadgesToEveryone: false,
@@ -1961,6 +1977,7 @@ export class WebSocketServer {
         }
         this.botInteractions.disconnect(botSession);
         this.disconnectBotScreens(botSession);
+        this.dmRelay.unregister(botSession);
         if (botSession.user && botSession.sessionId) this.finalizeSessionLeave(botSession.user, botSession.sessionId);
         botSession.replaced = true;
         this.sessions.delete(botWs);
@@ -2999,6 +3016,11 @@ export class WebSocketServer {
         'Atualize o cliente e o servidor para configurar o cache de áudios.', requestId);
       return;
     }
+    if (payload.dmRelayEnabled !== undefined && !session.protocol?.features.includes('dm-relay')) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE,
+        'Atualize o cliente e o servidor para configurar mensagens diretas.', requestId);
+      return;
+    }
     if ((payload.recentSoundCacheEnabled !== undefined || payload.recentSoundCacheLimit !== undefined)
       && !this.recentSoundCache) {
       this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR,
@@ -3197,6 +3219,7 @@ export class WebSocketServer {
       name: result.name!,
       hasPassword: result.hasPassword!,
       allowSoundboard: result.allowSoundboard,
+      dmRelayEnabled: result.dmRelayEnabled,
       recentSoundCacheEnabled: result.recentSoundCacheEnabled,
       recentSoundCacheLimit: result.recentSoundCacheLimit,
       allowEveryoneMention: result.allowEveryoneMention,
@@ -3263,14 +3286,14 @@ export class WebSocketServer {
     grant.inFlight = true;
     let admitted = false;
     try {
-      if (!(await this.requirePermission(session, Permission.SPEAK, requestId, payload.channelId))
-        || !(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
+      if (!(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
       if (!isCurrent() || (await this.serverRepo.getServer())?.voiceMode !== 'p2p') {
         this.sendError(session.ws, ProtocolErrorCode.VOICE_RECONNECT_EXPIRED, 'O modo de voz mudou novamente.', requestId);
         return;
       }
+      const permissionMuted = await this.resolvePermissionMuted(session, payload.channelId);
       const result = await this.signalingService.joinVoiceChannel(
-        session.sessionId, session.user.id, payload.channelId, payload.isMuted, payload.isDeafened
+        session.sessionId, session.user.id, payload.channelId, payload.isMuted, payload.isDeafened, permissionMuted
       );
       admitted = !!result.voiceState;
       if (!result.success || !result.voiceState) {
@@ -3279,9 +3302,9 @@ export class WebSocketServer {
         return;
       }
       if (!isCurrent()) return;
-      if (!(await this.requirePermission(session, Permission.SPEAK, requestId, payload.channelId))
-        || !(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
+      if (!(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
       if (!isCurrent()) return;
+      result.voiceState = await this.applyPermissionMuted(session.sessionId, await this.resolvePermissionMuted(session, payload.channelId)) ?? result.voiceState;
       const joined: VoiceUserJoinedPayload = {
         channelId: payload.channelId,
         sessionId: session.sessionId,
@@ -3294,8 +3317,8 @@ export class WebSocketServer {
         payload: joined,
       });
       if (!isCurrent()
-        || !(await this.requirePermission(session, Permission.SPEAK, requestId, payload.channelId))
         || !(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
+      await this.applyPermissionMuted(session.sessionId, await this.resolvePermissionMuted(session, payload.channelId));
       const state = this.signalingService.getVoiceState(session.sessionId);
       if (!isCurrent() || state?.channelId !== payload.channelId) return;
       this.send(session.ws, {
@@ -3443,6 +3466,27 @@ export class WebSocketServer {
     }
   }
 
+  private async handleDmRelaySend(
+    session: ClientSession,
+    payload: DmRelaySendPayload,
+    requestId?: string,
+  ): Promise<void> {
+    const server = await this.serverRepo.getServer();
+    const error = this.dmRelay.relay(session, payload, {
+      enabled: server?.dmRelayEnabled !== false,
+      requestId,
+    });
+    if (error) {
+      const errorPayload: ServerErrorPayload = {
+        code: error.code,
+        message: error.message,
+        requestId,
+        relayId: error.relayId,
+      };
+      this.send(session.ws, { type: MessageType.SERVER_ERROR, requestId, payload: errorPayload });
+    }
+  }
+
   private validateRecentSoundPayload(
     session: ClientSession,
     payload: RecentSoundRecordPayload,
@@ -3563,8 +3607,10 @@ export class WebSocketServer {
     const attempt = {};
     if (session.isBot) session.botVoiceJoinAttempt = attempt;
     const accessVersion = this.botSettingsPermissionVersion;
-    if (!(await this.requirePermission(session, Permission.SPEAK, requestId,
-      session.isBot && payload.invocationId !== undefined ? undefined : payload.channelId))) return;
+    if (session.isBot) {
+      if (!(await this.requirePermission(session, Permission.SPEAK, requestId,
+        payload.invocationId !== undefined ? undefined : payload.channelId))) return;
+    } else if (!(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
     let authorization: Awaited<ReturnType<BotInteractionHandler['authorizeVoiceJoin']>>;
     if (session.isBot && payload.invocationId !== undefined) {
       authorization = await this.botInteractions.authorizeVoiceJoin(session, payload.invocationId, payload.channelId);
@@ -3592,7 +3638,8 @@ export class WebSocketServer {
       session.user.id,
       payload.channelId,
       payload.isMuted,
-      payload.isDeafened
+      payload.isDeafened,
+      await this.resolvePermissionMuted(session, payload.channelId)
     );
     if (!result.success || !result.voiceState) {
       this.sendError(
@@ -3621,6 +3668,7 @@ export class WebSocketServer {
       this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Voice admission changed; retry with the current caller context.', requestId);
       return;
     }
+    result.voiceState = await this.applyPermissionMuted(session.sessionId, await this.resolvePermissionMuted(session, payload.channelId)) ?? result.voiceState;
     if (session.isBot) {
       // The command authorizes admission only. Playback can outlive it; the
       // channel-scoped grant is subsequently checked against the creator's ACLs.
@@ -3782,8 +3830,12 @@ export class WebSocketServer {
       }
       effectivePayload.nativeScreenShares = parsed.data;
     }
-    if (current?.serverMuted || (session.isBot && !this.isCurrentBotOperation(session, 'publish_voice'))) {
+    if (current?.serverMuted || current?.permissionMuted || (session.isBot && !this.isCurrentBotOperation(session, 'publish_voice'))) {
       effectivePayload.isSpeaking = false;
+      if (current?.permissionMuted) effectivePayload.isSharingScreenAudio = false;
+    }
+    if (current?.permissionMuted && effectivePayload.nativeScreenShares) {
+      effectivePayload.nativeScreenShares = effectivePayload.nativeScreenShares.map(source => ({ ...source, audio: false }));
     }
 
     // Health is server-observed; renderer payloads cannot overwrite it.
@@ -3799,7 +3851,8 @@ export class WebSocketServer {
         this.closeBotVoiceReception(session, updated.channelId);
       }
       if (!current || current.isMuted !== updated.isMuted || current.isDeafened !== updated.isDeafened ||
-          current.serverMuted !== updated.serverMuted || current.serverDeafened !== updated.serverDeafened) {
+          current.serverMuted !== updated.serverMuted || current.serverDeafened !== updated.serverDeafened ||
+          current.permissionMuted !== updated.permissionMuted) {
         await this.syncSfuMicrophoneMute(sessionId);
       }
       const changedPayload: VoiceStateChangedPayload = { voiceState: updated };
@@ -3983,7 +4036,38 @@ export class WebSocketServer {
   private syncSfuMicrophoneMute(sessionId: string): Promise<void> {
     const state = this.signalingService.getVoiceState(sessionId);
     return this.sfuManager.setMicrophonesMuted(sessionId,
-      !state || state.isMuted || state.isDeafened || !!state.serverMuted || !!state.serverDeafened);
+      !state || state.isMuted || state.isDeafened || !!state.serverMuted || !!state.serverDeafened || !!state.permissionMuted);
+  }
+
+  private async resolvePermissionMuted(session: ClientSession, channelId: string): Promise<boolean> {
+    return !!session.user && !session.isBot &&
+      !(await this.channelService.canUserAccessChannel(session.user.id, channelId, Permission.SPEAK));
+  }
+
+  private closePermissionMutedAudio(voiceState: VoiceParticipantState): void {
+    for (const producer of this.sfuManager.getProducersInChannel(voiceState.channelId)) {
+      if (producer.producerSessionId !== voiceState.sessionId || producer.appData.mediaType !== 'screen_audio') continue;
+      this.sfuManager.closeProducer(producer.producerId);
+      this.broadcast({
+        type: MessageType.SFU_PRODUCER_CLOSED,
+        payload: { channelId: voiceState.channelId, producerId: producer.producerId } satisfies SfuProducerClosedPayload,
+      });
+    }
+  }
+
+  private async applyPermissionMuted(sessionId: string, muted: boolean): Promise<VoiceParticipantState | null> {
+    const current = this.signalingService.getVoiceState(sessionId);
+    if (!current) return null;
+    let updated = this.signalingService.setPermissionMuted(sessionId, muted);
+    if (muted && updated?.isSharingScreenAudio) {
+      updated = this.signalingService.updateVoiceState(sessionId, {
+        isSharingScreenAudio: false,
+        nativeScreenShares: updated.nativeScreenShares?.map(source => ({ ...source, audio: false })),
+      }) ?? updated;
+    }
+    if (updated && muted) this.closePermissionMutedAudio(updated);
+    await this.syncSfuMicrophoneMute(sessionId);
+    return updated;
   }
 
   private async authorizeBotVoiceMedia(
@@ -4212,6 +4296,12 @@ export class WebSocketServer {
     if (!appData.success || payload.kind !== (
       appData.data.mediaType === 'mic' || appData.data.mediaType === 'screen_audio' ? 'audio' : 'video')) {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Tipo ou origem da mídia inválidos.', requestId);
+      return;
+    }
+    const currentVoiceState = this.signalingService.getVoiceState(sessionId);
+    if (!session.isBot && currentVoiceState?.permissionMuted &&
+        (appData.data.mediaType === 'mic' || appData.data.mediaType === 'screen_audio')) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Sem permissão para falar neste canal.', requestId);
       return;
     }
     const nativeScreen = 'nativeScreen' in appData.data ? appData.data.nativeScreen : undefined;
@@ -4627,8 +4717,9 @@ export class WebSocketServer {
     channelId?: string,
   ): Promise<boolean> {
     if (!session.user) return false;
-    if (channelId && !await this.requireChannelAccess(session, channelId, requestId)) return false;
-    const allowed = channelId
+    const serverLevelOnly = permission === Permission.MANAGE_CHANNELS || permission === Permission.MOVE_MEMBERS;
+    if (channelId && !serverLevelOnly && !await this.requireChannelAccess(session, channelId, requestId)) return false;
+    const allowed = channelId && !serverLevelOnly
       ? await this.channelService.canUserAccessChannel(session.user.id, channelId, permission)
       : session.isBot
       ? hasPermission((await this.channelService.getAccessContext(session.user.id)).permissions, permission)
@@ -4894,7 +4985,7 @@ export class WebSocketServer {
   private async applyVoiceRestriction(
     session: ClientSession,
     userId: string,
-    restriction: keyof VoiceRestrictions,
+    restriction: 'serverMuted' | 'serverDeafened',
     value: boolean,
     requestId?: string,
   ): Promise<void> {
@@ -4966,12 +5057,14 @@ export class WebSocketServer {
     if (previous.channelId === payload.channelId) {
       return;
     }
-    if (!(await this.requirePermission(session, Permission.MOVE_MEMBERS, requestId, previous.channelId)) ||
-        !(await this.requirePermission(session, Permission.MOVE_MEMBERS, requestId, payload.channelId))) return;
+    if (!(await this.requirePermission(session, Permission.MOVE_MEMBERS, requestId))) return;
 
+    const targetCanView = await this.channelService.canUserAccessChannel(previous.userId, payload.channelId, Permission.VIEW_CHANNEL);
+    const targetCanSpeak = await this.channelService.canUserAccessChannel(previous.userId, payload.channelId, Permission.SPEAK);
     // Moving someone into a private channel they cannot access would drop them
-    // into a room that is not even in their channel list (#384).
-    if (!(await this.channelService.canUserAccessChannel(previous.userId, payload.channelId, Permission.SPEAK))) {
+    // into a room that is not even in their channel list (#384). Bots still
+    // need voice publish permission; humans without it enter permission-muted.
+    if (!targetCanView || (target.isBot && !targetCanSpeak)) {
       this.sendError(
         session.ws,
         ProtocolErrorCode.PERMISSION_DENIED,
@@ -4986,6 +5079,7 @@ export class WebSocketServer {
       this.sendError(session.ws, joinResult.errorCode || ProtocolErrorCode.BAD_REQUEST, joinResult.errorMessage || 'Não foi possível mover o usuário.', requestId);
       return;
     }
+    joinResult.voiceState = await this.applyPermissionMuted(payload.targetSessionId, !target.isBot && !targetCanSpeak) ?? joinResult.voiceState;
 
     this.closeSfuSession(previous.sessionId, previous.channelId);
     this.broadcast({ type: MessageType.ADMIN_MOVE_USER, requestId, payload });
@@ -5110,6 +5204,7 @@ export class WebSocketServer {
     this.botLocalExecution.disconnect(session);
     this.botInteractions.disconnect(session);
     this.disconnectBotScreens(session);
+    this.dmRelay.unregister(session);
 
     // If this session was replaced by a newer connection of the same device, it
     // is a stale/zombie socket. Do not broadcast USER_LEFT nor touch the
@@ -5418,8 +5513,7 @@ export class WebSocketServer {
   }
 
   private async requireCategoryManagement(session: ClientSession, categoryId: string, requestId?: string): Promise<boolean> {
-    if (session.user && categoryId &&
-        await this.channelService.canUserAccessCategory(session.user.id, categoryId, Permission.MANAGE_CHANNELS)) return true;
+    if (session.user && categoryId) return this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId);
     this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Categoria indisponível.', requestId);
     return false;
   }
@@ -5609,9 +5703,20 @@ export class WebSocketServer {
       session.visibleChannelIds = nowVisible;
       const voiceState = session.sessionId && this.signalingService.getVoiceState(session.sessionId);
       const voiceChannel = voiceState && channelsById.get(voiceState.channelId);
-      if (voiceState && voiceChannel && !this.hasBotVoiceGrant(session, voiceState.channelId) &&
-          !hasChannelPermission(voiceChannel, context.permissions, context.roleIds, Permission.SPEAK, context.isBot, context.userId)) {
-        this.evictFromVoiceChannel(voiceState.sessionId, voiceState.channelId);
+      if (voiceState && voiceChannel && !this.hasBotVoiceGrant(session, voiceState.channelId)) {
+        const canView = hasChannelPermission(voiceChannel, context.permissions, context.roleIds, Permission.VIEW_CHANNEL, context.isBot, context.userId);
+        const canSpeak = hasChannelPermission(voiceChannel, context.permissions, context.roleIds, Permission.SPEAK, context.isBot, context.userId);
+        if (!canView || (session.isBot && !canSpeak)) {
+          this.evictFromVoiceChannel(voiceState.sessionId, voiceState.channelId);
+        } else {
+          const updated = await this.applyPermissionMuted(voiceState.sessionId, !canSpeak);
+          if (updated && updated !== voiceState) {
+            await this.broadcastToChannel(updated.channelId, {
+              type: MessageType.VOICE_STATE_CHANGED,
+              payload: { voiceState: updated } satisfies VoiceStateChangedPayload,
+            }, undefined, () => this.signalingService.getVoiceState(updated.sessionId) === updated);
+          }
+        }
       }
     }
   }

@@ -5,7 +5,8 @@ import { t } from '../i18n';
 
 /**
  * The channel that blocks voice admission for the target member (#390).
- * Visibility and speaking permission both apply, even in public channels.
+ * Visibility applies even in public channels; missing speaking permission only
+ * mutes the target after a successful move.
  *
  * An unknown channel is deliberately treated as allowed. The server stays the
  * authority, and guessing here would block a legitimate move on stale state.
@@ -18,7 +19,7 @@ export function findBlockedMoveTarget(userId: string, channelId: string): Channe
   // authorize their public-room admission rather than applying human Everyone.
   if (serverStore.knownMembers.get(userId)?.isBot) return channel.isPrivate ? channel : null;
   const permissions = serverStore.getUserChannelPermissions(userId, channelId);
-  const allowed = hasPermission(permissions, Permission.VIEW_CHANNEL) && hasPermission(permissions, Permission.SPEAK);
+  const allowed = hasPermission(permissions, Permission.VIEW_CHANNEL);
   return allowed ? null : channel;
 }
 

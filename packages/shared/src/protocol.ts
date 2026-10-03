@@ -40,6 +40,7 @@ export enum ProtocolErrorCode {
   FORUM_INVALID = 'FORUM_INVALID',
   MESSAGE_SEARCH_INVALID = 'MESSAGE_SEARCH_INVALID',
   BOT_OFFLINE = 'BOT_OFFLINE',
+  DM_RELAY_DISABLED = 'DM_RELAY_DISABLED',
   BOT_COMMAND_NOT_FOUND = 'BOT_COMMAND_NOT_FOUND',
   BOT_INVALID_OPTIONS = 'BOT_INVALID_OPTIONS',
   BOT_INTERACTION_EXPIRED = 'BOT_INTERACTION_EXPIRED',
@@ -192,6 +193,7 @@ export enum MessageType {
   RECENT_SOUND_RECORD = 'RECENT_SOUND_RECORD',
   RECENT_SOUNDS_LIST = 'RECENT_SOUNDS_LIST',
   RECENT_SOUND_DOWNLOAD = 'RECENT_SOUND_DOWNLOAD',
+  DM_RELAY_SEND = 'DM_RELAY_SEND',
   /**
    * Client -> server, when the person who triggered a sound stops it. The audio
    * is broadcast once and then played by each listener on their own, so a stop
@@ -323,6 +325,8 @@ export enum MessageType {
   RECENT_SOUND_ADDED = 'RECENT_SOUND_ADDED',
   RECENT_SOUNDS_RESULT = 'RECENT_SOUNDS_RESULT',
   RECENT_SOUND_DATA = 'RECENT_SOUND_DATA',
+  DM_RELAY_ACK = 'DM_RELAY_ACK',
+  DM_RELAY_DELIVER = 'DM_RELAY_DELIVER',
   /** Server -> clients in the channel: drop this user's ongoing sound (#499). */
   SOUNDBOARD_STOPPED = 'SOUNDBOARD_STOPPED',
   SERVER_ERROR = 'SERVER_ERROR',
@@ -506,6 +510,7 @@ export interface ServerUpdateSettingsPayload {
   allowSoundboard?: boolean;
   recentSoundCacheEnabled?: boolean;
   recentSoundCacheLimit?: number;
+  dmRelayEnabled?: boolean;
   /** Enables or disables the `@todos` / `@everyone` mention (#464). */
   allowEveryoneMention?: boolean;
   /** Enables or disables editing of already-sent messages (#504). */
@@ -588,6 +593,33 @@ export interface RecentSoundRecordPayload {
 
 export interface SoundboardStopPayload {
   channelId: string;
+}
+
+export type DmRelayKind = 'friend' | 'envelope' | 'file' | 'signal';
+
+export interface DmRelayItem {
+  /** Recipient full normalized Ed25519 SPKI public key hex. */
+  to: string;
+  kind: DmRelayKind;
+  /** Opaque end-to-end encrypted client data. */
+  data: string;
+}
+
+export interface DmRelaySendPayload {
+  relayId: string;
+  items: DmRelayItem[];
+}
+
+export interface DmRelayAckPayload {
+  relayId: string;
+  accepted: number;
+}
+
+export interface DmRelayDeliverPayload {
+  /** Sender full normalized authenticated Ed25519 SPKI public key hex. */
+  from: string;
+  kind: DmRelayKind;
+  data: string;
 }
 
 export interface VoiceJoinPayload {
@@ -717,6 +749,7 @@ export interface ServerErrorPayload {
   code: ProtocolErrorCode;
   message: string;
   requestId?: string;
+  relayId?: string;
   /**
    * Protocol version the server speaks, sent with
    * `PROTOCOL_VERSION_UNSUPPORTED` so the client can say *who* is outdated
@@ -733,6 +766,7 @@ export interface ServerSettingsUpdatedPayload {
   allowSoundboard?: boolean;
   recentSoundCacheEnabled?: boolean;
   recentSoundCacheLimit?: number;
+  dmRelayEnabled?: boolean;
   /** Current state of the `@todos` / `@everyone` mention (#464). */
   allowEveryoneMention?: boolean;
   /** Current state of the message-editing switch (#504). */
@@ -877,8 +911,12 @@ export interface ServerNetworkInterface {
   address: string;
   family: 'IPv4' | 'IPv6';
   type: 'public' | 'lan' | 'vpn' | 'loopback';
+  /** Portuguese label kept for older clients; current clients translate from `type`/`name`. */
   description: string;
 }
+
+/** `name` of the entry for the internet IP the server discovered, as opposed to an adapter. */
+export const PUBLIC_IP_INTERFACE_NAME = 'Internet (IP Público)';
 
 export interface ServerInviteInfoPayload {
   port: number;

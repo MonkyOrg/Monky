@@ -35,7 +35,7 @@ export class SqliteServerRepository implements IServerRepository {
   }
 
   async getServer(): Promise<ServerRecord | null> {
-    const row = this.db.prepare('SELECT id, name, everyone_permissions as everyonePermissions, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, max_message_length as maxMessageLength, message_delete_undo_seconds as messageDeleteUndoSeconds, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, recent_sound_cache_enabled as recentSoundCacheEnabled, recent_sound_cache_limit as recentSoundCacheLimit, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots FROM server_meta LIMIT 1').get() as ServerRecord | undefined;
+    const row = this.db.prepare('SELECT id, name, everyone_permissions as everyonePermissions, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, max_message_length as maxMessageLength, message_delete_undo_seconds as messageDeleteUndoSeconds, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, dm_relay_enabled as dmRelayEnabled, recent_sound_cache_enabled as recentSoundCacheEnabled, recent_sound_cache_limit as recentSoundCacheLimit, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots FROM server_meta LIMIT 1').get() as ServerRecord | undefined;
     if (!row) return null;
     return {
       id: row.id,
@@ -48,6 +48,7 @@ export class SqliteServerRepository implements IServerRepository {
       messageDeleteUndoSeconds: row.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,
       ownerUserId: row.ownerUserId ?? null,
       allowSoundboard: row.allowSoundboard !== undefined ? Boolean(row.allowSoundboard) : true,
+      dmRelayEnabled: row.dmRelayEnabled !== undefined ? Boolean(row.dmRelayEnabled) : true,
       recentSoundCacheEnabled: Boolean(row.recentSoundCacheEnabled),
       recentSoundCacheLimit: row.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT,
       allowEveryoneMention: row.allowEveryoneMention !== undefined ? Boolean(row.allowEveryoneMention) : true,
@@ -119,6 +120,10 @@ export class SqliteServerRepository implements IServerRepository {
     if (server.allowSoundboard !== undefined) {
       fields.push('allow_soundboard = ?');
       values.push(server.allowSoundboard ? 1 : 0);
+    }
+    if (server.dmRelayEnabled !== undefined) {
+      fields.push('dm_relay_enabled = ?');
+      values.push(server.dmRelayEnabled ? 1 : 0);
     }
     if (server.recentSoundCacheEnabled !== undefined) {
       fields.push('recent_sound_cache_enabled = ?');

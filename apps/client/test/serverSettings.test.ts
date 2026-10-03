@@ -152,6 +152,13 @@ test('deletion undo settings require negotiated support and an integer window fr
   }
 });
 
+test('DM relay setting requires negotiated support before submitting', () => {
+  assert.equal(serverSettingsValidationError({ dmRelayEnabled: false }, server()), 'chat.featureUpdateRequired');
+  const supported = server({ protocol: { version: PROTOCOL_VERSION, minimumVersion: MIN_CLIENT_PROTOCOL, features: ['dm-relay'] } });
+  assert.equal(serverSettingsValidationError({ dmRelayEnabled: false }, supported), null);
+  assert.equal(serverSettingsValidationError({ dmRelayEnabled: true }, supported), null);
+});
+
 test('per-field validation uses current persisted prerequisites and does not resubmit unrelated settings', () => {
   const s = server();
   assert.equal(serverSettingsValidationError({ name: 'A' }, s), 'serverSettings.nameInvalid');

@@ -83,7 +83,7 @@ async function runAutomaticScreenPipSmoke() {
   const setup = async () => {
     session.serverStore.setServerDetails({
       id: 'pip-server', name: 'PiP fixture', createdAt: 1, maxUsers: 10, voiceStates: {},
-      protocol: { version: 35, minimumVersion: 29, features: ['screen-viewers'] },
+      protocol: { version: 36, minimumVersion: 29, features: ['screen-viewers'] },
       channels: [channel], members: [local, remote], knownMembers: [local, remote],
       roles: [], userRoles: [], myPermissions: 2147483647, ownerId: local.id,
     }, local);

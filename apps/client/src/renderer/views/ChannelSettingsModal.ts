@@ -31,8 +31,6 @@ const permissionNames = [
   [Permission.USE_BOT_COMMANDS, 'useBotCommands'],
   [Permission.MANAGE_EVENTS, 'manageEvents'],
   [Permission.EMIT_LIVE_ACTIONS, 'emitLiveActions'],
-  [Permission.MANAGE_CHANNELS, 'manageChannels'],
-  [Permission.MOVE_MEMBERS, 'moveMembers'],
 ] as const;
 const states = [
   { value: 'deny', icon: 'close', label: 'channelPermissions.deny' },
@@ -52,9 +50,7 @@ export class ChannelSettingsModal {
     const sessionId = store.currentUser?.sessionId;
     const current = () => target.kind === 'channel' ? store.getChannel(target.value.id)
       : store.serverDetails?.categories?.find(category => category.id === target.value.id);
-    const allowed = () => target.kind === 'channel'
-      ? store.hasPermission(Permission.MANAGE_CHANNELS, target.value.id)
-      : store.hasCategoryPermission(Permission.MANAGE_CHANNELS, target.value.id);
+    const allowed = () => store.hasPermission(Permission.MANAGE_CHANNELS);
     if (!serverId || !allowed() || !current()) return;
     const snapshot = () => JSON.stringify({
       value: current(),
@@ -176,7 +172,7 @@ export class ChannelSettingsModal {
       picker.sync(root);
       const visiblePermissions = permissionNames.filter(([bit]) => (bit & CHANNEL_PERMISSIONS) !== 0 &&
         (target.kind === 'category' || target.value.type === 'VOICE' ||
-          ![Permission.SPEAK, Permission.MUTE_MEMBERS, Permission.DEAFEN_MEMBERS, Permission.MOVE_MEMBERS, Permission.USE_SOUNDBOARD].includes(bit)));
+          ![Permission.SPEAK, Permission.MUTE_MEMBERS, Permission.DEAFEN_MEMBERS, Permission.USE_SOUNDBOARD].includes(bit)));
       root.querySelector<HTMLElement>('[data-permission-rules]')!.innerHTML = `
         <div class="channel-rules-heading"><h3>${escapeHtml(targets.find(item => item.key === selectedTarget)?.name ?? '')}</h3>
           ${selectedTarget === EVERYONE_ROLE_ID ? '' : `<button type="button" class="btn btn-danger" data-remove-rule>${t('channelPermissions.removeRole')}</button>`}</div>

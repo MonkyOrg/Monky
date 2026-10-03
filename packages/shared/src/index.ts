@@ -1,6 +1,8 @@
 export { getOverlayCardSize, isOverlayCardSizeCustom, overlayCardAspect } from './overlay';
 export {
   PROTOCOL_VERSION,
+  ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX,
+  ED25519_SPKI_PUBLIC_KEY_DER_HEX_LENGTH,
   OVERLAY_DEFAULT_WIDTH,
   OVERLAY_DEFAULT_HEIGHT,
   OVERLAY_DEFAULT_CARD_WIDTH,
@@ -61,3 +63,4 @@ export { releaseRequiresProtocolUpdate } from './releaseCompatibility.js';
 export { createMessageContentSchema } from './validators.js';
 export * from './soundboardEditing';
 export * from './recentSounds.js';
+export * from './directMessages.js';

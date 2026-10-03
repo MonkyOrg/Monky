@@ -59,6 +59,7 @@ export const ptBR = {
   'create.serverNotFound': 'Servidor não encontrado.',
   'create.alreadyHasOwner': 'Este servidor já possui um owner configurado.',
   'create.bootstrapFailed': 'Falha ao atualizar o usuário bootstrap.',
+  'create.identityCollision': 'O clientId desta identidade coincide com outro membro, mas a chave pública é diferente. A entrada foi recusada por segurança.',
   'create.adminRoleNotFound': 'Cargo Admin não encontrado.',
   'create.ownerConfigured': 'Dono do servidor configurado com sucesso.',
   'create.askDataDir': 'Onde guardar os dados do servidor',

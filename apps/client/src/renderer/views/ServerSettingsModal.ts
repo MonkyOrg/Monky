@@ -235,6 +235,8 @@ export class ServerSettingsModal {
     this.bindSetting('#input-recent-sounds-limit', 'recentSoundsLimit', 'serverSettings.recentSoundsLimit',
       () => String(details()?.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT),
       (value) => ({ recentSoundCacheLimit: Number(value) }));
+    this.bindSetting('#checkbox-dm-relay-enabled', 'dmRelay', 'serverSettings.dmRelayEnabled',
+      () => String(details()?.dmRelayEnabled !== false), (value) => ({ dmRelayEnabled: value === 'true' }));
     this.bindSetting('#checkbox-allow-everyone-mention', 'everyone', 'serverSettings.allowEveryoneMention',
       () => String(details()?.allowEveryoneMention !== false), (value) => ({ allowEveryoneMention: value === 'true' }));
     this.bindSetting('#checkbox-allow-message-edit', 'messageEdit', 'serverSettings.allowMessageEdit',

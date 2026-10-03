@@ -35,7 +35,8 @@ export type ClientLogCategory =
   | 'SERVER_HOST'
   | 'SCREEN_SHARE'
   | 'SOUNDBOARD'
-  | 'MEDIA';
+  | 'MEDIA'
+  | 'DM';
 
 export type LogLevel = 'INFO' | 'WARN' | 'ERROR';
 

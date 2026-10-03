@@ -16,7 +16,7 @@ depend on your access.
 | --- | --- |
 | General | Name, image and banner, event activation, limits, voice mode and server process information |
 | Security | Entry password |
-| Voice & Video | Soundboard access, recent audio cache and the integrated TURN relay |
+| Voice & Video | Soundboard access, recent audio cache, direct-message relay and the integrated TURN relay |
 | Storage | Attachment limits and usage |
 | Notifications | Mentions, message editing and notices published in chat |
 | Members | Inspect members and manage access according to your permissions |
@@ -65,6 +65,13 @@ the play button provides a local-only preview without sending the clip to the
 call or creating another history entry. **Download** opens the operating
 system's safe save dialog. A toast confirms when the file is saved; cancelling
 the dialog does not show a success message.
+
+### Direct messages
+
+Under **Voice & Video**, the **Allow direct messages through this server** switch
+controls whether updated clients may use this server only as a bridge for
+end-to-end encrypted DMs. The server does not store the content or queue for
+those messages.
 
 ## Channels
 
@@ -243,6 +250,12 @@ A second assigned role explicitly denying sending still blocks it.
 keeps the channel visible but removes history, search results and message
 notifications. Mute/deafen permissions remain server-wide because those
 restrictions apply to the member throughout the server.
+**Manage channels** and **Move members** are also server-wide permissions:
+they do not appear in the channel or category permission editor and cannot be
+granted or denied by local rules. **Speak** no longer blocks joining a voice
+channel; anyone with **View channel** can enter, but without **Speak** they are
+muted for microphone, soundboard and screen-share audio until that permission
+applies in the channel.
 
 ### Private channel
 

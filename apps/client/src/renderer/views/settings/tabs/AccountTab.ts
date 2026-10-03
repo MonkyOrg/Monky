@@ -9,7 +9,9 @@ import { showIdentityExportDialog, showIdentityImportDialog } from '../../Identi
 import { showBackupExportDialog, showBackupImportDialog } from '../../BackupDialogs';
 import { showAlert } from '../../Dialog';
 import { attachInputEmojiPicker } from '../../../utils/inputEmojiPicker';
-import { MessageType } from '@monky/shared';
+import { DM_MAX_FILE_BYTES_OPTIONS, MessageType } from '@monky/shared';
+import { dmStore } from '../../../stores/dmStore';
+import { formatBytes } from '../../../utils/attachment';
 
 export class AccountTab {
   private detachEmojiPicker: (() => void) | null = null;
@@ -22,7 +24,7 @@ export class AccountTab {
       <!-- Nickname & Profile -->
       <div data-settings-section="profile" data-settings-label="${escapeHtml(t('settings.tabAccount'))}" style="display: flex; gap: 16px; align-items: center; padding: 14px; background: var(--bg-card); border-radius: var(--radius-md); margin-bottom: 16px; border: 1px solid var(--border-color);">
         <button type="button" id="settings-avatar-wrapper" class="settings-avatar-wrapper" title="${t('settings.avatarTitle')}">
-          <img id="settings-avatar-preview" class="settings-avatar-img" src="${serverStore.currentUser?.avatarUrl ? getAvatarUrl(serverStore.currentUser.avatarUrl) : (connectionStore.savedAvatarBase64 || getAvatarUrl(null))}" alt="Avatar" data-fallback="avatar">
+          <img id="settings-avatar-preview" class="settings-avatar-img" src="${connectionStore.savedAvatarBase64 ? getAvatarUrl(connectionStore.savedAvatarBase64) : getAvatarUrl(serverStore.currentUser?.avatarUrl)}" alt="Avatar" data-fallback="avatar">
           <div class="settings-avatar-overlay">
             <span class="material-symbols-outlined md-20">photo_camera</span>
           </div>
@@ -32,7 +34,7 @@ export class AccountTab {
             <label>${t('connection.nicknameLabel')}</label>
             <div style="display: flex; gap: 8px; margin-top: 6px;">
               <div class="input-with-emoji-container" style="flex: 1;">
-                <input id="settings-nickname-input" type="text" value="${escapeHtml(serverStore.currentUser?.nickname || connectionStore.savedNickname || '')}" style="width: 100%; padding-right: 36px;" maxlength="32">
+                <input id="settings-nickname-input" type="text" value="${escapeHtml(connectionStore.savedNickname || serverStore.currentUser?.nickname || '')}" style="width: 100%; padding-right: 36px;" maxlength="32">
                 <button type="button" id="btn-emoji-nickname" class="btn-input-emoji" title="${t('chat.emojiPickerTitle')}">
                   <span class="material-symbols-outlined md-18">mood</span>
                 </button>
@@ -60,6 +62,43 @@ export class AccountTab {
           </label>
         </div>
       </div>
+
+      <div data-settings-section="connections" data-settings-label="${escapeHtml(t('settings.connectionsSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+        <label style="display: flex; align-items: center; gap: 6px;">
+          <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">hub</span>
+          ${t('settings.connectionsSection')}
+        </label>
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
+          <div style="flex: 1; margin-right: 12px;">
+            <div style="font-size: 13px; color: var(--text-primary);">${t('settings.autoConnectServersLabel')}</div>
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('settings.autoConnectServersHint')}</div>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="toggle-auto-connect-servers" ${settingsStore.autoConnectServers ? 'checked' : ''}>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
+      ${dmStore.available ? `
+      <div data-settings-section="direct-messages" data-settings-label="${escapeHtml(t('settings.dmSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+        <label style="display: flex; align-items: center; gap: 6px;" for="select-dm-max-file">
+          <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">forum</span>
+          ${t('settings.dmSection')}
+        </label>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
+          <div style="flex: 1;">
+            <div style="font-size: 13px; color: var(--text-primary);">${t('settings.dmMaxFileLabel')}</div>
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('settings.dmMaxFileHint')}</div>
+          </div>
+          <select id="select-dm-max-file" style="width: auto; min-width: 110px;">
+            ${DM_MAX_FILE_BYTES_OPTIONS.map((bytes) =>
+              `<option value="${bytes}" ${bytes === dmStore.snapshot.settings.maxFileBytes ? 'selected' : ''}>${formatBytes(bytes)}</option>`
+            ).join('')}
+          </select>
+        </div>
+      </div>
+      ` : ''}
 
       <!-- Language (#16) -->
       <div data-settings-section="language" data-settings-label="${escapeHtml(t('settings.languageSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
@@ -193,6 +232,22 @@ export class AccountTab {
       }
     });
 
+    const toggleAutoConnect = container.querySelector<HTMLInputElement>('#toggle-auto-connect-servers');
+    toggleAutoConnect?.addEventListener('change', () => {
+      settingsStore.autoConnectServers = toggleAutoConnect.checked;
+      settingsStore.save();
+    });
+
+    const selectDmMaxFile = container.querySelector<HTMLSelectElement>('#select-dm-max-file');
+    selectDmMaxFile?.addEventListener('change', async () => {
+      const previous = dmStore.snapshot.settings.maxFileBytes;
+      const failure = await dmStore.updateMaxFileBytes(Number(selectDmMaxFile.value));
+      if (failure) {
+        selectDmMaxFile.value = String(previous);
+        callbacks.showError(t('dm.errorGeneric'));
+      }
+    });
+
     btnExportIdentity?.addEventListener('click', async () => {
       await showIdentityExportDialog(connectionStore.clientId || '');
     });
@@ -203,6 +258,8 @@ export class AccountTab {
         connectionStore.clientId = imported.clientId;
         connectionStore.publicKey = imported.publicKey;
         connectionStore.hasIdentity = true;
+        // The imported identity brings its own friends and conversations.
+        void dmStore.reload();
         const restored = imported.restoredScopes ?? [];
         const message = imported.extrasFailed
           ? `${t('identity.importSuccess')} ${t('backup.extrasRestoreFailed')}`

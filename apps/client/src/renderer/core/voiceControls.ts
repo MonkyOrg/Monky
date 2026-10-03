@@ -32,20 +32,25 @@ export function updateLocalSpeaking(speaking: boolean): void {
 export function getVoiceControlModeration(): {
   serverMuted: boolean;
   serverDeafened: boolean;
+  permissionMuted: boolean;
   muteReason: string | null;
   deafenReason: string | null;
 } {
   const { serverMuted, serverDeafened } = serverStore.voiceRestrictions;
+  const permissionMuted = voiceStore.permissionMuted;
   const deafenReason = serverDeafened ? t('permissions.serverDeafened') : null;
+  const permissionReason = permissionMuted ? t('permissions.permissionMuted') : null;
   return {
     serverMuted,
     serverDeafened,
-    muteReason: deafenReason ?? (serverMuted ? t('permissions.serverMuted') : null),
+    permissionMuted,
+    muteReason: permissionReason ?? deafenReason ?? (serverMuted ? t('permissions.serverMuted') : null),
     deafenReason,
   };
 }
 
 export function toggleMicrophoneMute(): void {
+  if (voiceStore.permissionMuted) return;
   const muted = !voiceStore.isMuted;
   voiceStore.setMuted(muted);
   const undeafened = !muted && voiceStore.isDeafened;

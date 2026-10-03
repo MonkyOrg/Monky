@@ -409,7 +409,7 @@ export class OverlayBridgeService {
         ? voiceStore.isCameraOn && videoService.getCameraState().status === 'ready'
         : (p.voiceState?.isCameraOn ?? false);
       const isSpeaking = isParticipantSpeaking(p, callStore);
-      const isMuted = isLocal ? voiceStore.getEffectiveMuted() : (p.voiceState?.isMuted ?? false);
+      const isMuted = isLocal ? voiceStore.getEffectiveMuted() : ((p.voiceState?.isMuted ?? false) || (p.voiceState?.permissionMuted ?? false));
       const isDeafened = isLocal ? voiceStore.getEffectiveDeafened() : (p.voiceState?.isDeafened ?? false);
       const serverMuted = isLocal ? voiceStore.serverMuted : (p.voiceState?.serverMuted ?? false);
       const serverDeafened = isLocal ? voiceStore.serverDeafened : (p.voiceState?.serverDeafened ?? false);

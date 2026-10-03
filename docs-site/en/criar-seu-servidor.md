@@ -1,21 +1,26 @@
 # Create Your Server
 
-Under **My Servers › Create Server**, fill in the host nickname, server name, local port, optional password, the starting text and voice channels and, if you want, a member limit.
+In Home, click the **+** button on the server rail and choose **Create my
+server**. Fill in the server name, local port, optional password, the starting
+text and voice channels and, if you want, a member limit. Monky uses the global
+nickname saved under **My Profile**.
 
 <AppScreenshot src="/screenshots/criar-servidor-en.png" :width="1000" :height="1640" alt="Server creation form with name, port, initial channels, member limit and voice mode." caption="The app hosts on your computer. Internet availability also depends on networking and firewall rules." />
 
 Click **Create and Start Server**. The server starts on your machine, listens on every network interface on the chosen port, and opens for browsing. Joining a voice channel is a separate action.
 
-Created servers are saved (up to 10). Later, use **Start**, **Stop** or **X** under *My Servers*.
+Created servers are saved (up to 10) and appear on the rail like any other
+server. Right-click the icon to **Start**, **Stop**, open **Monitor** or
+**Delete** the local data.
 
-Starting an offline server from Home or the server rail preserves the current
+Starting an offline server from the server rail preserves the current
 call, including camera, screen shares and mute. If this instance already hosts
 another server, it will not replace it: stop that server explicitly when safe
 before starting a different one.
 
-This does not change **returning Home through the house icon**: that action
-asks to disconnect from servers and end the call. To start another saved
-server without leaving the call, use its entry in the server rail.
+Returning Home through the house icon does not disconnect servers or end the
+call. To start another saved server without leaving the call, use its entry in
+the server rail.
 
 ## Invite friends
 
@@ -62,9 +67,9 @@ one running on a VPS. Administrators have access; other members need the
 grant access. The server checks authorization for every request; the client
 does not need to host a local server.
 
-For a server hosted on this device, the **monitoring** icon next to *Stop*
-under *My Servers* still opens the explicitly local monitor, separate from
-the remote server in focus.
+For a server hosted on this device, the **Monitor** action in the rail context
+menu still opens the explicitly local monitor, separate from the remote server
+in focus.
 
 The panel shows:
 

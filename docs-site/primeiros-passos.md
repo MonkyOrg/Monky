@@ -12,8 +12,9 @@ outro computador e quer manter a mesma conta nos servidores, escolha
 
 <AppScreenshot src="/screenshots/identidade-pt.png" alt="Primeira abertura do Monky, com as opções Criar nova identidade e Importar identidade existente." caption="A identidade substitui um cadastro central. Criar outra identidade não recupera os cargos e vínculos da anterior." />
 
-Seu nickname e sua foto são a apresentação dessa identidade; mudar o nome não
-cria uma conta nova.
+Na sequência, informe seu **nickname** e, se quiser, escolha um avatar. Esse
+perfil é global: ele aparece em todos os servidores conectados e pode ser
+alterado depois em **Configurações → Meu Perfil** sem criar uma conta nova.
 
 ### Guarde um backup da identidade
 
@@ -25,17 +26,23 @@ identidade não recupera os acessos da anterior.
 
 ## 2. Escolha como entrar
 
-Após criar a identidade, o assistente oferece entrar no servidor de um amigo
-ou criar um servidor. Você pode dispensá-lo e reabri-lo em
-**Precisa de ajuda pra começar?**.
+Após criar a identidade e o perfil, o Monky abre a **Home**. Ela tem o trilho
+de servidores à esquerda, a lista de **Mensagens diretas** e a página
+**Amigos** com as abas Disponível, Todos e Pendente. Se nenhum servidor estiver
+salvo, o botão **+** no trilho fica destacado.
 
-<AppScreenshot src="/screenshots/inicio-pt.png" alt="Tela inicial do Monky com nickname, endereço, porta e as abas Entrar no Servidor e Meus Servidores." caption="Na tela inicial, informe o endereço de quem hospeda — não o IP do seu próprio computador, a menos que o servidor esteja nele." />
+<AppScreenshot src="/screenshots/inicio-pt.png" alt="Home do Monky com trilho de servidores, mensagens diretas e a página Amigos." caption="Use o botão + no trilho para criar ou entrar em um servidor. A Home continua disponível mesmo sem servidores conectados." />
 
 | Situação | Próximo passo |
 | --- | --- |
 | Alguém já hospeda para o grupo | [Entrar em um servidor](/entrar-em-um-servidor) |
 | Quero hospedar no meu computador | [Criar pelo aplicativo](/criar-seu-servidor) |
 | Quero um servidor disponível 24 horas | [Hospedar em uma VPS](/hospedar-em-vps) |
+
+Servidores salvos se conectam em segundo plano por padrão para manter presença
+de amigos e mensagens diretas. Desative isso em **Configurações → Meu Perfil →
+Conexões** se preferir conectar manualmente. O servidor marcado com
+**Entrar ao abrir o Monky** continua abrindo em primeiro plano.
 
 ## 3. Converse por texto e voz
 

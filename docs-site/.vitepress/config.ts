@@ -15,6 +15,7 @@ const ptSidebar = [
     text: 'Usar o Monky',
     items: [
       { text: 'Entrar em um servidor', link: '/entrar-em-um-servidor' },
+      { text: 'Amigos e mensagens diretas', link: '/amigos-e-mensagens-diretas' },
       { text: 'Conversas, voz e mídia', link: '/usando-o-app' },
       { text: 'Configurações', link: '/configuracoes' },
       { text: 'Usar bots', link: '/bots' },
@@ -84,6 +85,7 @@ const enSidebar = [
     text: 'Use Monky',
     items: [
       { text: 'Join a server', link: '/en/entrar-em-um-servidor' },
+      { text: 'Friends and direct messages', link: '/en/amigos-e-mensagens-diretas' },
       { text: 'Chat, voice and media', link: '/en/usando-o-app' },
       { text: 'Settings', link: '/en/configuracoes' },
       { text: 'Use bots', link: '/en/bots' },

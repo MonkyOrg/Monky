@@ -264,11 +264,18 @@ async function* regression() {
   await settle(oldCode); await settle(newCode);
 
   const wizard = new OnboardingWizard();
-  wizard.open();
+  let wizardFinished = 'pending';
+  wizard.open(action => { wizardFinished = action; });
   const onboarding = motion.topModal();
   check(onboarding.getAnimations().length > 0, 'Onboarding enters');
   await settle(onboarding);
   const stableCard = onboarding.querySelector('.modal-card');
+  check(!!onboarding.querySelector('#onboarding-next') && !onboarding.querySelector('#onboarding-host'),
+    'Onboarding starts by showing Home before asking for a path');
+  onboarding.querySelector('#onboarding-next').click();
+  await settle(stableCard);
+  check(!!onboarding.querySelector('#onboarding-join') && !!onboarding.querySelector('#onboarding-host'),
+    'Second onboarding step offers joining or creating a server');
   onboarding.querySelector('#onboarding-host').click();
   check(onboarding.querySelector('.modal-card') === stableCard && stableCard.querySelector('[data-ui-closing]')?.inert,
     'Onboarding retains its card and animates actual outgoing content');
@@ -284,7 +291,18 @@ async function* regression() {
     'Step completion removes old content without replacing the card');
   wizard.close();
   check(onboarding.hasAttribute('data-ui-closing'), 'Onboarding exits');
+  check(wizardFinished === null, 'Closing the guide without a choice reports no action');
   await settle(onboarding);
+  wizardFinished = 'pending';
+  wizard.openHostTutorials(action => { wizardFinished = action; });
+  const hostTutorials = motion.topModal();
+  await settle(hostTutorials);
+  check(!hostTutorials.querySelector('.onboarding-step-dots') && !hostTutorials.querySelector('#onboarding-create-now'),
+    'Hosting tutorials opened from the create form skip the guide-only controls');
+  hostTutorials.querySelector('#onboarding-back').click();
+  check(hostTutorials.hasAttribute('data-ui-closing') && wizardFinished === null,
+    'Back from hosting tutorials closes them instead of jumping to the guide start');
+  await settle(hostTutorials);
   const tutorial = new TutorialViewer();
   tutorial.open({ id: 'motion', name: 'common.close', icon: 'info', steps: [
     { title: 'common.close', content: 'common.close' }, { title: 'common.close', content: 'common.close' },

@@ -501,6 +501,8 @@ async function regression(locale) {
   field('[data-channel-tab="permissions"]').click();
   check(!collapsed('.channel-sync-status') && !field('.channel-permission-controls').disabled &&
     field('[data-sync-category]').hidden && !field('[data-customize]'), 'synchronized permissions are informational and directly editable');
+  check(!document.querySelector('[data-permission-bit="1"]') && !document.querySelector('[data-permission-bit="128"]'),
+    'server-wide management permissions are not shown in channel rules');
   field('[data-permission-bit="256"][data-permission-state="deny"]').click();
   check(!field('[data-sync-category]').hidden && field('[data-sync-status]').textContent === t('channelPermissions.unsynced'),
     'Changing a permission immediately reveals synchronization without a Customize step');

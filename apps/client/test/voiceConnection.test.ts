@@ -48,7 +48,7 @@ test('human and bot speaking share the same muted/deafened and departed-session 
     assert.ok(model);
     manager.setSpeaking(entry.voiceState.sessionId, true);
     assert.equal(model.isSpeaking, true);
-    for (const flag of ['isMuted', 'isDeafened', 'serverMuted', 'serverDeafened'] as const) {
+    for (const flag of ['isMuted', 'isDeafened', 'serverMuted', 'serverDeafened', 'permissionMuted'] as const) {
       manager.updateVoiceState({ ...entry.voiceState, isSpeaking: true, [flag]: true });
       assert.equal(model.isSpeaking, false, `${flag} clears a published speaking state`);
       manager.setSpeaking(entry.voiceState.sessionId, true);

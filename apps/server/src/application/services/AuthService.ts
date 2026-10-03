@@ -280,7 +280,16 @@ export class AuthService {
     // members (#403): we must know whether this person already has a record.
     let userRecord = await this.userRepo.findByPublicKey(pending.publicKey);
     if (!userRecord) {
-      userRecord = await this.userRepo.findByClientId(pending.clientId);
+      const byClientId = await this.userRepo.findByClientId(pending.clientId);
+      if (byClientId?.publicKey && normalizePublicKeyHex(byClientId.publicKey) !== pending.publicKey) {
+        return {
+          success: false,
+          authFailed: true,
+          errorCode: ProtocolErrorCode.UNAUTHORIZED,
+          errorMessage: 'Esta identidade não corresponde ao membro registrado neste servidor.',
+        };
+      }
+      userRecord = byClientId;
     }
 
     // Only a brand-new member consumes a slot — an existing member must never be
@@ -333,13 +342,14 @@ export class AuthService {
       };
       await this.userRepo.create(userRecord);
     } else {
-      await this.userRepo.update(userRecord.id, {
+      const updates: Partial<UserRecord> = {
         nickname: trimmedNick,
-        publicKey: pending.publicKey,
         lastSeenAt: now,
-      });
+      };
+      if (!userRecord.publicKey) updates.publicKey = pending.publicKey;
+      await this.userRepo.update(userRecord.id, updates);
       userRecord.nickname = trimmedNick;
-      userRecord.publicKey = pending.publicKey;
+      userRecord.publicKey = userRecord.publicKey ?? pending.publicKey;
       userRecord.lastSeenAt = now;
     }
 
@@ -412,6 +422,7 @@ export class AuthService {
       maxMessageLength: server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
       hasPassword: !!(server.passwordHash && server.passwordHash.length > 0),
       allowSoundboard: server.allowSoundboard !== false,
+      dmRelayEnabled: server.dmRelayEnabled !== false,
       recentSoundCacheEnabled: Boolean(server.recentSoundCacheEnabled),
       recentSoundCacheLimit: server.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT,
       allowEveryoneMention: server.allowEveryoneMention !== false,
@@ -470,6 +481,7 @@ export class AuthService {
     return {
       id: user.id,
       clientId: user.clientId,
+      publicKey: user.publicKey ? normalizePublicKeyHex(user.publicKey) : undefined,
       nickname: user.nickname,
       avatarUrl: this.avatarStorage.getPublicUrl(user.avatarPath),
       status,
@@ -492,6 +504,7 @@ export class AuthService {
     name?: string;
     password?: string | null;
     allowSoundboard?: boolean;
+    dmRelayEnabled?: boolean;
     recentSoundCacheEnabled?: boolean;
     recentSoundCacheLimit?: number;
     allowEveryoneMention?: boolean;
@@ -510,6 +523,7 @@ export class AuthService {
     name?: string;
     hasPassword?: boolean;
     allowSoundboard?: boolean;
+    dmRelayEnabled?: boolean;
     recentSoundCacheEnabled?: boolean;
     recentSoundCacheLimit?: number;
     allowEveryoneMention?: boolean;
@@ -593,6 +607,9 @@ export class AuthService {
     if (payload.allowSoundboard !== undefined) {
       updates.allowSoundboard = Boolean(payload.allowSoundboard);
       if (!updates.allowSoundboard) updates.recentSoundCacheEnabled = false;
+    }
+    if (payload.dmRelayEnabled !== undefined) {
+      updates.dmRelayEnabled = Boolean(payload.dmRelayEnabled);
     }
     if (payload.recentSoundCacheEnabled !== undefined) {
       updates.recentSoundCacheEnabled = Boolean(payload.recentSoundCacheEnabled);
@@ -680,6 +697,7 @@ export class AuthService {
       name: updatedServer?.name || server.name,
       hasPassword: !!(updatedServer?.passwordHash && updatedServer.passwordHash.length > 0),
       allowSoundboard: updatedServer?.allowSoundboard !== false,
+      dmRelayEnabled: updatedServer?.dmRelayEnabled !== false,
       recentSoundCacheEnabled: Boolean(updatedServer?.recentSoundCacheEnabled),
       recentSoundCacheLimit: updatedServer?.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT,
       allowEveryoneMention: updatedServer?.allowEveryoneMention !== false,

@@ -1,21 +1,26 @@
 # Criar Seu Servidor
 
-Na aba **Meus Servidores › Criar Servidor**, preencha nickname do anfitrião, nome do servidor, porta local, senha opcional, os canais iniciais de texto e voz e, se quiser, um limite de membros.
+Na Home, clique no botão **+** no trilho de servidores e escolha
+**Criar meu servidor**. Preencha nome do servidor, porta local, senha opcional,
+os canais iniciais de texto e voz e, se quiser, um limite de membros. O Monky
+usa o nickname global salvo em **Meu Perfil**.
 
 <AppScreenshot src="/screenshots/criar-servidor-pt.png" :width="1000" :height="1640" alt="Formulário de criação de servidor com nome, porta, canais iniciais, limite de membros e modo de voz." caption="O aplicativo hospeda na sua máquina. A disponibilidade pela internet depende também da rede e do firewall." />
 
 Clique em **Criar e Iniciar Servidor**. O servidor sobe na sua máquina, escuta em todas as interfaces de rede na porta escolhida e abre para visualização. Entrar em um canal de voz é uma ação separada.
 
-Servidores criados ficam salvos (até 10). Depois, use **Iniciar**, **Parar** ou **X** na aba *Meus Servidores*.
+Servidores criados ficam salvos (até 10) e aparecem no trilho como qualquer
+outro servidor. Clique com o botão direito no ícone para **Iniciar**, **Parar**,
+abrir o **Monitor** ou **Excluir** os dados locais.
 
-Iniciar um servidor offline pela Home ou pela barra lateral preserva a chamada
+Iniciar um servidor offline pelo trilho de servidores preserva a chamada
 atual, inclusive câmera, compartilhamentos e mute. Se outro servidor já estiver
 hospedado nesta instância, ele não será substituído: pare-o explicitamente
 quando for seguro antes de iniciar um diferente.
 
-Isso não muda a ação de **voltar à Home pela casinha**: ela pede confirmação
-para desconectar dos servidores e encerrar a chamada. Para apenas iniciar
-outro servidor salvo sem sair da chamada, use sua entrada na barra lateral.
+Voltar à Home pela casinha não desconecta servidores nem encerra a chamada.
+Para iniciar outro servidor salvo sem sair da chamada, use sua entrada no
+trilho lateral.
 
 ## Convidar amigos
 
@@ -63,9 +68,9 @@ cargo. **Gerenciar servidor**, sozinho, não concede esse acesso. O servidor
 confere a autorização em cada solicitação; não é necessário hospedar nada
 na máquina do cliente.
 
-Para o servidor hospedado no próprio dispositivo, o ícone de **monitoramento**
-ao lado de *Parar*, na aba *Meus Servidores*, continua abrindo o monitor
-explicitamente local, separado do servidor remoto em foco.
+Para o servidor hospedado no próprio dispositivo, a ação **Monitor** no menu de
+contexto do trilho continua abrindo o monitor explicitamente local, separado do
+servidor remoto em foco.
 
 O painel traz:
 

@@ -14,7 +14,7 @@ export class ServerStore {
   public bus: EventBus = appEvents;
   public serverDetails: ServerDetails | null = null;
   public currentUser: UserSummary | null = null;
-  public voiceRestrictions: VoiceRestrictions = { serverMuted: false, serverDeafened: false };
+  public voiceRestrictions: VoiceRestrictions = { serverMuted: false, serverDeafened: false, permissionMuted: false };
   public activeTextChannelId: string | null = null;
   public roles: Role[] = [];
   public userRoles: UserRoleSummary[] = [];
@@ -117,9 +117,10 @@ export class ServerStore {
   /** All devices of this identity share the same server policy, even outside voice. */
   public updateVoiceRestrictions(userId: string, restrictions: VoiceRestrictions): void {
     if (!this.currentUser || userId !== this.currentUser.id) return;
-    const { serverMuted, serverDeafened } = restrictions;
-    if (this.voiceRestrictions.serverMuted === serverMuted && this.voiceRestrictions.serverDeafened === serverDeafened) return;
-    this.voiceRestrictions = { serverMuted, serverDeafened };
+    const { serverMuted, serverDeafened, permissionMuted = this.voiceRestrictions.permissionMuted ?? false } = restrictions;
+    if (this.voiceRestrictions.serverMuted === serverMuted && this.voiceRestrictions.serverDeafened === serverDeafened &&
+        this.voiceRestrictions.permissionMuted === permissionMuted) return;
+    this.voiceRestrictions = { serverMuted, serverDeafened, permissionMuted };
     this.bus.emit('server.voice_restrictions_updated');
   }
 
@@ -294,6 +295,7 @@ export class ServerStore {
     messageDeleteUndoSeconds?: number,
     recentSoundCacheEnabled?: boolean,
     recentSoundCacheLimit?: number,
+    dmRelayEnabled?: boolean,
   ): void {
     if (this.serverDetails) {
       if (maxMessageLength !== undefined) this.serverDetails.maxMessageLength = maxMessageLength;
@@ -323,6 +325,7 @@ export class ServerStore {
       if (messageDeleteUndoSeconds !== undefined) this.serverDetails.messageDeleteUndoSeconds = messageDeleteUndoSeconds;
       if (recentSoundCacheEnabled !== undefined) this.serverDetails.recentSoundCacheEnabled = recentSoundCacheEnabled;
       if (recentSoundCacheLimit !== undefined) this.serverDetails.recentSoundCacheLimit = recentSoundCacheLimit;
+      if (dmRelayEnabled !== undefined) this.serverDetails.dmRelayEnabled = dmRelayEnabled;
       if (voiceMode !== undefined) {
         this.serverDetails.voiceMode = voiceMode;
       }
@@ -516,6 +519,9 @@ export class ServerStore {
   }
 
   public hasPermission(permission: Permission, channelId?: string | null): boolean {
+    if (permission === Permission.MANAGE_CHANNELS || permission === Permission.MOVE_MEMBERS) {
+      return hasPermission(this.myPermissions, permission);
+    }
     if (channelId) {
       const channel = this.channelAccessRules(channelId);
       return !!channel && !!this.currentUser &&
@@ -525,6 +531,9 @@ export class ServerStore {
   }
 
   public hasCategoryPermission(permission: Permission, categoryId: string): boolean {
+    if (permission === Permission.MANAGE_CHANNELS || permission === Permission.MOVE_MEMBERS) {
+      return hasPermission(this.myPermissions, permission);
+    }
     const category = this.serverDetails?.categories?.find(item => item.id === categoryId);
     return !!category && !!this.currentUser &&
       hasChannelPermission(category, this.myPermissions, this.getUserRoleIds(this.currentUser.id), permission, false, this.currentUser.id);
@@ -534,7 +543,7 @@ export class ServerStore {
     clientLog.info('SERVER_HOST', 'Server store cleared');
     this.serverDetails = null;
     this.currentUser = null;
-    this.voiceRestrictions = { serverMuted: false, serverDeafened: false };
+    this.voiceRestrictions = { serverMuted: false, serverDeafened: false, permissionMuted: false };
     this.activeTextChannelId = null;
     this.roles = [];
     this.userRoles = [];

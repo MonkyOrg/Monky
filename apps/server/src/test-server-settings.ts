@@ -22,11 +22,12 @@ function fixture() {
   Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
   const session: Parameters<WebSocketServer['handleServerUpdateSettings']>[0] = {
     ws, sessionId: 'admin-session', isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+    protocol: { version: 36, minimumVersion: 35, features: ['dm-relay'] },
     user: { id: 'admin', clientId: 'admin-key', sessionId: 'admin-session', nickname: 'Admin', status: 'ONLINE', joinedAt: 1 },
   };
   const record: ServerRecord = {
     id: 'server', name: 'Server', createdAt: 1, maxUsers: 0, passwordHash: '',
-    voiceMode: 'p2p', turnEnabled: false, turnSecret: 'test-secret',
+    voiceMode: 'p2p', turnEnabled: false, turnSecret: 'test-secret', dmRelayEnabled: true,
   };
   let allowed = true;
   let running = false;
@@ -51,8 +52,9 @@ function fixture() {
     if (patch.name !== undefined) record.name = patch.name;
     if (patch.voiceMode !== undefined) record.voiceMode = patch.voiceMode;
     if (patch.turnEnabled !== undefined) record.turnEnabled = patch.turnEnabled;
+    if (patch.dmRelayEnabled !== undefined) record.dmRelayEnabled = patch.dmRelayEnabled;
     if (record.voiceMode === 'sfu') record.turnEnabled = false;
-    return { success: true, name: record.name, hasPassword: false, voiceMode: record.voiceMode, turnEnabled: record.turnEnabled };
+    return { success: true, name: record.name, hasPassword: false, voiceMode: record.voiceMode, turnEnabled: record.turnEnabled, dmRelayEnabled: record.dmRelayEnabled };
   };
   server['authService'] = auth;
   const turn = Object.create(CoturnManager.prototype) as CoturnManager;
@@ -124,6 +126,22 @@ test('a spawned relay that died before acknowledgement cannot report success', a
   assert.equal(f.record.turnEnabled, false);
   assert.equal(f.messages.at(-1)?.type, MessageType.SERVER_ERROR);
   assert.equal(f.messages.at(-1)?.requestId, 'dead-process');
+});
+
+test('DM relay setting persists, broadcasts, and requires negotiated support', async () => {
+  const f = fixture();
+  await f.server['handleServerUpdateSettings'](f.session, { dmRelayEnabled: false }, 'dm-off');
+  assert.equal(f.record.dmRelayEnabled, false);
+  assert.equal(f.messages.at(-1)?.type, MessageType.SERVER_SETTINGS_UPDATED);
+  assert.equal(f.messages.at(-1)?.requestId, 'dm-off');
+  assert.equal((f.messages.at(-1)?.payload as ServerSettingsUpdatedPayload).dmRelayEnabled, false);
+  const legacy = fixture();
+  legacy.session.protocol = { version: 35, minimumVersion: 35, features: [] };
+  await legacy.server['handleServerUpdateSettings'](legacy.session, { dmRelayEnabled: false }, 'legacy-dm');
+  assert.equal(legacy.record.dmRelayEnabled, true);
+  assert.equal(legacy.messages.at(-1)?.type, MessageType.SERVER_ERROR);
+  assert.equal(legacy.messages.at(-1)?.requestId, 'legacy-dm');
+  assert.equal((legacy.messages.at(-1)?.payload as { code: ProtocolErrorCode }).code, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
 });
 
 test('SFU initialization failures reject the request before mode persistence and remain retryable', async () => {

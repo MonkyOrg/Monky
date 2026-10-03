@@ -20,7 +20,7 @@ export function isParticipantSpeaking(
   const local = sessionId === localSessionId;
   const state = local ? voiceStore : participant.voiceState;
   return (local ? voiceStore.isSpeaking : participant.isSpeaking) &&
-    !state.isMuted && !state.isDeafened && !state.serverMuted && !state.serverDeafened;
+    !state.isMuted && !state.isDeafened && !state.serverMuted && !state.serverDeafened && !state.permissionMuted;
 }
 
 export function voiceConnectionIndicator(ping: number | null, reconnecting = false, connecting = false) {

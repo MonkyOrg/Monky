@@ -1,8 +1,9 @@
 # Entrar Em Um Servidor
 
-Na aba **Entrar no Servidor** existem quatro caminhos.
+Na Home, clique no botão **+** no trilho de servidores e escolha
+**Entrar em um servidor**. O modal reúne quatro caminhos.
 
-<AppScreenshot src="/screenshots/inicio-pt.png" alt="Tela inicial do Monky, com as opções de conexão e os campos do servidor." caption="O endereço e a porta precisam apontar para o processo que hospeda o servidor." />
+<AppScreenshot src="/screenshots/inicio-pt.png" alt="Home do Monky com trilho de servidores, mensagens diretas e página Amigos." caption="Use o botão + do trilho para entrar em um servidor. O endereço e a porta precisam apontar para o processo que hospeda o servidor." />
 
 ## Convite por link
 
@@ -45,13 +46,18 @@ não altera o transporte do servidor nem libera portas, VPN ou firewall.
 
 Clique em **Buscar**. O app escuta por cerca de 5 segundos os servidores Monky na rede local e lista nome, IP e versão. Clique em **Entrar**.
 
-## Servidores Salvos
+## Servidores salvos no trilho
 
-Todo servidor em que você entra fica salvo. A bolinha indica **online** ou **offline**, e a lista mostra quem está conectado. Use **Usar** para preencher os campos ou **X** para remover.
+Todo servidor em que você entra fica salvo no trilho da esquerda. A bolinha
+indica **online** ou **offline**; clicar no ícone abre a sessão. Clique com o
+botão direito para editar endereço, porta ou senha, remover da lista, marcar
+como favorito ou definir **Entrar ao abrir o Monky**.
 
 ## Entrada manual
 
-Preencha **Seu Nickname**, **IP / Host do Servidor**, **Porta** (normalmente `3000`) e **Senha do Servidor** se existir. Depois clique em **Entrar no Servidor**.
+Preencha **IP / Host do Servidor**, **Porta** (normalmente `3000`) e **Senha do
+Servidor** se existir. O Monky usa o nickname global salvo em **Meu Perfil**.
+Depois clique em **Entrar**.
 
 ## Vários servidores ao mesmo tempo
 
@@ -65,12 +71,12 @@ Na prática, isso significa que:
 
 Você fala em um servidor por vez, porque o microfone é um só: ao entrar em um canal de voz de outro servidor, a chamada **muda de lugar** e você sai automaticamente do canal anterior. O chat de texto, esse sim, continua ativo em todos ao mesmo tempo.
 
-O botão **Início** (a casinha, no topo da coluna) volta à tela inicial sem
-desconectar servidores nem encerrar a chamada. A barra lateral permite
+O botão **Início** (a casinha, no topo da coluna) volta à Home sem
+desconectar servidores nem encerrar a chamada. O trilho permite
 reabrir uma conexão, e os controles inferiores continuam disponíveis.
 O botão **Desconectar** da barra inferior sai somente do servidor indicado
 no botão, após confirmação. Em seguida, o Monky abre o próximo servidor
-conectado; se não houver nenhum, mostra a tela inicial.
+conectado; se não houver nenhum, mostra a Home.
 
 ## Vários dispositivos ao mesmo tempo
 

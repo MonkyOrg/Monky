@@ -2,6 +2,7 @@ import { setMainStdioLogger } from './mainStdio';
 import { app, BrowserWindow, dialog, ipcMain, IpcMainEvent, Menu, screen, session, shell } from 'electron';
 import path from 'path';
 import { setupIpcHandlers } from './ipcHandlers';
+import { flushDirectMessages } from './dm/dmIpc';
 import { setupUpdater } from './updater';
 import {
   handleLaunchDuringUpdate,
@@ -24,6 +25,7 @@ import { bindBotScreenDocuments, registerBotScreenScheme } from './botScreenDocu
 import { resolveDevelopmentProfile } from './developmentProfile';
 import { bindDevelopmentQa, configureDevelopmentQaMedia, loadDevelopmentQa } from './developmentQa';
 import { CrashRecovery } from './crashRecovery';
+import { hasIdentity } from './identityService';
 import { initializeMainLanguage, mt } from './i18n';
 import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
 import { ServerInviteInbox, registerServerInviteProtocol } from './serverInvites';
@@ -129,6 +131,7 @@ ipcMain.handle(SERVER_INVITE_IPC.take, (event: Electron.IpcMainInvokeEvent, ...a
   return serverInviteInbox.take();
 });
 app.once('will-quit', () => {
+  flushDirectMessages();
   ipcMain.removeHandler(SERVER_INVITE_IPC.take);
   app.removeListener('open-url', onOpenInviteUrl);
 });
@@ -322,6 +325,11 @@ function createWindow(deferShow = false): void {
 
   const { width: screenW } = screen.getPrimaryDisplay().workAreaSize;
   const winWidth = Math.min(700, Math.round(screenW * 0.85));
+  // Monky always opens maximized once an identity exists. Only the first-launch
+  // identity card keeps the compact window; the renderer maximizes right after
+  // the identity is created or imported. Automated QA keeps its own sizing.
+  const openMaximized = !developmentQa && hasIdentity();
+  const showNow = !deferShow && !developmentQa?.smoke;
 
   mainWindow = new BrowserWindow({
     width: winWidth,
@@ -331,8 +339,10 @@ function createWindow(deferShow = false): void {
     backgroundColor: '#0e1117',
     // Right after an update install the window is held back (show: false) and
     // only revealed once it has painted, so the "finishing" splash hands off to
-    // a fully-drawn UI with no dark gap in between (#498).
-    show: !deferShow && !developmentQa?.smoke,
+    // a fully-drawn UI with no dark gap in between (#498). A maximized launch is
+    // also created hidden: maximize() reveals it already at full size instead of
+    // flashing the compact window first.
+    show: showNow && !openMaximized,
     // Windows/Linux: fully frameless (custom title bar in the renderer).
     // macOS: keep the native traffic-light buttons but hide the title bar.
     frame: isMac,
@@ -352,6 +362,11 @@ function createWindow(deferShow = false): void {
       additionalArguments: developmentQa ? ['--monky-prepared-qa'] : [],
     },
   });
+
+  if (showNow && openMaximized) {
+    mainWindow.maximize();
+    mainWindow.focus();
+  }
 
   getCrashRecovery().watch(mainWindow);
   const disposeQa = bindDevelopmentQa(mainWindow, developmentQa, quitApplication);
@@ -393,6 +408,7 @@ function createWindow(deferShow = false): void {
     },
     clientLogger,
     overlayManager,
+    quitApplication,
   });
   localExecutionStopped = false;
   rendererNativeRetired = false;
@@ -425,7 +441,8 @@ function createWindow(deferShow = false): void {
       cleanupReveal();
       updateLog('reveal main window after update', { reason });
       if (!window.isDestroyed() && !window.isVisible()) {
-        window.show();
+        if (openMaximized) window.maximize();
+        else window.show();
         window.focus();
       }
       dismissTimer = setTimeout(() => dismissInstallSplash(), 80);

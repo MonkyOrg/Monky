@@ -496,9 +496,10 @@ export class VoiceStageView {
     if (btnMic) {
       const muted = voiceStore.isMuted || voiceStore.isDeafened;
       btnMic.className = `btn btn-icon ${muted ? 'danger-active' : ''}`;
-      const blocked = moderation.serverMuted || moderation.serverDeafened;
+      const blocked = moderation.serverMuted || moderation.serverDeafened || moderation.permissionMuted;
       btnMic.setAttribute('aria-pressed', String(voiceStore.isMuted));
       btnMic.title = [t(voiceStore.isMuted ? 'stage.unmuteMic' : 'stage.muteMic'), moderation.muteReason].filter(Boolean).join('. ');
+      (btnMic as HTMLButtonElement).disabled = moderation.permissionMuted;
       updateAudioStateIcon(btnMic, muted ? 'mic_off' : 'mic', blocked);
     }
 
@@ -1554,6 +1555,7 @@ export class VoiceStageView {
     const isScreenOn = isLocal ? voiceStore.isScreenSharing : (p.voiceState?.isScreenSharing ?? false);
     const isServerMuted = isLocalCall ? voiceStore.serverMuted : (p.voiceState?.serverMuted ?? false);
     const isServerDeafened = isLocalCall ? voiceStore.serverDeafened : (p.voiceState?.serverDeafened ?? false);
+    const isPermissionMuted = isLocalCall ? voiceStore.permissionMuted : (p.voiceState?.permissionMuted ?? false);
     const isSelfMuted = isLocalCall ? voiceStore.isMuted : (p.voiceState?.isMuted ?? false);
     const isSelfDeafened = isLocalCall ? voiceStore.isDeafened : (p.voiceState?.isDeafened ?? false);
     const isSfu = serverStore.serverDetails?.voiceMode === 'sfu';
@@ -1661,7 +1663,7 @@ export class VoiceStageView {
         ${isPeerFailed ? `<span class="material-symbols-outlined md-14 stage-peer-failed-icon" title="${isSfu ? t('main.sfuConnectionFailed') : peerFailureTooltip('stage.peerConnectionFailed')}">link_off</span>` : ''}
         ${isConnecting ? `<span class="material-symbols-outlined md-14 stage-peer-connecting-icon" title="${t(isSfu ? 'main.sfuConnecting' : 'stage.peerConnecting')}">sync</span>` : ''}
         ${isRelayed ? `<span class="material-symbols-outlined md-14" style="color: var(--warning, #f0b232);" title="${t('stage.peerRelayed')}">swap_horiz</span>` : ''}
-        ${renderAudioMuteIndicators({ ...p.voiceState, isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened })}
+        ${renderAudioMuteIndicators({ ...p.voiceState, isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened, permissionMuted: isPermissionMuted })}
         ${isCamOn ? '<span class="material-symbols-outlined md-14" style="color: var(--accent-primary);">videocam</span>' : ''}
         ${isScreenOn ? '<span class="material-symbols-outlined md-14" style="color: var(--success);">screen_share</span>' : ''}
       </div>

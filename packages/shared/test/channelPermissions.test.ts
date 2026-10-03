@@ -111,13 +111,27 @@ test('inheritance snapshots every rule and fails closed when the parent disappea
 
 test('channel rules cannot grant administrative server rights, duplicate targets or contradictory bits', () => {
   assert.equal(channelPermissionOverwritesSchema.safeParse([{ roleId: null, allow: CHANNEL_PERMISSIONS, deny: 0 }]).success, true);
-  for (const allow of [Permission.ADMINISTRATOR, Permission.MANAGE_SERVER, Permission.MANAGE_ROLES, 0xFFFFFFFF]) {
+  for (const allow of [Permission.ADMINISTRATOR, Permission.MANAGE_SERVER, Permission.MANAGE_ROLES,
+    Permission.MANAGE_CHANNELS, Permission.MOVE_MEMBERS, 0xFFFFFFFF]) {
     assert.equal(channelPermissionOverwritesSchema.safeParse([{ roleId: null, allow, deny: 0 }]).success, false);
   }
   assert.equal(channelPermissionOverwritesSchema.safeParse([{ roleId: null, allow: 256, deny: 256 }]).success, false);
   assert.equal(channelPermissionOverwritesSchema.safeParse([
     { roleId: null, allow: 0, deny: 0 }, { roleId: null, allow: 0, deny: 0 },
   ]).success, false);
+});
+
+test('server-level permissions ignore legacy channel overwrites', () => {
+  assert.equal((CHANNEL_PERMISSIONS & Permission.MANAGE_CHANNELS), 0);
+  assert.equal((CHANNEL_PERMISSIONS & Permission.MOVE_MEMBERS), 0);
+  const legacy = rules([
+    { roleId: null, allow: Permission.MANAGE_CHANNELS | Permission.MOVE_MEMBERS, deny: Permission.SPEAK },
+    { roleId: 'speaker', allow: Permission.SPEAK, deny: Permission.MOVE_MEMBERS },
+  ]);
+  assert.equal(hasChannelPermission(legacy, DEFAULT_PERMISSIONS, ['speaker'], Permission.MANAGE_CHANNELS), false);
+  assert.equal(hasChannelPermission(legacy, DEFAULT_PERMISSIONS | Permission.MANAGE_CHANNELS, ['speaker'], Permission.MANAGE_CHANNELS), true);
+  assert.equal(hasChannelPermission(legacy, DEFAULT_PERMISSIONS | Permission.MOVE_MEMBERS, ['speaker'], Permission.MOVE_MEMBERS), true);
+  assert.equal(hasChannelPermission(legacy, DEFAULT_PERMISSIONS & ~Permission.SPEAK, ['speaker'], Permission.SPEAK), true);
 });
 
 test('a bot capability ceiling cannot be expanded by an Everyone grant', () => {

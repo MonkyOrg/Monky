@@ -16,6 +16,7 @@ export class VoiceStore {
   public isDeafened: boolean = settingsStore.isDeafened;
   public serverMuted: boolean = false;
   public serverDeafened: boolean = false;
+  public permissionMuted: boolean = false;
   private micMutedBeforeDeafen: boolean = false;
   public isSpeaking: boolean = false;
   public microphoneOpen: boolean = false;
@@ -121,10 +122,11 @@ export class VoiceStore {
       this.setSpeaking(false);
     }
     const clearedModeration = (!channelId || sessionKey !== this.voiceSessionKey)
-      && (this.serverMuted || this.serverDeafened);
+      && (this.serverMuted || this.serverDeafened || this.permissionMuted);
     if (!channelId || sessionKey !== this.voiceSessionKey) {
       this.serverMuted = false;
       this.serverDeafened = false;
+      this.permissionMuted = false;
     }
     if (channelId !== this.currentVoiceChannelId || sessionKey !== this.voiceSessionKey) {
       this.isConnecting = false;
@@ -193,8 +195,15 @@ export class VoiceStore {
     emitOutsideRouting(() => appEvents.emit('voice.state_updated'));
   }
 
+  public setPermissionMuted(muted: boolean): void {
+    clientLog.warn('AUDIO', `Permission muted: ${muted}`);
+    this.permissionMuted = muted;
+    if (this.getEffectiveMuted()) this.setSpeaking(false);
+    emitOutsideRouting(() => appEvents.emit('voice.state_updated'));
+  }
+
   public getEffectiveMuted(): boolean {
-    return this.isMuted || this.serverMuted || this.isDeafened || this.serverDeafened;
+    return this.isMuted || this.serverMuted || this.permissionMuted || this.isDeafened || this.serverDeafened;
   }
 
   public getEffectiveDeafened(): boolean {
@@ -298,6 +307,7 @@ export class VoiceStore {
     // and are deliberately NOT reset when leaving a channel, server, or call.
     this.serverMuted = false;
     this.serverDeafened = false;
+    this.permissionMuted = false;
     this.isSpeaking = false;
     this.isCameraOn = false;
     this.screenShareIds = [];

@@ -1,8 +1,9 @@
 # Join a Server
 
-The **Join Server** tab offers four routes.
+In Home, click the **+** button on the server rail and choose **Join a server**.
+The modal offers four routes.
 
-<AppScreenshot src="/screenshots/inicio-en.png" alt="Monky's home screen with connection options and server fields." caption="The address and port must point to the process hosting the server." />
+<AppScreenshot src="/screenshots/inicio-en.png" alt="Monky Home with the server rail, direct messages and Friends page." caption="Use the + button on the rail to join a server. The address and port must point to the process hosting the server." />
 
 ## Invitation link
 
@@ -45,13 +46,18 @@ do not change the server transport or configure ports, VPNs or firewalls.
 
 Click **Scan**. For about 5 seconds the app listens for Monky servers on the local network and lists name, IP and version. Click **Join**.
 
-## Saved Servers
+## Saved servers on the rail
 
-Every server you join is saved. The dot shows whether it is **online** or **offline**, and the list shows who is connected. Use **Use** to fill in the fields or **X** to remove it.
+Every server you join is saved on the left rail. The dot shows whether it is
+**online** or **offline**; clicking the icon opens that session. Right-click it
+to edit address, port or password, remove it from the list, mark it as a
+favorite or set **Join on startup**.
 
 ## Manual entry
 
-Fill in **Your Nickname**, **Server IP / Host**, **Port** (usually `3000`) and **Server Password** if one exists. Then click **Join Server**.
+Fill in **Server IP / Host**, **Port** (usually `3000`) and **Server Password**
+if one exists. Monky uses the global nickname saved under **My Profile**. Then
+click **Join**.
 
 ## Several servers at once
 
@@ -65,7 +71,7 @@ In practice that means:
 
 You talk on one server at a time, because there is only one microphone: joining a voice channel on another server **moves the call** and takes you out of the previous channel automatically. Text chat, on the other hand, stays active everywhere at once.
 
-The **Home** button (the house at the top of the column) opens the start screen
+The **Home** button (the house at the top of the column) opens Home
 without disconnecting servers or ending the call. The rail lets you reopen
 a connection, and the bottom controls remain available. **Disconnect** in the
 bottom bar leaves only the server named in its tooltip, after confirmation.

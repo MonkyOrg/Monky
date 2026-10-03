@@ -8,6 +8,7 @@ import { clientLog } from './ClientLogService';
 import { sessionKeyFor, sessionManager, type ServerSession } from './SessionManager';
 import { currentEventOrigin } from './sessionRouting';
 import { getServerSessionForAddress, openServerSession } from './serverConnection';
+import { checkServerOnline } from '../utils/serverStatus';
 
 export class AutoEntryService {
   private running: Promise<void> | null = null;
@@ -16,7 +17,11 @@ export class AutoEntryService {
   private pendingSession: ServerSession | null = null;
   private pendingKey: string | null = null;
   private pendingCancelled = false;
-  private readonly unbind: Array<() => void> = [];
+  private listenersInstalled = false;
+  private readonly suppressedKeys = new Set<string>();
+  private readonly backgroundInFlight = new Set<string>();
+  private readonly runUnbind: Array<() => void> = [];
+  private readonly listenerUnbind: Array<() => void> = [];
 
   constructor(
     private readonly reportNotice: (message: string) => void,
@@ -24,6 +29,7 @@ export class AutoEntryService {
   ) {}
 
   public start(): Promise<void> {
+    this.installBackgroundListeners();
     // Returning Home, importing settings or toggling a switch is not another
     // launch. In particular, logging out must never reconnect these servers.
     this.running ??= Promise.resolve().then(() => this.run()).catch((error: unknown) => {
@@ -42,8 +48,6 @@ export class AutoEntryService {
         error: error instanceof Error ? error.message : String(error),
       });
     }
-    const candidates = connectionStore.savedServers.filter(server => settingsStore.isServerAutoEntryEnabled(server));
-    if (!candidates.length || this.cancelled) return;
     const identity = { clientId: connectionStore.clientId, publicKey: connectionStore.publicKey };
     const nickname = connectionStore.savedNickname.trim();
     const ready = () => connectionStore.hasIdentity && !!identity.clientId && !!identity.publicKey
@@ -55,6 +59,7 @@ export class AutoEntryService {
       this.reportNotice(t('autoEntry.prerequisites'));
       return;
     }
+    if (this.cancelled) return;
 
     const stillSaved = (server: SavedServer) => connectionStore.savedServers
       .find(item => autoEntryServerKey(item) === autoEntryServerKey(server));
@@ -62,7 +67,7 @@ export class AutoEntryService {
       if (this.pendingServer && (!ready() || !stillSaved(this.pendingServer)
         || !settingsStore.isServerAutoEntryEnabled(this.pendingServer))) this.cancelPending();
     };
-    this.unbind.push(
+    this.runUnbind.push(
       appEvents.on('settings.updated', checkPending),
       appEvents.on('connection.saved_servers_changed', checkPending),
       appEvents.on('network.disconnected', () => {
@@ -71,6 +76,7 @@ export class AutoEntryService {
         if (currentEventOrigin() !== this.pendingKey) this.dispose();
       }),
     );
+    const candidates = connectionStore.savedServers.filter(server => settingsStore.isServerAutoEntryEnabled(server));
     const attempted = new Set<string>();
     try {
       for (const candidate of candidates) {
@@ -147,7 +153,97 @@ export class AutoEntryService {
         }
       }
     } finally {
-      for (const off of this.unbind.splice(0)) off();
+      for (const off of this.runUnbind.splice(0)) off();
+    }
+    if (!this.cancelled && ready() && settingsStore.autoConnectServers) {
+      await this.connectBackgroundSavedServers(identity, nickname, attempted);
+    }
+  }
+
+  private installBackgroundListeners(): void {
+    if (this.listenersInstalled) return;
+    this.listenersInstalled = true;
+    this.listenerUnbind.push(
+      appEvents.on('connection.manual_disconnect', (payload: { key?: string }) => {
+        if (payload.key) this.suppressedKeys.add(payload.key);
+      }),
+      appEvents.on('connection.saved_server_online', (server: SavedServer) => {
+        if (!settingsStore.autoConnectServers) return;
+        const identity = { clientId: connectionStore.clientId, publicKey: connectionStore.publicKey };
+        const nickname = connectionStore.savedNickname.trim();
+        if (!connectionStore.hasIdentity || !identity.clientId || !identity.publicKey || !nickname) return;
+        void this.connectSavedInBackground(server, identity, nickname, true);
+      }),
+      appEvents.on('settings.updated', () => {
+        if (!settingsStore.autoConnectServers) return;
+        const identity = { clientId: connectionStore.clientId, publicKey: connectionStore.publicKey };
+        const nickname = connectionStore.savedNickname.trim();
+        if (!connectionStore.hasIdentity || !identity.clientId || !identity.publicKey || !nickname) return;
+        void this.connectBackgroundSavedServers(identity, nickname, new Set());
+      }),
+    );
+  }
+
+  private async connectBackgroundSavedServers(
+    identity: { clientId: string; publicKey: string },
+    nickname: string,
+    excluded: ReadonlySet<string>,
+  ): Promise<void> {
+    const servers = connectionStore.savedServers.filter((server) => {
+      const key = autoEntryServerKey(server);
+      return !!key && !excluded.has(key) && !settingsStore.isServerAutoEntryEnabled(server);
+    });
+    const workers = Array.from({ length: Math.min(2, servers.length) }, async (_unused, workerIndex) => {
+      for (let index = workerIndex; index < servers.length; index += 2) {
+        if (this.cancelled || !settingsStore.autoConnectServers) return;
+        await this.connectSavedInBackground(servers[index], identity, nickname, false);
+      }
+    });
+    await Promise.all(workers);
+  }
+
+  private async connectSavedInBackground(
+    server: SavedServer,
+    identity: { clientId: string; publicKey: string },
+    nickname: string,
+    onlineAlreadyKnown: boolean,
+  ): Promise<void> {
+    const key = autoEntryServerKey(server);
+    if (!key || this.suppressedKeys.has(sessionKeyFor(server.host, server.port)) || this.backgroundInFlight.has(key)) return;
+    if (getServerSessionForAddress(server.host, server.port)) return;
+    this.backgroundInFlight.add(key);
+    try {
+      if (!onlineAlreadyKnown && !(await checkServerOnline(server.host, server.port))) {
+        clientLog.info('CONNECTION', `Background auto-connect skipped offline server ${server.host}:${server.port}`);
+        return;
+      }
+      const result = await openServerSession(server.host, server.port, identity, nickname, server.password, {
+        background: true,
+        timeoutMs: this.connectionTimeoutMs,
+      });
+      connectionStore.addSavedServer({
+        ...server,
+        name: result.server.name,
+        serverId: result.server.id,
+        lastConnected: Date.now(),
+      });
+      const session = getServerSessionForAddress(server.host, server.port);
+      const avatar = connectionStore.savedAvatarBase64;
+      if (session && avatar && session.client.getStatus() === 'CONNECTED') {
+        void session.client.sendRequest(MessageType.USER_UPDATE_AVATAR, {
+          avatarBase64: avatar, mimeType: 'image/png',
+        }).catch((error: unknown) => {
+          clientLog.warn('CONNECTION', 'Could not update the background session avatar', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+    } catch (error: unknown) {
+      clientLog.warn('CONNECTION', `Background auto-connect failed for ${server.host}:${server.port}`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      this.backgroundInFlight.delete(key);
     }
   }
 
@@ -171,6 +267,8 @@ export class AutoEntryService {
   public dispose(): void {
     this.cancelled = true;
     this.cancelPending();
-    for (const off of this.unbind.splice(0)) off();
+    for (const off of this.runUnbind.splice(0)) off();
+    for (const off of this.listenerUnbind.splice(0)) off();
+    this.listenersInstalled = false;
   }
 }
