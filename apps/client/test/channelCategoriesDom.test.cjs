@@ -60,7 +60,6 @@ if (!process.versions.electron) {
       contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true,
     } });
     browser.webContents.debugger.attach('1.3');
-    const selectAllModifier = process.platform === 'darwin' ? 'meta' : 'control';
     const drag = async (from, to) => {
       browser.webContents.sendInputEvent({ type: 'mouseMove', ...from });
       await new Promise(resolve => setTimeout(resolve, 20));
@@ -105,6 +104,22 @@ if (!process.versions.electron) {
       else send();
       await browser.webContents.executeJavaScript('window.categoryKeyDelivery');
       await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+    };
+    // Chromium leaves Cmd+A to the macOS application menu, which synthetic input bypasses;
+    // run the same editing command the menu role would execute.
+    const selectAllText = async (deliveryDelay = 0) => {
+      if (process.platform !== 'darwin') return key('A', ['control'], deliveryDelay);
+      browser.webContents.selectAll();
+      await browser.webContents.executeJavaScript(`new Promise((resolve, reject) => {
+        let frames = 0;
+        const selected = () => {
+          const field = document.activeElement;
+          if (field && 'selectionStart' in field && field.selectionStart === 0 && field.selectionEnd === field.value.length) resolve();
+          else if (++frames > 180) reject(new Error('Select all did not reach the focused field: ' + field?.outerHTML));
+          else requestAnimationFrame(selected);
+        };
+        selected();
+      })`);
     };
     const resize = async (width) => {
       await browser.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', {
@@ -227,7 +242,6 @@ if (!process.versions.electron) {
         '[data-category-id="destination"] > .category-title',
         0.75,
       );
-      console.log('Channel drag geometry', channelDragGeometry);
       if (channelDragGeometry.targetAfter.top <= channelDragGeometry.targetBefore.top) {
         throw new Error('The Uncategorized target did not push existing categories down during channel drag: ' +
           JSON.stringify(channelDragGeometry));
@@ -281,7 +295,7 @@ if (!process.versions.electron) {
       await key('Escape');
       await click('[data-audience-toggle]');
       // Delivery can lag behind two animation frames; text insertion must await the native key.
-      await key('A', [selectAllModifier], 120);
+      await selectAllText(120);
       await browser.webContents.insertText('ana');
       await key('ArrowDown');
       if (!await browser.webContents.executeJavaScript(`document.querySelector('[data-audience-search]')?.value === 'ana' && document.activeElement?.matches('[data-audience-kind="user"][data-audience-id="member"]')`)) {
@@ -327,7 +341,7 @@ if (!process.versions.electron) {
           throw new Error(`Settings overflow or unloaded icons at ${width}px: ${JSON.stringify(bounds)}`);
         }
         await click('[data-audience-toggle]');
-        await key('A', [selectAllModifier]);
+        await selectAllText();
         await key('Backspace');
         const popup = await browser.webContents.executeJavaScript(`(() => {
           const popup = document.querySelector('[data-audience-popup]');

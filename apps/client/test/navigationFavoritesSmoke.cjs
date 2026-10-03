@@ -91,6 +91,13 @@ if (!process.versions.electron) {
       if (level >= 3) console.error(`[renderer:${phase}] ${message}`);
     });
     await window.loadURL(`http://127.0.0.1:${address.port}/__navigation_favorites__`);
+    // Renderer rejections otherwise reach Node as an empty object.
+    const evaluate = async expression => {
+      const result = await window.webContents.executeJavaScript(`Promise.resolve().then(() => ${expression}).then(`
+        + 'value => ({ value }), error => ({ error: String(error && (error.stack || error)) }))', true);
+      if ('error' in result) throw new Error(result.error);
+      return result.value;
+    };
     phase = 'motion preference';
     window.webContents.debugger.attach('1.3');
     await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
@@ -99,51 +106,51 @@ if (!process.versions.electron) {
     });
     await motionPreference('no-preference');
     phase = 'fixture';
-    await window.webContents.executeJavaScript(`(${setupNavigationFavoritesSmoke.toString()})()`, true);
+    await evaluate(`(${setupNavigationFavoritesSmoke.toString()})()`);
     phase = 'favorite keyboard controls';
     for (const mode of ['grid', 'list', 'settings', 'home']) {
-      await window.webContents.executeJavaScript(`window.navigationFavoritesSmoke.focusFavorite(${JSON.stringify(mode)})`, true);
+      await evaluate(`window.navigationFavoritesSmoke.focusFavorite(${JSON.stringify(mode)})`);
       for (const [keyCode, pressed] of [['Return', true], ['Space', false]]) {
         window.focus();
         window.webContents.focus();
         window.webContents.sendInputEvent({ type: 'keyDown', keyCode });
         window.webContents.sendInputEvent({ type: 'char', keyCode: keyCode === 'Return' ? '\r' : ' ' });
         window.webContents.sendInputEvent({ type: 'keyUp', keyCode });
-        await window.webContents.executeJavaScript(`window.navigationFavoritesSmoke.checkFavoriteKeyboard(${pressed})`, true);
+        await evaluate(`window.navigationFavoritesSmoke.checkFavoriteKeyboard(${pressed})`);
       }
     }
     phase = 'favorite filters and lifecycle';
-    await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.favorites()', true);
+    await evaluate('window.navigationFavoritesSmoke.favorites()');
     phase = 'favorite-first alphabetical ordering';
-    await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.favoritesOrdering()', true);
+    await evaluate('window.navigationFavoritesSmoke.favoritesOrdering()');
     for (const mode of ['grid', 'list', 'settings', 'home']) {
       phase = `${mode} favorite motion`;
       await motionPreference('no-preference');
-      await window.webContents.executeJavaScript(`window.navigationFavoritesSmoke.favoriteMotion(${JSON.stringify(mode)})`, true);
+      await evaluate(`window.navigationFavoritesSmoke.favoriteMotion(${JSON.stringify(mode)})`);
       phase = `${mode} reduced motion`;
       await motionPreference('reduce');
-      await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.favoriteMotionReduced()', true);
+      await evaluate('window.navigationFavoritesSmoke.favoriteMotionReduced()');
     }
     await motionPreference('no-preference');
     phase = 'voice-preserving navigation';
-    await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.navigation()', true);
+    await evaluate('window.navigationFavoritesSmoke.navigation()');
     phase = 'Home without disconnecting';
-    await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.homeNavigation()', true);
+    await evaluate('window.navigationFavoritesSmoke.homeNavigation()');
     phase = 'invitation links and confirmation';
-    await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.invitations()', true);
+    await evaluate('window.navigationFavoritesSmoke.invitations()');
     for (const width of [1050, 640]) {
       phase = `modal stacking at ${width}px`;
       window.webContents.sendInputEvent({ type: 'mouseLeave', x: 0, y: 0 });
       window.setContentSize(width, 850);
-      await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.modalStacking()', true);
+      await evaluate('window.navigationFavoritesSmoke.modalStacking()');
     }
     window.setContentSize(1050, 850);
     phase = 'connection recovery and explicit departures';
-    await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.connectionRecovery()', true);
+    await evaluate('window.navigationFavoritesSmoke.connectionRecovery()');
     phase = 'noise quick toggle';
-    await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.noiseToggle()', true);
+    await evaluate('window.navigationFavoritesSmoke.noiseToggle()');
     phase = 'cleanup';
-    const checks = await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.cleanup()', true);
+    const checks = await evaluate('window.navigationFavoritesSmoke.cleanup()');
     console.log(`Navigation/favorites smoke: ${checks} checks passed (P2P/SFU, local/remote, failures, races, keyboard, persistence, filters, motion, cleanup, noise toggle)`);
     await finish(0);
   }).catch(async error => {
@@ -164,6 +171,20 @@ async function setupNavigationFavoritesSmoke() {
       await tick();
     }
     throw new Error(message);
+  };
+  const frame = () => new Promise(resolve => requestAnimationFrame(() => resolve()));
+  const settleAnimations = async () => {
+    for (let round = 0; round < 10; round++) {
+      const running = document.getAnimations().filter(animation => animation.playState === 'running'
+        && Number.isFinite(animation.effect?.getComputedTiming().endTime ?? Infinity));
+      if (!running.length) {
+        await frame();
+        await frame();
+        return;
+      }
+      await Promise.all(running.map(animation => animation.finished.catch(() => null)));
+    }
+    throw new Error('Surface animations did not settle');
   };
   const deferred = () => {
     let resolve, reject;
@@ -978,7 +999,8 @@ async function setupNavigationFavoritesSmoke() {
         scroller.style.minHeight = '0';
         scroller.style.overflowY = 'auto';
         await document.fonts.ready;
-        await new Promise(resolve => setTimeout(resolve, 280));
+        // The modal entrance moves the list root, which cancels a FLIP by design.
+        await settleAnimations();
         clearMetrics();
       };
       const unmount = () => {

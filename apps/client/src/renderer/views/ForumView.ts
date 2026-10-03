@@ -162,7 +162,17 @@ export class ForumView {
     const empty = container?.querySelector<HTMLElement>('.forum-empty-state');
     if (empty) empty.hidden = this.loading === 'initial';
     if (loading) loading.hidden = this.loading !== 'initial' && this.loading !== 'append';
-    if (sentinel) sentinel.hidden = this.loading !== null || !this.more;
+    if (sentinel) {
+      const hidden = this.loading !== null || !this.more;
+      const revealed = sentinel.hidden && !hidden;
+      sentinel.hidden = hidden;
+      // Intersection changes are sampled per rendering frame. A page can load within one frame,
+      // so restart observation to re-evaluate a sentinel that is still within range.
+      if (revealed && this.lazyObserver) {
+        this.lazyObserver.unobserve(sentinel);
+        this.lazyObserver.observe(sentinel);
+      }
+    }
   }
 
   private renderPosts(animateReorder = false): void {
