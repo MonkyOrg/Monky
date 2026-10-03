@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Permission, ProtocolErrorCode, Role, RoleAssignPayload, RoleCreatePayload, RoleUpdatePayload, UserRoleSummary, roleAssignmentSchema, roleCreateSchema, roleUpdateSchema, stripAdministrator } from '@monky/shared';
+import { EVERYONE_ROLE_ID, Permission, ProtocolErrorCode, Role, RoleAssignPayload, RoleCreatePayload, RoleUpdatePayload, UserRoleSummary, roleAssignmentSchema, roleCreateSchema, roleUpdateSchema, stripAdministrator } from '@monky/shared';
 import { RoleRecord } from '../../domain/entities';
 import { IRoleRepository, IUserRepository } from '../../domain/repositories';
 import { PermissionService } from './PermissionService';
@@ -12,6 +12,7 @@ interface RoleResult {
 }
 
 interface RoleStateResult {
+  everyonePermissions: number;
   roles: Role[];
   userRoles: UserRoleSummary[];
 }
@@ -54,6 +55,7 @@ export class RoleService {
 
   public async getRoleState(): Promise<RoleStateResult> {
     return {
+      everyonePermissions: await this.permissionService.getEveryonePermissions(),
       roles: await this.listRoles(),
       userRoles: await this.listUserRoles(),
     };
@@ -123,6 +125,15 @@ export class RoleService {
     const parsed = roleUpdateSchema.safeParse(payload);
     if (!parsed.success) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: parsed.error.errors[0]?.message || 'Cargo inválido' };
+    }
+
+    if (parsed.data.roleId === EVERYONE_ROLE_ID) {
+      if (parsed.data.permissions === undefined ||
+          Object.keys(payload).some(key => key !== 'roleId' && key !== 'permissions')) {
+        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Todos permite editar apenas as permissões.' };
+      }
+      await this.permissionService.updateEveryonePermissions(parsed.data.permissions);
+      return { success: true };
     }
 
     const existing = await this.roleRepo.findById(parsed.data.roleId);

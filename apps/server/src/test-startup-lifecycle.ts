@@ -512,7 +512,7 @@ test('partially failed seeding rolls back before cleanup so a retry gets its com
   const db = retry['dbConn'].getDb();
   assert.deepEqual((await new SqliteChannelRepository(db).listByServerId(record.id)).map(channel => channel.type).sort(), ['TEXT', 'VOICE']);
   assert.ok(await new SqliteRoleRepository(db).findByName('Admin'));
-  assert.ok(await new SqliteRoleRepository(db).findByName('Membro'));
+  assert.equal(await new SqliteRoleRepository(db).findByName('Membro'), null);
   await retry.stop();
   assertReleased(retry);
 });

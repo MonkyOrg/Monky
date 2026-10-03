@@ -1193,10 +1193,11 @@ async function runEditorContextSmoke(window, locale) {
 }
 
 async function installFixture() {
-  const [{ ChatView }, { sessionManager }, chats, { appEvents }, routing, language, { selectEnhancer }, { runScopeHandlers }] = await Promise.all([
+  const [{ ChatView }, { sessionManager }, chats, { appEvents }, routing, language, { selectEnhancer }, { runScopeHandlers }, { Permission }] = await Promise.all([
     import('/views/ChatView.ts'), import('/core/SessionManager.ts'), import('/stores/chatStore.ts'),
     import('/core/EventBus.ts'), import('/core/sessionRouting.ts'), import('/i18n/index.ts'),
     import('/core/SelectEnhancer.ts'), import('/@id/@codemirror/view'),
+    import('/@id/@monky/shared'),
   ]);
   const root = document.getElementById('app');
   root.style.cssText = 'height:100vh;width:100%;display:flex;flex-direction:column;';
@@ -1797,7 +1798,7 @@ async function installFixture() {
       active.session.serverStore.bus.emit('server.updated');
     },
     removeSendPermission() {
-      active.session.serverStore.myPermissions = 0;
+      active.session.serverStore.myPermissions = Permission.VIEW_CHANNEL | Permission.READ_MESSAGES;
       active.session.serverStore.bus.emit('server.roles_updated');
     },
     async setChannel(channel) { view.setChannel(channel); await settle(); },

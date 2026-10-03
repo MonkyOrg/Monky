@@ -1,12 +1,16 @@
-import { ChannelCategory } from '@monky/shared';
+import { ChannelCategory, channelOverwrites, channelPrivacy, withChannelPrivacy } from '@monky/shared';
 import { ICategoryRepository } from '../../domain/repositories';
 import { IDatabaseDriver } from './SqliteWrapper';
+import { SqliteChannelPermissions } from './SqliteChannelPermissions';
 
 type CategoryRow = Omit<ChannelCategory, 'isPrivate' | 'allowedRoleIds'> & { isPrivate: number };
 const COLUMNS = 'id, server_id AS serverId, name, position, created_at AS createdAt, is_private AS isPrivate';
 
 export class SqliteCategoryRepository implements ICategoryRepository {
-  constructor(private db: IDatabaseDriver) {}
+  private readonly permissions: SqliteChannelPermissions;
+  constructor(private db: IDatabaseDriver) {
+    this.permissions = new SqliteChannelPermissions(db, 'category');
+  }
 
   /** Synchronous hydration keeps each channel and its inherited ACL in one snapshot. */
   readByServerId(serverId: string): ChannelCategory[] {
@@ -17,7 +21,9 @@ export class SqliteCategoryRepository implements ICategoryRepository {
       .all(serverId) as { categoryId: string; roleId: string }[];
     const byCategory = new Map<string, string[]>();
     for (const role of roles) byCategory.set(role.categoryId, [...(byCategory.get(role.categoryId) ?? []), role.roleId]);
-    return rows.map((row) => ({ ...row, isPrivate: row.isPrivate === 1, allowedRoleIds: byCategory.get(row.id) ?? [] }));
+    const permissions = this.permissions.read(rows.map(row => row.id));
+    return rows.map((row) => ({ ...row, isPrivate: row.isPrivate === 1, allowedRoleIds: byCategory.get(row.id) ?? [],
+      permissionOverwrites: permissions.get(row.id) ?? [] }));
   }
 
   async listByServerId(serverId: string): Promise<ChannelCategory[]> { return this.readByServerId(serverId); }
@@ -30,14 +36,31 @@ export class SqliteCategoryRepository implements ICategoryRepository {
 
   async create(category: ChannelCategory): Promise<void> {
     this.db.transaction(() => {
+      if (category.permissionOverwrites) category = { ...category, ...channelPrivacy(category.permissionOverwrites) };
       this.db.prepare('INSERT INTO channel_categories (id, server_id, name, position, created_at, is_private) VALUES (?, ?, ?, ?, ?, ?)')
         .run(category.id, category.serverId, category.name, category.position, category.createdAt, category.isPrivate ? 1 : 0);
       this.replaceRoles(category.id, category.isPrivate ? category.allowedRoleIds : []);
+      this.permissions.replace(category.id, channelOverwrites(category));
     })();
   }
 
-  async update(id: string, updates: Partial<Pick<ChannelCategory, 'name' | 'isPrivate' | 'allowedRoleIds'>>): Promise<void> {
+  async update(id: string, updates: Partial<Pick<ChannelCategory, 'name' | 'isPrivate' | 'allowedRoleIds' | 'permissionOverwrites'>>): Promise<void> {
     this.db.transaction(() => {
+      if (updates.permissionOverwrites !== undefined) {
+        const stored = this.db.prepare('SELECT is_private AS isPrivate FROM channel_categories WHERE id = ?').get(id) as { isPrivate: number } | undefined;
+        const privacy = channelPrivacy(updates.permissionOverwrites, {
+          isPrivate: stored?.isPrivate === 1, allowedRoleIds: [],
+          permissionOverwrites: this.permissions.read([id]).get(id) ?? [],
+        });
+        this.permissions.replace(id, updates.permissionOverwrites);
+        updates = { ...updates, ...privacy, isPrivate: updates.isPrivate ?? privacy.isPrivate };
+      } else if (updates.isPrivate !== undefined || updates.allowedRoleIds !== undefined) {
+        const stored = this.db.prepare('SELECT is_private AS isPrivate FROM channel_categories WHERE id = ?').get(id) as { isPrivate: number } | undefined;
+        if (!stored) return;
+        const roles = this.db.prepare('SELECT role_id AS roleId FROM category_allowed_roles WHERE category_id = ?').all(id) as { roleId: string }[];
+        this.permissions.replace(id, withChannelPrivacy(this.permissions.read([id]).get(id) ?? [],
+          updates.isPrivate ?? stored.isPrivate === 1, updates.allowedRoleIds ?? roles.map(role => role.roleId)));
+      }
       if (updates.name !== undefined) this.db.prepare('UPDATE channel_categories SET name = ? WHERE id = ?').run(updates.name, id);
       if (updates.isPrivate !== undefined) this.db.prepare('UPDATE channel_categories SET is_private = ? WHERE id = ?').run(updates.isPrivate ? 1 : 0, id);
       if (updates.allowedRoleIds !== undefined) this.replaceRoles(id, updates.allowedRoleIds);
@@ -53,6 +76,12 @@ export class SqliteCategoryRepository implements ICategoryRepository {
 
   async deletePreservingAccess(id: string): Promise<void> {
     this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM channel_permission_overwrites WHERE channel_id IN
+        (SELECT id FROM channels WHERE category_id = ? AND inherit_category_permissions = 1)`).run(id);
+      this.db.prepare(`INSERT INTO channel_permission_overwrites (channel_id, target_id, role_id, user_id, allow_bits, deny_bits)
+        SELECT c.id, p.target_id, p.role_id, p.user_id, p.allow_bits, p.deny_bits FROM channels c
+        JOIN category_permission_overwrites p ON p.category_id = c.category_id
+        WHERE c.category_id = ? AND c.inherit_category_permissions = 1`).run(id);
       this.db.prepare(`DELETE FROM channel_allowed_roles WHERE channel_id IN
         (SELECT id FROM channels WHERE category_id = ? AND inherit_category_permissions = 1)`).run(id);
       this.db.prepare(`INSERT INTO channel_allowed_roles (channel_id, role_id)

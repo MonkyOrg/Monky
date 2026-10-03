@@ -5,6 +5,7 @@ import { soundboardService, SoundItem } from '../core/SoundboardService';
 import { settingsStore } from '../stores/settingsStore';
 import { serverStore } from '../stores/serverStore';
 import { voiceStore } from '../stores/voiceStore';
+import { sessionManager } from '../core/SessionManager';
 import { favoritesStore, soundFavoriteKey } from '../stores/favoritesStore';
 import { appEvents } from '../core/EventBus';
 import { clientLog } from '../core/ClientLogService';
@@ -46,8 +47,11 @@ export class SoundboardModal {
     const lifecycle = this.lifecycle;
     this.searchQuery = '';
 
-    const serverAllows = serverStore.serverDetails?.allowSoundboard !== false;
-    const hasSoundboardPermission = serverStore.hasPermission(Permission.USE_SOUNDBOARD);
+    const voiceServer = voiceStore.voiceSessionKey ? sessionManager.get(voiceStore.voiceSessionKey)?.serverStore : undefined;
+    const permissionStore = voiceServer ?? serverStore;
+    const serverAllows = permissionStore.serverDetails?.allowSoundboard !== false;
+    const hasSoundboardPermission = permissionStore.hasPermission(Permission.USE_SOUNDBOARD,
+      voiceServer ? voiceStore.currentVoiceChannelId : undefined);
 
     this.modalEl = document.createElement('div');
     this.modalEl.className = 'modal-backdrop';

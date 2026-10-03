@@ -35,7 +35,8 @@ export class UserContextMenu {
     const hasAvatar = !!user.avatarUrl;
     // Kick and move still require a live voice connection; mute/deafen target the identity.
     const targetState = this.resolveVoiceTarget(user)?.voiceState;
-    const voiceChannels = (serverStore.serverDetails?.channels ?? []).filter((channel) => channel.type === 'VOICE');
+    const voiceChannels = (serverStore.serverDetails?.channels ?? []).filter((channel) =>
+      channel.type === 'VOICE' && serverStore.hasPermission(Permission.MOVE_MEMBERS, channel.id));
     const roleIds = new Set(serverStore.getUserRoleIds(user.id));
     const manageableRoles = serverStore.roles
       .filter((role) => !role.isDefault && !serverStore.isAdminRole(role))
@@ -44,7 +45,7 @@ export class UserContextMenu {
     const canMuteMembers = serverStore.hasPermission(Permission.MUTE_MEMBERS);
     const canDeafenMembers = serverStore.hasPermission(Permission.DEAFEN_MEMBERS);
     const canKickMembers = !!targetState && serverStore.hasPermission(Permission.KICK_MEMBERS);
-    const canMoveMembers = !!targetState && serverStore.hasPermission(Permission.MOVE_MEMBERS) && voiceChannels.length > 0;
+    const canMoveMembers = !!targetState && serverStore.hasPermission(Permission.MOVE_MEMBERS, targetState.channelId) && voiceChannels.length > 0;
     const canManageRoles = !user.isBot && serverStore.hasPermission(Permission.MANAGE_ROLES) && manageableRoles.length > 0;
     // Promoting/demoting admins is also available straight from the member list (#273).
     const adminRole = serverStore.getAdminRole();

@@ -223,35 +223,6 @@ struct Target {
     return TRUE;
   }
 
-  struct Enumeration {
-    const Target* target = nullptr;
-    std::size_t visited = 0, titles = 0, tuples = 0;
-    bool failed = false;
-  };
-
-  static BOOL CALLBACK Enumerate(HWND window, LPARAM parameter) noexcept {
-    auto& context = *reinterpret_cast<Enumeration*>(parameter);
-    try {
-      if (++context.visited > kMaxWindowCandidates) { context.failed = true; return FALSE; }
-      const int length = GetWindowTextLengthW(window);
-      if (length <= 0 || length > 512) return TRUE;
-      const auto title = WindowTitle(window);
-      if (!SameOrdinal(title, context.target->title)) return TRUE;
-      ++context.titles;
-      const auto className = WindowClass(window);
-      if (!SameOrdinal(className, context.target->className)) return TRUE;
-      DWORD pid = 0;
-      Require(GetWindowThreadProcessId(window, &pid) != 0, "Cannot resolve matching title PID");
-      Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
-      Require(static_cast<bool>(process), "Cannot rule out an inaccessible ambiguous source");
-      if (SameOrdinal(ExecutableBasename(process.Get()), context.target->executable)) ++context.tuples;
-      return TRUE;
-    } catch (...) {
-      context.failed = true;
-      return FALSE;
-    }
-  }
-
   void VerifyUnique() const {
     Verify();
     if (kind == CaptureKind::Monitor) {
@@ -263,12 +234,6 @@ struct Target {
       Verify();
       return;
     }
-    Enumeration context{this};
-    const auto success = EnumWindows(Enumerate, reinterpret_cast<LPARAM>(&context));
-    Require(success && !context.failed, "Could not completely enumerate bounded source identity candidates",
-        "ERR_SCREEN_CAPTURE_SOURCE_AMBIGUOUS");
-    ValidateSelectionEvidence(context.tuples, context.titles, true, true);
-    Verify();
   }
 };
 
@@ -1177,15 +1142,6 @@ class Host {
         ",\"encoderDeviceIndependentlyObserved\":false,\"sourceFramesAvailable\":false,"
         "\"actualBackendHwnd\":null,\"hardwareQualified\":false}");
   }
-  void CheckStockFinder() {
-    if (arguments_.kind == CaptureKind::Monitor) { target_.VerifyUnique(); return; }
-    if (target_.Paused()) return;
-    const auto finder = arguments_.method == Method::Wgc ? api().ms_find_window_top_level : api().ms_find_window;
-    const auto chosen = finder(abi::WindowSearch::IncludeMinimized, abi::WindowPriority::Title,
-        target_.key.className.c_str(), target_.key.title.c_str(), target_.key.executable.c_str());
-    Require(chosen == target_.window, "Stock title-priority finder no longer selects the explicit HWND",
-        "ERR_SCREEN_CAPTURE_SOURCE_AMBIGUOUS");
-  }
   abi::Property* Property(abi::Properties* properties, const char* name, abi::PropertyType type) {
     auto* value = api().obs_properties_get(properties, name);
     Require(value && api().obs_property_get_type(value) == type && api().obs_property_enabled(value),
@@ -1251,14 +1207,18 @@ class Host {
       try {
         if (className && title && executable) {
           const SourceKey observed{BoundedString(title, 512), BoundedString(className, 256), BoundedString(executable, 260)};
-          if (observed == target_.key) { ++matching; result = encoded; }
+          if (observed == target_.key) {
+            Require(result.empty() || result == encoded, "Selected window has inconsistent property encodings",
+                "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
+            ++matching; result = encoded;
+          }
         }
       } catch (...) {
         api().bfree(className); api().bfree(title); api().bfree(executable); throw;
       }
       api().bfree(className); api().bfree(title); api().bfree(executable);
     }
-    Require(matching == 1, "Exact selected window key is absent or ambiguous in stock source properties",
+    Require(matching > 0, "Exact selected window key is absent from stock source properties",
         "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
     return result;
   }
@@ -1274,7 +1234,10 @@ class Host {
       SetBoolean(properties.value, sourceSettings_, "force_sdr", false);
     } else {
       const auto selected = WindowSetting(properties.value);
-      SetString(properties.value, sourceSettings_, "window", selected);
+      // This tuple configures the source; the bound HWND, not its title, selects the captured window.
+      api().obs_data_set_string(sourceSettings_, "window", selected.c_str());
+      Require(BoundedString(api().obs_data_get_string(sourceSettings_, "window"), 4096) == selected,
+          "Bound window setting readback differs", "ERR_SCREEN_CAPTURE_SETTINGS");
       SetInteger(properties.value, sourceSettings_, "priority", 1, true);
       if (api().obs_properties_get(properties.value, "capture_audio"))
         SetBoolean(properties.value, sourceSettings_, "capture_audio", false);
@@ -1297,7 +1260,7 @@ class Host {
         SetBoolean(properties.value, sourceSettings_, "force_sdr", false);
       }
     }
-    target_.VerifyUnique(); CheckStockFinder();
+    target_.VerifyUnique();
   }
   void PollLiveFeedback() {
     for (const auto& feedback : live_->Poll()) {
@@ -1443,11 +1406,11 @@ class Host {
     const bool gameHooks = !arguments_.encoderProbe && arguments_.kind == CaptureKind::Game;
     Require(Symbol<Configure>(image, "monky_configure_capture_startup")(gameHooks),
         "Capture module refused the explicit startup mode", "ERR_SCREEN_CAPTURE_STARTUP_MODE");
-    if (gameHooks) {
+    if (!arguments_.encoderProbe && arguments_.kind != CaptureKind::Monitor) {
       using Bind = bool (*)(std::uint64_t, std::uint32_t, std::uint64_t);
-      Require(Symbol<Bind>(image, "monky_bind_game_target")(arguments_.hwnd, arguments_.processId, target_.creation),
-              "Game Capture could not hold the selected HWND/PID/creation/thread identity",
-              "ERR_SCREEN_CAPTURE_PROCESS_IDENTITY");
+      Require(Symbol<Bind>(image, "monky_bind_window_target")(arguments_.hwnd, arguments_.processId, target_.creation),
+              "Capture could not hold the exact selected HWND/PID/creation/thread identity",
+              "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
     } else if (!arguments_.encoderProbe && arguments_.kind == CaptureKind::Monitor) {
       using Bind = bool (*)(std::uint64_t, const char*, const char*, std::int32_t, std::int32_t, std::uint32_t, std::uint32_t);
       const auto& monitor = arguments_.monitor;
@@ -1621,7 +1584,7 @@ class Host {
   }
   void StartSource() {
     Require(!arguments_.encoderProbe, "Encoder probing cannot create a capture source", "ERR_SCREEN_CAPTURE_PROBE_ISOLATION");
-    target_.VerifyUnique(); CheckStockFinder(); CheckParent(); CheckFailure(); run_->Verify();
+    target_.VerifyUnique(); CheckParent(); CheckFailure(); run_->Verify();
     strictEncoderWarnings_.store(true);
     BindMainCanvas();
     const auto canvasUuid = BoundedString(api().obs_canvas_get_uuid(mainCanvas_), 36);
@@ -1735,7 +1698,7 @@ class Host {
     Require(!arguments_.encoderProbe, "Encoder probing cannot start video output", "ERR_SCREEN_CAPTURE_PROBE_ISOLATION");
     PollInput();
     if (life_.phase == Phase::Stopping) return;
-    Tick(); target_.VerifyUnique(); CheckStockFinder();
+    Tick(); target_.VerifyUnique();
     Require(SourceReadyForEncoder(life_.phase, observation_), "Encoder requires attached source with positive dimensions",
         "ERR_SCREEN_CAPTURE_SOURCE");
     CheckSceneOutput();
@@ -1754,7 +1717,7 @@ class Host {
       return;
     }
     const auto now = GetTickCount64();
-    if (now - lastUniqueCheck_ >= 100) { target_.VerifyUnique(); CheckStockFinder(); lastUniqueCheck_ = now; }
+    if (now - lastUniqueCheck_ >= 100) { target_.VerifyUnique(); lastUniqueCheck_ = now; }
     abi::CallData data{};
     bool attached = false;
     std::optional<SourceKey> observed;
@@ -1767,11 +1730,9 @@ class Host {
             api().calldata_get_data(&data, "hooked", &attached, sizeof(attached)),
             "Stock source cannot expose get_hooked attachment evidence", "ERR_SCREEN_CAPTURE_HOOK_IDENTITY");
         if (attached) {
-          if (arguments_.kind != CaptureKind::Window) {
-            bool identity = false;
-            Require(api().calldata_get_data(&data, "identity_valid", &identity, sizeof(identity)) && identity,
-                    "The capture backend did not bind the exact selected native identity", "ERR_SCREEN_CAPTURE_HOOK_IDENTITY");
-          }
+          bool identity = false;
+          Require(api().calldata_get_data(&data, "identity_valid", &identity, sizeof(identity)) && identity,
+                  "The capture backend did not bind the exact selected native identity", "ERR_SCREEN_CAPTURE_HOOK_IDENTITY");
           if (arguments_.kind != CaptureKind::Monitor) {
             const char* title = nullptr; const char* className = nullptr; const char* executable = nullptr;
             Require(api().calldata_get_string(&data, "title", &title) && api().calldata_get_string(&data, "class", &className) &&
@@ -1779,14 +1740,14 @@ class Host {
                 "ERR_SCREEN_CAPTURE_HOOK_IDENTITY");
             observed = SourceKey{BoundedString(title, 512), BoundedString(className, 256), BoundedString(executable, 260)};
           }
-          if (arguments_.kind == CaptureKind::Game) {
+          if (arguments_.kind != CaptureKind::Monitor) {
             std::int64_t hwnd = 0, pid = 0, creation = 0;
             Require(api().calldata_get_data(&data, "hwnd", &hwnd, sizeof(hwnd)) &&
                     api().calldata_get_data(&data, "process_id", &pid, sizeof(pid)) &&
                     api().calldata_get_data(&data, "process_creation", &creation, sizeof(creation)) &&
                     hwnd > 0 && static_cast<std::uint64_t>(hwnd) == arguments_.hwnd &&
                     pid == arguments_.processId && static_cast<std::uint64_t>(creation) == target_.creation,
-                    "Game Capture reported a different HWND/PID/process creation identity", "ERR_SCREEN_CAPTURE_HOOK_IDENTITY");
+                    "Capture reported a different HWND/PID/process creation identity", "ERR_SCREEN_CAPTURE_HOOK_IDENTITY");
           }
           width = api().obs_source_get_width(source_); height = api().obs_source_get_height(source_);
           if (arguments_.kind == CaptureKind::Monitor && width && height)
@@ -1806,7 +1767,7 @@ class Host {
     if (attached && width && height) UpdateSourceDimensions(observation_, life_.phase, width, height);
     // WGC can temporarily detach or report zero dimensions across minimize,
     // resize and exclusive-fullscreen transitions. HWND/PID/creation and the
-    // unique stock selection above still identify the only permitted source.
+    // backend binding above still identify the only permitted source.
     observation_.sourceAttached = attached && width > 0 && height > 0;
     target_.Verify();
     CheckFailure();

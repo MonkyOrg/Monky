@@ -166,6 +166,60 @@ test('a real IPC credit acknowledgement arriving after stop cannot revive or fai
   assert.deepEqual(f.errors, []);
 });
 
+test('coalesced feedback retains the latest availability and cannot outlive its output epoch', async () => {
+  for (const scenario of ['latest', 'stop', 'failure', 'calibration']) {
+    const admissions = [];
+    const f = fixture({ feedback: () => {
+      const admission = deferred();
+      admissions.push(admission);
+      return admission.promise;
+    } });
+    await f.owner.start('owned-output');
+    f.owner.probe({ epoch: 1, probeId: 1 });
+    f.owner.calibrate({ epoch: 1, probeId: 1, rendererBeforeUs: 1999000, rendererAfterUs: 1999200 });
+    f.engine.asynchronousNative = true;
+    for (const name of ['audioClockProbe', 'calibrateAudioClock']) {
+      const direct = f.engine[name];
+      f.engine[name] = (...args) => Promise.resolve(direct(...args));
+    }
+    const measured = { epoch: 1, available: true, clockEpoch: 1, calibrationId: 1,
+      atPerformanceTimeUs: 1999500, estimatedPlayoutFrame: -480, confirmedPcmEnd: 0,
+      feedbackAgeUs: 0, outputClockAgeUs: 0 };
+    const first = f.owner.feedback(measured);
+    const superseded = f.owner.feedback(measured);
+    const last = f.owner.feedback(scenario === 'calibration' ? measured : { epoch: 1, available: false });
+    assert.equal(await superseded, false);
+    assert.equal(admissions.length, 1);
+    if (scenario === 'stop') await f.owner.stop();
+    if (scenario === 'calibration') {
+      await f.owner.probe({ epoch: 1, probeId: 2 });
+      await f.owner.calibrate({ epoch: 1, probeId: 2, rendererBeforeUs: 1999000, rendererAfterUs: 1999200 });
+    }
+    if (scenario === 'failure') {
+      const failure = assert.rejects(first, /actual feedback failure/u);
+      admissions[0].reject(new Error('actual feedback failure'));
+      await failure;
+      assert.ok(f.errors.some(entry => entry.error.message === 'actual feedback failure'));
+    } else {
+      admissions[0].resolve();
+      assert.equal(await first, scenario !== 'stop');
+    }
+    if (scenario === 'latest') {
+      assert.equal(admissions.length, 2);
+      assert.deepEqual(f.calls.filter(call => call.type === 'feedback').at(-1).data, { epoch: 1, available: false });
+      admissions[1].resolve();
+      assert.equal(await last, true);
+    } else {
+      assert.equal(await last, false);
+      assert.equal(admissions.length, 1);
+    }
+    await f.owner.stop();
+    assert.equal(f.owner.getStats().queuedFeedback, false);
+    if (scenario !== 'failure') assert.deepEqual(f.errors, []);
+    if (scenario === 'calibration') assert.equal(f.owner.getStats().supersededCalibrationFeedback, 1);
+  }
+});
+
 test('constructor and import are inert; one real same-engine owner persists across all restarts', async () => {
   const f = fixture();
   assert.deepEqual(f.calls, []);

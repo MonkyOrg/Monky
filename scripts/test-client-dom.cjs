@@ -32,6 +32,8 @@ const commands = [
   ['npm', 'run', 'test:transport', '--workspace=apps/client'],
   ['npm', 'run', 'test:bot-marketplace', '--workspace=apps/client'],
   ['npm', 'run', 'test:soundboard', '--workspace=apps/client'],
+  ['npm', 'run', 'test:community', '--workspace=apps/client'],
+  ['npm', 'run', 'test:pip', '--workspace=apps/client'],
 ];
 
 function run(runCommand = spawnSync, platform = process.platform) {

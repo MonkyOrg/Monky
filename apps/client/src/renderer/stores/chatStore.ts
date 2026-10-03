@@ -903,6 +903,26 @@ export class ChatStore {
     }
   }
 
+  public revokeChannel(channelId: string): void {
+    this.finishChannelInvocations(channelId);
+    for (const [id, invocation] of this.invocations) {
+      if (invocation.channelId === channelId) this.invocations.delete(id);
+    }
+    for (const [id, outgoing] of this.outgoing) {
+      if (outgoing.payload.channelId === channelId) this.outgoing.delete(id);
+    }
+    this.messages.delete(channelId);
+    this.ephemeralMessages.delete(channelId);
+    this.historicalChannels.delete(channelId);
+    this.replyDrafts.delete(channelId);
+    this.blockDrafts.delete(channelId);
+    this.messageEdits.delete(channelId);
+    this.drafts.delete(channelId);
+    if (this.mentionChannels.delete(channelId)) this.bus.emit('chat.mentions_updated');
+    if (this.unreadChannels.delete(channelId)) this.bus.emit('chat.unread_updated');
+    this.bus.emit('chat.history_loaded', { channelId });
+  }
+
   public finishAllInvocations(reason: CommandFinishReason): void {
     for (const invocation of this.invocations.values()) this.finishInvocation({ ...invocation, reason });
     for (const [channelId, draft] of this.commandDrafts) {

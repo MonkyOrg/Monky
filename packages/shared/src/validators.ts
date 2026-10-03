@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { LIMITS, PROTOCOL_VERSION } from './constants.js';
+import { CHANNEL_PERMISSIONS, EVERYONE_ROLE_ID, channelPermissionTargetKey } from './permissions.js';
 import { protocolOfferSchema } from './protocolCompatibility.js';
 import { screenShareIdSchema, nativeScreenRenditionSchema } from './screenSharing.js';
 export { screenShareIdSchema } from './screenSharing.js';
@@ -217,7 +218,24 @@ export const channelAllowedRoleIdsSchema = z
   .max(100, 'Cargos demais para um canal')
   .transform((ids) => Array.from(new Set(ids)));
 
+const channelPermissionBitsSchema = z.number().int().min(0).max(CHANNEL_PERMISSIONS)
+  .refine(bits => (bits & ~CHANNEL_PERMISSIONS) === 0, 'Permissão não aplicável ao canal');
+const channelPermissionBits = {
+  allow: channelPermissionBitsSchema,
+  deny: channelPermissionBitsSchema,
+};
+export const channelPermissionOverwritesSchema = z.array(z.union([
+  z.object({
+    roleId: z.string().min(1).max(128).refine(id => id !== EVERYONE_ROLE_ID).nullable(),
+    ...channelPermissionBits,
+  }).strict(),
+  z.object({ userId: z.string().min(1).max(128), ...channelPermissionBits }).strict(),
+]).refine(value => (value.allow & value.deny) === 0, 'Permissão conflitante'))
+  .max(101)
+  .refine(entries => new Set(entries.map(channelPermissionTargetKey)).size === entries.length, 'Alvo duplicado');
+
 export const channelCreateSchema = z.object({
+  permissionOverwrites: channelPermissionOverwritesSchema.optional(),
   categoryId: z.string().min(1).nullable().optional().default(null),
   inheritCategoryPermissions: z.boolean().optional().default(true),
   botCommandsEnabled: z.boolean().optional().default(true),
@@ -231,6 +249,7 @@ export const channelCreateSchema = z.object({
 // Editing a channel (#384). Only the fields present are changed, so `name` and
 // `isPrivate` are optional here even though they are required on creation.
 export const channelUpdateSchema = z.object({
+  permissionOverwrites: channelPermissionOverwritesSchema.optional(),
   categoryId: z.string().min(1).nullable().optional(),
   inheritCategoryPermissions: z.boolean().optional(),
   botCommandsEnabled: z.boolean().optional(),
@@ -252,6 +271,7 @@ export const channelReorderSchema = z.object({
 }).refine((value) => value.type !== undefined || value.categoryId !== undefined, 'Informe uma categoria ou tipo');
 
 export const categoryCreateSchema = z.object({
+  permissionOverwrites: channelPermissionOverwritesSchema.optional(),
   name: channelNameSchema,
   isPrivate: z.boolean().optional().default(false),
   allowedRoleIds: channelAllowedRoleIdsSchema.optional().default([]),

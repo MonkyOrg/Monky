@@ -16,7 +16,7 @@ function bindGameSource(source) {
   assert.ok(start > 0 && end > start);
   source = source.slice(0, start) + `static void get_selected_window(struct game_capture *gc)
 {
-\tHWND window = monky_game_window();
+\tHWND window = monky_selected_window();
 \tif (window)
 \t\tsetup_window(gc, window);
 \telse
@@ -27,35 +27,35 @@ function bindGameSource(source) {
     const signature = name === 'inject_hook' ? 'static inline bool' : 'static bool';
     const anchor = `${signature} ${name}(struct game_capture *gc)\n{`;
     source = replaceOnce(source, anchor, anchor + `
-\tif (!monky_game_identity_matches(gc->next_window, gc->process_id, gc->target_process))
+\tif (!monky_window_identity_matches(gc->next_window, gc->process_id, gc->target_process))
 \t\treturn false;`);
   }
   source = replaceOnce(source, 'static void game_capture_tick(void *data, float seconds)\n{\n\tstruct game_capture *gc = data;',
     `static void game_capture_tick(void *data, float seconds)
 {
 \tstruct game_capture *gc = data;
-\tif (!monky_game_target_alive()) {
+\tif (!monky_window_target_alive()) {
 \t\tif (gc->active) stop_capture(gc);
 \t\treturn;
 \t}
-\tif (!monky_game_window()) return;`);
+\tif (!monky_selected_window()) return;`);
   source = replaceOnce(source, 'static void *game_capture_create(obs_data_t *settings, obs_source_t *source)\n{',
     `static void *game_capture_create(obs_data_t *settings, obs_source_t *source)
 {
-\tif (!monky_game_target_alive() ||
+\tif (!monky_window_target_alive() ||
 \t    strcmp(obs_data_get_string(settings, "capture_mode"), "window") != 0 ||
 \t    !obs_data_get_bool(settings, "anti_cheat_hook") || obs_data_get_bool(settings, "capture_audio"))
 \t\treturn NULL;`);
   source = replaceOnce(source, '\tcalldata_set_bool(cd, "hooked", gc->capturing);',
     `\tHWND hook_window = gc->global_hook_info && gc->global_hook_info->window
 \t\t? (HWND)(uintptr_t)gc->global_hook_info->window : gc->window;
-\tbool identity = gc->capturing && monky_game_identity_matches(gc->window, gc->process_id, gc->target_process) &&
-\t\tmonky_game_identity_matches(hook_window, gc->process_id, gc->target_process);
+\tbool identity = gc->capturing && monky_window_identity_matches(gc->window, gc->process_id, gc->target_process) &&
+\t\tmonky_window_identity_matches(hook_window, gc->process_id, gc->target_process);
 \tcalldata_set_bool(cd, "hooked", gc->capturing);
 \tcalldata_set_bool(cd, "identity_valid", identity);
 \tcalldata_set_int(cd, "hwnd", (int64_t)(uintptr_t)hook_window);
 \tcalldata_set_int(cd, "process_id", gc->process_id);
-\tcalldata_set_int(cd, "process_creation", (int64_t)monky_game_creation());`);
+\tcalldata_set_int(cd, "process_creation", (int64_t)monky_window_creation());`);
   source = replaceOnce(source,
     '"void get_hooked(out bool hooked, out string title, out string class, out string executable)"',
     '"void get_hooked(out bool hooked, out string title, out string class, out string executable, ' +
@@ -63,10 +63,55 @@ function bindGameSource(source) {
   source = replaceOnce(source, '\tif (!gc->texture || !gc->active)\n',
     `\tHWND hook_window = gc->global_hook_info && gc->global_hook_info->window
 \t\t? (HWND)(uintptr_t)gc->global_hook_info->window : gc->window;
-\tif (!monky_game_window() || !monky_game_identity_matches(hook_window, gc->process_id, gc->target_process))
+\tif (!monky_selected_window() || !monky_window_identity_matches(hook_window, gc->process_id, gc->target_process))
 \t\treturn;
 \tif (!gc->texture || !gc->active)
 `);
+  return source;
+}
+
+function bindWindowSource(source) {
+  source = '#include "sourceBinding.h"\n' + source;
+  const finderStart = source.indexOf('\t\twc->window = (wc->method == METHOD_WGC) ? ms_find_window_top_level(');
+  const finderEnd = source.indexOf('\n\t\tif (!wc->window)', finderStart);
+  assert.ok(finderStart > 0 && finderEnd > finderStart, 'Pinned WGC selection anchor changed.');
+  source = source.slice(0, finderStart) + '\t\twc->window = monky_selected_window();' + source.slice(finderEnd);
+  source = replaceOnce(source, 'static void *wc_create(obs_data_t *settings, obs_source_t *source)\n{',
+    `static void *wc_create(obs_data_t *settings, obs_source_t *source)
+{
+\tif (!monky_window_target_alive() || obs_data_get_int(settings, "method") != 2 ||
+\t    obs_data_get_bool(settings, "capture_audio"))
+\t\treturn NULL;`);
+  source = replaceOnce(source, '\tif (wc->hooked && wc->window) {',
+    `\tDWORD process_id = 0;
+\tGetWindowThreadProcessId(wc->window, &process_id);
+\tbool identity = monky_window_identity_matches(wc->window, process_id, NULL);
+\tcalldata_set_bool(cd, "identity_valid", identity);
+\tcalldata_set_int(cd, "hwnd", (int64_t)(uintptr_t)wc->window);
+\tcalldata_set_int(cd, "process_id", process_id);
+\tcalldata_set_int(cd, "process_creation", (int64_t)monky_window_creation());
+\tif (wc->hooked && identity) {`);
+  source = replaceOnce(source,
+    '"void get_hooked(out bool hooked, out string title, out string class, out string executable)"',
+    '"void get_hooked(out bool hooked, out string title, out string class, out string executable, ' +
+      'out bool identity_valid, out int hwnd, out int process_id, out int process_creation)"');
+  source = replaceOnce(source, 'static void wc_tick(void *data, float seconds)\n{\n\tstruct window_capture *wc = data;',
+    `static void wc_tick(void *data, float seconds)
+{
+\tstruct window_capture *wc = data;
+\tif (!monky_window_target_alive()) {
+\t\tforce_reset(wc);
+\t\treturn;
+\t}
+\tif (!monky_selected_window()) return;`);
+  source = replaceOnce(source, '\t\tif (wc->window && (wc->capture_winrt == NULL)) {',
+    '\t\tif (wc->window == monky_selected_window() && (wc->capture_winrt == NULL)) {');
+  source = replaceOnce(source, 'static void wc_render(void *data, gs_effect_t *effect)\n{\n\tstruct window_capture *wc = data;',
+    `static void wc_render(void *data, gs_effect_t *effect)
+{
+\tstruct window_capture *wc = data;
+\tif (!monky_selected_window() || wc->window != monky_selected_window())
+\t\treturn;`);
   return source;
 }
 
@@ -109,4 +154,4 @@ function configureWinrtSource(source) {
   return '#include "wgcCadence.h"\n' + source.replaceAll(anchor, anchor + '\n\tMonkyConfigureWgcCadence(session);');
 }
 
-module.exports = { bindGameSource, bindMonitorSource, configureWinrtSource };
+module.exports = { bindGameSource, bindWindowSource, bindMonitorSource, configureWinrtSource };

@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import http from 'node:http';
 import test from 'node:test';
-import { MessageType, Permission, ProtocolErrorCode, canAccessChannel, DEFAULT_PERMISSIONS, resolveChannelPermissions } from '@monky/shared';
+import { MessageType, Permission, ProtocolErrorCode, canAccessChannel, DEFAULT_PERMISSIONS, CHANNEL_PERMISSIONS, resolveChannelPermissions } from '@monky/shared';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 import { SqlJsDriver } from './infrastructure/database/SqliteWrapper';
 import { SqliteChannelRepository, SqliteRoleRepository, SqliteServerRepository } from './infrastructure/database/SqliteRepositories';
@@ -18,7 +18,8 @@ test('category permissions fail closed and channel overrides replace inheritance
   const inherited = { categoryId: 'category', isPrivate: false, allowedRoleIds: [] };
   const category = { isPrivate: true, allowedRoleIds: ['team'] };
   assert.deepEqual(resolveChannelPermissions(inherited, category), category);
-  assert.deepEqual(resolveChannelPermissions(inherited, null), { isPrivate: true, allowedRoleIds: [] });
+  assert.deepEqual(resolveChannelPermissions(inherited, null), { isPrivate: true, allowedRoleIds: [],
+    permissionOverwrites: [{ roleId: null, allow: 0, deny: CHANNEL_PERMISSIONS }] });
   assert.equal(canAccessChannel(resolveChannelPermissions(inherited, category), DEFAULT_PERMISSIONS, []), false);
   assert.equal(canAccessChannel(resolveChannelPermissions(inherited, category), DEFAULT_PERMISSIONS, ['team']), true);
   assert.deepEqual(resolveChannelPermissions({ ...inherited, inheritCategoryPermissions: false }, category), {
@@ -147,7 +148,8 @@ test('category CRUD/mixed ordering and revocation cover auth, voice, chat, attac
   assert.deepEqual(persisted?.allowedRoleIds, []);
   assert.equal((await f.channelRepo.findById(text(publicOverride.id)))?.isPrivate, false);
   assert.equal(await f.channelService.canUserAccessChannel(outsider.id, chatId), false);
-  assert.equal(canAccessChannel(persisted!, Permission.MANAGE_CHANNELS, []), true);
+  assert.equal(canAccessChannel(persisted!, Permission.MANAGE_CHANNELS, []), false);
+  assert.equal(canAccessChannel(persisted!, Permission.ADMINISTRATOR, []), true);
 });
 
 test('moving, deleting, role deletion and explicit overrides never silently publish access', async (t) => {

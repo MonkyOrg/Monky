@@ -69,7 +69,8 @@ class NativeAudioOutputOwner {
     packets: 0, pcmFrames: 0, enqueuedPackets: 0, stalePackets: 0, stoppingPackets: 0,
     staleControls: 0, outputErrors: 0, staleOutputErrors: 0, probes: 0, expiredProbes: 0, calibrations: 0,
     outputInvalidations: 0, staleOutputInvalidations: 0,
-    availableFeedback: 0, unavailableFeedback: 0, rejectedClockObservations: 0, errorCount: 0, observerErrors: 0,
+    availableFeedback: 0, unavailableFeedback: 0, coalescedFeedback: 0, supersededCalibrationFeedback: 0,
+    rejectedClockObservations: 0, errorCount: 0, observerErrors: 0,
   };
 
   constructor(engine, commands, renderer, onError, { timeoutMs = 5000 } = {}) {
@@ -149,6 +150,7 @@ class NativeAudioOutputOwner {
       nativeAttempted: false, nativeConfigured: false, nativeRetired: true, nativeStop: null,
       nativeIdentityUncertain: false, awaitingEngineClose: false, stopWork: null,
       outputInvalidationReason: null,
+      feedbackWork: null, queuedFeedback: null,
       creditFrames: 0, lastGrantSequence: 0, grantAdmissionUncertain: false,
       nextSequence: 0, nextPlayoutFrame: 0, enqueues: new Set(), enqueueUncertain: false,
       probes: new Map(), lastProbeId: 0, calibrationId: null, lastCalibrationId: 0, lastClockEpoch: 0,
@@ -359,21 +361,55 @@ class NativeAudioOutputOwner {
         throw new Error('Invalid or uncalibrated physical native audio feedback.');
       }
       if (payload.available) record.lastClockEpoch = payload.clockEpoch;
+      if (record.feedbackWork) {
+        if (record.queuedFeedback) {
+          record.queuedFeedback.resolve(false);
+          this.#counts.coalescedFeedback++;
+        }
+        const queued = { ...deferred(), payload: { ...payload } };
+        record.queuedFeedback = queued;
+        return queued.promise;
+      }
       nativeFeedback = { ...payload };
       const result = this.#engine.setAudioOutputFeedback(payload);
-      return this.#receiveNative(result, record, 'feedback', receipt => {
+      const work = this.#receiveNative(result, record, 'feedback', receipt => {
         if (receipt !== undefined) throw new Error('Native audio feedback admission must return void.');
         this.#assertLive(record);
         record.lastFeedback = { ...payload };
         this.#counts[payload.available ? 'availableFeedback' : 'unavailableFeedback']++;
         return true;
       }, nativeFeedback);
+      if (thenable(work)) {
+        record.feedbackWork = work;
+        const drain = () => this.#drainFeedback(record, work);
+        void work.then(drain, drain);
+      }
+      return work;
     } catch (error) {
       if (nativeFeedback) record.rejectedFeedback = nativeFeedback;
       if (nativeFeedback && this.#rejectClockObservation(record, error, 'feedback')) return false;
       this.#fail(record, error, 'feedback');
       throw error;
     }
+  }
+
+  #drainFeedback(record, work) {
+    if (record.feedbackWork !== work) return;
+    record.feedbackWork = null;
+    const queued = record.queuedFeedback;
+    record.queuedFeedback = null;
+    if (!queued) return;
+    if (record.stopping || this.#current !== record || this.#engineClosed) {
+      queued.resolve(false);
+      return;
+    }
+    if (queued.payload.available && queued.payload.calibrationId !== record.calibrationId) {
+      this.#counts.supersededCalibrationFeedback++;
+      queued.resolve(false);
+      return;
+    }
+    try { Promise.resolve(this.feedback(queued.payload)).then(queued.resolve, queued.reject); }
+    catch (error) { queued.reject(error); }
   }
 
   handleNativeEvent(event) {
@@ -591,6 +627,8 @@ class NativeAudioOutputOwner {
     record.abortReason = asError(reason);
     record.calibrationId = null;
     record.probes.clear();
+    record.queuedFeedback?.resolve(false);
+    record.queuedFeedback = null;
     record.cancellation.resolve(record.abortReason);
     record.controller.abort(record.abortReason);
     if (record.externalSignal && record.externalAbort) {
@@ -781,6 +819,7 @@ class NativeAudioOutputOwner {
       outputInvalidationReason: record?.outputInvalidationReason ?? null,
       rendererStartupPending: Boolean(record && !record.rendererStartSettled), rendererRetired: record?.rendererRetired ?? true,
       pendingEnqueues: record?.enqueues.size ?? 0, outstandingCreditFrames: record?.creditFrames ?? 0,
+      feedbackInFlight: Boolean(record?.feedbackWork), queuedFeedback: Boolean(record?.queuedFeedback),
       reservedFrames: (record?.creditFrames ?? 0) + (record?.enqueues.size ?? 0) * 480,
       lastGrantSequence: record?.lastGrantSequence ?? 0, grantAdmissionUncertain: record?.grantAdmissionUncertain ?? false,
       enqueueUncertain: record?.enqueueUncertain ?? false, nextSequence: record?.nextSequence ?? 0,

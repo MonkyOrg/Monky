@@ -616,16 +616,6 @@ inline void ValidateKey(const SourceKey& key) {
           "Selected window key is missing, overlong or not an executable basename", "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
 }
 
-inline void ValidateSelectionEvidence(std::size_t matchingTuples, std::size_t matchingTitles,
-                                     bool hwndPidCreationLive, bool stockFinderMatches) {
-  Require(hwndPidCreationLive && stockFinderMatches, "Selected HWND/PID/creation time or stock finder changed",
-          "ERR_SCREEN_CAPTURE_SOURCE_LOST");
-  // WINDOW_PRIORITY_TITLE matches title alone in the pinned stock source.
-  Require(matchingTuples == 1 && matchingTitles == 1,
-          "Stock title matching is ambiguous even if a title/class/executable tuple is unique",
-          "ERR_SCREEN_CAPTURE_SOURCE_AMBIGUOUS");
-}
-
 inline void ValidateHookEvidence(const SourceKey& selected, const SourceKey& observed) {
   ValidateKey(selected); ValidateKey(observed);
   Require(selected == observed, "Stock get_hooked tuple differs from the explicitly selected source",

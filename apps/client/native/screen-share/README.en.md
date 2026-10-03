@@ -241,6 +241,13 @@ Ordinary calls have 128 credits/32 MiB. Retirement has a separate reserve of
 saturation must not prevent release of an already-owned texture. Credits return
 only on actual completion or process exit.
 
+Audio clock observations keep at most one call in flight and the latest pending
+observation. Replacing an observation resolves its promise as `false`, not as
+native application. Stop and epoch replacement cancel pending work; superseded
+calibrations are not reapplied. `coalescedFeedback` and
+`supersededCalibrationFeedback` record these cases. PCM credits and their
+processing receipts are not coalesced.
+
 Compressed capture-pipe copies remain bounded to 16 items/8 MiB, including the
 item being written. Admission now uses the native owner's existing 15-second
 deadline instead of confusing local delivery with media freshness. RTC still
@@ -312,10 +319,11 @@ replacing the window/process withdraws its announcement even without viewers.
 
 WinUI windows (for example, WhatsApp) are not blocked solely because their class
 is `WinUIDesktopWin32WindowClass`/`ApplicationFrameWindow`. Admission requires
-the OBS properties list and finder to match the selected window, with a unique
-title and preserved HWND/PID/creation identity. If enumeration redirects to a
-child in another process, selection is rejected rather than implicitly sharing
-that child.
+an admissible OBS property and an exact HWND/PID/creation/thread binding.
+The generated WGC source uses that binding rather than the stock title finder,
+so identically titled windows remain distinguishable. If enumeration redirects
+to a child in another process, selection is rejected rather than implicitly
+sharing that child.
 
 Availability distinguishes files, encoders and sources:
 
@@ -537,6 +545,13 @@ flags remain original. The bridge waits for previous processing receipts before
 activating the new epoch; in-flight credits are never revoked. Device failures
 remain explicit and terminal. The RTC diagnostic timer stops before native
 close begins, so it cannot inspect dismantled state while resources still drain.
+
+A paired QPC/RTC sample that takes longer than 2 ms does not, by itself,
+invalidate continuous PCM. Only in this case, the block continues without an
+absolute timestamp and increments the source's `clockObservationsUnavailable`
+diagnostic. The next valid observation resumes timestamps without restarting
+the epoch. Clock limits are not widened, timestamps are not invented and PCM
+is not discarded; discontinuities, regressions and other errors remain explicit.
 
 For playout, `currentFrame` observes the graph clock, not the speaker clock.
 Chromium 152.0.7977.130 [advances the graph before updating the
@@ -932,8 +947,9 @@ still depends on the source cadence and system load.
 `test\nativeWindowIdentitySmoke.cjs --artifacts=<absolute_path>` uses the
 build-generated `capture-contract-test.exe` to create owned
 WinUI/ApplicationFrameWindow windows. It verifies real WGC capture with
-same-process children and rejects duplicate titles, remapping to children in
-another process and changed process identity. It does not capture personal
+same-process children and distinguishes both windows with duplicate titles,
+while rejecting remapping to another process's child and changed process
+identity. It does not capture personal
 windows or record video; `--contracts=<absolute_executable>` allows a different
 build directory.
 

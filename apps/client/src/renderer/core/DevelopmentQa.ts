@@ -102,9 +102,27 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
     if (!channel) throw new Error('The real text-channel control is missing.');
     channel.click();
     await until(() => !!document.querySelector('#chat-message-input'), 'chat view', owner.signal);
-    const seed = '**QA preparado / Prepared QA**\nPerfil, servidor e dados isolados / Isolated profile, server and data.';
-    session.client.send(MessageType.CHAT_SEND, { channelId: text.id, content: seed });
-    await until(() => session.chatStore.getMessages(text.id).some((message) => message.content === seed), 'authenticated seeded message acknowledgement', owner.signal);
+    if (config.scenario === 'empty-forum') {
+      const forum = auth.server.channels.find(channel => channel.type === 'FORUM');
+      if (!forum) throw new Error('The empty QA forum was not created.');
+      await until(() => session.serverStore.knownMembers.size === 20 && session.serverStore.roles.length === 10,
+        '20 QA members and 10 roles', owner.signal);
+      const forumButton = document.querySelector<HTMLButtonElement>(
+        `[data-channel-id="${CSS.escape(forum.id)}"][data-channel-type="FORUM"]`,
+      );
+      if (!forumButton) throw new Error('The empty QA forum control is missing.');
+      forumButton.click();
+      await until(() => !!document.querySelector('.forum-empty-state strong')
+        && document.querySelector('[data-forum-posts]')?.getAttribute('aria-busy') === 'false',
+      'loaded empty QA forum', owner.signal);
+      if (document.querySelector('.forum-post-row') || session.chatStore.getMessages(text.id).length !== 0) {
+        throw new Error('The empty QA scenario unexpectedly contains threads or chat messages.');
+      }
+    } else {
+      const seed = '**QA preparado / Prepared QA**\nPerfil, servidor e dados isolados / Isolated profile, server and data.';
+      session.client.send(MessageType.CHAT_SEND, { channelId: text.id, content: seed });
+      await until(() => session.chatStore.getMessages(text.id).some((message) => message.content === seed), 'authenticated seeded message acknowledgement', owner.signal);
+    }
 
     if (config.scenario === 'connected' && !config.smoke) {
       session.client.send(MessageType.SOUNDBOARD_PLAY, {

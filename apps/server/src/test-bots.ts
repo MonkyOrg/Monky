@@ -88,7 +88,7 @@ async function createPrivateVoiceFixture(t: TestContext, mode: 'p2p' | 'sfu' = '
   const textId = text(channels.find((channel) => channel.type === 'TEXT')?.id);
   const publicVoiceId = text(channels.find((channel) => channel.type === 'VOICE')?.id);
   const role = { id: randomUUID(), name: 'Private listeners', color: null, position: 1,
-    permissions: 0, isDefault: false, createdAt: Date.now() };
+    permissions: DEFAULT_PERMISSIONS, isDefault: false, createdAt: Date.now() };
   await f.roleRepo.create(role);
   await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: caller.id, roleId: role.id });
   const createdRoom = await owner.peer.request(MessageType.CHANNEL_CREATE, {
@@ -1287,7 +1287,7 @@ test('bot settings reject stale sessions and recheck permissions changed during 
 test('bot settings selector events revalidate creator access after responder authorization', async (t) => {
   const f = await createSettingsFixture(t);
   const role = { id: randomUUID(), name: 'Private settings', color: null, position: 1,
-    permissions: 0, isDefault: false, createdAt: Date.now() };
+    permissions: DEFAULT_PERMISSIONS, isDefault: false, createdAt: Date.now() };
   await f.roleRepo.create(role);
   await f.roleRepo.assignRole(f.alice.id, role.id);
   await f.roleRepo.assignRole(f.bob.id, role.id);
@@ -1599,11 +1599,10 @@ test('public selectors publish durable controls, enforce permissions and finaliz
   const finalHistory = await owner.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId });
   assert.equal(records(finalHistory.payload.messages).filter((message) => message.id === results[0].payload.resultMessageId).length, 1);
   const another = await bot.peer.request(MessageType.SELECTOR_CREATE, { ...input, id: randomUUID() });
-  const memberRole = await fixture.roleRepo.findByName('Membro');
-  assert.ok(memberRole);
-  await fixture.roleRepo.update(memberRole.id, { permissions: memberRole.permissions & ~Permission.USE_BOT_COMMANDS });
+  const memberPermissions = await fixture.permissions.getEveryonePermissions();
+  await fixture.permissions.updateEveryonePermissions(memberPermissions & ~Permission.USE_BOT_COMMANDS);
   await alice.peer.error(MessageType.SELECTOR_RESPOND, { id: another.payload.id, value: 'a' }, ProtocolErrorCode.PERMISSION_DENIED);
-  await fixture.roleRepo.update(memberRole.id, { permissions: memberRole.permissions });
+  await fixture.permissions.updateEveryonePermissions(memberPermissions);
   const concurrent = await Promise.all([alice, bob, owner].map(({ peer }) =>
     peer.request(MessageType.SELECTOR_RESPOND, { id: another.payload.id, value: 'a' })
   ));
@@ -1619,9 +1618,7 @@ test('private channel selectors bind invocations and revalidate durable creator 
   const owner = await fixture.human('Capability owner');
   const creator = await fixture.human('Capability creator');
   const voter = await fixture.human('Capability voter');
-  const memberRole = await fixture.roleRepo.findByName('Membro');
-  assert.ok(memberRole);
-  await fixture.roleRepo.update(memberRole.id, { permissions: 0 });
+  await fixture.permissions.updateEveryonePermissions(0);
   const creatorRole = {
     id: randomUUID(), name: 'Poll creators', color: '#123456', permissions: DEFAULT_PERMISSIONS,
     position: 1, isDefault: false, createdAt: Date.now(),
@@ -2009,7 +2006,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
   const channels = records(record(owner.auth.payload.server).channels);
   const textChannel = text(channels.find((channel) => channel.type === 'TEXT')?.id);
   const voiceChannel = text(channels.find((channel) => channel.type === 'VOICE')?.id);
-  const privateRole = { id: randomUUID(), name: 'Private members', color: '#123456', permissions: 0, position: 1, isDefault: false, createdAt: Date.now() };
+  const privateRole = { id: randomUUID(), name: 'Private members', color: '#123456', permissions: DEFAULT_PERMISSIONS, position: 1, isDefault: false, createdAt: Date.now() };
   await fixture.roleRepo.create(privateRole);
   await fixture.roleRepo.assignRole(alice.id, privateRole.id);
   const privateCreated = await owner.peer.request(MessageType.CHANNEL_CREATE, {
@@ -2555,7 +2552,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
   await t.test('permission loss, privacy changes and channel deletion clean pending state', async () => {
     const active = await invoke();
     await ask(active.id, 'permissions');
-    const member = await fixture.roleRepo.findByName('Membro');
+    const member = await fixture.roleRepo.findById(privateRole.id);
     assert.ok(member);
     const changed = await owner.peer.request(MessageType.ROLE_UPDATE, { roleId: member.id, permissions: DEFAULT_PERMISSIONS & ~Permission.SEND_MESSAGES });
     assert.equal(changed.type, MessageType.ROLES_LIST);
@@ -2605,7 +2602,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
   });
 
   await t.test('USE_BOT_COMMANDS revocation cancels forms without revoking ordinary chat', async () => {
-    const member = await fixture.roleRepo.findByName('Membro');
+    const member = await fixture.roleRepo.findById(privateRole.id);
     assert.ok(member);
     const active = await invoke();
     await ask(active.id, 'revoke-bot-permission');
@@ -2628,7 +2625,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
   });
 
   await t.test('checks bot permission and channel switch again at submission without broadcasts', async () => {
-    const member = await fixture.roleRepo.findByName('Membro');
+    const member = await fixture.roleRepo.findById(privateRole.id);
     assert.ok(member);
     for (const revoked of ['permission', 'channel']) {
       const active = await invoke();
@@ -2657,6 +2654,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       position: 2, isDefault: false, createdAt: Date.now(),
     };
     await fixture.roleRepo.create(managerRole);
+    await fixture.roleRepo.unassignRole(alice.id, privateRole.id);
     await fixture.roleRepo.assignRole(alice.id, managerRole.id);
     try {
       const managed = await alice.peer.request(MessageType.BOT_CREATE, {});
@@ -2666,11 +2664,12 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       assert.equal((await alice.peer.request(MessageType.BOT_REVOKE, { botId: managedId })).type, MessageType.BOT_REVOKED);
     } finally {
       await fixture.roleRepo.delete(managerRole.id);
+      await fixture.roleRepo.assignRole(alice.id, privateRole.id);
     }
   });
 
   await t.test('revalidates access on submissions and replies even without a visibility broadcast', async () => {
-    const member = await fixture.roleRepo.findByName('Membro');
+    const member = await fixture.roleRepo.findById(privateRole.id);
     assert.ok(member);
     const submission = await invoke();
     await ask(submission.id, 'recheck');
@@ -2862,7 +2861,7 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
   const channels = records(record(owner.auth.payload.server).channels);
   const channelId = text(channels.find((channel) => channel.type === 'TEXT')?.id);
   const voiceChannelId = text(channels.find((channel) => channel.type === 'VOICE')?.id);
-  const role = { id: randomUUID(), name: 'Download members', color: '#123456', permissions: 0, position: 1, isDefault: false, createdAt: Date.now() };
+  const role = { id: randomUUID(), name: 'Download members', color: '#123456', permissions: DEFAULT_PERMISSIONS, position: 1, isDefault: false, createdAt: Date.now() };
   await fixture.roleRepo.create(role);
   await fixture.roleRepo.assignRole(alice.id, role.id);
   const privateCreated = await owner.peer.request(MessageType.CHANNEL_CREATE, {
@@ -3216,7 +3215,7 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
   });
 
   await t.test('revalidates autocomplete permission and channel access on replies without a broadcast', async () => {
-    const member = await fixture.roleRepo.findByName('Membro');
+    const member = await fixture.roleRepo.findById(role.id);
     assert.ok(member);
     for (const revoked of ['permission', 'send', 'channel']) {
       const pending = await search();
@@ -3334,7 +3333,7 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
   });
 
   await t.test('lazy audio previews revalidate access before dispatch and delivery, and abort on registry changes', async () => {
-    const member = await fixture.roleRepo.findByName('Membro');
+    const member = await fixture.roleRepo.findById(role.id);
     assert.ok(member);
     for (const stage of ['request', 'result']) {
       for (const permission of [Permission.USE_BOT_COMMANDS, Permission.SEND_MESSAGES]) {
@@ -3524,7 +3523,7 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
     await alice.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, {
       invocationId, downloadId: pending.received.downloadId, result: { status: 'downloaded' },
     }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
-    const member = await fixture.roleRepo.findByName('Membro');
+    const member = await fixture.roleRepo.findById(role.id);
     assert.ok(member);
     for (const revoked of ['permission', 'channel']) {
       const active = await invoke();
@@ -3604,7 +3603,7 @@ test('bot permission migration preserves existing roles and channels and runs on
   try {
     const roleRepo = new SqliteRoleRepository(migrated.getDb());
     for (const [index, permissions] of previous.entries()) {
-      assert.equal((await roleRepo.findById(`legacy-${index}`))?.permissions, (permissions | Permission.USE_BOT_COMMANDS) >>> 0);
+      assert.equal((await roleRepo.findById(`legacy-${index}`))?.permissions, (permissions | Permission.USE_BOT_COMMANDS | Permission.VIEW_CHANNEL) >>> 0);
     }
     const channelRepo = new SqliteChannelRepository(migrated.getDb());
     assert.equal((await channelRepo.findById('legacy-channel'))?.botCommandsEnabled, true);
@@ -3730,7 +3729,7 @@ test('autocomplete and sound download timers bound state and discard responses c
     broadcastToChannel: async () => assert.fail('Downloads must not be broadcast'),
     publishResponse: async () => assert.fail('Downloads must not be published'),
   }, fixture.channelService, fixture.userService, registry);
-  const granted: ChannelAccessContext = { permissions: DEFAULT_PERMISSIONS, roleIds: [] };
+  const granted: ChannelAccessContext = { userId: caller.id, permissions: DEFAULT_PERMISSIONS, roleIds: [] };
   let accessGate: Promise<ChannelAccessContext> | null = null;
   t.mock.method(fixture.userService, 'isMember', async () => true);
   t.mock.method(fixture.channelService, 'getAccessContext', async () => accessGate ?? granted);

@@ -44,14 +44,11 @@ export class MessageSearchService {
       }
     };
     assertCurrent();
-    if (!(await this.permissions.checkPermission(userId, Permission.READ_MESSAGES))) {
-      throw new MessageSearchError(ProtocolErrorCode.PERMISSION_DENIED, 'Message search is not permitted.');
-    }
     const candidates = (await this.channels.listChannels()).filter(channel =>
       (channel.type === 'TEXT' || channel.type === 'VOICE') &&
       (!filters.channelIds.length || filters.channelIds.includes(channel.id)));
     const accessible = await Promise.all(candidates.map(async channel =>
-      await this.channels.canUserAccessChannel(userId, channel.id) ? channel.id : null));
+      await this.channels.canUserAccessChannel(userId, channel.id, Permission.READ_MESSAGES) ? channel.id : null));
     const channelIds = accessible.filter((id): id is string => id !== null).sort();
     assertCurrent();
     const binding = this.binding(userId, filters, channelIds);
@@ -69,10 +66,7 @@ export class MessageSearchService {
       records.filter((record): record is MessageRecord => record !== null && !record.deletedAt),
       userId,
     );
-    if (!(await this.permissions.checkPermission(userId, Permission.READ_MESSAGES))) {
-      throw new MessageSearchError(ProtocolErrorCode.PERMISSION_DENIED, 'Message search is not permitted.');
-    }
-    const stillAccessible = await Promise.all(channelIds.map(id => this.channels.canUserAccessChannel(userId, id)));
+    const stillAccessible = await Promise.all(channelIds.map(id => this.channels.canUserAccessChannel(userId, id, Permission.READ_MESSAGES)));
     assertCurrent();
     if (stillAccessible.some(allowed => !allowed) || revision !== this.searchRepo.getRevision()) {
       throw new MessageSearchError(ProtocolErrorCode.PERMISSION_DENIED, 'Message search changed; search again.');

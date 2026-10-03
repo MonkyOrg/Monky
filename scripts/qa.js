@@ -8,7 +8,7 @@ import { startOwnedProcess } from './qa/process.js';
 
 const require = createRequire(import.meta.url);
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const scenarios = ['connected', 'server-settings', 'voice', 'voice-receive', 'music', 'home', 'login', 'bot-install', 'tool-consent'];
+export const scenarios = ['connected', 'empty-forum', 'server-settings', 'voice', 'voice-receive', 'music', 'home', 'login', 'bot-install', 'tool-consent'];
 
 export function parseQaArguments(args) {
   const result = { scenario: 'connected', smoke: false, realMedia: false, bot: null, botRoot: null };
@@ -59,6 +59,7 @@ export function isolatedEnvironment(root, extra = {}, { useSystemKeychain = fals
 
 export const scenarioPreparation = {
   connected: 'Fresh identity, authenticated owner, 100 QA respondents, seeded chat, and identified plus anonymous all-field QA forms with 100 varied responses each; no voice or local consent.',
+  'empty-forum': 'Empty forum and chat, 20 members including the authenticated owner, 10 roles including built-in roles, and events enabled; no threads, messages or forms are seeded.',
   'server-settings': 'Connected owner and real General settings; no setting is edited for the test.',
   voice: 'Connected owner, muted synthetic input and real P2P SDK peer. The SDK fixture is not production music.',
   'voice-receive': 'Listening-only SDK fixture, muted synthetic input and a listening indicator without a block for unrequested publication. /qa-listen toggles reception; no audio is recorded.',
@@ -128,6 +129,12 @@ export async function runQa(options, hooks = {}) {
     const server = spawn('QA server', process.execPath, [serviceFile], path.join(root, 'server'), serviceEnv('server'));
     const serverReady = await startup(server.ready);
     if (serverReady.protocol !== PROTOCOL_VERSION) throw new Error('QA server/client build protocol mismatch.');
+    if (options.scenario === 'empty-forum') {
+      const fixture = await startup(server.call('qa-seed-empty-forum'));
+      if (!fixture.id || fixture.members !== 19 || fixture.roles !== 10 || fixture.threads !== 0) {
+        throw new Error('The empty forum and audience fixture was not prepared.');
+      }
+    }
     if (options.scenario === 'connected') {
       const seeded = await startup(server.call('qa-seed-members', ['QA Ana', 'QA Bruno', 'QA Carla']));
       if (seeded.members !== 3) throw new Error('Connected QA member fixtures were not prepared.');
@@ -199,9 +206,10 @@ export async function runQa(options, hooks = {}) {
     }
     const stats = await startup(server.call('qa-snapshot'));
     const expectsLogin = !['home', 'login'].includes(options.scenario);
-    const expectedMembers = options.scenario === 'connected' ? 101 : 1;
+    const expectedMembers = options.scenario === 'connected' ? 101 : options.scenario === 'empty-forum' ? 20 : 1;
+    const messagesReady = options.scenario === 'empty-forum' ? stats.messages === 0 : stats.messages >= 1;
     if (ready.connected !== expectsLogin || (expectsLogin &&
-        (stats.onlineUsers !== 1 || stats.members !== expectedMembers || stats.messages < 1)) ||
+        (stats.onlineUsers !== 1 || stats.members !== expectedMembers || !messagesReady)) ||
         (!expectsLogin && (stats.members !== 0 || stats.messages !== 0))) throw new Error('QA readiness disagrees with the real authenticated server state.');
     if (bot) {
       const state = await startup(bot.call('qa-snapshot'));

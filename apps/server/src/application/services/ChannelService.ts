@@ -6,6 +6,13 @@ import {
   ChannelUpdatePayload,
   ProtocolErrorCode,
   canAccessChannel,
+  Permission,
+  getChannelPermissions,
+  hasChannelPermission,
+  channelOverwrites,
+  channelPrivacy,
+  withChannelPrivacy,
+  type ChannelPermissionOverwrite,
   channelCreateSchema,
   channelReorderSchema,
   channelUpdateSchema,
@@ -20,14 +27,16 @@ import {
   categoryReorderSchema,
 } from '@monky/shared';
 import { ChannelRecord } from '../../domain/entities';
-import { ICategoryRepository, IChannelRepository, IRoleRepository, IServerRepository } from '../../domain/repositories';
+import { ICategoryRepository, IChannelRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
 import { PermissionService } from './PermissionService';
 import { BotPermissionService } from './BotPermissionService';
 
 /** Everything needed to decide what a member may see, resolved once per call. */
 export interface ChannelAccessContext {
+  userId: string;
   permissions: number;
   roleIds: string[];
+  isBot?: boolean;
 }
 
 export class ChannelService {
@@ -37,11 +46,13 @@ export class ChannelService {
     private roleRepo: IRoleRepository,
     private permissionService: PermissionService,
     private botPermissions: BotPermissionService,
+    private userRepo: IUserRepository,
     private categoryRepo?: ICategoryRepository,
   ) {}
 
   private toSummary(record: ChannelRecord): ChannelSummary {
     return {
+      permissionOverwrites: record.permissionOverwrites,
       forumId: record.forumId ?? null,
       forumLocked: record.forumLocked ?? false,
       forumClosed: record.forumClosed ?? false,
@@ -71,18 +82,37 @@ export class ChannelService {
     return roleIds.filter((id) => known.has(id));
   }
 
+  private async validOverwrites(
+    overwrites: ChannelPermissionOverwrite[] | undefined, isPrivate?: boolean, allowedRoleIds?: string[],
+  ): Promise<boolean> {
+    if (!overwrites) return true;
+    if (allowedRoleIds !== undefined || isPrivate !== undefined && channelPrivacy(overwrites).isPrivate !== isPrivate) return false;
+    const roles = new Set((await this.roleRepo.listAll()).map(role => role.id));
+    const userIds = overwrites.flatMap(overwrite => overwrite.userId !== undefined ? [overwrite.userId] : []);
+    const members = new Set((await this.userRepo.findByIds(userIds)).map(user => user.id));
+    return overwrites.every(overwrite => overwrite.userId !== undefined ? members.has(overwrite.userId)
+      : overwrite.roleId === null || roles.has(overwrite.roleId));
+  }
+
   public getRoleAccessVersion(): number | null {
     return this.permissionService.getRoleAccessVersion();
   }
 
-  public async getAccessContext(userId: string): Promise<ChannelAccessContext> {
+  public async getAccessContext(userId: string, channelId?: string): Promise<ChannelAccessContext> {
     const botPermissions = this.botPermissions.getChannelPermissions(userId);
-    if (botPermissions !== undefined) return { permissions: botPermissions, roleIds: [] };
+    if (botPermissions !== undefined) {
+      const channel = channelId ? await this.channelRepo.findById(channelId) : null;
+      return { userId, permissions: channelId
+        ? channel && !channel.isPrivate ? getChannelPermissions(channel, botPermissions, [], true) : 0
+        : botPermissions, roleIds: [], isBot: true };
+    }
     const [permissions, roles] = await Promise.all([
       this.permissionService.getUserPermissions(userId),
       this.roleRepo.listRolesForUser(userId),
     ]);
-    return { permissions, roleIds: roles.map((role) => role.id) };
+    const roleIds = roles.map(role => role.id);
+    const channel = channelId ? await this.channelRepo.findById(channelId) : null;
+    return { userId, permissions: channelId ? channel ? getChannelPermissions(channel, permissions, roleIds, false, userId) : 0 : permissions, roleIds };
   }
 
   public async listChannels(): Promise<ChannelSummary[]> {
@@ -93,12 +123,21 @@ export class ChannelService {
     return channels.map((c) => this.toSummary(c));
   }
 
-  public async canUserAccessChannel(userId: string, channelId: string): Promise<boolean> {
+  public async canUserAccessChannel(userId: string, channelId: string, permission: Permission = Permission.VIEW_CHANNEL): Promise<boolean> {
     const channel = await this.channelRepo.findById(channelId);
     if (!channel) return false;
 
     const context = await this.getAccessContext(userId);
-    return canAccessChannel(channel, context.permissions, context.roleIds);
+    return canAccessChannel(channel, context.permissions, context.roleIds, context.isBot, userId) &&
+      hasChannelPermission(channel, context.permissions, context.roleIds, permission, context.isBot, userId);
+  }
+
+  public async canUserAccessCategory(userId: string, categoryId: string, permission: Permission): Promise<boolean> {
+    const category = await this.categoryRepo?.findById(categoryId);
+    if (!category) return false;
+    const context = await this.getAccessContext(userId);
+    return canAccessChannel(category, context.permissions, context.roleIds, context.isBot, userId) &&
+      hasChannelPermission(category, context.permissions, context.roleIds, permission, context.isBot, userId);
   }
 
   /** Visibility metadata for one channel, used to scope broadcasts (#384). */
@@ -119,6 +158,10 @@ export class ChannelService {
       };
     }
 
+    if (!await this.validOverwrites(parseResult.data.permissionOverwrites, payload.isPrivate, payload.allowedRoleIds)) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Permissões ou cargos inválidos.' };
+    }
+
     const server = await this.serverRepo.getServer();
     if (!server) {
       return {
@@ -135,6 +178,7 @@ export class ChannelService {
     }
     const isPrivate = parseResult.data.isPrivate;
     const channelRecord: ChannelRecord = {
+      permissionOverwrites: parseResult.data.permissionOverwrites,
       categoryId,
       inheritCategoryPermissions,
       id: uuidv4(),
@@ -171,7 +215,10 @@ export class ChannelService {
       };
     }
 
-    const { channelId, name, maxParticipants, isPrivate, allowedRoleIds, botCommandsEnabled, categoryId, inheritCategoryPermissions } = parseResult.data;
+    const { channelId, name, maxParticipants, isPrivate, allowedRoleIds, botCommandsEnabled, categoryId, inheritCategoryPermissions, permissionOverwrites } = parseResult.data;
+    if (!await this.validOverwrites(permissionOverwrites, isPrivate, allowedRoleIds)) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Permissões ou cargos inválidos.' };
+    }
     const existing = await this.channelRepo.findById(channelId);
     if (!existing) {
       return {
@@ -188,7 +235,7 @@ export class ChannelService {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Use forum post controls.' };
     }
     const nextCategoryId = categoryId === undefined ? existing.categoryId ?? null : categoryId;
-    const changesAccess = isPrivate !== undefined || allowedRoleIds !== undefined;
+    const changesAccess = isPrivate !== undefined || allowedRoleIds !== undefined || permissionOverwrites !== undefined;
     const nextInherit = nextCategoryId
       ? inheritCategoryPermissions ?? (changesAccess ? false : existing.inheritCategoryPermissions ?? true)
       : false;
@@ -201,15 +248,24 @@ export class ChannelService {
       : allowedRoleIds !== undefined
         ? await this.sanitizeRoleIds(allowedRoleIds)
         : existing.allowedRoleIds;
+    const nextOverwrites = permissionOverwrites ?? (
+      isPrivate !== undefined || allowedRoleIds !== undefined
+        ? withChannelPrivacy(channelOverwrites(existing), nextIsPrivate, nextRoleIds)
+        : channelOverwrites(existing));
 
     await this.channelRepo.update(channelId, {
+      ...(changesAccess ? {
+        permissionOverwrites: nextOverwrites,
+        ...channelPrivacy(nextOverwrites, existing),
+        ...(isPrivate !== undefined ? { isPrivate } : {}),
+      }
+        : nextCategoryId !== (existing.categoryId ?? null) || nextInherit !== (existing.inheritCategoryPermissions ?? true)
+          ? { permissionOverwrites: nextOverwrites, isPrivate: existing.isPrivate, allowedRoleIds: existing.allowedRoleIds } : {}),
       categoryId: nextCategoryId,
       inheritCategoryPermissions: nextInherit,
       ...(name !== undefined ? { name } : {}),
       ...(maxParticipants !== undefined ? { maxParticipants } : {}),
-      isPrivate: nextIsPrivate,
       botCommandsEnabled: nextBotCommandsEnabled,
-      allowedRoleIds: nextRoleIds,
     });
 
     return {
@@ -231,7 +287,8 @@ export class ChannelService {
    * end so an out-of-date client cannot remove them from the ordering.
    */
   public async reorderChannels(
-    payload: ChannelReorderPayload
+    payload: ChannelReorderPayload,
+    actorUserId?: string,
   ): Promise<{ success: boolean; errorCode?: ProtocolErrorCode; errorMessage?: string; positions?: Array<{ channelId: string; position: number }> }> {
     const parseResult = channelReorderSchema.safeParse(payload);
     if (!parseResult.success) {
@@ -268,6 +325,14 @@ export class ChannelService {
     }
 
     const positions = ordered.map((channelId, index) => ({ channelId, position: index }));
+    if (actorUserId) {
+      const context = await this.getAccessContext(actorUserId);
+      if (positions.some(position => {
+        const channel = byId.get(position.channelId)!;
+        return channel.position !== position.position &&
+          !hasChannelPermission(channel, context.permissions, context.roleIds, Permission.MANAGE_CHANNELS, context.isBot, context.userId);
+      })) return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Permissão insuficiente para reordenar estes canais.' };
+    }
     if (this.channelRepo.updatePositions) await this.channelRepo.updatePositions(positions);
     else for (const { channelId, position } of positions) await this.channelRepo.updatePosition(channelId, position);
 
@@ -298,6 +363,7 @@ export class ChannelService {
   public async mutateCategory(
     operation: 'create' | 'update' | 'delete' | 'reorder',
     payload: CategoryCreatePayload | CategoryUpdatePayload | CategoryDeletePayload | CategoryReorderPayload,
+    actorUserId?: string,
   ): Promise<{ success: boolean; errorCode?: ProtocolErrorCode; errorMessage?: string }> {
     const repo = this.categoryRepo;
     const server = await this.serverRepo.getServer();
@@ -305,7 +371,8 @@ export class ChannelService {
     const invalid = { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Categoria inválida' };
     if (operation === 'create') {
       const parsed = categoryCreateSchema.safeParse(payload);
-      if (!parsed.success) return invalid;
+      if (!parsed.success || !await this.validOverwrites(parsed.data.permissionOverwrites,
+        'isPrivate' in payload ? payload.isPrivate : undefined, 'allowedRoleIds' in payload ? payload.allowedRoleIds : undefined)) return invalid;
       const categories = await repo.listByServerId(server.id);
       if (categories.length >= 200) return invalid;
       await repo.create({
@@ -315,14 +382,18 @@ export class ChannelService {
       });
     } else if (operation === 'update') {
       const parsed = categoryUpdateSchema.safeParse(payload);
-      if (!parsed.success) return invalid;
+      if (!parsed.success || !await this.validOverwrites(parsed.data.permissionOverwrites, parsed.data.isPrivate, parsed.data.allowedRoleIds)) return invalid;
       const existing = await repo.findById(parsed.data.categoryId);
       if (!existing || existing.serverId !== server.id) return invalid;
       const isPrivate = parsed.data.isPrivate ?? existing.isPrivate;
       await repo.update(existing.id, {
+        ...(parsed.data.isPrivate !== undefined ? { isPrivate: parsed.data.isPrivate } : {}),
+        permissionOverwrites: parsed.data.permissionOverwrites ?? (
+          parsed.data.isPrivate !== undefined || parsed.data.allowedRoleIds !== undefined
+            ? withChannelPrivacy(channelOverwrites(existing), isPrivate,
+              await this.sanitizeRoleIds(parsed.data.allowedRoleIds ?? existing.allowedRoleIds))
+            : undefined),
         name: parsed.data.name,
-        isPrivate,
-        allowedRoleIds: isPrivate ? await this.sanitizeRoleIds(parsed.data.allowedRoleIds ?? existing.allowedRoleIds) : [],
       });
     } else if (operation === 'delete') {
       const parsed = categoryDeleteSchema.safeParse(payload);
@@ -334,7 +405,15 @@ export class ChannelService {
       const categories = await repo.listByServerId(server.id);
       const known = new Set(categories.map((category) => category.id));
       const ordered = [...new Set(parsed.data.orderedIds)].filter((id) => known.has(id));
-      await repo.reorder([...ordered, ...categories.map((category) => category.id).filter((id) => !ordered.includes(id))]);
+      const next = [...ordered, ...categories.map(category => category.id).filter(id => !ordered.includes(id))];
+      if (actorUserId) {
+        const context = await this.getAccessContext(actorUserId);
+        if (categories.some(category => category.position !== next.indexOf(category.id) &&
+          !hasChannelPermission(category, context.permissions, context.roleIds, Permission.MANAGE_CHANNELS, context.isBot, context.userId))) {
+          return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Permissão insuficiente para reordenar estas categorias.' };
+        }
+      }
+      await repo.reorder(next);
     }
     return { success: true };
   }

@@ -31,6 +31,7 @@ const baseConfig = () => ({
 test('QA scenarios validate explicit production, fixture and unprepared paths', () => {
   assert.deepEqual(scenarios, [...shared.DEVELOPMENT_QA_SCENARIOS]);
   assert.equal(parseQaArguments([]).scenario, 'connected');
+  assert.equal(parseQaArguments(['empty-forum']).scenario, 'empty-forum');
   assert.equal(parseQaArguments([]).realMedia, false);
   assert.equal(parseQaArguments(['connected', '--real-media']).realMedia, true);
   assert.equal(parseQaArguments(['voice']).bot, 'sdk-fixture');
@@ -335,6 +336,22 @@ test('failure after actual readiness cleans every real child and its private run
   }), /deliberate post-ready failure/);
   assert.ok(observed.pids.every(pid => !alive(pid)));
   await assert.rejects(fs.access(observed.root), /ENOENT/);
+});
+
+test('empty forum QA has no threads or messages and exactly 20 members and 10 roles', { timeout: 60_000 }, async () => {
+  const result = await runQa(parseQaArguments(['empty-forum', '--smoke']), {
+    onReady(state) {
+      assert.equal(state.windowVisible, false);
+      assert.equal(state.ready.connected, true);
+      assert.equal(state.stats.members, 20);
+      assert.equal(state.stats.messages, 0);
+      assert.equal(state.stats.channels, 3);
+      assert.equal(state.ready.commandCount, undefined);
+      assert.ok(state.prepared.includes('10 roles'));
+    },
+  });
+  assert.ok(result.pids.every(pid => !alive(pid)));
+  await assert.rejects(fs.access(result.root), /ENOENT/);
 });
 
 test('an attached hidden QA startup handles interruption without orphaning the real app or server', { timeout: 60_000 }, async () => {

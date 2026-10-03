@@ -152,8 +152,9 @@ test('Windows DOM runs independently of native compilation while the existing re
   assert.equal(check.run, 'test "$PACKAGE_RESULT" = success && test "$DOM_RESULT" = success');
 });
 
-test('CI exercises screen privacy alongside voice lifecycle tests', () => {
+test('CI exercises channel permissions and screen privacy alongside voice lifecycle tests', () => {
   const server = step(ci.jobs['bot-tests'], 'Test server, client state and real bot conversations');
+  assert.ok(server.run.split('\n').includes('npm run test:community --workspace=apps/server'));
   const command = server.run.split('\n').find(line => line.startsWith('node --test '));
   assert.ok(command);
   assert.ok(command.split(' ').includes('apps/server/dist/test-screen-subscriptions.js'));
@@ -333,6 +334,8 @@ test('the extracted DOM lane preserves every existing test command and its order
     'npm run test:transport --workspace=apps/client',
     'npm run test:bot-marketplace --workspace=apps/client',
     'npm run test:soundboard --workspace=apps/client',
+    'npm run test:community --workspace=apps/client',
+    'npm run test:pip --workspace=apps/client',
   ]);
   for (const [executable, scriptOrRun, script] of commands) {
     if (executable === 'node') assert.ok(fs.existsSync(path.join(root, ...scriptOrRun.split('/'))));

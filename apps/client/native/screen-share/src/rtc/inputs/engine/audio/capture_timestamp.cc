@@ -28,6 +28,16 @@ std::optional<std::int64_t> CaptureTimestampQpc(
   return capture_us;
 }
 
+RtcCaptureTimestamp CaptureTimestampRtc(const CaptureClockMapping& mapped) {
+  if (mapped.status == CaptureClockStatus::kSampleUncertain)
+    throw AudioError(Failure::ClockObservationUnavailable, CaptureClockErrorMessage(mapped.status));
+  if (mapped.status != CaptureClockStatus::kOk)
+    throw AudioError(Failure::Clock, CaptureClockErrorMessage(mapped.status));
+  // AudioTrackSinkInterface's "absolute" timestamp uses TimeMillis, not the
+  // NTP value reported independently by a remote mixer's RTP/RTCP mapping.
+  return RtcCaptureTimestamp{mapped.timestamp_us / 1000};
+}
+
 PairedCaptureTimestampMapper::PairedCaptureTimestampMapper(std::shared_ptr<CaptureClock> clock)
     : clock_(std::move(clock)) {
   if (!clock_) throw AudioError(Failure::Clock, "Audio source requires the real engine capture mapper");
@@ -41,12 +51,7 @@ std::optional<RtcCaptureTimestamp> PairedCaptureTimestampMapper::Map(
     epoch_ = epoch.epoch;
     ordering_ = CaptureClockSourceState{};
   }
-  const auto mapped = clock_->Map(*capture, ordering_);
-  if (mapped.status != CaptureClockStatus::kOk)
-    throw AudioError(Failure::Clock, CaptureClockErrorMessage(mapped.status));
-  // AudioTrackSinkInterface's "absolute" timestamp uses TimeMillis, not the
-  // NTP value reported independently by a remote mixer's RTP/RTCP mapping.
-  return RtcCaptureTimestamp{mapped.timestamp_us / 1000};
+  return CaptureTimestampRtc(clock_->Map(*capture, ordering_));
 }
 
 }  // namespace monky::native_rtc::engine::audio

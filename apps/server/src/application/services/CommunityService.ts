@@ -58,8 +58,9 @@ export class CommunityService {
     return { eventsEnabled: settings.eventsEnabled, bannerUrl: this.images.getPublicUrl(settings.bannerPath) };
   }
 
-  async requirePermission(userId: string, permission: Permission): Promise<void> {
-    if (!await this.permissions.checkPermission(userId, permission)) {
+  async requirePermission(userId: string, permission: Permission, channelId?: string): Promise<void> {
+    if (!(channelId ? await this.channels.canUserAccessChannel(userId, channelId, permission)
+      : await this.permissions.checkPermission(userId, permission))) {
       throw new CommunityError('Permission denied.', ProtocolErrorCode.PERMISSION_DENIED);
     }
   }
@@ -73,15 +74,13 @@ export class CommunityService {
   async canViewLiveAction(userId: string, action: LiveActionRecord): Promise<boolean> {
     return this.settings().eventsEnabled && this.botAllowed(action.botId) && action.expiresAt > Date.now() &&
       (await this.channels.getChannelSummary(action.channelId))?.botCommandsEnabled === true &&
-      await this.permissions.checkPermission(userId, Permission.READ_MESSAGES) &&
-      await this.channels.canUserAccessChannel(userId, action.channelId) &&
+      await this.channels.canUserAccessChannel(userId, action.channelId, Permission.READ_MESSAGES) &&
       await this.permissions.canAccessAudience(userId, action.creatorUserId, action.audience);
   }
 
   async canViewNativeForm(userId: string, form: NativeLiveFormRecord): Promise<boolean> {
     return this.settings().eventsEnabled &&
-      await this.permissions.checkPermission(userId, Permission.READ_MESSAGES) &&
-      await this.channels.canUserAccessChannel(userId, form.channelId) &&
+      await this.channels.canUserAccessChannel(userId, form.channelId, Permission.READ_MESSAGES) &&
       await this.permissions.canAccessAudience(userId, form.creatorUserId, form.audience);
   }
 
@@ -90,10 +89,12 @@ export class CommunityService {
     creatorUserId: string,
     audience: ServerEvent['audience'],
     permission: Permission,
+    channelId?: string,
   ): Promise<boolean> {
     if (userId === creatorUserId || await this.permissions.checkPermission(userId, Permission.MANAGE_SERVER)) return true;
     return await this.permissions.isSelectedAudienceMember(userId, audience) &&
-      await this.permissions.checkPermission(userId, permission);
+      (channelId ? await this.channels.canUserAccessChannel(userId, channelId, permission)
+        : await this.permissions.checkPermission(userId, permission));
   }
 
   async publicEvent(event: ServerEvent, userId: string): Promise<ServerEventPublic> {
@@ -146,8 +147,7 @@ export class CommunityService {
         if (await this.canViewLiveAction(userId, action)) liveActions.push(await this.publicLiveAction(action, userId));
       }
       for (const poll of this.polls?.repository.listActiveLiveActions(Date.now()) ?? []) {
-        if (await this.permissions.checkPermission(userId, Permission.READ_MESSAGES) &&
-            await this.channels.canUserAccessChannel(userId, poll.channelId) &&
+        if (await this.channels.canUserAccessChannel(userId, poll.channelId, Permission.READ_MESSAGES) &&
             await this.permissions.canAccessAudience(userId, poll.creatorUserId, poll.audience)) {
           polls.push(this.polls!.publicPoll(
             poll,
@@ -229,11 +229,12 @@ export class CommunityService {
     if (parsed.id && !previous) throw new CommunityError('Event not found.');
     if (previous) {
       if (!await this.canViewEvent(userId, previous) ||
-          !await this.canManageAudienceResource(userId, previous.creatorUserId, previous.audience, Permission.MANAGE_EVENTS)) {
+          !await this.canManageAudienceResource(userId, previous.creatorUserId, previous.audience, Permission.MANAGE_EVENTS,
+            previous.location.kind === 'external' ? undefined : previous.location.channelId)) {
         throw new CommunityError('Event unavailable.', ProtocolErrorCode.PERMISSION_DENIED);
       }
     } else {
-      await this.requirePermission(userId, Permission.MANAGE_EVENTS);
+      await this.requirePermission(userId, Permission.MANAGE_EVENTS, parsed.location.kind === 'external' ? undefined : parsed.location.channelId);
     }
     if (previous && previous.status !== 'scheduled' && previous.status !== 'active') {
       throw new CommunityError('This event has ended.');
@@ -285,11 +286,12 @@ export class CommunityService {
     let saved = false;
     try {
       if (previous) {
-        if (!await this.canManageAudienceResource(userId, previous.creatorUserId, previous.audience, Permission.MANAGE_EVENTS)) {
+        if (!await this.canManageAudienceResource(userId, previous.creatorUserId, previous.audience, Permission.MANAGE_EVENTS,
+          previous.location.kind === 'external' ? undefined : previous.location.channelId)) {
           throw new CommunityError('Event unavailable.', ProtocolErrorCode.PERMISSION_DENIED);
         }
       } else {
-        await this.requirePermission(userId, Permission.MANAGE_EVENTS);
+        await this.requirePermission(userId, Permission.MANAGE_EVENTS, parsed.location.kind === 'external' ? undefined : parsed.location.channelId);
       }
       assertCurrent();
       return this.repository.transaction(() => {
@@ -324,11 +326,13 @@ export class CommunityService {
     const parsed = eventControlSchema.parse(input);
     const event = this.repository.event(parsed.id);
     if (!event || !await this.canViewEvent(userId, event) ||
-        !await this.canManageAudienceResource(userId, event.creatorUserId, event.audience, Permission.MANAGE_EVENTS)) {
+        !await this.canManageAudienceResource(userId, event.creatorUserId, event.audience, Permission.MANAGE_EVENTS,
+          event.location.kind === 'external' ? undefined : event.location.channelId)) {
       throw new CommunityError('Event not found.');
     }
     assertCurrent();
-    if (!await this.canManageAudienceResource(userId, event.creatorUserId, event.audience, Permission.MANAGE_EVENTS)) {
+    if (!await this.canManageAudienceResource(userId, event.creatorUserId, event.audience, Permission.MANAGE_EVENTS,
+      event.location.kind === 'external' ? undefined : event.location.channelId)) {
       throw new CommunityError('Event not found.');
     }
     if (event.revision !== parsed.expectedRevision) throw new CommunityError('The event changed. Reload before editing.', ProtocolErrorCode.COMMUNITY_CONFLICT);
@@ -501,11 +505,11 @@ export class CommunityService {
   ): Promise<void> {
     const action = this.repository.liveAction(id);
     if (!action || !await this.canViewLiveAction(userId, action) ||
-        !await this.canManageAudienceResource(userId, action.creatorUserId, action.audience, Permission.EMIT_LIVE_ACTIONS)) {
+        !await this.canManageAudienceResource(userId, action.creatorUserId, action.audience, Permission.EMIT_LIVE_ACTIONS, action.channelId)) {
       throw new CommunityError('Live action unavailable.', ProtocolErrorCode.PERMISSION_DENIED);
     }
     assertCurrent();
-    if (!await this.canManageAudienceResource(userId, action.creatorUserId, action.audience, Permission.EMIT_LIVE_ACTIONS)) {
+    if (!await this.canManageAudienceResource(userId, action.creatorUserId, action.audience, Permission.EMIT_LIVE_ACTIONS, action.channelId)) {
       throw new CommunityError('Live action unavailable.', ProtocolErrorCode.PERMISSION_DENIED);
     }
     this.deleteLiveAction(action);
@@ -519,7 +523,7 @@ export class CommunityService {
   ): Promise<NativeLiveForm> {
     const parsed = nativeLiveFormCreateSchema.parse(input);
     if (!this.settings().eventsEnabled) throw new CommunityError('Live actions are disabled.');
-    await this.requirePermission(userId, Permission.EMIT_LIVE_ACTIONS);
+    await this.requirePermission(userId, Permission.EMIT_LIVE_ACTIONS, parsed.channelId);
     const channel = await this.channels.getChannelSummary(parsed.channelId);
     if ((channel?.type !== 'TEXT' && channel?.type !== 'VOICE') || channel.forumId ||
         !await this.channels.canUserAccessChannel(userId, parsed.channelId)) {
@@ -530,7 +534,7 @@ export class CommunityService {
       throw new CommunityError('Too many native live forms.');
     }
     assertCurrent();
-    await this.requirePermission(userId, Permission.EMIT_LIVE_ACTIONS);
+    await this.requirePermission(userId, Permission.EMIT_LIVE_ACTIONS, parsed.channelId);
     const form: NativeLiveFormRecord = {
       id: randomUUID(),
       channelId: parsed.channelId,
@@ -563,6 +567,7 @@ export class CommunityService {
     }
     const validation = validateNativeLiveFormValues(form.form, parsed.values);
     if (!validation.success) throw new CommunityError('Invalid form response.', ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    await this.requirePermission(userId, Permission.SEND_MESSAGES, form.channelId);
     assertCurrent();
     this.repository.saveNativeFormResponse(form.id, userId, validation.values, now);
     return this.publicNativeForm(form, userId);
@@ -576,11 +581,11 @@ export class CommunityService {
   ): Promise<void> {
     const form = this.repository.nativeForm(id);
     if (!form || !await this.canViewNativeForm(userId, form) ||
-        !await this.canManageAudienceResource(userId, form.creatorUserId, form.audience, Permission.EMIT_LIVE_ACTIONS)) {
+        !await this.canManageAudienceResource(userId, form.creatorUserId, form.audience, Permission.EMIT_LIVE_ACTIONS, form.channelId)) {
       throw new CommunityError('Live form unavailable.', ProtocolErrorCode.PERMISSION_DENIED);
     }
     assertCurrent();
-    if (!await this.canManageAudienceResource(userId, form.creatorUserId, form.audience, Permission.EMIT_LIVE_ACTIONS)) {
+    if (!await this.canManageAudienceResource(userId, form.creatorUserId, form.audience, Permission.EMIT_LIVE_ACTIONS, form.channelId)) {
       throw new CommunityError('Live form unavailable.', ProtocolErrorCode.PERMISSION_DENIED);
     }
     this.repository.closeNativeForm(id, now);
@@ -594,7 +599,7 @@ export class CommunityService {
     const parsed = nativeLiveFormResultsRequestSchema.parse(input);
     const form = this.repository.nativeForm(parsed.id);
     if (!form || !await this.canViewNativeForm(userId, form) ||
-        !await this.canManageAudienceResource(userId, form.creatorUserId, form.audience, Permission.EMIT_LIVE_ACTIONS)) {
+        !await this.canManageAudienceResource(userId, form.creatorUserId, form.audience, Permission.EMIT_LIVE_ACTIONS, form.channelId)) {
       throw new CommunityError('Live form unavailable.', ProtocolErrorCode.PERMISSION_DENIED);
     }
     assertCurrent();

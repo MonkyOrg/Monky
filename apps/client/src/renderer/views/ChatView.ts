@@ -49,7 +49,7 @@ import { commandVoiceError } from '../utils/botVoice';
 import { botLocaleFor } from '../utils/botLocale';
 import { translateProtocolError } from '../i18n/protocolErrors';
 import { highlightMessageJump } from '../utils/messageJumpHighlight';
-import { smoothScrollIntoView, smoothScrollTo } from '../utils/scroll';
+import { restoreScrollWithMotion, smoothScrollIntoView, smoothScrollTo } from '../utils/scroll';
 import { imageCarouselNavigationButton, moveImageCarousel, renderImageCarousel } from './ImageCarousel';
 
 /** How close to the end the feed must be to keep following new messages (#270). */
@@ -249,6 +249,7 @@ export class ChatView {
     `;
     this.container.innerHTML = markup;
 
+    if (!this.server.hasPermission(Permission.READ_MESSAGES, this.currentChannelId)) this.store.revokeChannel(this.currentChannelId);
     this.renderMessages({ forceScroll: true });
     this.attachEvents();
     const forumId = channel?.forumId;
@@ -256,7 +257,7 @@ export class ChatView {
   }
 
   private loadHistory(): void {
-    if (!this.currentChannelId) return;
+    if (!this.currentChannelId || !this.server.hasPermission(Permission.READ_MESSAGES, this.currentChannelId)) return;
 
     networkClient.send(MessageType.CHAT_LOAD_HISTORY, {
       channelId: this.currentChannelId,
@@ -269,6 +270,10 @@ export class ChatView {
     if (!feed || !this.currentChannelId) return;
     contextMenu.close();
     this.reactionPicker?.close();
+    if (!this.server.hasPermission(Permission.READ_MESSAGES, this.currentChannelId)) {
+      feed.innerHTML = `<div class="chat-empty-placeholder" role="status">${t('channelPermissions.readDenied')}</div>`;
+      return;
+    }
 
     // Read before the feed is replaced: new messages only pull the view down when
     // the user is already reading the end of the conversation (#270).
@@ -294,8 +299,8 @@ export class ChatView {
 
     this.pinnedToBottom = shouldScroll;
     if (shouldScroll) {
-      this.scrollToBottom();
-      this.repinWhileMediaLoads(feed);
+      this.scrollToBottom(options.forceScroll === true);
+      this.repinWhileMediaLoads(feed, options.forceScroll === true);
     }
   }
 
@@ -523,7 +528,7 @@ export class ChatView {
     const editingAllowed = serverStore.serverDetails?.allowMessageEdit !== false;
 
     const items: ContextMenuEntry[] = [];
-    if (serverStore.hasPermission(Permission.SEND_MESSAGES)) {
+    if (serverStore.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId)) {
       items.push({
         label: t('chat.emojiAction'), icon: 'add_reaction',
         onClick: () => this.container.querySelector<HTMLButtonElement>(
@@ -629,7 +634,7 @@ export class ChatView {
       const refocus = this.isCurrentComposer() && this.currentChannelId === channelId &&
         (this.composerInput?.hasFocus ||
           document.activeElement === this.container.querySelector('#btn-send-message'));
-      store.updateMessage(result.message);
+      if (this.server.hasPermission(Permission.READ_MESSAGES, channelId)) store.updateMessage(result.message);
       store.finishMessageEdit(channelId, edit);
       if (refocus && this.isCurrentComposer() && this.currentChannelId === channelId) this.focusChatInput();
     } catch {
@@ -700,7 +705,7 @@ export class ChatView {
       const result = await this.client.sendRequest<ChatMessageUpdatedPayload>(MessageType.CHAT_DELETE, {
         channelId: message.channelId, messageId,
       });
-      this.store.updateMessage(result.message);
+      if (this.server.hasPermission(Permission.READ_MESSAGES, message.channelId)) this.store.updateMessage(result.message);
     } catch {
       if (this.isCurrentSession()) void showAlert({ message: t('chat.deleteFailed'), variant: 'danger' });
     }
@@ -725,7 +730,7 @@ export class ChatView {
       const result = await this.client.sendRequest<ChatMessageUpdatedPayload>(MessageType.CHAT_RESTORE, {
         messageId, channelId: message.channelId, deletedAt: message.deletedAt, revision: message.revision,
       });
-      this.store.updateMessage(result.message);
+      if (this.server.hasPermission(Permission.READ_MESSAGES, message.channelId)) this.store.updateMessage(result.message);
     } catch {
       if (error?.isConnected) { error.textContent = t('chat.undoDeleteFailed'); error.hidden = false; }
     } finally {
@@ -761,10 +766,13 @@ export class ChatView {
    * grows the feed and would leave the view above the newest message. Re-pin it
    * while the user hasn't scrolled away (#270).
    */
-  private repinWhileMediaLoads(target: HTMLElement): void {
+  private repinWhileMediaLoads(target: HTMLElement, shortReveal = false): void {
     const repin = () => {
       const feed = document.getElementById('chat-messages-feed');
-      if (feed && this.pinnedToBottom) smoothScrollTo(feed, { top: feed.scrollHeight });
+      if (feed && target.isConnected && this.pinnedToBottom) {
+        if (shortReveal) restoreScrollWithMotion(feed, feed.scrollHeight);
+        else smoothScrollTo(feed, { top: feed.scrollHeight });
+      }
     };
     target.querySelectorAll('img, iframe').forEach((el) => {
       el.addEventListener('load', repin, { once: true });
@@ -878,12 +886,13 @@ export class ChatView {
     const forumLocked = forumChannel?.forumLocked === true;
     const forumClosed = forumChannel?.forumClosed === true;
     const forumBlocked = forumLocked || forumClosed;
-    const canSendMessages = !forumBlocked && (!permissionsResolved || serverStore.hasPermission(Permission.SEND_MESSAGES));
+    const canSendMessages = !forumBlocked && (!permissionsResolved ||
+      serverStore.hasPermission(Permission.READ_MESSAGES, this.currentChannelId) && serverStore.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId));
     this.container.querySelectorAll<HTMLButtonElement>('.chat-reaction, .chat-reaction-add, [data-message-action="reply"]').forEach((button) => {
       button.disabled = !canSendMessages || (!!edit && button.dataset.messageAction === 'reply');
     });
     if (!canSendMessages) { this.reactionPicker?.destroy(); this.reactionPicker = null; }
-    const canAttachFiles = canSendMessages && (!permissionsResolved || serverStore.hasPermission(Permission.ATTACH_FILES));
+    const canAttachFiles = canSendMessages && (!permissionsResolved || serverStore.hasPermission(Permission.ATTACH_FILES, this.currentChannelId));
     const locked = !edit && permissionsResolved && !canSendMessages;
     const readOnly = locked || !!edit?.pending || this.blockSendPending;
     const commandSelected = !!this.currentChannelId && !!chatStore.getCommandDraft(this.currentChannelId);
@@ -1078,7 +1087,7 @@ export class ChatView {
     const pollHtml = m.poll
       ? renderNativePoll(
           m.poll,
-          serverStore.hasPermission(Permission.SEND_MESSAGES),
+          serverStore.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId),
           value => this.formatDateTime(value),
           this.client.getHttpBaseUrl(),
         )
@@ -1154,7 +1163,8 @@ export class ChatView {
       const message = await client.sendRequest<ChatMessage>(MessageType.CHAT_SEND, outgoing.payload);
       if (!message || message.id !== outgoing.message.id || message.channelId !== outgoing.message.channelId ||
           message.userId !== outgoing.message.userId) throw new Error(t('chat.deliveryInvalidAck'));
-      store.addMessage(message);
+      if (this.server.hasPermission(Permission.READ_MESSAGES, message.channelId) &&
+          store.getOutgoing(message.id) === outgoing) store.addMessage(message);
     } catch (error) {
       console.warn('[ChatView] Message delivery was not confirmed', error);
       store.failOutgoing(outgoing, error instanceof Error ? error.message : t('chat.deliveryFailed'));
@@ -1170,8 +1180,8 @@ export class ChatView {
       void showAlert({ message: t('chat.featureUpdateRequired'), variant: 'danger' });
       return;
     }
-    if (!this.server.hasPermission(Permission.SEND_MESSAGES) ||
-        (outgoing.payload.attachmentIds?.length && !this.server.hasPermission(Permission.ATTACH_FILES))) {
+    if (!this.server.hasPermission(Permission.SEND_MESSAGES, outgoing.payload.channelId) ||
+        (outgoing.payload.attachmentIds?.length && !this.server.hasPermission(Permission.ATTACH_FILES, outgoing.payload.channelId))) {
       void showAlert({ message: t('chat.sendPermissionDenied'), variant: 'danger' });
       return;
     }
@@ -1181,7 +1191,7 @@ export class ChatView {
 
   private renderReactions(message: ChatMessage): string {
     const me = serverStore.currentUser?.id;
-    const disabled = serverStore.hasPermission(Permission.SEND_MESSAGES) ? '' : 'disabled';
+    const disabled = serverStore.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId) ? '' : 'disabled';
     const buttons = (message.reactions ?? []).map((reaction) => {
       const mine = reaction.users.some((user) => user.userId === me);
       const names = reaction.users.map((user) => serverStore.knownMembers.get(user.userId)?.nickname ?? user.userNickname).join(', ');
@@ -1194,7 +1204,7 @@ export class ChatView {
   }
 
   private renderMessageToolbar(): string {
-    const disabled = serverStore.hasPermission(Permission.SEND_MESSAGES) ? '' : 'disabled';
+    const disabled = serverStore.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId) ? '' : 'disabled';
     const button = (action: string, icon: string, label: string, extra = '') =>
       `<button type="button" ${extra} data-message-action="${action}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"><span class="material-symbols-outlined md-18" aria-hidden="true">${icon}</span></button>`;
     return `<div class="chat-message-toolbar" role="group" aria-label="${t('chat.messageActions')}">
@@ -1219,7 +1229,7 @@ export class ChatView {
   }
 
   private startReply(messageId: string): void {
-    if (!this.isCurrentComposer() || this.messageEdit || !this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+    if (!this.isCurrentComposer() || this.messageEdit || !this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId)) return;
     const message = chatStore.getMessages(this.currentChannelId).find((entry) => entry.id === messageId);
     if (!message || message.deletedAt || message.isSystem || message.isEphemeral || this.store.getOutgoing(message.id)) return;
     if (this.server.serverDetails?.protocol?.features.includes('chat-blocks')) {
@@ -1358,7 +1368,7 @@ export class ChatView {
   private bindReactionButtons(row: HTMLElement): void {
     row.querySelectorAll<HTMLButtonElement>('.chat-reaction, .chat-reaction-add').forEach((button) => {
       button.addEventListener('click', (event) => {
-        if (!this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+        if (!this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId)) return;
         const channelId = this.currentChannelId;
         const store = getActiveChatStore();
         const client = getActiveNetworkClient();
@@ -2027,7 +2037,7 @@ export class ChatView {
         void this.submitMessageEdit();
         return;
       }
-      if (!serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+      if (!serverStore.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId)) return;
       const draftedBlocks = this.store.getBlockDraft(this.currentChannelId);
       const blocks = draftedBlocks.length ? messageBlocksInput([
         ...draftedBlocks, ...(input.value.trim() ? [{ type: 'text' as const, text: input.value }] : []),
@@ -2172,7 +2182,7 @@ export class ChatView {
       if (!action) return;
       closeCreateMenu();
       if (action === 'attachment') {
-        if (serverStore.hasPermission(Permission.ATTACH_FILES)) openFileInputPicker(fileInput, btnAttach);
+        if (serverStore.hasPermission(Permission.ATTACH_FILES, this.currentChannelId)) openFileInputPicker(fileInput, btnAttach);
       } else if (action === 'poll' && this.currentChannelId &&
         !serverStore.getChannel(this.currentChannelId)?.forumId) {
         openNativePollWizard(this.client, this.server, this.currentChannelId);
@@ -2185,7 +2195,7 @@ export class ChatView {
     this.unbindEvents.push(() => document.removeEventListener('pointerdown', closeCreateOutside));
     fileInput?.addEventListener('change', () => {
       if (fileInput.files && fileInput.files.length > 0) {
-        if (!serverStore.hasPermission(Permission.ATTACH_FILES)) return;
+        if (!serverStore.hasPermission(Permission.ATTACH_FILES, this.currentChannelId)) return;
         this.addFiles(fileInput.files);
       }
       fileInput.value = '';
@@ -2209,7 +2219,7 @@ export class ChatView {
 
       const onEmojiClick = () => {
         if (!isCurrentInput() || this.messageEdit?.pending) return;
-        if (!this.messageEdit && this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+        if (!this.messageEdit && this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId)) return;
         pickerOptions.emojiOnly = !!this.messageEdit;
         picker.toggle();
       };
@@ -2234,7 +2244,7 @@ export class ChatView {
           input.focus();
           return;
         }
-        if (this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+        if (this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId)) return;
         if (this.server.serverDetails?.protocol?.features.includes('chat-blocks')) {
           this.addComposerBlock({ type: 'code', language: 'plaintext', code: selected });
           return;
@@ -2256,7 +2266,7 @@ export class ChatView {
       if (e.target instanceof HTMLTextAreaElement && e.target.closest('.chat-code-input')) return;
       const files = e.clipboardData?.files;
       if (files && files.length > 0) {
-        if (!serverStore.hasPermission(Permission.ATTACH_FILES)) return;
+        if (!serverStore.hasPermission(Permission.ATTACH_FILES, this.currentChannelId)) return;
         e.preventDefault();
         this.addFiles(files);
         return;
@@ -2276,7 +2286,7 @@ export class ChatView {
       if (!this.currentChannelId) return;
       const files = ce.clipboardData?.files;
       if (files && files.length > 0) {
-        if (!serverStore.hasPermission(Permission.ATTACH_FILES)) return;
+        if (!serverStore.hasPermission(Permission.ATTACH_FILES, this.currentChannelId)) return;
         e.preventDefault();
         this.addFiles(files);
         // Focus the input so the user can add a message to accompany the file.
@@ -2434,7 +2444,19 @@ export class ChatView {
     this.container.querySelector('#btn-cancel-message-edit')?.addEventListener('click', () => this.cancelMessageEdit());
 
     // Listen for new messages
+    let couldRead = !!this.currentChannelId && this.server.hasPermission(Permission.READ_MESSAGES, this.currentChannelId);
     const refreshComposerSettings = () => {
+      const canRead = !!this.currentChannelId && this.server.hasPermission(Permission.READ_MESSAGES, this.currentChannelId);
+      if (canRead !== couldRead) {
+        couldRead = canRead;
+        if (!canRead && this.currentChannelId) {
+          this.store.revokeChannel(this.currentChannelId);
+          if (this.composerInput) this.composerInput.value = '';
+          this.renderReplyComposer();
+        }
+        this.renderMessages();
+        if (canRead) this.loadHistory();
+      }
       if (input) {
         if (this.messageLengthLimit > 0) input.maxLength = this.messageLengthLimit;
         else input.removeAttribute('maxlength');
@@ -2468,6 +2490,11 @@ export class ChatView {
         if (jumpId) this.pendingJumpId = null;
         if (returnLatest) returnLatest.hidden = !data.aroundMessageId;
         this.renderMessages({ forceScroll: !jumpId });
+        if (!this.server.hasPermission(Permission.READ_MESSAGES, data.channelId)) {
+          if (this.composerInput) this.composerInput.value = '';
+          this.renderReplyComposer();
+          this.renderComposerBlocks();
+        }
         if (jumpId) {
           if (chatStore.getMessages(data.channelId).some((message) => message.id === jumpId)) this.jumpToMessage(jumpId);
           else void showAlert({ message: t('chat.replyUnavailable'), variant: 'danger' });
@@ -2608,13 +2635,17 @@ export class ChatView {
     }
   }
 
-  private scrollToBottom(): void {
+  private scrollToBottom(shortReveal = false): void {
     const feed = document.getElementById('chat-messages-feed');
     if (feed) {
-      smoothScrollTo(feed, { top: feed.scrollHeight });
+      const scroll = () => {
+        if (shortReveal) restoreScrollWithMotion(feed, feed.scrollHeight);
+        else smoothScrollTo(feed, { top: feed.scrollHeight });
+      };
+      scroll();
       // The feed height is still settling right after the markup swap.
       requestAnimationFrame(() => {
-        if (this.pinnedToBottom) smoothScrollTo(feed, { top: feed.scrollHeight });
+        if (feed.isConnected && this.pinnedToBottom) scroll();
       });
     }
   }
@@ -2802,10 +2833,10 @@ export class ChatView {
     if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE') || !channel.botCommandsEnabled) {
       return t('botChat.commandsDisabledInChannel');
     }
-    if (!serverStore.hasPermission(Permission.USE_BOT_COMMANDS)) return t('botChat.commandsPermissionDenied');
+    if (!serverStore.hasPermission(Permission.USE_BOT_COMMANDS, this.currentChannelId)) return t('botChat.commandsPermissionDenied');
     if (channel.forumLocked) return t('forum.lockedPlaceholder');
     if (channel.forumClosed) return t('forum.closedPlaceholder');
-    if (!serverStore.hasPermission(Permission.SEND_MESSAGES)) return t('chat.sendPermissionDenied');
+    if (!serverStore.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId)) return t('chat.sendPermissionDenied');
     return command ? this.getVoiceCommandDeniedReason(command) : undefined;
   }
 
@@ -3074,7 +3105,7 @@ export class ChatView {
   private sendCodeBlock(language: string, code: string): void {
     const channelId = this.currentChannelId;
     if (!this.isCurrentComposer() || this.messageEdit || !channelId) return;
-    if (this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES)) {
+    if (this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId)) {
       void showAlert({ message: t('chat.sendPermissionDenied'), variant: 'danger' });
       return;
     }
@@ -3104,7 +3135,7 @@ export class ChatView {
     if (!root || !this.currentChannelId) return;
     if (this.messageEdit) { setSurfaceVisible(root, false); return; }
     renderMessageBlockComposer(root, this.store, this.currentChannelId, () => this.updateComposerCounter(),
-      this.blockSendPending || !this.isCurrentComposer() || !this.server.hasPermission(Permission.SEND_MESSAGES));
+      this.blockSendPending || !this.isCurrentComposer() || !this.server.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId));
     this.updateComposerCounter();
   }
 
@@ -3147,7 +3178,7 @@ export class ChatView {
     if (reply?.deleted) { void showAlert({ message: t('chat.replyUnavailable'), variant: 'danger' }); return; }
     if (
       this.arePermissionsResolved() &&
-      (!serverStore.hasPermission(Permission.SEND_MESSAGES) || !serverStore.hasPermission(Permission.ATTACH_FILES))
+      (!serverStore.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId) || !serverStore.hasPermission(Permission.ATTACH_FILES, this.currentChannelId))
     ) {
       void showAlert({ message: t('chat.stickerPermissionDenied'), variant: 'danger' });
       return;
@@ -3181,7 +3212,7 @@ export class ChatView {
 
   private addFiles(fileList: FileList): void {
     if (!this.isCurrentComposer() || this.messageEdit || !this.currentChannelId) return;
-    if (this.arePermissionsResolved() && (!serverStore.hasPermission(Permission.SEND_MESSAGES) || !serverStore.hasPermission(Permission.ATTACH_FILES))) {
+    if (this.arePermissionsResolved() && (!serverStore.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId) || !serverStore.hasPermission(Permission.ATTACH_FILES, this.currentChannelId))) {
       return;
     }
     const channelId = this.currentChannelId;

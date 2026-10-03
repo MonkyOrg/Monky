@@ -29,11 +29,11 @@ export function openNativePollWizard(
   channelId: string,
   config: { liveAction?: boolean; lockLiveAction?: boolean } = {},
 ): ReturnType<typeof openCommunityModal> | undefined {
-  if (!server.hasPermission(Permission.SEND_MESSAGES) ||
+  if (!server.hasPermission(Permission.SEND_MESSAGES, channelId) ||
       !server.serverDetails?.protocol?.features.includes('native-polls')) return;
   const modal = openCommunityModal(t('poll.create'));
   modal.element.querySelector('.community-modal')?.classList.add('event-wizard', 'native-poll-wizard');
-  const canLive = server.hasPermission(Permission.EMIT_LIVE_ACTIONS);
+  const canLive = server.hasPermission(Permission.EMIT_LIVE_ACTIONS, channelId);
   let step = 0;
   let question = '';
   let options: PollOption[] = [{ label: '', emoji: null }, { label: '', emoji: null }];

@@ -5,6 +5,7 @@ import {
   ChatMessage,
   LIMITS,
   ProtocolErrorCode,
+  Permission,
   attachmentCaptionSchema,
   hasEveryoneMention,
   messageContentSchema,
@@ -62,8 +63,8 @@ export class ChatService {
      * must never ping people who cannot even see the private channel it was
      * written in.
      */
-    private canUserAccessChannel: (userId: string, channelId: string) => Promise<boolean>,
-    private canUserReadMessages: (userId: string) => Promise<boolean>,
+    private canUserAccessChannel: (userId: string, channelId: string, permission?: Permission) => Promise<boolean>,
+    private canUserReadMessages: (userId: string, channelId: string) => Promise<boolean>,
     private readonly polls?: NativePollService,
   ) {}
 
@@ -100,6 +101,9 @@ export class ChatService {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem de referência indisponível.' };
     }
     const existing = messageId ? await this.messageRepo.findById(messageId) : null;
+    if (!await this.canUserAccessChannel(accessUserId, channelId, Permission.SEND_MESSAGES)) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Publicação não permitida neste canal.' };
+    }
     if (!canSend()) return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Publicação cancelada.' };
     if (existing) {
       if (!existing.botAuthor || existing.userId !== bot.id || existing.channelId !== channelId ||
@@ -132,6 +136,7 @@ export class ChatService {
   }
 
   private async canViewMessage(viewerUserId: string | undefined, record: MessageRecord): Promise<boolean> {
+    if (viewerUserId && !await this.canUserReadMessages(viewerUserId, record.channelId)) return false;
     if (!viewerUserId || !this.polls) return true;
     const poll = this.polls.repository.findByMessageId(record.id);
     return !poll || await this.polls.canView(viewerUserId, poll);
@@ -223,6 +228,9 @@ export class ChatService {
     if (!message || message.channelId !== channelId || message.isSystem || message.deletedAt ||
         !await this.canViewMessage(userId, message)) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Essa mensagem não pode receber reações.' };
+    }
+    if (!await this.canUserAccessChannel(userId, channelId, Permission.SEND_MESSAGES)) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Reação não permitida neste canal.' };
     }
     if (!canReact()) return { success: false, errorCode: ProtocolErrorCode.UNAUTHORIZED, errorMessage: 'Conexão encerrada.' };
     const result = await this.messageRepo.setReaction(messageId, userId, emoji, add);
@@ -348,6 +356,10 @@ export class ChatService {
     };
 
     const mentions = await this.collectMentions(user.id, channelId, messageRecord);
+    if (!await this.canUserAccessChannel(userId, channelId, Permission.SEND_MESSAGES) ||
+        attachmentIds?.length && !await this.canUserAccessChannel(userId, channelId, Permission.ATTACH_FILES)) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Envio não permitido neste canal.' };
+    }
     if (!canSend()) return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Access changed.' };
     const committed = await this.messageRepo.createChatMessage(messageRecord, attachmentIds ?? [], mentions);
     if (!committed) {
@@ -393,7 +405,8 @@ export class ChatService {
     userId: string,
     channelId: string,
     messageId: string,
-    content: string
+    content: string,
+    canEdit: () => boolean = () => true,
   ): Promise<{ success: boolean; errorCode?: ProtocolErrorCode; errorMessage?: string; message?: ChatMessage }> {
     const server = await this.serverRepo.getServer();
     if (server?.allowMessageEdit === false) {
@@ -446,6 +459,9 @@ export class ChatService {
     const editedAt = Date.now();
     const blocks: MessageBlock[] | undefined = existing.blocks
       ? [...existing.blocks.filter(block => block.type === 'reply'), { type: 'text', text: parseResult.data }] : undefined;
+    if (!await this.canUserAccessChannel(userId, channelId, Permission.SEND_MESSAGES) || !canEdit()) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Edição não permitida neste canal.' };
+    }
     await this.messageRepo.updateContent(messageId, parseResult.data, editedAt, blocks);
 
     const [message] = await this.loadHistory(channelId, 1, undefined, messageId, userId);
@@ -516,7 +532,7 @@ export class ChatService {
     const existing = await this.messageRepo.findById(messageId);
     if (!existing || existing.channelId !== channelId || existing.isSystem
       || !await this.canViewMessage(userId, existing)
-      || !(await this.canUserAccessChannel(userId, channelId)) || !(await this.canUserReadMessages(userId))) {
+      || !(await this.canUserAccessChannel(userId, channelId)) || !(await this.canUserReadMessages(userId, channelId))) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem indisponível.' };
     }
     if (existing.deletedByUserId !== userId || (existing.userId !== userId && !canModerate)) {
@@ -570,7 +586,7 @@ export class ChatService {
 
       const nickname = candidate.nickname.trim().toLowerCase();
       if (!mentionsEveryone && !(nickname && lowerContent.includes('@' + nickname))) continue;
-      if (!(await this.canUserReadMessages(candidate.id))
+      if (!(await this.canUserReadMessages(candidate.id, channelId))
         || !(await this.canUserAccessChannel(candidate.id, channelId))) continue;
 
       const mention: MentionRecord = {

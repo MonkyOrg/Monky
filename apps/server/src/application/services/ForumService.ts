@@ -19,14 +19,13 @@ export class ForumService {
   ) {}
 
   async canRead(userId: string, channelId: string): Promise<boolean> {
-    return await this.permissions.checkPermission(userId, Permission.READ_MESSAGES) &&
-      await this.channels.canUserAccessChannel(userId, channelId);
+    return this.channels.canUserAccessChannel(userId, channelId, Permission.READ_MESSAGES);
   }
 
   async requireAccess(userId: string, channelId: string, write = false): Promise<ChannelSummary> {
     const channel = await this.channels.getChannelSummary(channelId);
     if (!channel || !await this.canRead(userId, channelId) ||
-        (write && !await this.permissions.checkPermission(userId, Permission.SEND_MESSAGES))) {
+        (write && !await this.channels.canUserAccessChannel(userId, channelId, Permission.SEND_MESSAGES))) {
       throw new ForumError('Forum unavailable.', ProtocolErrorCode.PERMISSION_DENIED);
     }
     return channel;
@@ -48,7 +47,7 @@ export class ForumService {
     const { id, channelId, title, content, attachmentIds = [] } = parsed.data;
     const forum = await this.requireAccess(userId, channelId, true);
     if (forum.type !== 'FORUM') throw new ForumError('Not a forum.');
-    if (attachmentIds.length && !await this.permissions.checkPermission(userId, Permission.ATTACH_FILES)) {
+    if (attachmentIds.length && !await this.channels.canUserAccessChannel(userId, channelId, Permission.ATTACH_FILES)) {
       throw new ForumError('Attachment permission required.', ProtocolErrorCode.PERMISSION_DENIED);
     }
     if (!current()) throw new ForumError('Access changed.', ProtocolErrorCode.PERMISSION_DENIED);
@@ -80,7 +79,7 @@ export class ForumService {
     await this.requireAccess(userId, parsed.data.channelId);
     const post = this.repository.get(parsed.data.channelId);
     if (!post) throw new ForumError('Post unavailable.');
-    const manager = await this.permissions.checkPermission(userId, Permission.MANAGE_CHANNELS);
+    const manager = await this.channels.canUserAccessChannel(userId, post.channelId, Permission.MANAGE_CHANNELS);
     const author = post.authorId === userId;
     const editsTitle = parsed.data.title !== undefined;
     const moderates = parsed.data.pinned !== undefined || parsed.data.locked !== undefined;
@@ -101,7 +100,7 @@ export class ForumService {
     await this.requireAccess(userId, parsed.data.channelId);
     const post = this.repository.get(parsed.data.channelId);
     if (!post) throw new ForumError('Post unavailable.');
-    const manager = await this.permissions.checkPermission(userId, Permission.MANAGE_CHANNELS);
+    const manager = await this.channels.canUserAccessChannel(userId, post.channelId, Permission.MANAGE_CHANNELS);
     if (!manager && post.authorId !== userId) {
       throw new ForumError('Permission denied.', ProtocolErrorCode.PERMISSION_DENIED);
     }

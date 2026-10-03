@@ -817,6 +817,13 @@ async function setupStageSmoke() {
     actions.picker++;
     appEvents.emit('modal.screenshare_picker_opened');
   });
+  const diagnosticParticipant = participants.get(remote.sessionId);
+  const originalCameraStream = diagnosticParticipant.remoteStream;
+  const diagnosticCanvas = document.createElement('canvas');
+  diagnosticCanvas.width = diagnosticCanvas.height = 16;
+  diagnosticCanvas.getContext('2d').fillRect(0, 0, 16, 16);
+  const diagnosticStream = diagnosticCanvas.captureStream(0);
+  diagnosticParticipant.remoteStream = diagnosticStream;
   const stage = new VoiceStageView(root);
   const codecStats = new Map([
     ['first-capability', { type: 'codec', mimeType: 'video/AV1' }],
@@ -932,6 +939,8 @@ async function setupStageSmoke() {
     copyButton.remove();
     stage.setFocusedTiles(focusedBeforeCopy);
   } finally {
+    diagnosticParticipant.remoteStream = originalCameraStream;
+    diagnosticStream.getTracks().forEach(track => track.stop());
     navigator.clipboard.writeText = originalClipboard;
     stage.collectTelemetrySnapshot = originalCollect;
     stage.getTelemetryTiles = originalTiles;

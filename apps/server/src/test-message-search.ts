@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { WebSocket, WebSocketServer } from 'ws';
-import { MessageType, Permission, ProtocolErrorCode, messageSearchSchema, type UserSummary } from '@monky/shared';
+import { DEFAULT_PERMISSIONS, MessageType, Permission, ProtocolErrorCode, messageSearchSchema, type UserSummary } from '@monky/shared';
 import { MessageSearchService, MessageSearchError } from './application/services/MessageSearchService';
 import { SqliteMessageSearchRepository } from './infrastructure/database/SqliteMessageSearchRepository';
 import { MessageSearchHandler, type MessageSearchSession } from './infrastructure/websocket/MessageSearchHandler';
@@ -129,8 +129,9 @@ test('each page enforces current READ_MESSAGES, channel access and mid-hydration
   const service = new MessageSearchService(f.repo, f.messageRepo, f.channelService, permissions, f.chatService, () => 0);
   assert.equal((await service.search(f.member.id, {})).messages.length, 1);
   canRead = false;
-  await assert.rejects(service.search(f.member.id, {}), (error: unknown) =>
-    error instanceof MessageSearchError && error.code === ProtocolErrorCode.PERMISSION_DENIED);
+  await f.permissions.updateEveryonePermissions(DEFAULT_PERMISSIONS & ~Permission.READ_MESSAGES);
+  assert.deepEqual((await service.search(f.member.id, {})).messages, []);
+  await f.permissions.updateEveryonePermissions(DEFAULT_PERMISSIONS);
   canRead = true;
   roleVersion = null;
   await assert.rejects(service.search(f.member.id, {}), MessageSearchError);
@@ -217,6 +218,9 @@ test('actual role revocation denies the next page even with a previously valid c
   for (let index = 0; index < 26; index++) await f.insert(`role-${index}`, 'role search');
   const first = await f.service.search(f.member.id, {});
   assert.ok(first.nextCursor);
+  await f.roleRepo.create({ id: 'search-reader', name: 'Search reader', color: null, position: 1,
+    permissions: DEFAULT_PERMISSIONS, isDefault: false, createdAt: 1 });
+  await f.roleRepo.assignRole(f.member.id, 'search-reader');
   const roles = await f.roleRepo.listRolesForUser(f.member.id);
   assert.ok(roles.length);
   await f.permissions.withRoleMutation(async () => {

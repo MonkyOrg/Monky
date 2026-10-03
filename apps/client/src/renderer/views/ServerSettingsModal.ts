@@ -415,7 +415,10 @@ export class ServerSettingsModal {
       if (button) button.hidden = !store.hasPermission(permission) && !(tab === 'roles' && store.hasPermission(Permission.MANAGE_SERVER));
       if (button?.hidden && this.activeTab === tab) this.switchTab('general');
     }
-    if (this.invalidated || !context.isCurrent()) return;
+    if (this.invalidated || !context.isCurrent()) {
+      this.rolesTab.refreshState();
+      return;
+    }
     for (const binding of this.bindings) {
       binding.input.setAttribute('aria-busy', String(operations.isPending(binding.key)));
       if (operations.isPending(binding.key) || binding.dirty) continue;
@@ -549,6 +552,7 @@ export class ServerSettingsModal {
     // Public close/reopen and Escape do not naturally blur an input. Committing
     // before checking the lock closes those otherwise easy-to-miss paths.
     for (const binding of this.bindings) if (binding.dirty) binding.commit();
+    this.rolesTab.finishEditing();
     const active = document.activeElement;
     if ((active instanceof HTMLInputElement || active instanceof HTMLSelectElement || active instanceof HTMLTextAreaElement) &&
       this.modalEl?.contains(active)) active.blur();

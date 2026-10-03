@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "PiP automático acompanha a transmissão focada mais recente ao sair e volta ao palco sem interromper o vídeo. Respeita o fechamento manual, e o PiP aberto pelo botão permanece ao minimizar. Vem ativado e pode ser desligado em Qualidade e compartilhamento.",
+  "en": "Automatic PiP follows the most recently focused broadcast when leaving and returns to the stage without interrupting video. It respects dismissal; manually opened PiP stays open when minimizing. Enabled by default; disable it in Quality & sharing."
+}

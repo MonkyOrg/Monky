@@ -83,10 +83,9 @@ if (!process.versions.electron) {
 async function runRegression(config) {
   const { setLanguage, t } = await import('/i18n/index.ts');
   setLanguage(config.language);
-  const [{ ServerMonitorModal }, { sessionManager }, { appEvents }, { RequestTimeoutError }, { ServerRolesTab }] = await Promise.all([
+  const [{ ServerMonitorModal }, { sessionManager }, { appEvents }, { RequestTimeoutError }] = await Promise.all([
     import('/views/ServerMonitorModal.ts'), import('/core/SessionManager.ts'),
     import('/core/EventBus.ts'), import('/core/NetworkClient.ts'),
-    import('/views/serverSettings/tabs/ServerRolesTab.ts'),
   ]);
   sessionManager.install();
   let checks = 0;
@@ -163,12 +162,6 @@ async function runRegression(config) {
   const first = session('server-a', 3000);
   const second = session('server-b', 3001);
   sessionManager.activate(first.key);
-  const roleHtml = document.createElement('div');
-  roleHtml.innerHTML = new ServerRolesTab().renderHtml();
-  const permissionSwitch = roleHtml.querySelector(`[data-permission="${config.view}"]`);
-  check(!!permissionSwitch, 'monitor viewing is editable on the actual roles tab');
-  check(permissionSwitch.closest('label')?.classList.contains('permission-switch'), 'permission uses the existing switch component');
-  check(roleHtml.textContent.includes(t('permissions.viewServerMonitor')), 'permission label is localized');
   const modal = new ServerMonitorModal();
   const opener = document.querySelector('#opener');
   opener.focus();

@@ -62,7 +62,7 @@ bool obs_module_load(void)
 	obs_register_source(&duplicator_capture_info);
 	obs_register_source(&window_capture_info);
 	if (game_enabled) {
-		if (!monky_game_target_alive())
+		if (!monky_window_target_alive())
 			return false;
 		/* Only pinned, privately copied offset helpers. No updater, cache or global Vulkan registration. */
 		if (!load_graphics_offsets(false, false, NULL) || !load_graphics_offsets(true, false, NULL)) {

@@ -12,7 +12,7 @@ const source = path.join(root, 'src', 'capture');
 const inputs = require(path.join(vendor, 'sources.json'));
 const runtimeInputs = require(path.join(vendor, 'runtime-inputs.json'));
 const additionalInputs = require(path.join(source, 'runtime-additions.json'));
-const { bindGameSource, bindMonitorSource, configureWinrtSource } = require('./captureSourceBindings.cjs');
+const { bindGameSource, bindWindowSource, bindMonitorSource, configureWinrtSource } = require('./captureSourceBindings.cjs');
 const quote = value => {
   assert.ok(typeof value === 'string' && !/["%!\r\n]/u.test(value), 'Unsupported build argument.');
   return `"${value.replace(/\\$/u, '\\\\')}"`;
@@ -119,9 +119,10 @@ function build(config) {
     const objects = path.join(buildDirectory, 'module-objects');
     fs.mkdirSync(objects, { recursive: true });
     const names = ['app-helpers', 'audio-helpers', 'compat-helpers', 'cursor-capture', 'dc-capture', 'load-graphics-offsets',
-      'monitor-capture', 'nt-stuff', 'window-capture'];
+      'monitor-capture', 'nt-stuff'];
     const specialized = [];
-    for (const [name, bind] of [['game-capture', bindGameSource], ['duplicator-monitor-capture', bindMonitorSource]]) {
+    for (const [name, bind] of [['game-capture', bindGameSource], ['window-capture', bindWindowSource],
+      ['duplicator-monitor-capture', bindMonitorSource]]) {
       const filename = path.join(generated, `${name}-bound.c`);
       write(filename, bind(fs.readFileSync(path.join(vendor, 'plugins', 'win-capture', `${name}.c`), 'utf8')));
       specialized.push(filename);
@@ -145,7 +146,7 @@ function build(config) {
       quote(path.join(dependencies, 'lib', 'jansson.lib')),
       'user32.lib', 'gdi32.lib', 'shell32.lib', 'advapi32.lib', 'kernel32.lib']);
     const moduleExports = execute(path.join(compiler, 'dumpbin.exe'), ['/nologo', '/exports', module], { env, capture: true });
-    for (const name of ['monky_configure_capture_startup', 'monky_bind_game_target', 'monky_bind_monitor_target',
+    for (const name of ['monky_configure_capture_startup', 'monky_bind_window_target', 'monky_bind_monitor_target',
       'obs_module_load', 'obs_module_unload', 'obs_module_ver'])
       assert.ok(new RegExp(`\\b${name}\\b`, 'u').test(moduleExports), `Missing capture module export: ${name}`);
 

@@ -269,7 +269,7 @@ export class BotScreenView {
     const { session } = this.context;
     if (!this.frame || this.requestId || this.endRequestId || action.id !== this.screen.id ||
         action.instanceId !== this.screen.instanceId || !this.canRead()) return;
-    if (!session.serverStore.hasPermission(Permission.USE_BOT_COMMANDS)) {
+    if (!session.serverStore.hasPermission(Permission.USE_BOT_COMMANDS, this.context.channelId)) {
       this.error.textContent = t('botChat.commandsPermissionDenied');
       this.error.hidden = false;
       return;

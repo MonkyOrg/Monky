@@ -1,15 +1,23 @@
-import { Permission, MessageType, type Role, type RoleUpdatePayload, type RolesListPayload } from '@monky/shared';
+import { EVERYONE_ROLE_ID, Permission, MessageType, type Role, type RoleUpdatePayload, type RolesListPayload } from '@monky/shared';
 import { serverStore } from '../../../stores/serverStore';
 import { getAvatarUrl } from '../../../utils/avatar';
 import { escapeHtml } from '../../../utils/html';
-import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
-import { showAlert, showConfirm } from '../../Dialog';
+import { enterModal, exitModal, handlesModalKey } from '../../../utils/modalSurface';
+import { removeOwnedSurfaces } from '../../../utils/surfaceMotion';
 import { t } from '../../../i18n';
 import type { ServerSettingsContext } from '../ServerSettingsContext';
 import { ServerMembersTab } from './ServerMembersTab';
 import { ColorPicker } from '../../ColorPicker';
 import { COLOR_PRESETS } from '../../../utils/colors';
-import { smoothScrollIntoView } from '../../../utils/scroll';
+import { ContextMenu } from '../../ContextMenu';
+import { showConfirm } from '../../Dialog';
+import { showSuccessToast } from '../../CopyToast';
+
+interface RoleDialog {
+  element: HTMLElement;
+  signal: AbortSignal;
+  close: (immediate?: boolean) => void;
+}
 
 export class ServerRolesTab {
   private draggedRoleId: string | null = null;
@@ -20,6 +28,10 @@ export class ServerRolesTab {
   private membersSignature = '';
   private dirtyName = false;
   private submittedName = '';
+  private editor: RoleDialog | null = null;
+  private memberPicker: RoleDialog | null = null;
+  private readonly roleMenu = new ContextMenu();
+  private roleDeletion: { roleId: string; controller: AbortController } | null = null;
   private readonly colorPicker = new ColorPicker({ id: 'role-editor-color', label: 'roles.roleColor' });
 
   public renderHtml(): string {
@@ -68,22 +80,23 @@ export class ServerRolesTab {
           </div>
         </div>
 
-        <div id="role-editor-section" style="display: none; background: var(--bg-card); border: 1px solid color-mix(in srgb, var(--accent-primary) 35%, var(--border-color)); border-radius: var(--radius-md); padding: 16px; flex-direction: column; gap: 14px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);">
-          <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
-            <div>
-              <div id="role-editor-title" style="font-size: 15px; font-weight: 700; color: var(--text-primary);">${t('roles.editorNewTitle')}</div>
-              <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">${t('serverSettings.roleImmediateHint')}</div>
-            </div>
-          </div>
+        </fieldset>
+      </div>
+    `;
+  }
+
+  private renderEditorHtml(everyone = false): string {
+    return `
+          <p class="role-dialog-hint">${t(everyone ? 'roles.everyoneHint' : 'serverSettings.roleImmediateHint')}</p>
           <input type="hidden" id="role-editor-id">
           <div style="display: flex; gap: 8px; flex-wrap: wrap; border-bottom: 1px solid var(--border-color); padding-bottom: 6px;">
-            <button type="button" class="role-editor-tab-btn active" data-role-editor-tab="display">${t('roles.displayTab')}</button>
-            <button type="button" class="role-editor-tab-btn" data-role-editor-tab="permissions">${t('roles.permissionsTab')}</button>
-            <button type="button" class="role-editor-tab-btn" data-role-editor-tab="members">${t('roles.membersTab')}</button>
+            ${everyone ? '' : `<button type="button" class="role-editor-tab-btn active" data-role-editor-tab="general">${t('roles.generalTab')}</button>`}
+            <button type="button" class="role-editor-tab-btn${everyone ? ' active' : ''}" data-role-editor-tab="permissions">${t('roles.permissionsTab')}</button>
+            ${everyone ? '' : `<button type="button" class="role-editor-tab-btn" data-role-editor-tab="members">${t('roles.membersTab')}</button>`}
           </div>
-          <div id="role-editor-tab-display" data-settings-section="role-display" data-settings-label="${escapeHtml(t('roles.displayTab'))}" class="role-editor-tab-panel" style="display: flex; flex-direction: column; gap: 12px;">
+          ${everyone ? '' : `<div id="role-editor-tab-general" class="role-editor-tab-panel" style="display: flex; flex-direction: column; gap: 12px;">
             <div class="form-group" style="margin-bottom: 0;">
-              <label>${t('roles.roleName')}</label>
+              <label for="role-editor-name">${t('roles.roleName')}</label>
               <input id="role-editor-name" type="text" maxlength="32" placeholder="${t('roles.roleNamePlaceholder')}">
             </div>
             <div style="display: flex; flex-direction: column; gap: 8px;">
@@ -101,28 +114,34 @@ export class ServerRolesTab {
                 <span class="slider"></span>
               </label>
             </div>
-          </div>
-          <div id="role-editor-tab-permissions" data-settings-section="role-permissions" data-settings-label="${escapeHtml(t('roles.permissionsTab'))}" class="role-editor-tab-panel" style="display: none; flex-direction: column; gap: 10px;">
+            <section class="role-delete-section" hidden>
+              <div>
+                <h3>${t('roles.deleteRole')}</h3>
+                <p class="role-dialog-hint">${t('roles.deleteHint')}</p>
+              </div>
+              <button type="button" id="btn-role-delete" class="btn btn-danger">${t('roles.deleteRole')}</button>
+            </section>
+          </div>`}
+          <div id="role-editor-tab-permissions" data-settings-section="role-permissions" data-settings-label="${escapeHtml(t('roles.permissionsTab'))}" class="role-editor-tab-panel" style="display: ${everyone ? 'flex' : 'none'}; flex-direction: column; gap: 10px;">
             ${this.renderPermissionSwitches()}
           </div>
-          <div id="role-editor-tab-members" data-settings-section="role-members" data-settings-label="${escapeHtml(t('roles.membersTab'))}" class="role-editor-tab-panel" style="display: none; flex-direction: column; gap: 10px;">
+          ${everyone ? '' : `<div id="role-editor-tab-members" data-settings-section="role-members" data-settings-label="${escapeHtml(t('roles.membersTab'))}" class="role-editor-tab-panel" style="display: none; flex-direction: column; gap: 10px;">
             <div id="role-editor-members-panel">${this.renderRoleMembersEditorPanel()}</div>
-          </div>
-          <div style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end;">
-            <button type="button" id="btn-role-done" class="btn btn-secondary">${t('common.done')}</button>
-            <button type="button" id="btn-role-delete" class="btn btn-danger">${t('common.delete')}</button>
-            <button type="button" id="btn-role-save" class="btn btn-primary">${t('roles.createRole')}</button>
-          </div>
-        </div>
-        </fieldset>
-      </div>
+          </div>`}
     `;
   }
 
   private renderRoleRows(): string {
     const roles = serverStore.getVisibleRoles().sort((a, b) => b.position - a.position);
     const members = serverStore.getAllMembersInDisplayOrder().filter(member => !member.isBot);
-    return roles.map((role) => `
+    const everyone = `<tr class="role-everyone-row" data-role-id="${EVERYONE_ROLE_ID}">
+      <td><div class="role-everyone-name"><span class="material-symbols-outlined md-18">groups</span>
+        <span>${t('roles.everyone')}</span></div></td>
+      <td>${t('roles.everyoneSummary')}</td><td>—</td>
+      <td style="text-align: right;"><button type="button" class="role-actions-trigger" data-role-menu="${EVERYONE_ROLE_ID}"
+        aria-label="${escapeHtml(t('roles.roleActions', { name: t('roles.everyone') }))}" aria-haspopup="menu" aria-expanded="false">
+        <span class="material-symbols-outlined md-18" aria-hidden="true">more_horiz</span></button></td></tr>`;
+    return everyone + roles.map((role) => `
       <tr class="role-table-row" data-role-id="${role.id}" draggable="true">
         <td><div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
           <span class="material-symbols-outlined md-16" title="${t('roles.dragReorderHint')}" style="color: var(--text-muted); cursor: grab;">drag_indicator</span>
@@ -132,7 +151,10 @@ export class ServerRolesTab {
         </div></td>
         <td style="font-size: 12px;">${escapeHtml(this.describeRolePermissions(role))}</td>
         <td class="role-member-count" data-role-count="${role.id}">${members.filter((member) => serverStore.getUserRoleIds(member.id).includes(role.id)).length}</td>
-        <td style="text-align: right;"><button type="button" class="btn btn-secondary role-open-btn" data-role-open="${role.id}">${t('common.edit')}</button></td>
+        <td style="text-align: right;"><button type="button" class="role-actions-trigger" data-role-menu="${role.id}"
+          title="${t('common.moreOptions')}" aria-label="${escapeHtml(t('roles.roleActions', { name: role.name }))}" aria-haspopup="menu" aria-expanded="false">
+          <span class="material-symbols-outlined md-18" aria-hidden="true">more_horiz</span>
+        </button></td>
       </tr>`).join('');
   }
 
@@ -156,6 +178,7 @@ export class ServerRolesTab {
 
   private renderPermissionSwitches(): string {
     const items: Array<{ key: Permission; label: string; description: string }> = [
+      { key: Permission.VIEW_CHANNEL, label: t('permissions.viewChannel'), description: t('permissions.viewChannelDesc') },
       { key: Permission.MANAGE_CHANNELS, label: t('permissions.manageChannels'), description: t('permissions.manageChannelsDesc') },
       { key: Permission.MANAGE_SERVER, label: t('permissions.manageServer'), description: t('permissions.manageServerDesc') },
       { key: Permission.MANAGE_EVENTS, label: t('permissions.manageEvents'), description: t('permissions.manageEventsDesc') },
@@ -199,35 +222,38 @@ export class ServerRolesTab {
       `;
     }
 
-    // A role belongs to the person, not to the connection, so offline members
-    // have to be listed too. This helper forces the right presence state on
-    // people who dropped mid-session (#477).
-    const members = serverStore.getAllMembersInDisplayOrder().filter(member => !member.isBot);
-
     return `
-      <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 10px;">${t('roles.membersEditorHint')}</div>
-      <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;">
-        <input type="text" id="role-members-search" class="role-members-search" placeholder="${t('roles.searchMembersPlaceholder')}" autocomplete="off">
-        <span id="role-members-count" style="font-size: 11px; color: var(--text-muted); white-space: nowrap;">${t('roles.membersShown', { shown: members.length, total: members.length })}</span>
-        <div style="display: flex; gap: 6px; margin-left: auto;">
-          <button type="button" class="btn btn-secondary role-members-bulk" data-bulk-assign="true" data-role-id="${roleId}">${t('roles.bulkAssign')}</button>
-          <button type="button" class="btn btn-secondary role-members-bulk" data-bulk-assign="false" data-role-id="${roleId}">${t('roles.bulkUnassign')}</button>
-        </div>
+      <div class="role-members-heading">
+        <p class="role-dialog-hint">${t('roles.membersEditorHint')}</p>
+        <button type="button" id="btn-role-add-members" class="btn btn-primary">${t('roles.addMembers')}</button>
+      </div>
+      ${this.renderMemberList(roleId, false)}
+    `;
+  }
+
+  private renderMemberList(roleId: string, adding: boolean): string {
+    const store = this.context?.store ?? serverStore;
+    const members = store.getAllMembersInDisplayOrder().filter(member =>
+      !member.isBot && store.getUserRoleIds(member.id).includes(roleId) !== adding);
+    const searchId = adding ? 'role-add-members-search' : 'role-members-search';
+    return `
+      <div class="role-members-toolbar">
+        <input type="search" id="${searchId}" class="role-members-search" aria-label="${t('roles.searchMembersPlaceholder')}" placeholder="${t('roles.searchMembersPlaceholder')}" autocomplete="off">
+        <span data-role-members-count class="role-dialog-hint">${t('roles.membersShown', { shown: members.length, total: members.length })}</span>
       </div>
       <div class="settings-table-wrap">
         <table class="settings-data-table">
           <thead>
             <tr>
               <th>${t('roles.memberColumn')}</th>
-              <th style="width: 100px; text-align: center;">${t('roles.assignedColumn')}</th>
+              <th class="role-member-action-cell">${t('roles.actionsColumn')}</th>
             </tr>
           </thead>
-          <tbody id="role-members-tbody">
+          <tbody>
             ${members.map((member) => {
-              const assigned = serverStore.getUserRoleIds(member.id).includes(roleId);
               const offline = member.status === 'DISCONNECTED';
               return `
-                <tr class="role-member-row" data-member-name="${escapeHtml(member.nickname.toLowerCase())}">
+                <tr class="role-member-row" data-member-name="${escapeHtml(member.nickname)}">
                   <td>
                     <div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
                       <img src="${getAvatarUrl(member.avatarUrl)}" alt="${escapeHtml(member.nickname)}" data-fallback="avatar" style="width: 34px; height: 34px; border-radius: 50%; object-fit: cover; border: 1px solid var(--border-color); flex-shrink: 0; ${offline ? 'opacity: 0.5;' : ''}">
@@ -239,11 +265,12 @@ export class ServerRolesTab {
                       </div>
                     </div>
                   </td>
-                  <td style="text-align: center;">
-                    <label class="permission-switch" aria-label="${t('roles.assignedColumn')}">
-                      <input type="checkbox" class="role-editor-member-switch" data-user-id="${member.id}" data-role-id="${roleId}" ${assigned ? 'checked' : ''}>
-                      <span class="slider"></span>
-                    </label>
+                  <td class="role-member-action-cell">
+                    <button type="button" class="btn ${adding ? 'btn-secondary' : 'btn-danger'} role-member-action"
+                      data-role-member-action="${adding ? 'add' : 'remove'}" data-user-id="${member.id}" data-role-id="${roleId}"
+                      aria-label="${escapeHtml(t(adding ? 'roles.addMemberLabel' : 'roles.removeMemberLabel', { name: member.nickname }))}">
+                      ${t(adding ? 'roles.addMember' : 'roles.removeMember')}
+                    </button>
                   </td>
                 </tr>
               `;
@@ -251,6 +278,7 @@ export class ServerRolesTab {
           </tbody>
         </table>
       </div>
+      <p data-role-members-empty class="role-members-empty" ${members.length ? 'hidden' : ''}>${t(adding ? 'roles.noAvailableMembers' : 'roles.noAssignedMembers')}</p>
     `;
   }
 
@@ -279,104 +307,10 @@ export class ServerRolesTab {
     this.detachEvents();
     this.root = container;
     this.context = context;
-    this.colorPicker.attachEvents(container, color => {
-      const roleId = this.editorRoleId();
-      if (roleId) this.updateRole(roleId, () => ({ roleId, color }));
-      this.syncColor(color);
-    });
     const controller = new AbortController();
     this.cleanup.push(() => controller.abort());
     const options = { signal: controller.signal };
-    const name = container.querySelector<HTMLInputElement>('#role-editor-name');
-    const commitName = () => {
-      const roleId = this.editorRoleId();
-      if (!name || !roleId) return;
-      this.dirtyName = false;
-      if (name.value === this.submittedName) return;
-      this.submittedName = name.value;
-      const nextName = name.value.trim();
-      this.updateRole(roleId, () => ({ roleId, name: nextName }));
-    };
-    name?.addEventListener('blur', commitName, options);
-    name?.addEventListener('change', commitName, options);
-    name?.addEventListener('input', () => { this.dirtyName = true; }, options);
-    name?.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') { event.preventDefault(); commitName(); name.blur(); }
-    }, options);
-    const closeMenus = () => {
-      for (const className of ['show', 'open', 'menu-open', 'row-menu-open']) {
-        container.querySelectorAll(`.settings-action-menu.${className}, .settings-action-submenu-wrap.${className}, .settings-action-menu-wrap.${className}, tr.${className}`)
-          .forEach((element) => element.classList.remove(className));
-      }
-    };
-    container.addEventListener('click', (event) => {
-      if (!(event.target instanceof HTMLElement) || !context.isCurrent()) return;
-      const target = event.target.closest<HTMLButtonElement>('button');
-      if (!target || target.matches(':disabled')) return;
-      if (target.id === 'btn-role-create-new') this.openEditor();
-      else if (target.id === 'btn-role-done') {
-        name?.blur();
-        if (!context.operations.isPending(`role:${this.editorRoleId()}`) && !context.operations.isPending('role-create')) this.hideEditor();
-      } else if (target.id === 'btn-role-save') this.createRole();
-      else if (target.id === 'btn-role-delete') {
-        const roleId = this.editorRoleId();
-        if (roleId) void context.operations.run(`role:${roleId}`, t('roles.rolesList'), Permission.MANAGE_ROLES,
-          () => context.request<RolesListPayload>(MessageType.ROLE_DELETE, { roleId }, Permission.MANAGE_ROLES));
-      } else if (target.dataset.roleOpen) this.openEditor(context.store.getRole(target.dataset.roleOpen));
-      else if (target.dataset.roleEditorTab) {
-        const tab = target.dataset.roleEditorTab;
-        container.querySelectorAll<HTMLButtonElement>('.role-editor-tab-btn').forEach((button) => button.classList.toggle('active', button === target));
-        container.querySelectorAll<HTMLElement>('.role-editor-tab-panel').forEach((panel) => {
-          panel.style.display = panel.id === `role-editor-tab-${tab}` ? 'flex' : 'none';
-        });
-      } else if (target.classList.contains('role-members-bulk') && target.dataset.roleId) {
-        this.applyBulkRoleChange(container, target.dataset.roleId, target.dataset.bulkAssign === 'true');
-      } else if (target.classList.contains('member-actions-trigger')) {
-        const wrap = target.closest('.settings-action-menu-wrap');
-        const menu = wrap?.querySelector('.settings-action-menu');
-        const willShow = !menu?.classList.contains('show');
-        closeMenus();
-        if (willShow) {
-          menu?.classList.add('show');
-          wrap?.classList.add('menu-open');
-          target.closest('tr')?.classList.add('row-menu-open');
-        }
-      } else if (target.dataset.memberAction && target.dataset.userId) {
-        const userId = target.dataset.userId;
-        const roleId = target.dataset.roleId;
-        if (target.dataset.memberAction === 'kick') {
-          void context.operations.run(`kick:${userId}`, t('userMenu.kickMember'), Permission.KICK_MEMBERS,
-            () => context.request<unknown>(MessageType.MEMBER_KICK, { targetUserId: userId }, Permission.KICK_MEMBERS));
-        } else if (roleId) {
-          this.assignRole(userId, roleId, !context.store.getUserRoleIds(userId).includes(roleId));
-        }
-        closeMenus();
-      } else if (target.closest('.settings-action-submenu-wrap')) {
-        target.closest('.settings-action-submenu-wrap')?.classList.toggle('open');
-      } else if (!target.closest('.settings-action-menu-wrap')) closeMenus();
-    }, options);
-    container.addEventListener('input', (event) => {
-      if (event.target instanceof HTMLInputElement && event.target.id === 'role-members-search') {
-        this.filterMemberRows(container, event.target.value);
-      }
-    }, options);
-    container.addEventListener('change', (event) => {
-      const input = event.target;
-      if (!(input instanceof HTMLInputElement) || input.matches(':disabled')) return;
-      const roleId = this.editorRoleId();
-      if (input.classList.contains('role-editor-member-switch') && input.dataset.roleId && input.dataset.userId) {
-        this.assignRole(input.dataset.userId, input.dataset.roleId, input.checked);
-      } else if (roleId && input.id === 'role-editor-is-default') {
-        const isDefault = input.checked;
-        this.updateRole(roleId, () => ({ roleId, isDefault }));
-      } else if (roleId && input.classList.contains('role-permission-switch')) {
-        const bit = Number(input.dataset.permission);
-        const enabled = input.checked;
-        this.updateRole(roleId, (role) => ({
-          roleId, permissions: enabled ? role.permissions | bit : role.permissions & ~bit,
-        }));
-      }
-    }, options);
+    this.attachControls(container, context, controller.signal);
     const body = container.querySelector<HTMLElement>('#roles-list tbody');
     let previousOrder: string[] = [];
     const order = () => [...container.querySelectorAll<HTMLElement>('.role-table-row')].map((row) => row.dataset.roleId ?? '');
@@ -420,11 +354,88 @@ export class ServerRolesTab {
         }
       });
     }, options);
-    this.hideEditor();
     this.refreshState();
   }
 
+  private attachControls(container: HTMLElement, context: ServerSettingsContext, signal: AbortSignal): void {
+    const options = { signal };
+    const closeMenus = () => {
+      for (const className of ['show', 'open', 'menu-open', 'row-menu-open']) {
+        container.querySelectorAll(`.settings-action-menu.${className}, .settings-action-submenu-wrap.${className}, .settings-action-menu-wrap.${className}, tr.${className}`)
+          .forEach((element) => element.classList.remove(className));
+      }
+    };
+    container.addEventListener('click', (event) => {
+      if (!(event.target instanceof HTMLElement) || !context.isCurrent()) return;
+      const target = event.target.closest<HTMLButtonElement>('button');
+      if (!target || target.matches(':disabled')) return;
+      if (target.id === 'btn-role-create-new') this.openEditor();
+      else if (target.id === 'btn-role-save') this.createRole();
+      else if (target.id === 'btn-role-delete') {
+        const roleId = this.editorRoleId();
+        if (roleId) this.deleteRole(roleId);
+      } else if (target.dataset.roleMenu) this.openRoleMenu(target, target.dataset.roleMenu);
+      else if (target.dataset.roleEditorTab) {
+        const tab = target.dataset.roleEditorTab;
+        container.querySelectorAll<HTMLButtonElement>('.role-editor-tab-btn').forEach((button) => button.classList.toggle('active', button === target));
+        container.querySelectorAll<HTMLElement>('.role-editor-tab-panel').forEach((panel) => {
+          const visible = panel.id === `role-editor-tab-${tab}`;
+          panel.style.display = visible ? 'flex' : 'none';
+        });
+      } else if (target.id === 'btn-role-add-members') {
+        this.openMemberPicker();
+      } else if (target.dataset.roleMemberAction && target.dataset.roleId && target.dataset.userId) {
+        this.assignRole(target.dataset.userId, target.dataset.roleId, target.dataset.roleMemberAction === 'add');
+      } else if (target.classList.contains('member-actions-trigger')) {
+        const wrap = target.closest('.settings-action-menu-wrap');
+        const menu = wrap?.querySelector('.settings-action-menu');
+        const willShow = !menu?.classList.contains('show');
+        closeMenus();
+        if (willShow) {
+          menu?.classList.add('show');
+          wrap?.classList.add('menu-open');
+          target.closest('tr')?.classList.add('row-menu-open');
+        }
+      } else if (target.dataset.memberAction && target.dataset.userId) {
+        const userId = target.dataset.userId;
+        const roleId = target.dataset.roleId;
+        if (target.dataset.memberAction === 'kick') {
+          void context.operations.run(`kick:${userId}`, t('userMenu.kickMember'), Permission.KICK_MEMBERS,
+            () => context.request<unknown>(MessageType.MEMBER_KICK, { targetUserId: userId }, Permission.KICK_MEMBERS));
+        } else if (roleId) {
+          this.assignRole(userId, roleId, !context.store.getUserRoleIds(userId).includes(roleId));
+        }
+        closeMenus();
+      } else if (target.closest('.settings-action-submenu-wrap')) {
+        target.closest('.settings-action-submenu-wrap')?.classList.toggle('open');
+      } else if (!target.closest('.settings-action-menu-wrap')) closeMenus();
+    }, options);
+    container.addEventListener('input', (event) => {
+      if (event.target instanceof HTMLInputElement && event.target.classList.contains('role-members-search')) {
+        this.filterMemberRows(container, event.target.value);
+      }
+    }, options);
+    container.addEventListener('change', (event) => {
+      const input = event.target;
+      if (!(input instanceof HTMLInputElement) || input.matches(':disabled')) return;
+      const roleId = this.editorRoleId();
+      if (roleId && input.id === 'role-editor-is-default') {
+        const isDefault = input.checked;
+        this.updateRole(roleId, () => ({ roleId, isDefault }));
+      } else if (roleId && input.classList.contains('role-permission-switch')) {
+        const bit = Number(input.dataset.permission);
+        const enabled = input.checked;
+        this.updateRole(roleId, (role) => ({
+          roleId, permissions: enabled ? role.permissions | bit : role.permissions & ~bit,
+        }));
+      }
+    }, options);
+  }
+
   public detachEvents(): void {
+    this.roleDeletion?.controller.abort();
+    this.roleMenu.close();
+    this.editor?.close(true);
     for (const dispose of this.cleanup) dispose();
     this.cleanup = [];
     this.colorPicker.cleanup();
@@ -436,32 +447,121 @@ export class ServerRolesTab {
     this.submittedName = '';
   }
 
-  private editorRoleId(): string {
-    return this.root?.querySelector<HTMLInputElement>('#role-editor-id')?.value ?? '';
+  private canDeleteRole(role: Role): boolean {
+    const store = this.context?.store ?? serverStore;
+    return role.id !== EVERYONE_ROLE_ID && store.hasPermission(Permission.MANAGE_ROLES) &&
+      (!(role.isDefault || store.isAdminRole(role)) || store.currentUser?.id === store.ownerId);
   }
 
-  private hideEditor(): void {
-    this.colorPicker.close(false, false);
-    const editor = this.root?.querySelector<HTMLElement>('#role-editor-section');
-    if (editor) setSurfaceVisible(editor, false);
-    const id = this.root?.querySelector<HTMLInputElement>('#role-editor-id');
-    if (id) id.value = '';
-    this.dirtyName = false;
+  private openRoleMenu(anchor: HTMLButtonElement, roleId: string): void {
+    const context = this.context;
+    const role = this.getEditorRole(roleId);
+    if (!context?.isCurrent() || !role || !context.store.hasPermission(Permission.MANAGE_ROLES)) return;
+    if (this.roleMenu.isOpenFor(anchor)) {
+      this.roleMenu.close();
+      return;
+    }
+    const rect = anchor.getBoundingClientRect();
+    this.roleMenu.open(rect.right, rect.bottom + 6, [
+      { label: t('roles.editRole'), icon: 'edit', onClick: () => this.openEditor(role) },
+      ...(roleId === EVERYONE_ROLE_ID ? [] : [{ label: t('roles.deleteRole'), icon: 'delete', danger: true,
+        disabled: !this.canDeleteRole(role) || context.operations.pendingCount > 0,
+        onClick: () => this.deleteRole(roleId) }]),
+    ], anchor);
+  }
+
+  private deleteRole(roleId: string): void {
+    const context = this.context;
+    if (!context || this.roleDeletion || context.operations.pendingCount) return;
+    const deletion = { roleId, controller: new AbortController() };
+    this.roleDeletion = deletion;
+    void context.operations.run(`role:${roleId}`, t('roles.deleteRole'), Permission.MANAGE_ROLES, async () => {
+      const role = context.store.getRole(roleId);
+      if (!role) throw new Error(t('serverSettings.roleUnavailable'));
+      if (!this.canDeleteRole(role)) throw new Error(t('protocolError.permissionDenied'));
+      const confirmed = await showConfirm({
+        title: t('roles.deleteRole'),
+        message: t('roles.deleteConfirm', { name: role.name }),
+        confirmLabel: t('roles.deleteRole'), variant: 'danger', focusCancel: true,
+        signal: deletion.controller.signal,
+      });
+      if (!confirmed) return;
+      const latest = context.store.getRole(roleId);
+      if (!latest) throw new Error(t('serverSettings.roleUnavailable'));
+      if (!this.canDeleteRole(latest)) throw new Error(t('protocolError.permissionDenied'));
+      await context.request<RolesListPayload>(MessageType.ROLE_DELETE, { roleId }, Permission.MANAGE_ROLES);
+    }).then(() => {
+      if (this.roleDeletion === deletion) this.roleDeletion = null;
+    });
+  }
+
+  private editorRoleId(): string {
+    return this.editor?.element.querySelector<HTMLInputElement>('#role-editor-id')?.value ?? '';
+  }
+
+  private getEditorRole(roleId: string): Role | undefined {
+    const store = this.context?.store ?? serverStore;
+    return roleId === EVERYONE_ROLE_ID
+      ? { id: roleId, name: t('roles.everyone'), color: null, position: 0, permissions: store.everyonePermissions, isDefault: false }
+      : store.getRole(roleId);
+  }
+
+  public finishEditing(): void {
+    const name = this.editor?.element.querySelector<HTMLInputElement>('#role-editor-name');
+    if (this.dirtyName) name?.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
   private openEditor(role?: Role): void {
-    const root = this.root;
-    if (!root || this.context?.operations.isPending('role-create')) return;
-    const editor = root.querySelector<HTMLElement>('#role-editor-section');
+    const context = this.context;
+    if (!this.root || !context?.isCurrent() || !context.store.hasPermission(Permission.MANAGE_ROLES) || this.editor) return;
+    this.editor = this.openDialog('role-editor-title', role ? t('roles.editorEditTitle', { name: role.name }) : t('roles.editorNewTitle'),
+      this.renderEditorHtml(role?.id === EVERYONE_ROLE_ID),
+      `<button type="button" id="btn-role-save" class="btn btn-primary">${t('roles.createRole')}</button>
+       ${role ? `<button type="button" class="btn btn-secondary" data-role-dialog-close>${t('common.done')}</button>` : ''}`,
+      () => {
+        this.memberPicker?.close(true);
+        this.colorPicker.cleanup();
+        this.editor = null;
+        this.dirtyName = false;
+        return this.root?.querySelector<HTMLElement>(role ? `[data-role-menu="${role.id}"]` : '#btn-role-create-new');
+      });
+    const root = this.editor.element;
+    root.dataset.roleEditor = '';
+    const options = { signal: this.editor.signal };
+    this.attachControls(root, context, this.editor.signal);
+    if (role?.id === EVERYONE_ROLE_ID) {
+      root.querySelector<HTMLInputElement>('#role-editor-id')!.value = role.id;
+      this.refreshState();
+      root.querySelector<HTMLInputElement>('.role-permission-switch')?.focus({ preventScroll: true });
+      return;
+    }
+    this.colorPicker.attachEvents(root, color => {
+      const roleId = this.editorRoleId();
+      if (roleId) this.updateRole(roleId, () => ({ roleId, color }));
+      this.syncColor(color);
+    });
     const id = root.querySelector<HTMLInputElement>('#role-editor-id');
     const name = root.querySelector<HTMLInputElement>('#role-editor-name');
-    if (!editor || !id || !name) return;
-    this.colorPicker.close(false, false);
-    setSurfaceVisible(editor, true, 'panel', 'flex');
+    if (!id || !name) return;
     id.value = role?.id ?? '';
     name.value = role?.name ?? '';
     this.submittedName = name.value;
     this.dirtyName = false;
+    const commitName = () => {
+      const roleId = this.editorRoleId();
+      if (!roleId) return;
+      this.dirtyName = false;
+      if (name.value === this.submittedName) return;
+      this.submittedName = name.value;
+      const nextName = name.value.trim();
+      this.updateRole(roleId, () => ({ roleId, name: nextName }));
+    };
+    name.addEventListener('blur', commitName, options);
+    name.addEventListener('change', commitName, options);
+    name.addEventListener('input', () => { this.dirtyName = true; }, options);
+    name.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') { event.preventDefault(); commitName(); name.blur(); }
+    }, options);
     const auto = root.querySelector<HTMLInputElement>('#role-editor-is-default');
     if (auto) auto.checked = role?.isDefault ?? false;
     this.syncColor(role?.color ?? COLOR_PRESETS[0]);
@@ -471,12 +571,74 @@ export class ServerRolesTab {
     const panel = root.querySelector('#role-editor-members-panel');
     if (panel) panel.innerHTML = this.renderRoleMembersEditorPanel(role?.id);
     this.membersSignature = '';
-    const title = root.querySelector('#role-editor-title');
-    if (title) title.textContent = role ? t('roles.editorEditTitle', { name: role.name }) : t('roles.editorNewTitle');
-    root.querySelector<HTMLButtonElement>('[data-role-editor-tab="display"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-role-editor-tab="general"]')?.click();
     this.refreshState();
-    smoothScrollIntoView(editor, { block: 'nearest' });
     name.focus({ preventScroll: true });
+  }
+
+  private openDialog(titleId: string, title: string, content: string, actions: string, onClose: () => HTMLElement | null | undefined | void): RoleDialog {
+    const element = document.createElement('div');
+    const controller = new AbortController();
+    const options = { signal: controller.signal };
+    element.className = 'modal-backdrop';
+    element.innerHTML = `<section class="modal-card role-dialog-card" role="dialog" aria-modal="true" aria-labelledby="${titleId}">
+      <header class="modal-header"><h2 class="modal-title" id="${titleId}">${escapeHtml(title)}</h2>
+        <button type="button" class="modal-close-btn" data-role-dialog-close aria-label="${t('common.close')}">&times;</button></header>
+      <fieldset class="role-dialog-body">${content}</fieldset>
+      <div class="error-banner role-dialog-errors" role="alert" aria-live="polite"></div>
+      <span class="role-dialog-status" role="status" aria-live="polite"></span>
+      <footer class="modal-footer">${actions}</footer>
+    </section>`;
+    const close = (immediate = false) => {
+      if (controller.signal.aborted) return;
+      if (!immediate) {
+        this.finishEditing();
+        if (this.context?.operations.pendingCount) return;
+      }
+      controller.abort();
+      const focus = onClose();
+      exitModal(element, immediate);
+      if (!immediate) focus?.focus({ preventScroll: true });
+    };
+    element.querySelectorAll('[data-role-dialog-close]').forEach(button =>
+      button.addEventListener('click', () => close(), options));
+    element.addEventListener('mousedown', event => { if (event.target === element) close(); }, options);
+    window.addEventListener('keydown', event => {
+      if (!handlesModalKey(element, event)) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        close();
+      } else if (event.key === 'Tab') {
+        const controls = [...element.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]')]
+          .filter(control => control.getClientRects().length && !control.hidden);
+        const index = controls.indexOf(document.activeElement as HTMLElement);
+        if (controls.length && (event.shiftKey ? index <= 0 : index < 0 || index === controls.length - 1)) {
+          event.preventDefault();
+          controls[event.shiftKey ? controls.length - 1 : 0].focus({ preventScroll: true });
+        }
+      }
+    }, { ...options, capture: true });
+    document.body.append(element);
+    enterModal(element);
+    return { element, close, signal: controller.signal };
+  }
+
+  private openMemberPicker(): void {
+    const roleId = this.editorRoleId();
+    const context = this.context;
+    if (!roleId || !context?.isCurrent() || this.memberPicker || !context.store.hasPermission(Permission.MANAGE_ROLES)) return;
+    this.memberPicker = this.openDialog('role-add-members-title', t('roles.addMembers'),
+      `<p class="role-dialog-hint">${t('roles.addMembersHint')}</p>
+       <div data-role-candidates>${this.renderMemberList(roleId, true)}</div>`,
+      `<button type="button" class="btn btn-secondary" data-role-dialog-close>${t('common.done')}</button>`, () => {
+        this.memberPicker = null;
+        return this.editor?.element.querySelector<HTMLElement>('#btn-role-add-members');
+      });
+    this.memberPicker.element.dataset.roleMemberPicker = '';
+    this.attachControls(this.memberPicker.element, context, this.memberPicker.signal);
+    this.refreshState();
+    this.memberPicker.element.querySelector<HTMLInputElement>('.role-members-search')?.focus({ preventScroll: true });
   }
 
   private syncColor(color: string): void {
@@ -487,7 +649,7 @@ export class ServerRolesTab {
     const context = this.context;
     if (!context) return;
     void context.operations.run(`role:${roleId}`, t('roles.rolesList'), Permission.MANAGE_ROLES, async () => {
-      const role = context.store.getRole(roleId);
+      const role = this.getEditorRole(roleId);
       if (!role) throw new Error(t('serverSettings.roleUnavailable'));
       const payload = patch(role);
       if (payload.name !== undefined && (!payload.name.trim() || payload.name.length > 32)) {
@@ -499,7 +661,8 @@ export class ServerRolesTab {
 
   private createRole(): void {
     const context = this.context;
-    const root = this.root;
+    const editor = this.editor;
+    const root = editor?.element;
     if (!context || !root || this.editorRoleId() || context.operations.isPending('role-create')) return;
     const name = root.querySelector<HTMLInputElement>('#role-editor-name')?.value.trim() ?? '';
     const color = root.querySelector<HTMLButtonElement>('#role-editor-color')?.value ?? COLOR_PRESETS[0];
@@ -509,141 +672,162 @@ export class ServerRolesTab {
     void context.operations.run('role-create', t('roles.createRole'), Permission.MANAGE_ROLES, async () => {
       if (!name || name.length > 32) throw new Error(t('serverSettings.roleNameInvalid'));
       await context.request<RolesListPayload>(MessageType.ROLE_CREATE, { name, color, isDefault, permissions }, Permission.MANAGE_ROLES);
-      if (context.isCurrent()) this.hideEditor();
+    }).then(result => {
+      if (result.ok && context.isCurrent() && this.editor === editor) editor?.close();
     });
   }
 
   private assignRole(userId: string, roleId: string, assign: boolean): void {
     const context = this.context;
-    if (!context) return;
+    if (!context || context.operations.isPending(`assignment:${userId}:${roleId}`)) return;
     void context.operations.run(`assignment:${userId}:${roleId}`, t('roles.assignedColumn'), Permission.MANAGE_ROLES, async () => {
+      const member = context.store.getAllMembersInDisplayOrder().find(member => member.id === userId);
+      const role = context.store.getRole(roleId);
+      if (!role) throw new Error(t('serverSettings.roleUnavailable'));
+      if (!member) throw new Error(t('roles.memberUnavailable'));
       await context.request<RolesListPayload>(
         assign ? MessageType.ROLE_ASSIGN : MessageType.ROLE_UNASSIGN, { userId, roleId }, Permission.MANAGE_ROLES,
       );
+      return { name: member.nickname, role: role.name };
+    }).then(result => {
+      if (result.ok && context.isCurrent()) {
+        showSuccessToast(t(assign ? 'roles.memberAdded' : 'roles.memberRemoved', result.value));
+      }
     });
   }
 
   public refreshState(): void {
     const root = this.root;
     const context = this.context;
-    if (!root || !context?.isCurrent()) return;
+    if (!root || !context) return;
+    if (!context.isCurrent() || !context.store.hasPermission(Permission.MANAGE_ROLES)) {
+      this.roleDeletion?.controller.abort();
+      this.roleMenu.close();
+      removeOwnedSurfaces(root);
+      this.editor?.close(true);
+      return;
+    }
     const { store, operations } = context;
-    const signature = JSON.stringify([store.roles, store.userRoles, store.serverDetails?.members, [...store.knownMembers]]);
+    if (this.roleDeletion) {
+      const deletingRole = store.getRole(this.roleDeletion.roleId);
+      if (!deletingRole || !this.canDeleteRole(deletingRole)) this.roleDeletion.controller.abort();
+    }
+    const signature = JSON.stringify([store.everyonePermissions, store.roles, store.userRoles, store.serverDetails?.members, [...store.knownMembers]]);
     if (signature !== this.stateSignature && !this.draggedRoleId && !operations.isPending('role-order')) {
       this.stateSignature = signature;
+      this.roleMenu.close();
       const body = root.querySelector('#roles-list tbody');
       if (body) body.innerHTML = this.renderRoleRows();
       const members = root.querySelector('#tab-panel-members > fieldset');
       if (members) members.innerHTML = new ServerMembersTab().renderHtml();
     }
     const roleId = this.editorRoleId();
-    const role = roleId ? store.getRole(roleId) : undefined;
+    const role = roleId ? this.getEditorRole(roleId) : undefined;
     const creating = operations.isPending('role-create');
     const pendingRole = operations.isPending(`role:${roleId}`);
-    const editor = root.querySelector<HTMLElement>('#role-editor-section');
-    editor?.setAttribute('aria-busy', String(creating || pendingRole));
-    if (roleId && !role && !pendingRole) this.hideEditor();
+    if (roleId && !role) this.editor?.close(true);
+    const editor = this.editor?.element;
+    if (!editor) return;
+    for (const dialog of [this.editor, this.memberPicker]) {
+      if (!dialog) continue;
+      dialog.element.querySelectorAll<HTMLButtonElement>('[data-role-dialog-close]').forEach(button => {
+        button.disabled = operations.pendingCount > 0;
+      });
+      const body = dialog.element.querySelector<HTMLFieldSetElement>('.role-dialog-body');
+      if (body) body.disabled = creating;
+      dialog.element.querySelector('.role-dialog-card')?.setAttribute('aria-busy', String(operations.pendingCount > 0));
+      const status = dialog.element.querySelector('.role-dialog-status');
+      if (status) status.textContent = operations.pendingCount
+        ? t('serverSettings.applying', { count: operations.pendingCount }) : '';
+      const errors = dialog.element.querySelector('.role-dialog-errors');
+      if (errors) {
+        errors.textContent = operations.failures.filter(failure =>
+          failure.key === 'role-create' || failure.key === `role:${roleId}` ||
+          failure.key.startsWith('assignment:') && failure.key.endsWith(`:${roleId}`))
+          .map(failure => failure.message).join('\n');
+        errors.classList.toggle('show', Boolean(errors.textContent));
+      }
+    }
     const memberSignature = `${roleId}:${signature}`;
-    if (role && this.membersSignature !== memberSignature && !operations.pendingCount) {
-      const panel = root.querySelector('#role-editor-members-panel');
-      const search = root.querySelector<HTMLInputElement>('#role-members-search');
-      const query = search?.value ?? '';
-      const hadFocus = document.activeElement === search;
-      if (panel) panel.innerHTML = this.renderRoleMembersEditorPanel(roleId);
-      const nextSearch = root.querySelector<HTMLInputElement>('#role-members-search');
-      if (nextSearch) { nextSearch.value = query; if (hadFocus) nextSearch.focus(); }
-      this.filterMemberRows(root, query);
+    if (role && roleId !== EVERYONE_ROLE_ID && this.membersSignature !== memberSignature) {
+      this.refreshMembers(editor, '#role-editor-members-panel', this.renderRoleMembersEditorPanel(roleId));
+      if (this.memberPicker) {
+        this.refreshMembers(this.memberPicker.element, '[data-role-candidates]', this.renderMemberList(roleId, true));
+      }
       this.membersSignature = memberSignature;
     }
-    const save = root.querySelector<HTMLButtonElement>('#btn-role-save');
+    const save = editor.querySelector<HTMLButtonElement>('#btn-role-save');
     if (save) { save.hidden = Boolean(roleId); save.disabled = creating; }
-    const remove = root.querySelector<HTMLButtonElement>('#btn-role-delete');
-    if (remove) remove.disabled = !role || pendingRole ||
-      ((role.isDefault || store.isAdminRole(role)) && store.currentUser?.id !== store.ownerId);
-    root.querySelectorAll<HTMLInputElement | HTMLButtonElement>('#role-editor-name, #role-editor-is-default, .role-permission-switch').forEach((input) => {
+    const remove = editor.querySelector<HTMLButtonElement>('#btn-role-delete');
+    if (remove) {
+      const section = remove.closest<HTMLElement>('.role-delete-section');
+      if (section) section.hidden = !roleId;
+      remove.disabled = !role || operations.pendingCount > 0 || !this.canDeleteRole(role);
+    }
+    editor.querySelectorAll<HTMLInputElement | HTMLButtonElement>('#role-editor-name, #role-editor-is-default, .role-permission-switch').forEach((input) => {
       input.disabled = creating;
     });
     this.colorPicker.setDisabled(creating || !store.hasPermission(Permission.MANAGE_ROLES));
     if (role && !pendingRole) {
-      const name = root.querySelector<HTMLInputElement>('#role-editor-name');
+      const name = editor.querySelector<HTMLInputElement>('#role-editor-name');
       if (name && !this.dirtyName) { name.value = role.name; this.submittedName = name.value; }
-      const auto = root.querySelector<HTMLInputElement>('#role-editor-is-default');
+      const auto = editor.querySelector<HTMLInputElement>('#role-editor-is-default');
       if (auto) auto.checked = role.isDefault;
       this.syncColor(role.color ?? COLOR_PRESETS[0]);
-      root.querySelectorAll<HTMLInputElement>('.role-permission-switch').forEach((input) => {
+      editor.querySelectorAll<HTMLInputElement>('.role-permission-switch').forEach((input) => {
         input.checked = Boolean(role.permissions & Number(input.dataset.permission));
       });
-      const title = root.querySelector('#role-editor-title');
+      const title = editor.querySelector('#role-editor-title');
       if (title) title.textContent = t('roles.editorEditTitle', { name: role.name });
     }
-    root.querySelectorAll<HTMLInputElement>('.role-editor-member-switch').forEach((input) => {
-      const userId = input.dataset.userId ?? '';
-      const assignedRole = input.dataset.roleId ?? '';
-      const pending = operations.isPending(`assignment:${userId}:${assignedRole}`) || operations.isPending(`bulk:${assignedRole}`);
-      input.setAttribute('aria-busy', String(pending));
-      if (!pending) input.checked = store.getUserRoleIds(userId).includes(assignedRole);
-    });
+    for (const dialog of [this.editor, this.memberPicker]) {
+      dialog?.element.querySelectorAll<HTMLButtonElement>('.role-member-action').forEach(button => {
+        const pending = operations.isPending(`assignment:${button.dataset.userId}:${roleId}`);
+        button.disabled = pending;
+        button.setAttribute('aria-busy', String(pending));
+      });
+    }
   }
 
-  /** Hides member rows that don't match the search box (#477). */
+  private refreshMembers(container: HTMLElement, selector: string, html: string): void {
+    const panel = container.querySelector<HTMLElement>(selector);
+    if (!panel) return;
+    const search = panel.querySelector<HTMLInputElement>('.role-members-search');
+    const query = search?.value ?? '';
+    const focused = panel.contains(document.activeElement);
+    const scroll = container.querySelector('.role-dialog-body');
+    const scrollTop = scroll?.scrollTop ?? 0;
+    panel.innerHTML = html;
+    const nextSearch = panel.querySelector<HTMLInputElement>('.role-members-search');
+    if (nextSearch) {
+      nextSearch.value = query;
+      if (focused) nextSearch.focus({ preventScroll: true });
+    }
+    this.filterMemberRows(panel, query);
+    if (scroll) scroll.scrollTop = scrollTop;
+  }
+
   private filterMemberRows(container: HTMLElement, query: string): void {
-    const term = query.trim().toLowerCase();
+    const normalize = (value: string) => value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+    const term = normalize(query.trim());
     const rows = Array.from(container.querySelectorAll('.role-member-row')) as HTMLElement[];
     let shown = 0;
     rows.forEach((row) => {
-      const name = row.dataset.memberName ?? '';
+      const name = normalize(row.dataset.memberName ?? '');
       const matches = term.length === 0 || name.includes(term);
       row.style.display = matches ? '' : 'none';
       if (matches) shown += 1;
     });
 
-    const counter = container.querySelector('#role-members-count');
+    const counter = container.querySelector('[data-role-members-count]');
     if (counter) {
       counter.textContent = t('roles.membersShown', { shown, total: rows.length });
     }
-  }
-
-  /**
-   * Applies one role change to every member matching the current search, so a
-   * whole group can be added or removed in one go (#477).
-   */
-  private applyBulkRoleChange(container: HTMLElement, roleId: string, assign: boolean): void {
-    const context = this.context;
-    if (!context || context.operations.isPending(`bulk:${roleId}`)) return;
-    const switches = (Array.from(
-      container.querySelectorAll(`.role-editor-member-switch[data-role-id="${roleId}"]`)
-    ) as HTMLInputElement[]).filter((input) => {
-      const row = input.closest('.role-member-row') as HTMLElement | null;
-      const visible = !row || row.style.display !== 'none';
-      return visible && input.checked !== assign;
-    });
-
-    if (switches.length === 0) {
-      void showAlert({ message: t('roles.bulkNothingToDo'), variant: 'warning' });
-      return;
+    const empty = container.querySelector<HTMLElement>('[data-role-members-empty]');
+    if (empty) {
+      empty.hidden = shown > 0;
+      empty.textContent = t(rows.length ? 'roles.noMatchingMembers'
+        : container.closest('[data-role-member-picker]') ? 'roles.noAvailableMembers' : 'roles.noAssignedMembers');
     }
-
-    const userIds = switches.map((input) => input.dataset.userId).filter((id): id is string => Boolean(id));
-    void context.operations.run(`bulk:${roleId}`, t(assign ? 'roles.bulkAssign' : 'roles.bulkUnassign'), Permission.MANAGE_ROLES, async () => {
-      const confirmed = await showConfirm({
-        title: assign ? t('roles.bulkAssign') : t('roles.bulkUnassign'),
-        message: t(assign ? 'roles.bulkAssignConfirm' : 'roles.bulkUnassignConfirm', { count: userIds.length }),
-        variant: assign ? 'info' : 'danger',
-      });
-      if (!confirmed) return;
-      const errors: string[] = [];
-      for (const userId of userIds) {
-        context.assertAllowed(Permission.MANAGE_ROLES);
-        if (context.store.getUserRoleIds(userId).includes(roleId) === assign) continue;
-        try {
-          await context.request<RolesListPayload>(
-            assign ? MessageType.ROLE_ASSIGN : MessageType.ROLE_UNASSIGN, { userId, roleId }, Permission.MANAGE_ROLES,
-          );
-        } catch (error) {
-          errors.push(error instanceof Error ? error.message : t('serverSettings.saveError'));
-        }
-      }
-      if (errors.length) throw new Error(t('serverSettings.bulkFailed', { count: errors.length, error: errors[0] }));
-    });
   }
 }

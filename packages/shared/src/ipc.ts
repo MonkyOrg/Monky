@@ -779,6 +779,7 @@ export interface IpcInvokeChannels {
   'crash-recovery:close': { args: []; returnType: boolean };
   // Janela
   'window:minimize': { args: []; returnType: void };
+  'screen-pip:open': { args: [requestId: string, requireInactive: boolean]; returnType: boolean };
   'window:maximize': { args: []; returnType: void };
   'window:toggle-maximize': { args: []; returnType: void };
   'window:set-in-server': { args: [inServer: boolean]; returnType: void };
@@ -938,6 +939,8 @@ export interface IpcInvokeChannels {
  * Mapeamento de Eventos Unidirecionais (Main -> Renderer via webContents.send)
  */
 export interface IpcEvents {
+  'window:inactive': [];
+  'window:active': [];
   'native-screen:event': [event: NativeScreenEvent];
   'server-invite:available': [];
   // Pedido de despedida antes do processo morrer: o renderer sai das chamadas e

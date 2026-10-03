@@ -83,7 +83,14 @@ void PcmTrackSource::Deliver(const NormalizedBlock& block) {
   std::optional<RtcCaptureTimestamp> timestamp;
   const auto has_timestamps = std::all_of(block.timing.spans.begin(), block.timing.spans.end(),
       [](const CaptureSpan& span) { return span.qpc_timestamp_us && !span.flags.timestamp_error; });
-  if (has_timestamps) timestamp = mapper_.Map(normalizer_.Epoch(), block.timing);
+  if (has_timestamps) {
+    try { timestamp = mapper_.Map(normalizer_.Epoch(), block.timing); }
+    catch (const AudioError& error) {
+      if (error.failure != Failure::ClockObservationUnavailable) throw;
+      // PCM continuity is still proven; only this block's absolute clock is unavailable.
+      ++unavailable_clock_observations_;
+    }
+  }
   if (timestamp) {
     if (timestamp->time_millis < 0 ||
         std::uint64_t(timestamp->time_millis) > kMaxSafeInteger ||

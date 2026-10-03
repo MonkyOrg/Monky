@@ -415,6 +415,7 @@ export interface ChatMentionsReadPayload {
 }
 
 export interface ChannelCreatePayload {
+  permissionOverwrites?: import('./permissions.js').ChannelPermissionOverwrite[];
   categoryId?: string | null;
   inheritCategoryPermissions?: boolean;
   botCommandsEnabled?: boolean;
@@ -431,6 +432,7 @@ export interface ChannelCreatePayload {
  * resending the name.
  */
 export interface ChannelUpdatePayload {
+  permissionOverwrites?: import('./permissions.js').ChannelPermissionOverwrite[];
   categoryId?: string | null;
   /** Explicit ACL fields imply an override unless this is explicitly true. */
   inheritCategoryPermissions?: boolean;
@@ -461,12 +463,14 @@ export interface ChannelReorderPayload {
 }
 
 export interface CategoryCreatePayload {
+  permissionOverwrites?: import('./permissions.js').ChannelPermissionOverwrite[];
   name: string;
   isPrivate?: boolean;
   allowedRoleIds?: string[];
 }
 
 export interface CategoryUpdatePayload {
+  permissionOverwrites?: import('./permissions.js').ChannelPermissionOverwrite[];
   categoryId: string;
   name?: string;
   isPrivate?: boolean;
@@ -863,6 +867,7 @@ export interface VoiceRestrictionsUpdatedPayload extends VoiceRestrictions {
 }
 
 export interface RolesListPayload {
+  everyonePermissions?: number;
   roles: Role[];
   userRoles: UserRoleSummary[];
 }

@@ -25,13 +25,18 @@ export function openServerEventWizard(feed: CommunityFeed, existing?: ServerEven
   const canManageExisting = () => !!existing && (
     existing.creatorUserId === feed.server.currentUser?.id ||
     feed.server.hasPermission(Permission.MANAGE_SERVER) ||
-    feed.server.hasPermission(Permission.MANAGE_EVENTS)
+    feed.server.hasPermission(Permission.MANAGE_EVENTS, existing.location.kind === 'external' ? undefined : existing.location.channelId)
   );
-  if (existing ? !canManageExisting() : !feed.server.hasPermission(Permission.MANAGE_EVENTS)) return;
+  const canCreate = () => feed.server.hasPermission(Permission.MANAGE_EVENTS) ||
+    !!feed.server.serverDetails?.channels.some(channel => !channel.forumId &&
+      (channel.type === 'TEXT' || channel.type === 'VOICE') && feed.server.hasPermission(Permission.MANAGE_EVENTS, channel.id));
+  if (existing ? !canManageExisting() : !canCreate()) return;
   const modal = openCommunityModal(t(existing ? 'community.edit' : 'community.newEvent'));
   modal.element.querySelector('.community-modal')?.classList.add('event-wizard', 'server-event-wizard');
   const channels = () => feed.server.serverDetails?.channels.filter((channel) =>
-    !channel.forumId && (channel.type === 'VOICE' || channel.type === 'TEXT')) ?? [];
+    !channel.forumId && (channel.type === 'VOICE' || channel.type === 'TEXT') &&
+    (existing && existing.location.kind !== 'external' && existing.location.channelId === channel.id && canManageExisting() ||
+      feed.server.hasPermission(Permission.MANAGE_EVENTS, channel.id))) ?? [];
   let step = 0;
   let locationChosen = !!existing;
   const existingImageSources = existing
@@ -433,7 +438,7 @@ export function openServerEventWizard(feed: CommunityFeed, existing?: ServerEven
     });
   }, { signal: modal.signal });
   const unsubscribe = feed.subscribe(() => {
-    if (!feed.snapshot || (existing ? !canManageExisting() : !feed.server.hasPermission(Permission.MANAGE_EVENTS))) modal.close(true);
+    if (!feed.snapshot || (existing ? !canManageExisting() : !canCreate())) modal.close(true);
     else {
       const select = viewport.querySelector<HTMLSelectElement>('[data-input=channel]');
       if (select) {

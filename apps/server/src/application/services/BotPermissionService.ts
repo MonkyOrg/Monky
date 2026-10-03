@@ -29,7 +29,7 @@ export class BotPermissionService {
       ['receive_voice', Permission.SPEAK],
     ] as const;
     return channelCapabilities.reduce((permissions, [capability, flag]) =>
-      state.requested?.includes(capability) && state.granted.includes(capability) ? permissions | flag : permissions, 0);
+      state.requested?.includes(capability) && state.granted.includes(capability) ? permissions | flag : permissions, Permission.VIEW_CHANNEL);
   }
 
   declare(botId: string, input: BotCapability[]): { permissions: BotPermissions; changed: boolean } {

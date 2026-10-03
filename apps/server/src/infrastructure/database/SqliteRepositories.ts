@@ -1,6 +1,7 @@
 import { IDatabaseDriver } from './SqliteWrapper';
-import { messageBlocksSchema, resolveChannelPermissions, type ChannelCategory, type MessageBlock } from '@monky/shared';
+import { CHANNEL_PERMISSIONS, DEFAULT_PERMISSIONS, channelOverwrites, channelPrivacy, withChannelPrivacy, messageBlocksSchema, resolveChannelPermissions, type ChannelCategory, type ChannelPermissionOverwrite, type MessageBlock } from '@monky/shared';
 import { SqliteCategoryRepository } from './SqliteCategoryRepository';
+import { SqliteChannelPermissions } from './SqliteChannelPermissions';
 import { ChannelType, LIMITS, REACTION_LIMITS, botCommandContextSchema, botMessageLocalizationsSchema } from '@monky/shared';
 import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from '../../domain/entities';
 import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepository, IMessageRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
@@ -34,10 +35,11 @@ export class SqliteServerRepository implements IServerRepository {
   }
 
   async getServer(): Promise<ServerRecord | null> {
-    const row = this.db.prepare('SELECT id, name, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, max_message_length as maxMessageLength, message_delete_undo_seconds as messageDeleteUndoSeconds, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, recent_sound_cache_enabled as recentSoundCacheEnabled, recent_sound_cache_limit as recentSoundCacheLimit, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots FROM server_meta LIMIT 1').get() as ServerRecord | undefined;
+    const row = this.db.prepare('SELECT id, name, everyone_permissions as everyonePermissions, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, max_message_length as maxMessageLength, message_delete_undo_seconds as messageDeleteUndoSeconds, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, recent_sound_cache_enabled as recentSoundCacheEnabled, recent_sound_cache_limit as recentSoundCacheLimit, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots FROM server_meta LIMIT 1').get() as ServerRecord | undefined;
     if (!row) return null;
     return {
       id: row.id,
+      everyonePermissions: row.everyonePermissions,
       name: row.name,
       passwordHash: row.passwordHash,
       createdAt: row.createdAt,
@@ -63,7 +65,7 @@ export class SqliteServerRepository implements IServerRepository {
 
   async createServer(server: ServerRecord): Promise<void> {
     this.db.prepare(
-      'INSERT INTO server_meta (id, name, password_hash, created_at, max_users, owner_user_id, allow_soundboard, allow_everyone_mention, show_role_badges_to_everyone, voice_mode, icon_path, max_message_length, message_delete_undo_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO server_meta (id, name, password_hash, created_at, max_users, owner_user_id, allow_soundboard, allow_everyone_mention, show_role_badges_to_everyone, voice_mode, icon_path, max_message_length, message_delete_undo_seconds, everyone_permissions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(
       server.id,
       server.name,
@@ -77,13 +79,18 @@ export class SqliteServerRepository implements IServerRepository {
       server.voiceMode || 'p2p',
       server.iconPath || null,
       server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
-      server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS
+      server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,
+      server.everyonePermissions ?? DEFAULT_PERMISSIONS
     );
   }
 
   async updateServer(server: Partial<ServerRecord>): Promise<void> {
     const fields: string[] = [];
     const values: any[] = [];
+    if (server.everyonePermissions !== undefined) {
+      fields.push('everyone_permissions = ?');
+      values.push(server.everyonePermissions);
+    }
     if (server.messageDeleteUndoSeconds !== undefined) {
       fields.push('message_delete_undo_seconds = ?');
       values.push(server.messageDeleteUndoSeconds);
@@ -281,8 +288,10 @@ interface SqliteChannelRow {
 
 export class SqliteChannelRepository implements IChannelRepository {
   public readonly categories: SqliteCategoryRepository;
+  private readonly permissions: SqliteChannelPermissions;
   constructor(private db: IDatabaseDriver) {
     this.categories = new SqliteCategoryRepository(db);
+    this.permissions = new SqliteChannelPermissions(db, 'channel');
   }
 
   private static readonly SELECT_COLUMNS =
@@ -306,14 +315,16 @@ export class SqliteChannelRepository implements IChannelRepository {
     return byChannel;
   }
 
-  private toRecord(row: SqliteChannelRow, allowedRoleIds: string[], categories: Map<string, ChannelCategory>): ChannelRecord {
+  private toRecord(row: SqliteChannelRow, allowedRoleIds: string[], categories: Map<string, ChannelCategory>, permissionOverwrites: ChannelPermissionOverwrite[]): ChannelRecord {
     const access = resolveChannelPermissions({
+      permissionOverwrites,
       categoryId: row.categoryId,
       inheritCategoryPermissions: row.inheritCategoryPermissions === 1,
       isPrivate: row.isPrivate === 1,
       allowedRoleIds,
     }, categories.get(row.categoryId ?? '') ?? null);
     return {
+      permissionOverwrites: access.permissionOverwrites,
       forumId: row.forumId,
       forumLocked: row.forumLocked === 1,
       forumClosed: row.forumClosed === 1,
@@ -339,12 +350,12 @@ export class SqliteChannelRepository implements IChannelRepository {
     if (!row) return null;
 
     const categories = new Map(this.categories.readByServerId(row.serverId).map((category) => [category.id, category]));
-    const record = this.toRecord(row, this.loadAllowedRoles([row.id]).get(row.id) ?? [], categories);
+    const record = this.toRecord(row, this.loadAllowedRoles([row.id]).get(row.id) ?? [], categories, this.permissions.read([row.id]).get(row.id) ?? []);
     if (!record.forumId) return record;
     const parentRow: SqliteChannelRow | undefined = this.db.prepare(
       `SELECT ${SqliteChannelRepository.SELECT_COLUMNS} FROM channels WHERE id = ?`
     ).get(record.forumId);
-    const parent = parentRow ? this.toRecord(parentRow, this.loadAllowedRoles([parentRow.id]).get(parentRow.id) ?? [], categories) : null;
+    const parent = parentRow ? this.toRecord(parentRow, this.loadAllowedRoles([parentRow.id]).get(parentRow.id) ?? [], categories, this.permissions.read([parentRow.id]).get(parentRow.id) ?? []) : null;
     return this.withForumAccess(record, parent);
   }
 
@@ -355,7 +366,8 @@ export class SqliteChannelRepository implements IChannelRepository {
 
     const allowedRoles = this.loadAllowedRoles(rows.map((row) => row.id));
     const categories = new Map(this.categories.readByServerId(serverId).map((category) => [category.id, category]));
-    const records = rows.map((row) => this.toRecord(row, allowedRoles.get(row.id) ?? [], categories));
+    const permissions = this.permissions.read(rows.map(row => row.id));
+    const records = rows.map((row) => this.toRecord(row, allowedRoles.get(row.id) ?? [], categories, permissions.get(row.id) ?? []));
     const byId = new Map(records.map(record => [record.id, record]));
     return records.map(record => record.forumId ? this.withForumAccess(record, byId.get(record.forumId) ?? null) : record);
   }
@@ -363,11 +375,13 @@ export class SqliteChannelRepository implements IChannelRepository {
   private withForumAccess(record: ChannelRecord, parent: ChannelRecord | null): ChannelRecord {
     const valid = parent?.type === 'FORUM' && !parent.forumId && parent.serverId === record.serverId;
     return { ...record, isPrivate: valid ? parent.isPrivate : true,
+      permissionOverwrites: valid ? channelOverwrites(parent) : [{ roleId: null, allow: 0, deny: CHANNEL_PERMISSIONS }],
       allowedRoleIds: valid ? [...parent.allowedRoleIds] : [], botCommandsEnabled: valid && parent.botCommandsEnabled };
   }
 
   async create(channel: ChannelRecord): Promise<void> {
     this.db.transaction(() => {
+      if (channel.permissionOverwrites) channel = { ...channel, ...channelPrivacy(channel.permissionOverwrites) };
       this.db.prepare(
         'INSERT INTO channels (id, server_id, name, type, position, created_at, max_participants, is_private, bot_commands_enabled, category_id, inherit_category_permissions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(
@@ -384,11 +398,26 @@ export class SqliteChannelRepository implements IChannelRepository {
         channel.inheritCategoryPermissions === false ? 0 : 1
       );
       this.replaceAllowedRoles(channel.id, channel.allowedRoleIds);
+      this.permissions.replace(channel.id, channelOverwrites(channel));
     })();
   }
 
   async update(id: string, updates: Partial<Omit<ChannelRecord, 'id' | 'serverId'>>): Promise<void> {
     this.db.transaction(() => {
+      if (updates.permissionOverwrites !== undefined) {
+        const stored = this.db.prepare('SELECT is_private AS isPrivate FROM channels WHERE id = ?').get(id) as { isPrivate: number } | undefined;
+        const privacy = channelPrivacy(updates.permissionOverwrites, {
+          isPrivate: stored?.isPrivate === 1, allowedRoleIds: [],
+          permissionOverwrites: this.permissions.read([id]).get(id) ?? [],
+        });
+        updates = { ...updates, ...privacy, isPrivate: updates.isPrivate ?? privacy.isPrivate };
+        this.permissions.replace(id, updates.permissionOverwrites!);
+      } else if (updates.isPrivate !== undefined || updates.allowedRoleIds !== undefined) {
+        const stored = this.db.prepare('SELECT is_private AS isPrivate FROM channels WHERE id = ?').get(id) as { isPrivate: number } | undefined;
+        if (!stored) return;
+        this.permissions.replace(id, withChannelPrivacy(this.permissions.read([id]).get(id) ?? [],
+          updates.isPrivate ?? stored.isPrivate === 1, updates.allowedRoleIds ?? this.loadAllowedRoles([id]).get(id) ?? []));
+      }
       const assignments: string[] = [];
       const values: unknown[] = [];
 

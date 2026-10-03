@@ -170,6 +170,7 @@ instalação continuam inalterados. Nada é copiado do perfil instalado.
 | Cenário | O que já fica preparado | O que não é pulado |
 |---|---|---|
 | `connected` (padrão) | Identidade nova, autenticação como primeiro administrador, canais e mensagem de exemplo | A funcionalidade que será exercitada no chat |
+| `empty-forum` | Fórum e chat vazios, 20 membros incluindo você, 10 cargos incluindo os padrões e eventos habilitados | Busca sem threads e rolagem de membros/cargos na visibilidade privada |
 | `server-settings` | O mesmo, com Geral nas configurações reais aberto | Alterar/aplicar configurações |
 | `voice` | Usuário mutado, dispositivos sintéticos e segundo participante SDK por P2P real | Teste de voz; a fixture é identificada e não simula música de produção |
 | `voice-receive` | Fixture SDK com permissão somente para ouvir, usuário mutado e indicadores reais na sala | `/qa-listen` alterna a escuta; desmutar envia áudio sintético, sem captura física nem gravação |
@@ -181,6 +182,7 @@ instalação continuam inalterados. Nada é copiado do perfil instalado.
 
 ```powershell
 npm run qa -- server-settings
+npm run qa -- empty-forum
 npm run qa -- voice
 npm run qa -- voice-receive
 npm run qa -- bot-install --bot=fixture

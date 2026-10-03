@@ -35,6 +35,8 @@ if (!process.versions.electron) {
   };
   app.whenReady().then(async () => {
     const { createServer } = await import('vite');
+    const fonts = ['material-symbols/outlined.css', '@fontsource/inter/400.css', '@fontsource/inter/600.css']
+      .map(id => `<link rel="stylesheet" href="/@fs/${require.resolve(id).replaceAll('\\', '/')}">`).join('');
     vite = await createServer({
       configFile: path.join(root, 'vite.config.ts'), logLevel: 'error',
       cacheDir: path.join(app.getPath('userData'), 'vite-cache'),
@@ -45,7 +47,7 @@ if (!process.versions.electron) {
           server.middlewares.use((request, response, next) => {
             if (request.url !== '/__categories__') return next();
             response.setHeader('Content-Type', 'text/html');
-            response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css"></head><body></body></html>');
+            response.end(`<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/dropdowns.css">${fonts}</head><body></body></html>`);
           });
         },
       }],
@@ -54,9 +56,10 @@ if (!process.versions.electron) {
       vite.httpServer.once('error', reject);
       vite.httpServer.listen(0, '127.0.0.1', resolve);
     });
-    browser = new BrowserWindow({ show: false, width: 1100, height: 850, webPreferences: {
+    browser = new BrowserWindow({ show: false, width: 800, height: 600, webPreferences: {
       contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true,
     } });
+    browser.webContents.debugger.attach('1.3');
     const drag = async (from, to) => {
       browser.webContents.sendInputEvent({ type: 'mouseMove', ...from });
       await new Promise(resolve => setTimeout(resolve, 20));
@@ -73,10 +76,91 @@ if (!process.versions.electron) {
       browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...to });
       await new Promise(resolve => setTimeout(resolve, 80));
     };
+    const key = async (keyCode, modifiers = [], deliveryDelay = 0) => {
+      const inputKeyCode = { ArrowDown: 'Down', ArrowUp: 'Up', ArrowLeft: 'Left', ArrowRight: 'Right' }[keyCode] ?? keyCode;
+      await browser.webContents.executeJavaScript(`window.categoryKeyDelivery = new Promise((resolve, reject) => {
+        const events = [];
+        const received = event => {
+          events.push({ key: event.key, code: event.code, trusted: event.isTrusted });
+          if (!event.isTrusted || event.key.toLowerCase() !== ${JSON.stringify(keyCode.toLowerCase())}) return;
+          clearTimeout(timer);
+          window.removeEventListener('keyup', received, true);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          window.removeEventListener('keyup', received, true);
+          reject(new Error('Native key was not delivered: ' + ${JSON.stringify(keyCode)} + '; ' + JSON.stringify({
+            events, active: document.activeElement?.outerHTML, query: document.querySelector('[data-audience-search]')?.value,
+          })));
+        }, 5000);
+        window.addEventListener('keyup', received, true);
+      }); void 0`);
+      const send = () => {
+        browser.webContents.sendInputEvent({ type: 'keyDown', keyCode: inputKeyCode, modifiers });
+        if (keyCode === 'Enter') browser.webContents.sendInputEvent({ type: 'char', keyCode: '\r', modifiers });
+        browser.webContents.sendInputEvent({ type: 'keyUp', keyCode: inputKeyCode, modifiers });
+      };
+      if (deliveryDelay) setTimeout(send, deliveryDelay);
+      else send();
+      await browser.webContents.executeJavaScript('window.categoryKeyDelivery');
+      await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+    };
+    // Chromium leaves Cmd+A to the macOS application menu, which synthetic input bypasses;
+    // run the same editing command the menu role would execute.
+    const selectAllText = async (deliveryDelay = 0) => {
+      if (process.platform !== 'darwin') return key('A', ['control'], deliveryDelay);
+      browser.webContents.selectAll();
+      await browser.webContents.executeJavaScript(`new Promise((resolve, reject) => {
+        let frames = 0;
+        const selected = () => {
+          const field = document.activeElement;
+          if (field && 'selectionStart' in field && field.selectionStart === 0 && field.selectionEnd === field.value.length) resolve();
+          else if (++frames > 180) reject(new Error('Select all did not reach the focused field: ' + field?.outerHTML));
+          else requestAnimationFrame(selected);
+        };
+        selected();
+      })`);
+    };
+    const resize = async (width) => {
+      await browser.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', {
+        width, height: 850, deviceScaleFactor: 1, mobile: false,
+      });
+      await browser.webContents.executeJavaScript(`new Promise((resolve, reject) => {
+        let frames = 0;
+        const ready = () => {
+          if (innerWidth === ${width}) requestAnimationFrame(() => requestAnimationFrame(resolve));
+          else if (++frames > 120) reject(new Error('Viewport resize timed out'));
+          else requestAnimationFrame(ready);
+        };
+        ready();
+      })`);
+    };
+    const click = async (selector) => {
+      const point = await browser.webContents.executeJavaScript(`(() => {
+        const element = document.querySelector(${JSON.stringify(selector)});
+        if (!element) return { failure: 'Missing pointer target: ' + ${JSON.stringify(selector)} };
+        element.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        const box = element.getBoundingClientRect();
+        const point = { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+        const hit = document.elementFromPoint(point.x, point.y);
+        if (!box.width || !box.height || hit !== element && !element.contains(hit)) {
+          return { failure: 'Pointer target is covered: ' + ${JSON.stringify(selector)} + ' by ' + hit?.outerHTML.slice(0, 200) };
+        }
+        return point;
+      })()`);
+      if (point.failure) throw new Error(point.failure);
+      browser.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+      browser.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
+      browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
+      await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+    };
     const dragChannelToSelector = async (from, selector, yRatio = 0.5) => {
       const targetBefore = await browser.webContents.executeJavaScript(`(() => {
-        const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
-        return { x: Math.round(box.left + Math.min(80, box.width / 2)), y: Math.round(box.top + box.height * ${yRatio}), top: box.top };
+        const target = document.querySelector(${JSON.stringify(selector)});
+        const box = target.getBoundingClientRect();
+        return { x: Math.round(box.left + Math.min(80, box.width / 2)), y: Math.round(box.top + box.height * ${yRatio}),
+          top: box.top, layoutTop: box.top - target.closest('#channel-categories-list').getBoundingClientRect().top,
+          scroll: target.closest('.channels-list-container').scrollTop };
       })()`);
       browser.webContents.sendInputEvent({ type: 'mouseMove', ...from });
       await new Promise(resolve => setTimeout(resolve, 20));
@@ -87,11 +171,24 @@ if (!process.versions.electron) {
         y: from.y + 7,
         modifiers: ['leftButtonDown'],
       });
-      await new Promise(resolve => setTimeout(resolve, 30));
-      const targetAfter = await browser.webContents.executeJavaScript(`(() => {
-        const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
-        return { x: Math.round(box.left + Math.min(80, box.width / 2)), y: Math.round(box.top + box.height * ${yRatio}), top: box.top };
-      })()`);
+      // Native input is delivered asynchronously; measure only after the renderer starts the drag.
+      const targetAfter = await browser.webContents.executeJavaScript(`new Promise(resolve => {
+        const started = performance.now();
+        const measure = () => {
+          if (!document.querySelector('.channel-reorder-active .channel-dragging')) {
+            if (performance.now() - started > 3000) resolve({ failure: 'The channel pointer drag did not start' });
+            else requestAnimationFrame(measure);
+            return;
+          }
+          const target = document.querySelector(${JSON.stringify(selector)});
+          const box = target.getBoundingClientRect();
+          resolve({ x: Math.round(box.left + Math.min(80, box.width / 2)), y: Math.round(box.top + box.height * ${yRatio}),
+            top: box.top, layoutTop: box.top - target.closest('#channel-categories-list').getBoundingClientRect().top,
+            scroll: target.closest('.channels-list-container').scrollTop });
+        };
+        measure();
+      })`);
+      if (targetAfter.failure) throw new Error(targetAfter.failure);
       for (let step = 1; step <= 8; step++) {
         browser.webContents.sendInputEvent({
           type: 'mouseMove',
@@ -108,7 +205,14 @@ if (!process.versions.electron) {
     timeout = setTimeout(() => { console.error('Category DOM timeout'); void finish(1); }, 90000);
     for (const locale of ['pt-BR', 'en']) {
       await browser.loadURL(`http://127.0.0.1:${vite.httpServer.address().port}/__categories__`);
-      await browser.webContents.executeJavaScript(`(${regression.toString()})(${JSON.stringify(locale)})`, true);
+      await resize(1100);
+      await browser.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
+      await browser.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+        features: [{ name: 'prefers-reduced-motion', value: locale === 'pt-BR' ? 'reduce' : 'no-preference' }],
+      });
+      const initial = await browser.webContents.executeJavaScript(`(${regression.toString()})(${JSON.stringify(locale)})
+        .then(() => null).catch(error => ({ failure: error.stack || String(error) }))`, true);
+      if (initial?.failure) throw new Error(initial.failure);
       await browser.webContents.executeJavaScript(
         'Promise.allSettled(document.getAnimations({ subtree: true }).map(animation => animation.finished))'
       );
@@ -139,7 +243,8 @@ if (!process.versions.electron) {
         0.75,
       );
       if (channelDragGeometry.targetAfter.top <= channelDragGeometry.targetBefore.top) {
-        throw new Error('The Uncategorized target did not push existing categories down during channel drag');
+        throw new Error('The Uncategorized target did not push existing categories down during channel drag: ' +
+          JSON.stringify(channelDragGeometry));
       }
       const channelMoved = await browser.webContents.executeJavaScript(`window.categoryTestRequests.some(({ type, payload }) =>
         type === 'CHANNEL_UPDATE' && payload.channelId === 'voice' && payload.categoryId === 'destination')`);
@@ -158,6 +263,119 @@ if (!process.versions.electron) {
       const categoryMoved = await browser.webContents.executeJavaScript(`window.categoryTestRequests.some(({ type, payload }) =>
         type === 'CATEGORY_REORDER' && payload.orderedIds.join(',') === 'destination,category')`);
       if (!categoryMoved) throw new Error('A real Chromium pointer drag did not reorder categories');
+      await browser.webContents.executeJavaScript('window.openChannelSettingsProbe(); document.fonts.ready');
+      await browser.webContents.executeJavaScript('Promise.allSettled(document.getAnimations({ subtree: true }).map(animation => animation.finished))');
+      await click('[data-channel-tab="permissions"]');
+      if (!await browser.webContents.executeJavaScript(`!document.querySelector('[data-customize]') && !document.querySelector('.channel-permission-controls').disabled && document.querySelector('[data-sync-category]').hidden`)) {
+        throw new Error('Synchronized permissions must be directly editable without a Customize button');
+      }
+      await click('[data-permission-bit="256"][data-permission-state="deny"]');
+      await key('End');
+      if (!await browser.webContents.executeJavaScript(`document.querySelector('[data-permission-bit="256"][data-permission-state="allow"]').getAttribute('aria-checked') === 'true'`)) {
+        throw new Error('Real keyboard navigation did not select Allow after a pointer selection');
+      }
+      await click('[data-audience-toggle]');
+      if (!await browser.webContents.executeJavaScript(`!!document.querySelector('[data-audience-popup]:popover-open') && document.activeElement.matches('[data-audience-search]')`)) {
+        throw new Error('The shared audience dropdown did not open and focus its search in channel settings');
+      }
+      await key('Escape');
+      if (!await browser.webContents.executeJavaScript(`!!document.querySelector('.channel-settings-card:not([hidden])') && !document.querySelector('[data-audience-popup]:popover-open')`)) {
+        throw new Error('Escape must close the role dropdown without closing channel settings');
+      }
+      await click('[data-audience-toggle]');
+      await browser.webContents.insertText('Additional');
+      await key('ArrowDown');
+      if (!await browser.webContents.executeJavaScript(`document.activeElement?.matches('[data-audience-kind="role"][data-audience-id="additional"]')`)) {
+        throw new Error('Native ArrowDown did not focus the filtered role');
+      }
+      await key('Enter');
+      if (!await browser.webContents.executeJavaScript(`!!document.querySelector('[data-permission-target="role:additional"].active')`)) {
+        throw new Error('Keyboard selection did not add the extra role override');
+      }
+      await key('Escape');
+      await click('[data-audience-toggle]');
+      // Delivery can lag behind two animation frames; text insertion must await the native key.
+      await selectAllText(120);
+      await browser.webContents.insertText('ana');
+      await key('ArrowDown');
+      if (!await browser.webContents.executeJavaScript(`document.querySelector('[data-audience-search]')?.value === 'ana' && document.activeElement?.matches('[data-audience-kind="user"][data-audience-id="member"]')`)) {
+        throw new Error('Native select-all and ArrowDown did not focus the filtered member');
+      }
+      await key('Enter');
+      if (!await browser.webContents.executeJavaScript(`!!document.querySelector('[data-permission-target="user:member"].active') && !document.querySelector('[data-audience-id="bot"]')`)) {
+        const state = await browser.webContents.executeJavaScript(`({
+          active: document.activeElement?.outerHTML, query: document.querySelector('[data-audience-search]')?.value,
+          popup: !!document.querySelector('[data-audience-popup]:popover-open'),
+          targets: [...document.querySelectorAll('[data-permission-target]')].map(element => element.dataset.permissionTarget),
+          options: [...document.querySelectorAll('[data-audience-id]:not([hidden])')].map(element => element.dataset.audienceId),
+        })`);
+        throw new Error('Searching and selecting a person did not add a member rule or exposed bots: ' + JSON.stringify(state));
+      }
+      await key('Escape');
+      await browser.webContents.executeJavaScript('Promise.allSettled(document.getAnimations({ subtree: true }).map(animation => animation.finished))');
+      for (const width of [1100, 320]) {
+        await resize(width);
+        await browser.webContents.executeJavaScript('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
+        const bounds = await browser.webContents.executeJavaScript(`(() => {
+          const card = document.querySelector('.channel-settings-card');
+          const body = card.querySelector('.settings-content-body');
+          const footer = card.querySelector('.modal-footer').getBoundingClientRect();
+          const sync = card.querySelector('[data-sync-category]');
+          const syncStyle = getComputedStyle(sync);
+          return { viewport: innerWidth, card: card.scrollWidth - card.clientWidth,
+            body: body.scrollWidth - body.clientWidth, right: card.getBoundingClientRect().right,
+            sync: sync.querySelector('[aria-hidden="true"]')?.textContent === 'sync' &&
+              syncStyle.fontFamily === getComputedStyle(body).fontFamily &&
+              syncStyle.fontSize === '11px' && syncStyle.cursor === 'pointer' &&
+              sync.getBoundingClientRect().height >= 32 && sync.getBoundingClientRect().height <= 48 &&
+              sync.getBoundingClientRect().right <= card.querySelector('.channel-sync-status').getBoundingClientRect().right,
+            footer: footer.bottom <= innerHeight, icons: document.fonts.check('18px "Material Symbols Outlined"'),
+            overflow: [...body.querySelectorAll('*')].filter(element => element.getBoundingClientRect().right > body.getBoundingClientRect().right)
+              .slice(0, 8).map(element => ({ tag: element.tagName, class: element.className, width: element.getBoundingClientRect().width })) };
+        })()`);
+        if (process.env.MONKY_COMMUNITY_SCREENSHOTS) {
+          fs.writeFileSync(path.join(process.env.MONKY_COMMUNITY_SCREENSHOTS, `channel-settings-${locale}-${width}.png`),
+            (await browser.webContents.capturePage()).toPNG());
+        }
+        if (bounds.card > 1 || bounds.body > 1 || bounds.right > bounds.viewport || !bounds.footer || !bounds.icons || !bounds.sync) {
+          throw new Error(`Settings overflow or unloaded icons at ${width}px: ${JSON.stringify(bounds)}`);
+        }
+        await click('[data-audience-toggle]');
+        await selectAllText();
+        await key('Backspace');
+        const popup = await browser.webContents.executeJavaScript(`(() => {
+          const popup = document.querySelector('[data-audience-popup]');
+          const box = popup.getBoundingClientRect();
+          return { left: box.left, right: box.right, top: box.top, bottom: box.bottom,
+            roles: !!popup.querySelector('[data-audience-kind="role"]:not([hidden])'),
+            members: !!popup.querySelector('[data-audience-kind="user"]:not([hidden])') };
+        })()`);
+        if (popup.left < 0 || popup.right > width || popup.top < 0 || popup.bottom > 850 || !popup.roles || !popup.members) {
+          throw new Error(`Role/member picker escaped the viewport or lost its groups: ${JSON.stringify(popup)}`);
+        }
+        if (process.env.MONKY_COMMUNITY_SCREENSHOTS) {
+          fs.writeFileSync(path.join(process.env.MONKY_COMMUNITY_SCREENSHOTS, `channel-settings-picker-${locale}-${width}.png`),
+            (await browser.webContents.capturePage()).toPNG());
+        }
+        await key('Escape');
+      }
+      await resize(1100);
+      await click('[data-sync-category]');
+      await browser.webContents.executeJavaScript('Promise.allSettled(document.getAnimations({ subtree: true }).map(animation => animation.finished))');
+      await click('[data-action="cancel"]');
+      if (!await browser.webContents.executeJavaScript(`!document.querySelector('[data-sync-category]').hidden && !!document.querySelector('[data-permission-target="role:additional"]') && !!document.querySelector('[data-permission-target="user:member"]')`)) {
+        throw new Error('Cancelling synchronization lost the local draft');
+      }
+      await click('[data-sync-category]');
+      await browser.webContents.executeJavaScript('Promise.allSettled(document.getAnimations({ subtree: true }).map(animation => animation.finished))');
+      await click('[data-action="confirm"]');
+      if (!await browser.webContents.executeJavaScript(`!document.querySelector('.channel-permission-controls').disabled && document.querySelector('[data-sync-category]').hidden && !document.querySelector('[data-permission-target="role:additional"]') && !document.querySelector('[data-permission-target="user:member"]')`)) {
+        throw new Error('Confirmed synchronization did not replace local overrides');
+      }
+      await click('#btn-save');
+      if (!await browser.webContents.executeJavaScript(`window.categoryTestRequests.at(-1).payload.inheritCategoryPermissions === true && !('permissionOverwrites' in window.categoryTestRequests.at(-1).payload)`)) {
+        throw new Error('Saving synchronization did not preserve live category inheritance');
+      }
       console.log(`Category DOM ${locale}: forms, mixed groups, keyboard, menus, scoped persistence passed`);
     }
     await finish(0);
@@ -166,6 +384,8 @@ if (!process.versions.electron) {
 
 async function regression(locale) {
   localStorage.clear();
+  const { selectEnhancer } = await import('/core/SelectEnhancer.ts');
+  selectEnhancer.init();
   const [{ setLanguage, t }, stores, network, { CategoryModal }, { CreateChannelModal }, { EditChannelModal }, { appEvents }] = await Promise.all([
     import('/i18n/index.ts'), import('/stores/serverStore.ts'), import('/core/NetworkClient.ts'),
     import('/views/CategoryModal.ts'),
@@ -191,10 +411,28 @@ async function regression(locale) {
     categories: [category, destination], members: [], roles: [{ id: 'role', name: 'Team', color: null, position: 2, permissions: 0, isDefault: false, createdAt: 1 }],
     userRoles: [], myPermissions: 0xFFFFFFFF,
   };
+  details.roles.push({ ...details.roles[0], id: 'additional', name: 'Additional role' });
   const user = { id: 'user', clientId: 'key', nickname: 'User', status: 'ONLINE' };
   store.setServerDetails(details, user);
+  store.knownMembers.set('member', { ...user, id: 'member', nickname: 'Ána Offline', status: 'DISCONNECTED' });
+  store.knownMembers.set('bot', { ...user, id: 'bot', nickname: 'Bot', isBot: true });
+  details.knownMembers = [...store.knownMembers.values()];
+  store.myPermissions = 546576;
+  store.setCategories([{ ...category, isPrivate: false, permissionOverwrites: [{ roleId: null, allow: 0, deny: 512 }] }, destination]);
+  check(!store.hasPermission(512, 'text') && store.hasPermission(524288, 'text'),
+    'A category-only update revokes inherited reading immediately without hiding the channel');
+  store.setCategories([{ ...category, permissionOverwrites: [
+    { roleId: null, allow: 0, deny: 524288 },
+    { userId: user.id, allow: 524288, deny: 512 },
+  ] }, destination]);
+  check(store.hasPermission(524288, 'text') && !store.hasPermission(512, 'text') &&
+    (store.getUserChannelPermissions('member', 'text') & 524288) === 0,
+  'Client inheritance resolves individual visibility and reading only for the matching member');
+  store.setCategories(details.categories);
+  store.myPermissions = details.myPermissions;
   stores.setActiveServerStore(store);
   const client = new network.NetworkClient();
+  client.getStatus = () => 'CONNECTED';
   const requests = [];
   client.sendRequest = async (type, payload) => { requests.push({ type, payload }); return {}; };
   network.setActiveNetworkClient(client);
@@ -258,20 +496,146 @@ async function regression(locale) {
   client.sendRequest = sendRequest;
   const edit = new EditChannelModal();
   edit.open('text');
-  checkInlineSwitch('#input-channel-inherit');
-  check(collapsed('#channel-permission-overrides'), 'edit reflects inheritance');
-  change('#input-channel-category', '');
-  check(collapsed('#channel-inherit-group') && !collapsed('#channel-permission-overrides'), 'uncategorizing exposes preserved effective ACL');
+  check(!field('#input-channel-inherit'), 'Editing uses synchronization status instead of another inheritance switch');
+  check(field('[data-channel-tab="general"]') && field('[data-channel-tab="permissions"]'), 'channel settings have a sidebar');
+  field('[data-channel-tab="permissions"]').click();
+  check(!collapsed('.channel-sync-status') && !field('.channel-permission-controls').disabled &&
+    field('[data-sync-category]').hidden && !field('[data-customize]'), 'synchronized permissions are informational and directly editable');
+  field('[data-permission-bit="256"][data-permission-state="deny"]').click();
+  check(!field('[data-sync-category]').hidden && field('[data-sync-status]').textContent === t('channelPermissions.unsynced'),
+    'Changing a permission immediately reveals synchronization without a Customize step');
+  field('[data-permission-bit="256"][data-permission-state="inherit"]').click();
+  check(field('[data-sync-category]').hidden && field('[data-sync-status]').textContent === t('channelPermissions.synced'),
+    'Restoring the category rules removes the synchronization action without a false difference');
+  field('[data-audience-toggle]').click();
+  field('[data-audience-kind="role"][data-audience-id="additional"]').click();
+  field('[data-audience-search]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check(field('[data-sync-category]').hidden, 'An all-inherited empty target is not a permission difference');
+  field('[data-permission-bit="256"][data-permission-state="deny"]').click();
   field('#form-edit-channel').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   await flush();
-  check(requests.at(-1).payload.categoryId === null && requests.at(-1).payload.isPrivate, 'detach preserves private access');
+  check(requests.at(-1).payload.inheritCategoryPermissions === false &&
+    requests.at(-1).payload.permissionOverwrites.some(rule => rule.roleId === 'additional' && (rule.deny & 256) !== 0),
+  'Saving a direct permission edit automatically persists independent rules');
+  edit.open('text');
+  field('[data-channel-tab="general"]').click();
+  change('#input-channel-category', '');
+  check(collapsed('.channel-sync-status'), 'uncategorizing removes irrelevant synchronization controls');
+  field('[data-channel-tab="permissions"]').click();
+  check(!field('.channel-permission-controls').disabled && field('#input-channel-private').checked, 'uncategorizing preserves effective private ACL');
+  field('[data-permission-bit="256"][data-permission-state="deny"]').click();
+  check(field('[data-permission-bit="256"][data-permission-state="deny"]').getAttribute('aria-checked') === 'true', 'Everyone can deny sending without hiding the channel');
+  field('[data-permission-target="role:role"]').click();
+  field('[data-permission-bit="256"][data-permission-state="allow"]').click();
+  field('#form-edit-channel').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await flush();
+  const rules = requests.at(-1).payload.permissionOverwrites;
+  check(requests.at(-1).payload.categoryId === null && rules.some(rule => rule.roleId === null && (rule.deny & 256) !== 0), 'local Everyone denial is saved');
+  check(rules.some(rule => rule.roleId === 'role' && (rule.allow & 256) !== 0), 'role grant and existing private visibility are preserved');
   const categoryModal = new CategoryModal();
   categoryModal.open(category);
-  check(field('#input-category-name').value === '<Team>', 'category names are escaped');
-  change('#input-category-name', 'Renamed');
-  field('.modal-backdrop form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  check(field('#input-channel-name').value === '<Team>', 'category names are escaped in the shared settings editor');
+  check(field('label[for="input-channel-name"]').textContent === t('categories.name'), 'Category editing labels the field as category name');
+  field('[data-channel-tab="permissions"]').click();
+  field('[data-audience-toggle]').click();
+  check(field('[data-audience-id="user"][data-audience-kind="user"]') &&
+    !field('[data-audience-id="bot"]'), 'Individual rules allow self and offline humans but not bots');
+  field('[data-audience-id="member"][data-audience-kind="user"]').click();
+  field('[data-audience-search]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check(field('.channel-settings-card'), 'Escape closes only the shared target picker');
+  field('[data-permission-bit="256"][data-permission-state="deny"]').click();
+  field('[data-channel-tab="general"]').click();
+  change('#input-channel-name', 'Renamed');
+  field('#form-edit-channel').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   await flush();
   check(requests.at(-1).type === 'CATEGORY_UPDATE' && requests.at(-1).payload.name === 'Renamed', 'category editing submits');
+  check(requests.at(-1).payload.permissionOverwrites.some(rule =>
+    rule.userId === 'member' && rule.roleId === undefined && (rule.deny & 256) !== 0),
+  'Category editing submits an individual denial without treating it as Everyone');
+  edit.open('text');
+  client.sendRequest = async () => { throw new Error('Controlled save failure'); };
+  field('#form-edit-channel').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await flush();
+  check(field('#btn-save') && !field('#btn-save').disabled &&
+    document.querySelector('.chat-copy-toast-label')?.textContent === 'Controlled save failure',
+  'A failed settings save shows an error toast and restores controls for retry');
+  client.sendRequest = sendRequest;
+  field('#form-edit-channel').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await flush();
+  check(!field('.channel-settings-card'), 'Retrying a settings save closes the editor after acknowledgement');
+  edit.open('text');
+  const beforeConflict = requests.length;
+  store.setCategories([{ ...category, name: 'Concurrent category change' }, destination]);
+  field('#form-edit-channel').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await flush();
+  check(requests.length === beforeConflict && document.querySelector('.chat-copy-toast-label')?.textContent === t('channelPermissions.changed'),
+    'A changed inherited category rejects a stale draft before sending');
+  edit.close();
+  store.setCategories(details.categories);
+  const initialCategories = [category, destination];
+  const updatedCategory = { ...category, permissionOverwrites: [
+    { roleId: null, allow: 0, deny: 524288 | 512 },
+    { roleId: 'role', allow: 524288, deny: 0 },
+  ] };
+  store.setCategories([updatedCategory, destination]);
+  edit.open('text');
+  check(field('[data-sync-category]').hidden &&
+    field('[data-permission-bit="512"][data-permission-state="deny"]').getAttribute('aria-checked') === 'true',
+  'Opening an inherited channel uses the latest category rules instead of stale channel data');
+  edit.close();
+  store.setCategories([category, { ...updatedCategory, id: destination.id }]);
+  edit.open('text');
+  change('#input-channel-category', destination.id);
+  check(field('[data-sync-category]').hidden &&
+    field('[data-permission-bit="512"][data-permission-state="deny"]').getAttribute('aria-checked') === 'true',
+  'Moving a synchronized channel adopts the destination rules immediately');
+  const beforeDestinationConflict = requests.length;
+  store.setCategories([category, { ...updatedCategory, id: destination.id, name: 'Concurrent destination change' }]);
+  field('#form-edit-channel').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await flush();
+  check(requests.length === beforeDestinationConflict &&
+    document.querySelector('.chat-copy-toast-label')?.textContent === t('channelPermissions.changed'),
+  'A concurrent change in the selected destination blocks a stale save');
+  edit.close();
+  store.setCategories(initialCategories);
+  const textChannel = store.getChannel('text');
+  const originalTextChannel = { ...textChannel };
+  Object.assign(textChannel, { inheritCategoryPermissions: false, permissionOverwrites: [
+    { roleId: 'role', allow: 524288, deny: 0 },
+    { roleId: null, allow: 0, deny: 524288 },
+    { userId: 'member', allow: 0, deny: 0 },
+  ] });
+  edit.open('text');
+  check(field('[data-sync-category]').hidden, 'Rule order and empty targets do not create false differences');
+  field('#form-edit-channel').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await flush();
+  check(requests.at(-1).payload.inheritCategoryPermissions === true &&
+    !('permissionOverwrites' in requests.at(-1).payload),
+  'Matching independent rules save as category inheritance without redundant overrides');
+  const legacyRules = [{ roleId: null, allow: 524288, deny: 0 }];
+  Object.assign(textChannel, { isPrivate: true, allowedRoleIds: [], permissionOverwrites: legacyRules });
+  store.setCategories([{ ...category, isPrivate: false, allowedRoleIds: [], permissionOverwrites: legacyRules }, destination]);
+  edit.open('text');
+  check(!field('[data-sync-category]').hidden && field('#input-channel-private').checked,
+    'Matching bits do not discard a legacy private flag that still excludes bots');
+  field('#form-edit-channel').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await flush();
+  check(requests.at(-1).payload.inheritCategoryPermissions === false,
+    'Saving different legacy privacy keeps the channel independent');
+  Object.assign(textChannel, { permissionOverwrites: undefined }, originalTextChannel);
+  store.setCategories(initialCategories);
+  edit.open('text');
+  let finishSettings;
+  client.sendRequest = () => new Promise(resolve => { finishSettings = resolve; });
+  field('#form-edit-channel').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  const previousPermissions = store.myPermissions;
+  store.myPermissions = 0;
+  store.bus.emit('server.updated');
+  check(!field('.channel-settings-card'), 'Losing management immediately closes even a pending editor');
+  finishSettings({});
+  await flush();
+  store.myPermissions = previousPermissions;
+  client.sendRequest = sendRequest;
   categoryModal.open();
   field('#input-category-name').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   check(!field('.modal-backdrop'), 'escape closes category modal');
@@ -422,6 +786,10 @@ async function regression(locale) {
   categoryModal.close();
   requests.length = 0;
   window.categoryTestRequests = requests;
+  window.openChannelSettingsProbe = () => {
+    document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
+    edit.open('text');
+  };
   window.categoryTestMouseEvents = [];
   for (const type of ['mousedown', 'mousemove', 'mouseup']) {
     document.addEventListener(type, event => {

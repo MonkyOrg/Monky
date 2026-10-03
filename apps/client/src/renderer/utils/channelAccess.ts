@@ -1,30 +1,24 @@
-import { ChannelSummary, canAccessChannel } from '@monky/shared';
+import { ChannelSummary, Permission, hasPermission } from '@monky/shared';
 import { serverStore } from '../stores/serverStore';
 import { showAlert } from '../views/Dialog';
 import { t } from '../i18n';
 
 /**
- * The private channel that blocks a voice move, or null when the move is fine
- * (#390).
- *
- * Whoever can move members usually manages channels too, which means they see
- * every private room — including the ones the person being moved cannot enter.
- * The server already refuses such a move, but silently: this mirrors the same
- * rule client-side so the warning names the channel instead of nothing
- * happening.
+ * The channel that blocks voice admission for the target member (#390).
+ * Visibility and speaking permission both apply, even in public channels.
  *
  * An unknown channel is deliberately treated as allowed. The server stays the
  * authority, and guessing here would block a legitimate move on stale state.
  */
 export function findBlockedMoveTarget(userId: string, channelId: string): ChannelSummary | null {
   const channel = serverStore.getChannel(channelId);
-  if (!channel || !channel.isPrivate) return null;
+  if (!channel) return null;
 
-  const allowed = canAccessChannel(
-    channel,
-    serverStore.getUserPermissions(userId),
-    serverStore.getUserRoleIds(userId)
-  );
+  // Bot capabilities are not disclosed in member summaries; let the server
+  // authorize their public-room admission rather than applying human Everyone.
+  if (serverStore.knownMembers.get(userId)?.isBot) return channel.isPrivate ? channel : null;
+  const permissions = serverStore.getUserChannelPermissions(userId, channelId);
+  const allowed = hasPermission(permissions, Permission.VIEW_CHANNEL) && hasPermission(permissions, Permission.SPEAK);
   return allowed ? null : channel;
 }
 

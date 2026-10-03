@@ -52,7 +52,7 @@ function fixture() {
     getRoleAccessVersion: () => roleVersion,
     getChannelSummary: async (id) => id === 'voice' && exists ? { ...channel } : null,
     getAccessContext: async (id) => {
-      const result = { permissions: permissions.get(id) ?? defaults, roleIds: roles.get(id) ?? [] };
+      const result = { userId: id, permissions: permissions.get(id) ?? defaults, roleIds: roles.get(id) ?? [] };
       accessHook?.(id);
       return result;
     },

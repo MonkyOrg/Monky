@@ -6,6 +6,7 @@ const { authoredOggPreview } = require(path.join(__dirname, 'fixtures', 'authore
 
 const clientRoot = path.resolve(__dirname, '..');
 const output = path.join(clientRoot, 'dist-test');
+const sharedModule = '/@fs/' + path.resolve(clientRoot, '..', '..', 'packages', 'shared', 'src', 'index.ts').replace(/\\/g, '/');
 
 if (!process.versions.electron) {
   fs.mkdirSync(output, { recursive: true });
@@ -132,7 +133,7 @@ if (!process.versions.electron) {
       return;
     }
     if (process.argv.includes('--surfaces-only')) {
-      await window.webContents.executeJavaScript(`(${runDomSmoke.toString()})()`, true);
+      await window.webContents.executeJavaScript(`(${runDomSmoke.toString()})(${JSON.stringify(sharedModule)})`, true);
       const result = await window.webContents.executeJavaScript('window.commandDomCaptureComposer()', true);
       await runMessageToolbarPointerSmoke(window);
       await window.webContents.executeJavaScript('window.commandDomCleanup()', true);
@@ -166,7 +167,7 @@ if (!process.versions.electron) {
       await finish(0);
       return;
     }
-    await window.webContents.executeJavaScript(`(${runDomSmoke.toString()})()`, true);
+    await window.webContents.executeJavaScript(`(${runDomSmoke.toString()})(${JSON.stringify(sharedModule)})`, true);
     for (const withArguments of [true, false]) {
       await window.webContents.executeJavaScript(`window.commandSpaceFixture.prepare(${withArguments})`, true);
       await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
@@ -3293,11 +3294,12 @@ async function runSidebarPttSmoke() {
   }
 }
 
-async function runDomSmoke() {
-  const [{ ChatView }, chats, servers, networks, events, inputs, catalog, language, proxies, botEvents] = await Promise.all([
+async function runDomSmoke(sharedModule) {
+  const [{ ChatView }, chats, servers, networks, events, inputs, catalog, language, proxies, botEvents, { Permission }] = await Promise.all([
     import('/views/ChatView.ts'), import('/stores/chatStore.ts'), import('/stores/serverStore.ts'),
     import('/core/NetworkClient.ts'), import('/core/EventBus.ts'), import('/utils/botInputs.ts'),
     import('/utils/commandCatalog.ts'), import('/i18n/index.ts'), import('/core/activeProxy.ts'), import('/core/botChatEvents.ts'),
+    import(sharedModule),
   ]);
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
@@ -3441,8 +3443,10 @@ async function runDomSmoke() {
   check(row.getBoundingClientRect().height === beforeHeight, 'Message toolbar must not shift chat layout');
   check(getComputedStyle(find('[data-message-action="emoji"]')).opacity === '1', 'Enabled emoji action must not look disabled');
   const messagePermissions = server.myPermissions;
-  server.myPermissions = 0;
+  server.myPermissions = Permission.VIEW_CHANNEL | Permission.READ_MESSAGES;
   events.appEvents.emit('server.roles_updated');
+  check(row.isConnected && store.getMessages('one').some(message => message.id === original.id),
+    'Revoking send permission must preserve readable messages and their toolbar');
   check(find('[data-message-action="emoji"]').disabled, 'Emoji action must remain disabled without message permission');
   check(getComputedStyle(find('[data-message-action="emoji"]')).opacity === '0.4', 'Disabled emoji action must retain the toolbar disabled styling');
   server.myPermissions = messagePermissions;
@@ -3724,7 +3728,7 @@ async function runDomSmoke() {
   type(find('#chat-message-input'), '/');
   check(find('#command-dropup').textContent.includes('not allowed in this text channel'), 'Channel denial must be localized in English');
   server.updateChannel(allowedChannel);
-  server.myPermissions = 1 << 8;
+  server.myPermissions = Permission.VIEW_CHANNEL | Permission.READ_MESSAGES | Permission.SEND_MESSAGES;
   events.appEvents.emit('server.roles_updated');
   check(find('#command-dropup').textContent.includes('do not have permission'), 'Role revocation must immediately refresh an open slash menu');
   check(!find('#chat-message-input').readOnly, 'Bot permission denial must not block ordinary chat');
@@ -3773,9 +3777,8 @@ async function runDomSmoke() {
   }
   language.setLanguage('pt-BR');
   type(find('#chat-message-input'), '');
-  const [{ CreateChannelModal }, { EditChannelModal }, { ServerRolesTab }] = await Promise.all([
+  const [{ CreateChannelModal }, { EditChannelModal }] = await Promise.all([
     import('/views/CreateChannelModal.ts'), import('/views/EditChannelModal.ts'),
-    import('/views/serverSettings/tabs/ServerRolesTab.ts'),
   ]);
   const createChannel = new CreateChannelModal();
   const editChannel = new EditChannelModal();
@@ -3811,10 +3814,6 @@ async function runDomSmoke() {
     await frame();
     check(channelRequests.at(-1)?.payload.botCommandsEnabled === true,
       'Voice creation must send its explicit bot command setting');
-    const rolesMarkup = document.createElement('div');
-    rolesMarkup.innerHTML = new ServerRolesTab().renderHtml();
-    check(!!rolesMarkup.querySelector('.role-permission-switch[data-permission="8192"]'), 'Role editor must expose MANAGE_BOTS as a switch');
-    check(!!rolesMarkup.querySelector('.role-permission-switch[data-permission="16384"]'), 'Role editor must expose USE_BOT_COMMANDS as a switch');
   } finally {
     createChannel.close();
     editChannel.close();
@@ -4076,7 +4075,7 @@ async function runDomSmoke() {
   find('.bot-inline-form').requestSubmit();
   check(sent.length === beforeDeniedForm, 'A forged DOM submit must not bypass the channel switch');
   server.updateChannel(allowedChannel);
-  server.myPermissions = 1 << 8;
+  server.myPermissions = Permission.VIEW_CHANNEL | Permission.READ_MESSAGES | Permission.SEND_MESSAGES;
   events.appEvents.emit('server.roles_updated');
   check(find('.bot-inline-form button[type="submit"]').disabled, 'Role revocation must disable an existing form');
   server.myPermissions = 2147483647;

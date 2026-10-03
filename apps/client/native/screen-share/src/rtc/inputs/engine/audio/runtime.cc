@@ -116,7 +116,8 @@ Json AudioSource::Snapshot() const {
           {"packets", state.packets}, {"blocks", state.blocks},
           {"pendingInputFrames", state.pending_input_frames},
           {"discardedPartialFrames", state.discarded_partial_frames},
-          {"clippedSamples", state.clipped_samples}, {"timestampedBlocks", timestamped_blocks_.load()}};
+          {"clippedSamples", state.clipped_samples}, {"timestampedBlocks", timestamped_blocks_.load()},
+          {"clockObservationsUnavailable", source_->ClockObservationsUnavailable()}};
 }
 
 AudioRuntime::AudioRuntime(Host& host, webrtc::Clock& clock)

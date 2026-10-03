@@ -392,6 +392,7 @@ export const en: CliTranslationMap = {
   'validation.roleColor': 'Invalid color. Use the #RRGGBB format.',
   'validation.voiceMode': 'Invalid voice mode: {value}. Use p2p or sfu.',
   'permission.MANAGE_CHANNELS': 'Manage Channels',
+  'permission.VIEW_CHANNEL': 'View Channels',
   'permission.MANAGE_SERVER': 'Manage Server',
   'permission.MANAGE_ROLES': 'Manage Roles',
   'permission.KICK_MEMBERS': 'Kick Members',

@@ -67,7 +67,7 @@ export interface ICategoryRepository {
   listByServerId(serverId: string): Promise<import('@monky/shared').ChannelCategory[]>;
   findById(id: string): Promise<import('@monky/shared').ChannelCategory | null>;
   create(category: import('@monky/shared').ChannelCategory): Promise<void>;
-  update(id: string, updates: Partial<Pick<import('@monky/shared').ChannelCategory, 'name' | 'isPrivate' | 'allowedRoleIds'>>): Promise<void>;
+  update(id: string, updates: Partial<Pick<import('@monky/shared').ChannelCategory, 'name' | 'isPrivate' | 'allowedRoleIds' | 'permissionOverwrites'>>): Promise<void>;
   /** Detaches children and snapshots inherited ACLs in the same transaction. */
   deletePreservingAccess(id: string): Promise<void>;
   reorder(orderedIds: string[]): Promise<void>;

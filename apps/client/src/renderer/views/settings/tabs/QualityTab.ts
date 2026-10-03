@@ -164,6 +164,19 @@ export class QualityTab {
         </small>
       </div>
 
+      <div data-settings-section="screen-pip" data-settings-label="${escapeHtml(t('settings.screenAutoPipLabel'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+          <div>
+            <label for="checkbox-screen-auto-pip" style="cursor: pointer;">${t('settings.screenAutoPipLabel')}</label>
+            <small id="screen-auto-pip-description" style="display: block; color: var(--text-muted);">${t('settings.screenAutoPipDesc')}</small>
+          </div>
+          <label class="toggle-switch" aria-label="${escapeHtml(t('settings.screenAutoPipLabel'))}">
+            <input id="checkbox-screen-auto-pip" type="checkbox" aria-describedby="screen-auto-pip-description" ${settingsStore.screenShareAutoPictureInPicture ? 'checked' : ''}>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
       <div data-settings-section="screen-preview" data-settings-label="${escapeHtml(t('settings.screenPreviewSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
           <div>
@@ -392,10 +405,22 @@ export class QualityTab {
     }
     const selectPreset = container.querySelector<HTMLSelectElement>('#select-preset');
     const checkboxPreviewFocus = container.querySelector<HTMLInputElement>('#checkbox-screen-preview-focus');
+    const checkboxAutoPip = container.querySelector<HTMLInputElement>('#checkbox-screen-auto-pip');
     const checkboxScreenTelemetry = container.querySelector<HTMLInputElement>('#checkbox-screen-telemetry');
     const selectScreenTelemetryPos = container.querySelector<HTMLSelectElement>('#select-screen-telemetry-position');
     const selectScreenTelemetryMode = container.querySelector<HTMLSelectElement>('#select-screen-telemetry-mode');
 
+    checkboxAutoPip?.addEventListener('change', () => {
+      const previous = settingsStore.screenShareAutoPictureInPicture;
+      settingsStore.screenShareAutoPictureInPicture = checkboxAutoPip.checked;
+      try { settingsStore.save(); }
+      catch (error) {
+        settingsStore.screenShareAutoPictureInPicture = previous;
+        checkboxAutoPip.checked = previous;
+        console.warn('[QualityTab] Could not save automatic Picture-in-Picture:', error);
+        void showAlert({ variant: 'danger', message: t('settings.screenAutoPipSaveError') });
+      }
+    }, options);
     checkboxPreviewFocus?.addEventListener('change', () => {
       settingsStore.screenSharePreviewPauseWhenUnfocused = checkboxPreviewFocus.checked;
       settingsStore.save();

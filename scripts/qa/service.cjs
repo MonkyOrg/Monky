@@ -87,6 +87,28 @@ async function startServer() {
       }
       return { members: (await users.listAll()).length };
     };
+    const seedEmptyForum = async () => {
+      assert.equal(config.scenario, 'empty-forum');
+      const names = Array.from({ length: 19 }, (_, index) => `QA Usuario ${String(index + 1).padStart(2, '0')}`);
+      await seedMembers(names.slice(0, 10));
+      const seeded = await seedMembers(names.slice(10));
+      const roles = new SqliteRoleRepository(server.dbConn.getDb());
+      const existing = await roles.listAll();
+      assert.ok(existing.length <= 10);
+      for (let index = existing.length; index < 10; index++) {
+        await roles.create({
+          id: randomUUID(), name: `QA Cargo ${String(index - existing.length + 1).padStart(2, '0')}`,
+          color: ['#507DBC', '#5A9367', '#B07BAC', '#D69842'][index % 4],
+          permissions: 0, position: index, isDefault: false, createdAt: Date.now(),
+        });
+      }
+      await new SqliteServerRepository(server.dbConn.getDb()).updateServer({ eventsEnabled: true });
+      const created = await server.wsServer.channelService.createChannel({
+        name: 'forum-vazio', type: 'FORUM', isPrivate: false, allowedRoleIds: [], botCommandsEnabled: true,
+      });
+      assert.equal(created.channel.type, 'FORUM');
+      return { id: created.channel.id, members: seeded.members, roles: (await roles.listAll()).length, threads: 0 };
+    };
     const qaResponseNames = [
       'QA Ana',
       'QA Bruno',
@@ -233,6 +255,7 @@ async function startServer() {
       ready: { port, name: `Monky QA ${config.scenario}`, protocol: shared.PROTOCOL_VERSION },
       snapshot: () => server.getStats(),
       seedMembers,
+      seedEmptyForum,
       seedForum,
       seedLiveForm,
       close: () => server.stop(),
@@ -377,6 +400,7 @@ process.on('message', message => {
     if (message.type === 'qa-ping') value = { alive: !!service && !stopping };
     else if (message.type === 'qa-snapshot' && service) value = await service.snapshot();
     else if (message.type === 'qa-seed-members' && service?.seedMembers) value = await service.seedMembers(message.value);
+    else if (message.type === 'qa-seed-empty-forum' && service?.seedEmptyForum) value = await service.seedEmptyForum();
     else if (message.type === 'qa-seed-forum' && service?.seedForum) value = await service.seedForum(message.value);
     else if (message.type === 'qa-seed-live-form' && service?.seedLiveForm) value = await service.seedLiveForm(message.value);
     else if (message.type === 'qa-join-voice' && service?.joinVoice) value = await service.joinVoice(message.value);

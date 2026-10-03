@@ -83,7 +83,53 @@ if (!process.versions.electron) {
         const step = await browser.webContents.executeJavaScript('window.settingsRegression.next().catch(error => ({ failure: error.stack || String(error) }))', true);
         if (step.failure) throw new Error(step.failure);
         if (step.done) { console.log(`Server settings DOM (${language}): ${step.value} checks passed`); break; }
-        if (process.env.MONKY_COMMUNITY_SCREENSHOTS) {
+        const roleClicks = {
+          'role-menu-open': '[data-role-menu="editors"]',
+          'role-editor-open': '.floating-context-menu:not([data-ui-closing]) [role="menuitem"]:first-child',
+          'role-member-picker-open': '#btn-role-add-members',
+          'role-create-open': '#btn-role-create-new',
+        };
+        if (roleClicks[step.value]) {
+          const point = await browser.webContents.executeJavaScript(`(() => {
+            const element = document.querySelector(${JSON.stringify(roleClicks[step.value])});
+            const box = element.getBoundingClientRect();
+            const point = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
+            const hit = document.elementFromPoint(point.x, point.y);
+            if (hit !== element && !element.contains(hit)) throw new Error('Role control is not clickable: ' + JSON.stringify({ point, hit: hit?.outerHTML, width: innerWidth }));
+            return point;
+          })()`);
+          browser.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+          browser.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
+          browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
+        } else if (step.value === 'role-member-picker-escape') {
+          browser.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+          browser.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+        } else if (step.value === 'role-member-picker-scroll') {
+          const point = await browser.webContents.executeJavaScript(`(() => {
+            const box = document.querySelector('[data-role-member-picker] .role-dialog-body').getBoundingClientRect();
+            return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
+          })()`);
+          browser.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+          browser.webContents.sendInputEvent({ type: 'mouseWheel', ...point, deltaX: 0, deltaY: -420 });
+        } else if (step.value === 'role-dialog-narrow') {
+          browser.setSize(360, 680);
+        } else if (step.value === 'role-dialog-normal') {
+          browser.setSize(1100, 850);
+        }
+        if (step.value === 'role-dialog-normal' || step.value === 'role-dialog-narrow') {
+          const width = step.value === 'role-dialog-normal' ? 1100 : 360;
+          await browser.webContents.executeJavaScript(`new Promise((resolve, reject) => {
+            let frames = 0;
+            const wait = () => {
+              if (innerWidth === ${width}) return requestAnimationFrame(() => requestAnimationFrame(resolve));
+              if (++frames > 120) return reject(new Error('Role dialog viewport did not resize'));
+              requestAnimationFrame(wait);
+            };
+            wait();
+          })`);
+        }
+        await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+        if (process.env.MONKY_COMMUNITY_SCREENSHOTS && !['role-dialog-normal', 'role-dialog-narrow'].includes(step.value)) {
           await browser.webContents.executeJavaScript('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
           fs.writeFileSync(path.join(process.env.MONKY_COMMUNITY_SCREENSHOTS, `727-${language}-${step.value}.png`),
             (await browser.webContents.capturePage()).toPNG());
@@ -215,7 +261,8 @@ async function* runRegression(language, sharedModule) {
       store.removeMemberCompletely(payload.targetUserId);
     } else if (type === 'ROLE_UPDATE') {
       const { roleId, ...patch } = payload;
-      store.updateRoles(store.roles.map((entry) => entry.id === roleId ? { ...entry, ...patch } : entry), store.userRoles);
+      store.updateRoles(store.roles.map((entry) => entry.id === roleId ? { ...entry, ...patch } : entry), store.userRoles,
+        roleId === '@everyone' ? patch.permissions : undefined);
     } else if (type === 'ROLE_ASSIGN' || type === 'ROLE_UNASSIGN') {
       const roleIds = store.getUserRoleIds(payload.userId).filter((id) => id !== payload.roleId);
       if (type === 'ROLE_ASSIGN') roleIds.push(payload.roleId);
@@ -262,6 +309,10 @@ async function* runRegression(language, sharedModule) {
     input.dispatchEvent(new Event('change', { bubbles: true }));
   };
   const tab = (name) => field(`[data-tab="${name}"]`).click();
+  const openRoleEditor = (roleId) => {
+    field(`[data-role-menu="${roleId}"]`).click();
+    field('.floating-context-menu [role="menuitem"]').click();
+  };
   const locked = () => field('#btn-done')?.disabled === true;
   const mainBackdrop = () => field('.server-settings-modal-card')?.closest('.modal-backdrop');
   modal.open();
@@ -513,7 +564,54 @@ async function* runRegression(language, sharedModule) {
   await flush();
   check(!locked() && field('[data-mode="sfu"]').getAttribute('aria-pressed') === 'true', 'Declining a prerequisite never changes persisted mode');
   tab('roles');
-  field('[data-role-open="editors"]').click();
+  check(!field('#role-editor-name'), 'Role settings do not render an inline editor below the list');
+  const everyoneRow = field('[data-role-menu="@everyone"]').closest('tr');
+  check(everyoneRow === everyoneRow.parentElement.firstElementChild && !everyoneRow.classList.contains('role-table-row'),
+    'Everyone is fixed first and cannot be reordered with real roles');
+  check(!store.roles.some(role => role.id === '@everyone'), 'Everyone never enters assignable roles');
+  openRoleEditor('@everyone');
+  await flush();
+  check(!field('#role-editor-name') && !field('[data-role-editor-tab="members"]') &&
+    !field('[data-role-editor-tab="general"]') && !field('#role-editor-tab-general') &&
+    !field('#role-editor-tab-members') && !field('#btn-role-delete'),
+    'Everyone has permission switches but no name, members, color or deletion controls');
+  const { display: everyoneDisplay, flexDirection: everyoneDirection, gap: everyoneGap } =
+    getComputedStyle(field('#role-editor-tab-permissions'));
+  check(field('[data-role-editor] .role-editor-tab-btn.active')?.textContent === t('roles.permissionsTab') &&
+    field('[data-role-editor]').querySelectorAll('.role-editor-tab-btn').length === 1 &&
+    everyoneDisplay === 'flex' && everyoneDirection === 'column' && everyoneGap === '10px',
+  'Everyone uses the normal role editor layout with only its active Permissions tab');
+  yield 'role-everyone-editor';
+  change('.role-permission-switch[data-permission="256"]', false);
+  await flush();
+  check(pendingRequest('ROLE_UPDATE').payload.roleId === '@everyone', 'Everyone edits its server setting, not a real role');
+  acknowledge('ROLE_UPDATE');
+  await flush();
+  check((store.everyonePermissions & 256) === 0, 'Everyone permission changes persist in the store');
+  field('[data-role-editor] [data-role-dialog-close]').click();
+  await flush();
+  yield 'role-menu-open';
+  await flush();
+  const roleMenu = field('.floating-context-menu');
+  check(!field('[data-role-open]') && field('[data-role-menu="editors"]').getAttribute('aria-expanded') === 'true' &&
+    roleMenu.querySelectorAll('[role="menuitem"]').length === 2 &&
+    roleMenu.textContent.includes(t('roles.editRole')) && roleMenu.textContent.includes(t('roles.deleteRole')),
+    'The role row uses a three-dot menu with Edit role and Delete role');
+  check(getComputedStyle(field('[data-role-menu="editors"]')).cursor === 'pointer',
+    'The three-dot button has a clickable cursor');
+  yield 'role-row-menu';
+  yield 'role-editor-open';
+  await flush();
+  const roleEditor = field('[data-role-editor]');
+  check(roleEditor && roleEditor !== mainBackdrop() && mainBackdrop().inert,
+    'A real Edit click opens a dedicated modal and suspends settings');
+  check(!field('.server-settings-modal-card').checkVisibility(), 'The suspended settings card is visually hidden behind the editor');
+  check(document.activeElement === field('#role-editor-name'), 'The editor focuses the role name without scrolling the settings list');
+  check(field('[data-role-editor-tab="general"]').textContent === t('roles.generalTab') &&
+    field('#role-editor-tab-general .role-delete-section #btn-role-delete') &&
+    !field('[data-role-editor] .modal-footer #btn-role-delete'),
+    'General replaces Display and contains deletion in its own section, outside the footer');
+  yield 'role-editor-modal';
   change('#role-editor-name', 'New role name');
   await flush();
   check(locked() && pendingRequest('ROLE_UPDATE').payload.name === 'New role name', 'Existing role names apply without a role Save button');
@@ -521,18 +619,73 @@ async function* runRegression(language, sharedModule) {
   await flush();
   check(store.getRole('editors').name === 'New role name' && field('#btn-role-save').hidden, 'Role editor remains open at the acknowledged state');
   field('[data-role-editor-tab="members"]').click();
-  change('.role-editor-member-switch[data-user-id="bob"]', true);
+  check(!field('.role-editor-member-switch') && !field('[data-bulk-assign]') &&
+    field('[data-role-editor] [data-role-members-empty]').textContent === t('roles.noAssignedMembers'),
+  'Membership lists only assigned people, without switches or filtered bulk actions');
+  yield 'role-member-picker-open';
   await flush();
+  const memberPicker = field('[data-role-member-picker]');
+  check(memberPicker && roleEditor.inert && document.activeElement === field('#role-add-members-search'),
+    'Add members opens a separate searchable dialog and suspends the editor');
+  check(memberPicker.querySelectorAll('[data-role-member-action="add"]').length === 2 &&
+    memberPicker.querySelector('[data-user-id="bob"]') && !memberPicker.querySelector('[data-user-id="helper"]'),
+    'Only remaining human members are candidates');
+  change('#role-add-members-search', 'not-a-member');
+  check(!memberPicker.querySelector('[data-role-members-empty]').hidden &&
+    memberPicker.querySelector('[data-role-members-empty]').textContent === t('roles.noMatchingMembers'),
+    'An unmatched candidate search has an explicit empty state');
+  change('#role-add-members-search', 'BOB');
+  check([...memberPicker.querySelectorAll('.role-member-row')].filter(row => row.style.display !== 'none').length === 1 &&
+    memberPicker.querySelector('[data-role-members-count]').textContent === t('roles.membersShown', { shown: 1, total: 2 }),
+  'Candidate search filters names case-insensitively with an accurate count');
+  const addBob = () => field('[data-role-member-action="add"][data-user-id="bob"]').click();
+  const beforeAddToast = field('.chat-copy-toast');
+  const pickerFooterTop = memberPicker.querySelector('.modal-footer').getBoundingClientRect().top;
+  addBob();
+  addBob();
+  await flush();
+  const applyingStatus = memberPicker.querySelector('.role-dialog-status');
+  check(field('.chat-copy-toast') === beforeAddToast && getComputedStyle(applyingStatus).clipPath === 'inset(50%)' &&
+    !memberPicker.querySelector('.modal-footer').textContent.includes(t('serverSettings.applying', { count: 1 })) &&
+    Math.abs(memberPicker.querySelector('.modal-footer').getBoundingClientRect().top - pickerFooterTop) < 1,
+    'Pending membership changes keep the footer stable with no visible loading text or premature success toast');
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  memberPicker.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  check(field('[data-role-member-picker]') === memberPicker && locked() &&
+    requests.filter(request => !request.done && request.type === 'ROLE_ASSIGN').length === 1,
+    'Assignments block duplicate clicks, Escape and backdrop dismissal until acknowledged');
   reject('ROLE_ASSIGN', 'Assignment denied');
   await flush();
-  check(!field('.role-editor-member-switch[data-user-id="bob"]').checked && !locked(), 'Role assignment failure is reconciled and does not trap the operator');
-  check(field('#server-settings-banner').textContent.includes('Assignment denied'), 'Role assignment failures are not swallowed');
-  change('.role-editor-member-switch[data-user-id="bob"]', true);
+  check(field('.chat-copy-toast') === beforeAddToast, 'Rejected assignments do not produce a success toast');
+  check(!field('[data-role-member-action="add"][data-user-id="bob"]').disabled && !locked(), 'Role assignment failure keeps the candidate available for retry');
+  check(memberPicker.querySelector('.role-dialog-errors.show').textContent.includes('Assignment denied'), 'Assignment failures appear in the active dialog');
+  addBob();
   await flush();
   acknowledge('ROLE_ASSIGN');
   await flush();
-  check(field('.role-editor-member-switch[data-user-id="bob"]').checked, 'Role assignment retries preserve the editor');
+  check(field('.chat-copy-toast-label')?.textContent === t('roles.memberAdded', { name: 'bob', role: 'New role name' }) &&
+    field('.chat-copy-toast .material-symbols-outlined')?.textContent === 'check_circle',
+    'Acknowledged assignment shows a localized success toast naming the member and role');
+  check(!memberPicker.querySelector('[data-user-id="bob"]') &&
+    roleEditor.querySelector('[data-role-member-action="remove"][data-user-id="bob"]'),
+  'Acknowledged additions leave the candidate list and appear in current membership');
+  check(field('#role-add-members-search').value === 'BOB', 'Acknowledgements preserve the candidate search');
+  yield 'role-member-picker-escape';
+  await flush();
+  check(!field('[data-role-member-picker]') && !roleEditor.inert && mainBackdrop().inert &&
+    document.activeElement === field('#btn-role-add-members'),
+    'Real Escape closes only the picker and restores focus to Add members');
   field('[data-role-editor-tab="permissions"]').click();
+  const normalPanelStyle = getComputedStyle(field('#role-editor-tab-permissions'));
+  check(normalPanelStyle.display === everyoneDisplay && normalPanelStyle.gap === everyoneGap,
+    'Normal roles and Everyone use the same permission panel layout and spacing');
+  for (const permission of [Permission.MANAGE_BOTS, Permission.USE_BOT_COMMANDS, Permission.VIEW_SERVER_MONITOR]) {
+    check(!!field(`[data-role-editor] .role-permission-switch[data-permission="${permission}"]`)?.closest('.permission-switch'),
+      `The opened role editor exposes permission ${permission} as a themed switch`);
+  }
+  check(field(`[data-role-editor] .role-permission-switch[data-permission="${Permission.VIEW_SERVER_MONITOR}"]`)
+    .closest('label').getAttribute('aria-label') === t('permissions.viewServerMonitor'),
+    'The monitor permission in the actual role dialog has a localized accessible label');
   const managementCopy = field('.role-permission-switch[data-permission="8192"]').closest('div').textContent;
   check(managementCopy.includes(t('permissions.manageBotsDesc')) && managementCopy.includes('token') &&
     !/editar o perfil|editing their profiles/i.test(managementCopy),
@@ -542,7 +695,7 @@ async function* runRegression(language, sharedModule) {
   check(pendingRequest('ROLE_UPDATE').payload.permissions === 48, 'Permission switches apply only the requested bit against current permissions');
   acknowledge('ROLE_UPDATE');
   await flush();
-  field('[data-role-editor-tab="display"]').click();
+  field('[data-role-editor-tab="general"]').click();
   field('#role-editor-color').click();
   field('[data-color-preset="#57f287"]').click();
   field('#role-editor-name').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }));
@@ -574,7 +727,7 @@ async function* runRegression(language, sharedModule) {
   reject('ROLE_UPDATE', 'Color update denied');
   await flush();
   check(field('#role-editor-color').value === '#3158af' && store.getRole('editors').color === '#3158af'
-    && field('#server-settings-banner').textContent.includes('Color update denied') && !locked(),
+    && roleEditor.querySelector('.role-dialog-errors').textContent.includes('Color update denied') && !locked(),
     'A rejected color change restores the acknowledged role color and reports the failure');
   change('#role-editor-is-default', true);
   await flush();
@@ -582,30 +735,99 @@ async function* runRegression(language, sharedModule) {
   await flush();
   check(store.getRole('editors').isDefault, 'Role auto-assignment is immediately persisted');
   field('[data-role-editor-tab="members"]').click();
-  change('.role-editor-member-switch[data-user-id="bob"]', false);
+  const beforeRemoveToast = field('.chat-copy-toast');
+  field('[data-role-member-action="remove"][data-user-id="bob"]').click();
+  await flush();
+  reject('ROLE_UNASSIGN', 'Removal denied');
+  await flush();
+  check(field('.chat-copy-toast') === beforeRemoveToast, 'Rejected removals do not produce a success toast');
+  check(field('[data-role-member-action="remove"][data-user-id="bob"]') &&
+    roleEditor.querySelector('.role-dialog-errors.show').textContent.includes('Removal denied'),
+    'Failed removal keeps acknowledged membership and shows its error locally');
+  field('[data-role-member-action="remove"][data-user-id="bob"]').click();
   await flush();
   acknowledge('ROLE_UNASSIGN');
   await flush();
-  field('[data-bulk-assign="true"]').click();
+  check(field('.chat-copy-toast-label')?.textContent === t('roles.memberRemoved', { name: 'bob', role: 'New role name' }),
+    'Acknowledged removal shows its own localized success toast');
+  check(!field('[data-role-member-action="remove"][data-user-id="bob"]'), 'Removal drops only the acknowledged member from the role list');
+  field('#btn-role-add-members').click();
   await flush();
-  document.querySelector('.dialog-card [data-action="confirm"]').click();
+  check(field('[data-role-member-action="add"][data-user-id="bob"]'), 'A removed member can be added again in the candidate dialog');
+  const currentKnownMembers = new Map(store.knownMembers);
+  for (let index = 0; index < 20; index++) {
+    store.knownMembers.set(`offline-${index}`, { ...member(`offline-${index}`), nickname: `QA Jo\u00e3o ${index}`, status: 'DISCONNECTED' });
+  }
+  appEvents.emit('server.updated');
   await flush();
-  reject('ROLE_ASSIGN', 'Owner cannot be assigned');
+  check(field('[data-role-member-action="add"][data-user-id="offline-0"]').closest('tr').querySelector('.member-badge-offline'),
+    'The add dialog includes registered offline members');
+  yield 'role-members-candidates';
+  const candidateBody = field('[data-role-member-picker] .role-dialog-body');
+  check(candidateBody.scrollHeight > candidateBody.clientHeight, 'Long candidate lists scroll inside the modal');
+  yield 'role-member-picker-scroll';
+  await settle(() => candidateBody.scrollTop > 0, 'Candidate wheel did not scroll the dialog');
+  check(field('[data-role-member-picker]') && candidateBody.scrollTop > 0, 'A real wheel scrolls candidates without dismissing the modal');
+  change('#role-add-members-search', 'joao 0');
+  check([...field('[data-role-member-picker]').querySelectorAll('.role-member-row')].filter(row => row.style.display !== 'none').length === 1,
+    'Candidate search ignores accents in offline member names');
+  field('[data-role-member-action="add"][data-user-id="offline-0"]').click();
   await flush();
-  check(locked(), 'A partially rejected batch keeps the guard while remaining members are applying');
   acknowledge('ROLE_ASSIGN');
   await flush();
-  check(!field('.role-editor-member-switch[data-user-id="admin"]').checked &&
-    field('.role-editor-member-switch[data-user-id="bob"]').checked, 'Bulk failures preserve each member’s actual acknowledged state');
-  check(field('#server-settings-banner').classList.contains('show') && !locked(), 'Partial failures remain explicit and release the guard');
-  field('#btn-role-create-new').click();
+  check(field('[data-role-member-action="remove"][data-user-id="offline-0"]') &&
+    !field('[data-role-member-action="add"][data-user-id="offline-0"]') && field('#role-add-members-search').value === 'joao 0',
+    'Offline assignment updates both lists without resetting the search');
+  change('#role-add-members-search', '');
+  yield 'role-dialog-narrow';
+  await flush();
+  check(field('[data-role-member-picker] .role-dialog-card').getBoundingClientRect().right <= innerWidth &&
+    candidateBody.scrollWidth <= candidateBody.clientWidth + 1,
+    'The candidate dialog fits a narrow window without horizontal overflow');
+  yield 'role-dialog-normal';
+  await flush();
+  store.knownMembers = currentKnownMembers;
+  store.updateRoles(store.roles, store.userRoles.filter(entry => !entry.userId.startsWith('offline-')));
+  await flush();
+  const currentAssignments = structuredClone(store.userRoles);
+  store.updateRoles(store.roles, [...store.userRoles.filter(entry => entry.userId !== 'bob'), { userId: 'bob', roleIds: ['editors'] }]);
+  await flush();
+  check(!field('[data-role-member-action="add"][data-user-id="bob"]') &&
+    field('[data-role-member-action="remove"][data-user-id="bob"]'),
+    'External membership changes update both dialogs without reopening them');
+  store.updateRoles(store.roles, ['admin', 'bob'].map(userId => ({ userId, roleIds: ['editors'] })));
+  await flush();
+  check(!field('[data-role-member-picker] [data-role-member-action]') &&
+    field('[data-role-member-picker] [data-role-members-empty]').textContent === t('roles.noAvailableMembers'),
+    'The add dialog explains when everyone already has the role');
+  store.updateRoles(store.roles, currentAssignments);
+  await flush();
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  await flush();
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  await flush();
+  check(!field('[data-role-editor]') && !mainBackdrop().inert && document.activeElement === field('[data-role-menu="editors"]'),
+    'Closing the role editor restores settings and its three-dot button');
+  yield 'role-create-open';
+  await flush();
+  check(field('[data-role-editor]') && field('.role-delete-section').hidden &&
+    !field('[data-role-editor] .modal-footer [data-role-dialog-close]') &&
+    field('[data-role-editor] .modal-header [data-role-dialog-close]') &&
+    field('#role-editor-title').textContent === t('roles.editorNewTitle'), 'Create role opens a fresh dedicated modal without a delete action');
+  yield 'role-create-clean-footer';
+  field('#btn-role-save').click();
+  await flush();
+  check(field('[data-role-editor] .role-dialog-errors.show').textContent.includes(t('serverSettings.roleNameInvalid')) &&
+    !requests.some(request => !request.done && request.type === 'ROLE_CREATE'),
+    'Invalid creation stays in the modal with actionable validation');
   change('#role-editor-name', 'Created role');
   field('#btn-role-save').click();
   await flush();
   check(locked(), 'Explicit role creation remains tracked');
   acknowledge('ROLE_CREATE');
   await flush();
-  check(store.getRole('created-role') && field('[data-role-open="created-role"]'), 'Role creation refreshes the list without reopening the modal');
+  check(store.getRole('created-role') && field('[data-role-menu="created-role"]') && !field('[data-role-editor]') && !mainBackdrop().inert,
+    'Successful creation closes its dialog and refreshes the existing settings list');
   const dragged = field('.role-table-row[data-role-id="created-role"]');
   const destination = field('.role-table-row[data-role-id="editors"]');
   dragged.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: new DataTransfer() }));
@@ -619,8 +841,33 @@ async function* runRegression(language, sharedModule) {
   acknowledge('ROLE_UPDATE');
   await flush();
   check(!locked() && field('.role-table-row').dataset.roleId === 'created-role', 'Acknowledged role ordering is preserved');
-  field('[data-role-open="created-role"]').click();
+  openRoleEditor('created-role');
   field('#btn-role-delete').click();
+  await flush();
+  check(field('.dialog-card').textContent.includes('Created role') && locked() &&
+    !requests.some(request => !request.done && request.type === 'ROLE_DELETE'),
+    'General deletion asks for confirmation before sending a destructive request');
+  field('.dialog-card [data-action="cancel"]').click();
+  await flush();
+  check(store.getRole('created-role') && field('[data-role-editor]') && !locked(),
+    'Cancelling deletion preserves the role and its editor');
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  await flush();
+  field('[data-role-menu="created-role"]').click();
+  field('.floating-context-menu .danger').click();
+  await flush();
+  check(field('.dialog-card').textContent.includes('Created role') && !field('[data-role-editor]'),
+    'Delete role in the three-dot menu uses the same confirmation without opening the editor');
+  field('.dialog-card [data-action="confirm"]').click();
+  await flush();
+  reject('ROLE_DELETE', 'Role deletion denied');
+  await flush();
+  check(store.getRole('created-role') && field('#server-settings-banner').textContent.includes('Role deletion denied') && !locked(),
+    'Rejected role deletion remains explicit and keeps the role');
+  openRoleEditor('created-role');
+  field('#btn-role-delete').click();
+  await flush();
+  field('.dialog-card [data-action="confirm"]').click();
   await flush();
   acknowledge('ROLE_DELETE');
   await flush();
@@ -872,8 +1119,19 @@ async function* runRegression(language, sharedModule) {
   appEvents.emit('server.updated');
   check(field('#checkbox-show-role-badges').matches(':disabled') && !field('#btn-role-create-new').matches(':disabled'),
     'Role management does not grant server-wide settings permission');
+  tab('roles');
+  field('[data-role-menu="editors"]').click();
+  check(field('.floating-context-menu .danger').disabled, 'The menu preserves protection of auto-assigned roles for non-owners');
+  field('.floating-context-menu [role="menuitem"]').click();
+  check(field('#btn-role-delete').disabled, 'General uses the same role-deletion protection as the menu');
+  field('[data-role-editor-tab="members"]').click();
+  field('#btn-role-add-members').click();
+  await flush();
+  check(field('[data-role-member-picker]'), 'A role manager can open both role dialogs without managing server settings');
   store.myPermissions = 0;
   appEvents.emit('server.updated');
+  check(!field('[data-role-editor]') && !field('[data-role-member-picker]') && !mainBackdrop().inert,
+    'Permission revocation immediately retires both dialogs and restores settings');
   check(field('#input-server-name').matches(':disabled') && field('[data-tab="bots"]').hidden, 'Permission changes immediately disable management controls');
   store.ownerId = 'admin';
   store.myPermissions = 0xFFFFFFFF;
@@ -881,6 +1139,11 @@ async function* runRegression(language, sharedModule) {
   check(!field('#input-server-name').matches(':disabled'), 'Restored permission enables corrections without reopening');
   change('#input-server-name', 'Old session update');
   change('#input-attach-file-mb', '15');
+  await flush();
+  tab('roles');
+  openRoleEditor('editors');
+  field('[data-role-editor-tab="members"]').click();
+  field('#btn-role-add-members').click();
   await flush();
   const otherStore = new stores.ServerStore();
   otherStore.setServerDetails({ ...store.serverDetails, id: 'server-b', name: 'Server B' }, member('admin'));
@@ -891,6 +1154,7 @@ async function* runRegression(language, sharedModule) {
   stores.setActiveServerStore(otherStore);
   network.setActiveNetworkClient(otherClient);
   appEvents.emit('session.changed', { key: 'server-b' });
+  check(!field('[data-role-editor]') && !field('[data-role-member-picker]'), 'Session changes immediately remove role dialogs with no stale controls');
   check(locked() && modal.close() === false, 'Session switching cannot dismiss an operation still awaiting its original server');
   acknowledge('SERVER_UPDATE_SETTINGS');
   await flush();

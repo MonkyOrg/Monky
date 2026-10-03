@@ -638,7 +638,7 @@ test('native live forms enforce creation, editable responses, results and close 
   assert.equal(created.type, MessageType.NATIVE_FORM_SNAPSHOT);
   const formId = text(created.payload.id);
   assert.equal(records((await member.peer.request(MessageType.COMMUNITY_GET)).payload.nativeForms).length, 1);
-  const legacy = await f.human('Legacy form client', undefined, undefined, false, 32);
+  const legacy = await f.human('Client without forms', undefined, undefined, false, undefined, { minimumVersion: 35, features: ['server-community'] });
   const legacySnapshot = record((await legacy.peer.request(MessageType.COMMUNITY_GET)).payload);
   assert.equal(Object.hasOwn(legacySnapshot, 'nativeForms'), false);
   await legacy.peer.error(MessageType.NATIVE_FORM_SUBMIT, {
@@ -658,7 +658,7 @@ test('native live forms enforce creation, editable responses, results and close 
     id: formId, expectedRevision: 0, values: firstValues,
   });
 
-  test('private bot actions and native forms enforce audience OR semantics, manager bypass and role revocation', async t => {
+  await t.test('private bot actions and native forms enforce audience OR semantics, manager bypass and role revocation', async t => {
     const f = await setup(t);
     const outsider = await f.human('Private action outsider');
     const manager = await f.human('Private action manager');
@@ -757,7 +757,7 @@ test('native live forms enforce creation, editable responses, results and close 
     await f.service.closeNativeForm(manager.id, form.id, f.now + 3);
   });
 
-  test('private poll messages are non-disclosing in realtime, history, jumps, replies, search totals and cursors', async t => {
+  await t.test('private poll messages are non-disclosing in realtime, history, jumps, replies, search totals and cursors', async t => {
     const f = await setup(t);
     const outsider = await f.human('Private poll outsider');
     const manager = await f.human('Private poll manager');

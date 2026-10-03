@@ -46,6 +46,10 @@ export function showInfoToast(message: string, durationMs = 3200): () => void {
   return showToast(message, 'info', durationMs);
 }
 
+export function showSuccessToast(message: string, durationMs = 3200): () => void {
+  return showToast(message, 'check_circle', durationMs);
+}
+
 export function showErrorToast(message: string, durationMs = 5000): () => void {
   return showToast(message, 'error', durationMs, 'danger');
 }

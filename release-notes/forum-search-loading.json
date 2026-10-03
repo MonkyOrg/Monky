@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A busca de threads preserva a lista ou o estado vazio enquanto atualiza os resultados, sem exibir skeletons a cada palavra digitada. Os skeletons continuam na carga inicial e ao carregar mais threads.",
+  "en": "Thread search preserves the list or empty state while refreshing results, without showing skeletons for each typed word. Skeletons remain available for the initial load and when loading more threads."
+}

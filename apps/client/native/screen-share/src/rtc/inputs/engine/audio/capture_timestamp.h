@@ -11,6 +11,7 @@ namespace monky::native_rtc::engine::audio {
 // A sample before this capture epoch is never attributed to an invented packet.
 std::optional<std::int64_t> CaptureTimestampQpc(
     const CaptureEpoch& epoch, const CaptureBlockTiming& timing);
+RtcCaptureTimestamp CaptureTimestampRtc(const CaptureClockMapping& mapped);
 
 // Shares the engine's existing paired NOW mapper but not another track's order
 // guard. No wall clock, NTP, arrival-time calibration or independent clock is made.

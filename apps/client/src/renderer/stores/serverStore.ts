@@ -3,6 +3,7 @@ import { appEvents, EventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { clientLog } from '../core/ClientLogService';
 import type { ChannelCategory } from '@monky/shared';
+import { getChannelPermissions, hasChannelPermission, resolveMemberPermissions, resolveChannelPermissions, type ChannelAccessRules } from '@monky/shared';
 
 export class ServerStore {
   /**
@@ -98,9 +99,8 @@ export class ServerStore {
   public canUserReadChannel(userId: string, channelId: string): boolean {
     const channel = this.getChannel(channelId);
     if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE')) return false;
-    const permissions = this.getUserPermissions(userId);
-    return hasPermission(permissions, Permission.READ_MESSAGES)
-      && canAccessChannel(channel, permissions, this.getUserRoleIds(userId));
+    const permissions = this.getUserChannelPermissions(userId, channelId);
+    return hasPermission(permissions, Permission.VIEW_CHANNEL) && hasPermission(permissions, Permission.READ_MESSAGES);
   }
 
   /** Updates commands from a COMMANDS_LIST_RESPONSE message (#569). */
@@ -350,10 +350,11 @@ export class ServerStore {
     this.bus.emit('server.meta_updated', this.serverDetails);
   }
 
-  public updateRoles(roles: Role[], userRoles: UserRoleSummary[]): void {
+  public updateRoles(roles: Role[], userRoles: UserRoleSummary[], everyonePermissions?: number): void {
     this.roles = roles;
     this.userRoles = userRoles;
     if (this.serverDetails) {
+      if (everyonePermissions !== undefined) this.serverDetails.everyonePermissions = everyonePermissions;
       this.serverDetails.roles = roles;
       this.serverDetails.userRoles = userRoles;
     }
@@ -389,16 +390,34 @@ export class ServerStore {
 
   /**
    * Permissions of any member, resolved the same way the server does it: the
-   * owner gets everything, someone with no role falls back to the defaults, and
-   * roles otherwise combine bit by bit (PermissionService.getUserPermissions).
+   * owner/admin gets everything; roleless members use Everyone, and assigned
+   * roles replace that base with deny-wins switches.
    */
   public getUserPermissions(userId: string): number {
     if (this.ownerId && userId === this.ownerId) return 0xFFFFFFFF;
     const roleIds = new Set(this.getUserRoleIds(userId));
     const roles = this.roles.filter((role) => roleIds.has(role.id));
-    return roles.length === 0
-      ? DEFAULT_PERMISSIONS
-      : roles.reduce((bits, role) => bits | role.permissions, 0);
+    return resolveMemberPermissions(this.everyonePermissions, roles);
+  }
+
+  public get everyonePermissions(): number {
+    return this.serverDetails?.everyonePermissions ?? DEFAULT_PERMISSIONS;
+  }
+
+  public getUserChannelPermissions(userId: string, channelId: string): number {
+    const channel = this.channelAccessRules(channelId);
+    return channel ? getChannelPermissions(channel, this.getUserPermissions(userId), this.getUserRoleIds(userId), false, userId) : 0;
+  }
+
+  private channelAccessRules(channelId: string): ChannelAccessRules | undefined {
+    let channel = this.getChannel(channelId);
+    if (channel?.forumId) {
+      channel = this.getChannel(channel.forumId);
+      if (channel?.type !== 'FORUM') return undefined;
+    }
+    if (!channel) return undefined;
+    const category = this.serverDetails?.categories?.find(item => item.id === channel.categoryId) ?? null;
+    return resolveChannelPermissions(channel, category);
   }
 
   public getChannel(channelId: string): ChannelSummary | undefined {
@@ -496,8 +515,19 @@ export class ServerStore {
     return this.myPermissions;
   }
 
-  public hasPermission(permission: Permission): boolean {
+  public hasPermission(permission: Permission, channelId?: string | null): boolean {
+    if (channelId) {
+      const channel = this.channelAccessRules(channelId);
+      return !!channel && !!this.currentUser &&
+        hasChannelPermission(channel, this.myPermissions, this.getUserRoleIds(this.currentUser.id), permission, false, this.currentUser.id);
+    }
     return hasPermission(this.myPermissions, permission);
+  }
+
+  public hasCategoryPermission(permission: Permission, categoryId: string): boolean {
+    const category = this.serverDetails?.categories?.find(item => item.id === categoryId);
+    return !!category && !!this.currentUser &&
+      hasChannelPermission(category, this.myPermissions, this.getUserRoleIds(this.currentUser.id), permission, false, this.currentUser.id);
   }
 
   public clear(): void {

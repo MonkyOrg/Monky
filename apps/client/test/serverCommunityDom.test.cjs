@@ -56,12 +56,15 @@ if (!process.versions.electron) {
       vite.httpServer.once('error', reject);
       vite.httpServer.listen(0, '127.0.0.1', resolve);
     });
-    browser = new BrowserWindow({ show: false, width: 1200, height: 1000,
+    browser = new BrowserWindow({ show: false, width: 800, height: 600,
       webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true } });
     browser.webContents.debugger.attach('1.3');
     timeout = setTimeout(() => { console.error('Community DOM timeout'); void finish(1); }, 90000);
     for (const locale of ['pt-BR', 'en']) {
       await browser.loadURL(`http://127.0.0.1:${vite.httpServer.address().port}/__community__`);
+      await browser.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', {
+        width: 1200, height: 1000, deviceScaleFactor: 1, mobile: false,
+      });
       await browser.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
         features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
       });
@@ -73,7 +76,8 @@ if (!process.versions.electron) {
         if (step.done) { console.log(`Community DOM (${locale}): ${step.value} checks`); break; }
         if (process.env.MONKY_COMMUNITY_TRACE) console.log(`Community step (${locale}): ${step.value}`);
         if (['event-step-reduced-motion', 'event-step-motion-enabled',
-          'live-action-reduced-motion', 'live-action-motion-enabled'].includes(step.value)) {
+          'live-action-reduced-motion', 'live-action-motion-enabled',
+          'chat-entry-reduced-motion', 'chat-entry-motion-enabled'].includes(step.value)) {
           await browser.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
             features: [{ name: 'prefers-reduced-motion', value: step.value.endsWith('reduced-motion') ? 'reduce' : 'no-preference' }],
           });
@@ -114,6 +118,88 @@ if (!process.versions.electron) {
             return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
           })()`);
           browser.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+          await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+        }
+        if (step.value.startsWith('event-audience-wheel-')) {
+          const modalWheel = step.value === 'event-audience-wheel-modal';
+          const point = await browser.webContents.executeJavaScript(`(() => {
+            const target = document.querySelector(${JSON.stringify(modalWheel
+              ? '.event-step-viewport' : '[data-resource-audience=event-audience] .share-audience-options')});
+            const box = target.getBoundingClientRect();
+            return { x: Math.round(${modalWheel ? 'box.left + 4' : 'box.left + box.width / 2'}),
+              y: Math.round(${modalWheel ? 'box.top + 4' : 'box.top + box.height / 2'}) };
+          })()`);
+          await browser.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
+            type: 'mouseWheel', ...point, deltaX: 0,
+            deltaY: modalWheel || step.value === 'event-audience-wheel-top' ? -160 : 160,
+          });
+          await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+        }
+        if (step.value === 'event-audience-scrollbar-modal') {
+          const drag = await browser.webContents.executeJavaScript(`(() => {
+            const scroller = document.querySelector('.event-step-viewport');
+            const box = scroller.getBoundingClientRect();
+            const thumbHeight = scroller.clientHeight * scroller.clientHeight / scroller.scrollHeight;
+            const trackHeight = scroller.clientHeight - thumbHeight;
+            const thumbTop = scroller.scrollTop / (scroller.scrollHeight - scroller.clientHeight) * trackHeight;
+            return { x: Math.round(box.right - 4),
+              y: Math.round(box.top + thumbTop + thumbHeight / 2),
+              endY: Math.round(box.top + thumbHeight / 2 + trackHeight * 0.2) };
+          })()`);
+          browser.webContents.sendInputEvent({ type: 'mouseMove', x: drag.x, y: drag.y });
+          browser.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: drag.x, y: drag.y });
+          for (let index = 1; index <= 5; index++) {
+            browser.webContents.sendInputEvent({ type: 'mouseMove', x: drag.x,
+              y: Math.round(drag.y + (drag.endY - drag.y) * index / 5) });
+            await browser.webContents.executeJavaScript('new Promise(requestAnimationFrame)');
+          }
+          browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: drag.x, y: drag.endY });
+          await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+        }
+        if (step.value === 'audience-search-clear') {
+          await browser.webContents.debugger.sendCommand('DOM.enable');
+          const { root: documentNode } = await browser.webContents.debugger.sendCommand('DOM.getDocument');
+          const { nodeId } = await browser.webContents.debugger.sendCommand('DOM.querySelector', {
+            nodeId: documentNode.nodeId, selector: '[data-resource-audience=poll-audience] [data-audience-search]',
+          });
+          const { node } = await browser.webContents.debugger.sendCommand('DOM.describeNode', { nodeId, depth: -1, pierce: true });
+          const findClearButton = current => {
+            if (current.attributes?.some(value => value === '-webkit-search-cancel-button')) return current;
+            for (const child of [...(current.children ?? []), ...(current.shadowRoots ?? [])]) {
+              const found = findClearButton(child);
+              if (found) return found;
+            }
+          };
+          const clear = findClearButton(node);
+          if (!clear) throw new Error('Native audience search clear button is missing');
+          const { nodeIds } = await browser.webContents.debugger.sendCommand('DOM.pushNodesByBackendIdsToFrontend', {
+            backendNodeIds: [clear.backendNodeId],
+          });
+          await browser.webContents.debugger.sendCommand('CSS.enable');
+          const { computedStyle } = await browser.webContents.debugger.sendCommand('CSS.getComputedStyleForNode', { nodeId: nodeIds[0] });
+          if (computedStyle.find(property => property.name === 'cursor')?.value !== 'pointer') {
+            throw new Error('The actual native audience search clear button must have a pointer cursor');
+          }
+          const { model } = await browser.webContents.debugger.sendCommand('DOM.getBoxModel', { nodeId: nodeIds[0] })
+            .catch(async error => {
+              const state = await browser.webContents.executeJavaScript(`(() => {
+                const root = document.querySelector('[data-resource-audience=poll-audience]');
+                const popup = root?.querySelector('[data-audience-popup]');
+                const search = root?.querySelector('[data-audience-search]');
+                const box = search?.getBoundingClientRect();
+                return { popupHidden: popup?.hidden, popoverOpen: popup?.matches(':popover-open'),
+                  expanded: root?.querySelector('[data-audience-toggle]')?.getAttribute('aria-expanded'),
+                  value: search?.value, focused: document.activeElement === search,
+                  searchBox: box && [box.left, box.top, box.width, box.height].map(Math.round),
+                  stepScroll: document.querySelector('[data-poll-step-viewport]')?.scrollTop };
+              })()`).catch(stateError => String(stateError));
+              throw new Error(`${error.message} ${JSON.stringify(state)}`);
+            });
+          const point = { x: Math.round((model.content[0] + model.content[2]) / 2),
+            y: Math.round((model.content[1] + model.content[5]) / 2) };
+          browser.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+          browser.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
+          browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
           await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
         }
         if (process.env.MONKY_COMMUNITY_SCREENSHOTS) {
@@ -175,6 +261,53 @@ async function* regression(locale, inviteModule) {
   localStorage.clear();
   let checks = 0;
   const check = (value, message) => { if (!value) throw new Error(message); checks++; };
+  const { RecentSoundsModal } = await import('/views/RecentSoundsModal.ts');
+  const { sessionManager: recentSessionManager } = await import('/core/SessionManager.ts');
+  const previousRecentSession = recentSessionManager.getActive;
+  const previousRecentApi = window.api;
+  const recentButton = document.createElement('button');
+  document.body.append(recentButton);
+  try {
+    for (const outcome of [
+      { result: { success: true }, toast: true },
+      { result: { success: false, canceled: true } },
+      { result: { success: false, error: 'Save failed' }, error: true },
+      { result: { success: true }, abort: true },
+      { result: { success: true }, switchSession: true },
+    ]) {
+      document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
+      const controller = new AbortController();
+      const errors = [];
+      let activeKey = 'recent-download';
+      let resolveSave;
+      recentSessionManager.getActive = () => ({ key: activeKey });
+      window.api = { ...previousRecentApi, saveRecentSound: () => new Promise(resolve => { resolveSave = resolve; }) };
+      const pending = new RecentSoundsModal().download('recent-download', 'sound', recentButton,
+        controller.signal, message => errors.push(message),
+        async () => ({ soundName: 'QA audio', mimeType: 'audio/wav', audioBase64: 'UklGRg==' }));
+      await Promise.resolve();
+      check(resolveSave && !document.querySelector('.chat-copy-toast') && recentButton.disabled,
+        'A pending audio save shows loading but no premature success toast');
+      if (outcome.abort) controller.abort();
+      if (outcome.switchSession) activeKey = 'other-server';
+      resolveSave(outcome.result);
+      await pending;
+      const toast = document.querySelector('.chat-copy-toast');
+      check(outcome.toast
+        ? toast?.querySelector('.chat-copy-toast-label')?.textContent === t('recentSounds.saved')
+          && toast.getAttribute('role') === 'status'
+        : !toast,
+      'Only a successful audio save in the current open surface shows localized confirmation');
+      check(errors.length === (outcome.error ? 1 : 0),
+        'Save errors remain explicit while cancellation and retired surfaces have no false failure');
+      setButtonLoading(recentButton, false);
+    }
+  } finally {
+    recentSessionManager.getActive = previousRecentSession;
+    window.api = previousRecentApi;
+    recentButton.remove();
+    document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
+  }
   check(translateProtocolError('COMMUNITY_INVALID', 'Live actions are disabled.') === t('poll.liveActionsDisabled'),
     'Disabled server activities retain their exact localized protocol reason');
   check(automaticScrollBehavior() === 'smooth',
@@ -257,6 +390,29 @@ async function* regression(locale, inviteModule) {
   const until = async predicate => {
     for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
     throw new Error('Condition did not become true');
+  };
+  // Automatic scrolls start from rAF callbacks; slow runners can exceed a fixed quiet window before the first frame.
+  const settleScroll = async element => {
+    let lastScroll = element.scrollTop;
+    let lastChange = performance.now();
+    const noteScroll = () => { lastChange = performance.now(); };
+    document.addEventListener('scroll', noteScroll, { capture: true });
+    try {
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const started = performance.now();
+      lastChange = Math.max(lastChange, started);
+      for (;;) {
+        if (element.scrollTop !== lastScroll) {
+          lastScroll = element.scrollTop;
+          lastChange = performance.now();
+        }
+        if (performance.now() - lastChange >= 200) return;
+        if (performance.now() - started > 5000) throw new Error(`Scrolling did not settle: ${element.className}`);
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    } finally {
+      document.removeEventListener('scroll', noteScroll, { capture: true });
+    }
   };
   const now = Date.now();
   const event = { id: 'event', creatorUserId: 'owner', title: '<img src=x onerror=alert(1)>',
@@ -986,6 +1142,7 @@ async function* regression(locale, inviteModule) {
   check(pollAudience.querySelector('[data-audience-toggle]').getAttribute('aria-expanded') === 'false'
     && pollAudience.querySelector('[data-audience-popup]').hidden,
   'Enabling private poll visibility reveals the audience field without opening its dropdown');
+  await settleScroll(document.querySelector('[data-poll-step-viewport]'));
   pollAudience.querySelector('[data-audience-toggle]').click();
   const liveRowBox = document.querySelector('.native-poll-live-row').getBoundingClientRect();
   const audienceBox = pollAudience.getBoundingClientRect();
@@ -1010,6 +1167,45 @@ async function* regression(locale, inviteModule) {
   check(document.querySelector('[data-poll-next]').disabled,
     'Private polls cannot advance with an empty audience');
   const audienceSearch = document.querySelector('[data-resource-audience=poll-audience] [data-audience-search]');
+  const audienceSearchRow = audienceSearch.closest('.share-audience-search');
+  audienceSearch.blur();
+  const unfocusedSeparator = getComputedStyle(audienceSearchRow).borderBottomColor;
+  audienceSearch.focus({ preventScroll: true });
+  check(audienceSearchRow.matches(':focus-within')
+    && getComputedStyle(audienceSearchRow).borderBottomColor === unfocusedSeparator,
+  'Focusing audience search keeps its separator neutral instead of adding a second accent highlight');
+  audienceSearch.value = 'missing member or role';
+  audienceSearch.dispatchEvent(new Event('input', { bubbles: true }));
+  const audienceEmpty = pollAudience.querySelector('[data-audience-no-results]');
+  const audienceEmptyStyle = getComputedStyle(audienceEmpty);
+  check(!audienceEmpty.hidden && audienceEmpty.textContent === t('audience.noResults')
+    && parseFloat(audienceEmptyStyle.fontSize) <= 14
+    && parseFloat(audienceEmptyStyle.paddingTop) >= 12
+    && parseFloat(audienceEmptyStyle.paddingBottom) >= 12
+    && audienceEmptyStyle.textAlign === 'center'
+    && audienceEmptyStyle.marginTop === '0px',
+  'An empty audience search has compact localized text, centered alignment and breathing room');
+  // The popup re-anchors on the next frames after its content shrinks; the native click must target its final position.
+  const pollAudiencePopup = pollAudience.querySelector('[data-audience-popup]');
+  let pollAudiencePopupTop = NaN;
+  for (let stableFrames = 0, frames = 0; stableFrames < 3; frames++) {
+    if (frames > 120) throw new Error('The audience dropdown did not settle before clearing its search');
+    await new Promise(requestAnimationFrame);
+    const top = pollAudiencePopup.getBoundingClientRect().top;
+    stableFrames = top === pollAudiencePopupTop ? stableFrames + 1 : 0;
+    pollAudiencePopupTop = top;
+  }
+  yield 'audience-search-clear';
+  check(audienceSearch.value === '' && audienceEmpty.hidden
+    && !pollAudience.querySelector('[data-audience-popup]').hidden
+    && [...pollAudience.querySelectorAll('[data-audience-id]')].every(option => !option.hidden)
+    && document.activeElement === audienceSearch,
+  `Clicking the real search clear button restores roles and members without closing the dropdown or losing focus: ${JSON.stringify({
+    value: audienceSearch.value, empty: audienceEmpty.hidden,
+    popup: pollAudience.querySelector('[data-audience-popup]').hidden,
+    options: [...pollAudience.querySelectorAll('[data-audience-id]')].map(option => option.hidden),
+    focus: document.activeElement?.outerHTML,
+  })}`);
   audienceSearch.value = 'team';
   audienceSearch.dispatchEvent(new Event('input', { bubbles: true }));
   check(!document.querySelector('[data-resource-audience=poll-audience] [data-audience-kind=role]').hidden
@@ -1071,6 +1267,10 @@ async function* regression(locale, inviteModule) {
   const restored = new ServerCommunityView(root, feed, async () => {}, undefined, channelId => openedTextChannels.push(channelId));
   check(!root.textContent.includes(event.title), 'Banner dismissal persists for the occurrence');
   root.querySelector('[data-community=events]').click();
+  for (let index = 0; index < 40; index++) {
+    const id = `scroll-audience-${index}`;
+    server.knownMembers.set(id, { id, nickname: `Scroll Member ${index}`, avatarUrl: null, status: 'DISCONNECTED' });
+  }
   document.querySelector('[data-create-event]').click();
   const eventListBackdrop = document.querySelector('.event-list-modal').closest('.modal-backdrop');
   const eventListCard = eventListBackdrop.querySelector('.modal-card');
@@ -1217,15 +1417,75 @@ async function* regression(locale, inviteModule) {
     expanded: eventAudienceTrigger.getAttribute('aria-expanded'),
   })}`);
   const eventStepScroller = document.querySelector('.event-step-viewport');
-  const maxEventScroll = eventStepScroller.scrollHeight - eventStepScroller.clientHeight;
-  eventStepScroller.scrollTop = Math.min(80, maxEventScroll);
+  const audiencePopup = document.querySelector('[data-resource-audience=event-audience] [data-audience-popup]');
+  const audienceOptions = audiencePopup.querySelector('.share-audience-options');
+  check(audienceOptions.scrollHeight > audienceOptions.clientHeight
+    && getComputedStyle(audienceOptions).overscrollBehaviorY === 'contain',
+  'A large private audience has its own bounded scroll area without scroll chaining');
+  await flush();
+  await settleScroll(eventStepScroller);
   const eventScrollBeforeWheel = eventStepScroller.scrollTop;
-  document.querySelector('[data-resource-audience=event-audience] [data-audience-popup]')
-    .dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -40 }));
+  yield 'event-audience-wheel-down';
+  await until(() => audienceOptions.scrollTop > 0 || audiencePopup.hidden);
+  check(!audiencePopup.hidden && eventAudienceTrigger.getAttribute('aria-expanded') === 'true'
+    && audienceOptions.scrollTop > 0 && eventStepScroller.scrollTop === eventScrollBeforeWheel,
+  `A real wheel gesture scrolls the audience options without closing the dropdown or moving the modal: ${JSON.stringify({
+    hidden: audiencePopup.hidden, expanded: eventAudienceTrigger.getAttribute('aria-expanded'),
+    optionsScroll: audienceOptions.scrollTop, optionsHeight: audienceOptions.clientHeight,
+    modalBefore: eventScrollBeforeWheel, modalAfter: eventStepScroller.scrollTop,
+    popup: audiencePopup.getBoundingClientRect().toJSON(),
+  })}`);
+  audienceOptions.scrollTop = audienceOptions.scrollHeight;
+  await flush();
+  yield 'event-audience-wheel-end';
+  check(!audiencePopup.hidden && eventStepScroller.scrollTop === eventScrollBeforeWheel,
+    'Wheeling at the bottom of the audience list does not leak scroll into the event modal');
+  audienceOptions.scrollTop = 0;
+  await flush();
+  yield 'event-audience-wheel-top';
+  check(!audiencePopup.hidden && eventStepScroller.scrollTop === eventScrollBeforeWheel,
+    'Wheeling at the top of the audience list keeps the dropdown open');
+  audienceOptions.scrollTop = audienceOptions.scrollHeight;
+  await flush();
+  audienceOptions.querySelector('[data-audience-id=scroll-audience-9]').click();
+  check(!audiencePopup.hidden
+    && audienceOptions.querySelector('[data-audience-id=scroll-audience-9]').getAttribute('aria-selected') === 'true',
+  'A member reached by scrolling can be selected without dismissing the audience dropdown');
+  audienceOptions.querySelector('[data-audience-id=scroll-audience-9]').click();
+  yield 'event-audience-wheel-modal';
+  await until(() => audiencePopup.hidden && eventStepScroller.scrollTop < eventScrollBeforeWheel);
   check(eventAudienceTrigger.getAttribute('aria-expanded') === 'false'
-    && document.querySelector('[data-resource-audience=event-audience] [data-audience-popup]').hidden
-    && eventStepScroller.scrollTop < eventScrollBeforeWheel,
-  'Scrolling over the audience dropdown closes it and transfers the gesture to the event form');
+    && audiencePopup.hidden,
+  'Scrolling the event modal outside the dropdown closes the audience picker and scrolls the form');
+  eventAudienceTrigger.click();
+  await settleScroll(eventStepScroller);
+  const eventScrollBeforeDrag = eventStepScroller.scrollTop;
+  yield 'event-audience-scrollbar-modal';
+  check(audiencePopup.hidden && eventAudienceTrigger.getAttribute('aria-expanded') === 'false'
+    && eventStepScroller.scrollTop < eventScrollBeforeDrag - 30,
+  `Dragging the native modal scrollbar dismisses the audience picker: ${JSON.stringify({
+    hidden: audiencePopup.hidden, before: eventScrollBeforeDrag, after: eventStepScroller.scrollTop,
+  })}`);
+  const eventScrollAfterDrag = eventStepScroller.scrollTop;
+  await new Promise(resolve => setTimeout(resolve, 650));
+  check(Math.abs(eventStepScroller.scrollTop - eventScrollAfterDrag) <= 1 && audiencePopup.hidden,
+    'Automatic audience positioning never scrolls back after a manual scrollbar drag');
+  const audienceScrollSpace = document.createElement('div');
+  audienceScrollSpace.style.height = '360px';
+  eventStepScroller.append(audienceScrollSpace);
+  eventStepScroller.scrollTop += eventAudienceTrigger.getBoundingClientRect().bottom
+    - (eventStepScroller.getBoundingClientRect().bottom - 20);
+  await settleScroll(eventStepScroller);
+  eventAudienceTrigger.click();
+  yield 'event-audience-scrollbar-modal';
+  check(audiencePopup.hidden && eventAudienceTrigger.getAttribute('aria-expanded') === 'false',
+    'A scrollbar drag also dismisses the audience picker while its opening scroll is in progress');
+  const interruptedAudienceScroll = eventStepScroller.scrollTop;
+  await new Promise(resolve => setTimeout(resolve, 650));
+  check(Math.abs(eventStepScroller.scrollTop - interruptedAudienceScroll) <= 1,
+    'Interrupting the opening scroll cancels its animation and pending reposition timer');
+  audienceScrollSpace.remove();
+  for (let index = 0; index < 40; index++) server.knownMembers.delete(`scroll-audience-${index}`);
   eventAudienceTrigger.click();
   document.querySelector('[data-action=next]').click();
   check(document.querySelector('[data-audience-toggle]').getAttribute('aria-invalid') === 'true'
@@ -1709,7 +1969,18 @@ async function* regression(locale, inviteModule) {
   forumListGate = new Promise(resolve => { releaseForumPage = resolve; });
   const forumScroller = root.querySelector('.forum-list-content');
   forumScroller.scrollTop = forumScroller.scrollHeight;
-  await until(() => calls.some(call => call.type === 'FORUM_LIST' && call.payload.offset === 25));
+  try {
+    await until(() => calls.some(call => call.type === 'FORUM_LIST' && call.payload.offset === 25));
+  } catch (error) {
+    throw new Error('Forum lazy loading did not request its second page: ' + JSON.stringify({
+      viewport: { width: innerWidth, height: innerHeight, visible: document.visibilityState },
+      root: root.getBoundingClientRect(), scroller: forumScroller.getBoundingClientRect(),
+      sentinel: root.querySelector('[data-forum-sentinel]').getBoundingClientRect(),
+      scroll: { top: forumScroller.scrollTop, height: forumScroller.scrollHeight, client: forumScroller.clientHeight },
+      more: forum.more, next: forum.next, loading: forum.loading,
+      requests: calls.filter(call => call.type === 'FORUM_LIST').map(call => call.payload),
+    }), { cause: error });
+  }
   check(!root.querySelector('[data-forum-loading]').hidden
     && root.querySelectorAll('.forum-thread-skeleton').length === 3
     && root.querySelector('[data-forum-posts]').getAttribute('aria-busy') === 'true',
@@ -1941,7 +2212,9 @@ async function* regression(locale, inviteModule) {
     const listBox = listNode.getBoundingClientRect(), paneBox = pane.getBoundingClientRect();
     const headerBox = mainRoot.querySelector('.forum-header').getBoundingClientRect();
     check(paneBox.left >= listBox.right && Math.abs(paneBox.top - headerBox.top) < 2 && listBox.width >= 240,
-      'Forum and discussion occupy adjacent columns with aligned headers');
+      'Forum and discussion occupy adjacent columns with aligned headers: ' + JSON.stringify({
+        viewport: innerWidth, list: listBox.toJSON(), pane: paneBox.toJSON(), header: headerBox.toJSON(),
+      }));
     check(Math.abs(pane.querySelector('.chat-input-container').getBoundingClientRect().bottom - paneBox.bottom) < 2,
       'The real discussion fills its column and anchors its composer at the bottom');
     check(mainRoot.querySelector('#server-tools').getBoundingClientRect().right <= headerBox.right,
@@ -2038,6 +2311,101 @@ async function* regression(locale, inviteModule) {
     main.showSelectedChannel('text');
     check(!mainRoot.querySelector('.forum-layout') && mainRoot.querySelector('.channel-title')?.textContent === 'Text',
       'Switching to a regular channel restores a full-width chat');
+    const previousHistory = actualChatStore.getMessages('text');
+    actualChatStore.setHistory('text', Array.from({ length: 200 }, (_, index) => ({
+      id: `long-history-${index}`, channelId: 'text', userId: chatServer.currentUser.id,
+      userNickname: 'Author', content: `History entry ${index}\nSecond line\nThird line`, createdAt: index + 1,
+    })));
+    const longFeed = mainRoot.querySelector('#chat-messages-feed');
+    const scrollCalls = [];
+    const scrollTo = longFeed.scrollTo;
+    // History hydration may already have pinned the feed; explicitly start this reveal at the top.
+    scrollTo.call(longFeed, { top: 0, behavior: 'instant' });
+    check(longFeed.scrollTop === 0, 'The long-history reveal starts away from its destination');
+    longFeed.scrollTo = function (options) {
+      const max = this.scrollHeight - this.clientHeight;
+      // scrollToBottom may request scrollHeight; Chromium clamps it to the last visible viewport.
+      scrollCalls.push({ ...options, requestedTop: options.top,
+        top: Math.max(0, Math.min(options.top, max)), before: this.scrollTop, max });
+      scrollTo.call(this, options);
+    };
+    main.chatView.renderMessages({ forceScroll: true });
+    check(longFeed.scrollHeight > longFeed.clientHeight * 20 &&
+      longFeed.scrollHeight - longFeed.clientHeight - longFeed.scrollTop <= 161 &&
+      scrollCalls.some(call => call.behavior === 'smooth' && call.top > call.before),
+    'A long chat begins its entry animation near the bottom, with no more than 160px left to travel: ' +
+      JSON.stringify({ height: longFeed.scrollHeight, viewport: longFeed.clientHeight, top: longFeed.scrollTop, scrollCalls }));
+    await new Promise((resolve, reject) => {
+      const start = performance.now();
+      const settle = () => {
+        if (Math.abs(longFeed.scrollHeight - longFeed.clientHeight - longFeed.scrollTop) <= 1) resolve();
+        else if (performance.now() - start > 2000) reject(new Error('Short chat entry did not reach the latest message'));
+        else requestAnimationFrame(settle);
+      };
+      requestAnimationFrame(settle);
+    });
+    // Exercise a normal bottom pin too: a clamped no-op is not another viewport of travel.
+    main.chatView.scrollToBottom();
+    check(scrollCalls.filter(call => call.behavior === 'smooth').every(call => Math.abs(call.top - call.before) <= 161),
+      'Every smooth leg of the history reveal stays within the distance limit, including the layout frame: ' +
+        JSON.stringify(scrollCalls));
+    scrollCalls.length = 0;
+    main.chatView.renderMessages({ forceScroll: true });
+    await flush();
+    check(Math.abs(longFeed.scrollHeight - longFeed.clientHeight - longFeed.scrollTop) <= 1 &&
+      scrollCalls.length > 0 && scrollCalls.every(call => Math.abs(call.top - call.before) <= 1),
+    'An already hydrated history remains at the bottom without introducing artificial entry movement');
+    yield 'chat-entry-reduced-motion';
+    scrollTo.call(longFeed, { top: 0, behavior: 'instant' });
+    scrollCalls.length = 0;
+    main.chatView.renderMessages({ forceScroll: true });
+    check(longFeed.scrollHeight - longFeed.clientHeight - longFeed.scrollTop <= 1 &&
+      scrollCalls.every(call => call.behavior === 'instant'),
+    'Reduced motion opens long histories directly at the destination without animation');
+    yield 'chat-entry-motion-enabled';
+    longFeed.scrollTo = scrollTo;
+    actualChatStore.setHistory('text', previousHistory);
+    main.chatView.renderMessages({ forceScroll: true });
+    const oldPermissions = chatServer.myPermissions;
+    const oldOwner = chatServer.ownerId;
+    const readableChannel = chatServer.getChannel('text');
+    chatServer.ownerId = 'another-owner';
+    chatServer.myPermissions = 546576;
+    const revokedMessage = { id: 'read-revoked', channelId: 'text', userId: chatServer.currentUser.id,
+      userNickname: 'Author', content: 'Cached private content', createdAt: 1 };
+    actualChatStore.addMessage(revokedMessage);
+    actualChatStore.setReplyDraft('text', revokedMessage);
+    actualChatStore.setBlockDraft('text', [{ type: 'text', text: 'Cached block' }]);
+    actualChatStore.beginMessageEdit(revokedMessage);
+    const outgoingMessage = { ...revokedMessage, id: 'late-permission-ack' };
+    const outgoing = actualChatStore.enqueueMessage(
+      { clientMessageId: outgoingMessage.id, channelId: 'text', content: outgoingMessage.content }, outgoingMessage);
+    const originalSendRequest = client.sendRequest;
+    let acknowledgeRetiredSend;
+    client.sendRequest = (type, ...args) => type === 'CHAT_SEND'
+      ? new Promise(resolve => { acknowledgeRetiredSend = resolve; }) : originalSendRequest.call(client, type, ...args);
+    const lateSend = main.chatView.transmitMessage(outgoing);
+    chatServer.updateChannel({ ...readableChannel, categoryId: null, inheritCategoryPermissions: false,
+      permissionOverwrites: [{ roleId: null, allow: 0, deny: 512 }] });
+    check(actualChatStore.getMessages('text').length === 0 &&
+      !actualChatStore.getReplyDraft('text') && !actualChatStore.getMessageEdit('text') &&
+      actualChatStore.getBlockDraft('text').length === 0,
+    'Read revocation clears the real chat cache, reply, edit and block draft immediately');
+    check(mainRoot.querySelector('#chat-message-input').value === '' &&
+      mainRoot.querySelector('#chat-edit-composer').hidden &&
+      mainRoot.querySelector('#chat-messages-feed').textContent.includes(t('channelPermissions.readDenied')),
+    'Read revocation clears the visible compositor as well as the message feed');
+    acknowledgeRetiredSend(outgoingMessage);
+    await lateSend;
+    client.sendRequest = originalSendRequest;
+    check(actualChatStore.getMessages('text').length === 0 &&
+      !mainRoot.querySelector('[data-message-id="late-permission-ack"]'),
+    'A late direct send acknowledgement cannot revive a revoked cache or message row');
+    chatServer.updateChannel(readableChannel);
+    chatServer.ownerId = oldOwner;
+    chatServer.myPermissions = oldPermissions;
+    check(!mainRoot.querySelector('#chat-messages-feed').textContent.includes(t('channelPermissions.readDenied')),
+      'Restoring reading removes the denied state and resumes the normal chat');
     const stage = mainRoot.querySelector('#main-center-stage');
     main.voiceStageView = new VoiceStageView(stage);
     let voiceJoinRequests = 0;
@@ -2312,6 +2680,59 @@ async function* regression(locale, inviteModule) {
   await flush();
   check(racing.snapshot.events.length === 0, 'Stale private snapshots are not restored');
   racing.dispose();
+  const searchRequests = [];
+  const searchClient = { ...client,
+    onEvent: () => () => {},
+    sendRequest: (type, payload) => new Promise((resolve, reject) => searchRequests.push({ payload, resolve, reject })),
+  };
+  const searchForum = new ForumView(root, searchClient, server, 'forum', () => {});
+  const searchInput = root.querySelector('[data-forum-search]');
+  const searchLoading = root.querySelector('[data-forum-loading]');
+  const searchPosts = root.querySelector('[data-forum-posts]');
+  const searchResult = posts => ({ channelId: 'forum', posts, hasMore: false, nextOffset: posts.length });
+  check(!searchLoading.hidden && !root.querySelector('.forum-empty-state'),
+    'The first forum request shows skeletons without a premature empty result');
+  searchRequests[0].resolve(searchResult([]));
+  await flush();
+  check(searchLoading.hidden && root.querySelector('.forum-empty-state strong')?.textContent === t('forum.emptyTitle'),
+    'A loaded empty forum removes its initial skeletons');
+  for (const query of ['F', 'Fo', 'Forum']) {
+    const before = searchRequests.length;
+    const retained = searchPosts.firstElementChild;
+    searchInput.value = query;
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+    check(searchLoading.hidden && searchPosts.firstElementChild === retained,
+      'Typing preserves the empty forum while the search debounce is pending');
+    await until(() => searchRequests.length === before + 1);
+    check(searchLoading.hidden && searchPosts.firstElementChild === retained
+      && searchPosts.getAttribute('aria-busy') === 'true'
+      && searchRequests.at(-1).payload.query === query,
+    'Searching a loaded empty forum never appends fictitious thread skeletons');
+    yield 'forum-empty-search-pending';
+    searchRequests.at(-1).resolve(searchResult([]));
+    await flush();
+    check(searchLoading.hidden && searchPosts.getAttribute('aria-busy') === 'false'
+      && root.querySelector('.forum-empty-state--search p')?.textContent === t('forum.noResults'),
+    'An empty search remains stable after its response');
+  }
+  const populatedRefresh = searchForum.load();
+  searchRequests.at(-1).resolve(searchResult([post]));
+  await populatedRefresh;
+  const retainedPost = searchPosts.firstElementChild;
+  const refreshing = searchForum.load();
+  check(searchLoading.hidden && searchPosts.firstElementChild === retainedPost
+    && searchPosts.getAttribute('aria-busy') === 'true',
+  'Refreshing loaded threads retains their cards without adding skeleton placeholders');
+  searchRequests.at(-1).resolve(searchResult([]));
+  await refreshing;
+  const failedRefresh = searchForum.load();
+  searchRequests.at(-1).reject(new Error('Controlled forum search failure'));
+  await failedRefresh;
+  check(searchLoading.hidden && searchPosts.getAttribute('aria-busy') === 'false'
+    && root.querySelector('.forum-empty-state--search')
+    && document.querySelector('.chat-copy-toast:not([data-ui-closing])'),
+  'Search errors settle loading, retain the empty result and surface a shared error toast');
+  searchForum.destroy();
   const forumPending = [], forumListeners = new Set();
   const forumClient = { ...client,
     onEvent: listener => { forumListeners.add(listener); return () => forumListeners.delete(listener); },

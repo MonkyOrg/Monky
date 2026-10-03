@@ -8,7 +8,7 @@ const { EventEmitter } = require('node:events');
 const { PassThrough, Writable } = require('node:stream');
 const protocol = require('../runtime/captureProtocol.cjs');
 const { CaptureBridge } = require('../runtime/captureBridge.cjs');
-const { bindGameSource, bindMonitorSource } = require('../scripts/captureSourceBindings.cjs');
+const { bindGameSource, bindWindowSource, bindMonitorSource } = require('../scripts/captureSourceBindings.cjs');
 const { fingerprint } = require('../scripts/buildTools.cjs');
 
 const runId = 'a'.repeat(32);
@@ -216,7 +216,8 @@ test('bridge preserves discriminated targets and only reports hardware-session c
 test('source specializations preserve pinned vendors and bind before stock Game Capture can inject or render', () => {
   const vendor = path.join(__dirname, '..', 'src', 'vendor', 'obs');
   const manifest = require('../src/vendor/obs/sources.json');
-  for (const [name, specialize] of [['game-capture', bindGameSource], ['duplicator-monitor-capture', bindMonitorSource]]) {
+  for (const [name, specialize] of [['game-capture', bindGameSource], ['window-capture', bindWindowSource],
+    ['duplicator-monitor-capture', bindMonitorSource]]) {
     const parts = ['plugins', 'win-capture', `${name}.c`], filename = path.join(vendor, ...parts);
     const pin = manifest.files.find(value => value.path === path.win32.join(...parts));
     assert.ok(pin);
@@ -227,15 +228,23 @@ test('source specializations preserve pinned vendors and bind before stock Game 
     assert.match(bound, /identity_valid/u);
     if (name === 'game-capture') {
       const selectedWindow = bound.slice(bound.indexOf('static void get_selected_window('), bound.indexOf('static void try_hook('));
-      assert.match(selectedWindow, /monky_game_window\(\)/u);
+      assert.match(selectedWindow, /monky_selected_window\(\)/u);
       assert.doesNotMatch(selectedWindow, /ms_find_window|FindWindow|GetForegroundWindow/u);
       assert.match(bound, /monky_open_bound_game_process\(open_process_proc/u);
-      assert.match(bound, /monky_game_identity_matches\(gc->next_window, gc->process_id, gc->target_process\)/u);
+      assert.match(bound, /monky_window_identity_matches\(gc->next_window, gc->process_id, gc->target_process\)/u);
       assert.match(bound, /!obs_data_get_bool\(settings, "anti_cheat_hook"\)/u);
+    } else if (name === 'window-capture') {
+      assert.doesNotMatch(bound, /ms_find_window|FindWindow|GetForegroundWindow\(\).*=/u);
+      assert.match(bound, /wc->window = monky_selected_window\(\)/u);
+      assert.match(bound, /monky_window_identity_matches\(wc->window, process_id, NULL\)/u);
+      assert.match(bound, /wc->window == monky_selected_window\(\) && \(wc->capture_winrt == NULL\)/u);
+      assert.match(bound, /wc->window != monky_selected_window\(\)/u);
+      assert.match(bound, /out int hwnd, out int process_id, out int process_creation/u);
     } else assert.match(bound, /monky_monitor_matches\(capture->handle, capture->monitor_id, capture->method\)/u);
     assert.throws(() => specialize(original.replace(name === 'game-capture'
       ? 'return open_process_proc(desired_access, inherit_handle, process_id);'
-      : '\tcapture->source = source;', 'changed upstream implementation')));
+      : name === 'window-capture' ? '\t\twc->window = (wc->method == METHOD_WGC) ? ms_find_window_top_level('
+        : '\tcapture->source = source;', 'changed upstream implementation')));
   }
   const startup = fs.readFileSync(path.join(__dirname, '..', 'src', 'capture', 'wgc-plugin-main.c'), 'utf8');
   assert.doesNotMatch(startup, /update_info_create|ENABLE_COMPAT_UPDATES|init_hook_files|CreateThread/u);

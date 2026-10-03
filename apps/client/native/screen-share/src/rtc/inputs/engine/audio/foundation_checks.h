@@ -63,6 +63,35 @@ class TrackSink final : public webrtc::AudioTrackSinkInterface {
   unsigned blocks = 0;
 };
 
+class InterruptedTimestamp final : public CaptureTimestampMapper {
+ public:
+  explicit InterruptedTimestamp(CaptureClockStatus failure) : failure_(failure) {}
+  std::optional<RtcCaptureTimestamp> Map(const CaptureEpoch& epoch, const CaptureBlockTiming& timing) override {
+    const auto capture = CaptureTimestampQpc(epoch, timing);
+    if (!capture) throw std::runtime_error("Expected original QPC in the clock fixture");
+    const auto now = *capture + 5000;
+    const auto span = ++calls_ != 2 ? 1
+        : failure_ == CaptureClockStatus::kSampleUncertain ? CaptureClockPolicy::kMaxSampleSpanUs + 1 : -1;
+    return CaptureTimestampRtc(policy_.Map({true, now, now, now + span}, *capture, ordering_));
+  }
+ private:
+  CaptureClockStatus failure_;
+  std::int64_t calls_ = 0;
+  CaptureClockPolicy policy_;
+  CaptureClockSourceState ordering_;
+};
+
+class TimedTrackSink final : public webrtc::AudioTrackSinkInterface {
+ public:
+  void OnData(const void*, int bits, int rate, std::size_t channels, std::size_t frames,
+              std::optional<std::int64_t> timestamp) override {
+    if (bits != 16 || rate != kRate || channels != kChannels || frames != kBlockFrames)
+      throw std::runtime_error("Unexpected PCM format");
+    timestamps.push_back(timestamp);
+  }
+  std::vector<std::optional<std::int64_t>> timestamps;
+};
+
 class Mixer final : public webrtc::AudioTransport {
  public:
   int32_t RecordedDataIsAvailable(const void*, std::size_t, std::size_t, std::size_t,
@@ -546,6 +575,43 @@ void RunAudioFoundationChecks(Check&& check) {
           "Screen source inherited microphone processing or global ADM capture");
     source->End();
     rejects([&] { source->Push(Packet(epoch, samples, 3, 3 * kBlockFrames)); }, Failure::NotReady);
+  }
+  {
+    for (const auto failure : {CaptureClockStatus::kSampleUncertain, CaptureClockStatus::kClockDiscontinuity}) {
+      InterruptedTimestamp mapper(failure);
+      Blocks observation;
+      TimedTrackSink sink;
+      auto source = webrtc::make_ref_counted<PcmTrackSource>(mapper, observation);
+      const CaptureEpoch epoch{"clock", "clock:1", Stereo(), 0, 0};
+      source->BeginEpoch(epoch);
+      source->AddSink(&sink);
+      source->SetEnabled(true);
+      const std::vector<float> samples(2 * kBlockFrames, .125f);
+      source->Push(Packet(epoch, samples, 0, 0));
+      if (failure == CaptureClockStatus::kSampleUncertain) {
+        source->Push(Packet(epoch, samples, 1, kBlockFrames));
+        source->Push(Packet(epoch, samples, 2, 2 * kBlockFrames));
+        check(sink.timestamps == std::vector<std::optional<std::int64_t>>{1000, std::nullopt, 1020},
+              "A transient clock observation ended PCM or fabricated an absolute timestamp");
+        check(source->Snapshot().packets == 3 && !source->Snapshot().reset_required,
+              "A clock sampling interruption retired the still-contiguous capture epoch");
+        check(source->ClockObservationsUnavailable() == 1,
+              "The unavailable capture clock observation disappeared from diagnostics");
+      } else {
+        rejects([&] { source->Push(Packet(epoch, samples, 1, kBlockFrames)); }, Failure::Clock);
+        check(source->Snapshot().reset_required && sink.timestamps.size() == 1,
+              "An unclassified capture clock failure was silently accepted");
+      }
+      source->RemoveSink(&sink);
+      source->End();
+    }
+    for (auto status = CaptureClockStatus::kSampleFailed; status < CaptureClockStatus::kCount;
+         status = static_cast<CaptureClockStatus>(static_cast<int>(status) + 1)) {
+      CaptureClockMapping mapped;
+      mapped.status = status;
+      rejects([&] { (void)CaptureTimestampRtc(mapped); },
+          status == CaptureClockStatus::kSampleUncertain ? Failure::ClockObservationUnavailable : Failure::Clock);
+    }
   }
   {
     webrtc::SimulatedClock rtc(1000000);

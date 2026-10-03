@@ -1180,6 +1180,39 @@ export function setupIpcHandlers(
   });
 
   // Window Controls
+  let screenPipWindowInactive = !mainWindow.isFocused() || mainWindow.isMinimized();
+  const notifyWindowActivity = () => {
+    if (mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+    const inactive = !mainWindow.isFocused() || mainWindow.isMinimized();
+    // Blur, minimize and restore can describe the same native transition.
+    if (inactive === screenPipWindowInactive) return;
+    screenPipWindowInactive = inactive;
+    mainWindow.webContents.send(inactive ? 'window:inactive' : 'window:active');
+  };
+  mainWindow.on('blur', notifyWindowActivity);
+  mainWindow.on('minimize', notifyWindowActivity);
+  mainWindow.on('focus', notifyWindowActivity);
+  mainWindow.on('restore', notifyWindowActivity);
+  ipcMain.handle('screen-pip:open', async (event, requestId: unknown, requireInactive: unknown) => {
+    if (mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
+      || event.senderFrame !== mainWindow.webContents.mainFrame
+      || typeof requestId !== 'string' || !/^[0-9a-f-]{36}$/i.test(requestId)
+      || typeof requireInactive !== 'boolean') {
+      throw new Error('Invalid screen Picture-in-Picture request.');
+    }
+    // A DOM blur can also come from an iframe; it is not an app switch.
+    if (requireInactive && mainWindow.isFocused() && !mainWindow.isMinimized()) return false;
+    const selector = JSON.stringify(`video[data-monky-screen-pip="${requestId}"]`);
+    return mainWindow.webContents.executeJavaScript(`(() => {
+      const video = document.querySelector(${selector});
+      if (!(video instanceof HTMLVideoElement) || !(video.srcObject instanceof MediaStream)
+        || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
+        || !video.srcObject.getVideoTracks().some(track => track.readyState === 'live')) {
+        throw new Error('The screen Picture-in-Picture presentation is no longer available.');
+      }
+      return video.requestPictureInPicture().then(() => true);
+    })()`, true);
+  });
   ipcMain.handle('window:minimize', () => {
     mainWindow.minimize();
   });
