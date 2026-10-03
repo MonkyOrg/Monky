@@ -180,7 +180,21 @@ if (!process.versions.electron) {
           if (computedStyle.find(property => property.name === 'cursor')?.value !== 'pointer') {
             throw new Error('The actual native audience search clear button must have a pointer cursor');
           }
-          const { model } = await browser.webContents.debugger.sendCommand('DOM.getBoxModel', { nodeId: nodeIds[0] });
+          const { model } = await browser.webContents.debugger.sendCommand('DOM.getBoxModel', { nodeId: nodeIds[0] })
+            .catch(async error => {
+              const state = await browser.webContents.executeJavaScript(`(() => {
+                const root = document.querySelector('[data-resource-audience=poll-audience]');
+                const popup = root?.querySelector('[data-audience-popup]');
+                const search = root?.querySelector('[data-audience-search]');
+                const box = search?.getBoundingClientRect();
+                return { popupHidden: popup?.hidden, popoverOpen: popup?.matches(':popover-open'),
+                  expanded: root?.querySelector('[data-audience-toggle]')?.getAttribute('aria-expanded'),
+                  value: search?.value, focused: document.activeElement === search,
+                  searchBox: box && [box.left, box.top, box.width, box.height].map(Math.round),
+                  stepScroll: document.querySelector('[data-poll-step-viewport]')?.scrollTop };
+              })()`).catch(stateError => String(stateError));
+              throw new Error(`${error.message} ${JSON.stringify(state)}`);
+            });
           const point = { x: Math.round((model.content[0] + model.content[2]) / 2),
             y: Math.round((model.content[1] + model.content[5]) / 2) };
           browser.webContents.sendInputEvent({ type: 'mouseMove', ...point });
@@ -377,16 +391,28 @@ async function* regression(locale, inviteModule) {
     for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
     throw new Error('Condition did not become true');
   };
+  // Automatic scrolls start from rAF callbacks; slow runners can exceed a fixed quiet window before the first frame.
   const settleScroll = async element => {
     let lastScroll = element.scrollTop;
     let lastChange = performance.now();
-    await until(() => {
-      if (element.scrollTop !== lastScroll) {
-        lastScroll = element.scrollTop;
-        lastChange = performance.now();
+    const noteScroll = () => { lastChange = performance.now(); };
+    document.addEventListener('scroll', noteScroll, { capture: true });
+    try {
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const started = performance.now();
+      lastChange = Math.max(lastChange, started);
+      for (;;) {
+        if (element.scrollTop !== lastScroll) {
+          lastScroll = element.scrollTop;
+          lastChange = performance.now();
+        }
+        if (performance.now() - lastChange >= 200) return;
+        if (performance.now() - started > 5000) throw new Error(`Scrolling did not settle: ${element.className}`);
+        await new Promise(resolve => setTimeout(resolve, 10));
       }
-      return performance.now() - lastChange >= 160;
-    });
+    } finally {
+      document.removeEventListener('scroll', noteScroll, { capture: true });
+    }
   };
   const now = Date.now();
   const event = { id: 'event', creatorUserId: 'owner', title: '<img src=x onerror=alert(1)>',
@@ -1159,6 +1185,16 @@ async function* regression(locale, inviteModule) {
     && audienceEmptyStyle.textAlign === 'center'
     && audienceEmptyStyle.marginTop === '0px',
   'An empty audience search has compact localized text, centered alignment and breathing room');
+  // The popup re-anchors on the next frames after its content shrinks; the native click must target its final position.
+  const pollAudiencePopup = pollAudience.querySelector('[data-audience-popup]');
+  let pollAudiencePopupTop = NaN;
+  for (let stableFrames = 0, frames = 0; stableFrames < 3; frames++) {
+    if (frames > 120) throw new Error('The audience dropdown did not settle before clearing its search');
+    await new Promise(requestAnimationFrame);
+    const top = pollAudiencePopup.getBoundingClientRect().top;
+    stableFrames = top === pollAudiencePopupTop ? stableFrames + 1 : 0;
+    pollAudiencePopupTop = top;
+  }
   yield 'audience-search-clear';
   check(audienceSearch.value === '' && audienceEmpty.hidden
     && !pollAudience.querySelector('[data-audience-popup]').hidden
@@ -1933,7 +1969,18 @@ async function* regression(locale, inviteModule) {
   forumListGate = new Promise(resolve => { releaseForumPage = resolve; });
   const forumScroller = root.querySelector('.forum-list-content');
   forumScroller.scrollTop = forumScroller.scrollHeight;
-  await until(() => calls.some(call => call.type === 'FORUM_LIST' && call.payload.offset === 25));
+  try {
+    await until(() => calls.some(call => call.type === 'FORUM_LIST' && call.payload.offset === 25));
+  } catch (error) {
+    throw new Error('Forum lazy loading did not request its second page: ' + JSON.stringify({
+      viewport: { width: innerWidth, height: innerHeight, visible: document.visibilityState },
+      root: root.getBoundingClientRect(), scroller: forumScroller.getBoundingClientRect(),
+      sentinel: root.querySelector('[data-forum-sentinel]').getBoundingClientRect(),
+      scroll: { top: forumScroller.scrollTop, height: forumScroller.scrollHeight, client: forumScroller.clientHeight },
+      more: forum.more, next: forum.next, loading: forum.loading,
+      requests: calls.filter(call => call.type === 'FORUM_LIST').map(call => call.payload),
+    }), { cause: error });
+  }
   check(!root.querySelector('[data-forum-loading]').hidden
     && root.querySelectorAll('.forum-thread-skeleton').length === 3
     && root.querySelector('[data-forum-posts]').getAttribute('aria-busy') === 'true',

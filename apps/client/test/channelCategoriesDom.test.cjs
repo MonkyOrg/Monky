@@ -141,8 +141,11 @@ if (!process.versions.electron) {
     };
     const dragChannelToSelector = async (from, selector, yRatio = 0.5) => {
       const targetBefore = await browser.webContents.executeJavaScript(`(() => {
-        const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
-        return { x: Math.round(box.left + Math.min(80, box.width / 2)), y: Math.round(box.top + box.height * ${yRatio}), top: box.top };
+        const target = document.querySelector(${JSON.stringify(selector)});
+        const box = target.getBoundingClientRect();
+        return { x: Math.round(box.left + Math.min(80, box.width / 2)), y: Math.round(box.top + box.height * ${yRatio}),
+          top: box.top, layoutTop: box.top - target.closest('#channel-categories-list').getBoundingClientRect().top,
+          scroll: target.closest('.channels-list-container').scrollTop };
       })()`);
       browser.webContents.sendInputEvent({ type: 'mouseMove', ...from });
       await new Promise(resolve => setTimeout(resolve, 20));
@@ -153,11 +156,24 @@ if (!process.versions.electron) {
         y: from.y + 7,
         modifiers: ['leftButtonDown'],
       });
-      await new Promise(resolve => setTimeout(resolve, 30));
-      const targetAfter = await browser.webContents.executeJavaScript(`(() => {
-        const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
-        return { x: Math.round(box.left + Math.min(80, box.width / 2)), y: Math.round(box.top + box.height * ${yRatio}), top: box.top };
-      })()`);
+      // Native input is delivered asynchronously; measure only after the renderer starts the drag.
+      const targetAfter = await browser.webContents.executeJavaScript(`new Promise(resolve => {
+        const started = performance.now();
+        const measure = () => {
+          if (!document.querySelector('.channel-reorder-active .channel-dragging')) {
+            if (performance.now() - started > 3000) resolve({ failure: 'The channel pointer drag did not start' });
+            else requestAnimationFrame(measure);
+            return;
+          }
+          const target = document.querySelector(${JSON.stringify(selector)});
+          const box = target.getBoundingClientRect();
+          resolve({ x: Math.round(box.left + Math.min(80, box.width / 2)), y: Math.round(box.top + box.height * ${yRatio}),
+            top: box.top, layoutTop: box.top - target.closest('#channel-categories-list').getBoundingClientRect().top,
+            scroll: target.closest('.channels-list-container').scrollTop });
+        };
+        measure();
+      })`);
+      if (targetAfter.failure) throw new Error(targetAfter.failure);
       for (let step = 1; step <= 8; step++) {
         browser.webContents.sendInputEvent({
           type: 'mouseMove',
@@ -211,8 +227,10 @@ if (!process.versions.electron) {
         '[data-category-id="destination"] > .category-title',
         0.75,
       );
+      console.log('Channel drag geometry', channelDragGeometry);
       if (channelDragGeometry.targetAfter.top <= channelDragGeometry.targetBefore.top) {
-        throw new Error('The Uncategorized target did not push existing categories down during channel drag');
+        throw new Error('The Uncategorized target did not push existing categories down during channel drag: ' +
+          JSON.stringify(channelDragGeometry));
       }
       const channelMoved = await browser.webContents.executeJavaScript(`window.categoryTestRequests.some(({ type, payload }) =>
         type === 'CHANNEL_UPDATE' && payload.channelId === 'voice' && payload.categoryId === 'destination')`);
