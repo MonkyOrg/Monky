@@ -285,7 +285,7 @@ async function setupHomeDiscordSmoke() {
   ownedButton.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 80, clientY: 80 }));
   await until(() => !!document.querySelector('.floating-context-menu'), 'owned server context menu did not open');
   const menuText = document.querySelector('.floating-context-menu').textContent;
-  for (const label of ['Iniciar', 'Parar', 'Monitor', 'Excluir'].some(label => menuText.includes(label))
+  for (const label of ['Iniciar', 'Parar', 'Excluir'].some(label => menuText.includes(label))
     ? ['Iniciar', 'Parar', 'Monitor', 'Excluir']
     : ['Start', 'Stop', 'Monitor', 'Delete']) {
     check(menuText.includes(label), `owned server context menu includes ${label}`);
