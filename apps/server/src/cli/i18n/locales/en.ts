@@ -59,6 +59,7 @@ export const en: CliTranslationMap = {
   'create.serverNotFound': 'Server not found.',
   'create.alreadyHasOwner': 'This server already has an owner configured.',
   'create.bootstrapFailed': 'Failed to update the bootstrap user.',
+  'create.identityCollision': 'This identity clientId collides with another member, but the public key is different. Login was refused for safety.',
   'create.adminRoleNotFound': 'Admin role not found.',
   'create.ownerConfigured': 'Server owner configured successfully.',
   'create.askDataDir': 'Where to store server data',

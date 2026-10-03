@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LIMITS, PROTOCOL_VERSION } from './constants.js';
+import { ED25519_SPKI_PUBLIC_KEY_DER_HEX_LENGTH, ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX, LIMITS, PROTOCOL_VERSION } from './constants.js';
 import { CHANNEL_PERMISSIONS, EVERYONE_ROLE_ID, channelPermissionTargetKey } from './permissions.js';
 import { protocolOfferSchema } from './protocolCompatibility.js';
 import { screenShareIdSchema, nativeScreenRenditionSchema } from './screenSharing.js';
@@ -135,6 +135,7 @@ export const voiceRestrictionsUpdatedSchema = z.object({
   userId: messageReferenceSchema,
   serverMuted: z.boolean(),
   serverDeafened: z.boolean(),
+  permissionMuted: z.boolean().optional(),
 });
 
 export const voiceModeTransitionSchema = z.object({
@@ -211,6 +212,49 @@ export const authConnectSchema = z.object({
 
 export const authChallengeResponseSchema = z.object({
   signature: z.string().regex(/^[a-fA-F0-9]+$/, 'Assinatura inválida'),
+});
+
+export const ed25519SpkiPublicKeyHexSchema = z.string()
+  .length(ED25519_SPKI_PUBLIC_KEY_DER_HEX_LENGTH, 'Chave pública inválida')
+  .regex(/^[a-fA-F0-9]+$/, 'Chave pública deve estar em hexadecimal')
+  .transform(value => value.toLowerCase())
+  .refine(value => value.startsWith(ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX), 'Chave pública Ed25519 inválida');
+
+export const dmRelayKindSchema = z.enum(['friend', 'envelope', 'file', 'signal']);
+const dmRelayBaseItemSchema = z.object({
+  to: ed25519SpkiPublicKeyHexSchema,
+});
+export const dmRelayItemSchema = z.discriminatedUnion('kind', [
+  dmRelayBaseItemSchema.extend({
+    kind: z.literal('friend'),
+    data: z.string().max(LIMITS.DM_RELAY_DATA_MAX_LENGTH, 'Payload de DM muito grande'),
+  }).strict(),
+  dmRelayBaseItemSchema.extend({
+    kind: z.literal('envelope'),
+    data: z.string().max(LIMITS.DM_RELAY_DATA_MAX_LENGTH, 'Payload de DM muito grande'),
+  }).strict(),
+  dmRelayBaseItemSchema.extend({
+    kind: z.literal('file'),
+    data: z.string().max(LIMITS.DM_RELAY_FILE_DATA_MAX_LENGTH, 'Arquivo de DM muito grande'),
+  }).strict(),
+  dmRelayBaseItemSchema.extend({
+    kind: z.literal('signal'),
+    data: z.string().max(LIMITS.DM_RELAY_DATA_MAX_LENGTH, 'Payload de DM muito grande'),
+  }).strict(),
+]);
+export const dmRelaySendSchema = z.object({
+  relayId: z.string().min(1, 'Relay inválido').max(128, 'Relay inválido'),
+  items: z.array(dmRelayItemSchema).min(1, 'Envie ao menos um item')
+    .max(LIMITS.DM_RELAY_MAX_ITEMS, 'Itens demais no relay'),
+}).strict().superRefine((value, ctx) => {
+  const total = value.items.reduce((sum, item) => sum + item.data.length, 0);
+  if (total > LIMITS.DM_RELAY_TOTAL_DATA_MAX_LENGTH) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Payload de DM muito grande',
+      path: ['items'],
+    });
+  }
 });
 
 export const channelAllowedRoleIdsSchema = z

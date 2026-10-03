@@ -135,6 +135,7 @@ export class SettingsStore {
   public chatSoundChannelOverrides: Record<string, ChatSoundMode> = {};
   public onboardingCompleted: boolean = false;
   public autoEntryServerKeys: string[] = [];
+  public autoConnectServers: boolean = true;
 
   // Sobreposição de Tela Flutuante (Overlay) (#169)
   public overlayMode: OverlayMode = 'cameras-only';
@@ -318,6 +319,9 @@ export class SettingsStore {
         if (typeof this.onboardingCompleted !== 'boolean') {
           this.onboardingCompleted = false;
         }
+        if (typeof this.autoConnectServers !== 'boolean') {
+          this.autoConnectServers = true;
+        }
 
         if (!['cameras-only', 'cameras-and-screens'].includes(this.overlayMode)) {
           this.overlayMode = 'cameras-only';
@@ -425,6 +429,23 @@ export class SettingsStore {
 
   public clearServerAutoEntry(): void {
     this.saveAutoEntryServerKeys([]);
+  }
+
+  /**
+   * Logout: drops what belongs to the identity leaving this computer (servers,
+   * bots, visibility, first-run guide) and keeps device preferences such as
+   * audio, video, language and shortcuts.
+   */
+  public clearAccountData(): void {
+    this.autoEntryServerKeys = [];
+    this.chatSoundServerOverrides = {};
+    this.chatSoundChannelOverrides = {};
+    this.botUserPreferences = {};
+    this.botLocalePreferences = {};
+    this.botDownloadConfirmationExceptions = [];
+    this.appearOffline = false;
+    this.onboardingCompleted = false;
+    this.save();
   }
 
   public retainAutoEntryServers(servers: readonly AutoEntryServerAddress[]): void {
@@ -725,6 +746,7 @@ export class SettingsStore {
         chatSoundChannelOverrides: this.chatSoundChannelOverrides,
         onboardingCompleted: this.onboardingCompleted,
         autoEntryServerKeys: this.autoEntryServerKeys,
+        autoConnectServers: this.autoConnectServers,
         overlayMode: this.overlayMode,
         overlayLayout: this.overlayLayout,
         overlayPosition: this.overlayPosition,

@@ -118,13 +118,13 @@ for (const serverProtocolVersion of [24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]
   });
 }
 
-test('current clients advertise server community, forums and message search to compatible servers', async context => {
+test('current clients advertise negotiated human-client features to compatible servers', async context => {
   const f = fixture(context);
   const pending = f.connect();
   const socket = f.lastSocket();
   socket.open();
   const initial = socket.sent[0];
-  for (const feature of ['server-community', 'forums', 'message-search']) {
+  for (const feature of ['server-community', 'forums', 'message-search', 'recent-sounds', 'dm-relay']) {
     assert.ok(initial.payload.protocolOffer.features.includes(feature));
   }
   socket.receive({ type: MessageType.AUTH_SUCCESS, requestId: initial.requestId, payload: {} });

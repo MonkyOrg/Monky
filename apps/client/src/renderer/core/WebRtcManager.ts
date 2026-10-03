@@ -374,9 +374,10 @@ export class WebRtcManager {
   public getLocalScreenState(): VoiceStateUpdatePayload {
     const screenShareIds = [...voiceStore.screenShareIds];
     const nativeScreenShares = videoService.getNativeScreenCaptures()
-      .map(capture => capture.source).filter(source => screenShareIds.includes(source.shareId));
+      .map(capture => voiceStore.permissionMuted ? { ...capture.source, audio: false } : capture.source)
+      .filter(source => screenShareIds.includes(source.shareId));
     return { screenShareIds, nativeScreenShares, isScreenSharing: voiceStore.isScreenSharing,
-      isSharingScreenAudio: this.localScreenAudioTrack !== null || nativeScreenShares.some(source => source.audio) };
+      isSharingScreenAudio: !voiceStore.permissionMuted && (this.localScreenAudioTrack !== null || nativeScreenShares.some(source => source.audio)) };
   }
 
   public getNativeScreenCapabilities(): Promise<NativeScreenCapabilities> {

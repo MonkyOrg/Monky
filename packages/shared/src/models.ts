@@ -39,6 +39,8 @@ export type UserStatus = 'ONLINE' | 'IDLE' | 'VOICE' | 'DISCONNECTED';
 export interface UserSummary {
   id: string;
   clientId: string;
+  /** Full normalized Ed25519 SPKI public key for human identities. */
+  publicKey?: string;
   nickname: string;
   avatarUrl?: string | null;
   status: UserStatus;
@@ -224,6 +226,7 @@ export interface VoiceRosterParticipant {
 export interface VoiceRestrictions {
   serverMuted: boolean;
   serverDeafened: boolean;
+  permissionMuted?: boolean;
 }
 
 export interface VoiceParticipantState extends VoiceRestrictions {
@@ -351,6 +354,7 @@ export interface ServerDetails {
   maxUsers: number;
   hasPassword?: boolean;
   allowSoundboard?: boolean;
+  dmRelayEnabled?: boolean;
   recentSoundCacheEnabled?: boolean;
   recentSoundCacheLimit?: number;
   /** Whether `@todos` / `@everyone` mentions the whole channel (#464). */

@@ -382,13 +382,16 @@ export async function exerciseBotUi(serverUrl, exercise) {
     });
     await devtools.wait('!!document.querySelector("#btn-onboard-create")', 'fresh identity onboarding');
     await devtools.click('#btn-onboard-create');
-    await devtools.wait('!!document.querySelector("#onboarding-skip")', 'connection onboarding');
-    await devtools.click('#onboarding-skip');
+    await devtools.wait('!!document.querySelector("#identity-profile-nickname")', 'profile onboarding');
+    await devtools.input('#identity-profile-nickname', 'UI Tester');
+    await devtools.click('#identity-profile-submit');
+    await devtools.wait('!!document.querySelector("#home-view")', 'empty Home');
     const url = new URL(serverUrl);
-    await devtools.input('#join-nickname', 'UI Tester');
-    await devtools.input('#join-host', url.hostname);
-    await devtools.input('#join-port', url.port);
-    await devtools.click('#btn-submit-join');
+    await devtools.click('#server-rail-add');
+    await devtools.click('#add-server-option-join');
+    await devtools.input('#add-server-host', url.hostname);
+    await devtools.input('#add-server-port', url.port);
+    await devtools.click('#add-server-submit-join');
     await devtools.wait('!!document.querySelector("#chat-message-input")', 'real server connection');
     await devtools.input('#chat-message-input', '/');
     await devtools.wait(`(() => {

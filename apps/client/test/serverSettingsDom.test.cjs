@@ -207,9 +207,9 @@ async function* runRegression(language, sharedModule) {
     id: 'server-a', name: 'Server A', serverVersion: '44.7.9-beta', createdAt: 1, maxUsers: 0, hasPassword: false,
     iconUrl: 'data:image/png;base64,AA==', voiceMode: 'p2p', turnEnabled: false,
     turnAvailability: { supported: false, reason: 'not-installed', autoInstallable: true },
-    allowSoundboard: true, recentSoundCacheEnabled: true, recentSoundCacheLimit: 20,
+    allowSoundboard: true, recentSoundCacheEnabled: true, recentSoundCacheLimit: 20, dmRelayEnabled: true,
     allowEveryoneMention: true, allowMessageEdit: true, showRoleBadgesToEveryone: true,
-    messageDeleteUndoSeconds: 60, protocol: { version: 34, minimumVersion: 27, features: ['message-delete-undo', 'recent-sounds'] },
+    messageDeleteUndoSeconds: 60, protocol: { version: 36, minimumVersion: 35, features: ['message-delete-undo', 'recent-sounds', 'dm-relay'] },
     channels: [], members: [member('admin'), member('bob')],
     knownMembers: [member('admin'), member('bob'), { ...member('carol'), status: 'DISCONNECTED' }, { ...member('helper'), isBot: true }],
     voiceStates: {}, roles: [role], userRoles: [], ownerId: 'admin', myPermissions: 0xFFFFFFFF,
@@ -241,7 +241,7 @@ async function* runRegression(language, sharedModule) {
     let result = {};
     if (type === 'SERVER_UPDATE_SETTINGS') {
       const s = store.serverDetails;
-      for (const key of ['name', 'maxUsers', 'allowSoundboard', 'recentSoundCacheEnabled', 'recentSoundCacheLimit', 'allowEveryoneMention', 'allowMessageEdit', 'showRoleBadgesToEveryone', 'turnEnabled', 'voiceMode', 'messageDeleteUndoSeconds']) {
+      for (const key of ['name', 'maxUsers', 'allowSoundboard', 'recentSoundCacheEnabled', 'recentSoundCacheLimit', 'dmRelayEnabled', 'allowEveryoneMention', 'allowMessageEdit', 'showRoleBadgesToEveryone', 'turnEnabled', 'voiceMode', 'messageDeleteUndoSeconds']) {
         if (payload[key] !== undefined) s[key] = payload[key];
       }
       if (payload.allowSoundboard === false) s.recentSoundCacheEnabled = false;
@@ -458,6 +458,9 @@ async function* runRegression(language, sharedModule) {
   tab('voice_video');
   check(field('#checkbox-recent-sounds').checked && field('#input-recent-sounds-limit').value === '20',
     'Recent audio cache settings are shown for compatible servers');
+  check(field('#checkbox-dm-relay-enabled').checked &&
+    field('[data-settings-section="dm-relay"]').textContent.includes(t('serverSettings.dmRelayEnabled')),
+  'DM relay setting is shown as a localized switch for compatible servers');
   change('#checkbox-allow-soundboard', false);
   await flush();
   check(pendingRequest('SERVER_UPDATE_SETTINGS').payload.name === 'Rapid one', 'First rapid edit is not replaced by a later DOM value');
@@ -474,6 +477,13 @@ async function* runRegression(language, sharedModule) {
   check(store.serverDetails.recentSoundCacheEnabled === false, 'Disabling soundboard also disables its recent audio cache');
   check(field('#checkbox-recent-sounds').disabled && field('#input-recent-sounds-limit').disabled,
     'Disabling soundboard also disables recent audio cache controls');
+  change('#checkbox-dm-relay-enabled', false);
+  await flush();
+  check(pendingRequest('SERVER_UPDATE_SETTINGS').payload.dmRelayEnabled === false, 'DM relay switch persists through server settings');
+  acknowledge('SERVER_UPDATE_SETTINGS');
+  await flush();
+  check(store.serverDetails.dmRelayEnabled === false && !field('#checkbox-dm-relay-enabled').checked,
+    'Acknowledged DM relay setting refreshes the switch');
   change('#checkbox-turn-enabled', true);
   await flush();
   appEvents.emit('message.TURN_INSTALL_PROGRESS', { stage: 'configuring', percent: 100 });

@@ -21,6 +21,7 @@ const ERROR_KEYS: Record<ProtocolErrorCode, TranslationKey> = {
   [ProtocolErrorCode.SERVER_FULL]: 'protocolError.serverFull',
   [ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED]: 'protocolError.protocolVersionUnsupported',
   [ProtocolErrorCode.FEATURE_REQUIRES_UPDATE]: 'chat.featureUpdateRequired',
+  [ProtocolErrorCode.DM_RELAY_DISABLED]: 'protocolError.dmRelayDisabled',
   [ProtocolErrorCode.INTERNAL_ERROR]: 'protocolError.internalError',
   [ProtocolErrorCode.UNAUTHORIZED]: 'protocolError.unauthorized',
   [ProtocolErrorCode.PERMISSION_DENIED]: 'protocolError.permissionDenied',

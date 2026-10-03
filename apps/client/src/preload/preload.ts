@@ -7,6 +7,7 @@ import * as nativeAudioProtocol from '@monky/shared';
 import { BOT_SCREEN_DOCUMENT_IPC, SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, DESKTOP_SOURCES_IPC, EVENT_CALENDAR_IPC, type BotScreenDocumentConsent, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
 import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenEventSchema } from '@monky/shared';
 import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
+import { DM_EVENT, DM_IPC, type DmApi, type DmEvent, type DmExportMode } from '@monky/shared';
 import type {
   ActionShortcutBinding,
   AudioPreviewCancellation,
@@ -106,8 +107,11 @@ export interface ElectronApi {
   getIdentity: () => Promise<AppIdentityResult>;
   getClientId: () => Promise<string>;
   signChallenge: (nonceHex: string) => Promise<string>;
-  exportIdentity: (password: string, extras?: string) => Promise<string>;
+  exportIdentity: (password: string, extras?: string, dmMode?: DmExportMode) => Promise<string>;
   importIdentity: (exportedIdentity: string, password: string) => Promise<AppIdentityImportResult>;
+  /** Deletes the identity, friends and DMs from this computer, then relaunches Monky. */
+  logOut: () => Promise<{ success: boolean; error?: string }>;
+  dm: DmApi;
   saveBackupFile: (contents: string, suggestedName: string) => Promise<{ success: boolean; filePath?: string; error?: string }>;
   openBackupFile: () => Promise<{ success: boolean; contents?: string; error?: string }>;
   encryptBackup: (contents: string, password: string) => Promise<BackupCryptoResult>;
@@ -326,8 +330,44 @@ const api: ElectronApi = {
   getIdentity: () => ipcRenderer.invoke('identity:get'),
   getClientId: () => ipcRenderer.invoke('identity:get-client-id'),
   signChallenge: (nonceHex) => ipcRenderer.invoke('identity:sign-challenge', nonceHex),
-  exportIdentity: (password, extras) => ipcRenderer.invoke('identity:export', password, extras),
+  exportIdentity: (password, extras, dmMode) => ipcRenderer.invoke('identity:export', password, extras, dmMode),
   importIdentity: (exportedIdentity, password) => ipcRenderer.invoke('identity:import', exportedIdentity, password),
+  logOut: () => ipcRenderer.invoke('identity:logout'),
+  dm: {
+    snapshot: () => ipcRenderer.invoke(DM_IPC.snapshot),
+    conversation: (peer, before, limit) => ipcRenderer.invoke(DM_IPC.conversation, peer, before ?? null, limit),
+    openConversation: peer => ipcRenderer.invoke(DM_IPC.openConversation, peer),
+    closeConversation: peer => ipcRenderer.invoke(DM_IPC.closeConversation, peer),
+    sendFriendRequest: (peer, nickname) => ipcRenderer.invoke(DM_IPC.sendFriendRequest, peer, nickname),
+    acceptFriend: peer => ipcRenderer.invoke(DM_IPC.acceptFriend, peer),
+    declineFriend: peer => ipcRenderer.invoke(DM_IPC.declineFriend, peer),
+    cancelFriendRequest: peer => ipcRenderer.invoke(DM_IPC.cancelFriendRequest, peer),
+    removeFriend: peer => ipcRenderer.invoke(DM_IPC.removeFriend, peer),
+    block: (peer, nickname) => ipcRenderer.invoke(DM_IPC.block, peer, nickname),
+    unblock: peer => ipcRenderer.invoke(DM_IPC.unblock, peer),
+    sendMessage: input => ipcRenderer.invoke(DM_IPC.sendMessage, input),
+    editMessage: (peer, messageId, content) => ipcRenderer.invoke(DM_IPC.editMessage, peer, messageId, content),
+    deleteMessage: (peer, messageId) => ipcRenderer.invoke(DM_IPC.deleteMessage, peer, messageId),
+    react: (peer, messageId, emoji, add) => ipcRenderer.invoke(DM_IPC.react, peer, messageId, emoji, add),
+    markRead: peer => ipcRenderer.invoke(DM_IPC.markRead, peer),
+    typing: peer => ipcRenderer.invoke(DM_IPC.typing, peer),
+    ingest: item => ipcRenderer.invoke(DM_IPC.ingest, item),
+    outgoing: (peers, force) => ipcRenderer.invoke(DM_IPC.outgoing, peers, force === true),
+    hello: toFriends => ipcRenderer.invoke(DM_IPC.hello, toFriends),
+    helloTo: peer => ipcRenderer.invoke(DM_IPC.helloTo, peer),
+    pendingPeers: () => ipcRenderer.invoke(DM_IPC.pendingPeers),
+    observePeer: peer => ipcRenderer.invoke(DM_IPC.observePeer, peer),
+    setSelfNickname: nickname => ipcRenderer.invoke(DM_IPC.setSelfNickname, nickname),
+    updateSettings: settings => ipcRenderer.invoke(DM_IPC.updateSettings, settings),
+    readAttachment: (peer, messageId, fileId) => ipcRenderer.invoke(DM_IPC.readAttachment, peer, messageId, fileId),
+    saveAttachment: (peer, messageId, fileId) => ipcRenderer.invoke(DM_IPC.saveAttachment, peer, messageId, fileId),
+    retryAttachment: (peer, messageId, fileId) => ipcRenderer.invoke(DM_IPC.retryAttachment, peer, messageId, fileId),
+    onEvent: callback => {
+      const listener = (_event: Electron.IpcRendererEvent, value: DmEvent) => callback(value);
+      ipcRenderer.on(DM_EVENT, listener);
+      return () => { ipcRenderer.removeListener(DM_EVENT, listener); };
+    },
+  },
   saveBackupFile: (contents, suggestedName) => ipcRenderer.invoke('backup:save-file', contents, suggestedName),
   openBackupFile: () => ipcRenderer.invoke('backup:open-file'),
   takeServerInvite: () => ipcRenderer.invoke(SERVER_INVITE_IPC.take),

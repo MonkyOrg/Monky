@@ -121,7 +121,8 @@ export class SignalingService {
     userId: string,
     channelId: string,
     initialMuted?: boolean,
-    initialDeafened?: boolean
+    initialDeafened?: boolean,
+    permissionMuted = false,
   ): Promise<{
     success: boolean;
     errorCode?: ProtocolErrorCode;
@@ -173,6 +174,7 @@ export class SignalingService {
       isMuted: resolvedMuted,
       isDeafened: resolvedDeafened,
       ...restrictions,
+      permissionMuted,
       isSpeaking: false,
       isCameraOn: previousState?.isCameraOn ?? false,
       isScreenSharing: isChannelChange ? false : (previousState?.isScreenSharing ?? false),
@@ -221,8 +223,9 @@ export class SignalingService {
       channelId: current.channelId,
       serverMuted: current.serverMuted,
       serverDeafened: current.serverDeafened,
+      permissionMuted: current.permissionMuted,
     };
-    if (updated.serverMuted || updated.serverDeafened) updated.isSpeaking = false;
+    if (updated.serverMuted || updated.serverDeafened || updated.permissionMuted) updated.isSpeaking = false;
 
     // #253: a participant may broadcast more than one screen at a time, so
     // `screenShareIds` is the real state and `isScreenSharing` is derived from
@@ -264,6 +267,14 @@ export class SignalingService {
     return this.setServerRestriction(userId, 'serverDeafened', deafened);
   }
 
+  public setPermissionMuted(sessionId: string, muted: boolean): VoiceParticipantState | null {
+    const current = this.voiceStates.get(sessionId);
+    if (!current || current.permissionMuted === muted) return current ?? null;
+    const updated = { ...current, permissionMuted: muted, isSpeaking: muted ? false : current.isSpeaking };
+    this.voiceStates.set(sessionId, updated);
+    return updated;
+  }
+
   private setServerRestriction(
     userId: string,
     restriction: keyof VoiceRestrictions,
@@ -273,7 +284,12 @@ export class SignalingService {
     // Persist before touching the roster: a failed write must not look like successful moderation.
     this.voiceRestrictions.save(userId, restrictions);
     return this.getSessionsOfUser(userId).map((state) => {
-      const updated = { ...state, ...restrictions, isSpeaking: false };
+      const updated = {
+        ...state,
+        serverMuted: restrictions.serverMuted,
+        serverDeafened: restrictions.serverDeafened,
+        isSpeaking: false,
+      };
       this.voiceStates.set(state.sessionId, updated);
       return updated;
     });

@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { LIMITS } from '@monky/shared';
+import { LIMITS, normalizePublicKeyHex } from '@monky/shared';
 import { UserRecord } from '../../domain/entities';
 import {
   ANSI,
@@ -27,9 +27,14 @@ import { checkSfuPreflight } from '../../infrastructure/sfu/SfuPreflight';
 import { startServerCommand } from './serverLifecycle';
 
 export async function findUserByPublicIdentity(ctx: CliContext, identity: DecryptedIdentity): Promise<UserRecord | null> {
+  const publicKey = normalizePublicKeyHex(identity.publicKey);
+  const byPublicKey = await ctx.userRepo.findByPublicKey(publicKey);
+  if (byPublicKey) return byPublicKey;
   const byClientId = await ctx.userRepo.findByClientId(identity.clientId);
-  if (byClientId) return byClientId;
-  return ctx.userRepo.findByPublicKey(identity.publicKey);
+  if (byClientId?.publicKey && normalizePublicKeyHex(byClientId.publicKey) !== publicKey) {
+    throw new Error(t('create.identityCollision'));
+  }
+  return byClientId;
 }
 
 export async function getUniqueNickname(ctx: CliContext, preferred?: string, excludeUserId?: string): Promise<string> {
@@ -53,6 +58,7 @@ export async function applyBootstrap(
   nicknameOverride: string
 ): Promise<void> {
   const identity = decryptIdentityExport(identityCode, identityPassword);
+  const publicKey = normalizePublicKeyHex(identity.publicKey);
   const server = await ctx.serverRepo.getServer();
   if (!server) {
     throw new Error(t('create.serverNotFound'));
@@ -70,7 +76,7 @@ export async function applyBootstrap(
     user = {
       id: uuidv4(),
       clientId: identity.clientId,
-      publicKey: identity.publicKey,
+      publicKey,
       nickname,
       avatarPath: null,
       createdAt: now,
@@ -78,8 +84,11 @@ export async function applyBootstrap(
     };
     await ctx.userRepo.create(user);
   } else {
+    if (user.publicKey && normalizePublicKeyHex(user.publicKey) !== publicKey) {
+      throw new Error(t('create.identityCollision'));
+    }
     await ctx.userRepo.update(user.id, {
-      publicKey: identity.publicKey,
+      publicKey: user.publicKey ?? publicKey,
       lastSeenAt: Date.now(),
       nickname: nicknameOverride.trim() ? await getUniqueNickname(ctx, nicknameOverride, user.id) : user.nickname,
     });

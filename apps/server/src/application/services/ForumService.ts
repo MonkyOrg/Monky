@@ -79,7 +79,7 @@ export class ForumService {
     await this.requireAccess(userId, parsed.data.channelId);
     const post = this.repository.get(parsed.data.channelId);
     if (!post) throw new ForumError('Post unavailable.');
-    const manager = await this.channels.canUserAccessChannel(userId, post.channelId, Permission.MANAGE_CHANNELS);
+    const manager = await this.permissions.checkPermission(userId, Permission.MANAGE_CHANNELS);
     const author = post.authorId === userId;
     const editsTitle = parsed.data.title !== undefined;
     const moderates = parsed.data.pinned !== undefined || parsed.data.locked !== undefined;
@@ -100,7 +100,7 @@ export class ForumService {
     await this.requireAccess(userId, parsed.data.channelId);
     const post = this.repository.get(parsed.data.channelId);
     if (!post) throw new ForumError('Post unavailable.');
-    const manager = await this.channels.canUserAccessChannel(userId, post.channelId, Permission.MANAGE_CHANNELS);
+    const manager = await this.permissions.checkPermission(userId, Permission.MANAGE_CHANNELS);
     if (!manager && post.authorId !== userId) {
       throw new ForumError('Permission denied.', ProtocolErrorCode.PERMISSION_DENIED);
     }

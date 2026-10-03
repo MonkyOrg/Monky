@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { deriveClientIdFromPublicKey, normalizePublicKeyHex } from '@monky/shared';
 import { openEnvelope, sealEnvelope } from './secretEnvelope';
+import { DmKeyring } from './dm/dmCrypto';
 
 const IDENTITY_FILE_NAME = 'identity.json';
 const EXPORT_PREFIX = 'MONKY-ID:';
@@ -23,6 +24,8 @@ export interface AppIdentity {
 /** An import may carry the servers/settings backup exported alongside it (#472). */
 export interface AppIdentityImport extends AppIdentity {
   extras?: string;
+  /** Friends (and optionally DM history) exported with the identity (#743). Main-process only. */
+  dm?: unknown;
 }
 
 interface LoadedIdentity extends AppIdentity {
@@ -121,6 +124,11 @@ export function hasIdentity(): boolean {
   }
 }
 
+/** Logout: removes the stored identity; the next launch asks for a new or imported one. */
+export function deleteIdentity(): void {
+  fs.rmSync(getIdentityFilePath(), { force: true });
+}
+
 export function getIdentity(createIfMissing = true): AppIdentity | null {
   const identity = createIfMissing ? ensureIdentity() : loadStoredIdentity();
   if (!identity) return null;
@@ -149,7 +157,17 @@ export function signChallenge(nonceHex: string): string {
   return sign(null, Buffer.from(nonceHex, 'hex'), privateKey).toString('hex');
 }
 
-export function exportIdentity(password: string, extras?: string): string {
+/**
+ * Keyring for friends/DMs (#743), derived from the identity seed. Main-process
+ * only: the private key never reaches the renderer.
+ */
+export function createDmKeyring(): DmKeyring | null {
+  const identity = loadStoredIdentity();
+  if (!identity) return null;
+  return new DmKeyring(identity.publicKey, identity.privateKeyDerBase64);
+}
+
+export function exportIdentity(password: string, extras?: string, dm?: unknown): string {
   const identity = ensureIdentity();
   const plaintext = JSON.stringify({
     version: 1,
@@ -159,6 +177,7 @@ export function exportIdentity(password: string, extras?: string): string {
     // envelope (#472). The main process never inspects them: the renderer owns
     // the format and hands over an opaque string.
     extras: extras && extras.length > 0 ? extras : undefined,
+    dm: dm ?? undefined,
   });
 
   return sealEnvelope(plaintext, password, EXPORT_PREFIX);
@@ -173,7 +192,7 @@ export function importIdentity(exportedIdentity: string, password: string): AppI
     'Senha incorreta ou identidade corrompida.'
   );
 
-  let payload: { privateKeyDerBase64: string; extras?: string };
+  let payload: { privateKeyDerBase64: string; extras?: string; dm?: unknown };
   try {
     payload = JSON.parse(decrypted);
   } catch {
@@ -190,5 +209,6 @@ export function importIdentity(exportedIdentity: string, password: string): AppI
     publicKey: identity.publicKey,
     clientId: identity.clientId,
     extras: typeof payload.extras === 'string' ? payload.extras : undefined,
+    dm: payload.dm,
   };
 }

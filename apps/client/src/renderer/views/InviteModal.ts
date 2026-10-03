@@ -1,4 +1,4 @@
-import { createServerInviteLink, MessageType, ServerInviteInfoPayload, ServerNetworkInterface } from '@monky/shared';
+import { createServerInviteLink, MessageType, PUBLIC_IP_INTERFACE_NAME, ServerInviteInfoPayload, ServerNetworkInterface } from '@monky/shared';
 import { v4 as uuidv4 } from 'uuid';
 import { getActiveNetworkClient, networkClient, type NetworkClient } from '../core/NetworkClient';
 import { appEvents } from '../core/EventBus';
@@ -28,6 +28,39 @@ function parseInviteInfo(value: unknown): ServerInviteInfoPayload {
     || !('networkInterfaces' in value) || !Array.isArray(value.networkInterfaces)
     || !value.networkInterfaces.every(isNetworkInterface)) throw new Error('Invalid server invite information');
   return { port: value.port, serverName: value.serverName, networkInterfaces: value.networkInterfaces };
+}
+
+/**
+ * The server's `description` is always Portuguese, so the label is rebuilt in
+ * the app language from the same name/address hints the server classifies by.
+ */
+function describeServerInterface(iface: ServerNetworkInterface): string {
+  const name = iface.name;
+  const lowerName = name.toLowerCase();
+  // Adapter names like "Wi-Fi" or "Radmin VPN" only repeat the label; numbered or custom names still help tell adapters apart.
+  const named = (label: string): string => {
+    const key = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const nameKey = key(name);
+    if (!nameKey || key(label).includes(nameKey) || /^(wifi|ethernet|wlan|wireless)$/.test(nameKey)) return label;
+    return t('invite.ifaceNamed', { label, name });
+  };
+  switch (iface.type) {
+    case 'loopback':
+      return t('invite.ifaceLoopback');
+    case 'public':
+      return name === PUBLIC_IP_INTERFACE_NAME ? t('invite.ifacePublic') : named(t('invite.ifaceExternal'));
+    case 'vpn': {
+      if (lowerName.includes('radmin') || iface.address.startsWith('26.')) return named('Radmin VPN');
+      if (lowerName.includes('hamachi') || iface.address.startsWith('25.')) return named('Hamachi VPN');
+      if (lowerName.includes('tailscale')) return named('Tailscale');
+      if (lowerName.includes('zerotier')) return named('ZeroTier');
+      return named(t('invite.ifaceVpnGeneric'));
+    }
+    case 'lan':
+      if (/wi-?fi|wlan|wireless/.test(lowerName)) return named(t('invite.ifaceLanWifi'));
+      if (/ethernet|^eth|^en[ops]?\d/.test(lowerName)) return named(t('invite.ifaceLanCable'));
+      return named(t('invite.ifaceLan'));
+  }
 }
 
 export class InviteModal {
@@ -69,7 +102,7 @@ export class InviteModal {
         </div>
 
         <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.5;">
-          ${t('invite.intro', { tab: t('connection.tabJoin') })}
+          ${t('invite.intro', { join: t('addServer.joinTitle') })}
         </div>
 
         <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 16px; display: flex; flex-direction: column; gap: 12px;">
@@ -214,7 +247,7 @@ export class InviteModal {
 
       if (!isCurrent()) return;
       if (info && info.networkInterfaces && info.networkInterfaces.length > 0) {
-        this.networkInterfaces = info.networkInterfaces;
+        this.networkInterfaces = info.networkInterfaces.map((iface) => ({ ...iface, description: describeServerInterface(iface) }));
         if (info.port) this.selectedPort = info.port;
         if (info.serverName) this.serverName = info.serverName;
         this.renderInterfaceOptions();

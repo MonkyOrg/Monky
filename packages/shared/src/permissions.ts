@@ -54,8 +54,7 @@ export interface ChannelAccessRules {
 }
 
 export const CHANNEL_PERMISSIONS =
-  Permission.VIEW_CHANNEL | Permission.MANAGE_CHANNELS |
-  Permission.SPEAK | Permission.MOVE_MEMBERS | Permission.SEND_MESSAGES | Permission.READ_MESSAGES |
+  Permission.VIEW_CHANNEL | Permission.SPEAK | Permission.SEND_MESSAGES | Permission.READ_MESSAGES |
   Permission.ATTACH_FILES | Permission.USE_SOUNDBOARD | Permission.USE_BOT_COMMANDS |
   Permission.MANAGE_EVENTS | Permission.EMIT_LIVE_ACTIONS;
 
@@ -95,7 +94,11 @@ export function withChannelPrivacy(
 
 export function channelOverwrites(rules: ChannelAccessRules): ChannelPermissionOverwrite[] {
   return rules.permissionOverwrites
-    ? rules.permissionOverwrites.map(overwrite => ({ ...overwrite }))
+    ? rules.permissionOverwrites.map(overwrite => ({
+      ...overwrite,
+      allow: overwrite.allow & CHANNEL_PERMISSIONS,
+      deny: overwrite.deny & CHANNEL_PERMISSIONS,
+    })).filter(overwrite => overwrite.allow !== 0 || overwrite.deny !== 0)
     : rules.isPrivate ? withChannelPrivacy([], true, rules.allowedRoleIds) : [];
 }
 
@@ -160,8 +163,7 @@ export function stripAdministrator(permissions: number): number {
 }
 
 /**
- * Canonical visibility follows scoped rules; only owners/admins bypass them.
- * Legacy snapshots without overwrites retain the previous management fallback.
+ * Canonical visibility follows scoped rules; only administrators bypass them.
  * Bots never enter private channels through ordinary role permissions.
  */
 export function canAccessChannel(
@@ -172,11 +174,11 @@ export function canAccessChannel(
   userId?: string,
 ): boolean {
   if (isBot && channel.isPrivate) return false;
+  if (hasPermission(userPermissions, Permission.ADMINISTRATOR)) return true;
   if (channel.permissionOverwrites !== undefined) {
     return hasChannelPermission(channel, userPermissions, userRoleIds, Permission.VIEW_CHANNEL, isBot, userId);
   }
   if (!channel.isPrivate) return true;
-  if (hasPermission(userPermissions, Permission.MANAGE_CHANNELS)) return true;
   return channel.allowedRoleIds.some((roleId) => userRoleIds.includes(roleId));
 }
 

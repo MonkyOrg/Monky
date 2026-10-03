@@ -26,7 +26,8 @@ import { NativeDesktopSources, nativeWindowIdFromSourceId, nativeMonitorDesktopS
 import { NativeThumbnailCapturer, loadThumbnailRuntime, createMacScreenProvider, type MacScreenProvider } from '@monky/screen-share';
 import { DesktopSourcePreviews } from './desktopSourcePreviews';
 import type { NativeWindowInfo, NativeMonitorInfo, NativeWindowState } from '@monky/screen-audio';
-import { exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
+import { deleteIdentity, exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
+import { exportDirectMessages, importDirectMessages, resetDirectMessages, setupDmIpc, wipeDirectMessages } from './dm/dmIpc';
 import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';
 import { HostServerOptions, ServerManager } from './serverManager';
 import { mt, setMainLanguage } from './i18n';
@@ -248,6 +249,8 @@ export interface SetupIpcOptions {
   setMinimizeToTray?: (enabled: boolean) => void;
   clientLogger?: import('./clientLogger').ClientLogger;
   overlayManager?: OverlayManager;
+  /** Graceful quit (leaves servers, stops the hosted server) used by logout. */
+  quitApplication?: () => void;
 }
 
 /**
@@ -385,6 +388,7 @@ export function setupIpcHandlers(
   const disposeEditorCommands = setupEditorCommands(mainWindow);
   const disposeEventCalendar = setupEventCalendarIpc(mainWindow, sanitizeDownloadFileName);
   const disposeRecentSoundSave = setupRecentSoundSaveIpc(mainWindow, sanitizeDownloadFileName);
+  const disposeDirectMessages = setupDmIpc(mainWindow, sanitizeDownloadFileName);
   ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, async (event): Promise<string | null> => {
     if (!ownsSoundDownload(event)) throw new Error(mt('error.defaultSoundboardFolder'));
     try {
@@ -511,10 +515,47 @@ export function setupIpcHandlers(
   ipcMain.handle('identity:get', async () => getIdentity(true));
   ipcMain.handle('identity:get-client-id', async () => getClientId());
   ipcMain.handle('identity:sign-challenge', async (_event, nonceHex: string) => signChallenge(nonceHex));
-  ipcMain.handle('identity:export', async (_event, password: string, extras?: string) =>
-    exportIdentity(password, typeof extras === 'string' ? extras : undefined)
+  ipcMain.handle('identity:export', async (_event, password: string, extras?: string, dmMode?: unknown) =>
+    exportIdentity(
+      password,
+      typeof extras === 'string' ? extras : undefined,
+      exportDirectMessages(dmMode === 'friends' || dmMode === 'history' ? dmMode : 'none'),
+    )
   );
-  ipcMain.handle('identity:import', async (_event, exportedIdentity: string, password: string) => importIdentity(exportedIdentity, password));
+  ipcMain.handle('identity:import', async (_event, exportedIdentity: string, password: string) => {
+    const { dm, ...imported } = importIdentity(exportedIdentity, password);
+    resetDirectMessages();
+    importDirectMessages(dm);
+    return imported;
+  });
+
+  // Logout: the identity only exists on this computer, so leaving it means
+  // deleting it together with friends and DMs. The renderer already cleared
+  // the identity-bound localStorage; relaunching gives a clean process that
+  // lands on the create/import screen.
+  let loggingOut = false;
+  ipcMain.handle('identity:logout', async (event) => {
+    if (mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
+      return { success: false, error: 'Forbidden' };
+    }
+    if (loggingOut) return { success: true };
+    loggingOut = true;
+    try {
+      deleteIdentity();
+      await wipeDirectMessages();
+      await mainWindow.webContents.session.flushStorageData();
+    } catch (error) {
+      loggingOut = false;
+      console.error('[Identity] Logout failed:', error);
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    setImmediate(() => {
+      app.relaunch();
+      if (options?.quitApplication) options.quitApplication();
+      else app.quit();
+    });
+    return { success: true };
+  });
 
   // Backup of saved servers and app settings (#472). The renderer owns the
   // content (it all lives in localStorage); the main process only picks the
@@ -1523,6 +1564,7 @@ export function setupIpcHandlers(
     disposeEditorCommands();
     disposeEventCalendar();
     disposeRecentSoundSave();
+    disposeDirectMessages();
     for (const channel of Object.values(AUDIO_PREVIEW_IPC)) ipcMain.removeHandler(channel);
     ipcMain.removeHandler('app:save-csv-file');
     clearAudioBufferAccumulator();

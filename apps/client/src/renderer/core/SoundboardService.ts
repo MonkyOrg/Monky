@@ -402,6 +402,11 @@ export class SoundboardService {
     const voiceSession = sessionManager.get(voiceKey);
     const voiceServerStore = voiceSession?.serverStore ?? serverStore;
 
+    if (voiceStore.permissionMuted) {
+      console.warn('[SoundboardService] Cannot play sound: missing SPEAK permission in this channel');
+      return false;
+    }
+
     if (voiceServerStore.serverDetails?.allowSoundboard === false) {
       console.warn('[SoundboardService] Soundboard is disabled on the voice server');
       return false;

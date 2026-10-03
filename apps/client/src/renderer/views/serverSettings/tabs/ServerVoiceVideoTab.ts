@@ -48,6 +48,7 @@ export class ServerVoiceVideoTab {
     const turnBlocked = turnBlockedReason();
     const turnNotice = turnBlocked ? null : turnInstallNotice();
     const supportsRecentSounds = s.protocol?.features.includes('recent-sounds');
+    const supportsDmRelay = s.protocol?.features.includes('dm-relay');
 
     return `
       <div data-settings-section="soundboard" data-settings-label="${escapeHtml(t('serverSettings.allowSoundboard'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
@@ -89,6 +90,21 @@ export class ServerVoiceVideoTab {
             style="width: 84px;" ${s.allowSoundboard === false || !s.recentSoundCacheEnabled ? 'disabled' : ''}>
         </label>
         <div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">${t('serverSettings.recentSoundsClearHint')}</div>
+      </div>` : ''}
+
+      ${supportsDmRelay ? `
+      <div data-settings-section="dm-relay" data-settings-label="${escapeHtml(t('serverSettings.dmRelayEnabled'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-top: 10px;">
+        <div>
+          <label for="checkbox-dm-relay-enabled" style="font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 2px;">
+            <span class="material-symbols-outlined md-18" style="color: var(--accent-primary);">encrypted</span>
+            <span>${t('serverSettings.dmRelayEnabled')}</span>
+          </label>
+          <div style="font-size: 11px; color: var(--text-muted);">${t('serverSettings.dmRelayEnabledDesc')}</div>
+        </div>
+        <label class="toggle-switch" aria-label="${t('serverSettings.dmRelayEnabled')}">
+          <input id="checkbox-dm-relay-enabled" type="checkbox" ${s.dmRelayEnabled !== false ? 'checked' : ''}>
+          <span class="toggle-slider"></span>
+        </label>
       </div>` : ''}
 
       <div id="server-turn-section" data-settings-section="turn-relay" data-settings-label="${escapeHtml(t('serverSettings.turnEnabled'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-top: 10px;">

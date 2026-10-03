@@ -16,7 +16,7 @@ disponíveis dependem do seu acesso.
 | --- | --- |
 | Geral | Nome, imagem e banner, habilitação de eventos, limites, modo de voz e informações do processo servidor |
 | Segurança | Senha de entrada |
-| Recursos de Voz e Vídeo | Permissão de Soundboard, cache de áudios recentes e relay TURN integrado |
+| Recursos de Voz e Vídeo | Permissão de Soundboard, cache de áudios recentes, relay de mensagens diretas e relay TURN integrado |
 | Armazenamento | Limites e uso de anexos |
 | Notificações | Menções, edição de mensagens e avisos publicados no chat |
 | Membros | Consultar membros e administrar acessos conforme suas permissões |
@@ -68,6 +68,13 @@ arquivo. O botão de reprodução oferece uma prévia somente local, sem reenvia
 o áudio para a chamada nem criar outra posição no histórico; **Baixar** abre o
 diálogo seguro do sistema operacional. Um toast confirma quando o arquivo é
 salvo; cancelar o diálogo não mostra confirmação.
+
+### Mensagens diretas
+
+Em **Recursos de Voz e Vídeo**, o switch **Permitir mensagens diretas por este servidor**
+controla se clientes atualizados podem usar este servidor apenas como ponte
+para DMs criptografadas ponta a ponta. O servidor não armazena o conteúdo nem
+a fila dessas mensagens.
 
 ## Canais
 
@@ -250,6 +257,11 @@ impede o envio mesmo assim. **Ver canal** é independente de **Ler mensagens**:
 retirar apenas a leitura mantém o canal visível, mas remove histórico, resultados
 de busca e notificações de mensagens. Permissões de silenciar/ensurdecer membros
 continuam gerais, pois essas restrições valem para a pessoa em todo o servidor.
+**Gerenciar canais** e **Mover membros** também são permissões gerais do servidor:
+elas não aparecem no editor de permissões de canal ou categoria e não podem ser
+concedidas nem negadas por regras locais. **Falar** não bloqueia a entrada em
+um canal de voz; quem tem **Ver canal** entra, mas fica sem microfone,
+soundboard e áudio da tela até receber **Falar** naquele canal.
 
 ### Canal privado
 

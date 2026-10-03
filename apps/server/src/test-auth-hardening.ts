@@ -1,11 +1,23 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, sign } from 'node:crypto';
 import { setImmediate as immediate } from 'node:timers/promises';
-import { LIMITS, MessageType, Permission, PROTOCOL_VERSION, ProtocolErrorCode } from '@monky/shared';
+import { deriveClientIdFromPublicKey, LIMITS, MessageType, Permission, PROTOCOL_VERSION, ProtocolErrorCode } from '@monky/shared';
 import { createFixture, identity } from './testFixtures/bots';
 import { PasswordService } from './infrastructure/security/PasswordService';
 import { RateLimiter } from './infrastructure/security/RateLimiter';
+
+async function authenticateWithIdentity(f: Awaited<ReturnType<typeof createFixture>>, keys: ReturnType<typeof identity>, nickname: string) {
+  const peer = await f.connect();
+  const challenge = await peer.request(MessageType.AUTH_CONNECT, {
+    protocolVersion: PROTOCOL_VERSION,
+    nickname,
+    publicKey: keys.publicKey,
+  });
+  assert.equal(challenge.type, MessageType.AUTH_CHALLENGE);
+  const signature = sign(null, Buffer.from(String(challenge.payload.nonce), 'hex'), keys.privateKey).toString('hex');
+  return peer.request(MessageType.AUTH_CHALLENGE_RESPONSE, { signature });
+}
 
 test('authentication cleanup retains the full window and reservations release once', (t) => {
   let now = 54_000;
@@ -89,6 +101,54 @@ test('valid connections sharing NAT do not consume failure quota', async (t) => 
     await human.peer.close();
   }
   assert.equal(f.rateLimiter['userMessageTimestamps'].size, 0);
+});
+
+test('clientId collision with a different stored public key refuses login without overwriting identity', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const attacker = identity();
+  const victim = identity();
+  const clientId = deriveClientIdFromPublicKey(attacker.publicKey);
+  const now = Date.now();
+  await f.userRepo.create({
+    id: randomUUID(),
+    clientId,
+    publicKey: victim.publicKey,
+    nickname: 'Victim',
+    avatarPath: null,
+    createdAt: now,
+    lastSeenAt: now,
+  });
+  const response = await authenticateWithIdentity(f, attacker, 'Attacker');
+  assert.equal(response.type, MessageType.AUTH_FAILED);
+  assert.equal(response.payload.code, ProtocolErrorCode.UNAUTHORIZED);
+  const stored = await f.userRepo.findByClientId(clientId);
+  assert.equal(stored?.publicKey, victim.publicKey);
+  assert.equal(await f.userRepo.findByPublicKey(attacker.publicKey), null);
+});
+
+test('clientId fallback only adopts legacy records with no stored public key', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const keys = identity();
+  const clientId = deriveClientIdFromPublicKey(keys.publicKey);
+  const id = randomUUID();
+  const now = Date.now();
+  await f.userRepo.create({
+    id,
+    clientId,
+    publicKey: null,
+    nickname: 'Legacy',
+    avatarPath: null,
+    createdAt: now,
+    lastSeenAt: now,
+  });
+  const response = await authenticateWithIdentity(f, keys, 'Legacy Updated');
+  assert.equal(response.type, MessageType.AUTH_SUCCESS);
+  const stored = await f.userRepo.findById(id);
+  assert.equal(stored?.publicKey, keys.publicKey);
+  assert.equal((await f.userRepo.findByPublicKey(keys.publicKey))?.id, id);
+  assert.equal(await f.userRepo.count(), 1);
 });
 
 test('MANAGE_ROLES cannot promote directly, edit Admin, or grant it as a default', async (t) => {

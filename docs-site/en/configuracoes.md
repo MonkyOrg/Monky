@@ -31,6 +31,21 @@ identity export. Saved servers can include passwords and are not written
 in plain text in this backup. Without the chosen password, the file cannot
 be recovered.
 
+When exporting the identity, check **Friends** to bring your friend list and,
+optionally, **Conversation history** to bring your direct messages. Under
+**Direct messages**, choose the **Maximum received file size**: your friends see
+this limit and cannot send you larger files. See
+[Friends and direct messages](/en/amigos-e-mensagens-diretas).
+
+### Log out
+
+The red **Log out** button, at the end of the tab list, deletes the identity,
+friends, direct messages and saved servers with their passwords from this
+computer. Before confirming, use **Export identity first** if you want to use
+that identity again later: without a backup it cannot be recovered. Computer
+preferences such as audio, language and shortcuts are kept. Monky then reopens
+on the create or import identity screen.
+
 ### Quality, bitrate and telemetry
 
 Under **Quality & sharing**, presets, codec and custom values are grouped with
@@ -706,17 +721,18 @@ participants.
 
 ### Enter the server when Monky opens
 
-On Home, select or enter the server and enable **Enter when Monky opens**,
-next to **Join Server**. The choice is saved only after a successful connection.
-There is a single destination: connecting to another server with the switch
-enabled replaces the previous one. A failed attempt leaves the saved destination unchanged.
+On Home, right-click a saved server in the rail and enable **Join on startup**.
+The choice is saved for that server. There is a single foreground destination:
+enabling it on another server replaces the previous one. A failed connection
+attempt leaves the saved destination unchanged.
 
 The preference applies to future launches until you turn that same switch off;
 turning it off disables automatic entry immediately, without having to connect.
-It never starts stopped servers or joins voice. When migrating older settings
-with multiple destinations, only the most recent choice is kept. A short
-animation accompanies the transition from Home to the server, unless reduced
-motion is enabled.
+It never starts stopped servers or joins voice. Other saved servers can still
+connect in the background when **Automatically connect to servers in the list**
+is enabled. When migrating older settings with multiple destinations, only the
+most recent choice is kept. A short animation accompanies the transition from
+Home to the server, unless reduced motion is enabled.
 
 ### Section navigation
 

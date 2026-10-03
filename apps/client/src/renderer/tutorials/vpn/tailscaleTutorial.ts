@@ -21,6 +21,7 @@ export const tailscaleTutorial: TutorialDefinition = {
     {
       title: 'tutorial.tailscale.step4.title',
       content: 'tutorial.tailscale.step4.content',
+      images: [{ shot: 'add-server-create', alt: 'tutorial.shotCreateAlt' }, { shot: 'invite-tailscale', alt: 'tutorial.shotInviteAlt' }],
       tip: 'tutorial.tailscale.step4.tip',
     },
   ],

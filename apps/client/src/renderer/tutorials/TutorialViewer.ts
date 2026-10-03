@@ -3,6 +3,7 @@ import { t } from '../i18n';
 import { enterModal, exitModal } from '../utils/modalSurface';
 import { replaceModalStep } from '../utils/modalSteps';
 import { enableBackdropClose } from '../utils/modal';
+import { renderOnboardingShot } from '../views/onboardingShots';
 
 /**
  * Generic in-app tutorial viewer.
@@ -52,6 +53,9 @@ export class TutorialViewer {
     const isFirst = this.currentStep === 0;
     const isLast = this.currentStep === total - 1;
     const progressPct = ((this.currentStep + 1) / total) * 100;
+    const shots = (step.images ?? [])
+      .map((image) => renderOnboardingShot(image.shot, t(image.alt), 'tutorial-shot'))
+      .join('');
 
     if (!this.modalEl) {
       this.modalEl = document.createElement('div');
@@ -83,16 +87,17 @@ export class TutorialViewer {
         </div>
 
         <!-- Step content -->
-        <div style="padding: 8px 0;">
+        <div class="tutorial-step-body">
           <h3 style="font-size: 16px; font-weight: 700; color: var(--text-primary); margin: 0 0 12px 0;">
             ${t(step.title)}
           </h3>
 
-          <!-- Placeholder image -->
-          <div class="tutorial-image-placeholder">
-            <span class="material-symbols-outlined" style="font-size: 32px; color: var(--text-muted);">image</span>
-            <span style="font-size: 11px; color: var(--text-muted);">${t('tutorial.imagePlaceholder')}</span>
-          </div>
+          ${shots || `
+            <div class="tutorial-image-placeholder">
+              <span class="material-symbols-outlined" style="font-size: 32px; color: var(--text-muted);">image</span>
+              <span style="font-size: 11px; color: var(--text-muted);">${t('tutorial.imagePlaceholder')}</span>
+            </div>
+          `}
 
           <div class="tutorial-content" style="font-size: 13px; color: var(--text-secondary); line-height: 1.65;">
             ${t(step.content)}

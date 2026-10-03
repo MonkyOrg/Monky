@@ -12,8 +12,9 @@ another computer and want to keep the same account on your servers, choose
 
 <AppScreenshot src="/screenshots/identidade-en.png" alt="Monky's first launch, offering Create new identity and Import existing identity." caption="Your identity replaces a central account. Creating another identity does not recover the previous one's roles or links." />
 
-Your nickname and photo represent this identity; changing your name does not
-create a new account.
+Next, enter your **nickname** and optionally choose an avatar. This profile is
+global: it is used on every connected server and can be changed later under
+**Settings → My Profile** without creating a new account.
 
 ### Keep an identity backup
 
@@ -25,17 +26,23 @@ restore the previous one's access.
 
 ## 2. Choose how to connect
 
-After creating an identity, the assistant offers to join a friend's server or
-create one. You can dismiss it and reopen it through
-**Need help getting started?**.
+After creating the identity and profile, Monky opens **Home**. It has the
+server rail on the left, the **Direct messages** list and the **Friends** page
+with Available, All and Pending tabs. If no server is saved yet, the **+**
+button on the rail is highlighted.
 
-<AppScreenshot src="/screenshots/inicio-en.png" alt="Monky's home screen with nickname, address, port and the Join Server and My Servers tabs." caption="Enter the host's address — not your own computer's IP unless it also hosts the server." />
+<AppScreenshot src="/screenshots/inicio-en.png" alt="Monky Home with the server rail, direct messages and Friends page." caption="Use the + button on the rail to create or join a server. Home remains available even with no connected servers." />
 
 | Situation | Next step |
 | --- | --- |
 | Someone already hosts for the group | [Join a server](/en/entrar-em-um-servidor) |
 | I want to host on my computer | [Create in the app](/en/criar-seu-servidor) |
 | I need an always-on server | [Host on a VPS](/en/hospedar-em-vps) |
+
+Saved servers connect in the background by default to keep friend presence and
+direct messages working. Disable this under **Settings → My Profile →
+Connections** if you prefer manual connections. The server marked **Join on
+startup** still opens in the foreground.
 
 ## 3. Start a conversation
 

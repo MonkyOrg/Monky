@@ -9,6 +9,7 @@ export const portForwardTutorial: TutorialDefinition = {
       title: 'tutorial.portForward.step1.title',
       content: 'tutorial.portForward.step1.content',
       tip: 'tutorial.portForward.step1.tip',
+      images: [{ shot: 'terminal-gateway', alt: 'tutorial.shotGatewayAlt' }],
     },
     {
       title: 'tutorial.portForward.step2.title',
@@ -26,6 +27,7 @@ export const portForwardTutorial: TutorialDefinition = {
     {
       title: 'tutorial.portForward.step5.title',
       content: 'tutorial.portForward.step5.content',
+      images: [{ shot: 'add-server-create', alt: 'tutorial.shotCreateAlt' }, { shot: 'invite-public', alt: 'tutorial.shotInviteAlt' }],
       tip: 'tutorial.portForward.step5.tip',
     },
   ],

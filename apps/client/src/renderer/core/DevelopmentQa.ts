@@ -9,6 +9,7 @@ import { voiceStore } from '../stores/voiceStore';
 import { sessionManager } from './SessionManager';
 import { joinCallOnSession, openServerSession } from './serverConnection';
 import { serverSettingsModal } from '../views/ServerSettingsModal';
+import { addServerModal } from '../views/addServer/AddServerModal';
 import { webRtcManager } from './WebRtcManager';
 import { localExecutionFor } from './LocalExecutionController';
 import { getCommandPresentation } from '@monky/shared';
@@ -73,11 +74,13 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
   };
   try {
     if (config.scenario === 'home' || config.scenario === 'login') {
-      if (!document.querySelector('.connection-layout')) throw new Error('The real Home view was not rendered.');
+      if (!document.querySelector('#home-view')) throw new Error('The real Home view was not rendered.');
       if (config.scenario === 'login') {
+        addServerModal.open('join');
+        await until(() => !!document.querySelector('#add-server-join-form'), 'add-server join form', owner.signal);
         for (const [id, value] of Object.entries({
-          'join-host': config.server.host, 'join-port': String(config.server.port),
-          'join-nickname': config.nickname, 'join-password': config.server.password,
+          'add-server-host': config.server.host, 'add-server-port': String(config.server.port),
+          'add-server-password': config.server.password,
         })) {
           const input = document.getElementById(id);
           if (!(input instanceof HTMLInputElement)) throw new Error(`Missing real login field: ${id}`);

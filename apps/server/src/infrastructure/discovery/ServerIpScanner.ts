@@ -1,5 +1,5 @@
 import os from 'os';
-import { ServerNetworkInterface } from '@monky/shared';
+import { PUBLIC_IP_INTERFACE_NAME, ServerNetworkInterface } from '@monky/shared';
 
 let cachedPublicIp: string | null = null;
 let lastPublicIpFetch = 0;
@@ -120,7 +120,7 @@ export async function scanServerNetworkInterfaces(publicIpOverride?: string | nu
   const publicIp = publicIpOverride !== undefined ? publicIpOverride : await getPublicIp();
   if (publicIp) {
     result.push({
-      name: 'Internet (IP Público)',
+      name: PUBLIC_IP_INTERFACE_NAME,
       address: publicIp,
       family: 'IPv4',
       type: 'public',

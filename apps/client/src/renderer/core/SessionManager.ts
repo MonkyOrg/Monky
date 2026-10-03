@@ -186,6 +186,16 @@ export class SessionManager {
     return session;
   }
 
+  public primeBackground(key: string): void {
+    const session = this.sessions.get(key);
+    if (!session || this.activeKey) return;
+    this.activeKey = key;
+    this.viewingHome = true;
+    this.mute(session);
+    this.applyBundle(session);
+    emitOutsideRouting(() => appEvents.emit('session.connections_changed'));
+  }
+
   /**
    * Points the global stores at `key`. The previously visible session is not
    * torn down: it keeps its socket and its data, muted, ready to be shown again.

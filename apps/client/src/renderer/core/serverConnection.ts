@@ -124,9 +124,6 @@ export async function openServerSession(
 ): Promise<AuthSuccessPayload> {
   clientLog.info('CONNECTION', `Opening server session: ${host}:${port}`, { nickname });
   const foreground = !options.background;
-  // Until a foreground bundle exists, routing a background event cannot
-  // restore the global stores. The first startup entry must use the normal path.
-  if (!foreground && !sessionManager.getActive()) throw new DOMException('No foreground session', 'AbortError');
   const existing = getServerSessionForAddress(host, port);
   const key = existing?.key ?? sessionKeyFor(host, port);
   if (existing?.client.getStatus() === 'CONNECTED') {
@@ -157,6 +154,7 @@ export async function openServerSession(
   const session = reusable?.session
     ?? sessionManager.create(existing?.host ?? host, existing?.port ?? port, nickname, password);
   if (foreground) sessionManager.activate(session.key);
+  else sessionManager.primeBackground(session.key);
   const operation = reusable ?? {
     session,
     previous,
@@ -357,6 +355,7 @@ export async function joinCallOnSession(
     });
     voiceStore.setServerMuted(joined.voiceState.serverMuted);
     voiceStore.setServerDeafened(joined.voiceState.serverDeafened);
+    voiceStore.setPermissionMuted(!!joined.voiceState.permissionMuted);
     if (joined.voiceState.isMuted !== voiceStore.isMuted || joined.voiceState.isDeafened !== voiceStore.isDeafened) {
       session.client.send(MessageType.VOICE_STATE_UPDATE, {
         isMuted: voiceStore.isMuted, isDeafened: voiceStore.isDeafened,

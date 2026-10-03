@@ -90,6 +90,7 @@ test('authentication supplies the current identity restriction before voice, aft
   server['sessionSockets'] = new Map();
   server['reconnectTimers'] = new Map();
   server['closing'] = false;
+  server['dmRelay'] = { register: () => {}, unregister: () => {} } as unknown as WebSocketServer['dmRelay'];
   server['broadcastRolesState'] = async () => {};
   server['handleCommandsList'] = () => {};
   const messages: Parameters<WebSocketServer['send']>[1][] = [];
@@ -394,6 +395,7 @@ test('voice join snapshot is captured after async broadcast and includes peers w
   const sfu = new SfuManager();
   server['signalingService'] = service;
   server['sfuManager'] = sfu;
+  server['channelService'] = { canUserAccessChannel: async () => true } as unknown as WebSocketServer['channelService'];
   server['serverRepo'] = {
     getServer: async () => ({ id: 'server', name: 'Voice', passwordHash: '', createdAt: 1, maxUsers: 10, voiceMode: 'sfu' }),
     createServer: async () => {}, updateServer: async () => {},
@@ -532,6 +534,53 @@ test('real missing-producer consume path replies before the delayed close broadc
   releaseBroadcast();
   await pendingPermission;
   assert.equal(broadcasts.length, 1);
+  sfu.close();
+});
+
+test('permission-muted SFU participants can publish video but not microphone or screen audio', async () => {
+  const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
+  const sfu = new SfuManager();
+  const service = signaling();
+  server['sfuManager'] = sfu;
+  server['signalingService'] = service;
+  server['closing'] = false;
+  const ws = Object.create(WebSocket.prototype) as WebSocket;
+  Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
+  const session: Parameters<WebSocketServer['handleSfuProduce']>[0] = {
+    ws, sessionId: 'self', isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+    user: { id: 'self', sessionId: 'self', clientId: 'self', nickname: 'Self', status: 'ONLINE', joinedAt: 1 },
+  };
+  server['sessions'] = new Map([[ws, session]]);
+  server['sessionSockets'] = new Map([['self', ws]]);
+  server['isCurrentSession'] = () => true;
+  const messages: Parameters<WebSocketServer['send']>[1][] = [];
+  server['send'] = (_ws, message) => { messages.push(message); };
+  server['broadcast'] = (message) => { messages.push(message); };
+  sfu.produce = async (_sessionId, _channelId, _transportId, _kind, _rtp, appData) =>
+    ({ id: `${appData?.mediaType ?? 'unknown'}-producer` });
+  sfu.setMicrophonesMuted = async () => {};
+  await service.joinVoiceChannel('self', 'self', 'room', false, false, true);
+  service.updateVoiceState('self', { screenShareIds: ['share'] });
+
+  await server['handleSfuProduce'](session, {
+    channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: {}, appData: { mediaType: 'mic' },
+  }, 'mic');
+  await server['handleSfuProduce'](session, {
+    channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: {}, appData: { mediaType: 'screen_audio', shareId: 'share' },
+  }, 'screen-audio');
+  await server['handleSfuProduce'](session, {
+    channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: {}, appData: { mediaType: 'camera' },
+  }, 'camera');
+  await server['handleSfuProduce'](session, {
+    channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: {}, appData: { mediaType: 'screen_video', shareId: 'share' },
+  }, 'screen-video');
+
+  assert.equal(messages.find(message => message.requestId === 'mic')?.type, MessageType.SERVER_ERROR);
+  assert.equal((messages.find(message => message.requestId === 'mic')?.payload as ServerErrorPayload).code, ProtocolErrorCode.PERMISSION_DENIED);
+  assert.equal(messages.find(message => message.requestId === 'screen-audio')?.type, MessageType.SERVER_ERROR);
+  assert.equal((messages.find(message => message.requestId === 'screen-audio')?.payload as ServerErrorPayload).code, ProtocolErrorCode.PERMISSION_DENIED);
+  assert.equal(messages.find(message => message.requestId === 'camera')?.type, MessageType.SFU_PRODUCED);
+  assert.equal(messages.find(message => message.requestId === 'screen-video')?.type, MessageType.SFU_PRODUCED);
   sfu.close();
 });
 

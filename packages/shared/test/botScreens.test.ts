@@ -12,7 +12,7 @@ import {
 
 test('authentication shape allows negotiation while the compatibility floor rejects obsolete peers', () => {
   const input = { nickname: 'Member', publicKey: 'ab'.repeat(32), protocolVersion: PROTOCOL_VERSION };
-  assert.equal(PROTOCOL_VERSION, 35);
+  assert.equal(PROTOCOL_VERSION, 36);
   assert.equal(MIN_CLIENT_PROTOCOL, 35);
   assert.equal(MIN_BOT_PROTOCOL, 24);
   assert.equal(authConnectSchema.safeParse(input).success, true);
@@ -26,7 +26,7 @@ test('authentication shape allows negotiation while the compatibility floor reje
       assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: version, protocolOffer }).success, true);
       assert.equal(negotiateProtocol(version, protocolOffer, 'client'), null);
       assert.deepEqual(negotiateProtocol(version, protocolOffer, 'bot'), {
-        version: 35, minimumVersion: 24, features: protocolOffer ? ['message-length-setting'] : [],
+        version: 36, minimumVersion: 24, features: protocolOffer ? ['message-length-setting'] : [],
       });
     }
     assert.equal(legacyProtocolFallback(version, 'client'), null);
@@ -34,24 +34,25 @@ test('authentication shape allows negotiation while the compatibility floor reje
   }
 });
 
-test('channel permissions raise the human client floor to 35 without raising the bot floor', () => {
+test('DM relay negotiates as a human-only feature without raising the compatibility floor', () => {
   assert.deepEqual(createProtocolOffer('client'), {
-    minimumVersion: 35, features: ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds'],
+    minimumVersion: 35, features: ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay'],
   });
   assert.deepEqual(createProtocolOffer('bot'), { minimumVersion: 24, features: ['message-length-setting', 'server-community'] });
-  assert.deepEqual(negotiateProtocol(35, undefined, 'client'), { version: 35, ...createProtocolOffer('client') });
+  assert.deepEqual(negotiateProtocol(36, undefined, 'client'), { version: 36, ...createProtocolOffer('client') });
+  assert.deepEqual(negotiateProtocol(35, undefined, 'client'), { version: 36, minimumVersion: 35, features: [] });
   for (const version of [31, 32, 33, 34]) assert.equal(negotiateProtocol(version, undefined, 'client'), null);
   assert.deepEqual(negotiateProtocol(35, {
     minimumVersion: 35, features: ['native-polls', 'native-live-forms'],
   }, 'client'), {
-    version: 35, minimumVersion: 35, features: ['native-polls', 'native-live-forms'],
+    version: 36, minimumVersion: 35, features: ['native-polls', 'native-live-forms'],
   });
   assert.equal(negotiateProtocol(30, undefined, 'client'), null);
-  assert.deepEqual(negotiateProtocol(35, { minimumVersion: 35, features: ['chat-blocks', 'message-delete-undo', 'unknown'] }, 'client'), {
-    version: 35, minimumVersion: 35, features: ['chat-blocks', 'message-delete-undo'],
+  assert.deepEqual(negotiateProtocol(36, { minimumVersion: 35, features: ['chat-blocks', 'message-delete-undo', 'dm-relay', 'unknown'] }, 'client'), {
+    version: 36, minimumVersion: 35, features: ['chat-blocks', 'message-delete-undo', 'dm-relay'],
   });
-  assert.equal(negotiateProtocol(36, undefined, 'client'), null);
-  assert.equal(negotiateProtocol(36, { minimumVersion: 36, features: [] }, 'client'), null);
+  assert.equal(negotiateProtocol(37, undefined, 'client'), null);
+  assert.equal(negotiateProtocol(37, { minimumVersion: 37, features: [] }, 'client'), null);
   for (const offer of [null, { minimumVersion: 29, features: 'chat-blocks' }, { minimumVersion: 30, features: [] }]) {
     assert.equal(negotiateProtocol(29, offer, 'client'), null);
   }

@@ -1,7 +1,5 @@
 import { MessageType } from '@monky/shared';
-import { networkClient } from '../core/NetworkClient';
 import { sessionManager } from '../core/SessionManager';
-import { serverStore } from '../stores/serverStore';
 import { connectionStore } from '../stores/connectionStore';
 import { t } from '../i18n';
 import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
@@ -18,6 +16,7 @@ import { LocalToolsTab } from './settings/tabs/LocalToolsTab';
 import { LogsTab } from './settings/tabs/LogsTab';
 import { AboutTab } from './settings/tabs/AboutTab';
 import { SettingsSectionNavigation } from './settings/SettingsSectionNavigation';
+import { showLogoutDialog } from './LogoutDialog';
 
 export class SettingsModal {
   private modalEl: HTMLElement | null = null;
@@ -91,6 +90,10 @@ export class SettingsModal {
           <button type="button" class="settings-tab-btn ${this.activeTab === 'about' ? 'active' : ''}" data-tab="about">
             <span class="material-symbols-outlined md-18">info</span>
             <span>${t('settings.tabAbout')}</span>
+          </button>
+          <button type="button" id="settings-logout-btn" class="settings-logout-btn">
+            <span class="material-symbols-outlined md-18">logout</span>
+            <span>${escapeHtml(t('settings.logout'))}</span>
           </button>
         </div>
 
@@ -222,6 +225,9 @@ export class SettingsModal {
     const closeModal = () => this.close();
     this.modalEl.querySelector('#modal-close')?.addEventListener('click', closeModal);
     this.modalEl.querySelector('#btn-settings-close')?.addEventListener('click', closeModal);
+    this.modalEl.querySelector('#settings-logout-btn')?.addEventListener('click', () => {
+      void showLogoutDialog();
+    });
     enableBackdropClose(this.modalEl, closeModal);
 
     const onEsc = (e: KeyboardEvent) => {
@@ -236,18 +242,28 @@ export class SettingsModal {
     // Attach sub-tab event listeners
     this.accountTab.attachEvents(this.modalEl, {
       onSaveNickname: async (name: string) => {
-        if (serverStore.currentUser) {
-          serverStore.currentUser.nickname = name;
-          networkClient.send(MessageType.USER_CHANGE_NICKNAME, { newNickname: name });
+        for (const session of sessionManager.getAll()) {
+          const user = session.serverStore.currentUser;
+          if (user) session.serverStore.updateCurrentUser({ ...user, nickname: name });
+          if (session.client.getStatus() === 'CONNECTED') {
+            session.client.send(MessageType.USER_CHANGE_NICKNAME, { newNickname: name });
+          }
         }
         connectionStore.saveUserProfile(name);
+        const footerName = document.getElementById('main-user-name');
+        if (footerName) footerName.textContent = name;
       },
       onAvatarChanged: async (base64: string) => {
-        if (serverStore.currentUser) {
-          serverStore.currentUser.avatarUrl = base64;
-          networkClient.send(MessageType.USER_UPDATE_AVATAR, { avatarBase64: base64 });
+        for (const session of sessionManager.getAll()) {
+          const user = session.serverStore.currentUser;
+          if (user) session.serverStore.updateCurrentUser({ ...user, avatarUrl: base64 });
+          if (session.client.getStatus() === 'CONNECTED') {
+            session.client.send(MessageType.USER_UPDATE_AVATAR, { avatarBase64: base64 });
+          }
         }
-        connectionStore.saveUserProfile(serverStore.currentUser?.nickname || connectionStore.savedNickname, base64);
+        connectionStore.saveUserProfile(connectionStore.savedNickname, base64);
+        const footerAvatar = document.getElementById('main-user-avatar') as HTMLImageElement | null;
+        if (footerAvatar) footerAvatar.src = base64;
       },
       onReloadModal: () => {
         void this.open();

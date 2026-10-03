@@ -2,6 +2,7 @@ import {
   ProtocolErrorCode,
   UserSummary,
   nicknameSchema,
+  normalizePublicKeyHex,
 } from '@monky/shared';
 import { IUserRepository } from '../../domain/repositories';
 import { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
@@ -60,6 +61,7 @@ export class UserService {
     const updatedUser: UserSummary = {
       id: user.id,
       clientId: user.clientId,
+      publicKey: user.publicKey ? normalizePublicKeyHex(user.publicKey) : undefined,
       nickname: user.nickname,
       avatarUrl: this.avatarStorage.getPublicUrl(user.avatarPath),
       status: 'ONLINE',
@@ -118,6 +120,7 @@ export class UserService {
       const updatedUser: UserSummary = {
         id: user.id,
         clientId: user.clientId,
+        publicKey: user.publicKey ? normalizePublicKeyHex(user.publicKey) : undefined,
         nickname: user.nickname,
         avatarUrl: null,
         status: 'ONLINE',
@@ -160,6 +163,7 @@ export class UserService {
     const updatedUser: UserSummary = {
       id: user.id,
       clientId: user.clientId,
+      publicKey: user.publicKey ? normalizePublicKeyHex(user.publicKey) : undefined,
       nickname: user.nickname,
       avatarUrl: this.avatarStorage.getPublicUrl(newFilename),
       status: 'ONLINE',

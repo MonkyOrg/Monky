@@ -2448,7 +2448,7 @@ async function runServerRestrictionSmoke() {
     a.updateVoiceRestrictions(user.id, {
       sessionId: 'another-device', serverMuted: false, serverDeafened: true,
     });
-    check(blocks() === 2 && Object.keys(a.voiceRestrictions).sort().join(',') === 'serverDeafened,serverMuted',
+    check(blocks() === 2 && Object.keys(a.voiceRestrictions).sort().join(',') === 'permissionMuted,serverDeafened,serverMuted',
       'An update for another device of the same identity applies outside voice without retaining transient session data');
 
     voice.setChannel('room-b', 'unrestricted-b');

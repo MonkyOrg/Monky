@@ -8,6 +8,7 @@ import {
   canAccessChannel,
   Permission,
   getChannelPermissions,
+  hasPermission,
   hasChannelPermission,
   channelOverwrites,
   channelPrivacy,
@@ -128,6 +129,9 @@ export class ChannelService {
     if (!channel) return false;
 
     const context = await this.getAccessContext(userId);
+    if (permission === Permission.MANAGE_CHANNELS || permission === Permission.MOVE_MEMBERS) {
+      return hasPermission(context.permissions, permission);
+    }
     return canAccessChannel(channel, context.permissions, context.roleIds, context.isBot, userId) &&
       hasChannelPermission(channel, context.permissions, context.roleIds, permission, context.isBot, userId);
   }
@@ -136,6 +140,9 @@ export class ChannelService {
     const category = await this.categoryRepo?.findById(categoryId);
     if (!category) return false;
     const context = await this.getAccessContext(userId);
+    if (permission === Permission.MANAGE_CHANNELS || permission === Permission.MOVE_MEMBERS) {
+      return hasPermission(context.permissions, permission);
+    }
     return canAccessChannel(category, context.permissions, context.roleIds, context.isBot, userId) &&
       hasChannelPermission(category, context.permissions, context.roleIds, permission, context.isBot, userId);
   }
@@ -327,11 +334,10 @@ export class ChannelService {
     const positions = ordered.map((channelId, index) => ({ channelId, position: index }));
     if (actorUserId) {
       const context = await this.getAccessContext(actorUserId);
-      if (positions.some(position => {
-        const channel = byId.get(position.channelId)!;
-        return channel.position !== position.position &&
-          !hasChannelPermission(channel, context.permissions, context.roleIds, Permission.MANAGE_CHANNELS, context.isBot, context.userId);
-      })) return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Permissão insuficiente para reordenar estes canais.' };
+      if (!hasPermission(context.permissions, Permission.MANAGE_CHANNELS) &&
+          positions.some(position => byId.get(position.channelId)!.position !== position.position)) {
+        return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Permissão insuficiente para reordenar estes canais.' };
+      }
     }
     if (this.channelRepo.updatePositions) await this.channelRepo.updatePositions(positions);
     else for (const { channelId, position } of positions) await this.channelRepo.updatePosition(channelId, position);
@@ -409,7 +415,7 @@ export class ChannelService {
       if (actorUserId) {
         const context = await this.getAccessContext(actorUserId);
         if (categories.some(category => category.position !== next.indexOf(category.id) &&
-          !hasChannelPermission(category, context.permissions, context.roleIds, Permission.MANAGE_CHANNELS, context.isBot, context.userId))) {
+          !hasPermission(context.permissions, Permission.MANAGE_CHANNELS))) {
           return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Permissão insuficiente para reordenar estas categorias.' };
         }
       }

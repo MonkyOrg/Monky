@@ -12,6 +12,7 @@ export interface ServerRecord {
   maxUsers: number;
   ownerUserId?: string | null;
   allowSoundboard?: boolean;
+  dmRelayEnabled?: boolean;
   recentSoundCacheEnabled?: boolean;
   recentSoundCacheLimit?: number;
   /** Whether `@todos` / `@everyone` pings the whole channel (#464). */

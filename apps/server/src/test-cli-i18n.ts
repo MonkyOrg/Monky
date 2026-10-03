@@ -653,7 +653,7 @@ test('members, roles and config display translated labels while retaining canoni
   context.mock.method(CoturnManager, 'describeAvailability', () => ({ supported: true }));
   await withContext(path.join(root, 'server-data'), async (ctx) => {
     await ctx.userRepo.create({
-      id: 'fixture-user', clientId: 'fixture-client', publicKey: 'synthetic-public-key',
+      id: 'fixture-user', clientId: '0123456789abcdef0123456789abcdef', publicKey: 'synthetic-public-key',
       nickname: 'Fixture Nickname', avatarPath: null, createdAt: 1, lastSeenAt: 2,
     });
     const admin = await ctx.roleRepo.findByName('Admin');
@@ -663,7 +663,7 @@ test('members, roles and config display translated labels while retaining canoni
       setCliLanguage(language);
       output.length = 0;
       await listMembers(ctx);
-      await showMemberInfo(ctx, 'fixture-client');
+      await showMemberInfo(ctx, '0123456789abcdef0123456789abcdef');
       await listRoles(ctx);
       await showConfig(ctx);
       const text = output.join('\n');

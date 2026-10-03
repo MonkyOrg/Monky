@@ -38,6 +38,9 @@ export function serverSettingsValidationError(
       return 'serverSettings.recentSoundsLimitInvalid';
     }
   }
+  if (patch.dmRelayEnabled !== undefined && !persisted.protocol?.features.includes('dm-relay')) {
+    return 'chat.featureUpdateRequired';
+  }
   if (patch.name !== undefined && (patch.name.trim().length < 2 || patch.name.trim().length > 50)) {
     return 'serverSettings.nameInvalid';
   }

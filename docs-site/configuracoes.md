@@ -1,6 +1,6 @@
 # Configurações
 
-Abra a **engrenagem** na tela inicial ou na barra inferior. Estas são as
+Abra a **engrenagem** na Home ou na barra inferior. Estas são as
 preferências do seu aplicativo. Para mudar algo compartilhado com os
 participantes, use [Configurações do Servidor](/administrar-servidor).
 
@@ -30,6 +30,21 @@ que você escolher. Selecione o que deseja incluir/restaurar; esses dados
 também podem acompanhar a exportação da identidade. A lista de servidores
 pode conter senhas e não é gravada em texto aberto nesse backup.
 Sem a senha escolhida, não há recuperação do arquivo.
+
+Ao exportar a identidade, marque **Amigos** para levar sua lista de amizades e,
+opcionalmente, **Histórico das conversas** para levar as mensagens diretas.
+Em **Mensagens diretas**, escolha o **Tamanho máximo de arquivo recebido**: seus
+amigos veem esse limite e não conseguem enviar arquivos maiores. Veja
+[Amigos e mensagens diretas](/amigos-e-mensagens-diretas).
+
+### Sair
+
+O botão vermelho **Sair**, no fim da lista de abas, apaga deste computador a
+identidade, os amigos, as mensagens diretas e os servidores salvos com as
+senhas. Antes de confirmar, use **Exportar identidade antes** se quiser voltar
+a usar essa identidade depois: sem backup, não há como recuperá-la. Preferências
+do computador, como áudio, idioma e atalhos, continuam. Em seguida o Monky
+reabre na tela de criar ou importar identidade.
 
 ### Qualidade, bitrate e telemetria
 
@@ -720,16 +735,18 @@ quem está conectado.
 
 ### Entrar no servidor ao abrir o Monky
 
-Na Home, selecione ou informe o servidor e ative **Entrar ao abrir o Monky**,
-ao lado de **Entrar no Servidor**. A escolha é salva somente depois de uma conexão
-bem-sucedida. Há um único destino: conectar em outro servidor com o switch
-ativado substitui o anterior. Uma tentativa que falha não altera o destino salvo.
+Na Home, clique com o botão direito em um servidor salvo no trilho e ative
+**Entrar ao abrir o Monky**. Há um único destino em primeiro plano: ativar em
+outro servidor substitui o anterior. Uma tentativa que falha não altera o
+destino salvo.
 
 A preferência vale nas próximas aberturas até você desligar esse mesmo switch;
 desligá-lo desativa a entrada automática imediatamente, sem precisar conectar.
-Não inicia servidores parados nem entra em voz. Ao migrar de uma configuração
-antiga com vários destinos, somente a última escolha é mantida. A passagem da
-Home para o servidor tem uma animação curta, desativada com movimento reduzido.
+Não inicia servidores parados nem entra em voz. Outros servidores salvos ainda
+podem conectar em segundo plano quando **Conectar automaticamente aos servidores
+da lista** está ligado. Ao migrar de uma configuração antiga com vários destinos,
+somente a última escolha é mantida. A passagem da Home para o servidor tem uma
+animação curta, desativada com movimento reduzido.
 
 ### Navegação por seções
 

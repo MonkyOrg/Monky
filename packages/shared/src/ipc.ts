@@ -818,6 +818,8 @@ export interface IpcInvokeChannels {
   'identity:sign-challenge': { args: [nonceHex: string]; returnType: string };
   'identity:export': { args: [password: string, extras?: string]; returnType: string };
   'identity:import': { args: [exportedIdentity: string, password: string]; returnType: AppIdentityImportResult };
+  // Sair: apaga a identidade, amigos e DMs deste computador e reinicia o app
+  'identity:logout': { args: []; returnType: { success: boolean; error?: string } };
 
   // Backup de servidores salvos e configuracoes (#472)
   'backup:save-file': { args: [contents: string, suggestedName: string]; returnType: BackupSaveResult };

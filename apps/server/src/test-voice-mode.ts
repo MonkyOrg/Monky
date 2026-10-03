@@ -33,7 +33,7 @@ test('SFU advertises AV1 forwarding limits and preserves legacy/native H264 prof
 
 function fixture(restricted = true) {
   let mode: 'sfu' | 'p2p' = 'sfu';
-  let allowed = true, exists = true, closes = 0;
+  let viewAllowed = true, speakAllowed = true, exists = true, closes = 0;
   let localModeChanges = 0;
   const channel: ChannelRecord = {
     id: 'room', serverId: 'server', name: 'Voice', type: 'VOICE', position: 0,
@@ -70,6 +70,10 @@ function fixture(restricted = true) {
   server['signalingService'] = signaling;
   const record = (): ServerRecord => ({ id: 'server', name: 'Test', createdAt: 1, passwordHash: '', maxUsers: 10, voiceMode: mode });
   server['serverRepo'] = { getServer: async () => record(), createServer: async () => {}, updateServer: async () => {} };
+  server['channelService'] = {
+    canUserAccessChannel: async (_userId: string, _channelId: string, permission = Permission.VIEW_CHANNEL) =>
+      exists && viewAllowed && (permission !== Permission.SPEAK || speakAllowed),
+  } as typeof server['channelService'];
   const auth = Object.create(AuthService.prototype) as AuthService;
   auth.updateServerSettings = async (payload) => {
     mode = payload.voiceMode ?? mode;
@@ -88,19 +92,19 @@ function fixture(restricted = true) {
   server['broadcastToChannel'] = async (_id, message) => { broadcasts.push(message); };
   server['send'] = (ws, message) => { sent.push({ session: sessions.find((entry) => entry.ws === ws), message }); };
   server['requirePermission'] = async (entry, permission, id) => {
-    if (permission !== Permission.SPEAK || allowed) return true;
+    if (permission !== Permission.SPEAK || speakAllowed) return true;
     server['sendError'](entry.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Denied', id);
     return false;
   };
   server['requireChannelAccess'] = async (entry, _channelId, id) => {
-    if (exists) return true;
+    if (exists && viewAllowed) return true;
     server['sendError'](entry.ws, ProtocolErrorCode.CHANNEL_NOT_FOUND, 'Gone', id);
     return false;
   };
   return {
     server, signaling, admin, alice, bob, broadcasts, sent,
     closes: () => closes, localModeChanges: () => localModeChanges, setMode: (next: 'p2p' | 'sfu') => { mode = next; },
-    revoke: () => { allowed = false; }, removeChannel: () => { exists = false; },
+    revoke: () => { viewAllowed = false; }, revokeSpeak: () => { speakAllowed = false; }, removeChannel: () => { exists = false; },
   };
 }
 
@@ -138,6 +142,18 @@ test('only a real SFU to P2P change fully closes media and grants one reconnect 
   await f.server['handleVoiceReconnect'](f.alice, { channelId: 'room', transitionId: id }, 'repeat');
   assert.equal(f.sent.at(-1)?.message.type, MessageType.SERVER_ERROR);
   assert.equal(f.signaling.getVoiceState('alice')?.channelId, 'room');
+});
+
+test('P2P reconnect keeps visible members admitted and permission-mutes missing speakers', async () => {
+  const f = fixture(false);
+  const id = await switchMode(f);
+  f.revokeSpeak();
+  await f.server['handleVoiceReconnect'](f.alice, { channelId: 'room', transitionId: id }, 'speak-muted');
+  const joined = f.sent.at(-1)?.message;
+  assert.equal(joined?.type, MessageType.VOICE_RECONNECTED);
+  const payload = joined?.payload as VoiceUserJoinedPayload;
+  assert.equal(payload.voiceState.permissionMuted, true);
+  assert.equal(f.signaling.getVoiceState('alice')?.permissionMuted, true);
 });
 
 test('concurrent settings saves observe the committed mode and tear down only once', async () => {

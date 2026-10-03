@@ -272,6 +272,10 @@ class ScreenAudioService {
     if (this.stopPromise) await this.stopPromise;
     if (this.startPromise) return this.startPromise;
     if (this.isCapturing) return this.outputTrack;
+    if (voiceStore.permissionMuted) {
+      appEvents.emit('screen_audio.error', t('permissions.permissionMuted'));
+      return null;
+    }
     const epoch = ++this.captureEpoch;
     const client = callClient();
     const sessionKey = voiceStore.voiceSessionKey;

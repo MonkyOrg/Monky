@@ -239,17 +239,20 @@ export class ScreenSharePickerModal {
     if (!info) return;
     const audioInput = this.modalEl?.querySelector<HTMLInputElement>('#chk-share-audio');
     const ownWindow = source?.isOwnWindow === true;
+    const permissionMuted = voiceStore.permissionMuted;
     if (audioInput) {
-      audioInput.checked = !ownWindow && this.shareAudioByTab[this.activeTab];
-      audioInput.disabled = this.isStarting || ownWindow || (this.hasScreenAudio() && !this.canReplaceScreenAudio());
+      audioInput.checked = !ownWindow && !permissionMuted && this.shareAudioByTab[this.activeTab];
+      audioInput.disabled = this.isStarting || ownWindow || permissionMuted || (this.hasScreenAudio() && !this.canReplaceScreenAudio());
+      audioInput.title = permissionMuted ? t('permissions.permissionMuted') : '';
       if (ownWindow) audioInput.setAttribute('aria-describedby', 'share-audio-warning');
       else audioInput.removeAttribute('aria-describedby');
     }
     const audio = audioInput?.checked ?? false;
     const audioWarning = this.modalEl?.querySelector<HTMLElement>('#share-audio-warning');
     if (audioWarning) {
-      audioWarning.hidden = !ownWindow;
-      audioWarning.textContent = ownWindow ? t('screenShare.ownWindowAudioUnavailable') : '';
+      audioWarning.hidden = !ownWindow && !permissionMuted;
+      audioWarning.textContent = ownWindow ? t('screenShare.ownWindowAudioUnavailable')
+        : permissionMuted ? t('permissions.permissionMuted') : '';
     }
     const aspectInput = this.modalEl?.querySelector<HTMLInputElement>('#chk-preserve-aspect-ratio');
     if (aspectInput) aspectInput.disabled = this.isStarting;
@@ -888,7 +891,7 @@ export class ScreenSharePickerModal {
     const sourceId = source?.id;
     const tab = this.activeTab;
     const captureKind = this.captureKind(tab);
-    const shareAudio = modal.querySelector<HTMLInputElement>('#chk-share-audio')?.checked ?? false;
+    const shareAudio = !voiceStore.permissionMuted && (modal.querySelector<HTMLInputElement>('#chk-share-audio')?.checked ?? false);
     const preserveAspectRatio = modal.querySelector<HTMLInputElement>('#chk-preserve-aspect-ratio')?.checked ?? true;
     const call = this.pickerCall ?? captureScreenShareCall();
     let stream: MediaStream | null = null;

@@ -1,5 +1,6 @@
 import jsQR from 'jsqr';
 import QRCode from 'qrcode';
+import type { DmExportMode } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
 import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
@@ -55,6 +56,23 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
             <span class="toggle-slider"></span>
           </label>
         </div>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+          <label style="font-size: 13px; cursor: pointer;" for="identity-export-include-friends">${t('backup.scopeFriends')}</label>
+          <label class="toggle-switch" aria-label="${t('backup.scopeFriends')}">
+            <input type="checkbox" id="identity-export-include-friends" checked>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div id="identity-export-history-row" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-left: 16px;">
+          <div style="display: grid; gap: 2px;">
+            <label style="font-size: 13px; cursor: pointer;" for="identity-export-include-history">${t('backup.scopeDmHistory')}</label>
+            <span style="font-size: 11px; color: var(--text-muted);">${t('backup.scopeDmHistoryHint')}</span>
+          </div>
+          <label class="toggle-switch" aria-label="${t('backup.scopeDmHistory')}">
+            <input type="checkbox" id="identity-export-include-history">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
       </div>
       <div style="display: flex; gap: 8px; margin-bottom: 14px;">
         <button type="button" id="btn-run-export-identity" class="btn btn-primary" style="flex: 1;">${t('identity.exportAction')}</button>
@@ -97,6 +115,16 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
   const fileButton = backdrop.querySelector('#btn-file-export-identity') as HTMLButtonElement;
   const includeServers = backdrop.querySelector('#identity-export-include-servers') as HTMLInputElement;
   const includeSettings = backdrop.querySelector('#identity-export-include-settings') as HTMLInputElement;
+  const includeFriends = backdrop.querySelector('#identity-export-include-friends') as HTMLInputElement;
+  const includeHistory = backdrop.querySelector('#identity-export-include-history') as HTMLInputElement;
+  const historyRow = backdrop.querySelector('#identity-export-history-row') as HTMLElement;
+  // History travels with the friends list; without friends it has no owner.
+  const syncHistoryRow = () => {
+    includeHistory.disabled = !includeFriends.checked;
+    historyRow.style.opacity = includeFriends.checked ? '1' : '0.5';
+  };
+  includeFriends.addEventListener('change', syncHistoryRow);
+  syncHistoryRow();
   const resultWrapper = backdrop.querySelector('#identity-export-result') as HTMLElement;
   const qrImage = backdrop.querySelector('#identity-export-qr') as HTMLImageElement;
   const qrWrap = backdrop.querySelector('#identity-export-qr-wrap') as HTMLElement;
@@ -124,7 +152,8 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
       if (includeSettings.checked) scopes.push('settings');
       const extras = scopes.length > 0 ? JSON.stringify(collectBackup(scopes)) : undefined;
 
-      const exported = await window.api.exportIdentity(passwordInput.value, extras);
+      const dmMode: DmExportMode = !includeFriends.checked ? 'none' : includeHistory.checked ? 'history' : 'friends';
+      const exported = await window.api.exportIdentity(passwordInput.value, extras, dmMode);
       codeTextarea.value = exported;
       resultWrapper.style.display = 'block';
       copyButton.style.display = 'inline-flex';

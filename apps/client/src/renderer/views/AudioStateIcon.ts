@@ -25,18 +25,19 @@ export function renderAudioMuteIndicators(state: {
   isDeafened: boolean;
   serverMuted?: boolean;
   serverDeafened?: boolean;
+  permissionMuted?: boolean;
   receivesVoice?: boolean;
   botVoicePermissions?: VoiceParticipantState['botVoicePermissions'];
 }, { size = 14, showMicrophone = true }: { size?: IconSize; showMicrophone?: boolean } = {}): string {
   const permissions = state.botVoicePermissions;
   const publishDenied = permissions?.publishRequested === true && !permissions.publish;
   const receiveDenied = permissions?.receiveRequested === true && !permissions.receive;
-  const micBlocked = !!(state.serverMuted || state.serverDeafened || publishDenied);
+  const micBlocked = !!(state.serverMuted || state.serverDeafened || state.permissionMuted || publishDenied);
   const micMuted = state.isMuted || state.isDeafened || micBlocked;
   const audioBlocked = !!(state.serverDeafened || receiveDenied);
   const audioMuted = state.isDeafened || audioBlocked;
   const micLabel = publishDenied ? t('botVoice.publishDenied') : state.serverDeafened ? t('permissions.serverDeafened')
-    : state.serverMuted ? t('permissions.serverMuted') : t('main.micMuted');
+    : state.permissionMuted ? t('permissions.permissionMuted') : state.serverMuted ? t('permissions.serverMuted') : t('main.micMuted');
   const audioLabel = receiveDenied ? t('botVoice.receiveDenied')
     : t(state.serverDeafened ? 'permissions.serverDeafened' : 'main.audioMuted');
   return (showMicrophone && micMuted ? renderAudioStateIcon(micBlocked ? 'mic' : 'mic_off', micBlocked, size, micLabel) : '')

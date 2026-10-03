@@ -494,6 +494,7 @@ test('bot voice rejects inaccessible/full rooms but approved publishing does not
   const created = await owner.peer.request(MessageType.BOT_CREATE, {});
   const botId = text(record(created.payload.bot).id);
   const bot = await f.bot(text(created.payload.token));
+  const botUserId = text(record(bot.auth.payload.currentUser).id);
   await owner.peer.request(MessageType.CHANNEL_UPDATE, {
     channelId: voiceId, inheritCategoryPermissions: false, isPrivate: true, allowedRoleIds: [],
   });
@@ -501,10 +502,13 @@ test('bot voice rejects inaccessible/full rooms but approved publishing does not
   await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: voiceId, isPrivate: false, maxParticipants: 1 });
   await owner.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId });
   await bot.peer.error(MessageType.VOICE_JOIN, { channelId: voiceId }, ProtocolErrorCode.CHANNEL_FULL);
-  const original = f.permissions.getUserPermissions.bind(f.permissions);
-  f.permissions.getUserPermissions = async (id) => id === botId ? DEFAULT_PERMISSIONS & ~Permission.SPEAK : original(id);
-  await bot.peer.error(MessageType.VOICE_JOIN, { channelId: voiceId }, ProtocolErrorCode.CHANNEL_FULL);
+  const originalBotPermissions = f.botPermissions.getChannelPermissions.bind(f.botPermissions);
+  f.botPermissions.getChannelPermissions = (id) =>
+    id === botId || id === botUserId ? Permission.VIEW_CHANNEL : originalBotPermissions(id);
+  await bot.peer.error(MessageType.VOICE_JOIN, { channelId: voiceId }, ProtocolErrorCode.PERMISSION_DENIED);
   await owner.peer.request(MessageType.VOICE_LEAVE, { channelId: voiceId });
+  await bot.peer.error(MessageType.VOICE_JOIN, { channelId: voiceId }, ProtocolErrorCode.PERMISSION_DENIED);
+  f.botPermissions.getChannelPermissions = originalBotPermissions;
   assert.equal((await bot.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId })).type, MessageType.VOICE_USER_JOINED);
   const left = await bot.peer.request(MessageType.VOICE_LEAVE, { channelId: voiceId });
   assert.equal(left.type, MessageType.VOICE_USER_LEFT);
