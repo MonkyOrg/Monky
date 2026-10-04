@@ -33,7 +33,6 @@ namespace monky::native_rtc::engine {
 namespace {
 namespace sv = monky::screen_video;
 namespace policy = monky::native_rtc::codec_policy;
-using Clock = std::chrono::steady_clock;
 using Gate = policy::CallbackGate<webrtc::EncodedImageCallback>;
 
 void Require(bool condition, const char* message, MonkyEngineStatus status = MONKY_ENGINE_INVALID) {
@@ -44,6 +43,14 @@ struct EncodedConfiguration {
   std::uint32_t width = 1920, height = 1080, fps = 120;
   bool av1 = false;
 };
+
+// Capture encoders emit a real IDR every keyint_sec=1 GOP of encoded AUs. A
+// loaded encoder skips frames and stretches that GOP in wall time, so recovery
+// is bounded in AUs at the configured rate: three GOPs tolerate discarded IDRs.
+constexpr std::uint64_t kRecoveryGops = 3;
+std::uint64_t RecoveryFrameBound(const EncodedConfiguration& video) {
+  return static_cast<std::uint64_t>(video.fps) * kRecoveryGops;
+}
 
 bool IsAv1Format(const webrtc::SdpVideoFormat& format) {
   if (format.name != "AV1") return false;
@@ -308,8 +315,9 @@ struct State : std::enable_shared_from_this<State> {
   void DispatchRetired(Token& token, const webrtc::VideoFrameBuffer* buffer) noexcept;
   void Forwarded(const Token& token);
   void CheckRecoveryDeadline() const {
-    Require(!recovering || Clock::now() - recovery_started <= std::chrono::milliseconds(1500),
-        "Encoded video did not recover through a real independent keyframe within1500ms", MONKY_ENGINE_TIMEOUT);
+    Require(!recovering || recovery_frames <= RecoveryFrameBound(video),
+        "Encoded video did not recover through a real independent keyframe within the live recovery bound",
+        MONKY_ENGINE_TIMEOUT);
   }
   void Retired(const Token& token) noexcept;
   Json Snapshot() const {
@@ -356,7 +364,7 @@ struct State : std::enable_shared_from_this<State> {
   std::size_t retained_bytes = 0, peak_frames = 0, peak_bytes = 0;
   bool paused = false, need_idr = true, worker_exited = false;
   bool recovering = false;
-  Clock::time_point recovery_started{};
+  std::uint64_t recovery_frames = 0;
 };
 
 struct Token {
@@ -381,7 +389,7 @@ void State::Recover(std::uint64_t expected_generation, std::uint64_t frame, cons
     std::lock_guard lock(mutex);
     if (stopping.load() || failed.load() || !enabled.load() || paused || expected_generation != generation) return;
     CheckRecoveryDeadline();
-    if (!recovering) { recovering = true; recovery_started = Clock::now(); }
+    if (!recovering) { recovering = true; recovery_frames = 0; }
     ++generation; need_idr = true; ++recovery_requests;
     if (std::string_view(reason) != "rtc-unconsumed" && std::string_view(reason) != "clock-sample-uncertain") ++expired;
     discarded.swap(queue); recovery_discards += discarded.size();
@@ -637,13 +645,13 @@ class Encoder final : public webrtc::VideoEncoder {
       Capacity(0, 0, token->bytes.size(), token->metadata.timestamp_us, now);
       const bool requested = types && (*types)[0] == webrtc::VideoFrameType::kVideoFrameKey;
       if ((needs_idr_ || requested) && !token->metadata.keyframe && !requested_idr_) {
-        requested_idr_ = true; idr_at_ = Clock::now();
+        requested_idr_ = true; idr_wait_frames_ = 0;
         state_->Keyframe(session_);
       }
       // PLI asks for a new independent picture; it does not break a valid local chain.
       if (needs_idr_ && !token->metadata.keyframe) {
-        Require(Clock::now() - idr_at_ <= std::chrono::milliseconds(1500),
-            "No real IDR arrived within the1500ms recovery bound", MONKY_ENGINE_TIMEOUT);
+        Require(++idr_wait_frames_ <= RecoveryFrameBound(state_->video),
+            "No real IDR arrived within the live recovery bound", MONKY_ENGINE_TIMEOUT);
         ++token->refused;
         return WEBRTC_VIDEO_CODEC_OK;
       }
@@ -729,7 +737,7 @@ class Encoder final : public webrtc::VideoEncoder {
   std::uint64_t session_ = 0, generation_ = 0;
   std::uint32_t maximum_bitrate_ = kEncodedBitrateCeiling;
   bool needs_idr_ = true, requested_idr_ = false;
-  Clock::time_point idr_at_{};
+  std::uint64_t idr_wait_frames_ = 0;
 };
 }  // namespace
 
@@ -846,6 +854,7 @@ class Source final : public VideoSource {
     std::unique_lock lock(state_->mutex);
     Require(!state_->stopping.load() && !state_->failed.load(), "Encoded source is closed or failed", MONKY_ENGINE_CLOSED);
     Require(state_->enabled.load() && !state_->paused, "Encoded admission is disabled or rate-paused", MONKY_ENGINE_BUSY);
+    if (state_->recovering) ++state_->recovery_frames;
     state_->CheckRecoveryDeadline();
     const auto current_time = [&] {
       const auto now = QpcNowUs();
@@ -1475,8 +1484,8 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
         state->expired == expired,
         "Uncertain clock sampling must fence compressed dependencies without terminating the source or counting expiry");
     dependent.reset();
-    const auto deadline = state->recovery_started;
-    check(!state->AcceptClockMapping(uncertain, state->generation, 9) && state->recovery_started == deadline,
+    const auto deadline = state->recovery_frames;
+    check(!state->AcceptClockMapping(uncertain, state->generation, 9) && state->recovery_frames == deadline,
         "Repeated uncertain clock sampling must not extend the recovery deadline");
     CaptureClockMapping valid;
     check(state->AcceptClockMapping(valid, state->generation, 10) && state->recovering,
@@ -1494,11 +1503,14 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
     }
   }
   state->Recover(state->generation, 4, "input-expired");
-  const auto recovery_started = state->recovery_started;
+  state->recovery_frames = 5;
   state->Recover(state->generation, 5, "publication-expired");
-  check(state->expired == 2 && state->recovery_started == recovery_started,
+  check(state->expired == 2 && state->recovery_frames == 5,
       "Repeated discarded IDRs cannot keep extending the recovery deadline");
-  state->recovery_started = Clock::now() - std::chrono::milliseconds(1501);
+  state->recovery_frames = RecoveryFrameBound(state->video);
+  state->CheckRecoveryDeadline();
+  check(!state->failed.load(), "A slow encoder within its configured GOP bound must keep recovering");
+  state->recovery_frames = RecoveryFrameBound(state->video) + 1;
   rejects([&] { state->CheckRecoveryDeadline(); });
   rejects([&] { state->Recover(state->generation, 6, "codec-expired"); });
   state->recovering = false; state->stopping.store(true);

@@ -97,8 +97,19 @@ reprodução separada; não substitui **Parar de assistir** para economizar band
 Trocar de página, usar a janela destacada ou ativar a sobreposição não altera
 as telas que você escolheu assistir na chamada. Sair da chamada ou encerrar a
 fonte remove essa escolha; uma nova transmissão precisa ser escolhida novamente.
+Quando quem transmite troca a janela ou a tela compartilhada, você continua
+assistindo à nova fonte automaticamente, com a mesma qualidade escolhida e o
+mesmo foco no palco, sem clicar em **Assistir transmissão** de novo. Isso vale
+para a fonte nova publicada em até 15 segundos depois da anterior; uma segunda
+tela que já existia não é aberta sozinha.
 Uma reconexão de transporte preserva a escolha enquanto a mesma fonte continuar
 válida.
+
+No Windows, Chrome, Edge e outros navegadores baseados no Chromium param de
+desenhar uma janela que fica totalmente coberta por outra, e a transmissão dela
+fica cinza até a janela voltar a aparecer. O seletor avisa ao escolher uma
+dessas janelas. Deixe uma parte dela visível, compartilhe a tela inteira ou
+desative **Calculate window occlusion on Windows** em `chrome://flags`.
 
 No caminho nativo, a última pessoa que para de assistir encerra também o
 pipeline de captura, encoder e envio daquele perfil, inclusive ao SFU.
@@ -528,8 +539,9 @@ compartilhamento, recepção de tela e telemetria; os perfis continuam incluindo
 ### Recepção de tela
 
 **PiP automático** vem ativado em **Qualidade e compartilhamento**. Ao sair do
-palco, trocar de aplicativo (Alt+Tab) ou minimizar o Monky, a transmissão que
-você está assistindo em foco abre numa janela flutuante. Com duas transmissões
+palco, minimizar o Monky ou escondê-lo na bandeja, a transmissão que
+você está assistindo em foco abre numa janela flutuante. Só trocar de janela ou
+de aplicativo (Alt+Tab), com o Monky ainda aberto na tela, não abre o PiP. Com duas transmissões
 em foco, entra a colocada em foco mais recentemente. Câmeras, sua própria
 prévia e transmissões ainda não assistidas não são abertas automaticamente.
 Um aviso explica a ação e onde desativá-la. O PiP continua ao navegar pelo
@@ -542,6 +554,11 @@ Se você fechar o PiP automático enquanto estiver fora, ele não reabre no mesm
 período de ausência nem ao retornar; uma nova saída pode abri-lo novamente.
 O PiP aberto manualmente permanece ao trocar de aplicativo, minimizar e
 restaurar a janela, inclusive quando movido para outro monitor.
+O botão **Voltar à guia** da janela do PiP traz o Monky de volta, mesmo
+minimizado ou escondido na bandeja, e abre o palco da chamada com a mesma
+transmissão em foco, sem reiniciar a reprodução. O **X** só fecha o PiP e
+deixa o Monky onde está. O botão de pausar/reproduzir do PiP pausa apenas a
+imagem que você vê; a transmissão continua ao vivo.
 
 Em **Configurações → Qualidade e compartilhamento → Recepção de tela**, escolha
 **Nativo** ou **Chromium**. No Windows e macOS, **Nativo é o padrão**, usando o runtime

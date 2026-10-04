@@ -256,6 +256,12 @@ export class ScreenSharePickerModal {
     }
     const aspectInput = this.modalEl?.querySelector<HTMLInputElement>('#chk-preserve-aspect-ratio');
     if (aspectInput) aspectInput.disabled = this.isStarting;
+    const occlusionTip = this.modalEl?.querySelector<HTMLElement>('#share-occlusion-tip');
+    if (occlusionTip) {
+      const sensitive = source?.type === 'window' && source.occlusionSensitive === true;
+      occlusionTip.hidden = !sensitive;
+      occlusionTip.textContent = sensitive ? t('screenShare.browserOcclusionTip') : '';
+    }
     const audioText = this.modalEl?.querySelector('#share-audio-text');
     if (audioText) audioText.textContent = this.audioToggleLabel(this.activeTab);
     const native = this.usesNativeCapture(source?.id ?? (this.activeTab === 'screen' ? 'native-monitor:' : 'window:'), audio);
@@ -455,6 +461,7 @@ export class ScreenSharePickerModal {
         </div>
         <p id="share-capture-info" class="share-game-tip" role="status" hidden></p>
         <p id="share-audio-warning" class="share-game-tip" role="status" hidden></p>
+        <p id="share-occlusion-tip" class="share-game-tip" role="note" hidden></p>
         <div class="share-aspect-option">
           <div>
             <label id="share-private-label" for="chk-private-share">${escapeHtml(t('screenShare.privateLabel'))}</label>

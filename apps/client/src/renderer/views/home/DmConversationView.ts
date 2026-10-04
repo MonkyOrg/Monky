@@ -9,12 +9,13 @@ import {
 } from '@monky/shared';
 import { t } from '../../i18n';
 import { dmStore } from '../../stores/dmStore';
+import { ownAvatarSource } from '../../core/profileSync';
 import { connectionStore } from '../../stores/connectionStore';
 import { formatBytes, fileIconName } from '../../utils/attachment';
 import { getAvatarUrl } from '../../utils/avatar';
 import { escapeHtml } from '../../utils/html';
 import { renderMarkdown } from '../../utils/markdown';
-import { formatMessageTime } from '../../utils/messageReply';
+import { formatMessageClock, formatMessageTime } from '../../utils/messageReply';
 import { showErrorToast } from '../CopyToast';
 import { showConfirm } from '../Dialog';
 import { EmojiPicker } from '../EmojiPicker';
@@ -29,8 +30,14 @@ interface StagedFile {
   previewUrl: string | null;
 }
 
-/** Messages from the same author this close together share one header. */
-const GROUP_WINDOW_MS = 5 * 60 * 1000;
+/** Consecutive messages from the same author on the same local day share one header. */
+function sameLocalDay(a: number, b: number): boolean {
+  const first = new Date(a);
+  const second = new Date(b);
+  return first.getFullYear() === second.getFullYear()
+    && first.getMonth() === second.getMonth()
+    && first.getDate() === second.getDate();
+}
 
 /**
  * One direct-message conversation (#743). History lives in the main process;
@@ -239,7 +246,7 @@ export class DmConversationView {
     const older = state?.hasMore
       ? `<button type="button" class="btn btn-secondary dm-load-older" data-dm-older>${t('dm.loadOlder')}</button>`
       : '';
-    feed.innerHTML = `${older}${intro}${messages.map((message, index) => this.renderMessage(message, messages[index - 1], state?.peerReadAt ?? 0)).join('')}`;
+    feed.innerHTML = `${older}${intro}${messages.map((message, index) => this.renderMessage(message, messages[index - 1])).join('')}`;
     this.bindFeed(feed);
     this.loadImages(feed);
     const firstAfter = feed.querySelector<HTMLElement>('.chat-message-row')?.dataset.messageId;
@@ -271,7 +278,7 @@ export class DmConversationView {
     if (author === me) {
       return {
         name: connectionStore.savedNickname.trim() || t('home.defaultNickname'),
-        avatar: connectionStore.savedAvatarBase64 || null,
+        avatar: ownAvatarSource(),
         mine: true,
       };
     }
@@ -279,15 +286,17 @@ export class DmConversationView {
     return { name: this.nickname(), avatar: peer?.avatar ?? null, mine: false };
   }
 
-  private renderMessage(message: DmMessageView, previous: DmMessageView | undefined, peerReadAt: number): string {
+  private renderMessage(message: DmMessageView, previous: DmMessageView | undefined): string {
     const author = this.authorInfo(message.author);
     const grouped = !!previous && previous.author === message.author && !previous.deleted && !message.replyTo &&
-      message.createdAt - previous.createdAt < GROUP_WINDOW_MS;
+      sameLocalDay(previous.createdAt, message.createdAt);
     const time = formatMessageTime(message.createdAt);
     const writable = this.canWrite();
+    const gutterTime = grouped ? `<span class="dm-grouped-time" aria-hidden="true">${formatMessageClock(message.createdAt)}</span>` : '';
     if (message.deleted) {
       return `
         <div class="chat-message-row chat-message-deleted${grouped ? ' dm-message-row--grouped' : ''}" data-message-id="${escapeHtml(message.id)}">
+          ${gutterTime}
           <img class="chat-author-avatar" src="${escapeHtml(getAvatarUrl(author.avatar))}" alt="" data-fallback="avatar">
           <div class="chat-message-body">
             <div class="chat-author-header">
@@ -302,35 +311,35 @@ export class DmConversationView {
         </div>
       `;
     }
-    const delivery = author.mine ? this.renderDelivery(message, peerReadAt) : '';
+    const pending = author.mine && message.delivery === 'pending';
+    const failed = author.mine && message.delivery === 'failed';
+    const editedBadge = message.editedAt
+      ? `<span class="chat-edited-badge" title="${escapeHtml(formatMessageTime(message.editedAt))}">${t('chat.messageEdited')}</span>`
+      : '';
+    const rowClass = `chat-message-row${grouped ? ' dm-message-row--grouped' : ''}${pending ? ' dm-message-row--pending' : ''}`;
     return `
-      <div class="chat-message-row${grouped ? ' dm-message-row--grouped' : ''}" tabindex="-1" data-message-id="${escapeHtml(message.id)}">
+      <div class="${rowClass}" tabindex="-1" data-message-id="${escapeHtml(message.id)}"${author.mine ? ` data-delivery="${pending ? 'pending' : failed ? 'failed' : 'sent'}"` : ''}>
         ${this.renderToolbar(author.mine, writable)}
+        ${gutterTime}
         <img class="chat-author-avatar" src="${escapeHtml(getAvatarUrl(author.avatar))}" alt="" data-fallback="avatar">
         <div class="chat-message-body">
           <div class="chat-author-header">
             <span class="chat-author-name">${escapeHtml(author.name)}</span>
             <span class="chat-timestamp">${time}</span>
-            ${delivery}
-            ${message.editedAt ? `<span class="chat-edited-badge" title="${escapeHtml(formatMessageTime(message.editedAt))}">${t('chat.messageEdited')}</span>` : ''}
+            ${grouped ? '' : editedBadge}
           </div>
-          ${grouped ? `<span class="dm-grouped-time"><span class="dm-grouped-clock">${time}</span>${delivery}</span>` : ''}
+          ${pending ? `<span class="chat-delivery-sr" role="status">${escapeHtml(t('dm.deliveryPending'))}</span>` : ''}
           ${message.replyTo ? this.renderReplyReference(message.replyTo) : ''}
-          ${message.content.trim() ? `<div class="chat-message-text">${renderMarkdown(message.content, { currentNickname: connectionStore.savedNickname })}</div>` : ''}
+          ${message.content.trim() ? `<div class="chat-message-text">${renderMarkdown(message.content, { currentNickname: connectionStore.savedNickname })}${grouped ? editedBadge : ''}</div>` : ''}
           ${message.attachments.length ? `<div class="dm-attachments">${message.attachments.map((attachment) => this.renderAttachment(message, attachment, author.mine)).join('')}</div>` : ''}
+          ${failed ? `<div class="chat-delivery chat-delivery--failed dm-delivery-failed" role="status">
+            <span class="material-symbols-outlined md-14" aria-hidden="true">error_outline</span>
+            <span>${escapeHtml(t('dm.deliveryFailed'))}</span>
+          </div>` : ''}
           <div class="chat-reactions">${this.renderReactions(message, writable)}</div>
         </div>
       </div>
     `;
-  }
-
-  private renderDelivery(message: DmMessageView, peerReadAt: number): string {
-    const state = message.delivery === 'delivered' && peerReadAt >= message.createdAt ? 'read' : message.delivery ?? 'pending';
-    const icon = state === 'pending' ? 'schedule' : state === 'failed' ? 'error_outline' : state === 'read' ? 'done_all' : 'check';
-    const label = t(state === 'pending' ? 'dm.deliveryPending' : state === 'failed' ? 'dm.deliveryFailed' : state === 'read' ? 'dm.deliveryRead' : 'dm.deliveryDelivered');
-    return `<span class="chat-delivery dm-delivery dm-delivery--${state}" role="status" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}">
-      <span class="material-symbols-outlined md-14" aria-hidden="true">${icon}</span>
-    </span>`;
   }
 
   private renderToolbar(mine: boolean, writable: boolean): string {

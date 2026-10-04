@@ -33,6 +33,17 @@ export class VoiceStore {
   public screenAudioShareId: string | null = null;
   /** Explicit receive intent belongs to the call, never to a mounted view. */
   private watchedScreenShares = new Map<string, Set<string>>();
+  /** Last published share ids per participant of the call, to tell new sources from old ones. */
+  private screenShareRosters = new Map<string, Set<string>>();
+  /**
+   * Switching the shared source publishes a new share id and retires the old
+   * one. A watched share that retires leaves its intent here, so the source the
+   * same publisher publishes next keeps playing without a second Watch click.
+   */
+  private screenWatchHandoffs = new Map<string, {
+    expiresAt: number; known: Set<string>; retired: Array<{ shareId: string; quality: ScreenShareQuality }>;
+  }>();
+  public static readonly SCREEN_WATCH_HANDOFF_MS = 15_000;
   private mutedScreenAudioSessions = new Set<string>();
   private screenQualities = new Map<string, Map<string, ScreenShareQuality>>();
 
@@ -86,6 +97,47 @@ export class VoiceStore {
     if (shareIds.length === 0) this.mutedScreenAudioSessions.delete(sessionId);
   }
 
+  /**
+   * Applies every call participant's published shares. Intent of a retired
+   * watched share moves to a share the same publisher had not published
+   * before (a source switch), within SCREEN_WATCH_HANDOFF_MS.
+   */
+  public reconcileScreenShares(rosters: ReadonlyMap<string, readonly string[]>, now = Date.now()): void {
+    const sessions = new Set([...rosters.keys(), ...this.watchedScreenShares.keys(), ...this.screenWatchHandoffs.keys()]);
+    for (const sessionId of sessions) {
+      const shareIds = rosters.get(sessionId) ?? [];
+      const current = new Set(shareIds);
+      let handoff = this.screenWatchHandoffs.get(sessionId);
+      if (handoff && handoff.expiresAt < now) {
+        this.screenWatchHandoffs.delete(sessionId);
+        handoff = undefined;
+      }
+      const retired = [...(this.watchedScreenShares.get(sessionId) ?? [])].filter(id => !current.has(id));
+      if (retired.length > 0 && rosters.has(sessionId)) {
+        handoff ??= { expiresAt: 0, known: new Set(), retired: [] };
+        handoff.expiresAt = now + VoiceStore.SCREEN_WATCH_HANDOFF_MS;
+        // Without a previous roster nothing proves which current share is new.
+        for (const id of this.screenShareRosters.get(sessionId) ?? [...retired, ...shareIds]) handoff.known.add(id);
+        for (const id of retired) handoff.retired.push({ shareId: id, quality: this.getScreenQuality(sessionId, id) });
+        this.screenWatchHandoffs.set(sessionId, handoff);
+      }
+      this.retainScreenShares(sessionId, shareIds);
+      if (!handoff?.retired.length || !rosters.has(sessionId)) continue;
+      for (const shareId of shareIds) {
+        if (handoff.known.has(shareId) || this.isWatchingScreen(sessionId, shareId)) continue;
+        const previous = handoff.retired.shift();
+        if (!previous) break;
+        handoff.known.add(shareId);
+        if (previous.quality !== 'source') this.setScreenQuality(sessionId, shareId, previous.quality);
+        this.setScreenWatching(sessionId, shareId, true);
+        emitOutsideRouting(() => appEvents.emit('voice.screen_watch_handoff',
+          { sessionId, fromShareId: previous.shareId, shareId }));
+      }
+      if (!handoff.retired.length) this.screenWatchHandoffs.delete(sessionId);
+    }
+    this.screenShareRosters = new Map([...rosters].map(([sessionId, ids]) => [sessionId, new Set(ids)]));
+  }
+
   public isScreenAudioMuted(sessionId: string): boolean {
     return this.mutedScreenAudioSessions.has(sessionId);
   }
@@ -99,6 +151,8 @@ export class VoiceStore {
 
   private clearScreenWatching(): void {
     for (const [sessionId] of this.getScreenWatchers()) this.retainScreenShares(sessionId, []);
+    this.screenWatchHandoffs.clear();
+    this.screenShareRosters.clear();
     this.mutedScreenAudioSessions.clear();
     this.screenQualities.clear();
   }

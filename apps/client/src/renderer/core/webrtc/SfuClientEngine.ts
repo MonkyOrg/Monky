@@ -2,6 +2,7 @@ import * as mediasoupClient from 'mediasoup-client';
 import type { types as mediasoupTypes } from 'mediasoup-client';
 import {
   MessageType,
+  ProtocolErrorCode,
   aggregateTransportHealth,
   VoiceConnectionHealth,
   VoiceRosterParticipant,
@@ -23,7 +24,7 @@ import {
   SfuRouterRtpCapabilitiesPayload,
   SfuWebRtcTransportCreatedPayload,
 } from '@monky/shared';
-import { NetworkClient } from '../NetworkClient';
+import { NetworkClient, ProtocolRequestError } from '../NetworkClient';
 import { clientLog } from '../ClientLogService';
 import { appEvents } from '../EventBus';
 import { currentEventOrigin } from '../sessionRouting';
@@ -101,6 +102,9 @@ export class SfuClientEngine {
   private joinEpoch = 0;
   private consumerSetupFailed = false;
   private microphoneSetupFailed = false;
+  // The server refuses microphone publication while Speak is denied in the
+  // channel. That is a permission mute, not a broken transport.
+  private microphoneDenied = false;
 
   constructor(
     getClient: () => NetworkClient,
@@ -438,6 +442,7 @@ export class SfuClientEngine {
     const channelId = this.channelId;
     this.pendingMicProducer = operation;
     this.microphoneSetupFailed = false;
+    this.microphoneDenied = false;
     this.notifyIfHealthy();
     let producer: mediasoupTypes.Producer | null = null;
     try {
@@ -474,8 +479,13 @@ export class SfuClientEngine {
         }
       }
       if (this.pendingMicProducer === operation) {
-        clientLog.error('SFU', 'Failed to produce mic track', { error: error instanceof Error ? error.message : String(error) });
-        this.microphoneSetupFailed = true;
+        if (error instanceof ProtocolRequestError && error.code === ProtocolErrorCode.PERMISSION_DENIED) {
+          clientLog.warn('SFU', 'Microphone publication refused while Speak is denied in this channel');
+          this.microphoneDenied = true;
+        } else {
+          clientLog.error('SFU', 'Failed to produce mic track', { error: error instanceof Error ? error.message : String(error) });
+          this.microphoneSetupFailed = true;
+        }
       }
       return null;
     } finally {
@@ -689,6 +699,7 @@ export class SfuClientEngine {
     if (key === 'mic') {
       this.pendingMicProducer = null;
       this.microphoneSetupFailed = false;
+      this.microphoneDenied = false;
     }
     if (key === 'camera') this.pendingCameraProducer = null;
     this.pendingScreenProducers.delete(key);
@@ -918,6 +929,14 @@ export class SfuClientEngine {
     return this.isInitialized && !!this.sendTransport && !!this.recvTransport;
   }
 
+  public hasMicrophonePublication(): boolean {
+    return this.producers.has('mic') || this.pendingMicProducer !== null;
+  }
+
+  public isMicrophoneDenied(): boolean {
+    return this.microphoneDenied;
+  }
+
   public isChannelConnected(): boolean {
     return this.getHealth() === 'connected';
   }
@@ -1018,6 +1037,7 @@ export class SfuClientEngine {
     this.recvTransportState = 'new';
     this.consumerSetupFailed = false;
     this.microphoneSetupFailed = false;
+    this.microphoneDenied = false;
   }
 
   /**

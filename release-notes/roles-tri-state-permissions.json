@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Cargos agora usam Negar, Herdar e Permitir em cada permissão, como nos canais. Cargos novos começam herdando de @todos, e Negar sempre prevalece. Os cargos existentes são convertidos mantendo o mesmo efeito.",
+  "en": "Roles now use Deny, Inherit and Allow for each permission, just like channels. New roles start inheriting from @everyone, and Deny always wins. Existing roles are converted keeping the same effect."
+}

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Sem a permissão Falar em voz, você não é mais desconectado nem impedido de entrar na chamada: entra silenciado administrativamente para ouvir e assistir, e o microfone volta quando a permissão é devolvida.",
+  "en": "Without the Speak permission, you are no longer disconnected or blocked from joining the call: you join administratively muted to listen and watch, and your microphone returns when the permission is restored."
+}

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O PiP automático agora abre só ao minimizar o Monky ou sair do palco, e não mais ao clicar em outra janela.",
+  "en": "Automatic PiP now opens only when you minimize Monky or leave the stage, no longer when you click another window."
+}

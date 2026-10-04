@@ -57,6 +57,8 @@ import {
   RoleDeletePayload,
   RoleUpdatePayload,
   RolesListPayload,
+  toLegacyRoles,
+  DEFAULT_PERMISSIONS,
   ServerErrorPayload,
   ServerInviteInfoPayload,
   ServerNetworkInterface,
@@ -1450,6 +1452,11 @@ export class WebSocketServer {
       Object.entries(this.signalingService.getAllVoiceStates())
         .filter(([, state]) => session.visibleChannelIds?.has(state.channelId))
     );
+
+    // Clients without allow/deny roles resolve full masks; give them the equivalent ones.
+    if (result.serverDetails.roles && !session.protocol?.features.includes('role-deny')) {
+      result.serverDetails.roles = toLegacyRoles(result.serverDetails.roles, result.serverDetails.everyonePermissions ?? DEFAULT_PERMISSIONS);
+    }
 
     // Send AUTH_SUCCESS to the connecting client
     const iceServers = await this.buildIceServersFor(result.user.id, session);
@@ -4738,11 +4745,15 @@ export class WebSocketServer {
       roles: state.roles,
       userRoles: state.userRoles,
     };
-    this.broadcast({
-      type: MessageType.ROLES_LIST,
-      requestId,
-      payload,
-    });
+    const message: ProtocolMessage<RolesListPayload> = { type: MessageType.ROLES_LIST, requestId, payload };
+    const legacy: ProtocolMessage<RolesListPayload> = {
+      ...message, payload: { ...payload, roles: toLegacyRoles(state.roles, state.everyonePermissions) },
+    };
+    for (const [ws, session] of this.sessions.entries()) {
+      if (ws.readyState === WebSocket.OPEN && session.user && !session.replaced && this.canDeliverBotEvent(session, message)) {
+        this.send(ws, session.protocol?.features.includes('role-deny') ? message : legacy);
+      }
+    }
 
     // Roles decide who may see a private channel, so any change to them can
     // grant or revoke access. Reconciling here covers every role mutation at

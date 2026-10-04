@@ -257,9 +257,10 @@ impede o envio mesmo assim. **Ver canal** é independente de **Ler mensagens**:
 retirar apenas a leitura mantém o canal visível, mas remove histórico, resultados
 de busca e notificações de mensagens. Permissões de silenciar/ensurdecer membros
 continuam gerais, pois essas restrições valem para a pessoa em todo o servidor.
-**Gerenciar canais** e **Mover membros** também são permissões gerais do servidor:
-elas não aparecem no editor de permissões de canal ou categoria e não podem ser
-concedidas nem negadas por regras locais. **Falar** não bloqueia a entrada em
+**Gerenciar canais**, **Mover membros**, **Gerenciar eventos** e **Emitir ações
+ao vivo** também são permissões gerais do servidor: elas não aparecem no editor
+de permissões de canal ou categoria e não podem ser concedidas nem negadas por
+regras locais. Regras antigas com essas permissões são ignoradas. **Falar** não bloqueia a entrada em
 um canal de voz; quem tem **Ver canal** entra, mas fica sem microfone,
 soundboard e áudio da tela até receber **Falar** naquele canal.
 
@@ -281,16 +282,28 @@ Isso não substitui a [aprovação de capacidades de cada bot](/bots#preferencia
 
 **Todos** fica fixo no topo, sem cor. É a base automática de qualquer membro,
 não um cargo atribuível: não é possível adicionar/remover pessoas, reordenar,
-renomear ou excluir Todos. Seus controles gerais, assim como os dos cargos,
-são switches de liga/desliga. Todos abre o mesmo editor dos cargos comuns,
-somente com a aba **Permissões**, sem as abas **Geral** e **Membros**.
+renomear ou excluir Todos. Seus controles gerais são switches de liga/desliga.
+Todos abre o mesmo editor dos cargos comuns, somente com a aba **Permissões**,
+sem as abas **Geral** e **Membros**.
 
-Servidores novos não criam o cargo Membro. Sem cargo, a pessoa usa Todos;
-com cargos, os switches dos cargos substituem essa base. Entre cargos, um
-switch desligado prevalece sobre o ligado. Por isso, revise todas as permissões
-ao criar um cargo, inclusive **Ver canal**. O cargo Membro antigo sem
-personalizações é convertido em Todos; cargos personalizados ou utilizados
-em audiências privadas de eventos e ações são preservados.
+Nos demais cargos, cada permissão tem três estados: **Negar**, **Herdar** e
+**Permitir**. Herdar segue o que está definido em Todos; Permitir concede a
+permissão mesmo que Todos esteja desligado; Negar retira a permissão mesmo que
+Todos esteja ligado. Um cargo novo começa com tudo em Herdar, então só muda o
+que você marcar.
+
+Servidores novos não criam o cargo Membro. Sem cargo, a pessoa usa Todos.
+Com vários cargos, as permissões concedidas se somam e qualquer **Negar** vence
+um Permitir de outro cargo. Dono e administradores têm acesso total. O cargo
+Membro antigo sem personalizações é convertido em Todos; cargos personalizados
+ou utilizados em audiências privadas de eventos e ações são preservados.
+
+Na atualização, os cargos que eram switches de liga/desliga são convertidos
+automaticamente: o que coincidia com Todos passa a Herdar, o que estava ligado
+a mais vira Permitir e o que estava desligado vira Negar. Cada cargo mantém o
+mesmo efeito de antes. A diferença está em quem tem vários cargos: antes uma
+permissão só valia se todos os cargos a tivessem; agora as permissões dos
+cargos se somam e apenas um Negar explícito as retira.
 
 Essa mudança exige clientes atualizados (protocolo 35 ou posterior). Clientes
 antigos são orientados a atualizar antes de conectar, para que também removam

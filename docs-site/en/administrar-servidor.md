@@ -250,9 +250,10 @@ A second assigned role explicitly denying sending still blocks it.
 keeps the channel visible but removes history, search results and message
 notifications. Mute/deafen permissions remain server-wide because those
 restrictions apply to the member throughout the server.
-**Manage channels** and **Move members** are also server-wide permissions:
-they do not appear in the channel or category permission editor and cannot be
-granted or denied by local rules. **Speak** no longer blocks joining a voice
+**Manage channels**, **Move members**, **Manage events** and **Emit live
+actions** are also server-wide permissions: they do not appear in the channel or
+category permission editor and cannot be granted or denied by local rules.
+Older rules containing them are ignored. **Speak** no longer blocks joining a voice
 channel; anyone with **View channel** can enter, but without **Speak** they are
 muted for microphone, soundboard and screen-share audio until that permission
 applies in the channel.
@@ -275,15 +276,27 @@ When off, it also blocks administrators. This does not replace
 
 **Everyone** is fixed at the top without a color. It is every member's automatic
 base, not an assignable role: it has no membership, reordering, rename or delete
-actions. Its server-level permissions, like ordinary role permissions, use
-on/off switches. Everyone opens the same editor as ordinary roles, with only
-the **Permissions** tab and no **General** or **Members** tabs.
+actions. Its server-level permissions use on/off switches.
+Everyone opens the same editor as ordinary roles, with only the **Permissions**
+tab and no **General** or **Members** tabs.
 
-New servers do not create a Member role. Members without roles use Everyone;
-assigned roles replace that base. Among roles, an off switch wins over an on
-switch. Review every permission when creating a role, including **View channel**.
-The original unmodified Member role is converted to Everyone; customized roles
-and roles used in private event/action audiences are preserved.
+In every other role, each permission has three states: **Deny**, **Inherit**
+and **Allow**. Inherit follows Everyone; Allow grants the permission even when
+Everyone has it off; Deny removes it even when Everyone has it on. A new role
+starts with everything on Inherit, so it only changes what you set.
+
+New servers do not create a Member role. Members without roles use Everyone.
+With several roles, granted permissions add up and any **Deny** wins over an
+Allow from another role. The owner and administrators have full access. The
+original unmodified Member role is converted to Everyone; customized roles and
+roles used in private event/action audiences are preserved.
+
+On update, roles that used on/off switches are converted automatically:
+whatever matched Everyone becomes Inherit, extra enabled permissions become
+Allow and disabled ones become Deny. Each role keeps the same effect as before.
+The difference is for members with several roles: previously a permission only
+applied if every role had it; now role permissions add up and only an explicit
+Deny removes them.
 
 This change requires updated clients (protocol 35 or later). Older clients are
 asked to update before connecting so that cached content is also removed when

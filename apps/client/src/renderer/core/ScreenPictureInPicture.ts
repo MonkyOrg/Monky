@@ -26,6 +26,8 @@ interface Presentation {
   dispose: Array<() => void>;
 }
 
+const PIP_LEAVE_SETTLE_MS = 150;
+
 class ScreenPictureInPicture {
   private current: Presentation | null = null;
 
@@ -80,8 +82,9 @@ class ScreenPictureInPicture {
       track.addEventListener('ended', ended);
       entry.dispose.push(() => track.removeEventListener('ended', ended));
     }
-    const left = (): void => this.retire(entry);
+    const left = (): void => this.left(entry);
     video.addEventListener('leavepictureinpicture', left);
+    this.bindMediaSession(entry);
     entry.dispose.push(() => video.removeEventListener('leavepictureinpicture', left));
     const unbindInactive = window.api.onWindowInactive(() => { entry.windowActive = false; });
     const unbindActive = window.api.onWindowActive(() => {
@@ -194,6 +197,58 @@ class ScreenPictureInPicture {
       });
     }
     this.retire(entry);
+  }
+
+  /**
+   * Chromium pauses the video when the PiP close button is used only while
+   * the page handles media pause; "back to tab" never pauses. Without these
+   * handlers both buttons produce the same leave event.
+   */
+  private bindMediaSession(entry: Presentation): void {
+    const session = navigator.mediaSession;
+    if (!session) return;
+    const actions = ['play', 'pause'] as const;
+    try {
+      session.setActionHandler('play', () => { void entry.video.play().catch(() => {}); });
+      session.setActionHandler('pause', () => entry.video.pause());
+    } catch {
+      return;
+    }
+    entry.dispose.push(() => {
+      for (const action of actions) {
+        try { session.setActionHandler(action, null); } catch { /* unsupported action */ }
+      }
+    });
+  }
+
+  private left(entry: Presentation): void {
+    if (entry.opening) {
+      this.retire(entry);
+      return;
+    }
+    // The close button's pause is delivered separately from the leave event.
+    window.setTimeout(() => this.settleLeave(entry), PIP_LEAVE_SETTLE_MS);
+  }
+
+  private settleLeave(entry: Presentation): void {
+    if (this.current !== entry || document.pictureInPictureElement === entry.video) return;
+    if (entry.video.paused) {
+      // The close button paused the shared element; a stage that still shows
+      // it keeps the broadcast live.
+      if (!entry.host && entry.video.isConnected && entry.video.srcObject) {
+        void entry.video.play().catch(() => {});
+      }
+      this.retire(entry);
+      return;
+    }
+    entry.returning = true;
+    entry.windowActive = true;
+    void window.api.returnFromScreenPictureInPicture().catch(error => {
+      console.warn('[ScreenPictureInPicture] Could not bring Monky forward:', error);
+    });
+    appEvents.emit('screen_pip.return_to_call', { sessionKey: entry.source.sessionKey, channelId: entry.source.channelId });
+    // Whatever the stage could not take back must not linger in the background.
+    if (this.current === entry) this.retire(entry);
   }
 
   private retire(entry: Presentation): void {

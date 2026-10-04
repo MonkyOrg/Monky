@@ -31,6 +31,29 @@ async function runAutomaticScreenPipSmoke() {
   const originalAutoPip = settings.screenShareAutoPictureInPicture;
   const originalSettings = localStorage.getItem('monky_settings');
   const requests = [];
+  const mediaHandlers = new Map();
+  let returns = 0;
+  replace(navigator.mediaSession, 'setActionHandler', (action, handler) => {
+    if (handler) mediaHandlers.set(action, handler);
+    else mediaHandlers.delete(action);
+  });
+  // Chromium's PiP close button pauses the page's video because Monky handles
+  // media pause; "back to tab" leaves it playing. Neither runs exitPictureInPicture.
+  const settleLeave = () => new Promise(resolve => setTimeout(resolve, 250));
+  const closeFromPip = async (latePause = false) => {
+    const video = pipElement;
+    pipElement = null;
+    if (!latePause) video.pause();
+    video.dispatchEvent(new Event('leavepictureinpicture'));
+    if (latePause) setTimeout(() => video.pause(), 40);
+    await settleLeave();
+  };
+  const backToTab = async () => {
+    const video = pipElement;
+    pipElement = null;
+    video.dispatchEvent(new Event('leavepictureinpicture'));
+    await settleLeave();
+  };
   const inactiveListeners = new Set();
   const activeListeners = new Set();
   const deactivateWindow = () => [...inactiveListeners].forEach(callback => callback());
@@ -63,7 +86,8 @@ async function runAutomaticScreenPipSmoke() {
   }, onWindowActive: callback => {
     activeListeners.add(callback);
     return () => activeListeners.delete(callback);
-  }, openScreenPictureInPicture: async (requestId, requireInactive) => {
+  }, returnFromScreenPictureInPicture: async () => { returns++; },
+  openScreenPictureInPicture: async (requestId, requireInactive) => {
     const video = document.querySelector(`video[data-monky-screen-pip="${requestId}"]`);
     requests.push({ video, requireInactive });
     if (failRequest) throw new Error('Expected automatic PiP rejection');
@@ -152,7 +176,7 @@ async function runAutomaticScreenPipSmoke() {
       deactivateWindow();
       stage.openAutomaticPictureInPicture();
       check(requests.length === before + 1 && requests.at(-1).video === latest,
-        'Concurrent navigation/blur requests choose the most recently focused screen only once');
+        'Concurrent navigation/minimize requests choose the most recently focused screen only once');
       const main = new MainView(document.getElementById('pip-fixture'));
       main.voiceStageView = stage;
       main.activeContentView = 'stage';
@@ -187,7 +211,7 @@ async function runAutomaticScreenPipSmoke() {
       const disabled = requests.length;
       stage.openAutomaticPictureInPicture();
       deactivateWindow();
-      check(requests.length === disabled, 'Disabled preference blocks navigation and blur');
+      check(requests.length === disabled, 'Disabled preference blocks navigation and minimize');
       selected().closest('[data-tile-key]').querySelector('.stage-pip-btn').click();
       await until(() => pipElement === selected(), 'Manual PiP must remain available when automatic PiP is disabled');
       const manualVideo = pipElement;
@@ -208,8 +232,8 @@ async function runAutomaticScreenPipSmoke() {
       stage.setFocusedTiles(keys);
       await until(() => selected()?.readyState >= 2, 'Refocused screen must be ready');
       deactivateWindow();
-      await until(() => pipElement === selected(), 'Window blur opens the focused screen');
-      check(requests.at(-1).requireInactive === true, 'Window events require Main to verify actual app inactivity');
+      await until(() => pipElement === selected(), 'Minimizing the window opens the focused screen');
+      check(requests.at(-1).requireInactive === true, 'Window events require Main to verify the window actually left the screen');
       const inactiveVideo = pipElement;
       stage.setChannel(channel.id);
       check(pipElement === inactiveVideo, 'An inactive stage refresh must not close PiP');
@@ -229,7 +253,10 @@ async function runAutomaticScreenPipSmoke() {
       await setup();
       deactivateWindow();
       await until(() => pipElement === selected(), 'Automatic PiP opens on the first inactive event');
-      await document.exitPictureInPicture();
+      const dismissedReturns = returns;
+      await closeFromPip();
+      check(returns === dismissedReturns && !selected().paused && selected().srcObject === streams[1],
+        'The PiP close button keeps Monky away and the paused stage broadcast resumes live');
       const dismissedRequests = requests.length;
       stage.render();
       stage.setChannel(channel.id);
@@ -258,7 +285,57 @@ async function runAutomaticScreenPipSmoke() {
       activateWindow();
       check(pipElement === persistentManual && !persistentManual.paused,
         'Restoring the app does not override an explicitly opened manual PiP');
-      await document.exitPictureInPicture();
+      check(typeof mediaHandlers.get('pause') === 'function' && typeof mediaHandlers.get('play') === 'function',
+        'Open PiP handles media pause so its close button is distinguishable from back to tab');
+      mediaHandlers.get('pause')();
+      check(persistentManual.paused, 'The PiP pause control pauses the presentation');
+      mediaHandlers.get('play')();
+      await until(() => !persistentManual.paused, 'The PiP play control resumes the presentation');
+      await closeFromPip(true);
+      check(!persistentManual.paused && !mediaHandlers.size && !pip.getStageReturn(session.key, channel.id),
+        'A close-button pause that arrives after the leave event is still a dismissal');
+
+      await setup();
+      deactivateWindow();
+      await until(() => pipElement === selected(), 'Minimizing opens PiP before back to tab');
+      const backVideo = pipElement;
+      const returnedBefore = returns;
+      const destinations = [];
+      const offReturn = appEvents.on('screen_pip.return_to_call', call => {
+        destinations.push(`${call.sessionKey}/${call.channelId}`);
+        stage.setChannel(call.channelId);
+      });
+      await backToTab();
+      offReturn();
+      check(returns === returnedBefore + 1 && destinations.join() === `${session.key}/${channel.id}`,
+        'Back to tab brings the minimized Monky window forward on the call');
+      check(selected() === backVideo && !backVideo.paused && stage.focusedTileKeys.join() === keys.join()
+        && !pip.getStageReturn(session.key, channel.id) && !mediaHandlers.size,
+      'Back to tab keeps the same live broadcast focused on the stage');
+      activateWindow();
+
+      await setup();
+      stage.openAutomaticPictureInPicture();
+      await until(() => pipElement === selected(), 'Leaving the stage opens PiP before back to tab');
+      const awayVideo = pipElement;
+      stage.destroy();
+      check(awayVideo.closest('.screen-pip-host'), 'The away presentation is retained outside the stage');
+      const offAway = appEvents.on('screen_pip.return_to_call', () => mountStage());
+      await backToTab();
+      offAway();
+      check(returns === returnedBefore + 2 && selected() === awayVideo && !awayVideo.paused
+        && awayVideo.srcObject === streams[1] && !document.querySelector('.screen-pip-host'),
+      'Back to tab from another view returns to the call stage without restarting playback');
+
+      await setup();
+      stage.openAutomaticPictureInPicture();
+      await until(() => pipElement === selected(), 'Leaving the stage opens PiP before closing it');
+      const closedAway = pipElement;
+      stage.destroy();
+      await closeFromPip();
+      check(returns === returnedBefore + 2 && closedAway.srcObject === null && !document.querySelector('.screen-pip-host'),
+        'Closing away PiP neither navigates nor keeps background media');
+      mountStage();
 
       await setup();
       stage.openAutomaticPictureInPicture();

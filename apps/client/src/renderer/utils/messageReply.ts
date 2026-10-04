@@ -6,7 +6,11 @@ import { renderMarkdown } from './markdown';
 
 export function formatMessageTime(timestamp: number): string {
   const date = new Date(timestamp);
-  return `${date.toLocaleDateString(getLanguage())} ${date.toLocaleTimeString(getLanguage(), { hour: '2-digit', minute: '2-digit' })}`;
+  return `${date.toLocaleDateString(getLanguage())} ${formatMessageClock(timestamp)}`;
+}
+
+export function formatMessageClock(timestamp: number): string {
+  return new Date(timestamp).toLocaleTimeString(getLanguage(), { hour: '2-digit', minute: '2-digit' });
 }
 
 export function renderReplyPreview(reply: MessageReply): string {

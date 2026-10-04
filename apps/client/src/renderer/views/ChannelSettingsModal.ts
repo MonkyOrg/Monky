@@ -29,8 +29,6 @@ const permissionNames = [
   [Permission.SPEAK, 'speak'],
   [Permission.USE_SOUNDBOARD, 'useSoundboard'],
   [Permission.USE_BOT_COMMANDS, 'useBotCommands'],
-  [Permission.MANAGE_EVENTS, 'manageEvents'],
-  [Permission.EMIT_LIVE_ACTIONS, 'emitLiveActions'],
 ] as const;
 const states = [
   { value: 'deny', icon: 'close', label: 'channelPermissions.deny' },

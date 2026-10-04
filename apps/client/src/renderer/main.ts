@@ -51,6 +51,7 @@ import { webRtcManager } from './core/WebRtcManager';
 import { chatStore } from './stores/chatStore';
 import { connectionStore } from './stores/connectionStore';
 import { dmStore } from './stores/dmStore';
+import { initProfileSync } from './core/profileSync';
 import { bindDmNotifications } from './core/dmNotifications';
 import { serverStore } from './stores/serverStore';
 import { settingsStore } from './stores/settingsStore';
@@ -93,6 +94,7 @@ class App {
   private inviteWork: Promise<boolean> | null = null;
   private unbindInvites: (() => void) | null = null;
   private unbindDm: (() => void) | null = null;
+  private unbindProfileSync: (() => void) | null = null;
   private disposed = false;
   private readonly autoEntryService = new AutoEntryService(message => clientLog.info('CONNECTION', message));
   private readonly voiceModeReconnect = new VoiceModeReconnect({
@@ -156,6 +158,7 @@ class App {
       this.disposed = true;
       this.unbindInvites?.();
       this.unbindDm?.();
+      this.unbindProfileSync?.();
       dmStore.dispose();
       joinInviteModal.close();
       selectEnhancer.dispose();
@@ -250,6 +253,8 @@ class App {
       clientLog.error('DM', 'Direct messages failed to start', { error: error instanceof Error ? error.message : String(error) });
     });
     this.unbindDm = bindDmNotifications();
+    // Nickname/avatar follow the identity across devices; runs once DMs are up.
+    void initProfileSync().then((off) => { this.unbindProfileSync = off; });
 
     // The product now lands on Home: server connections are opened from the rail
     // or in the background after the shell has painted.
@@ -468,6 +473,9 @@ class App {
     audioProcessor.setMuted(voiceStore.getEffectiveMuted());
     audioProcessor.setDeafened(voiceStore.getEffectiveDeafened());
     webRtcManager.setDeafened(voiceStore.getEffectiveDeafened());
+    void webRtcManager.syncMicrophonePublication().catch((error: unknown) => {
+      clientLog.warn('AUDIO', 'Could not publish the microphone after Speak was allowed', { error: String(error) });
+    });
     if (voiceStore.permissionMuted && screenAudioService.getIsCapturing()) {
       void screenAudioService.stop().catch((error: unknown) => {
         clientLog.warn('SCREEN_SHARE', 'Could not stop screen audio after permission mute', { error: String(error) });

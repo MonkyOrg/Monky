@@ -63,6 +63,8 @@ export class DmTransport {
   private lastOutgoing = 0;
   private me: string | null = null;
   private friends = new Set<string>();
+  /** Identities the main process keeps a record for; only these are worth observing. */
+  private known = new Set<string>();
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly api: DmApi) {}
@@ -81,12 +83,18 @@ export class DmTransport {
   }
 
   /** Kept in sync by the DM store from each snapshot. */
-  setIdentity(me: string | null, friends: Iterable<string>): void {
+  setIdentity(me: string | null, friends: Iterable<string>, known: Iterable<string> = friends): void {
+    if (me !== this.me) {
+      for (const link of this.links.values()) link.observed.clear();
+    }
     this.me = me;
     const next = new Set(friends);
     const added = [...next].filter((peer) => !this.friends.has(peer));
     this.friends = next;
-    if (added.length > 0) this.tick();
+    const nextKnown = new Set(known);
+    const newlyKnown = [...nextKnown].some((peer) => !this.known.has(peer));
+    this.known = nextKnown;
+    if (added.length > 0 || newlyKnown) this.tick();
   }
 
   /** Identities reachable through at least one relay-enabled server right now. */
@@ -294,7 +302,8 @@ export class DmTransport {
         this.lastOutgoing = 0;
       } else if (invisible && now - link.lastBlindHello > BLIND_HELLO_EVERY_MS) {
         link.lastBlindHello = now;
-        this.callOn(link, () => this.api.hello(true));
+        // Friends only: own devices already exchanged state when the link came up.
+        this.callOn(link, () => this.api.hello(true, false));
       }
       this.observe(link);
       const peers = this.linkPeers(link);
@@ -332,7 +341,8 @@ export class DmTransport {
     const base = link.session.client.getHttpBaseUrl();
     for (const member of link.session.serverStore.serverDetails?.members ?? []) {
       const identity = identityOf(member);
-      if (!identity || identity === this.me) continue;
+      // Not cached until the main process has a record, or the first look would be lost.
+      if (!identity || identity === this.me || !this.known.has(identity)) continue;
       const avatar = member.avatarUrl
         ? (member.avatarUrl.startsWith('/') && base ? `${base}${member.avatarUrl}` : member.avatarUrl)
         : null;

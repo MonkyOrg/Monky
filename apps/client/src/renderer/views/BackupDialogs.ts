@@ -2,6 +2,7 @@ import { t } from '../i18n';
 import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { applyBackup, BACKUP_FILE_EXTENSION, BackupScope, collectBackup, parseBackup } from '../utils/backup';
 import { withButtonLoading } from '../utils/buttonLoading';
+import { recordProfileChange } from '../core/profileSync';
 import { showAlert, showConfirm } from './Dialog';
 
 /**
@@ -214,6 +215,10 @@ export async function showBackupImportDialog(trigger?: HTMLElement): Promise<Bac
   if (applied.length === 0) {
     await showAlert({ title: t('backup.importTitle'), message: t('backup.nothingToImport'), variant: 'warning' });
     return null;
+  }
+  if (applied.includes('settings') && (backup.settings?.nickname || backup.settings?.avatar)) {
+    // Restoring is an explicit choice, so the restored profile wins on the other devices too.
+    void recordProfileChange({ nickname: !!backup.settings.nickname, avatar: !!backup.settings.avatar });
   }
 
   await showAlert({ title: t('backup.importTitle'), message: t('backup.importSuccess'), variant: 'success' });

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
-import { aggregateTransportHealth, VoiceConnectionHealth, VoiceRosterParticipant, SfuConsumedPayload, MessageType, DEFAULT_CUSTOM_PROFILE } from '@monky/shared';
+import { aggregateTransportHealth, VoiceConnectionHealth, VoiceRosterParticipant, SfuConsumedPayload, MessageType, DEFAULT_CUSTOM_PROFILE, ProtocolErrorCode } from '@monky/shared';
 import { ParticipantManager } from '../src/renderer/core/ParticipantManager';
-import { NetworkClient } from '../src/renderer/core/NetworkClient';
+import { NetworkClient, ProtocolRequestError } from '../src/renderer/core/NetworkClient';
 import { SfuClientEngine } from '../src/renderer/core/webrtc/SfuClientEngine';
 import { RemoteMediaRouter } from '../src/renderer/core/webrtc/RemoteMediaRouter';
 import { RemoteVadMonitor } from '../src/renderer/core/webrtc/RemoteVadMonitor';
@@ -677,6 +677,37 @@ test('failed microphone publication cannot be hidden by a healthy receive transp
   assert.equal(engine.isChannelConnected(), false);
   engine.closeProducer('mic');
   assert.equal(engine.isChannelConnected(), true, 'explicit receive-only mode no longer requires microphone publication');
+});
+
+test('a microphone refused for denied Speak keeps the SFU call and publishes once Speak returns', async (t) => {
+  const { engine, client, failures, connected, health } = engineFixture();
+  t.after(() => { engine.leave(); client.dispose(); });
+  t.mock.method(engine, 'canProduceKind', () => true);
+  t.mock.method(client, 'send', () => {});
+  engine['channelId'] = 'room';
+  engine['sendTransportState'] = 'connected';
+  engine['recvTransportState'] = 'connected';
+  let allowed = false;
+  Object.defineProperty(engine, 'sendTransport', { writable: true, value: {
+    close() {},
+    async produce({ track }: { track: MediaStreamTrack }) {
+      if (!allowed) throw new ProtocolRequestError('Sem permissão para falar neste canal.', ProtocolErrorCode.PERMISSION_DENIED);
+      return { id: 'mic-producer', track, closed: false, on() {}, close() { this.closed = true; } };
+    },
+  } });
+  const track = { id: 'mic', kind: 'audio', readyState: 'live' } as MediaStreamTrack;
+  assert.equal(await engine.produceMic(track), null);
+  assert.equal(engine.isMicrophoneDenied(), true);
+  assert.equal(engine.hasMicrophonePublication(), false);
+  assert.equal(failures(), 0, 'a permission mute must not tear the call down');
+  assert.equal(health.at(-1), 'connected');
+  assert.equal(engine.isChannelConnected(), true);
+  allowed = true;
+  assert.ok(await engine.produceMic(track));
+  assert.equal(engine.isMicrophoneDenied(), false);
+  assert.equal(engine.hasMicrophonePublication(), true);
+  assert.equal(failures(), 0);
+  assert.ok(connected() > 0);
 });
 
 test('pending microphone publication stays connecting and a cancelled producer cannot replace its successor', async (t) => {

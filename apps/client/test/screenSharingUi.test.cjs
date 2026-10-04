@@ -202,6 +202,26 @@ for (const language of ['pt-BR', 'en']) {
     assert.ok(control(f, 'select-video-codec'));
   });
 
+  test(`Chromium browser windows warn that covering them freezes the capture (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    f.sources[1].occlusionSensitive = true;
+    await f.picker.open();
+    const tip = control(f, 'share-occlusion-tip');
+    assert.equal(tip.hidden, true, 'The default screen tab never warns.');
+    chooseWindowMethod(f, 'window');
+    assert.equal(tip.hidden, false);
+    assert.equal(tip.textContent, f.i18n.t('screenShare.browserOcclusionTip'));
+    chooseWindowMethod(f, 'game');
+    assert.equal(tip.hidden, false, 'The warning follows the source, not the capture method.');
+    chooseWindowMethod(f, 'window', f.sources[2].id);
+    assert.equal(tip.hidden, true);
+    assert.equal(tip.textContent, '');
+    control(f, 'share-tab-screen').click();
+    assert.equal(tip.hidden, true);
+    f.picker.close();
+  });
+
   test(`own Monky window disables only its audio and preserves other source choices (${language})`, async t => {
     const f = fixture(language);
     t.after(() => f.close());

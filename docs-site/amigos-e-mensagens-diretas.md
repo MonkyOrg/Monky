@@ -39,13 +39,17 @@ O **X** de uma conversa só a tira da lista; ela volta quando chegar uma nova
 mensagem.
 
 Nas DMs você pode usar formatação, emojis, respostas, edição, exclusão,
-reações e anexos. O Monky mostra quando a outra pessoa está digitando e o
-estado de cada mensagem enviada: aguardando entrega, entregue ou lida.
+reações e anexos. O Monky mostra quando a outra pessoa está digitando.
+Mensagens seguidas da mesma pessoa no mesmo dia ficam agrupadas sob um único
+nome e foto; passe o mouse sobre uma delas para ver o horário. Uma mensagem
+que ainda não foi entregue aparece semitransparente e fica normal assim que
+chega ao seu amigo. Nos canais dos servidores vale o mesmo: a mensagem fica
+semitransparente enquanto está sendo enviada.
 
 ::: info Entrega quando vocês se encontram
 Uma mensagem só é transmitida quando vocês dois estão online em pelo menos um
-servidor em comum. Antes disso, ela fica em **Aguardando entrega** no seu
-computador e é enviada automaticamente depois. O modo **Aparecer offline**
+servidor em comum. Antes disso, ela fica guardada no seu computador,
+semitransparente, e é enviada automaticamente depois. O modo **Aparecer offline**
 continua recebendo DMs sem revelar sua presença.
 :::
 
@@ -83,5 +87,18 @@ antes do envio.
 Ao exportar a identidade em **Configurações → Meu Perfil → Identidade**,
 escolha se a exportação leva os **Amigos** e, opcionalmente, o
 **Histórico das conversas**. O histórico pode deixar o código grande demais
-para o QR; nesse caso, salve o arquivo. Quando a mesma identidade está em
-mais de um computador, a lista de amigos se sincroniza entre eles.
+para o QR; nesse caso, salve o arquivo.
+
+Quando a mesma identidade está em mais de um computador, o Monky sincroniza
+entre eles a lista de amigos, o histórico das conversas (com edições,
+exclusões, reações e o que já foi lido), além do seu apelido e da sua foto.
+O apelido e a foto mais recentes valem em todos os computadores e também são
+os que seus amigos veem nas DMs. A foto viaja numa versão reduzida.
+
+::: info Os dois computadores precisam se encontrar
+Assim como as mensagens, a sincronização passa pelos servidores e não fica
+guardada neles. Ela acontece quando os dois computadores estão abertos ao
+mesmo tempo, conectados a pelo menos um servidor em comum. O que um deles
+fez enquanto o outro estava desligado chega ao outro na próxima vez em que
+os dois estiverem online juntos.
+:::

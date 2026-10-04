@@ -3,7 +3,7 @@ import { appEvents, EventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { clientLog } from '../core/ClientLogService';
 import type { ChannelCategory } from '@monky/shared';
-import { getChannelPermissions, hasChannelPermission, resolveMemberPermissions, resolveChannelPermissions, type ChannelAccessRules } from '@monky/shared';
+import { getChannelPermissions, hasChannelPermission, resolveLegacyMemberPermissions, resolveMemberPermissions, resolveChannelPermissions, type ChannelAccessRules } from '@monky/shared';
 
 export class ServerStore {
   /**
@@ -393,14 +393,22 @@ export class ServerStore {
 
   /**
    * Permissions of any member, resolved the same way the server does it: the
-   * owner/admin gets everything; roleless members use Everyone, and assigned
-   * roles replace that base with deny-wins switches.
+   * owner/admin gets everything; Everyone is the base and assigned roles allow
+   * or deny on top of it, with any denial winning.
    */
   public getUserPermissions(userId: string): number {
     if (this.ownerId && userId === this.ownerId) return 0xFFFFFFFF;
     const roleIds = new Set(this.getUserRoleIds(userId));
     const roles = this.roles.filter((role) => roleIds.has(role.id));
-    return resolveMemberPermissions(this.everyonePermissions, roles);
+    return this.rolesUseDeny
+      ? resolveMemberPermissions(this.everyonePermissions, roles)
+      : resolveLegacyMemberPermissions(this.everyonePermissions, roles);
+  }
+
+  /** Servers without the negotiated `role-deny` feature send and expect each role as a full switch mask. */
+  public get rolesUseDeny(): boolean {
+    const protocol = this.serverDetails?.protocol;
+    return protocol ? protocol.features.includes('role-deny') : this.roles.every((role) => typeof role.deny === 'number');
   }
 
   public get everyonePermissions(): number {

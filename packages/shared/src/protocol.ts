@@ -534,7 +534,9 @@ export interface ServerUpdateSettingsPayload {
 export interface RoleCreatePayload {
   name: string;
   color?: string | null;
+  /** Allowed bits. Without `deny`, a full switch mask from an older client. */
   permissions: number;
+  deny?: number;
   position?: number;
   isDefault?: boolean;
 }
@@ -543,7 +545,9 @@ export interface RoleUpdatePayload {
   roleId: string;
   name?: string;
   color?: string | null;
+  /** Allowed bits. Without `deny`, a full switch mask from an older client. */
   permissions?: number;
+  deny?: number;
   position?: number;
   isDefault?: boolean;
 }

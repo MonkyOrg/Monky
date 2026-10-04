@@ -1,5 +1,5 @@
-import { MessageType } from '@monky/shared';
 import { sessionManager } from '../core/SessionManager';
+import { applyProfileEverywhere, recordProfileChange } from '../core/profileSync';
 import { connectionStore } from '../stores/connectionStore';
 import { t } from '../i18n';
 import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
@@ -242,28 +242,13 @@ export class SettingsModal {
     // Attach sub-tab event listeners
     this.accountTab.attachEvents(this.modalEl, {
       onSaveNickname: async (name: string) => {
-        for (const session of sessionManager.getAll()) {
-          const user = session.serverStore.currentUser;
-          if (user) session.serverStore.updateCurrentUser({ ...user, nickname: name });
-          if (session.client.getStatus() === 'CONNECTED') {
-            session.client.send(MessageType.USER_CHANGE_NICKNAME, { newNickname: name });
-          }
-        }
-        connectionStore.saveUserProfile(name);
-        const footerName = document.getElementById('main-user-name');
-        if (footerName) footerName.textContent = name;
+        applyProfileEverywhere({ nickname: name });
+        // The new name also reaches this identity's other devices and friends' DMs.
+        void recordProfileChange({ nickname: true });
       },
       onAvatarChanged: async (base64: string) => {
-        for (const session of sessionManager.getAll()) {
-          const user = session.serverStore.currentUser;
-          if (user) session.serverStore.updateCurrentUser({ ...user, avatarUrl: base64 });
-          if (session.client.getStatus() === 'CONNECTED') {
-            session.client.send(MessageType.USER_UPDATE_AVATAR, { avatarBase64: base64 });
-          }
-        }
-        connectionStore.saveUserProfile(connectionStore.savedNickname, base64);
-        const footerAvatar = document.getElementById('main-user-avatar') as HTMLImageElement | null;
-        if (footerAvatar) footerAvatar.src = base64;
+        applyProfileEverywhere({ avatar: base64 });
+        void recordProfileChange({ avatar: true });
       },
       onReloadModal: () => {
         void this.open();

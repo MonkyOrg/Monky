@@ -7,7 +7,7 @@ const { promisify } = require('node:util');
 const root = path.resolve(__dirname, '..');
 
 if (!process.versions.electron) {
-  require('node:test')('native window inactivity opens PiP and window return closes it without restarting playback', { timeout: 40000 }, async () => {
+  require('node:test')('minimizing opens PiP, focus loss does not, and window return closes it without restarting playback', { timeout: 40000 }, async () => {
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-pip-window-'));
     const env = { ...process.env, MONKY_PIP_TEST_PROFILE: profile };
     delete env.ELECTRON_RUN_AS_NODE;
@@ -43,7 +43,7 @@ if (!process.versions.electron) {
         preload: path.join(root, 'dist-electron', 'preload', 'preload.js') } });
     mainWindow.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     const file = fs.readFileSync(path.join(root, 'src', 'main', 'ipcHandlers.ts'), 'utf8');
-    const start = file.indexOf('let screenPipWindowInactive =');
+    const start = file.indexOf('const isWindowAway =');
     const end = file.indexOf("ipcMain.handle('window:minimize'", start);
     assert.ok(start >= 0 && end > start);
     vm.runInNewContext(ts.transpileModule(file.slice(start, end), {
@@ -91,7 +91,13 @@ if (!process.versions.electron) {
       webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } });
     await other.loadURL('data:text/html,<body>Monky QA: native focus target</body>');
     other.show(); other.focus();
-    await until('window.nativeEvents > 0', 'A second native window must notify the renderer of inactivity');
+    await new Promise(resolve => setTimeout(resolve, 600));
+    assert.equal(await evaluate('window.nativeEvents'), 0, 'Focusing another window is not leaving Monky');
+    assert.equal(await evaluate('!!document.pictureInPictureElement'), false, 'Focus loss alone cannot open PiP');
+    other.hide(); mainWindow.focus();
+    await until('document.hasFocus()', 'The main window regains focus');
+    mainWindow.minimize();
+    await until('window.nativeEvents > 0', 'Minimizing must notify the renderer of inactivity');
     await until('!!document.pictureInPictureElement || !!window.pipError', 'Real PiP must open');
     assert.equal(await evaluate('window.pipError ?? null'), null);
     assert.equal(await evaluate('window.inactiveActivation'), false);
@@ -111,14 +117,31 @@ if (!process.versions.electron) {
     assert.equal(await evaluate('!!document.pictureInPictureElement'), false,
       'Returning after dismissal cannot flash a PiP window');
     other.show(); other.focus();
+    await new Promise(resolve => setTimeout(resolve, 600));
+    assert.equal(await evaluate('!!document.pictureInPictureElement'), false, 'Focus loss still cannot open PiP');
+    other.hide(); mainWindow.focus();
+    await until('document.hasFocus()', 'The main window regains focus again');
+    mainWindow.minimize();
     await until('!!document.pictureInPictureElement', 'The next real departure may open PiP again');
     const activeEvents = await evaluate('window.activeEvents');
-    other.hide(); mainWindow.focus();
+    mainWindow.restore(); mainWindow.focus();
     await until(`window.activeEvents > ${activeEvents} && !document.pictureInPictureElement`,
-      'Returning native focus must notify the renderer and close real PiP');
+      'Restoring the window must notify the renderer and close real PiP');
     await until(`document.querySelector('video').getVideoPlaybackQuality().totalVideoFrames > ${frames + 6}`,
       'Returning to the main window must preserve playback');
     assert.equal(await evaluate('window.pipError ?? null'), null);
+    mainWindow.minimize();
+    await until('!!document.pictureInPictureElement', 'PiP opens before returning through its window');
+    await evaluate('window.api.returnFromScreenPictureInPicture()');
+    await until('document.hasFocus()', 'PiP back to tab must restore and focus the minimized window');
+    assert.equal(mainWindow.isMinimized(), false);
+    await until('!document.pictureInPictureElement', 'The restored window closes automatic PiP');
+    mainWindow.hide();
+    await until('!!document.pictureInPictureElement', 'Hiding to the tray opens PiP');
+    await evaluate('window.api.returnFromScreenPictureInPicture()');
+    await until('document.hasFocus()', 'PiP back to tab must show a window hidden in the tray');
+    assert.equal(mainWindow.isVisible(), true);
+    await until('!document.pictureInPictureElement', 'The shown window closes automatic PiP');
     const runPowerShell = async (file, args) => {
       const { stdout } = await promisify(execFile)('powershell.exe',
         ['-NoProfile', '-NonInteractive', '-File', path.join(__dirname, 'fixtures', file), ...args],
@@ -165,7 +188,7 @@ if (!process.versions.electron) {
     await until('document.hasFocus()', 'The manual PiP owner can regain focus');
     assert.equal(await evaluate('!!document.pictureInPictureElement'), true);
     await evaluate('document.exitPictureInPicture()');
-    console.log('Native focus loss/return, production preload/IPC, real PiP and uninterrupted frames passed.');
+    console.log('Ignored focus loss, minimize/restore, production preload/IPC, real PiP and uninterrupted frames passed.');
     finish(0);
   }).catch(error => { console.error(error); finish(1); });
 }

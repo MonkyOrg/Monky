@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Mensagens seguidas nas DMs ficam agrupadas, com o horário ao passar o mouse. No lugar dos vistos, a mensagem fica semitransparente até ser entregue, também nos canais dos servidores enquanto é enviada.",
+  "en": "Consecutive DM messages are grouped, with the time shown on hover. Instead of check marks, a message stays semi-transparent until delivered, and in server channels while it is being sent."
+}

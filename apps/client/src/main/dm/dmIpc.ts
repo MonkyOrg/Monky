@@ -171,7 +171,7 @@ export function setupDmIpc(mainWindow: BrowserWindow, sanitizeFileName: (name: s
   });
   handle(DM_IPC.outgoing, (dm, peers, force) =>
     dm.outgoing(Array.isArray(peers) ? peers.filter((peer): peer is string => typeof peer === 'string') : [], force === true));
-  handle(DM_IPC.hello, (dm, toFriends) => dm.hello(toFriends === true));
+  handle(DM_IPC.hello, (dm, toFriends, announce) => dm.hello(toFriends === true, announce !== false));
   handle(DM_IPC.helloTo, (dm, peer) => dm.helloTo(text(peer)));
   handle(DM_IPC.pendingPeers, (dm) => dm.pendingPeers());
   handle(DM_IPC.observePeer, (dm, observed) => {
@@ -183,6 +183,16 @@ export function setupDmIpc(mainWindow: BrowserWindow, sanitizeFileName: (name: s
     });
   });
   handle(DM_IPC.setSelfNickname, (dm, nickname) => dm.setSelfNickname(text(nickname)));
+  handle(DM_IPC.setSelfProfile, (dm, input) => {
+    const value = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+    const stamp = (at: unknown): number | undefined => (typeof at === 'number' && Number.isFinite(at) ? at : undefined);
+    return dm.setSelfProfile({
+      nickname: typeof value.nickname === 'string' ? value.nickname : undefined,
+      nicknameAt: stamp(value.nicknameAt),
+      avatar: typeof value.avatar === 'string' || value.avatar === null ? value.avatar : undefined,
+      avatarAt: stamp(value.avatarAt),
+    });
+  });
   handle(DM_IPC.updateSettings, (dm, settings) => {
     const value = (settings && typeof settings === 'object' ? settings : {}) as Record<string, unknown>;
     return dm.updateSettings(typeof value.maxFileBytes === 'number' ? { maxFileBytes: value.maxFileBytes } : {});

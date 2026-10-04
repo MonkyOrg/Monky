@@ -94,6 +94,8 @@ export interface DesktopSource {
   name: string;
   type: 'screen' | 'window';
   isOwnWindow?: boolean;
+  /** Chromium-based browsers stop painting a fully covered window, so its capture freezes gray. */
+  occlusionSensitive?: boolean;
   displayNumber?: number;
   thumbnailDataUrl: string;
   appIconDataUrl: string | null;

@@ -199,7 +199,7 @@ export const en: CliTranslationMap = {
   'roles.deleted': 'Role {name} removed successfully.',
   'roles.selectToRemove': 'Select the role to remove:',
   'roles.selectToAssign': 'Select the role to assign:',
-  'roles.permissionsLabel': 'Role permissions:',
+  'roles.permissionsLabel': 'Permissions the role allows (the rest inherit Everyone):',
 
   // ── Server Lifecycle ───────────────────────────────────────────────────
   'lifecycle.migratingPm2': 'Migrating old PM2 process ("monky-server") to the new format...',
@@ -340,6 +340,7 @@ export const en: CliTranslationMap = {
   'label.color': 'Color',
   'label.position': 'Position',
   'label.permissions': 'Permissions',
+  'label.deniedPermissions': 'Denied permissions',
   'label.isDefault': 'Default role',
   'label.members': 'Members',
   'label.dataDir': 'Data directory',

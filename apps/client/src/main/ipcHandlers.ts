@@ -130,6 +130,19 @@ async function downloadToFile(url: string, destPath: string): Promise<void> {
 /** Extensões que a soundboard aceita, na listagem e na leitura de um som. */
 const SOUNDBOARD_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.webm']);
 
+/**
+ * Chromium browsers on Windows stop painting a window that other windows fully
+ * cover (native window occlusion), so a capture of it turns gray until shown.
+ */
+const OCCLUSION_SENSITIVE_PROCESSES = new Set([
+  'chrome.exe', 'msedge.exe', 'brave.exe', 'opera.exe', 'vivaldi.exe', 'chromium.exe', 'yandex.exe', 'arc.exe',
+]);
+
+export function isOcclusionSensitiveProcess(processPath: string | null | undefined): boolean {
+  return typeof processPath === 'string'
+    && OCCLUSION_SENSITIVE_PROCESSES.has(path.win32.basename(processPath).toLowerCase());
+}
+
 interface NativeWindowOwner {
   windowId: number;
   pid: number;
@@ -705,6 +718,7 @@ export function setupIpcHandlers(
         windows = type === 'screen' ? [] : nativeSources.listWindows();
         result = windows.map(({ id, window }) => ({
           id, name: window.title, type: 'window', isOwnWindow: window.processId === process.pid,
+          ...(isOcclusionSensitiveProcess(window.processPath) ? { occlusionSensitive: true } : {}),
           thumbnailDataUrl: '', appIconDataUrl: null, thumbnailState: window.isIconic ? 'unavailable' : 'pending',
         }));
         if (type !== 'window') result.push(...nativeMonitorDesktopSources(nativeSources.listMonitors()));
@@ -1221,19 +1235,23 @@ export function setupIpcHandlers(
   });
 
   // Window Controls
-  let screenPipWindowInactive = !mainWindow.isFocused() || mainWindow.isMinimized();
+  // Automatic Picture-in-Picture follows the window leaving the screen
+  // (minimized or hidden to the tray), never a plain focus change.
+  const isWindowAway = () => mainWindow.isMinimized() || !mainWindow.isVisible();
+  let screenPipWindowInactive = isWindowAway();
   const notifyWindowActivity = () => {
     if (mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
-    const inactive = !mainWindow.isFocused() || mainWindow.isMinimized();
-    // Blur, minimize and restore can describe the same native transition.
+    const inactive = isWindowAway();
+    // Minimize, hide, restore and show can describe the same native transition.
     if (inactive === screenPipWindowInactive) return;
     screenPipWindowInactive = inactive;
     mainWindow.webContents.send(inactive ? 'window:inactive' : 'window:active');
   };
-  mainWindow.on('blur', notifyWindowActivity);
   mainWindow.on('minimize', notifyWindowActivity);
-  mainWindow.on('focus', notifyWindowActivity);
+  mainWindow.on('hide', notifyWindowActivity);
   mainWindow.on('restore', notifyWindowActivity);
+  mainWindow.on('show', notifyWindowActivity);
+  mainWindow.on('focus', notifyWindowActivity);
   ipcMain.handle('screen-pip:open', async (event, requestId: unknown, requireInactive: unknown) => {
     if (mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
       || event.senderFrame !== mainWindow.webContents.mainFrame
@@ -1241,8 +1259,7 @@ export function setupIpcHandlers(
       || typeof requireInactive !== 'boolean') {
       throw new Error('Invalid screen Picture-in-Picture request.');
     }
-    // A DOM blur can also come from an iframe; it is not an app switch.
-    if (requireInactive && mainWindow.isFocused() && !mainWindow.isMinimized()) return false;
+    if (requireInactive && !isWindowAway()) return false;
     const selector = JSON.stringify(`video[data-monky-screen-pip="${requestId}"]`);
     return mainWindow.webContents.executeJavaScript(`(() => {
       const video = document.querySelector(${selector});
@@ -1253,6 +1270,17 @@ export function setupIpcHandlers(
       }
       return video.requestPictureInPicture().then(() => true);
     })()`, true);
+  });
+  // Chromium's "back to tab" only activates the web contents; Electron does
+  // not restore a minimized or tray-hidden window for it.
+  ipcMain.handle('screen-pip:return', (event) => {
+    if (mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
+      || event.senderFrame !== mainWindow.webContents.mainFrame) {
+      throw new Error('Invalid screen Picture-in-Picture request.');
+    }
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.show();
+    mainWindow.focus();
   });
   ipcMain.handle('window:minimize', () => {
     mainWindow.minimize();

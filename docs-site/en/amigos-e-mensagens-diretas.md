@@ -38,13 +38,17 @@ is online. A conversation's **X** only removes it from the list; it comes back
 when a new message arrives.
 
 DMs support formatting, emojis, replies, editing, deleting, reactions and
-attachments. Monky shows when the other person is typing and the state of each
-sent message: waiting for delivery, delivered or read.
+attachments. Monky shows when the other person is typing. Consecutive
+messages from the same person on the same day are grouped under a single name
+and picture; hover one to see its time. A message that has not been delivered
+yet appears semi-transparent and turns solid once it reaches your friend.
+Server channels work the same way: a message is semi-transparent while it is
+being sent.
 
 ::: info Delivery when you meet
 A message is only transmitted while you are both online on at least one common
-server. Until then it stays as **Waiting for delivery** on your computer and is
-sent automatically later. **Appear offline** still receives DMs without
+server. Until then it stays on your computer, semi-transparent, and is sent
+automatically later. **Appear offline** still receives DMs without
 revealing your presence.
 :::
 
@@ -81,5 +85,17 @@ over your friend's limit, Monky warns you before sending.
 When exporting the identity under **Settings → My Profile → Identity**, choose
 whether the export brings your **Friends** and, optionally, the
 **Conversation history**. History can make the code too large for the QR code;
-in that case, save the file. When the same identity is on more than one
-computer, the friend list syncs between them.
+in that case, save the file.
+
+When the same identity is on more than one computer, Monky syncs between them
+the friend list, the conversation history (including edits, deletions,
+reactions and what has been read), plus your nickname and picture. The most
+recent nickname and picture apply on every computer and are also what your
+friends see in DMs. The picture travels as a reduced copy.
+
+::: info Both computers need to meet
+Like messages, syncing goes through servers and is not stored on them. It
+happens while both computers are open at the same time, connected to at least
+one common server. Whatever one of them did while the other was off reaches
+the other the next time both are online together.
+:::

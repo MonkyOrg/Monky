@@ -155,7 +155,7 @@ app.whenReady().then(async () => {
     }
     const { sourceId } = await commands.request('source.createEncodedVideo', 0,
       { width: video.width, height: video.height, fps: video.fps, syncGroup: id, enabled: false });
-    flow = new LiveSenderFlow({ engine, sourceId, onError, initialBitrateKbps: video.maxBitrateKbps });
+    flow = new LiveSenderFlow({ engine, sourceId, onError, initialBitrateKbps: video.maxBitrateKbps, fps: video.fps });
     flow.bind({
       async setBitrate(bitrateKbps) {
         await window.webContents.executeJavaScript(`av1Fixture.setBitrate(${bitrateKbps * 1000})`);

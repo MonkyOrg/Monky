@@ -3,7 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { DEFAULT_PERMISSIONS, EVERYONE_ROLE_ID, MessageType, Permission, ProtocolErrorCode, canAccessChannel } from '@monky/shared';
+import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, EVERYONE_ROLE_ID, MessageType, Permission, PROTOCOL_VERSION, ProtocolErrorCode, canAccessChannel, createProtocolOffer, resolveLegacyMemberPermissions, resolveMemberPermissions } from '@monky/shared';
 import { createApprovedBotFixture, record, records, text } from './testFixtures/bots';
 import { SqlJsDriver } from './infrastructure/database/SqliteWrapper';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
@@ -71,7 +71,7 @@ test('migration replaces only the unmodified Member role, preserves old private 
   }
 });
 
-test('Everyone is persisted but never an assignable role, and ordinary role denials win', async t => {
+test('Everyone is persisted but never an assignable role; roles allow or deny over it and a denial wins', async t => {
   const f = await createApprovedBotFixture();
   t.after(() => f.dispose());
   const owner = await f.human('Permission owner');
@@ -86,8 +86,23 @@ test('Everyone is persisted but never an assignable role, and ordinary role deni
   await owner.peer.error(MessageType.ROLE_UNASSIGN, { userId: member.id, roleId: EVERYONE_ROLE_ID }, ProtocolErrorCode.BAD_REQUEST);
   await owner.peer.error(MessageType.ROLE_DELETE, { roleId: EVERYONE_ROLE_ID }, ProtocolErrorCode.BAD_REQUEST);
   await owner.peer.error(MessageType.ROLE_UPDATE, { roleId: EVERYONE_ROLE_ID, name: 'Renamed' }, ProtocolErrorCode.BAD_REQUEST);
-  for (const [id, permissions] of [['writer', DEFAULT_PERMISSIONS], ['muted', everyone]] as const) {
-    await f.roleRepo.create({ id, permissions, name: id, color: null, position: 1, isDefault: false, createdAt: 1 });
+  const createdRole = async (payload: Record<string, unknown>) =>
+    records(record((await owner.peer.request(MessageType.ROLE_CREATE, payload)).payload).roles).find(role => role.name === payload.name)!;
+  const blank = await createdRole({ name: 'Blank', permissions: 0, deny: 0 });
+  assert.equal(blank.permissions, 0);
+  assert.equal(blank.deny, 0);
+  await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: member.id, roleId: text(blank.id) });
+  assert.equal(await f.permissions.getUserPermissions(member.id), everyone, 'a role left on Inherit keeps Everyone');
+  await owner.peer.request(MessageType.ROLE_UPDATE, { roleId: text(blank.id), permissions: Permission.MANAGE_CHANNELS, deny: Permission.SPEAK });
+  assert.equal(await f.permissions.getUserPermissions(member.id), (everyone | Permission.MANAGE_CHANNELS) & ~Permission.SPEAK);
+  await owner.peer.error(MessageType.ROLE_UPDATE, { roleId: text(blank.id), permissions: Permission.SPEAK, deny: Permission.SPEAK }, ProtocolErrorCode.BAD_REQUEST);
+  await owner.peer.request(MessageType.ROLE_UNASSIGN, { userId: member.id, roleId: text(blank.id) });
+  const legacyMask = Permission.CONFIGURE_BOTS | Permission.READ_MESSAGES;
+  const legacy = await createdRole({ name: 'Old client', permissions: legacyMask });
+  assert.deepEqual([legacy.permissions, legacy.deny], [Permission.CONFIGURE_BOTS, everyone & ~legacyMask],
+    'an older client full mask converts against Everyone without changing its effect');
+  for (const [id, permissions, deny] of [['writer', Permission.SEND_MESSAGES, 0], ['muted', 0, Permission.SEND_MESSAGES]] as const) {
+    await f.roleRepo.create({ id, permissions, deny, name: id, color: null, position: 1, isDefault: false, createdAt: 1 });
   }
   await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: member.id, roleId: 'writer' });
   assert.equal(await f.permissions.checkPermission(member.id, Permission.SEND_MESSAGES), true);
@@ -95,6 +110,91 @@ test('Everyone is persisted but never an assignable role, and ordinary role deni
   assert.equal(await f.permissions.checkPermission(member.id, Permission.SEND_MESSAGES), false);
   await f.roleService.assignAdminRole(member.id);
   assert.equal(await f.permissions.checkPermission(member.id, Permission.SEND_MESSAGES), true);
+});
+
+test('clients without role-deny receive equivalent full masks and their saves keep the same effect', async t => {
+  const f = await createApprovedBotFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Role owner');
+  const offer = createProtocolOffer('client');
+  const old = await f.human('Old client', undefined, undefined, false, PROTOCOL_VERSION, {
+    ...offer, features: offer.features.filter(feature => feature !== 'role-deny'),
+  });
+  const everyone = DEFAULT_PERMISSIONS;
+  const rule = { permissions: Permission.MANAGE_CHANNELS, deny: Permission.SEND_MESSAGES };
+  await f.roleRepo.create({ id: 'mixed', name: 'Mixed', color: null, position: 1, isDefault: false, createdAt: 1, ...rule });
+  await f.roleService.assignAdminRole(owner.id);
+  const since = old.peer.messages.length;
+  const current = await owner.peer.request(MessageType.ROLE_UPDATE, { roleId: 'mixed', name: 'Mixed rule' });
+  const currentRole = records(record(current.payload).roles).find(role => role.id === 'mixed')!;
+  assert.deepEqual([currentRole.permissions, currentRole.deny], [rule.permissions, rule.deny]);
+  const broadcast = await old.peer.wait(message => message.type === MessageType.ROLES_LIST, since);
+  const oldRole = records(record(broadcast.payload).roles).find(role => role.id === 'mixed')!;
+  const mask = (everyone | rule.permissions) & ~rule.deny;
+  assert.equal(oldRole.permissions, mask);
+  assert.equal('deny' in oldRole, false, 'older clients never see deny they cannot resolve');
+  assert.equal(resolveLegacyMemberPermissions(everyone, [{ permissions: mask }]), resolveMemberPermissions(everyone, [rule]));
+  const adminRole = records(record(broadcast.payload).roles).find(role => (Number(role.permissions) & Permission.ADMINISTRATOR) !== 0);
+  assert.equal(adminRole?.permissions, ADMIN_PERMISSIONS, 'the Admin role keeps its full mask for older clients');
+  const relogin = await f.human('Old client', old.keys, old.deviceId, false, PROTOCOL_VERSION, {
+    ...offer, features: offer.features.filter(feature => feature !== 'role-deny'),
+  });
+  const loginRole = records(record(relogin.auth.payload.server).roles).find(role => role.id === 'mixed')!;
+  assert.deepEqual([loginRole.permissions, 'deny' in loginRole], [mask, false]);
+  await f.roleService.assignAdminRole(old.id);
+  await relogin.peer.request(MessageType.ROLE_UPDATE, { roleId: 'mixed', permissions: mask | Permission.KICK_MEMBERS });
+  const saved = (await f.roleRepo.findById('mixed'))!;
+  assert.deepEqual([saved.permissions, saved.deny], [rule.permissions | Permission.KICK_MEMBERS, rule.deny],
+    'an older client save converts back to the same allow/deny rule');
+});
+
+test('migrating full-mask roles to allow/deny keeps every effective permission and strips server bits from channel rules', async () => {
+  const folder = path.resolve('.qa', `role-deny-migration-${randomUUID()}`);
+  const filename = path.join(folder, 'server.db');
+  const migrations = path.join(__dirname, 'infrastructure', 'database', 'migrations');
+  let legacy: SqlJsDriver | undefined;
+  let connection: DatabaseConnection | undefined;
+  try {
+    legacy = await SqlJsDriver.create(filename);
+    legacy.exec('CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)');
+    for (const file of fs.readdirSync(migrations).filter(file => file.endsWith('.sql') && file < '046_').sort()) {
+      legacy.exec(fs.readFileSync(path.join(migrations, file), 'utf8'));
+      legacy.prepare('INSERT INTO schema_migrations VALUES (?, ?)').run(file, 1);
+    }
+    const everyone = DEFAULT_PERMISSIONS & ~Permission.ATTACH_FILES;
+    legacy.prepare("INSERT INTO server_meta (id, name, password_hash, created_at, everyone_permissions) VALUES ('server', 'Legacy', '', 1, ?)").run(everyone);
+    const masks: Record<string, number> = {
+      mod: (DEFAULT_PERMISSIONS | Permission.MANAGE_CHANNELS) & ~Permission.SEND_MESSAGES,
+      plain: everyone,
+      empty: 0,
+      Admin: ADMIN_PERMISSIONS,
+    };
+    const createRole = legacy.prepare('INSERT INTO roles (id, name, position, permissions, is_default, created_at) VALUES (?, ?, 1, ?, 0, 1)');
+    for (const [id, mask] of Object.entries(masks)) createRole.run(id, id, mask);
+    legacy.exec("INSERT INTO channels (id, server_id, name, type, position, created_at) VALUES ('room', 'server', 'Room', 'TEXT', 0, 1)");
+    legacy.prepare("INSERT INTO channel_permission_overwrites (channel_id, target_id, role_id, allow_bits, deny_bits) VALUES ('room', 'role:mod', 'mod', ?, ?)")
+      .run(Permission.MANAGE_EVENTS | Permission.SEND_MESSAGES, Permission.EMIT_LIVE_ACTIONS);
+    legacy.prepare("INSERT INTO channel_permission_overwrites (channel_id, target_id, role_id, allow_bits, deny_bits) VALUES ('room', 'role:plain', 'plain', ?, 0)")
+      .run(Permission.MANAGE_EVENTS);
+    legacy.close();
+    legacy = undefined;
+    connection = await DatabaseConnection.create(filename);
+    const roles = new SqliteRoleRepository(connection.getDb());
+    for (const [id, mask] of Object.entries(masks)) {
+      const role = (await roles.findById(id))!;
+      assert.equal((role.permissions & (role.deny ?? 0)) >>> 0, 0, `${id} never allows and denies the same bit`);
+      assert.equal(resolveMemberPermissions(everyone, [role]), resolveLegacyMemberPermissions(everyone, [{ permissions: mask }]),
+        `${id} keeps its effective permissions`);
+    }
+    assert.deepEqual([(await roles.findById('plain'))!.permissions, (await roles.findById('plain'))!.deny], [0, 0], 'a role equal to Everyone becomes all Inherit');
+    assert.deepEqual([(await roles.findById('Admin'))!.permissions, (await roles.findById('Admin'))!.deny], [ADMIN_PERMISSIONS, 0]);
+    const room = (await new SqliteChannelRepository(connection.getDb()).findById('room'))!;
+    assert.deepEqual(room.permissionOverwrites?.map(rule => [rule.roleId, rule.allow, rule.deny]), [['mod', Permission.SEND_MESSAGES, 0]]);
+  } finally {
+    legacy?.close();
+    connection?.close();
+    fs.rmSync(folder, { recursive: true, force: true });
+  }
 });
 
 test('upgrading role-only overwrite tables preserves rules and member targets survive two restarts', async () => {
