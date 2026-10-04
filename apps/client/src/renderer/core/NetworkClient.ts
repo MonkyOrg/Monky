@@ -31,6 +31,14 @@ export class RequestTimeoutError extends Error {
   }
 }
 
+/** A request the server answered with a protocol error; keeps the code callers branch on. */
+export class ProtocolRequestError extends Error {
+  constructor(message: string, public readonly code: ProtocolErrorCode) {
+    super(message);
+    this.name = 'ProtocolRequestError';
+  }
+}
+
 export interface PendingRequest {
   resolve: (value: any) => void;
   reject: (reason: any) => void;
@@ -567,7 +575,7 @@ export class NetworkClient {
 
       if (type === MessageType.SERVER_ERROR) {
         const errorPayload = payload as ServerErrorPayload;
-        pending.reject(new Error(translateProtocolError(errorPayload.code, errorPayload.message)));
+        pending.reject(new ProtocolRequestError(translateProtocolError(errorPayload.code, errorPayload.message), errorPayload.code));
         return;
       }
 

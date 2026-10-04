@@ -3,22 +3,50 @@ import { test } from 'node:test';
 import {
   ADMIN_PERMISSIONS, CHANNEL_PERMISSIONS, DEFAULT_PERMISSIONS, Permission,
   canAccessChannel, channelPrivacy, getChannelPermissions, hasChannelPermission, resolveChannelPermissions, withChannelPrivacy,
-  resolveMemberPermissions, type ChannelPermissionOverwrite,
+  resolveMemberPermissions, resolveLegacyMemberPermissions, legacyRoleRule, legacyRoleMask, type ChannelPermissionOverwrite,
 } from '../src/permissions';
-import { channelPermissionOverwritesSchema } from '../src/validators';
+import { channelPermissionOverwritesSchema, roleCreateSchema, roleUpdateSchema } from '../src/validators';
 
 const rules = (permissionOverwrites: ChannelPermissionOverwrite[]) => ({
   isPrivate: false, allowedRoleIds: [], permissionOverwrites,
 });
 
-test('Everyone is automatic; ordinary role switches override it and denials win between roles', () => {
+test('Everyone is the base; roles allow or deny on top of it, unset bits inherit and a denial wins', () => {
   const base = DEFAULT_PERMISSIONS & ~Permission.SPEAK;
   assert.equal(resolveMemberPermissions(base, []), base);
-  assert.equal(resolveMemberPermissions(base, [{ permissions: DEFAULT_PERMISSIONS }]), DEFAULT_PERMISSIONS);
+  assert.equal(resolveMemberPermissions(base, [{ permissions: 0, deny: 0 }]), base, 'a new role inherits everything');
+  assert.equal(resolveMemberPermissions(base, [{ permissions: Permission.SPEAK, deny: 0 }]), DEFAULT_PERMISSIONS);
   assert.equal(resolveMemberPermissions(DEFAULT_PERMISSIONS, [
-    { permissions: DEFAULT_PERMISSIONS }, { permissions: base },
-  ]), base);
+    { permissions: Permission.MANAGE_CHANNELS, deny: 0 }, { permissions: 0, deny: Permission.SPEAK },
+  ]), (DEFAULT_PERMISSIONS | Permission.MANAGE_CHANNELS) & ~Permission.SPEAK, 'grants add up across roles');
+  assert.equal(resolveMemberPermissions(DEFAULT_PERMISSIONS, [
+    { permissions: Permission.SPEAK, deny: 0 }, { permissions: 0, deny: Permission.SPEAK },
+  ]), base, 'a denial from any role wins over an allow from another');
+  assert.equal(resolveMemberPermissions(DEFAULT_PERMISSIONS, [{ permissions: 0, deny: Permission.ADMINISTRATOR }]), DEFAULT_PERMISSIONS);
   assert.equal(resolveMemberPermissions(0, [{ permissions: 0 }, { permissions: Permission.ADMINISTRATOR }]), ADMIN_PERMISSIONS);
+});
+
+test('former full role masks convert to allow/deny without changing a single role, and back for older servers', () => {
+  const everyone = DEFAULT_PERMISSIONS & ~Permission.ATTACH_FILES;
+  const masks = [0, DEFAULT_PERMISSIONS, Permission.CONFIGURE_BOTS, (DEFAULT_PERMISSIONS | Permission.MANAGE_ROLES) & ~Permission.SEND_MESSAGES];
+  for (const mask of masks) {
+    const rule = legacyRoleRule(mask, everyone);
+    assert.equal(rule.permissions & rule.deny, 0);
+    assert.equal(resolveMemberPermissions(everyone, [rule]), resolveLegacyMemberPermissions(everyone, [{ permissions: mask }]));
+    assert.equal(legacyRoleMask(rule, everyone), mask);
+  }
+  assert.deepEqual(legacyRoleRule(ADMIN_PERMISSIONS, everyone), { permissions: ADMIN_PERMISSIONS, deny: 0 });
+  assert.equal(resolveLegacyMemberPermissions(DEFAULT_PERMISSIONS, [
+    { permissions: DEFAULT_PERMISSIONS }, { permissions: DEFAULT_PERMISSIONS & ~Permission.SPEAK },
+  ]), DEFAULT_PERMISSIONS & ~Permission.SPEAK);
+});
+
+test('role payloads carry separate allow and deny bits that never overlap', () => {
+  assert.equal(roleCreateSchema.parse({ name: 'Mods', permissions: Permission.MANAGE_CHANNELS, deny: Permission.SPEAK }).deny, Permission.SPEAK);
+  assert.equal(roleCreateSchema.parse({ name: 'Legacy', permissions: DEFAULT_PERMISSIONS }).deny, undefined);
+  assert.equal(roleCreateSchema.safeParse({ name: 'Both', permissions: Permission.SPEAK, deny: Permission.SPEAK }).success, false);
+  assert.equal(roleUpdateSchema.safeParse({ roleId: 'r', permissions: Permission.SPEAK, deny: Permission.SPEAK }).success, false);
+  assert.equal(roleUpdateSchema.parse({ roleId: 'r', deny: Permission.SPEAK }).deny, Permission.SPEAK);
 });
 
 test('channel role grants override Everyone, while a denial from any assigned role wins', () => {
@@ -119,6 +147,28 @@ test('channel rules cannot grant administrative server rights, duplicate targets
   assert.equal(channelPermissionOverwritesSchema.safeParse([
     { roleId: null, allow: 0, deny: 0 }, { roleId: null, allow: 0, deny: 0 },
   ]).success, false);
+});
+
+test('events and live actions are server permissions; legacy channel bits are accepted but dropped', () => {
+  assert.equal((CHANNEL_PERMISSIONS & Permission.MANAGE_EVENTS), 0);
+  assert.equal((CHANNEL_PERMISSIONS & Permission.EMIT_LIVE_ACTIONS), 0);
+  const legacyBits = Permission.MANAGE_EVENTS | Permission.EMIT_LIVE_ACTIONS;
+  const parsed = channelPermissionOverwritesSchema.safeParse([
+    { roleId: null, allow: Permission.SEND_MESSAGES | legacyBits, deny: 0 },
+    { roleId: 'host', allow: 0, deny: legacyBits },
+  ]);
+  assert.equal(parsed.success, true);
+  assert.deepEqual(parsed.success && parsed.data, [
+    { roleId: null, allow: Permission.SEND_MESSAGES, deny: 0 },
+    { roleId: 'host', allow: 0, deny: 0 },
+  ]);
+  const stored = rules([
+    { roleId: null, allow: legacyBits, deny: 0 },
+    { roleId: 'host', allow: 0, deny: legacyBits },
+  ]);
+  assert.equal(hasChannelPermission(stored, DEFAULT_PERMISSIONS, [], Permission.MANAGE_EVENTS), false);
+  assert.equal(hasChannelPermission(stored, DEFAULT_PERMISSIONS | legacyBits, ['host'], Permission.MANAGE_EVENTS), true);
+  assert.equal(hasChannelPermission(stored, DEFAULT_PERMISSIONS | legacyBits, ['host'], Permission.EMIT_LIVE_ACTIONS), true);
 });
 
 test('server-level permissions ignore legacy channel overwrites', () => {

@@ -1101,7 +1101,8 @@ export class ChatView {
           component.presentation,
         )).join('')}</div>`
       : '';
-    const rowClass = `chat-message-row${isMentioned ? ' chat-message-mentioned' : ''}${m.isEphemeral ? ' chat-message-private' : ''}${isBot ? ' chat-bot-response' : ''}`;
+    const sending = me?.id === m.userId && !isBot && this.store.getOutgoing(m.id)?.status === 'sending';
+    const rowClass = `chat-message-row${isMentioned ? ' chat-message-mentioned' : ''}${m.isEphemeral ? ' chat-message-private' : ''}${isBot ? ' chat-bot-response' : ''}${sending ? ' chat-message-row--sending' : ''}`;
 
     return `
       <div class="${rowClass}" tabindex="-1" data-user-id="${escapeHtml(m.userId)}" data-message-id="${escapeHtml(m.id)}">
@@ -1131,15 +1132,19 @@ export class ChatView {
     `;
   }
 
+  /** Sending is shown by fading the row; only a failure keeps a visible indicator. */
   private renderDelivery(messageId: string): string {
     const outgoing = this.store.getOutgoing(messageId);
     const state = outgoing?.status ?? 'sent';
-    const label = t(state === 'sending' ? 'chat.deliverySending' : state === 'failed' ? 'chat.deliveryFailed' : 'chat.deliverySent');
-    const icon = state === 'sending' ? 'schedule' : state === 'failed' ? 'error_outline' : 'check_circle';
-    return `<span class="chat-delivery chat-delivery--${state}" data-delivery="${state}" role="status" aria-label="${escapeHtml(label)}"
+    if (state === 'sent') return '<span class="chat-delivery chat-delivery--sent" data-delivery="sent" hidden></span>';
+    if (state === 'sending') {
+      return `<span class="chat-delivery chat-delivery--sending chat-delivery-sr" data-delivery="sending" role="status">${escapeHtml(t('chat.deliverySending'))}</span>`;
+    }
+    const label = t('chat.deliveryFailed');
+    return `<span class="chat-delivery chat-delivery--failed" data-delivery="failed" role="status" aria-label="${escapeHtml(label)}"
       title="${escapeHtml(outgoing?.error || label)}">
-      <span class="material-symbols-outlined md-14" aria-hidden="true">${icon}</span>
-      ${state === 'failed' ? `<span>${escapeHtml(label)}</span><button type="button" data-retry-message>${t('chat.deliveryRetry')}</button>` : ''}
+      <span class="material-symbols-outlined md-14" aria-hidden="true">error_outline</span>
+      <span>${escapeHtml(label)}</span><button type="button" data-retry-message>${t('chat.deliveryRetry')}</button>
     </span>`;
   }
 

@@ -879,6 +879,7 @@ interface SqliteRoleRow {
   color: string | null;
   position: number;
   permissions: number;
+  deny: number;
   isDefault: number;
   createdAt: number;
 }
@@ -887,7 +888,7 @@ export class SqliteRoleRepository implements IRoleRepository {
   constructor(private db: IDatabaseDriver) {}
 
   private static readonly SELECT =
-    'SELECT id, name, color, position, permissions, is_default as isDefault, created_at as createdAt FROM roles';
+    'SELECT id, name, color, position, permissions, deny_permissions as deny, is_default as isDefault, created_at as createdAt FROM roles';
 
   private mapRole(row: SqliteRoleRow): RoleRecord {
     return {
@@ -896,6 +897,7 @@ export class SqliteRoleRepository implements IRoleRepository {
       color: row.color,
       position: row.position,
       permissions: row.permissions,
+      deny: row.deny ?? 0,
       isDefault: Boolean(row.isDefault),
       createdAt: row.createdAt,
     };
@@ -918,7 +920,7 @@ export class SqliteRoleRepository implements IRoleRepository {
 
   async listRolesForUser(userId: string): Promise<RoleRecord[]> {
     const rows = this.db.prepare(
-      `SELECT roles.id, roles.name, roles.color, roles.position, roles.permissions, roles.is_default as isDefault, roles.created_at as createdAt
+      `SELECT roles.id, roles.name, roles.color, roles.position, roles.permissions, roles.deny_permissions as deny, roles.is_default as isDefault, roles.created_at as createdAt
        FROM roles
        INNER JOIN user_roles ON user_roles.role_id = roles.id
        WHERE user_roles.user_id = ?
@@ -938,8 +940,8 @@ export class SqliteRoleRepository implements IRoleRepository {
 
   async create(role: RoleRecord): Promise<void> {
     this.db.prepare(
-      'INSERT INTO roles (id, name, color, position, permissions, is_default, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(role.id, role.name, role.color, role.position, role.permissions, role.isDefault ? 1 : 0, role.createdAt);
+      'INSERT INTO roles (id, name, color, position, permissions, deny_permissions, is_default, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(role.id, role.name, role.color, role.position, role.permissions, role.deny ?? 0, role.isDefault ? 1 : 0, role.createdAt);
   }
 
   async update(roleId: string, updates: Partial<RoleRecord>): Promise<void> {
@@ -960,6 +962,10 @@ export class SqliteRoleRepository implements IRoleRepository {
     if (updates.permissions !== undefined) {
       fields.push('permissions = ?');
       values.push(updates.permissions);
+    }
+    if (updates.deny !== undefined) {
+      fields.push('deny_permissions = ?');
+      values.push(updates.deny);
     }
     if (updates.isDefault !== undefined) {
       fields.push('is_default = ?');

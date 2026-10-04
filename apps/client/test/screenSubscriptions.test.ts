@@ -697,6 +697,52 @@ test('screen watch intent is call-scoped, source-specific, view-independent and 
   assert.equal(store.isWatchingAnyScreen('publisher'), false, 'a new call never inherits the previous call');
 });
 
+test('screen watch intent follows a publisher switching sources, but never jumps to a pre-existing share', async () => {
+  const store = new VoiceStore();
+  const handoffs: unknown[] = [];
+  const unbind = appEvents.on('voice.screen_watch_handoff', (event: unknown) => handoffs.push(event));
+  try {
+    store.setChannel('room', 'server-a');
+    const roster = (ids: string[], others: string[] = []) => new Map([['publisher', ids], ['other', others]]);
+    store.reconcileScreenShares(roster(['one']), 1_000);
+    store.setScreenWatching('publisher', 'one', true);
+    store.setScreenQuality('publisher', 'one', '720p60');
+    store.reconcileScreenShares(roster(['two'], ['unrelated']), 2_000);
+    assert.equal(store.isWatchingScreen('publisher', 'one'), false);
+    assert.equal(store.isWatchingScreen('publisher', 'two'), true, 'a switch in one update keeps watching');
+    assert.equal(store.getScreenQuality('publisher', 'two'), '720p60', 'the chosen quality moves with the watch');
+    assert.equal(store.isWatchingScreen('other', 'unrelated'), false, 'other publishers never inherit intent');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.deepEqual(handoffs, [{ sessionId: 'publisher', fromShareId: 'one', shareId: 'two' }]);
+
+    store.reconcileScreenShares(roster([]), 3_000);
+    assert.equal(store.isWatchingAnyScreen('publisher'), false);
+    store.reconcileScreenShares(roster(['three']), 3_000 + VoiceStore.SCREEN_WATCH_HANDOFF_MS);
+    assert.equal(store.isWatchingScreen('publisher', 'three'), true, 'retire-then-publish within the window keeps watching');
+
+    store.reconcileScreenShares(roster([]), 20_000);
+    store.reconcileScreenShares(roster(['late']), 20_001 + VoiceStore.SCREEN_WATCH_HANDOFF_MS);
+    assert.equal(store.isWatchingScreen('publisher', 'late'), false, 'a later new broadcast needs a new Watch');
+
+    store.reconcileScreenShares(roster(['a', 'b']), 40_000);
+    store.setScreenWatching('publisher', 'a', true);
+    store.reconcileScreenShares(roster(['b']), 40_001);
+    assert.equal(store.isWatchingScreen('publisher', 'b'), false, 'stopping one of two shares never watches the other');
+    store.reconcileScreenShares(new Map([['other', []]]), 40_002);
+    store.reconcileScreenShares(roster(['c']), 40_003);
+    assert.equal(store.isWatchingScreen('publisher', 'c'), true, 'a rejoin within the window still counts as the switch');
+
+    store.setScreenWatching('publisher', 'c', true);
+    store.reconcileScreenShares(roster([]), 50_000);
+    store.setChannel('room', 'server-b');
+    store.setChannel('room', 'server-b');
+    store.reconcileScreenShares(roster(['d']), 50_001);
+    assert.equal(store.isWatchingAnyScreen('publisher'), false, 'a new call never inherits a pending switch');
+  } finally {
+    unbind();
+  }
+});
+
 test('screen replacement ignores late old-consumer video/audio cleanup and never stops its successor', t => {
   const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
   Object.defineProperty(globalThis, 'document', { configurable: true, value: { getElementById: () => null } });

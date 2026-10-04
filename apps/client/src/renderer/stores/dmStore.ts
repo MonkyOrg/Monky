@@ -12,6 +12,8 @@ import {
   type DmOutgoingFile,
   type DmPeerView,
   type DmResult,
+  type DmSelfProfile,
+  type DmSelfProfileInput,
   type DmSnapshot,
 } from '@monky/shared';
 import { EventBus } from '../core/EventBus';
@@ -263,6 +265,23 @@ export class DmStore {
     return new Blob([result.value.data as BlobPart], { type: result.value.mime });
   }
 
+  /**
+   * Merges the local nickname/avatar into the profile that travels with the
+   * identity and returns the winning values (null when DMs are unavailable).
+   */
+  async setSelfProfile(input: DmSelfProfileInput): Promise<DmSelfProfile | null> {
+    if (!this.api) return null;
+    try {
+      const result = await this.api.setSelfProfile(input);
+      if (!result.ok) return null;
+      this.transport?.execute(result.value.dispatch);
+      return result.value.profile;
+    } catch (error) {
+      clientLog.warn('DM', 'Profile sync failed', { error: error instanceof Error ? error.message : String(error) });
+      return null;
+    }
+  }
+
   async saveAttachment(peer: string, messageId: string, fileId: string): Promise<DmFailure | null> {
     if (!this.api) return unavailable();
     const result = await this.api.saveAttachment(peer, messageId, fileId);
@@ -294,7 +313,8 @@ export class DmStore {
   private applySnapshot(snapshot: DmSnapshot): void {
     this.snapshotValue = snapshot;
     const friends = snapshot.peers.filter((peer) => peer.relation === 'friend' && !peer.blocked).map((peer) => peer.publicKey);
-    this.transport?.setIdentity(snapshot.me?.publicKey ?? null, friends);
+    const known = snapshot.peers.map((peer) => peer.publicKey);
+    this.transport?.setIdentity(snapshot.me?.publicKey ?? null, friends, known);
     this.presenceSignature = '';
     this.bus.emit('changed');
   }
@@ -320,7 +340,14 @@ export class DmStore {
       case 'messages': {
         const state = this.conversations.get(event.peer);
         if (state) {
-          state.messages = mergeMessages(state.messages, event.messages);
+          // History synced from another device can be older than the loaded page;
+          // it shows up when scrolling back instead of leaving gaps.
+          const oldest = state.hasMore ? state.messages[0] : undefined;
+          const incoming = oldest
+            ? event.messages.filter((message) => message.createdAt > oldest.createdAt
+              || (message.createdAt === oldest.createdAt && message.id.localeCompare(oldest.id) >= 0))
+            : event.messages;
+          state.messages = mergeMessages(state.messages, incoming);
           state.peerReadAt = Math.max(state.peerReadAt, event.peerReadAt);
         }
         for (const message of event.messages) {
@@ -345,6 +372,9 @@ export class DmStore {
         break;
       case 'dispatch':
         this.transport?.execute(event.dispatch);
+        break;
+      case 'self-profile':
+        this.bus.emit('self-profile', { profile: event.profile });
         break;
     }
   }

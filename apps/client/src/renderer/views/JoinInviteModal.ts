@@ -1,6 +1,7 @@
 import { LIMITS, serverInviteSchema, type ServerInvite } from '@monky/shared';
 import { getServerSessionForAddress, openServerSession, updateSessionAvatar } from '../core/serverConnection';
 import { connectionStore } from '../stores/connectionStore';
+import { recordProfileChange } from '../core/profileSync';
 import { clientLog } from '../core/ClientLogService';
 import { t } from '../i18n';
 import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
@@ -150,6 +151,7 @@ export class JoinInviteModal {
           if (!reused) {
             if (identityNickname === null && connectionStore.savedNickname === previousNickname) {
               connectionStore.saveUserProfile(name);
+              void recordProfileChange({ nickname: true });
             }
             connectionStore.addSavedServer({
               host: invite.host, port: invite.port, name: result.server.name, serverId: result.server.id,

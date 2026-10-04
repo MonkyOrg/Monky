@@ -219,7 +219,7 @@ class NativeScreenEndpoint {
         { width, height, fps, syncGroup: this.source.instanceId, enabled: false });
       this.sourceId = created.sourceId;
       this.flow = new LiveSenderFlow({
-        engine: this.engine, sourceId: this.sourceId, initialBitrateKbps: Math.min(5000, maxBitrateKbps),
+        engine: this.engine, sourceId: this.sourceId, initialBitrateKbps: Math.min(5000, maxBitrateKbps), fps,
         onError: error => this.report(error), onWritable: () => this.host?.resumePackets(),
       });
       this.abort.signal.throwIfAborted();

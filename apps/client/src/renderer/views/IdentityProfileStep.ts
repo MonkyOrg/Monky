@@ -2,6 +2,7 @@ import { LIMITS } from '@monky/shared';
 import logoUrl from '../assets/Logo.png';
 import { t } from '../i18n';
 import { connectionStore } from '../stores/connectionStore';
+import { stampProfileChange } from '../core/profileSync';
 import { getAvatarUrl } from '../utils/avatar';
 import { escapeHtml } from '../utils/html';
 import { attachInputEmojiPicker } from '../utils/inputEmojiPicker';
@@ -16,6 +17,7 @@ export function hasValidLocalProfile(): boolean {
 export function showIdentityProfileStep(container: HTMLElement): Promise<void> {
   return new Promise((resolve) => {
     let avatar = connectionStore.savedAvatarBase64 || '';
+    let avatarPicked = false;
     let detachEmoji: (() => void) | null = null;
     const render = (): void => {
       detachEmoji?.();
@@ -60,6 +62,7 @@ export function showIdentityProfileStep(container: HTMLElement): Promise<void> {
         const cropped = await pickAndCropImage(event.currentTarget as HTMLElement);
         if (!cropped) return;
         avatar = cropped;
+        avatarPicked = true;
         const preview = container.querySelector<HTMLImageElement>('#identity-profile-avatar-preview');
         if (preview) preview.src = cropped;
       });
@@ -72,6 +75,8 @@ export function showIdentityProfileStep(container: HTMLElement): Promise<void> {
           return;
         }
         connectionStore.saveUserProfile(nickname, avatar);
+        // Chosen now, so it wins over what this identity used on other devices.
+        stampProfileChange({ nickname: true, avatar: avatarPicked });
         detachEmoji?.();
         detachEmoji = null;
         resolve();

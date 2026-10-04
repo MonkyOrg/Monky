@@ -183,6 +183,7 @@ export interface ElectronApi {
   onPttCaptured: (cb: (binding: PttKeyBinding) => void) => () => void;
   minimize: () => Promise<void>;
   openScreenPictureInPicture: (requestId: string, requireInactive: boolean) => Promise<boolean>;
+  returnFromScreenPictureInPicture: () => Promise<void>;
   onWindowInactive: (cb: () => void) => () => void;
   onWindowActive: (cb: () => void) => () => void;
   maximize: () => Promise<void>;
@@ -353,11 +354,12 @@ const api: ElectronApi = {
     typing: peer => ipcRenderer.invoke(DM_IPC.typing, peer),
     ingest: item => ipcRenderer.invoke(DM_IPC.ingest, item),
     outgoing: (peers, force) => ipcRenderer.invoke(DM_IPC.outgoing, peers, force === true),
-    hello: toFriends => ipcRenderer.invoke(DM_IPC.hello, toFriends),
+    hello: (toFriends, announce) => ipcRenderer.invoke(DM_IPC.hello, toFriends, announce !== false),
     helloTo: peer => ipcRenderer.invoke(DM_IPC.helloTo, peer),
     pendingPeers: () => ipcRenderer.invoke(DM_IPC.pendingPeers),
     observePeer: peer => ipcRenderer.invoke(DM_IPC.observePeer, peer),
     setSelfNickname: nickname => ipcRenderer.invoke(DM_IPC.setSelfNickname, nickname),
+    setSelfProfile: input => ipcRenderer.invoke(DM_IPC.setSelfProfile, input),
     updateSettings: settings => ipcRenderer.invoke(DM_IPC.updateSettings, settings),
     readAttachment: (peer, messageId, fileId) => ipcRenderer.invoke(DM_IPC.readAttachment, peer, messageId, fileId),
     saveAttachment: (peer, messageId, fileId) => ipcRenderer.invoke(DM_IPC.saveAttachment, peer, messageId, fileId),
@@ -492,6 +494,7 @@ const api: ElectronApi = {
   },
   minimize: () => ipcRenderer.invoke('window:minimize'),
   openScreenPictureInPicture: (requestId, requireInactive) => ipcRenderer.invoke('screen-pip:open', requestId, requireInactive),
+  returnFromScreenPictureInPicture: () => ipcRenderer.invoke('screen-pip:return'),
   onWindowInactive: (cb) => {
     const listener = () => cb();
     ipcRenderer.on('window:inactive', listener);

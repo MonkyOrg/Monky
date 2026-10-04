@@ -100,6 +100,8 @@ export class VoiceStageView {
   private windowInactive = false;
   private unbindEvents: Array<() => void> = [];
   private focusedTileKeys: string[] = [];
+  /** Focused screen tiles whose share retired, kept so a source switch can refocus its successor. */
+  private retiredScreenFocus = new Map<string, number>();
   private focusEpoch = 0;
   private focusError: HTMLElement | null = null;
   private readonly seenScreenStarts = new WeakSet<MediaStream>();
@@ -171,6 +173,7 @@ export class VoiceStageView {
     if (channelId !== this.currentChannelId) this.stopTelemetryMonitor();
     this.currentChannelId = channelId;
     this.focusedTileKeys = [];
+    this.retiredScreenFocus.clear();
     if (!channelId) {
       this.stopTelemetryMonitor();
     }
@@ -860,9 +863,13 @@ export class VoiceStageView {
     if (this.focusStartedScreens(tiles)) return;
 
     // Drop focus entries whose tile disappeared (share ended, peer left).
-    this.focusedTileKeys = this.focusedTileKeys.filter((key) =>
-      tiles.some((tile) => tile.key === key)
-    );
+    const now = Date.now();
+    for (const [key, expiresAt] of this.retiredScreenFocus) if (expiresAt < now) this.retiredScreenFocus.delete(key);
+    this.focusedTileKeys = this.focusedTileKeys.filter((key) => {
+      if (tiles.some((tile) => tile.key === key)) return true;
+      if (key.includes(':screen:')) this.retiredScreenFocus.set(key, now + VoiceStore.SCREEN_WATCH_HANDOFF_MS);
+      return false;
+    });
 
     let markup: string;
     if (this.focusedTileKeys.length > 0) {
@@ -1491,6 +1498,21 @@ export class VoiceStageView {
         showErrorToast(t('stage.pictureInPictureErrorMessage'));
       });
       return;
+    }
+  }
+
+  /** A publisher switching sources keeps the viewer's focused layout on the new share. */
+  private refocusScreenHandoff(handoff: { sessionId: string; fromShareId: string; shareId: string }): void {
+    if (!this.isJoinedHere()) return;
+    const previousKey = `${handoff.sessionId}:screen:${handoff.fromShareId}`;
+    const nextKey = `${handoff.sessionId}:screen:${handoff.shareId}`;
+    const retired = (this.retiredScreenFocus.get(previousKey) ?? 0) >= Date.now();
+    this.retiredScreenFocus.delete(previousKey);
+    if (this.focusedTileKeys.includes(nextKey)) return;
+    if (this.focusedTileKeys.includes(previousKey)) {
+      this.setFocusedTiles(this.focusedTileKeys.map(key => key === previousKey ? nextKey : key), { screenStart: true });
+    } else if (retired) {
+      this.setFocusedTiles([...this.focusedTileKeys, nextKey].slice(-2), { screenStart: true });
     }
   }
 
@@ -2362,7 +2384,9 @@ export class VoiceStageView {
     const u24 = appEvents.on('local.screen_started', (start: { shareId: string; stream: MediaStream }) => this.queueScreenStartFocus(start));
     const u25 = appEvents.on('local.screen_stopped', (shareId: string) => this.pendingScreenFocus.delete(shareId));
     const u26 = appEvents.on('screen_pip.stage_return', () => this.restorePictureInPicture());
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22, u23, u24, u25, u26);
+    const u27 = appEvents.on('voice.screen_watch_handoff',
+      (handoff: { sessionId: string; fromShareId: string; shareId: string }) => this.refocusScreenHandoff(handoff));
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22, u23, u24, u25, u26, u27);
     const inactive = () => {
       if (this.windowInactive) return;
       this.windowInactive = true;

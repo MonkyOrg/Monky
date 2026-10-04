@@ -491,6 +491,7 @@ export class ConnectionStore {
       'monky_created_servers',
       'monky_nickname',
       'monky_avatar',
+      'monky_profile_at',
     ]) {
       try {
         localStorage.removeItem(key);

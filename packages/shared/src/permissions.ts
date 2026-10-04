@@ -55,13 +55,60 @@ export interface ChannelAccessRules {
 
 export const CHANNEL_PERMISSIONS =
   Permission.VIEW_CHANNEL | Permission.SPEAK | Permission.SEND_MESSAGES | Permission.READ_MESSAGES |
-  Permission.ATTACH_FILES | Permission.USE_SOUNDBOARD | Permission.USE_BOT_COMMANDS |
-  Permission.MANAGE_EVENTS | Permission.EMIT_LIVE_ACTIONS;
+  Permission.ATTACH_FILES | Permission.USE_SOUNDBOARD | Permission.USE_BOT_COMMANDS;
 
-export function resolveMemberPermissions(everyone: number, roles: readonly { permissions: number }[]): number {
+/**
+ * Server management bits that earlier channel editors could store. They are
+ * still accepted from older clients but dropped: only server roles grant them.
+ */
+export const LEGACY_CHANNEL_PERMISSIONS = Permission.MANAGE_EVENTS | Permission.EMIT_LIVE_ACTIONS;
+
+/** A server role: `permissions` holds the allowed bits, `deny` the denied ones; every other bit inherits Everyone. */
+export interface RolePermissionRule {
+  permissions: number;
+  deny?: number;
+}
+
+/**
+ * Everyone is the base of every member. Roles allow or deny on top of it and
+ * any denial wins; bits a role leaves unset inherit. Administrators bypass it.
+ */
+export function resolveMemberPermissions(everyone: number, roles: readonly RolePermissionRule[]): number {
+  if (roles.some(role => hasPermission(role.permissions, Permission.ADMINISTRATOR))) return ADMIN_PERMISSIONS;
+  let allow = 0;
+  let deny = 0;
+  for (const role of roles) {
+    allow |= role.permissions;
+    deny |= role.deny ?? 0;
+  }
+  return stripAdministrator((everyone | allow) & ~deny);
+}
+
+/**
+ * Servers before allow/deny roles stored each role as a full switch mask that
+ * replaced Everyone, and intersected the masks of several roles.
+ */
+export function resolveLegacyMemberPermissions(everyone: number, roles: readonly { permissions: number }[]): number {
   if (roles.some(role => hasPermission(role.permissions, Permission.ADMINISTRATOR))) return ADMIN_PERMISSIONS;
   if (roles.length === 0) return stripAdministrator(everyone);
   return stripAdministrator(roles.reduce((bits, role) => bits & role.permissions, ADMIN_PERMISSIONS));
+}
+
+/** Expresses a former full role mask as allow/deny against Everyone without changing what it grants. */
+export function legacyRoleRule(permissions: number, everyone: number): Required<RolePermissionRule> {
+  if (hasPermission(permissions, Permission.ADMINISTRATOR)) return { permissions: permissions >>> 0, deny: 0 };
+  return { permissions: (permissions & ~everyone) >>> 0, deny: stripAdministrator(everyone & ~permissions) };
+}
+
+/** The full switch mask an older server expects for an allow/deny role. */
+export function legacyRoleMask(rule: RolePermissionRule, everyone: number): number {
+  if (hasPermission(rule.permissions, Permission.ADMINISTRATOR)) return rule.permissions >>> 0;
+  return stripAdministrator((everyone | rule.permissions) & ~(rule.deny ?? 0));
+}
+
+/** Roles as clients without allow/deny support expect them: full masks and no `deny`. */
+export function toLegacyRoles<T extends RolePermissionRule>(roles: readonly T[], everyone: number): Array<Omit<T, 'deny'>> {
+  return roles.map(({ deny, ...role }) => ({ ...role, permissions: legacyRoleMask({ permissions: role.permissions, deny }, everyone) }));
 }
 
 /** Converts the old privacy form to the same rules used by the permission editor. */

@@ -7,7 +7,7 @@ const { LiveSenderFlow } = require('../runtime/encodedSender.cjs');
 function model() {
   const submitted = [], errors = [], calls = [];
   let now = 2000;
-  const flow = new LiveSenderFlow({ sourceId: 7, initialBitrateKbps: 20000,
+  const flow = new LiveSenderFlow({ sourceId: 7, initialBitrateKbps: 20000, fps: 120,
     onError: error => errors.push(error), now: () => now,
     engine: { submitEncodedFrame(sourceId, frame) {
       submitted.push(frame);
@@ -24,8 +24,35 @@ function model() {
     sourceId: 7, sequence, kind: 'rate', bitrateBps: bitrate, paused, keyframeConfirmed: false,
     requestedFps, fpsApplied: null, bitrateCeilingBps: 80000000,
   } });
-  return { flow, submitted, errors, calls, frame, feedback, tick: value => { now = value; } };
+  // keyint_sec=1 at 120fps; recovery tolerates three GOPs of encoded AUs.
+  const bound = 360;
+  let nextId = 1000;
+  const deltas = count => { for (let index = 0; index < count; index++) flow.packet(frame(nextId++)); };
+  return { flow, submitted, errors, calls, frame, feedback, bound, deltas, tick: value => { now = value; } };
 }
+
+test('a slow encoder stretching its GOP in wall time does not end the share', async () => {
+  const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
+  m.flow.packet(m.frame(1, true));
+  m.flow.feedback({ target: 7, data: { sourceId: 7, sequence: 1, kind: 'recovery',
+    reason: 'input-expired', frameId: 1, generation: 2,
+    mode: 'next-real-idr', maximumWaitMs: 1500, keyframeConfirmed: false } });
+  // An overloaded software encoder skips frames: one 120-AU GOP takes 4 s.
+  for (let id = 2; id < 121; id++) { m.tick(2000 + id * 33); m.flow.packet(m.frame(id)); }
+  assert.equal(m.submitted.length, 1);
+  m.flow.packet(m.frame(121, true));
+  assert.equal(m.submitted.length, 2);
+  assert.equal(m.flow.snapshot().awaitedRecoveryFrames, 0);
+  assert.equal(m.flow.snapshot().recoveryFrameBound, 360);
+  await m.flow.close(); assert.deepEqual(m.errors, []);
+});
+
+test('the live sender requires its configured encoder frame rate', () => {
+  for (const fps of [undefined, 0, 59.94, 241]) {
+    assert.throws(() => new LiveSenderFlow({ sourceId: 7, initialBitrateKbps: 1000, fps, onError() {},
+      engine: { submitEncodedFrame() {} } }), /configured encoder frame rate/);
+  }
+});
 
 test('no watcher means no native submission; initial/resumed admission waits for actual IDR', async () => {
   const m = model();
@@ -86,14 +113,13 @@ test('a receiver PLI cannot clear or extend an actual dependency-recovery deadli
   m.flow.feedback({ target: 7, data: { sourceId: 7, sequence: 1, kind: 'recovery',
     reason: 'rtc-unconsumed', frameId: 1, generation: 2,
     mode: 'next-real-idr', maximumWaitMs: 1500, keyframeConfirmed: false } });
-  m.tick(3000);
+  m.flow.packet(m.frame(2));
   m.flow.feedback({ target: 7, data: { sourceId: 7, sequence: 2, kind: 'keyframe',
     mode: 'next-real-idr', maximumWaitMs: 1500, keyframeConfirmed: false } });
   assert.equal(m.flow.needsIdr, true);
-  assert.equal(m.flow.waitingSince, 2000);
-  m.flow.packet(m.frame(2));
+  assert.equal(m.flow.awaitedFrames, 1);
   assert.equal(m.submitted.length, 1);
-  m.tick(3501);
+  m.deltas(m.bound - 1);
   assert.throws(() => m.flow.packet(m.frame(3)), /No real IDR/);
   await m.flow.close(); assert.deepEqual(m.errors, []);
 });
@@ -146,7 +172,7 @@ test('an explicit RTC pause suspends admission; missing IDR after resume still f
   const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
   m.feedback(1, 49999, true); m.flow.packet(m.frame(1, true)); assert.equal(m.submitted.length, 0);
   m.feedback(2, 20000000); m.flow.packet(m.frame(2));
-  m.tick(3501); assert.throws(() => m.flow.packet(m.frame(3)), /No real IDR/);
+  m.deltas(m.bound - 1); assert.throws(() => m.flow.packet(m.frame(3)), /No real IDR/);
   await m.flow.close();
 });
 
@@ -213,11 +239,10 @@ for (const [direction, allocation, selected] of [['increase', 1500000, 1350], ['
     m.flow.feedback({ target: 7, data: { sourceId: 7, sequence: 2, kind: 'recovery',
       reason: 'rtc-unconsumed', frameId: 1, generation: 2,
       mode: 'next-real-idr', maximumWaitMs: 1500, keyframeConfirmed: false } });
-    const waitingSince = m.flow.waitingSince;
-    m.tick(3500); m.feedback(3, allocation); await m.flow.rateWork;
-    assert.equal(m.flow.needsIdr, true); assert.equal(m.flow.waitingSince, waitingSince);
     m.flow.packet(m.frame(2)); assert.equal(m.submitted.length, 1);
-    m.tick(4601); assert.throws(() => m.flow.packet(m.frame(3)), /No real IDR/);
+    m.tick(3500); m.feedback(3, allocation); await m.flow.rateWork;
+    assert.equal(m.flow.needsIdr, true); assert.equal(m.flow.awaitedFrames, 1);
+    m.deltas(m.bound - 1); assert.throws(() => m.flow.packet(m.frame(3)), /No real IDR/);
     await m.flow.close(); assert.deepEqual(m.errors, []);
   });
 }
@@ -418,8 +443,9 @@ test('persistent recovery rejection is bounded and unknown errors never become r
   m.flow.engine.submitEncodedFrame = () => {
     throw Object.assign(new Error('stale IDR'), { code: 'ERR_RTC_ENCODED_RECOVERY', status: 8 });
   };
-  m.flow.packet(m.frame(1, true)); m.tick(3501);
-  assert.throws(() => m.flow.packet(m.frame(2, true)), /within1500ms/);
+  for (let id = 1; id <= m.bound; id++) m.flow.packet(m.frame(id, true));
+  assert.equal(m.flow.snapshot().nativeRecoveryRejections, m.bound);
+  assert.throws(() => m.flow.packet(m.frame(m.bound + 1, true)), /fresh IDR within the live recovery bound/);
   m.flow.engine.submitEncodedFrame = () => {
     throw Object.assign(new Error('terminal recovery failure'), { code: 'ERR_RTC_ENCODED_RECOVERY', status: 7 });
   };

@@ -224,7 +224,7 @@ test('actual role revocation denies the next page even with a previously valid c
   const roles = await f.roleRepo.listRolesForUser(f.member.id);
   assert.ok(roles.length);
   await f.permissions.withRoleMutation(async () => {
-    for (const role of roles) await f.roleRepo.update(role.id, { permissions: 0 });
+    for (const role of roles) await f.roleRepo.update(role.id, { permissions: 0, deny: Permission.READ_MESSAGES });
   });
   assert.equal(await f.permissions.checkPermission(f.member.id, Permission.READ_MESSAGES), false);
   await assert.rejects(f.service.search(f.member.id, { cursor: first.nextCursor }), MessageSearchError);

@@ -694,10 +694,11 @@ export class WebRtcManager {
         this.sfuEngine.leave();
         return;
       }
-      if (this.localAudioTrack) {
+      // Speak denied: stay in the call listening; publish once it is allowed.
+      if (this.localAudioTrack && !voiceStore.permissionMuted) {
         const producer = await this.sfuEngine.produceMic(this.localAudioTrack);
         if (this.isSfuJoinStale(epoch, channelId)) return;
-        if (!producer) {
+        if (!producer && !this.sfuEngine.isMicrophoneDenied()) {
           this.handleSfuConnectionFailure('Could not publish the microphone to the SFU');
           return;
         }
@@ -959,11 +960,14 @@ export class WebRtcManager {
 
   /** Source discovery is voice metadata, independent of whether RTP is flowing. */
   public reconcileScreenSources(): void {
-    for (const [sessionId] of voiceStore.getScreenWatchers()) {
-      const state = this.voiceParticipants.get(sessionId)?.voiceState;
-      voiceStore.retainScreenShares(sessionId,
-        state?.channelId === voiceStore.currentVoiceChannelId ? state?.screenShareIds ?? [] : []);
-    }
+    const channelId = voiceStore.currentVoiceChannelId;
+    voiceStore.reconcileScreenShares(new Map(channelId
+      ? this.voiceParticipants.getInVoiceChannel(channelId).flatMap(participant => {
+        const state = participant.voiceState;
+        return state?.sessionId && state.sessionId !== this.currentSessionId
+          ? [[state.sessionId, state.screenShareIds ?? []] as const] : [];
+      })
+      : []));
     for (const [sessionId, shares] of this.remoteScreenSubscriptions) {
       const state = this.voiceParticipants.get(sessionId)?.voiceState;
       for (const [shareId, subscription] of shares) {
@@ -2175,7 +2179,11 @@ export class WebRtcManager {
     let restorePublication: () => Promise<void>;
     ensureCurrent();
     if (this.isSfuMode()) {
-      if (!previous) {
+      if (!this.sfuEngine.hasMicrophonePublication() && voiceStore.permissionMuted) {
+        // Speak is denied: nothing is published, so the track is swapped locally
+        // and published once the permission returns.
+        restorePublication = async () => {};
+      } else if (!previous) {
         // The user may have joined receive-only after capture failed.
         if (!this.sfuEngine.isReady()) throw new Error('SFU microphone transport is not ready');
         const producer = await this.sfuEngine.produceMic(track);
@@ -2240,13 +2248,21 @@ export class WebRtcManager {
     };
   }
 
+  /** Publishes the SFU microphone that was withheld while Speak was denied. */
+  public async syncMicrophonePublication(): Promise<void> {
+    const track = this.localAudioTrack;
+    if (!this.isSfuMode() || this.voiceReconnectSuspended || this.isSfuJoining || voiceStore.permissionMuted ||
+        !track || track.readyState !== 'live' || !this.sfuEngine.isReady() || this.sfuEngine.hasMicrophonePublication()) return;
+    await this.sfuEngine.produceMic(track);
+  }
+
   public async setLocalAudioTrack(track: MediaStreamTrack | null): Promise<void> {
     this.localAudioTrack = track;
     if (this.voiceReconnectSuspended) return;
     if (this.isSfuMode()) {
       if (!this.sfuEngine.isReady()) {
         await this.initSfuForCurrentChannel();
-      } else if (track) {
+      } else if (track && !voiceStore.permissionMuted) {
         await this.sfuEngine.produceMic(track);
       } else {
         this.sfuEngine.closeProducer('mic');

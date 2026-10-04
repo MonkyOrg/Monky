@@ -4,6 +4,7 @@ import {
   DM_MAX_ATTACHMENTS,
   DM_MAX_FILE_BYTES_LIMIT,
   DM_MAX_MESSAGE_LENGTH,
+  DM_PROFILE_AVATAR_MAX_LENGTH,
   type DmAttachmentState,
   type DmAttachmentView,
   type DmConversationPage,
@@ -18,6 +19,9 @@ import {
   type DmPeerView,
   type DmRelation,
   type DmRelayItem,
+  type DmSelfProfile,
+  type DmSelfProfileInput,
+  type DmSelfProfileResult,
   type DmSendMessageInput,
   type DmSettings,
   type DmSnapshot,
@@ -60,6 +64,16 @@ const MAX_FILE_NAME_LENGTH = 200;
 const PAGE_SIZE = 80;
 const FILE_CACHE_TTL_MS = 60_000;
 const MAX_CLOCK_SKEW_MS = 5 * 60_000;
+const DAY_MS = 86_400_000;
+/** Own-device exchanges arrive once per shared server; identical copies within this window are answered once. */
+const SELF_REPEAT_WINDOW_MS = 30_000;
+const MAX_DIGEST_DAYS = 1000;
+/** Plaintext bytes per sealed item, so the relay's 64 KiB item limit holds after encryption. */
+const MAX_SEALED_ITEM_BYTES = 44_000;
+const MAX_HISTORY_RESPONSE_BYTES = 600_000;
+const MAX_HISTORY_ROUNDS = 50;
+const MAX_DIGEST_PARTS = 200;
+const PENDING_DIGEST_TTL_MS = 60_000;
 
 type StatementType = 'request' | 'accept' | 'cancel' | 'remove';
 
@@ -96,6 +110,11 @@ interface PeerRecord {
   requestedAt: number | null;
   maxFileBytes: number;
   seenStatements: string[];
+  /** Newest profile (nickname/avatar) the friend sent us; 0/undefined when only servers told us. */
+  profileAt?: number;
+  profileHash?: string;
+  /** The avatar came from the friend's profile, so server observations must not replace it. */
+  profileAvatar?: boolean;
 }
 
 interface OutboxEntry {
@@ -137,6 +156,7 @@ interface DmState {
   outbox: Record<string, OutboxEntry[]>;
   conversations: Record<string, ConversationMeta>;
   downloads: Record<string, DownloadState>;
+  profile: DmSelfProfile;
 }
 
 interface StoredAttachment {
@@ -228,6 +248,68 @@ function sanitizeAvatar(value: unknown): string | null {
   return null;
 }
 
+/** Avatars that travel inside DMs must be small inline images, never remote URLs. */
+function sanitizeProfileAvatar(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length > DM_PROFILE_AVATAR_MAX_LENGTH) return null;
+  return /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(value) ? value : null;
+}
+
+function profileHash(nickname: string, avatar: string | null): string {
+  return createHash('sha256').update(`${nickname}\n${avatar ?? ''}`).digest('hex').slice(0, 16);
+}
+
+/** Last-writer-wins with a deterministic tie-break, so every device converges. */
+function profileFieldWins(at: number, value: string, currentAt: number, current: string): boolean {
+  if (at !== currentAt) return at > currentAt;
+  return at > 0 && value !== current && value > current;
+}
+
+function emptyProfile(): DmSelfProfile {
+  return { nickname: '', nicknameAt: 0, avatar: null, avatarAt: 0 };
+}
+
+function sanitizeSelfProfile(value: unknown): DmSelfProfile {
+  if (!isRecord(value)) return emptyProfile();
+  const stamp = (at: unknown) => (typeof at === 'number' && Number.isFinite(at) && at > 0 ? at : 0);
+  const nickname = sanitizeNickname(value.nickname, '');
+  const avatar = sanitizeProfileAvatar(value.avatar);
+  return {
+    nickname,
+    nicknameAt: nickname ? stamp(value.nicknameAt) : 0,
+    avatar,
+    avatarAt: stamp(value.avatarAt),
+  };
+}
+
+function utf8Length(value: string): number {
+  return Buffer.byteLength(value, 'utf8');
+}
+
+/** What decides whether two devices hold the same version of a message. */
+function messageFingerprint(message: StoredMessage): string {
+  const reactions = Object.entries(message.reactions)
+    .flatMap(([emoji, users]) => Object.entries(users).map(([user, value]) => `${emoji}:${user}:${value.on ? 1 : 0}:${value.ts}`))
+    .sort()
+    .join(',');
+  return `${message.id}|${message.deleted ? 1 : 0}|${message.editedAt ?? 0}|${reactions};`;
+}
+
+interface DigestConversation {
+  p: string;
+  lr: number;
+  pr: number;
+  /** Oldest day listed when the digest was truncated; 0 when complete. */
+  from: number;
+  /** `day:hash` pairs separated by commas. */
+  b: string;
+}
+
+interface PendingDigest {
+  parts: Array<Record<string, unknown> | undefined>;
+  received: number;
+  at: number;
+}
+
 function clampMaxFileBytes(value: unknown, fallback = DM_DEFAULT_MAX_FILE_BYTES): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return fallback;
   return Math.min(Math.floor(value), DM_MAX_FILE_BYTES_LIMIT);
@@ -274,6 +356,15 @@ export class DmService {
   private readonly fileCache = new Map<string, { data: Buffer; expiresAt: number }>();
   private snapshotTimer: NodeJS.Timeout | null = null;
   private lastStamp = 0;
+  /** Identifies this running device in own-device exchanges. */
+  readonly device = newDmId();
+  private readonly lastDigest = new Map<string, { hash: string; at: number }>();
+  private readonly profileSentTo = new Map<string, { key: string; at: number }>();
+  private readonly digestRounds = new Map<string, number>();
+  /** `peer:day:hash` already sent to each own device, so copies of a digest do not resend history. */
+  private readonly pushedDays = new Map<string, Set<string>>();
+  private readonly pendingDigests = new Map<string, PendingDigest>();
+  private readonly dayBucketCache = new Map<string, Map<number, string>>();
 
   constructor(options: DmServiceOptions) {
     this.keyring = options.keyring;
@@ -303,6 +394,7 @@ export class DmService {
       outbox: {},
       conversations: {},
       downloads: {},
+      profile: emptyProfile(),
     };
     if (!loaded || loaded.identity !== this.me) return empty;
     return {
@@ -313,6 +405,7 @@ export class DmService {
       outbox: loaded.outbox ?? {},
       conversations: loaded.conversations ?? {},
       downloads: loaded.downloads ?? {},
+      profile: sanitizeSelfProfile(loaded.profile),
     };
   }
 
@@ -354,6 +447,7 @@ export class DmService {
   }
 
   private saveConversation(peer: string): void {
+    this.dayBucketCache.delete(peer);
     this.store.writeJsonSoon(DmPersistence.peerFileName(peer), () => this.conversation(peer));
   }
 
@@ -550,7 +644,7 @@ export class DmService {
   }
 
   private myNickname(): string {
-    return sanitizeNickname(this.selfNickname, 'Monky');
+    return sanitizeNickname(this.state.profile.nickname || this.selfNickname, 'Monky');
   }
 
   private selfNickname = '';
@@ -832,14 +926,15 @@ export class DmService {
     const record = this.state.peers[peer];
     if (!record) return;
     let dirty = false;
-    if (observed.nickname !== undefined) {
+    // What the friend sent us beats what servers show.
+    if (observed.nickname !== undefined && !(record.profileAt && record.profileAt > 0)) {
       const nickname = sanitizeNickname(observed.nickname, record.nickname);
       if (nickname !== record.nickname) {
         record.nickname = nickname;
         dirty = true;
       }
     }
-    if (observed.avatar !== undefined) {
+    if (observed.avatar !== undefined && !record.profileAvatar) {
       const avatar = sanitizeAvatar(observed.avatar);
       if (avatar !== record.avatar) {
         record.avatar = avatar;
@@ -854,7 +949,7 @@ export class DmService {
       this.state.settings.maxFileBytes = clampMaxFileBytes(settings.maxFileBytes, this.state.settings.maxFileBytes);
     }
     this.changed();
-    return this.hello(true);
+    return { broadcast: this.friendHellos() };
   }
 
   // ---------------------------------------------------------------------------
@@ -1102,15 +1197,31 @@ export class DmService {
    * friends flush their outbox to us. `toFriends` is false for visible clients
    * that only need the sync.
    */
-  hello(toFriends: boolean): DmDispatch {
+  hello(toFriends: boolean, announce = true): DmDispatch {
     const broadcast = this.syncItems();
-    if (toFriends) {
-      for (const record of Object.values(this.state.peers)) {
-        if (record.relation !== 'friend' || record.blocked || !record.cert) continue;
-        broadcast.push(this.envelopeItem(record, 'hello', { reply: false, maxFileBytes: this.state.settings.maxFileBytes }));
-      }
+    if (announce) {
+      // Other devices of this identity answer with what they have that this one lacks.
+      broadcast.push(this.selfItem('hello-self', { device: this.device, reply: false, prof: this.profileSummary() }, 'signal'));
+      broadcast.push(...this.digestItems(false, null));
     }
+    if (toFriends) broadcast.push(...this.friendHellos());
     return { broadcast };
+  }
+
+  private friendHellos(): DmRelayItem[] {
+    const items: DmRelayItem[] = [];
+    for (const record of Object.values(this.state.peers)) {
+      if (record.relation !== 'friend' || record.blocked || !record.cert) continue;
+      items.push(this.envelopeItem(record, 'hello', this.friendHelloBody(false)));
+    }
+    return items;
+  }
+
+  private friendHelloBody(reply: boolean): Record<string, unknown> {
+    const body: Record<string, unknown> = { reply, maxFileBytes: this.state.settings.maxFileBytes };
+    const profile = this.friendProfileBody();
+    if (profile.at > 0) body.prof = { at: profile.at, h: profileHash(profile.nickname, profile.avatar) };
+    return body;
   }
 
   /** Hello for one friend that just became reachable. */
@@ -1118,9 +1229,510 @@ export class DmService {
     const peer = this.requirePeerKey(peerKey);
     const record = this.state.peers[peer];
     if (!record || record.relation !== 'friend' || record.blocked || !record.cert) return {};
-    return this.dispatchFor(peer, [
-      this.envelopeItem(record, 'hello', { reply: false, maxFileBytes: this.state.settings.maxFileBytes }),
-    ]);
+    return this.dispatchFor(peer, [this.envelopeItem(record, 'hello', this.friendHelloBody(false))]);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Profile (nickname + avatar that travel with the identity)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Merges what the renderer has locally. Fields win by their timestamp, so a
+   * value chosen on another device later is kept and handed back for the
+   * renderer to apply. Values without a timestamp (profiles saved before the
+   * sync existed) only fill an empty profile.
+   */
+  setSelfProfile(input: DmSelfProfileInput): DmSelfProfileResult {
+    const changed = this.mergeOwnProfile(input, 1);
+    if (changed) this.saveState();
+    return { profile: { ...this.state.profile }, dispatch: changed ? this.profileDispatch() : {} };
+  }
+
+  private mergeOwnProfile(input: DmSelfProfileInput, minimumAt: number): boolean {
+    const profile = this.state.profile;
+    const limit = this.now() + MAX_CLOCK_SKEW_MS;
+    const stamp = (at: unknown): number =>
+      typeof at === 'number' && Number.isFinite(at) && at > 0 ? Math.min(at, limit) : 0;
+    let changed = false;
+    if (input.nickname !== undefined) {
+      const nickname = sanitizeNickname(input.nickname, '');
+      const at = nickname ? Math.max(stamp(input.nicknameAt), minimumAt) : 0;
+      if (nickname && profileFieldWins(at, nickname, profile.nicknameAt, profile.nickname)) {
+        profile.nickname = nickname;
+        profile.nicknameAt = at;
+        changed = true;
+      }
+    }
+    if (input.avatar !== undefined) {
+      const avatar = input.avatar === null ? null : sanitizeProfileAvatar(input.avatar);
+      // A picture that does not fit is ignored rather than read as "no picture".
+      if (input.avatar === null || avatar !== null) {
+        const at = avatar ? Math.max(stamp(input.avatarAt), minimumAt) : stamp(input.avatarAt);
+        if (profileFieldWins(at, avatar ?? '', profile.avatarAt, profile.avatar ?? '')) {
+          profile.avatar = avatar;
+          profile.avatarAt = at;
+          changed = true;
+        }
+      }
+    }
+    if (changed) this.observeStamp(Math.max(profile.nicknameAt, profile.avatarAt));
+    return changed;
+  }
+
+  private profileSummary(): Record<string, unknown> {
+    const profile = this.state.profile;
+    return {
+      n: profile.nickname,
+      na: profile.nicknameAt,
+      aa: profile.avatarAt,
+      ah: profileHash('', profile.avatar),
+    };
+  }
+
+  private selfProfileItem(): DmRelayItem {
+    return this.selfItem('profile', { ...this.state.profile }, 'file');
+  }
+
+  private friendProfileBody(): { nickname: string; avatar: string | null; at: number } {
+    const profile = this.state.profile;
+    return {
+      nickname: this.myNickname(),
+      avatar: profile.avatar,
+      at: Math.max(profile.nicknameAt, profile.avatarAt),
+    };
+  }
+
+  /** New profile: own devices get it now; friends now if reachable, otherwise on their next hello. */
+  private profileDispatch(): DmDispatch {
+    const peers: Record<string, DmRelayItem[]> = {};
+    const body = this.friendProfileBody();
+    if (body.at > 0) {
+      for (const record of Object.values(this.state.peers)) {
+        if (record.relation !== 'friend' || record.blocked || !record.cert) continue;
+        peers[record.publicKey] = [this.envelopeItem(record, 'profile', body, 'file')];
+      }
+    }
+    const dispatch: DmDispatch = { broadcast: [this.selfProfileItem()] };
+    if (Object.keys(peers).length > 0) dispatch.peers = peers;
+    return dispatch;
+  }
+
+  private applyFriendProfile(record: PeerRecord, data: Record<string, unknown>): void {
+    const at = typeof data.at === 'number' && Number.isFinite(data.at) ? Math.min(data.at, this.now() + MAX_CLOCK_SKEW_MS) : 0;
+    if (at <= 0 || at <= (record.profileAt ?? 0)) return;
+    const rawNickname = typeof data.nickname === 'string' ? data.nickname : '';
+    const rawAvatar = typeof data.avatar === 'string' ? data.avatar : null;
+    record.nickname = sanitizeNickname(rawNickname, record.nickname);
+    const avatar = sanitizeProfileAvatar(rawAvatar);
+    if (avatar) {
+      record.avatar = avatar;
+      record.profileAvatar = true;
+    } else if (record.profileAvatar) {
+      // They removed the picture: let what servers show fill it again.
+      record.avatar = null;
+      record.profileAvatar = false;
+    }
+    record.profileAt = at;
+    record.profileHash = profileHash(rawNickname, rawAvatar);
+    this.changed();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Own-device sync (friends, history, read markers)
+  // ---------------------------------------------------------------------------
+
+  /** Per-day fingerprints of a conversation, cached until it changes. */
+  private dayBuckets(peer: string): Map<number, string> {
+    const cached = this.dayBucketCache.get(peer);
+    if (cached) return cached;
+    const hashes = new Map<number, ReturnType<typeof createHash>>();
+    for (const message of this.conversation(peer).messages) {
+      const day = Math.floor(message.createdAt / DAY_MS);
+      let hash = hashes.get(day);
+      if (!hash) {
+        hash = createHash('sha256');
+        hashes.set(day, hash);
+      }
+      hash.update(messageFingerprint(message));
+    }
+    const buckets = new Map<number, string>();
+    for (const [day, hash] of hashes) buckets.set(day, hash.digest('hex').slice(0, 12));
+    this.dayBucketCache.set(peer, buckets);
+    return buckets;
+  }
+
+  /**
+   * Summary of friends and history, split in sealed parts. Another own device
+   * answers with the friends and days of history this one is missing.
+   */
+  private digestItems(cont: boolean, forDevice: string | null): DmRelayItem[] {
+    const seq = newDmId();
+    const peers = Object.values(this.state.peers)
+      .filter((record) => record.relationUpdatedAt > 0 || record.blockedUpdatedAt > 0)
+      .map((record) => [record.publicKey, record.relationUpdatedAt, record.blockedUpdatedAt]);
+    const convs: DigestConversation[] = [];
+    for (const [peer, meta] of Object.entries(this.state.conversations)) {
+      if (!this.state.peers[peer]) continue;
+      const days = [...this.dayBuckets(peer)].sort((a, b) => b[0] - a[0]);
+      if (days.length === 0 && meta.lastReadAt === 0 && meta.peerReadAt === 0) continue;
+      const kept = days.slice(0, MAX_DIGEST_DAYS);
+      convs.push({
+        p: peer,
+        lr: meta.lastReadAt,
+        pr: meta.peerReadAt,
+        from: kept.length < days.length ? kept[kept.length - 1][0] : 0,
+        b: kept.map(([day, hash]) => `${day}:${hash}`).join(','),
+      });
+    }
+    const parts: Array<{ peers: unknown[]; convs: DigestConversation[] }> = [];
+    let current = { peers: [] as unknown[], convs: [] as DigestConversation[] };
+    let size = 0;
+    const add = (kind: 'peers' | 'convs', entry: unknown) => {
+      const length = utf8Length(JSON.stringify(entry)) + 1;
+      if (size + length > MAX_SEALED_ITEM_BYTES - 400 && size > 0) {
+        parts.push(current);
+        current = { peers: [], convs: [] };
+        size = 0;
+      }
+      (current[kind] as unknown[]).push(entry);
+      size += length;
+    };
+    for (const entry of peers) add('peers', entry);
+    for (const entry of convs) add('convs', entry);
+    parts.push(current);
+    const total = Math.min(parts.length, MAX_DIGEST_PARTS);
+    return parts.slice(0, total).map((part, index) =>
+      this.selfItem('digest', {
+        device: this.device,
+        seq,
+        part: index,
+        parts: total,
+        cont,
+        for: forDevice,
+        peers: part.peers,
+        convs: part.convs,
+      }, 'signal'));
+  }
+
+  private receiveSelfHello(data: Record<string, unknown>): DmDispatch {
+    const device = typeof data.device === 'string' && isDmId(data.device) ? data.device : null;
+    if (!device || device === this.device) return {};
+    const reply: DmRelayItem[] = [];
+    if (data.reply !== true) {
+      reply.push(this.selfItem('hello-self', { device: this.device, reply: true, prof: this.profileSummary() }, 'signal'));
+      reply.push(...this.digestItems(false, null));
+    }
+    const prof = isRecord(data.prof) ? data.prof : {};
+    const theirNicknameAt = typeof prof.na === 'number' ? prof.na : 0;
+    const theirAvatarAt = typeof prof.aa === 'number' ? prof.aa : 0;
+    if (typeof prof.n === 'string' && this.mergeOwnProfile({ nickname: prof.n, nicknameAt: theirNicknameAt }, 0)) {
+      this.saveState();
+      this.onEvent({ type: 'self-profile', profile: { ...this.state.profile } });
+    }
+    const mine = this.state.profile;
+    const theirAvatarHash = typeof prof.ah === 'string' ? prof.ah : '';
+    const avatarBehind = mine.avatarAt > theirAvatarAt
+      || (mine.avatarAt === theirAvatarAt && mine.avatarAt > 0 && theirAvatarHash !== profileHash('', mine.avatar));
+    if (avatarBehind || mine.nicknameAt > theirNicknameAt) {
+      const key = `${mine.nicknameAt}:${mine.avatarAt}`;
+      const now = this.now();
+      const last = this.profileSentTo.get(device);
+      if (!last || last.key !== key || now - last.at >= SELF_REPEAT_WINDOW_MS) {
+        this.profileSentTo.set(device, { key, at: now });
+        reply.push(this.selfProfileItem());
+      }
+    }
+    return reply.length > 0 ? { reply } : {};
+  }
+
+  private receiveSelfProfile(data: Record<string, unknown>): DmDispatch {
+    const changed = this.mergeOwnProfile({
+      nickname: typeof data.nickname === 'string' ? data.nickname : undefined,
+      nicknameAt: typeof data.nicknameAt === 'number' ? data.nicknameAt : 0,
+      avatar: typeof data.avatar === 'string' || data.avatar === null ? data.avatar : undefined,
+      avatarAt: typeof data.avatarAt === 'number' ? data.avatarAt : 0,
+    }, 0);
+    if (changed) {
+      this.saveState();
+      this.scheduleSnapshot();
+      this.onEvent({ type: 'self-profile', profile: { ...this.state.profile } });
+    }
+    return {};
+  }
+
+  private receiveDigest(data: Record<string, unknown>): DmDispatch {
+    const device = typeof data.device === 'string' && isDmId(data.device) ? data.device : null;
+    if (!device || device === this.device || !isDmId(data.seq)) return {};
+    if (typeof data.for === 'string' && data.for !== this.device) return {};
+    const parts = typeof data.parts === 'number' && Number.isSafeInteger(data.parts) ? data.parts : 0;
+    const part = typeof data.part === 'number' && Number.isSafeInteger(data.part) ? data.part : -1;
+    if (parts < 1 || parts > MAX_DIGEST_PARTS || part < 0 || part >= parts) return {};
+    const now = this.now();
+    for (const [key, pending] of this.pendingDigests) {
+      if (now - pending.at > PENDING_DIGEST_TTL_MS) this.pendingDigests.delete(key);
+    }
+    const key = `${device}:${data.seq}`;
+    let pending = this.pendingDigests.get(key);
+    if (!pending) {
+      pending = { parts: new Array(parts).fill(undefined), received: 0, at: now };
+      this.pendingDigests.set(key, pending);
+    }
+    // A digest arrives once per shared server; the copies after the first are ignored.
+    if (pending.received < 0 || pending.parts.length !== parts || pending.parts[part]) return {};
+    pending.parts[part] = data;
+    pending.received += 1;
+    if (pending.received < parts) return {};
+    const complete = pending.parts;
+    pending.parts = [];
+    pending.received = -1;
+
+    const cont = data.cont === true;
+    let repeat = false;
+    if (cont) {
+      const rounds = (this.digestRounds.get(device) ?? 0) + 1;
+      if (rounds > MAX_HISTORY_ROUNDS) return {};
+      this.digestRounds.set(device, rounds);
+    } else {
+      // The same state seen again shortly after (another shared server) only gets what changed since.
+      const hash = createHash('sha256')
+        .update(JSON.stringify(complete.map((body) => [body?.peers, body?.convs])))
+        .digest('hex');
+      const last = this.lastDigest.get(device);
+      repeat = !!last && last.hash === hash && now - last.at < SELF_REPEAT_WINDOW_MS;
+      if (!repeat) {
+        this.lastDigest.set(device, { hash, at: now });
+        this.digestRounds.set(device, 0);
+        this.pushedDays.set(device, new Set());
+      }
+    }
+
+    const theirPeers = new Map<string, { relationAt: number; blockedAt: number }>();
+    const convs: DigestConversation[] = [];
+    for (const body of complete) {
+      for (const entry of Array.isArray(body?.peers) ? body.peers : []) {
+        if (!Array.isArray(entry) || !isIdentityPublicKey(entry[0])) continue;
+        theirPeers.set(normalizeIdentityKey(entry[0]), {
+          relationAt: typeof entry[1] === 'number' ? entry[1] : 0,
+          blockedAt: typeof entry[2] === 'number' ? entry[2] : 0,
+        });
+      }
+      for (const entry of Array.isArray(body?.convs) ? body.convs : []) {
+        if (!isRecord(entry) || !isIdentityPublicKey(entry.p)) continue;
+        const peer = normalizeIdentityKey(entry.p);
+        if (peer === this.me) continue;
+        convs.push({
+          p: peer,
+          lr: typeof entry.lr === 'number' ? entry.lr : 0,
+          pr: typeof entry.pr === 'number' ? entry.pr : 0,
+          from: typeof entry.from === 'number' ? entry.from : 0,
+          b: typeof entry.b === 'string' ? entry.b : '',
+        });
+      }
+    }
+
+    const reply: DmRelayItem[] = [];
+    if (!cont && !repeat) {
+      // The friend sync in their hello only says what they have; here we learn what they lack.
+      const behind = Object.values(this.state.peers).some((record) => {
+        if (record.relationUpdatedAt <= 0 && record.blockedUpdatedAt <= 0) return false;
+        const theirs = theirPeers.get(record.publicKey);
+        return !theirs || theirs.relationAt < record.relationUpdatedAt || theirs.blockedAt < record.blockedUpdatedAt;
+      });
+      if (behind) reply.push(...this.syncItems());
+    }
+    if (!cont) this.applyReadMarkers(convs);
+    reply.push(...this.historyFor(device, convs));
+    return reply.length > 0 ? { reply } : {};
+  }
+
+  private applyReadMarkers(convs: DigestConversation[]): void {
+    const limit = this.now() + MAX_CLOCK_SKEW_MS;
+    let dirty = false;
+    for (const conv of convs) {
+      if (!this.state.peers[conv.p]) continue;
+      const meta = this.meta(conv.p);
+      const lastReadAt = Math.min(conv.lr, limit);
+      const peerReadAt = Math.min(conv.pr, limit);
+      if (lastReadAt > meta.lastReadAt) {
+        meta.lastReadAt = lastReadAt;
+        this.refreshMeta(conv.p);
+        dirty = true;
+      }
+      if (peerReadAt > meta.peerReadAt) {
+        meta.peerReadAt = peerReadAt;
+        dirty = true;
+      }
+    }
+    if (dirty) this.changed();
+  }
+
+  /** Days of history the other device lacks or holds differently, newest first, within one response budget. */
+  private historyFor(device: string, convs: DigestConversation[]): DmRelayItem[] {
+    const pushed = this.pushedDays.get(device) ?? new Set<string>();
+    this.pushedDays.set(device, pushed);
+    const remote = new Map(convs.map((conv) => [conv.p, conv]));
+    const peers = Object.keys(this.state.conversations)
+      .filter((peer) => !!this.state.peers[peer])
+      .sort((a, b) => (this.state.conversations[b]?.lastMessageAt ?? 0) - (this.state.conversations[a]?.lastMessageAt ?? 0));
+    const bodies: Array<Record<string, unknown>> = [];
+    let total = 0;
+    let more = false;
+    outer: for (const peer of peers) {
+      const local = this.dayBuckets(peer);
+      if (local.size === 0) continue;
+      const theirs = remote.get(peer);
+      const theirBuckets = new Map<number, string>();
+      for (const pair of (theirs?.b ?? '').split(',')) {
+        const [day, hash] = pair.split(':');
+        if (day && hash) theirBuckets.set(Number(day), hash);
+      }
+      const from = theirs?.from ?? 0;
+      const days = [...local.keys()]
+        .filter((day) => day >= from && theirBuckets.get(day) !== local.get(day) && !pushed.has(`${peer}:${day}:${local.get(day)}`))
+        .sort((a, b) => b - a);
+      if (days.length === 0) continue;
+      const byDay = new Map<number, StoredMessage[]>();
+      for (const message of this.conversation(peer).messages) {
+        const day = Math.floor(message.createdAt / DAY_MS);
+        const list = byDay.get(day);
+        if (list) list.push(message);
+        else byDay.set(day, [message]);
+      }
+      const nickname = this.state.peers[peer]?.nickname ?? '';
+      let batch: unknown[] = [];
+      let batchSize = 0;
+      const flush = () => {
+        if (batch.length === 0) return;
+        bodies.push({ peer, nickname, from: this.device, for: device, msgs: batch });
+        total += batchSize;
+        batch = [];
+        batchSize = 0;
+      };
+      for (const day of days) {
+        if (total + batchSize >= MAX_HISTORY_RESPONSE_BYTES) {
+          more = true;
+          flush();
+          break outer;
+        }
+        pushed.add(`${peer}:${day}:${local.get(day)}`);
+        for (const message of byDay.get(day) ?? []) {
+          const wire = {
+            id: message.id,
+            author: message.author,
+            content: message.content,
+            createdAt: message.createdAt,
+            editedAt: message.editedAt,
+            deleted: message.deleted,
+            replyTo: message.replyTo,
+            reactions: message.reactions,
+            attachments: message.attachments.map(({ fileId, name, size, mime, sha256 }) => ({ fileId, name, size, mime, sha256 })),
+          };
+          const length = utf8Length(JSON.stringify(wire)) + 1;
+          if (length > MAX_SEALED_ITEM_BYTES - 2_000) continue;
+          if (batchSize + length > MAX_SEALED_ITEM_BYTES - 2_000) flush();
+          batch.push(wire);
+          batchSize += length;
+        }
+      }
+      flush();
+    }
+    // The last part asks for another digest so the rest follows in the next round.
+    if (more && bodies.length > 0) bodies[bodies.length - 1].more = true;
+    return bodies.map((body) => this.selfItem('hist', body, 'signal'));
+  }
+
+  /** Merges history another own device sent: union of messages, deletes win, edits and reactions by timestamp. */
+  private receiveHistory(data: Record<string, unknown>): DmDispatch {
+    if (!isIdentityPublicKey(data.peer) || !Array.isArray(data.msgs)) return {};
+    const peer = normalizeIdentityKey(data.peer);
+    if (peer === this.me) return {};
+    if (!this.state.peers[peer]) this.ensurePeer(peer, typeof data.nickname === 'string' ? data.nickname : undefined);
+    const limit = this.now() + MAX_CLOCK_SKEW_MS;
+    const meta = this.meta(peer);
+    const changedMessages: StoredMessage[] = [];
+    let inserted = false;
+    for (const raw of data.msgs.slice(0, 2000)) {
+      if (!isRecord(raw) || !isDmId(raw.id) || !isIdentityPublicKey(raw.author)) continue;
+      const author = normalizeIdentityKey(raw.author);
+      if (author !== this.me && author !== peer) continue;
+      const createdAt = typeof raw.createdAt === 'number' && Number.isFinite(raw.createdAt) ? Math.min(raw.createdAt, limit) : 0;
+      const editedAt = typeof raw.editedAt === 'number' && Number.isFinite(raw.editedAt) ? Math.min(raw.editedAt, limit) : null;
+      const deleted = raw.deleted === true;
+      const content = typeof raw.content === 'string' ? raw.content.slice(0, DM_MAX_MESSAGE_LENGTH) : '';
+      const reactions: StoredReactions = {};
+      if (isRecord(raw.reactions)) {
+        for (const [emojiRaw, users] of Object.entries(raw.reactions).slice(0, 200)) {
+          const emoji = emojiRaw.trim().slice(0, MAX_EMOJI_LENGTH);
+          if (!emoji || !isRecord(users)) continue;
+          for (const [userRaw, value] of Object.entries(users)) {
+            if (!isIdentityPublicKey(userRaw) || !isRecord(value) || typeof value.ts !== 'number') continue;
+            const user = normalizeIdentityKey(userRaw);
+            if (user !== this.me && user !== peer) continue;
+            (reactions[emoji] ??= {})[user] = { on: value.on === true, ts: Math.min(value.ts, limit) };
+          }
+        }
+      }
+      const existing = this.findMessage(peer, raw.id);
+      if (!existing) {
+        const attachments = deleted
+          ? []
+          : (Array.isArray(raw.attachments) ? raw.attachments.slice(0, DM_MAX_ATTACHMENTS) : [])
+              .map((entry) => sanitizeAttachmentMeta(entry))
+              .filter((entry): entry is AttachmentMeta => !!entry)
+              .map<StoredAttachment>((file) => {
+                const local = this.store.hasAttachment(file.fileId);
+                const state: DmAttachmentState = local ? (author === this.me ? 'local' : 'ready') : 'unavailable';
+                return { ...file, state, receivedBytes: local ? file.size : 0 };
+              });
+        if (!deleted && !content && attachments.length === 0) continue;
+        const message: StoredMessage = {
+          id: raw.id,
+          author,
+          content: deleted ? '' : content,
+          createdAt,
+          editedAt: deleted ? null : editedAt,
+          deleted,
+          replyTo: isDmId(raw.replyTo) ? raw.replyTo : null,
+          reactions: deleted ? {} : reactions,
+          attachments,
+          delivery: author === this.me ? 'delivered' : null,
+        };
+        if (!this.insertMessage(peer, message)) continue;
+        this.observeStamp(createdAt);
+        if (author === this.me) meta.lastReadAt = Math.max(meta.lastReadAt, createdAt);
+        changedMessages.push(message);
+        inserted = true;
+        continue;
+      }
+      if (existing.author !== author) continue;
+      let dirty = false;
+      if (deleted && !existing.deleted) {
+        this.markDeleted(existing);
+        dirty = true;
+      } else if (!existing.deleted && !deleted && editedAt !== null && (existing.editedAt === null || editedAt > existing.editedAt)) {
+        existing.content = content;
+        existing.editedAt = editedAt;
+        dirty = true;
+      }
+      if (!existing.deleted) {
+        for (const [emoji, users] of Object.entries(reactions)) {
+          for (const [user, value] of Object.entries(users)) {
+            if (this.applyReaction(existing, user, emoji, value.on, value.ts)) dirty = true;
+          }
+        }
+      }
+      if (dirty) changedMessages.push(existing);
+    }
+    if (changedMessages.length > 0) {
+      if (inserted) meta.hidden = false;
+      this.refreshMeta(peer);
+      this.changed(peer);
+      this.emitMessages(peer, changedMessages);
+    }
+    if (data.more === true && typeof data.from === 'string' && isDmId(data.from) && data.for === this.device) {
+      return { reply: this.digestItems(true, data.from) };
+    }
+    return {};
   }
 
   /**
@@ -1341,11 +1953,26 @@ export class DmService {
         const flush = this.outgoing([peer], true).peers?.[peer] ?? [];
         const reply = [...flush];
         if (data.reply !== true) {
-          reply.push(this.envelopeItem(record, 'hello', { reply: true, maxFileBytes: this.state.settings.maxFileBytes }));
+          reply.push(this.envelopeItem(record, 'hello', this.friendHelloBody(true)));
+        }
+        // Their nickname/avatar changed since we last saw it: ask for the new one.
+        const prof = isRecord(data.prof) ? data.prof : null;
+        if (
+          prof && typeof prof.h === 'string' && typeof prof.at === 'number'
+          && prof.h !== record.profileHash && prof.at > (record.profileAt ?? 0)
+        ) {
+          reply.push(this.envelopeItem(record, 'profile-req', {}));
         }
         this.scheduleSnapshot();
         return { reply };
       }
+      case 'profile-req': {
+        const body = this.friendProfileBody();
+        return body.at > 0 ? { reply: [this.envelopeItem(record, 'profile', body, 'file')] } : {};
+      }
+      case 'profile':
+        this.applyFriendProfile(record, data);
+        return {};
       case 'file-req':
         return { reply: this.serveFile(record, data) };
       case 'file-chunk':
@@ -1508,6 +2135,10 @@ export class DmService {
     if (header.type === 'sync') {
       return this.mergeSync(Array.isArray(data.entries) ? data.entries : []);
     }
+    if (header.type === 'hello-self') return this.receiveSelfHello(data);
+    if (header.type === 'digest') return this.receiveDigest(data);
+    if (header.type === 'hist') return this.receiveHistory(data);
+    if (header.type === 'profile') return this.receiveSelfProfile(data);
     if (header.type === 'self') {
       const op = isRecord(data.op) ? data.op : null;
       if (!op || !isIdentityPublicKey(data.peer)) return {};

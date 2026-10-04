@@ -96,8 +96,19 @@ not replace **Stop watching** when you want to save bandwidth.
 
 Changing pages, using a pop-out window or enabling the overlay does not change
 the screens you chose to watch in the call. Leaving the call or ending the
-source clears that choice; a new broadcast must be selected again. A transport
-reconnection preserves the choice while the same source remains valid.
+source clears that choice; a new broadcast must be selected again. When the
+publisher switches the shared window or screen, you keep watching the new
+source automatically, with the same chosen quality and stage focus, without
+clicking **Watch broadcast** again. This applies to a new source published
+within 15 seconds of the previous one; a second screen that already existed
+never opens on its own. A transport reconnection preserves the choice while
+the same source remains valid.
+
+On Windows, Chrome, Edge and other Chromium-based browsers stop drawing a
+window that another window fully covers, and its broadcast turns gray until
+the window shows again. The picker warns when you choose one of these windows.
+Keep part of it visible, share the entire screen, or disable **Calculate
+window occlusion on Windows** in `chrome://flags`.
 
 On the native path, the last viewer to stop also closes that profile's capture,
 encoder and sending pipeline, including the upload to the SFU.
@@ -519,8 +530,9 @@ preview, screen reception and telemetry; profiles still include voice and camera
 ### Screen reception
 
 **Automatic PiP** is enabled by default under **Quality & sharing**. Leaving
-the stage, switching apps (Alt+Tab) or minimizing Monky opens the focused
-broadcast you are watching in a floating window. With two focused broadcasts,
+the stage, minimizing Monky or hiding it to the tray opens the focused
+broadcast you are watching in a floating window. Merely switching windows or
+apps (Alt+Tab) while Monky stays open on screen does not open PiP. With two focused broadcasts,
 it uses the one focused most recently. Cameras, your own preview and
 broadcasts you have not chosen to watch never open automatically.
 A notification explains the action and where to disable it. PiP survives app
@@ -533,6 +545,11 @@ If you close automatic PiP while away, it stays closed for that absence and
 upon return; leaving again can open it again. Manually opened PiP remains
 open when switching apps, minimizing or restoring the window, including when
 moved to another monitor.
+The PiP window's **Back to tab** button brings Monky back, even when minimized
+or hidden in the tray, and opens the call's stage with the same broadcast
+focused, without restarting playback. **X** only closes PiP and leaves Monky
+where it is. The PiP pause/play button only pauses the picture you see; the
+broadcast stays live.
 
 Under **Settings → Quality & sharing → Screen reception**, choose **Native** or
 **Chromium**. On Windows and macOS, **Native is the default**, using the runtime included

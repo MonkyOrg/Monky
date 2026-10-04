@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { test } from 'node:test';
-import type { DmDispatch, DmEvent, DmRelayItem } from '@monky/shared';
+import { DM_PROFILE_AVATAR_MAX_LENGTH, LIMITS, type DmDispatch, type DmEvent, type DmRelayItem } from '@monky/shared';
 import { DmKeyring, verifyDmCertificate } from '../src/main/dm/dmCrypto';
 import { DmError, DmService, DM_FILE_CHUNK_BYTES } from '../src/main/dm/dmService';
 
@@ -62,6 +62,9 @@ function relay(devices: Device[], origin: Device, dispatch: DmDispatch, budget =
   while (queue.length > 0) {
     assert.ok(budget.left-- > 0, 'relay loop did not converge');
     const { origin: sender, item } = queue.shift()!;
+    // The server refuses bigger items, so the test relay does too.
+    const max = item.kind === 'file' ? LIMITS.DM_RELAY_FILE_DATA_MAX_LENGTH : LIMITS.DM_RELAY_DATA_MAX_LENGTH;
+    assert.ok(item.data.length <= max, `${item.kind} item of ${item.data.length} chars exceeds the relay limit`);
     if (!sender.online) continue;
     for (const device of devices) {
       if (device === sender || !device.online || device.identity.publicKey !== item.to) continue;
@@ -257,6 +260,160 @@ test('own devices sync friends and receive copies of sent messages', () => {
   assert.equal(peer(bob, aliceIdentity)?.relation, 'none');
   assert.equal(bob.service.snapshot().conversations[0].readOnly, true);
   assert.equal(bob.service.getConversation(aliceIdentity.publicKey).messages.length, 2);
+});
+
+/** What two devices must agree on for a conversation to look the same. */
+function history(device: Device, other: Identity) {
+  return device.service.getConversation(other.publicKey, null, 500).messages.map((message) => ({
+    id: message.id,
+    author: message.author,
+    content: message.content,
+    createdAt: message.createdAt,
+    editedAt: message.editedAt,
+    deleted: message.deleted,
+    reactions: message.reactions.map((reaction) => `${reaction.emoji}:${[...reaction.users].sort().join('+')}`).sort(),
+  }));
+}
+
+test('an own device that was offline catches up on friends and full history once both are online', () => {
+  const aliceIdentity = createIdentity();
+  const alice1 = createDevice('Alice', aliceIdentity);
+  const alice2 = createDevice('Alice', aliceIdentity);
+  const bob = createDevice('Bob', createIdentity());
+  const devices = [alice1, alice2, bob];
+  const bobKey = bob.identity.publicKey;
+
+  alice2.online = false;
+  befriend(devices, alice1, bob);
+  relay(devices, alice1, alice1.service.sendMessage({ peer: bobKey, content: 'primeira' }));
+  relay(devices, bob, bob.service.sendMessage({ peer: aliceIdentity.publicKey, content: 'resposta' }));
+  relay(devices, alice1, alice1.service.sendMessage({ peer: bobKey, content: 'vai ser editada' }));
+  relay(devices, alice1, alice1.service.sendMessage({ peer: bobKey, content: 'vai ser apagada' }));
+  const [first, answer, edited, removed] = alice1.service.getConversation(bobKey).messages;
+  relay(devices, alice1, alice1.service.editMessage(bobKey, edited.id, 'editada'));
+  relay(devices, alice1, alice1.service.deleteMessage(bobKey, removed.id));
+  relay(devices, bob, bob.service.react(aliceIdentity.publicKey, first.id, '👍', true));
+  relay(devices, alice1, alice1.service.markRead(bobKey));
+  assert.equal(peer(alice2, bob.identity), undefined);
+
+  const before = alice2.events.length;
+  alice2.online = true;
+  relay(devices, alice2, alice2.service.hello(false));
+  assert.equal(peer(alice2, bob.identity)?.relation, 'friend');
+  assert.deepEqual(history(alice2, bob.identity), history(alice1, bob.identity));
+  assert.equal(history(alice2, bob.identity).length, 4);
+  assert.equal(alice2.service.snapshot().conversations[0].unread, 0, 'read on the other device stays read');
+  assert.ok(!alice2.events.slice(before).some((event) => event.type === 'incoming-message'), 'old history must not notify');
+  const own = alice2.service.getConversation(bobKey).messages.find((message) => message.id === first.id);
+  assert.equal(own?.delivery, 'delivered');
+
+  // Now the other way round: the device that stayed online has news.
+  alice1.online = false;
+  relay(devices, bob, bob.service.sendMessage({ peer: aliceIdentity.publicKey, content: 'só no segundo' }));
+  relay(devices, alice2, alice2.service.react(bobKey, answer.id, '❤️', true));
+  relay(devices, alice2, alice2.service.editMessage(bobKey, edited.id, 'editada de novo'));
+  alice1.online = true;
+  relay(devices, alice1, alice1.service.hello(false));
+  assert.deepEqual(history(alice1, bob.identity), history(alice2, bob.identity));
+  assert.equal(history(alice1, bob.identity).length, 5);
+
+  // The same hello again (a second shared server) sends nothing new.
+  let items = 0;
+  const counted = alice1.service.hello(false);
+  const budget = { left: 5000 };
+  relay(devices, alice1, counted, budget);
+  items = 5000 - budget.left;
+  const again = { left: 5000 };
+  relay(devices, alice1, alice1.service.hello(false), again);
+  assert.ok(5000 - again.left <= items, 'a repeated hello must not resend history');
+});
+
+test('long histories reach another own device over several rounds', () => {
+  let clock = Date.UTC(2024, 0, 1, 12);
+  const now = () => clock;
+  const aliceIdentity = createIdentity();
+  const alice1 = createDevice('Alice', aliceIdentity, undefined, now);
+  const alice2 = createDevice('Alice', aliceIdentity, undefined, now);
+  const bob = createDevice('Bob', createIdentity(), undefined, now);
+  const devices = [alice1, alice2, bob];
+  alice2.online = false;
+  befriend(devices, alice1, bob);
+  const text = 'x'.repeat(2_000);
+  for (let day = 0; day < 12; day += 1) {
+    for (let index = 0; index < 30; index += 1) {
+      clock += 1_000;
+      relay(devices, alice1, alice1.service.sendMessage({ peer: bob.identity.publicKey, content: `${day}-${index}-${text}` }));
+    }
+    clock += 86_400_000;
+  }
+  alice2.online = true;
+  relay(devices, alice2, alice2.service.hello(false), { left: 20_000 });
+  const synced = history(alice2, bob.identity);
+  assert.equal(synced.length, 360);
+  assert.deepEqual(synced, history(alice1, bob.identity));
+});
+
+test('nickname and avatar follow the identity to its other devices, newest wins', () => {
+  const identity = createIdentity();
+  const a1 = createDevice('Alice', identity);
+  const a2 = createDevice('Alice', identity);
+  const devices = [a1, a2];
+  const avatar = `data:image/webp;base64,${Buffer.from('avatar-1').toString('base64')}`;
+
+  a2.online = false;
+  const chosen = a1.service.setSelfProfile({ nickname: 'Alice Nova', nicknameAt: 1_000, avatar, avatarAt: 1_000 });
+  assert.equal(chosen.profile.nickname, 'Alice Nova');
+  relay(devices, a1, chosen.dispatch);
+
+  // A profile saved before the sync existed only seeds; it never beats a real choice.
+  const seeded = a2.service.setSelfProfile({ nickname: 'Alice Velha', nicknameAt: 0 });
+  assert.equal(seeded.profile.nicknameAt, 1);
+  a2.online = true;
+  relay(devices, a2, a2.service.hello(false));
+  const latest = a2.events.filter((event): event is Extract<DmEvent, { type: 'self-profile' }> => event.type === 'self-profile').pop();
+  assert.equal(latest?.profile.nickname, 'Alice Nova');
+  assert.equal(latest?.profile.avatar, avatar);
+  assert.equal(a1.service.setSelfProfile({}).profile.nickname, 'Alice Nova');
+
+  relay(devices, a2, a2.service.setSelfProfile({ nickname: 'Alice Final', nicknameAt: 2_000 }).dispatch);
+  const live = a1.events.filter((event): event is Extract<DmEvent, { type: 'self-profile' }> => event.type === 'self-profile').pop();
+  assert.equal(live?.profile.nickname, 'Alice Final');
+  assert.equal(live?.profile.avatar, avatar);
+
+  const tooBig = `data:image/webp;base64,${'A'.repeat(DM_PROFILE_AVATAR_MAX_LENGTH)}`;
+  assert.equal(a1.service.setSelfProfile({ avatar: tooBig, avatarAt: 3_000 }).profile.avatar, avatar);
+  assert.equal(a1.service.setSelfProfile({ avatar: 'https://example.com/a.png', avatarAt: 3_000 }).profile.avatar, avatar);
+});
+
+test('friends get the profile picture even when it changed while they were away', () => {
+  const alice = createDevice('Alice', createIdentity());
+  const bob = createDevice('Bob', createIdentity());
+  const devices = [alice, bob];
+  befriend(devices, alice, bob);
+  const aliceKey = alice.identity.publicKey;
+
+  const first = `data:image/png;base64,${Buffer.from('foto-1').toString('base64')}`;
+  relay(devices, alice, alice.service.setSelfProfile({ nickname: 'Alice Perfil', nicknameAt: 1_000, avatar: first, avatarAt: 1_000 }).dispatch);
+  assert.equal(peer(bob, alice.identity)?.avatar, first);
+  assert.equal(peer(bob, alice.identity)?.nickname, 'Alice Perfil');
+
+  // What servers show does not replace what the friend chose.
+  bob.service.observePeer({ publicKey: aliceKey, nickname: 'Apelido no servidor', avatar: 'http://host/avatars/x.png' });
+  assert.equal(peer(bob, alice.identity)?.avatar, first);
+  assert.equal(peer(bob, alice.identity)?.nickname, 'Alice Perfil');
+
+  bob.online = false;
+  const second = `data:image/png;base64,${Buffer.from('foto-2').toString('base64')}`;
+  relay(devices, alice, alice.service.setSelfProfile({ avatar: second, avatarAt: 2_000 }).dispatch);
+  assert.equal(peer(bob, alice.identity)?.avatar, first);
+  bob.online = true;
+  relay(devices, alice, alice.service.helloTo(bob.identity.publicKey));
+  assert.equal(peer(bob, alice.identity)?.avatar, second);
+
+  // Up to date: another hello asks for nothing.
+  const budget = { left: 5000 };
+  relay(devices, alice, alice.service.helloTo(bob.identity.publicKey), budget);
+  assert.ok(5000 - budget.left <= 3);
 });
 
 test('blocking is silent and drops requests and messages', () => {

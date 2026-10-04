@@ -67,6 +67,7 @@ export async function listRoles(ctx: CliContext): Promise<void> {
     console.log(`  ${t('label.color')}: ${role.color ?? '-'}`);
     console.log(`  ${t('label.position')}: ${role.position}`);
     console.log(`  ${t('label.permissions')}: ${role.permissions}`);
+    console.log(`  ${t('label.deniedPermissions')}: ${role.deny ?? 0}`);
     console.log(`  ${t('label.isDefault')}: ${formatBool(role.isDefault)}`);
     console.log(`  ${t('label.members')}: ${counts.get(role.id) ?? 0}`);
   }
@@ -104,6 +105,7 @@ export async function createRoleInteractive(ctx: CliContext, args: string[]): Pr
     color: roleColor,
     position: Date.now(),
     permissions,
+    deny: 0,
     isDefault: false,
     createdAt: Date.now(),
   };

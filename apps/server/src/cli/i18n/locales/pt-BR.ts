@@ -199,7 +199,7 @@ export const ptBR = {
   'roles.deleted': 'Cargo {name} removido com sucesso.',
   'roles.selectToRemove': 'Selecione o cargo para remover:',
   'roles.selectToAssign': 'Selecione o cargo para atribuir:',
-  'roles.permissionsLabel': 'Permissões do cargo:',
+  'roles.permissionsLabel': 'Permissões que o cargo permite (as demais herdam de Todos):',
 
   // ── Server Lifecycle ───────────────────────────────────────────────────
   'lifecycle.migratingPm2': 'Migrando o processo PM2 antigo ("monky-server") para o novo formato...',
@@ -340,6 +340,7 @@ export const ptBR = {
   'label.color': 'Cor',
   'label.position': 'Posição',
   'label.permissions': 'Permissões',
+  'label.deniedPermissions': 'Permissões negadas',
   'label.isDefault': 'Cargo padrão',
   'label.members': 'Membros',
   'label.dataDir': 'Pasta de dados',

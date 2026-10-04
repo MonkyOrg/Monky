@@ -44,8 +44,12 @@ export const DM_IPC = {
   saveAttachment: 'dm:save-attachment',
   retryAttachment: 'dm:retry-attachment',
   setSelfNickname: 'dm:set-self-nickname',
+  setSelfProfile: 'dm:set-self-profile',
   pendingPeers: 'dm:pending-peers',
 } as const;
+
+/** Largest avatar (data URL) that travels with the identity and to friends. */
+export const DM_PROFILE_AVATAR_MAX_LENGTH = 120_000;
 
 export const DM_EVENT = 'dm:event';
 
@@ -169,8 +173,34 @@ export interface DmObservedPeer {
   avatar?: string | null;
 }
 
+/**
+ * Nickname and avatar that travel with the identity (own devices and friends).
+ * Each field is last-writer-wins on its own timestamp; 0 means never set.
+ */
+export interface DmSelfProfile {
+  nickname: string;
+  nicknameAt: number;
+  /** Small data URL (WebP) or null. */
+  avatar: string | null;
+  avatarAt: number;
+}
+
+/** Local values the renderer knows, with the time each one was chosen. */
+export interface DmSelfProfileInput {
+  nickname?: string;
+  nicknameAt?: number;
+  avatar?: string | null;
+  avatarAt?: number;
+}
+
+export interface DmSelfProfileResult {
+  profile: DmSelfProfile;
+  dispatch: DmDispatch;
+}
+
 export type DmEvent =
   | { type: 'snapshot'; snapshot: DmSnapshot }
+  | { type: 'self-profile'; profile: DmSelfProfile }
   | { type: 'messages'; peer: string; messages: DmMessageView[]; peerReadAt: number }
   | { type: 'typing'; peer: string }
   | { type: 'incoming-message'; peer: string; message: DmMessageView }
@@ -233,11 +263,13 @@ export interface DmApi {
   typing(peer: string): Promise<DmResult<DmDispatch>>;
   ingest(item: DmIncomingRelayItem): Promise<DmResult<DmDispatch>>;
   outgoing(peers: string[], force?: boolean): Promise<DmResult<DmDispatch>>;
-  hello(toFriends: boolean): Promise<DmResult<DmDispatch>>;
+  /** `announce` (default true) also starts the own-device history/profile exchange. */
+  hello(toFriends: boolean, announce?: boolean): Promise<DmResult<DmDispatch>>;
   helloTo(peer: string): Promise<DmResult<DmDispatch>>;
   pendingPeers(): Promise<DmResult<string[]>>;
   observePeer(peer: DmObservedPeer): Promise<DmResult<void>>;
   setSelfNickname(nickname: string): Promise<DmResult<void>>;
+  setSelfProfile(input: DmSelfProfileInput): Promise<DmResult<DmSelfProfileResult>>;
   updateSettings(settings: Partial<DmSettings>): Promise<DmResult<DmDispatch>>;
   readAttachment(peer: string, messageId: string, fileId: string): Promise<DmResult<DmAttachmentData>>;
   saveAttachment(peer: string, messageId: string, fileId: string): Promise<DmResult<boolean>>;

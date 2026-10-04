@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A transmissão de tela não cai mais quando a imagem precisa se recuperar de uma perda de pacotes enquanto o computador de quem transmite está sob carga.",
+  "en": "Screen broadcasts no longer drop when the picture needs to recover from packet loss while the sharer's computer is under load."
+}

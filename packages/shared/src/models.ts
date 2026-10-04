@@ -207,7 +207,10 @@ export interface Role {
   name: string;
   color: string | null;
   position: number;
+  /** Allowed bits; every bit neither allowed nor denied inherits Everyone. */
   permissions: number;
+  /** Denied bits. Servers before allow/deny roles omit it and send a full switch mask. */
+  deny?: number;
   isDefault: boolean;
 }
 

@@ -5,20 +5,28 @@ const { assertNativeRtcEngineClosed } = require('./nativeRtcCommands.cjs');
 const STARTUP_BITRATE_KBPS = 150;
 const MINIMUM_CAPTURE_BITRATE_KBPS = 50;
 const RECOVERY_REASONS = new Set(['rtc-unconsumed', 'input-expired', 'publication-expired', 'codec-expired', 'clock-sample-uncertain']);
+// Every capture encoder runs with keyint_sec=1, so a real IDR follows within
+// one configured-rate GOP of encoded AUs. Encoders skip frames under CPU load,
+// which stretches that GOP in wall time; the recovery bound therefore counts
+// AUs (three GOPs, tolerating discarded IDRs) instead of elapsed milliseconds.
+const KEYFRAME_INTERVAL_SECONDS = 1;
+const RECOVERY_GOPS = 3;
 
 class LiveSenderFlow {
-  constructor({ engine, sourceId, onError, initialBitrateKbps, now = () => performance.now(), onWritable = () => {} }) {
+  constructor({ engine, sourceId, onError, initialBitrateKbps, fps, now = () => performance.now(), onWritable = () => {} }) {
     assert.equal(typeof engine?.submitEncodedFrame, 'function');
     assert.ok(Number.isSafeInteger(sourceId) && sourceId > 0);
     assert.equal(typeof onError, 'function');
     assert.ok(Number.isInteger(initialBitrateKbps) && initialBitrateKbps >= 50 &&
       initialBitrateKbps <= 80000 && initialBitrateKbps % 50 === 0);
+    assert.ok(Number.isInteger(fps) && fps >= 1 && fps <= 240, 'Live sender requires the configured encoder frame rate.');
     Object.assign(this, { engine, sourceId, onError, now, onWritable });
+    this.recoveryFrameBound = fps * KEYFRAME_INTERVAL_SECONDS * RECOVERY_GOPS;
     this.demand = false; this.connected = false; this.needsIdr = true; this.paused = false;
     this.capturePaused = false;
     this.currentKbps = initialBitrateKbps; this.desiredKbps = initialBitrateKbps; this.lastUpdateAt = -Infinity;
     this.applyingKbps = null;
-    this.feedbackSequence = 0; this.waitingSince = null; this.peakRtcArrivalFps = null;
+    this.feedbackSequence = 0; this.awaitedFrames = null; this.peakRtcArrivalFps = null;
     this.counts = { observed: 0, admitted: 0, notWatched: 0, pausedPackets: 0, awaitingIdr: 0,
       bitrateSettingsUpdates: 0, keyframeRequests: 0, actualIdrsAdmitted: 0, cancelledFeedbackRequests: 0,
       nativeCopiesReleased: 0, inputBackpressure: 0, nativeRecoveryRequests: 0, nativeRecoveryRejections: 0,
@@ -36,17 +44,17 @@ class LiveSenderFlow {
   }
   setDemand(value) {
     assert.equal(typeof value, 'boolean');
-    if (this.demand !== value) { this.needsIdr = true; this.waitingSince = null; }
+    if (this.demand !== value) { this.needsIdr = true; this.awaitedFrames = null; }
     this.demand = value;
   }
   setConnected(value) {
     assert.equal(typeof value, 'boolean');
-    if (this.connected !== value) { this.needsIdr = true; this.waitingSince = null; }
+    if (this.connected !== value) { this.needsIdr = true; this.awaitedFrames = null; }
     this.connected = value;
   }
   setCapturePaused(value) {
     assert.equal(typeof value, 'boolean');
-    if (this.capturePaused !== value) { this.needsIdr = true; this.waitingSince = null; }
+    if (this.capturePaused !== value) { this.needsIdr = true; this.awaitedFrames = null; }
     this.capturePaused = value;
   }
   feedback(event) {
@@ -63,7 +71,7 @@ class LiveSenderFlow {
         assert.ok(Number.isSafeInteger(data.frameId) && data.frameId > 0);
         assert.ok(Number.isSafeInteger(data.generation) && data.generation > 0);
         this.counts.nativeRecoveryRequests++; this.lastRecovery = { ...data };
-        this.needsIdr = true; this.waitingSince ??= this.now();
+        this.needsIdr = true; this.awaitedFrames ??= 0;
       }
       // A receiver PLI does not invalidate the publisher's existing picture chain.
       this.requestIdr();
@@ -79,7 +87,7 @@ class LiveSenderFlow {
     if (data.kind === 'encoder-closed' && data.bitrateBps === 0 && !data.paused) {
       // A new codec is initialized by its first frame. No remaining encoder is
       // not a zero-rate network allocation; retain the applied setting for IDR bootstrap.
-      this.paused = false; this.needsIdr = true; this.waitingSince = null;
+      this.paused = false; this.needsIdr = true; this.awaitedFrames = null;
       this.desiredKbps = this.applyingKbps ?? this.currentKbps;
       this.lastFeedback = { ...data, hostSelectedKbps: this.desiredKbps };
       return;
@@ -88,7 +96,7 @@ class LiveSenderFlow {
     // Keep real media reaching RTC's pacer while it has a positive allocation.
     // The encoder's property minimum must not become a network pause/floor.
     const paused = data.paused || data.bitrateBps === 0;
-    if (paused !== this.paused) { this.needsIdr = true; this.waitingSince = null; }
+    if (paused !== this.paused) { this.needsIdr = true; this.awaitedFrames = null; }
     this.paused = paused;
     if (!paused) {
       // Stock AMF Flush/ReInit is costly. Keep 10% headroom and require a
@@ -157,18 +165,18 @@ class LiveSenderFlow {
       return;
     }
     if (this.closing || !this.connected || !this.demand) {
-      this.counts.observed++; this.counts.notWatched++; this.needsIdr = true; this.waitingSince = null; return;
+      this.counts.observed++; this.counts.notWatched++; this.needsIdr = true; this.awaitedFrames = null; return;
     }
     assert.deepEqual(this.errors, [], 'Live source admission follows an earlier failure.');
     if (this.capturePaused) {
-      this.counts.observed++; this.counts.sourcePausedPackets++; this.needsIdr = true; this.waitingSince = null; return;
+      this.counts.observed++; this.counts.sourcePausedPackets++; this.needsIdr = true; this.awaitedFrames = null; return;
     }
     if (this.paused) {
-      this.counts.observed++; this.counts.pausedPackets++; this.needsIdr = true; this.waitingSince = null; return;
+      this.counts.observed++; this.counts.pausedPackets++; this.needsIdr = true; this.awaitedFrames = null; return;
     }
     if (this.needsIdr && !frame.keyframe) {
-      this.waitingSince ??= this.now();
-      assert.ok(this.now() - this.waitingSince <= 1500, 'No real IDR arrived within the live recovery bound.');
+      this.awaitedFrames = (this.awaitedFrames ?? 0) + 1;
+      assert.ok(this.awaitedFrames <= this.recoveryFrameBound, 'No real IDR arrived within the live recovery bound.');
       this.counts.observed++; this.counts.awaitingIdr++; return;
     }
     if (this.inFlight.size === 16) { this.counts.inputBackpressure++; return false; }
@@ -204,8 +212,9 @@ class LiveSenderFlow {
   rejectFrame(frame, error) {
     if (error.code === 'ERR_RTC_ENCODED_RECOVERY' && error.status === 8) {
       this.counts.observed++; this.counts.nativeRecoveryRejections++;
-      this.needsIdr = true; this.waitingSince ??= this.now();
-      assert.ok(this.now() - this.waitingSince <= 1500, 'Native input did not recover through a fresh IDR within1500ms.');
+      this.needsIdr = true; this.awaitedFrames = (this.awaitedFrames ?? 0) + 1;
+      assert.ok(this.awaitedFrames <= this.recoveryFrameBound,
+        'Native input did not recover through a fresh IDR within the live recovery bound.');
       this.requestIdr();
       return;
     }
@@ -218,7 +227,7 @@ class LiveSenderFlow {
     assert.equal(result.sourceId, this.sourceId); assert.equal(result.networkDeliveryConfirmed, false);
     this.inFlight.add(frame.frameId);
     this.counts.observed++; this.counts.admitted++; if (frame.keyframe) this.counts.actualIdrsAdmitted++;
-    this.needsIdr = false; this.waitingSince = null;
+    this.needsIdr = false; this.awaitedFrames = null;
   }
   released(event) {
     assert.equal(event.target, this.sourceId); assert.equal(event.data.sourceId, this.sourceId);
@@ -244,7 +253,8 @@ class LiveSenderFlow {
   }
   snapshot() {
     return { ...this.counts, demand: this.demand, connected: this.connected, paused: this.paused, capturePaused: this.capturePaused,
-      awaitingRealIdr: this.needsIdr, currentSettingsKbps: this.currentKbps, desiredSettingsKbps: this.desiredKbps,
+      awaitingRealIdr: this.needsIdr, awaitedRecoveryFrames: this.awaitedFrames ?? 0,
+      recoveryFrameBound: this.recoveryFrameBound, currentSettingsKbps: this.currentKbps, desiredSettingsKbps: this.desiredKbps,
       bitratePolicy: { targetHeadroomPercent: 10, minimumIncreasePercent: 10 },
       feedback: this.lastFeedback ?? null, errors: [...this.errors], queuedJavaScriptFrames: 0,
       peakRtcArrivalFps: this.peakRtcArrivalFps,

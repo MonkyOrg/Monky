@@ -47,6 +47,7 @@ import { userContextMenu } from './UserContextMenu';
 import { soundboardModal } from './SoundboardModal';
 import { soundEffects } from '../core/SoundEffects';
 import { getAvatarUrl, toAbsoluteServerIconUrl } from '../utils/avatar';
+import { ownAvatarSource } from '../core/profileSync';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
 import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
 import { serverRailView } from './ServerRailView';
@@ -427,7 +428,7 @@ export class MainView {
     appEvents.emit('stage.visibility_changed', false);
 
     const nickname = connectionStore.savedNickname.trim() || t('home.defaultNickname');
-    const avatar = connectionStore.savedAvatarBase64 || serverStore.currentUser?.avatarUrl || null;
+    const avatar = ownAvatarSource();
     const moderation = getVoiceControlModeration();
     const markup = `
       <div class="main-layout main-layout--home">
@@ -2707,6 +2708,13 @@ export class MainView {
       serverRailView.render();
     });
 
+    // PiP "back to tab" returns to the call it was showing, even from another server.
+    const u9b = appEvents.on('screen_pip.return_to_call', (call: { sessionKey: string; channelId: string }) => {
+      if (voiceStore.voiceSessionKey === call.sessionKey && voiceStore.currentVoiceChannelId === call.channelId) {
+        this.openVoiceStage();
+      }
+    });
+
     const u10 = appEvents.on('settings.updated', () => {
       const btnRnnoise = document.getElementById('sidebar-btn-rnnoise');
       if (btnRnnoise) {
@@ -2762,7 +2770,7 @@ export class MainView {
     const u21 = appEvents.on('network.status', () => this.refreshServerMonitorVisibility());
     const u22 = appEvents.on('voice.screen_watch_changed', () => this.updateScreenShareNotice());
 
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u7b, u7c, u7d, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22);
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u7b, u7c, u7d, u8, u9, u9b, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22);
   }
 
   /** True when the channel's conversation is currently visible on screen (#14). */

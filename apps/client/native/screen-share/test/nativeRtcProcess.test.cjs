@@ -149,7 +149,7 @@ test('video admission waits for the native acknowledgement without a JavaScript 
   await engine.ready;
   let writable;
   const canWrite = new Promise(resolve => { writable = resolve; });
-  const flow = new LiveSenderFlow({ engine, sourceId: 2, initialBitrateKbps: 1000,
+  const flow = new LiveSenderFlow({ engine, sourceId: 2, initialBitrateKbps: 1000, fps: 60,
     onError: assert.fail, onWritable: writable });
   flow.setDemand(true); flow.setConnected(true);
   const frame = { frameId: 1, data: Buffer.alloc(32), keyframe: true };

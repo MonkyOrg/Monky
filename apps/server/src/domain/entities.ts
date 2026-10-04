@@ -155,7 +155,10 @@ export interface RoleRecord {
   name: string;
   color: string | null;
   position: number;
+  /** Allowed bits; bits neither allowed nor denied inherit Everyone. */
   permissions: number;
+  /** Denied bits, 0 when omitted. */
+  deny?: number;
   isDefault: boolean;
   createdAt: number;
 }

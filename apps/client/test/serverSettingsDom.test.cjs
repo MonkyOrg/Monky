@@ -172,7 +172,7 @@ async function* runRegression(language, sharedModule) {
   };
   const member = (id) => ({ id, clientId: `${id}-key`, sessionId: `${id}-session`, nickname: id, status: 'ONLINE', joinedAt: 1 });
   const store = new stores.ServerStore();
-  const role = { id: 'editors', serverId: 'server-a', name: 'Editors', color: '#5865f2', position: 1, permissions: 16, isDefault: false, createdAt: 1 };
+  const role = { id: 'editors', serverId: 'server-a', name: 'Editors', color: '#5865f2', position: 1, permissions: 16, deny: 0, isDefault: false, createdAt: 1 };
   const botInfo = (overrides = {}) => ({
     id: 'bot-a',
     name: 'Helper',
@@ -209,7 +209,7 @@ async function* runRegression(language, sharedModule) {
     turnAvailability: { supported: false, reason: 'not-installed', autoInstallable: true },
     allowSoundboard: true, recentSoundCacheEnabled: true, recentSoundCacheLimit: 20, dmRelayEnabled: true,
     allowEveryoneMention: true, allowMessageEdit: true, showRoleBadgesToEveryone: true,
-    messageDeleteUndoSeconds: 60, protocol: { version: 36, minimumVersion: 35, features: ['message-delete-undo', 'recent-sounds', 'dm-relay'] },
+    messageDeleteUndoSeconds: 60, protocol: { version: 36, minimumVersion: 35, features: ['message-delete-undo', 'recent-sounds', 'dm-relay', 'role-deny'] },
     channels: [], members: [member('admin'), member('bob')],
     knownMembers: [member('admin'), member('bob'), { ...member('carol'), status: 'DISCONNECTED' }, { ...member('helper'), isBot: true }],
     voiceStates: {}, roles: [role], userRoles: [], ownerId: 'admin', myPermissions: 0xFFFFFFFF,
@@ -689,22 +689,48 @@ async function* runRegression(language, sharedModule) {
   const normalPanelStyle = getComputedStyle(field('#role-editor-tab-permissions'));
   check(normalPanelStyle.display === everyoneDisplay && normalPanelStyle.gap === everyoneGap,
     'Normal roles and Everyone use the same permission panel layout and spacing');
+  const roleStates = (permission) => field(`[data-role-editor] .role-permission-states:has([data-role-permission-bit="${permission}"])`);
+  const selectedState = (permission) =>
+    field(`[data-role-editor] [data-role-permission-bit="${permission}"].selected`)?.dataset.permissionState;
+  check(!field('[data-role-editor] .role-permission-switch'), 'Normal roles do not use Everyone on/off switches');
   for (const permission of [Permission.MANAGE_BOTS, Permission.USE_BOT_COMMANDS, Permission.VIEW_SERVER_MONITOR]) {
-    check(!!field(`[data-role-editor] .role-permission-switch[data-permission="${permission}"]`)?.closest('.permission-switch'),
-      `The opened role editor exposes permission ${permission} as a themed switch`);
+    const states = roleStates(permission);
+    check(states?.getAttribute('role') === 'radiogroup' &&
+      [...states.querySelectorAll('[role="radio"]')].map(button => button.dataset.permissionState).join() === 'deny,inherit,allow',
+      `The opened role editor exposes permission ${permission} as Deny/Inherit/Allow`);
   }
-  check(field(`[data-role-editor] .role-permission-switch[data-permission="${Permission.VIEW_SERVER_MONITOR}"]`)
-    .closest('label').getAttribute('aria-label') === t('permissions.viewServerMonitor'),
+  check(selectedState(Permission.SPEAK) === 'allow' && selectedState(Permission.MANAGE_BOTS) === 'inherit',
+    'Role permission states reflect the stored allow and inherit bits');
+  check(roleStates(Permission.VIEW_SERVER_MONITOR).getAttribute('aria-label') === t('permissions.viewServerMonitor'),
     'The monitor permission in the actual role dialog has a localized accessible label');
-  const managementCopy = field('.role-permission-switch[data-permission="8192"]').closest('div').textContent;
+  check(field('[data-role-editor] #role-editor-tab-permissions').textContent.includes(t('roles.permissionStatesHint')),
+    'Normal roles explain how Inherit, Allow and Deny combine with Everyone');
+  const managementCopy = roleStates(8192).parentElement.textContent;
   check(managementCopy.includes(t('permissions.manageBotsDesc')) && managementCopy.includes('token') &&
     !/editar o perfil|editing their profiles/i.test(managementCopy),
   'MANAGE_BOTS permission copy no longer claims admins can edit bot profiles');
-  change('.role-permission-switch[data-permission="32"]', true);
+  field('[data-role-editor] [data-role-permission-bit="32"][data-permission-state="allow"]').click();
   await flush();
-  check(pendingRequest('ROLE_UPDATE').payload.permissions === 48, 'Permission switches apply only the requested bit against current permissions');
+  check(pendingRequest('ROLE_UPDATE').payload.permissions === 48 && pendingRequest('ROLE_UPDATE').payload.deny === 0,
+    'Allow applies only the requested bit against current role rules');
   acknowledge('ROLE_UPDATE');
   await flush();
+  field('[data-role-editor] [data-role-permission-bit="16"][data-permission-state="deny"]').click();
+  await flush();
+  check(pendingRequest('ROLE_UPDATE').payload.permissions === 32 && pendingRequest('ROLE_UPDATE').payload.deny === 16 &&
+    selectedState(16) === 'deny', 'Deny moves the bit out of the allowed set and into the denied set');
+  acknowledge('ROLE_UPDATE');
+  await flush();
+  field('[data-role-editor] [data-role-permission-bit="16"][data-permission-state="deny"]')
+    .dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+  await flush();
+  check(pendingRequest('ROLE_UPDATE').payload.deny === 0 && selectedState(16) === 'inherit' &&
+    document.activeElement === field('[data-role-editor] [data-role-permission-bit="16"][data-permission-state="inherit"]'),
+    'Arrow keys move between permission states and Inherit clears allow and deny');
+  acknowledge('ROLE_UPDATE');
+  await flush();
+  check(store.getRole('editors').permissions === 32 && store.getRole('editors').deny === 0,
+    'Acknowledged role rules persist in the store');
   field('[data-role-editor-tab="general"]').click();
   field('#role-editor-color').click();
   field('[data-color-preset="#57f287"]').click();
@@ -834,6 +860,8 @@ async function* runRegression(language, sharedModule) {
   field('#btn-role-save').click();
   await flush();
   check(locked(), 'Explicit role creation remains tracked');
+  check(pendingRequest('ROLE_CREATE').payload.permissions === 0 && pendingRequest('ROLE_CREATE').payload.deny === 0,
+    'New roles start with every permission inheriting Everyone');
   acknowledge('ROLE_CREATE');
   await flush();
   check(store.getRole('created-role') && field('[data-role-menu="created-role"]') && !field('[data-role-editor]') && !mainBackdrop().inert,

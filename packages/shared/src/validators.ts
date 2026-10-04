@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { ED25519_SPKI_PUBLIC_KEY_DER_HEX_LENGTH, ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX, LIMITS, PROTOCOL_VERSION } from './constants.js';
-import { CHANNEL_PERMISSIONS, EVERYONE_ROLE_ID, channelPermissionTargetKey } from './permissions.js';
+import { CHANNEL_PERMISSIONS, EVERYONE_ROLE_ID, LEGACY_CHANNEL_PERMISSIONS, channelPermissionTargetKey } from './permissions.js';
 import { protocolOfferSchema } from './protocolCompatibility.js';
 import { screenShareIdSchema, nativeScreenRenditionSchema } from './screenSharing.js';
 export { screenShareIdSchema } from './screenSharing.js';
@@ -262,8 +262,9 @@ export const channelAllowedRoleIdsSchema = z
   .max(100, 'Cargos demais para um canal')
   .transform((ids) => Array.from(new Set(ids)));
 
-const channelPermissionBitsSchema = z.number().int().min(0).max(CHANNEL_PERMISSIONS)
-  .refine(bits => (bits & ~CHANNEL_PERMISSIONS) === 0, 'Permissão não aplicável ao canal');
+const channelPermissionBitsSchema = z.number().int().min(0).max(CHANNEL_PERMISSIONS | LEGACY_CHANNEL_PERMISSIONS)
+  .refine(bits => (bits & ~(CHANNEL_PERMISSIONS | LEGACY_CHANNEL_PERMISSIONS)) === 0, 'Permissão não aplicável ao canal')
+  .transform(bits => (bits & CHANNEL_PERMISSIONS) >>> 0);
 const channelPermissionBits = {
   allow: channelPermissionBitsSchema,
   deny: channelPermissionBitsSchema,
@@ -346,22 +347,29 @@ export const permissionBitsSchema = z
   .min(0, 'Permissões inválidas')
   .max(0xFFFFFFFF, 'Permissões inválidas');
 
+const roleRuleConflict = (role: { permissions?: number; deny?: number }) =>
+  role.permissions === undefined || role.deny === undefined || (role.permissions & role.deny) === 0;
+const roleRuleConflictMessage = 'Uma permissão não pode ser permitida e negada ao mesmo tempo';
+
+/** `permissions` are the allowed bits; without `deny` they are an older client's full switch mask. */
 export const roleCreateSchema = z.object({
   name: roleNameSchema,
   color: roleColorSchema.default(null),
   permissions: permissionBitsSchema,
+  deny: permissionBitsSchema.optional(),
   position: z.number().int().min(0).optional(),
   isDefault: z.boolean().optional().default(false),
-});
+}).refine(roleRuleConflict, roleRuleConflictMessage);
 
 export const roleUpdateSchema = z.object({
   roleId: z.string().min(1, 'Cargo inválido'),
   name: roleNameSchema.optional(),
   color: roleColorSchema,
   permissions: permissionBitsSchema.optional(),
+  deny: permissionBitsSchema.optional(),
   position: z.number().int().min(0).optional(),
   isDefault: z.boolean().optional(),
-});
+}).refine(roleRuleConflict, roleRuleConflictMessage);
 
 export const roleAssignmentSchema = z.object({
   userId: z.string().min(1, 'Usuário inválido'),
