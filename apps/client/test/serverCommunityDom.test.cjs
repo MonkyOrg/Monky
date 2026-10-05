@@ -387,8 +387,10 @@ async function* regression(locale, inviteModule) {
   check(pickerError?.message === 'picker unavailable' && !pickerTrigger.disabled
     && !pickerTrigger.dataset.loading && !pickerTrigger.hasAttribute('aria-busy'),
   'A synchronous native picker failure remains explicit and restores its trigger');
+  // Time-based budget: slow CI runners need more than 100 short polls.
   const until = async predicate => {
-    for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
+    const deadline = performance.now() + 5000;
+    while (performance.now() < deadline) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
     throw new Error('Condition did not become true');
   };
   // Automatic scrolls start from rAF callbacks; slow runners can exceed a fixed quiet window before the first frame.
@@ -2008,7 +2010,9 @@ async function* regression(locale, inviteModule) {
   const createBar = root.querySelector('.forum-create-bar');
   const createHeight = createShell.getBoundingClientRect().height;
   forumSearch.focus();
-  await new Promise(resolve => setTimeout(resolve, 180));
+  // The focused shell grows with a transition; measure it settled instead of after a fixed delay.
+  await until(() => createShell.getBoundingClientRect().height > createHeight + 20);
+  await Promise.allSettled(createShell.getAnimations({ subtree: true }).map(animation => animation.finished));
   const shortcutRect = root.querySelector('.forum-create-shortcut').getBoundingClientRect();
   const shellRect = createShell.getBoundingClientRect();
   check(root.querySelector('.forum-create-shortcut').textContent.includes('Shift')
