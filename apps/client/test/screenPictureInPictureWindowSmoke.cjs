@@ -183,8 +183,9 @@ if (!process.versions.electron) {
     const moved = returning.getBounds();
     assert.deepEqual({ ...moved }, { x: mainArea.x + 40, y: mainArea.y + 40, width: 320, height: 180 });
     await evaluate('window.api.returnFromScreenPictureInPicture()');
-    await untilPage('document.hasFocus()', 'Back to Monky must restore and focus the minimized window');
-    assert.equal(mainWindow.isMinimized(), false);
+    // macOS can report focus before its deminiaturize animation clears isMinimized().
+    await until(async () => !mainWindow.isMinimized() && await evaluate('document.hasFocus()'),
+      'Back to Monky must restore and focus the minimized window');
     await until(() => returning.isDestroyed(), 'The restored window closes automatic PiP');
 
     mainWindow.minimize();
@@ -198,8 +199,8 @@ if (!process.versions.electron) {
     mainWindow.hide();
     await untilPage('!!window.pip', 'Hiding to the tray opens PiP');
     await evaluate('window.api.returnFromScreenPictureInPicture()');
-    await untilPage('document.hasFocus()', 'Back to Monky must show a window hidden in the tray');
-    assert.equal(mainWindow.isVisible(), true);
+    await until(async () => mainWindow.isVisible() && await evaluate('document.hasFocus()'),
+      'Back to Monky must show a window hidden in the tray');
     await untilPage('!window.pip', 'The shown window closes automatic PiP');
 
     await evaluate('window.manualPip = true');
