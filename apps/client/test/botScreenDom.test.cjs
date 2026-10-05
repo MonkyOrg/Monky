@@ -444,6 +444,8 @@ if (!process.versions.electron) {
       window.open(${JSON.stringify(leak + '?popup')});
       try { top.location = ${JSON.stringify(leak + '?top')}; } catch {}
     })()`);
+    // Wait for the allowed image instead of racing it; blocked navigations then get the same window to show up.
+    await waitFor(() => leaks >= requestsBefore + 1, 'the miniapp image request reaches the web');
     await new Promise((resolve) => setTimeout(resolve, 150));
     assert.ok(alice.url.startsWith('monky-miniapp:'));
     assert.equal(aliceWindow.webContents.getURL(), url);
