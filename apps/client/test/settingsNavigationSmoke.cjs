@@ -390,15 +390,25 @@ async function runVersionCopyKeyboardSmoke(window) {
     }
     await evaluate(`document.querySelector(${JSON.stringify(selector)}).blur()`);
     window.webContents.sendInputEvent({ type: 'mouseMove', x: 3, y: 3 });
-    await wait(170);
-    const initial = await evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(selector)})).backgroundColor`);
+    // Compare settled colours: slow runners can render the 140ms transition several frames late.
+    const settledBackground = hover => evaluate(`(async () => {
+      const button = document.querySelector(${JSON.stringify(selector)});
+      const deadline = performance.now() + 3000;
+      while (performance.now() < deadline) {
+        if (button.matches(':hover') === ${hover} && button.getAnimations().length === 0) return getComputedStyle(button).backgroundColor;
+        await new Promise(resolve => setTimeout(resolve, 16));
+      }
+      return { hover: button.matches(':hover'), animations: button.getAnimations().length };
+    })()`);
+    const initial = await settledBackground(false);
+    if (typeof initial !== 'string') throw new Error(`${surface}: version text did not settle without hover: ${JSON.stringify(initial)}`);
     const point = await evaluate(`(() => {
       const rect = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
       return {x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)};
     })()`);
     window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
-    await wait(180);
-    const hovered = await evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(selector)})).backgroundColor`);
+    const hovered = await settledBackground(true);
+    if (typeof hovered !== 'string') throw new Error(`${surface}: version text did not settle under hover: ${JSON.stringify(hovered)}`);
     if (hovered === initial) throw new Error(`${surface}: version text must have a subtle hover affordance`);
     await evaluate(`document.querySelector(${JSON.stringify(selector)}).focus()`);
     // A non-activating key changes input modality without racing Tab's focus move.
