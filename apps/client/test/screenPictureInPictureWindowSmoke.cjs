@@ -31,6 +31,8 @@ if (!process.versions.electron) {
   app.disableHardwareAcceleration();
   app.on('window-all-closed', () => {});
   let mainWindow, other, deadline;
+  // The runner's real cursor is outside the test's control, so the PiP reads this one.
+  let pipCursor = { x: -100000, y: -100000 };
   const finish = code => {
     clearTimeout(deadline);
     for (const window of BrowserWindow.getAllWindows()) window.destroy();
@@ -51,7 +53,9 @@ if (!process.versions.electron) {
     assert.ok(start >= 0 && end > start);
     vm.runInNewContext(ts.transpileModule(file.slice(start, end), {
       compilerOptions: { target: ts.ScriptTarget.ES2022 },
-    }).outputText, { mainWindow, ipcMain, ScreenPictureInPictureWindows });
+    }).outputText, { mainWindow, ipcMain, ScreenPictureInPictureWindows: class extends ScreenPictureInPictureWindows {
+      constructor(owner) { super(owner, Date.now, () => pipCursor); }
+    } });
     const page = path.join(process.env.MONKY_PIP_TEST_PROFILE, 'pip.html');
     fs.writeFileSync(page, '<!doctype html><body style="background:#22252d;color:white">Monky QA: PiP<canvas width="160" height="90"></canvas><video muted autoplay></video></body>');
     await mainWindow.loadFile(page);
@@ -159,11 +163,10 @@ if (!process.versions.electron) {
       `The PiP window paints the broadcast (center BGR ${blue},${green},${red})`);
     assert.equal(await evaluate("getComputedStyle(window.pip.document.documentElement).getPropertyValue('--monky-pip-hover').trim()"), '',
       'Controls start hidden while the cursor is elsewhere');
-    const cursor = screen.getCursorScreenPoint();
-    pip.setBounds({ x: cursor.x - 40, y: cursor.y - 40, width: bounds.width, height: bounds.height });
+    pipCursor = { x: bounds.x + Math.floor(bounds.width / 2), y: bounds.y + Math.floor(bounds.height / 2) };
     await untilPage("getComputedStyle(window.pip.document.documentElement).getPropertyValue('--monky-pip-hover').trim() === '1'",
       'Hovering the PiP window reveals its controls');
-    pip.setBounds(bounds);
+    pipCursor = { x: bounds.x - 1, y: bounds.y - 1 };
     await untilPage("getComputedStyle(window.pip.document.documentElement).getPropertyValue('--monky-pip-hover').trim() === ''",
       'Leaving the PiP window hides its controls');
 

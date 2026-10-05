@@ -41,7 +41,11 @@ export class ScreenPictureInPictureWindows {
   private window: BrowserWindow | null = null;
   private lastBounds: Rectangle | null = null;
 
-  constructor(private readonly owner: BrowserWindow, private readonly now: () => number = Date.now) {
+  constructor(
+    private readonly owner: BrowserWindow,
+    private readonly now: () => number = Date.now,
+    private readonly cursor: () => { x: number; y: number } = () => screen.getCursorScreenPoint(),
+  ) {
     managers.set(owner.webContents, this);
     owner.webContents.on('did-create-window', (window, details) => this.adopt(window, details.frameName));
   }
@@ -129,7 +133,7 @@ export class ScreenPictureInPictureWindows {
     };
     const poll = setInterval(() => {
       if (window.isDestroyed()) return;
-      const inside = window.isVisible() && contains(window.getBounds(), screen.getCursorScreenPoint());
+      const inside = window.isVisible() && contains(window.getBounds(), this.cursor());
       if (inside === hovering) return;
       hovering = inside;
       reveal(inside);
