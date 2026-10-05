@@ -182,7 +182,7 @@ export interface ElectronApi {
   onPttStateChanged: (cb: (active: boolean) => void) => () => void;
   onPttCaptured: (cb: (binding: PttKeyBinding) => void) => () => void;
   minimize: () => Promise<void>;
-  openScreenPictureInPicture: (requestId: string, requireInactive: boolean) => Promise<boolean>;
+  openScreenPictureInPicture: (requestId: string, requireInactive: boolean, aspectRatio: number) => Promise<boolean>;
   returnFromScreenPictureInPicture: () => Promise<void>;
   onWindowInactive: (cb: () => void) => () => void;
   onWindowActive: (cb: () => void) => () => void;
@@ -493,7 +493,8 @@ const api: ElectronApi = {
     };
   },
   minimize: () => ipcRenderer.invoke('window:minimize'),
-  openScreenPictureInPicture: (requestId, requireInactive) => ipcRenderer.invoke('screen-pip:open', requestId, requireInactive),
+  openScreenPictureInPicture: (requestId, requireInactive, aspectRatio) =>
+    ipcRenderer.invoke('screen-pip:open', requestId, requireInactive, aspectRatio),
   returnFromScreenPictureInPicture: () => ipcRenderer.invoke('screen-pip:return'),
   onWindowInactive: (cb) => {
     const listener = () => cb();

@@ -240,9 +240,10 @@ desconecta quem estava na voz; chat, envio de anexos e bots respeitam o mesmo ac
 
 Cada permissão de **Todos**, de um cargo ou de uma pessoa possui três estados:
 **X — Negar**, **— — Herdar** e **✓ — Permitir**. Herdar não concede nem nega;
-mantém o resultado das permissões gerais. Regras de cargos e pessoas
-prevalecem sobre Todos; entre os cargos atribuídos e a regra individual,
-**Negar vence**, independentemente da ordem.
+mantém o resultado das permissões gerais. Regras de cargos prevalecem sobre
+Todos; entre os cargos atribuídos, **Negar vence**, independentemente da ordem.
+A regra individual de uma pessoa vence a dos cargos dela, tanto para permitir
+quanto para negar.
 Donos e administradores mantêm acesso total.
 
 Use **Adicionar cargos e pessoas** para pesquisar e selecionar os alvos no mesmo
@@ -253,7 +254,8 @@ remover sua regra; as alterações só entram em vigor ao salvar.
 Por exemplo, negue **Enviar mensagens** para Todos e permita **Ler mensagens**
 para manter um canal de avisos. Adicione um cargo e permita o envio para que
 somente seus integrantes publiquem. Um segundo cargo com negação explícita
-impede o envio mesmo assim. **Ver canal** é independente de **Ler mensagens**:
+impede o envio mesmo assim, a menos que a pessoa tenha uma regra individual
+que permita. **Ver canal** é independente de **Ler mensagens**:
 retirar apenas a leitura mantém o canal visível, mas remove histórico, resultados
 de busca e notificações de mensagens. Permissões de silenciar/ensurdecer membros
 continuam gerais, pois essas restrições valem para a pessoa em todo o servidor.
@@ -286,24 +288,26 @@ renomear ou excluir Todos. Seus controles gerais são switches de liga/desliga.
 Todos abre o mesmo editor dos cargos comuns, somente com a aba **Permissões**,
 sem as abas **Geral** e **Membros**.
 
-Nos demais cargos, cada permissão tem três estados: **Negar**, **Herdar** e
-**Permitir**. Herdar segue o que está definido em Todos; Permitir concede a
-permissão mesmo que Todos esteja desligado; Negar retira a permissão mesmo que
-Todos esteja ligado. Um cargo novo começa com tudo em Herdar, então só muda o
-que você marcar.
+Nos demais cargos, cada permissão também é um switch de liga/desliga. Ligado
+concede a permissão a quem tem o cargo; desligado não concede nem retira, então
+a pessoa ainda pode recebê-la de Todos ou de outro cargo. Um cargo não consegue
+tirar o que Todos libera: para restringir algo a poucas pessoas, desligue em
+Todos e ligue só nos cargos que devem ter a permissão. Um cargo novo começa com
+tudo desligado, ou seja, com as mesmas permissões de Todos.
 
 Servidores novos não criam o cargo Membro. Sem cargo, a pessoa usa Todos.
-Com vários cargos, as permissões concedidas se somam e qualquer **Negar** vence
-um Permitir de outro cargo. Dono e administradores têm acesso total. O cargo
+Com vários cargos, as permissões se somam: basta um cargo conceder para a
+pessoa ter a permissão. Dono e administradores têm acesso total. O cargo
 Membro antigo sem personalizações é convertido em Todos; cargos personalizados
 ou utilizados em audiências privadas de eventos e ações são preservados.
 
-Na atualização, os cargos que eram switches de liga/desliga são convertidos
-automaticamente: o que coincidia com Todos passa a Herdar, o que estava ligado
-a mais vira Permitir e o que estava desligado vira Negar. Cada cargo mantém o
-mesmo efeito de antes. A diferença está em quem tem vários cargos: antes uma
-permissão só valia se todos os cargos a tivessem; agora as permissões dos
-cargos se somam e apenas um Negar explícito as retira.
+Na atualização, os cargos que usavam **Negar**, **Herdar** e **Permitir**
+voltam a ser switches: Permitir vira ligado, e Herdar e Negar viram desligado.
+Negações em cargos do servidor deixam de existir, então quem só perdia uma
+permissão por causa de um cargo volta a recebê-la de Todos. Para impedir algo
+em um lugar específico, use **Negar** nas permissões do canal ou da categoria.
+Em servidores que ainda usavam switches com a regra antiga, uma permissão só
+valia se todos os cargos da pessoa a tivessem; agora basta um deles.
 
 Essa mudança exige clientes atualizados (protocolo 35 ou posterior). Clientes
 antigos são orientados a atualizar antes de conectar, para que também removam

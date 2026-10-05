@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Quando a janela que você transmite é minimizada ou ocultada, um aviso amarelo na sua prévia do palco mostra que quem assiste vê a imagem parada até você restaurá-la. Antes, a sua prévia dizia, por engano, que a transmissão continuava normal.",
+  "en": "When the window you are sharing is minimized or hidden, a yellow warning on your stage preview now shows that viewers see a frozen picture until you restore it. Before, your preview wrongly said the broadcast was continuing normally."
+}

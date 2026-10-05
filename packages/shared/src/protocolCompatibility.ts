@@ -10,10 +10,11 @@ import { PROTOCOL_VERSION } from './constants.js';
 // Protocol 31 adds mixed categories and the FORUM channel kind.
 // Channel permissions require clients to revoke cached content independently of visibility.
 // Protocol 36 adds the negotiated human-only DM relay.
-// role-deny: roles carry allow/deny over Everyone; clients without it receive legacy full masks.
+// role-deny: 36.1 roles carry allow/deny over Everyone; clients without it receive legacy full masks.
+// role-grants: roles only grant on top of Everyone and add up; clients with only role-deny receive nothing denied.
 export const MIN_CLIENT_PROTOCOL = 35;
 export const MIN_BOT_PROTOCOL = 24;
-export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny'] as const;
+export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];
 export const protocolOfferSchema = z.object({
   minimumVersion: z.number().int().positive(),
@@ -27,7 +28,7 @@ export function createProtocolOffer(kind: 'client' | 'bot'): ProtocolOffer {
       feature !== 'chat-delivery' && feature !== 'message-delete-undo' && feature !== 'screen-viewers' &&
       feature !== 'message-search' && feature !== 'forums' && feature !== 'native-polls' &&
       feature !== 'native-live-forms' && feature !== 'recent-sounds' && feature !== 'dm-relay' &&
-      feature !== 'role-deny')) };
+      feature !== 'role-deny' && feature !== 'role-grants')) };
 }
 export function negotiateProtocol(version: unknown, offer: unknown, kind: 'client' | 'bot'): ProtocolAgreement | null {
   const minimumVersion = kind === 'bot' ? MIN_BOT_PROTOCOL : MIN_CLIENT_PROTOCOL;

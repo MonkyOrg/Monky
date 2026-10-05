@@ -42,7 +42,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 const video = { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 };
-const input = { shareId: 'local-screen', desktopSourceId: 'window:123:0', video, audio: true, audioBitrateKbps: 128, thumbnail: '' };
+const input = { shareId: 'local-screen', desktopSourceId: 'window:123:0', video, audio: true, audioBitrateKbps: 128 };
 const profile = (width = 1280, height = 720, fps = 60) => ({
   ...shared.QUALITY_PRESETS.ULTRA, screenWidth: width, screenHeight: height, screenFps: fps, screenBitrateKbps: 6000,
 });
@@ -369,7 +369,7 @@ for (const scenario of [
       });
     const owner = { nativeScreens: f.controller, voiceReconnectSuspended: false };
     const id = scenario.kind === 'monitor' ? `native-monitor:${'a'.repeat(64)}` : `window:123:${'b'.repeat(64)}`;
-    const starting = exports.SourceStartCore.prototype.startNativeScreenShare.call(owner, id, false, '', () => true, scenario.kind);
+    const starting = exports.SourceStartCore.prototype.startNativeScreenShare.call(owner, id, false, () => true, scenario.kind);
     if (!scenario.allowed) {
       await assert.rejects(starting, /screenShare.nativeUnavailable/);
       assert.equal(streams, 0);
@@ -403,7 +403,7 @@ for (const captureKind of ['window', 'monitor', 'game']) {
       const owner = { nativeScreens: f.controller, voiceReconnectSuspended: false };
       const id = captureKind === 'monitor' ? `native-monitor:${'b'.repeat(64)}` : `window:123:${'c'.repeat(64)}`;
       const stream = await exports.SourceStartCore.prototype.startNativeScreenShare.call(
-        owner, id, false, '', () => true, captureKind, preserveAspectRatio);
+        owner, id, false, () => true, captureKind, preserveAspectRatio);
       const command = f.commands.find(command => command.action === 'source-add');
       assert.equal(command.preserveAspectRatio, preserveAspectRatio);
       assert.equal(command.captureKind, captureKind);
@@ -479,7 +479,7 @@ for (const failure of [null, 'admission', 'retirement', 'cancelled']) {
     });
     const starting = exports.SourceStartCore.prototype.startNativeScreenShare.call(
       { nativeScreens: f.controller, voiceReconnectSuspended: false },
-      `native-monitor:${'a'.repeat(64)}`, true, '', () => current, 'monitor', false, {
+      `native-monitor:${'a'.repeat(64)}`, true, () => current, 'monitor', false, {
         shareId: old.shareId,
         retirePrevious: async () => {
           retireCalls++;
@@ -548,6 +548,60 @@ test('preview preference is synchronized on join and changes without creating a 
   f.emit({ type: 'preview-state', publisherSessionId: 'self', shareId: source.shareId,
     sourceInstanceId: source.instanceId, state: 'paused' });
   assert.equal(f.controller.getLocalPreviewState(source.shareId), 'paused');
+  assert.equal(f.commands.some(command => command.action === 'watch'), false);
+});
+
+test('a covered browser window is exposed to its publisher stage while it lasts, without a toast', async t => {
+  const f = fixture(t);
+  const source = await f.local(input);
+  const event = { type: 'source-occlusion', publisherSessionId: 'self', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, occluded: true, engine: 'firefox' };
+  const updates = () => f.events.filter(([type]) => type === 'native_screen.updated').length;
+  const warning = () => f.controller.getLocalSourceWarning(source.shareId);
+  f.emit({ ...event, sourceInstanceId: randomUUID() });
+  f.emit({ ...event, publisherSessionId: 'other' });
+  f.emit({ ...event, occluded: false });
+  assert.equal(warning(), null);
+  let before = updates();
+  f.emit(event);
+  assert.equal(warning(), 'covered', 'Every browser engine gets the same stage warning.');
+  assert.equal(updates(), before + 1, 'The stage re-renders when the source becomes covered.');
+  before = updates();
+  f.emit(event);
+  assert.equal(updates(), before, 'A repeated state is not a new transition.');
+  before = updates();
+  f.emit({ ...event, engine: 'chromium' });
+  assert.equal(warning(), 'covered');
+  assert.equal(updates(), before, 'The browser engine does not change the stage warning.');
+  f.emit({ ...event, occluded: false });
+  assert.equal(warning(), null);
+  assert.equal(f.events.some(([type]) => type.startsWith('native_screen.source_') && type !== 'native_screen.source_failed'), false,
+    'Covered windows are reported on the stage, never as a toast.');
+  assert.equal(f.controller.getLocalPreviewState(source.shareId), 'waiting', 'Occlusion never changes the source state.');
+});
+
+test('a minimized shared window is exposed to its publisher stage and outranks a covered browser', async t => {
+  const f = fixture(t);
+  const source = await f.local(input);
+  const event = { type: 'source-visibility', publisherSessionId: 'self', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, hidden: true };
+  const warning = () => f.controller.getLocalSourceWarning(source.shareId);
+  assert.equal(warning(), null);
+  f.emit({ ...event, sourceInstanceId: randomUUID() });
+  f.emit({ ...event, publisherSessionId: 'other' });
+  f.emit({ ...event, hidden: false });
+  assert.equal(warning(), null);
+  f.emit({ type: 'source-occlusion', publisherSessionId: 'self', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, occluded: true, engine: 'chromium' });
+  f.emit(event);
+  assert.equal(warning(), 'hidden');
+  f.emit({ ...event, hidden: false });
+  assert.equal(warning(), 'covered');
+  f.emit({ type: 'source-occlusion', publisherSessionId: 'self', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, occluded: false, engine: 'chromium' });
+  assert.equal(warning(), null);
+  assert.equal(f.controller.getLocalSourceWarning('missing'), null);
+  assert.equal(f.events.some(([type]) => type === 'native_screen.source_hidden'), false);
   assert.equal(f.commands.some(command => command.action === 'watch'), false);
 });
 

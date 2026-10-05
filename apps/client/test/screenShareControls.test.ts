@@ -212,7 +212,7 @@ test('native discovery includes only published source descriptors and never need
   const source = { shareId: 'native', instanceId: crypto.randomUUID(), audio: true,
     video: { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 } };
   context.mock.method(videoService, 'getNativeScreenCaptures', () => [{
-    source, desktopSourceId: 'window:12345:0', thumbnail: '', audioBitrateKbps: 128,
+    source, desktopSourceId: 'window:12345:0', audioBitrateKbps: 128,
   }]);
   const call = captureScreenShareCall();
   notifyScreenShareState(call);
@@ -232,7 +232,7 @@ test('stopping a native share awaits its media owner after removing the local pl
   const source = { shareId: 'native', instanceId: crypto.randomUUID(), audio: false,
     video: { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 } };
   context.mock.method(videoService, 'getNativeScreenCapture', (shareId: string) => shareId === 'native'
-    ? { source, desktopSourceId: 'window:12345:0', thumbnail: '', audioBitrateKbps: 64 } : null);
+    ? { source, desktopSourceId: 'window:12345:0', audioBitrateKbps: 64 } : null);
   context.mock.method(webRtcManager, 'removeNativeScreenSource', async (shareId: string) => {
     calls.push(shareId);
     assert.equal(voiceStore.screenShareIds.includes(shareId), false);
@@ -259,7 +259,7 @@ test('a late native retirement cannot withdraw the sources of a successor call',
   const source = { shareId: 'native', instanceId: crypto.randomUUID(), audio: true,
     video: { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 } };
   context.mock.method(videoService, 'getNativeScreenCapture', (shareId: string) => shareId === source.shareId
-    ? { source, desktopSourceId: 'window:12345:0', thumbnail: '', audioBitrateKbps: 64 } : null);
+    ? { source, desktopSourceId: 'window:12345:0', audioBitrateKbps: 64 } : null);
   context.mock.method(webRtcManager, 'removeNativeScreenSource', () => retired.promise);
   f.add(source.shareId);
   const stopping = stopLocalScreenShares(f.audio);
@@ -278,7 +278,7 @@ test('failed native retirement stays visible and withdraws the old roster only a
   const source = { shareId: 'native', instanceId: crypto.randomUUID(), audio: true,
     video: { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 } };
   context.mock.method(videoService, 'getNativeScreenCapture', (shareId: string) => shareId === source.shareId
-    ? { source, desktopSourceId: 'window:12345:0', thumbnail: '', audioBitrateKbps: 64 } : null);
+    ? { source, desktopSourceId: 'window:12345:0', audioBitrateKbps: 64 } : null);
   context.mock.method(webRtcManager, 'removeNativeScreenSource', async () => {
     assert.deepEqual(f.messages, []);
     await retired.promise;

@@ -29,7 +29,6 @@ export interface NativeScreenCapture {
   readonly desktopSourceId: string;
   readonly captureKind?: NativeScreenCaptureKind;
   readonly preserveAspectRatio?: boolean;
-  readonly thumbnail: string;
   readonly audioBitrateKbps: number;
 }
 

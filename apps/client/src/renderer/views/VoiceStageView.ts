@@ -4,7 +4,9 @@ import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisib
 import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
 import { appEvents } from '../core/EventBus';
 import { sessionManager } from '../core/SessionManager';
-import { screenPictureInPicture, type ScreenPictureInPictureSource } from '../core/ScreenPictureInPicture';
+import {
+  screenPictureInPicture, type ScreenPictureInPictureRelease, type ScreenPictureInPictureSource,
+} from '../core/ScreenPictureInPicture';
 import { networkClient } from '../core/NetworkClient';
 import { callClient, leaveCurrentCall } from '../core/serverConnection';
 import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
@@ -676,6 +678,8 @@ export class VoiceStageView {
    * without requiring Shift.
    */
   private toggleFocus(tileKey: string): void {
+    // A broadcast a manual PiP took off the stage only comes back through it.
+    if (tileKey === this.pictureInPictureTileKey()) return;
     const isFocused = this.focusedTileKeys.includes(tileKey);
     this.setFocusedTiles(isFocused
       ? this.focusedTileKeys.filter((key) => key !== tileKey)
@@ -932,9 +936,10 @@ export class VoiceStageView {
       card.className = [...card.classList].filter(name => name !== 'speaking').join(' ');
     }
     const structure = template.innerHTML;
+    const pipKey = this.pictureInPictureTileKey();
     // Voice metadata must not detach a playing video or exit its fullscreen card.
     const sameMedia = tiles.every(tile => {
-      if (tile.kind === 'voice' || tile.kind === 'miniapp') return true;
+      if (tile.kind === 'voice' || tile.kind === 'miniapp' || tile.key === pipKey) return true;
       const video = area.querySelector<HTMLVideoElement>(`[data-video-tile-key="${CSS.escape(tile.key)}"]`);
       const stream = tile.kind === 'screen' && sidOf(tile.p) !== currentSessionId
         && !this.isWatchingScreen(sidOf(tile.p), tile.shareId!) ? null : this.getTileStream(tile, currentSessionId);
@@ -963,7 +968,7 @@ export class VoiceStageView {
         // overlay (volume/fullscreen), nor right after a slider drag whose
         // pointer-up may land outside the controls (#75).
         if (Date.now() < this.suppressCardClickUntil) return;
-        if ((e.target as HTMLElement).closest('.stage-card-controls, .stage-viewers')) return;
+        if ((e.target as HTMLElement).closest('.stage-card-controls, .stage-viewers, .stage-pip-placeholder')) return;
         // While zoomed in, a click pans instead of dropping out of focus (#271).
         if (this.focusZoom.scale > 1 && card.classList.contains('stage-focused-main')) return;
         const tileKey = card.getAttribute('data-tile-key');
@@ -1000,6 +1005,13 @@ export class VoiceStageView {
         event.stopPropagation();
         const targetId = button.dataset.pipTarget;
         if (targetId) void this.openPictureInPicture(targetId, button);
+      });
+    });
+
+    area.querySelectorAll<HTMLButtonElement>('.stage-pip-return-btn').forEach(button => {
+      button.addEventListener('click', event => {
+        event.stopPropagation();
+        screenPictureInPicture.returnToStage();
       });
     });
 
@@ -1191,6 +1203,21 @@ export class VoiceStageView {
     this.syncTelemetryMonitor();
     this.syncBotScreenLayout();
     this.refreshNativeScreenState();
+    this.watchPendingLoadingOverlays();
+  }
+
+  /**
+   * Remote media (RemoteMediaRouter, WebRtcManager) attaches streams straight
+   * to the tile video when a track arrives after the tile rendered, e.g. the
+   * first watch of a screen. Every pending overlay must therefore already be
+   * listening, or it stays over the playing video.
+   */
+  private watchPendingLoadingOverlays(): void {
+    for (const overlay of this.container.querySelectorAll<HTMLElement>('.stage-loading-overlay:not([data-ui-closing])')) {
+      const video = document.getElementById(overlay.id.slice('loading-'.length));
+      if (!(video instanceof HTMLVideoElement) || this.videoLoadingListeners.has(video)) continue;
+      this.hideVideoLoadingWhenReady(video, video.id);
+    }
   }
 
   private getTileStream(tile: ParticipantStageTile, currentSessionId: string | undefined): MediaStream | null {
@@ -1218,6 +1245,12 @@ export class VoiceStageView {
     </div>`;
   }
 
+  /** The black standby layer covers the local preview until it shows live frames of a visible window. */
+  private isLocalPreviewLive(shareId: string): boolean {
+    return webRtcManager.getLocalScreenPreviewState(shareId) === 'playing'
+      && webRtcManager.getLocalScreenSourceWarning(shareId) !== 'hidden';
+  }
+
   private refreshNativeScreenState(): void {
     for (const card of this.container.querySelectorAll<HTMLElement>('[data-kind="screen"][data-session-id]')) {
       const sessionId = card.dataset.sessionId;
@@ -1241,13 +1274,31 @@ export class VoiceStageView {
       }
       if (sessionId && shareId && serverStore.isMySession(sessionId) && videoService.getNativeScreenCapture(shareId)) {
         const state = webRtcManager.getLocalScreenPreviewState(shareId);
+        const warning = webRtcManager.getLocalScreenSourceWarning(shareId);
         card.dataset.previewState = state;
+        card.toggleAttribute('data-source-hidden', warning === 'hidden');
         const placeholder = card.querySelector<HTMLElement>('.stage-native-thumbnail');
         if (placeholder) {
-          placeholder.hidden = state === 'playing';
+          placeholder.toggleAttribute('data-live', this.isLocalPreviewLive(shareId));
           const label = placeholder.querySelector('span');
-          if (label) label.textContent = t(state === 'unavailable' ? 'stage.nativePreviewUnavailable'
-            : state === 'paused' ? 'stage.nativePreviewPaused' : 'stage.nativeThumbnail');
+          if (label) {
+            // The warning explains the frozen picture; the preview labels would claim viewers receive normally.
+            label.hidden = warning !== null;
+            label.textContent = t(state === 'unavailable' ? 'stage.nativePreviewUnavailable'
+              : state === 'paused' ? 'stage.nativePreviewPaused' : 'stage.nativeThumbnail');
+          }
+        }
+        const warningEl = card.querySelector<HTMLElement>('.stage-source-warning');
+        if (warningEl) {
+          warningEl.hidden = warning === null;
+          if (warning) warningEl.dataset.sourceWarning = warning;
+          else warningEl.removeAttribute('data-source-warning');
+          const title = warning ? t(`stage.sourceWarningTitle.${warning}`) : '';
+          const detail = warning ? t(`stage.sourceWarning.${warning}`) : '';
+          const titleEl = warningEl.querySelector('.stage-source-warning-title');
+          const detailEl = warningEl.querySelector('.stage-source-warning-detail');
+          if (titleEl && titleEl.textContent !== title) titleEl.textContent = title;
+          if (detailEl && detailEl.textContent !== detail) detailEl.textContent = detail;
         }
         continue;
       }
@@ -1467,8 +1518,7 @@ export class VoiceStageView {
   }
 
   private isPictureInPictureAvailable(): boolean {
-    return document.pictureInPictureEnabled === true
-      && typeof HTMLVideoElement.prototype.requestPictureInPicture === 'function';
+    return screenPictureInPicture.isAvailable();
   }
 
   private pictureInPictureSource(video: HTMLVideoElement): ScreenPictureInPictureSource | null {
@@ -1476,16 +1526,42 @@ export class VoiceStageView {
     const publisherSessionId = card?.dataset.sessionId;
     const prefix = `${publisherSessionId}:screen:`;
     const key = card?.dataset.tileKey;
-    if (!publisherSessionId || !key?.startsWith(prefix) || !this.renderedSessionKey
+    const publisher = publisherSessionId ? participantManager.get(publisherSessionId) : undefined;
+    if (!publisherSessionId || !publisher || !key?.startsWith(prefix) || !this.renderedSessionKey
       || !this.currentChannelId || !(video.srcObject instanceof MediaStream)) return null;
     return {
       sessionKey: this.renderedSessionKey, channelId: this.currentChannelId,
-      publisherSessionId, shareId: key.slice(prefix.length), stream: video.srcObject,
+      publisherSessionId, publisherName: participantManager.displayName(publisher),
+      shareId: key.slice(prefix.length), stream: video.srcObject,
     };
   }
 
+  /** The broadcast a manual PiP took off this stage shows only its placeholder here. */
+  private pictureInPictureTileKey(): string | null {
+    return screenPictureInPicture.getStageExclusiveTileKey(this.renderedSessionKey, this.currentChannelId);
+  }
+
+  /**
+   * A manual PiP takes its broadcast out of focus and gives that focus back when
+   * it ends without being brought back. A share already gone keeps it retired,
+   * so the publisher's next source takes it over (refocusScreenHandoff).
+   */
+  private syncPictureInPictureTile(release?: ScreenPictureInPictureRelease): void {
+    const key = this.pictureInPictureTileKey();
+    let keys = this.focusedTileKeys.filter(candidate => candidate !== key);
+    if (release && release.tileKey !== key && !keys.includes(release.tileKey) && this.isJoinedHere()
+        && release.sessionKey === this.renderedSessionKey && release.channelId === this.currentChannelId) {
+      keys = [...keys, release.tileKey].slice(-MAX_FOCUSED_TILES);
+    }
+    if (keys.length !== this.focusedTileKeys.length || keys.some((candidate, index) => candidate !== this.focusedTileKeys[index])) {
+      this.setFocusedTiles(keys);
+    } else {
+      this.renderParticipants();
+    }
+  }
+
   public openAutomaticPictureInPicture(reason: 'navigation' | 'window-inactive' = 'navigation'): void {
-    screenPictureInPicture.markStageLeft(this.renderedSessionKey, this.currentChannelId, reason);
+    screenPictureInPicture.markStageLeft(this.renderedSessionKey, this.currentChannelId);
     if (!settingsStore.screenShareAutoPictureInPicture || !this.isPictureInPictureAvailable()) return;
     for (const key of [...this.focusedTileKeys].reverse()) {
       const card = this.container.querySelector<HTMLElement>(`[data-tile-key="${CSS.escape(key)}"]`);
@@ -1521,8 +1597,10 @@ export class VoiceStageView {
     const entry = screenPictureInPicture.getStageReturn(this.renderedSessionKey, this.currentChannelId);
     if (!entry) return;
     const key = `${entry.source.publisherSessionId}:screen:${entry.source.shareId}`;
-    const keys = [...entry.focusedTileKeys];
-    if (!keys.includes(key)) keys.push(key);
+    // Automatic PiP restores the layout left behind; a manual one rejoins the
+    // current layout, back in focus only if it was focused when it opened.
+    const keys = entry.automatic ? [...entry.focusedTileKeys] : this.focusedTileKeys.filter(candidate => candidate !== key);
+    if ((entry.automatic || entry.focusedTileKeys.includes(key)) && !keys.includes(key)) keys.push(key);
     this.setFocusedTiles(keys.slice(-2), {
       isCurrent: () => screenPictureInPicture.getStageReturn(this.renderedSessionKey, this.currentChannelId) === entry,
       afterRender: () => {
@@ -1538,12 +1616,11 @@ export class VoiceStageView {
 
   private async openPictureInPicture(videoId: string, button: HTMLButtonElement): Promise<void> {
     const video = document.getElementById(videoId) as HTMLVideoElement | null;
-    if (!video || !this.isPictureInPictureAvailable()
-      || typeof video.requestPictureInPicture !== 'function') {
+    if (!video || !this.isPictureInPictureAvailable()) {
       button.hidden = true;
       return;
     }
-    if (document.pictureInPictureElement === video || button.disabled) return;
+    if (screenPictureInPicture.isPresenting(video) || button.disabled) return;
 
     button.disabled = true;
     button.setAttribute('aria-busy', 'true');
@@ -1595,6 +1672,8 @@ export class VoiceStageView {
     const isWatching = !!tile.shareId && this.isWatchingScreen(sidOf(p), tile.shareId);
     // An unrequested source is only a placeholder; no remote payload is needed.
     const isLocked = isRemoteScreen && !isWatching;
+    const inPictureInPicture = isRemoteScreen && isWatching && tile.key === this.pictureInPictureTileKey();
+    const hasVideo = isVideoTile && !inPictureInPicture;
     // Distinguish the two tiles of a camera + screen sharer with a "· Tela"
     // suffix on the screen tile label (#26); when the same person shares two
     // screens at once, number them so the tiles stay tellable apart (#253).
@@ -1609,20 +1688,37 @@ export class VoiceStageView {
 
     return `
       ${isVideoTile ? `
-        <video id="${videoId}" data-video-tile-key="${escapeHtml(tile.key)}" class="stage-video-element ${isScreenTile ? 'screen-share' : ''}${isLocked ? ' screen-locked' : ''}" autoplay playsinline muted></video>
-        ${isScreenTile ? `<span class="stage-capture-mode-badge" data-native-screen="${!!(localNative || remoteNative)}"
+        ${inPictureInPicture ? `
+          <div class="stage-pip-placeholder${isMini ? ' stage-pip-placeholder--mini' : ''}" role="status">
+            ${isMini ? '' : `<span class="material-symbols-outlined stage-pip-placeholder-icon" aria-hidden="true">picture_in_picture_alt</span>
+              <span class="stage-pip-placeholder-text">${t('stage.pictureInPictureShowing')}</span>`}
+            <button type="button" class="stage-pip-return-btn" title="${t('stage.pictureInPictureBringBackLabel')}" aria-label="${t('stage.pictureInPictureBringBackLabel')}">
+              <span class="material-symbols-outlined md-18" aria-hidden="true">pip_exit</span>
+              ${isMini ? '' : `<span>${t('stage.pictureInPictureBringBack')}</span>`}
+            </button>
+          </div>
+        ` : `<video id="${videoId}" data-video-tile-key="${escapeHtml(tile.key)}" class="stage-video-element ${isScreenTile ? 'screen-share' : ''}${isLocked ? ' screen-locked' : ''}" autoplay playsinline muted></video>`}
+        ${hasVideo && isScreenTile ? `<span class="stage-capture-mode-badge" data-native-screen="${!!(localNative || remoteNative)}"
           role="status" aria-live="polite" aria-atomic="true" hidden></span>` : ''}
-        ${localNative ? `<div class="stage-native-thumbnail">
-          ${localNative.thumbnail ? `<img src="${escapeHtml(localNative.thumbnail)}" alt="">` : ''}
+        ${localNative ? `<div class="stage-native-thumbnail"${this.isLocalPreviewLive(tile.shareId!) ? ' data-live' : ''}>
           <span>${t('stage.nativeThumbnail')}</span>
+        </div>
+        <div class="stage-source-warning" role="status" aria-live="polite" aria-atomic="true" hidden>
+          <div class="stage-source-warning-box">
+            <span class="material-symbols-outlined" aria-hidden="true">warning</span>
+            <div class="stage-source-warning-text">
+              <strong class="stage-source-warning-title"></strong>
+              <span class="stage-source-warning-detail"></span>
+            </div>
+          </div>
         </div>` : ''}
-        ${!isLocked && !localNative ? `
+        ${!isLocked && !localNative && hasVideo ? `
           <div class="stage-loading-overlay${isMini ? ' stage-loading-overlay--mini' : ''}" id="loading-${videoId}">
             <div class="reconnect-spinner"></div>
             ${isMini ? '' : `<span>${isScreenTile ? t('stage.loadingScreen') : t('stage.loadingCamera')}</span>`}
           </div>
         ` : ''}
-        ${(isVideoTile && !isLocked && !isMini) ? `
+        ${(hasVideo && !isLocked && !isMini) ? `
           <div
             class="telemetry-overlay position-${settingsStore.screenShareTelemetryPosition}${settingsStore.screenShareTelemetryEnabled ? '' : ' is-hidden'}"
             data-telemetry-key="${escapeHtml(tile.key)}"
@@ -1651,21 +1747,21 @@ export class VoiceStageView {
               <button class="stage-stopwatch-btn" data-stopwatch-session="${sidOf(p)}" data-stopwatch-share="${tile.shareId}" title="${t('stage.stopWatching')}" aria-label="${t('stage.stopWatching')}">
                 <span class="material-symbols-outlined md-18">visibility_off</span>
               </button>
-              ${this.isPictureInPictureAvailable() ? `
+              ${this.isPictureInPictureAvailable() && hasVideo ? `
                 <button type="button" class="stage-pip-btn" data-pip-target="${videoId}" title="${t('stage.pictureInPicture')}" aria-label="${t('stage.pictureInPicture')}">
                   <span class="material-symbols-outlined md-18">picture_in_picture_alt</span>
                 </button>
               ` : ''}
             ` : ''}
-            ${!isMini ? `
+            ${!isMini && hasVideo ? `
               <button type="button" class="stage-diagnostics-btn" data-diagnostics-key="${escapeHtml(tile.key)}" ${settingsStore.screenShareTelemetryEnabled ? '' : 'hidden'}
                 title="${escapeHtml(t('stage.telemetryCopy'))}" aria-label="${escapeHtml(t('stage.telemetryCopy'))}">
                 <span class="material-symbols-outlined md-18">content_copy</span>
               </button>
             ` : ''}
-            <button class="stage-fullscreen-btn" data-fullscreen-target="${videoId}" title="${t('stage.fullscreen')}" aria-label="${t('stage.fullscreen')}">
+            ${hasVideo ? `<button class="stage-fullscreen-btn" data-fullscreen-target="${videoId}" title="${t('stage.fullscreen')}" aria-label="${t('stage.fullscreen')}">
               <span class="material-symbols-outlined md-18">fullscreen</span>
-            </button>
+            </button>` : ''}
           </div>
         `}
       ` : `
@@ -2384,9 +2480,11 @@ export class VoiceStageView {
     const u24 = appEvents.on('local.screen_started', (start: { shareId: string; stream: MediaStream }) => this.queueScreenStartFocus(start));
     const u25 = appEvents.on('local.screen_stopped', (shareId: string) => this.pendingScreenFocus.delete(shareId));
     const u26 = appEvents.on('screen_pip.stage_return', () => this.restorePictureInPicture());
+    const u28 = appEvents.on('screen_pip.updated',
+      (release?: ScreenPictureInPictureRelease) => this.syncPictureInPictureTile(release));
     const u27 = appEvents.on('voice.screen_watch_handoff',
       (handoff: { sessionId: string; fromShareId: string; shareId: string }) => this.refocusScreenHandoff(handoff));
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22, u23, u24, u25, u26, u27);
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22, u23, u24, u25, u26, u27, u28);
     const inactive = () => {
       if (this.windowInactive) return;
       this.windowInactive = true;

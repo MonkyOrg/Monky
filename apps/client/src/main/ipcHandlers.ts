@@ -23,6 +23,8 @@ import { createLocalExecutionService } from './localExecution/createService';
 import { setupLocalExecutionIpc, type LocalExecutionIpc } from './localExecution/ipc';
 import { setupNativeScreenSharingIpc } from './nativeScreenSharing';
 import { NativeDesktopSources, nativeWindowIdFromSourceId, nativeMonitorDesktopSources } from './nativeWindows';
+import { browserOcclusionEngine } from './browserOcclusion';
+import { ScreenPictureInPictureWindows } from './screenPictureInPictureWindow';
 import { NativeThumbnailCapturer, loadThumbnailRuntime, createMacScreenProvider, type MacScreenProvider } from '@monky/screen-share';
 import { DesktopSourcePreviews } from './desktopSourcePreviews';
 import type { NativeWindowInfo, NativeMonitorInfo, NativeWindowState } from '@monky/screen-audio';
@@ -129,19 +131,6 @@ async function downloadToFile(url: string, destPath: string): Promise<void> {
 
 /** Extensões que a soundboard aceita, na listagem e na leitura de um som. */
 const SOUNDBOARD_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.webm']);
-
-/**
- * Chromium browsers on Windows stop painting a window that other windows fully
- * cover (native window occlusion), so a capture of it turns gray until shown.
- */
-const OCCLUSION_SENSITIVE_PROCESSES = new Set([
-  'chrome.exe', 'msedge.exe', 'brave.exe', 'opera.exe', 'vivaldi.exe', 'chromium.exe', 'yandex.exe', 'arc.exe',
-]);
-
-export function isOcclusionSensitiveProcess(processPath: string | null | undefined): boolean {
-  return typeof processPath === 'string'
-    && OCCLUSION_SENSITIVE_PROCESSES.has(path.win32.basename(processPath).toLowerCase());
-}
 
 interface NativeWindowOwner {
   windowId: number;
@@ -716,11 +705,14 @@ export function setupIpcHandlers(
       let result: DesktopSource[];
       try {
         windows = type === 'screen' ? [] : nativeSources.listWindows();
-        result = windows.map(({ id, window }) => ({
-          id, name: window.title, type: 'window', isOwnWindow: window.processId === process.pid,
-          ...(isOcclusionSensitiveProcess(window.processPath) ? { occlusionSensitive: true } : {}),
-          thumbnailDataUrl: '', appIconDataUrl: null, thumbnailState: window.isIconic ? 'unavailable' : 'pending',
-        }));
+        result = windows.map(({ id, window }) => {
+          const occlusionEngine = browserOcclusionEngine(window.processPath);
+          return {
+            id, name: window.title, type: 'window', isOwnWindow: window.processId === process.pid,
+            ...(occlusionEngine ? { occlusionEngine } : {}),
+            thumbnailDataUrl: '', appIconDataUrl: null, thumbnailState: window.isIconic ? 'unavailable' : 'pending',
+          } satisfies DesktopSource;
+        });
         if (type !== 'window') result.push(...nativeMonitorDesktopSources(nativeSources.listMonitors()));
       } catch (error) {
         console.warn('[ScreenShare:Main] Native desktop source enumeration failed:', error);
@@ -1252,27 +1244,22 @@ export function setupIpcHandlers(
   mainWindow.on('restore', notifyWindowActivity);
   mainWindow.on('show', notifyWindowActivity);
   mainWindow.on('focus', notifyWindowActivity);
-  ipcMain.handle('screen-pip:open', async (event, requestId: unknown, requireInactive: unknown) => {
+  const screenPipWindows = new ScreenPictureInPictureWindows(mainWindow);
+  // Authorizes one popup from the main frame; the renderer opens it right
+  // after with window.open, which needs no user activation in Electron.
+  ipcMain.handle('screen-pip:open', (event, requestId: unknown, requireInactive: unknown, aspectRatio: unknown) => {
     if (mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
       || event.senderFrame !== mainWindow.webContents.mainFrame
       || typeof requestId !== 'string' || !/^[0-9a-f-]{36}$/i.test(requestId)
-      || typeof requireInactive !== 'boolean') {
+      || typeof requireInactive !== 'boolean'
+      || typeof aspectRatio !== 'number' || !Number.isFinite(aspectRatio) || aspectRatio <= 0) {
       throw new Error('Invalid screen Picture-in-Picture request.');
     }
     if (requireInactive && !isWindowAway()) return false;
-    const selector = JSON.stringify(`video[data-monky-screen-pip="${requestId}"]`);
-    return mainWindow.webContents.executeJavaScript(`(() => {
-      const video = document.querySelector(${selector});
-      if (!(video instanceof HTMLVideoElement) || !(video.srcObject instanceof MediaStream)
-        || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
-        || !video.srcObject.getVideoTracks().some(track => track.readyState === 'live')) {
-        throw new Error('The screen Picture-in-Picture presentation is no longer available.');
-      }
-      return video.requestPictureInPicture().then(() => true);
-    })()`, true);
+    screenPipWindows.authorize(requestId, aspectRatio);
+    return true;
   });
-  // Chromium's "back to tab" only activates the web contents; Electron does
-  // not restore a minimized or tray-hidden window for it.
+  // "Voltar ao Monky" must bring back a minimized or tray-hidden window.
   ipcMain.handle('screen-pip:return', (event) => {
     if (mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
       || event.senderFrame !== mainWindow.webContents.mainFrame) {

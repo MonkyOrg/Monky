@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { EVERYONE_ROLE_ID, Permission, ProtocolErrorCode, Role, RoleAssignPayload, RoleCreatePayload, RoleUpdatePayload, UserRoleSummary, legacyRoleRule, roleAssignmentSchema, roleCreateSchema, roleUpdateSchema, stripAdministrator } from '@monky/shared';
+import { EVERYONE_ROLE_ID, Permission, ProtocolErrorCode, Role, RoleAssignPayload, RoleCreatePayload, RoleUpdatePayload, UserRoleSummary, RoleModel, legacyRoleGrants, roleAssignmentSchema, roleCreateSchema, roleUpdateSchema, stripAdministrator } from '@monky/shared';
 import { RoleRecord } from '../../domain/entities';
 import { IRoleRepository, IUserRepository } from '../../domain/repositories';
 import { PermissionService } from './PermissionService';
@@ -34,16 +34,18 @@ export class RoleService {
       color: role.color,
       position: role.position,
       permissions: role.permissions,
-      deny: role.deny ?? 0,
       isDefault: role.isDefault,
     };
   }
 
-  /** Older clients send a full switch mask without `deny`; it keeps its meaning against the current Everyone. */
-  private async toRule(permissions: number, deny: number | undefined): Promise<{ permissions: number; deny: number }> {
-    return deny === undefined
-      ? legacyRoleRule(permissions, await this.permissionService.getEveryonePermissions())
-      : { permissions: (permissions & ~deny) >>> 0, deny };
+  /**
+   * The bits a role grants. Current and 36.1 clients send them directly (a
+   * 36.1 denial no longer exists and is ignored); older clients send a full
+   * mask that also carries what Everyone grants.
+   */
+  private async toGrants(permissions: number, model: RoleModel, previous?: number): Promise<number> {
+    if (model !== 'legacy') return permissions >>> 0;
+    return legacyRoleGrants(permissions, await this.permissionService.getEveryonePermissions(), previous);
   }
 
   public async listRoles(): Promise<Role[]> {
@@ -98,7 +100,7 @@ export class RoleService {
     return name.trim().toLowerCase() === RESERVED_ADMIN_ROLE_NAME;
   }
 
-  public async createRole(actorUserId: string, payload: RoleCreatePayload): Promise<RoleResult> {
+  public async createRole(actorUserId: string, payload: RoleCreatePayload, model: RoleModel = 'grants'): Promise<RoleResult> {
     if (!(await this.permissionService.checkPermission(actorUserId, Permission.MANAGE_ROLES))) {
       return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Você não pode gerenciar cargos.' };
     }
@@ -112,13 +114,11 @@ export class RoleService {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Esse nome de cargo é reservado.' };
     }
 
-    const rule = await this.toRule(parsed.data.permissions, parsed.data.deny);
     const roleRecord: RoleRecord = {
       id: uuidv4(),
       name: parsed.data.name,
       color: parsed.data.color ?? null,
-      permissions: stripAdministrator(rule.permissions),
-      deny: stripAdministrator(rule.deny),
+      permissions: stripAdministrator(await this.toGrants(parsed.data.permissions, model)),
       position: parsed.data.position ?? Date.now(),
       isDefault: parsed.data.isDefault ?? false,
       createdAt: Date.now(),
@@ -127,7 +127,7 @@ export class RoleService {
     return { success: true, role: this.toRole(roleRecord) };
   }
 
-  public async updateRole(actorUserId: string, payload: RoleUpdatePayload): Promise<RoleResult> {
+  public async updateRole(actorUserId: string, payload: RoleUpdatePayload, model: RoleModel = 'grants'): Promise<RoleResult> {
     if (!(await this.permissionService.checkPermission(actorUserId, Permission.MANAGE_ROLES))) {
       return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Você não pode gerenciar cargos.' };
     }
@@ -168,11 +168,10 @@ export class RoleService {
     const updates: Partial<RoleRecord> = {};
     if (parsed.data.name !== undefined) updates.name = parsed.data.name;
     if (parsed.data.color !== undefined) updates.color = parsed.data.color ?? null;
-    if (parsed.data.permissions !== undefined || parsed.data.deny !== undefined) {
-      const rule = await this.toRule(parsed.data.permissions ?? existing.permissions, parsed.data.deny);
+    if (parsed.data.permissions !== undefined) {
+      const grants = await this.toGrants(parsed.data.permissions, model, existing.permissions);
       // Admin rights come exclusively from the Admin role now (#277).
-      updates.permissions = isBuiltInAdmin ? rule.permissions : stripAdministrator(rule.permissions);
-      updates.deny = stripAdministrator(rule.deny);
+      updates.permissions = isBuiltInAdmin ? grants : stripAdministrator(grants);
     }
     if (parsed.data.position !== undefined) updates.position = parsed.data.position;
     if (parsed.data.isDefault !== undefined) updates.isDefault = parsed.data.isDefault;

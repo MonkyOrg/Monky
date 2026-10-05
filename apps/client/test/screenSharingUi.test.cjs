@@ -202,19 +202,27 @@ for (const language of ['pt-BR', 'en']) {
     assert.ok(control(f, 'select-video-codec'));
   });
 
-  test(`Chromium browser windows warn that covering them freezes the capture (${language})`, async t => {
+  test(`browser windows warn that covering them freezes the capture (${language})`, async t => {
     const f = fixture(language);
     t.after(() => f.close());
-    f.sources[1].occlusionSensitive = true;
+    f.sources.push({ ...f.sources[2], id: 'window:303:0', name: 'Plain window' });
+    f.sources[1].occlusionEngine = 'chromium';
+    f.sources[2].occlusionEngine = 'firefox';
     await f.picker.open();
     const tip = control(f, 'share-occlusion-tip');
     assert.equal(tip.hidden, true, 'The default screen tab never warns.');
     chooseWindowMethod(f, 'window');
     assert.equal(tip.hidden, false);
-    assert.equal(tip.textContent, f.i18n.t('screenShare.browserOcclusionTip'));
+    assert.equal(tip.textContent, f.i18n.t('screenShare.occlusionTip.chromium'));
+    assert.doesNotMatch(tip.textContent, /cinza|gray|chrome:\/\/flags/);
     chooseWindowMethod(f, 'game');
     assert.equal(tip.hidden, false, 'The warning follows the source, not the capture method.');
     chooseWindowMethod(f, 'window', f.sources[2].id);
+    assert.equal(tip.hidden, false);
+    assert.equal(tip.textContent, f.i18n.t('screenShare.occlusionTip.firefox'));
+    assert.match(tip.textContent, /about:config/);
+    assert.match(tip.textContent, /widget\.windows\.window_occlusion_tracking\.enabled/);
+    chooseWindowMethod(f, 'window', f.sources[3].id);
     assert.equal(tip.hidden, true);
     assert.equal(tip.textContent, '');
     control(f, 'share-tab-screen').click();
@@ -716,7 +724,7 @@ for (const [tab, kind, sourceId] of [
     assert.equal(control(f, 'share-capture-info').hidden, true);
     assert.equal(nativeStarts(f).length, 0);
     await f.picker.startSharing('replace');
-    assert.deepEqual(nativeStarts(f), [['native-start', sourceId, true, '', kind, true]]);
+    assert.deepEqual(nativeStarts(f), [['native-start', sourceId, true, kind, true]]);
     const restores = f.traces.filter(value => value[0] === 'prepare-window');
     assert.deepEqual(restores, kind === 'monitor' ? [] : [['prepare-window', sourceId]]);
     assert.equal(f.capabilities.capture, false, 'The UI must not upgrade Main capabilities by itself');
@@ -752,7 +760,7 @@ test('failed selected-source probing keeps the game choice and previous shares w
   chooseWindowMethod(f, 'game');
   await f.picker.startSharing('replace');
   assert.equal(nativeStarts(f).length, 1);
-  assert.equal(nativeStarts(f)[0][4], 'game');
+  assert.equal(nativeStarts(f)[0][3], 'game');
   assert.equal(f.picker.activeTab, 'window');
   assert.equal(f.picker.windowCaptureMethod, 'game');
   assert.equal(f.picker.selectedSourceId, 'window:101:0');
@@ -773,7 +781,6 @@ for (const [tab, kind, sourceId] of [
     t.after(() => f.close());
     const previous = f.createStream('window:303:0');
     f.voiceStore.addScreenShare(previous.id);
-    f.sources.find(source => source.id === sourceId).thumbnailDataUrl = 'data:image/png;base64,selected';
     await f.picker.open();
     control(f, `share-tab-${tab}`).click();
     const card = f.document.querySelector(`[data-source-id="${sourceId}"]`);
@@ -782,7 +789,7 @@ for (const [tab, kind, sourceId] of [
     assert.equal(control(f, 'btn-share-add').disabled, false);
     assert.equal(control(f, 'btn-share-add').getAttribute('aria-describedby'), kind === 'game' ? 'share-game-tip' : null);
     await f.picker.startSharing('add');
-    assert.deepEqual(nativeStarts(f), [['native-start', sourceId, true, 'data:image/png;base64,selected', kind, true]]);
+    assert.deepEqual(nativeStarts(f), [['native-start', sourceId, true, kind, true]]);
     assert.equal(f.traces.filter(value => value[0] === 'prepare-window').length, kind === 'monitor' ? 0 : 1);
     assert.equal(f.voiceStore.screenShareIds.length, 2);
     assert.ok(f.voiceStore.screenShareIds.includes(previous.id));
@@ -805,7 +812,7 @@ test('terminal Game Capture rejection preserves existing shares without a second
   chooseWindowMethod(f, 'game');
   await f.picker.startSharing('replace');
   assert.equal(nativeStarts(f).length, 1);
-  assert.equal(nativeStarts(f)[0][4], 'game');
+  assert.equal(nativeStarts(f)[0][3], 'game');
   assert.equal(f.picker.activeTab, 'window');
   assert.equal(f.picker.windowCaptureMethod, 'game');
   assert.equal(f.picker.selectedSourceId, 'window:101:0');
@@ -999,7 +1006,7 @@ test('double-click retains the replace shortcut without starting a second native
   card.dispatchEvent(new Event('dblclick', { bubbles: true }));
   await flush();
   assert.equal(nativeStarts(f).length, 1);
-  assert.equal(nativeStarts(f)[0][4], 'window');
+  assert.equal(nativeStarts(f)[0][3], 'window');
   assert.equal(f.voiceStore.screenShareIds.length, 1);
   assert.equal(f.streams.has(previous.id), false);
   assert.equal(f.picker.modalEl, null);
@@ -1027,7 +1034,7 @@ test('Game Capture requires explicit confirmation and is never inherited by a di
   assert.equal(f.traces.length, 0);
   control(f, 'btn-share').click();
   await flush();
-  assert.deepEqual(nativeStarts(f), [['native-start', 'window:202:0', true, '', 'game', true]]);
+  assert.deepEqual(nativeStarts(f), [['native-start', 'window:202:0', true, 'game', true]]);
 });
 
 test('changing method cannot retain a window removed from the current source set or switch to another one', async t => {
@@ -1248,7 +1255,7 @@ for (const kind of ['window', 'game', 'monitor']) {
       assert.equal(f.picker.selectedSourceId, sourceId);
       assert.equal(aspect.checked, preserveAspectRatio);
       await f.picker.startSharing('replace');
-      assert.deepEqual(nativeStarts(f), [['native-start', sourceId, true, '', kind, preserveAspectRatio]]);
+      assert.deepEqual(nativeStarts(f), [['native-start', sourceId, true, kind, preserveAspectRatio]]);
       assert.equal(f.saves, 0, 'Aspect ratio is not a global preference');
       f.controls.sources = async () => f.sources;
       await f.picker.open();
@@ -1293,7 +1300,7 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(f.traces.length, 0, 'UI enumeration must not create capture thumbnails or probe hardware');
     key(cards[0], ' ');
     await f.picker.startSharing('replace');
-    assert.deepEqual(nativeStarts(f), [['native-start', sources[0].id, true, sources[0].thumbnailDataUrl, 'monitor', true]]);
+    assert.deepEqual(nativeStarts(f), [['native-start', sources[0].id, true, 'monitor', true]]);
   });
 
   test(`unnumbered monitors and application windows retain escaped source names (${language})`, async t => {

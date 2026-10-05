@@ -33,6 +33,7 @@
               "src/win/wasapi_format.cpp",
               "src/packet_capture.cpp",
               "src/win/window_enum.cpp",
+              "src/win/window_frames.cpp",
               "src/win/window_resize.cpp",
               "src/win/keyboard_layout.cpp"
             ],
@@ -44,8 +45,12 @@
               "-lAvrt",
               "-lKsuser",
               "-lUser32",
+              "-lGdi32",
               "-lComctl32",
-              "-lDwmapi"
+              "-lDwmapi",
+              "-lD3d11",
+              "-lDxgi",
+              "-lWindowsApp"
             ],
             "msvs_settings": {
               "VCCLCompilerTool": {

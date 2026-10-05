@@ -24,6 +24,11 @@ const policy = { exports: {} };
 vm.runInThisContext(`(function(exports, require) { ${ts.transpileModule(fs.readFileSync(policySource, 'utf8'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText}\n})`, { filename: policySource })(policy.exports, require);
+const occlusionSource = path.join(path.dirname(sourceFile), 'browserOcclusion.ts');
+const occlusion = { exports: {} };
+vm.runInThisContext(`(function(exports, require) { ${ts.transpileModule(fs.readFileSync(occlusionSource, 'utf8'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
+}).outputText}\n})`, { filename: occlusionSource })(occlusion.exports, require);
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => {
   let resolve;
@@ -245,6 +250,10 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   let target = { kind: 'window', hwnd: 12345, expectedProcessId: 56789,
     expectedProcessCreationTime100ns: '123456789' }, frameDestroyed = false, contentDestroyed = false;
   let windowOpen = true, windowPaused = false, creationTime = '123456789';
+  let windowProcessPath = null, windowOccluded = null;
+  // 'frozen' keeps the frame count, 'painting' adds frames on every read.
+  let frameProbeMode = 'frozen', nextFrameProbe = 1;
+  const frameProbes = new Map();
   let focused = true;
   let monitor = structuredClone(monitorTarget);
   const frame = { url: 'file:///C:/monky-test/index.html', detached: false, isDestroyed: () => frameDestroyed, postMessage() {} };
@@ -347,6 +356,29 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
         isIconic: windowPaused, isVisible: !windowPaused, isTopLevel: true } : null;
     },
     getMonitorState: id => monitor && id === monitor.deviceId ? structuredClone(monitor) : null,
+    listWindows: () => windowProcessPath === null ? [] : [{ hwnd: target.hwnd, processId: target.expectedProcessId,
+      processPath: windowProcessPath }],
+    getWindowOcclusion: hwnd => {
+      assert.equal(hwnd, 12345);
+      if (windowOccluded instanceof Error) throw windowOccluded;
+      return windowOpen && !windowPaused ? windowOccluded : null;
+    },
+    startWindowFrameProbe: hwnd => {
+      assert.equal(hwnd, 12345);
+      if (frameProbeMode instanceof Error) throw frameProbeMode;
+      if (frameProbeMode === 'unavailable') return null;
+      const id = nextFrameProbe++;
+      frameProbes.set(id, { frames: 1 });
+      return id;
+    },
+    getWindowFrameProbe: id => {
+      const probe = frameProbes.get(id);
+      if (!probe) return null;
+      if (frameProbeMode === 'failed') return { state: 'failed', frames: probe.frames, error: 'modeled probe failure' };
+      if (frameProbeMode === 'painting') probe.frames += 24;
+      return { state: 'running', frames: probe.frames, error: null };
+    },
+    stopWindowFrameProbe: id => frameProbes.delete(id),
     createPacketCapture(selection, onEvent) {
       captures.push(selection);
       if (packetCapture) return packetCapture(selection, onEvent);
@@ -358,6 +390,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
     if (name === 'electron') return electron;
     if (name === './i18n') return { mt: key => key };
     if (name === './screenEncodingPolicy') return policy.exports;
+    if (name === './browserOcclusion') return occlusion.exports;
     if (name === '@monky/screen-share') return { ...runtime, NativeScreenEndpoint: Endpoint, CaptureBridge: Probe,
       createCaptureBridge: options => new Probe(options),
       assertMacCaptureBridgeClosed: probe => {
@@ -449,6 +482,10 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
     replaceTarget: value => { target = value; },
     closeWindow: () => { windowOpen = false; },
     pauseWindow: value => { windowPaused = value; },
+    setWindowProcessPath: value => { windowProcessPath = value; },
+    setWindowOccluded: value => { windowOccluded = value; },
+    setFrameProbeMode: value => { frameProbeMode = value; },
+    frameProbes, startedFrameProbes: () => nextFrameProbe - 1,
     replaceWindowProcess: () => { creationTime = '987654321'; },
     focus: async value => {
       focused = value;
@@ -1256,6 +1293,102 @@ test('closing the selected window retires its announcement with zero viewers and
   assert.equal(f.endpoints.length + f.captures.length, 0);
 });
 
+test('a covered browser window warns only once its content stops updating, once per transition', async t => {
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const occlusionEvents = f => f.sent.filter(event => event.type === 'source-occlusion');
+  const f = fixture(t);
+  await f.join();
+  f.setWindowProcessPath(String.raw`C:\Program Files\Mozilla Firefox\firefox.exe`);
+  f.setWindowOccluded(false);
+  f.setFrameProbeMode('painting');
+  const { source } = await f.addSource();
+  assert.equal(f.logs.find(entry => entry.message === 'Native screen source-admitted').data.occlusionEngine, 'firefox');
+  await wait(1150);
+  assert.equal(f.startedFrameProbes(), 0, 'Visible windows are never frame-probed.');
+  f.setWindowOccluded(true);
+  await wait(3300);
+  assert.deepEqual(occlusionEvents(f), [], 'A covered browser that keeps painting still streams and stays silent.');
+  assert.equal(f.frameProbes.size, 1);
+  f.setFrameProbeMode('frozen');
+  await wait(2300);
+  assert.deepEqual(occlusionEvents(f).map(({ occluded, engine, shareId, sourceInstanceId, publisherSessionId }) =>
+    ({ occluded, engine, shareId, sourceInstanceId, publisherSessionId })),
+  [{ occluded: true, engine: 'firefox', shareId: source.shareId, sourceInstanceId: source.instanceId,
+    publisherSessionId: f.config.sessionId }]);
+  assert.equal(shared.nativeScreenEventSchema.parse(occlusionEvents(f)[0]).type, 'source-occlusion');
+  await wait(1100);
+  assert.equal(occlusionEvents(f).length, 1, 'Only transitions are reported.');
+  f.setFrameProbeMode('painting');
+  await wait(1100);
+  assert.deepEqual(occlusionEvents(f).map(event => event.occluded), [true, false], 'Resumed painting clears the warning.');
+  f.setWindowOccluded(false);
+  await wait(1100);
+  assert.equal(f.frameProbes.size, 0, 'Uncovering stops the probe.');
+  assert.equal(f.startedFrameProbes(), 1);
+  assert.deepEqual(f.logs.filter(entry => entry.message === 'Native screen source-occlusion')
+    .map(entry => [entry.level, entry.data.occluded, entry.data.engine, typeof entry.data.contentFrames]),
+  [['WARN', true, 'firefox', 'number'], ['INFO', false, 'firefox', 'number']]);
+  assert.ok(f.logs.some(entry => entry.message === 'Native screen source-frame-probe' && entry.data.frames > 0));
+  f.setWindowOccluded(new TypeError('modeled occlusion failure'));
+  await wait(1100);
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 1, 'Occlusion probing never retires the source.');
+  assert.ok(f.logs.some(entry => entry.message === 'Native screen source-occlusion failed' && entry.level === 'ERROR'));
+  assert.deepEqual(f.errors, []);
+});
+
+test('without a working content frame probe a covered browser window warns from coverage alone', async t => {
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  for (const mode of ['unavailable', 'failed', new TypeError('modeled probe start failure')]) {
+    const f = fixture(t);
+    await f.join();
+    f.setWindowProcessPath(String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`);
+    f.setWindowOccluded(true);
+    f.setFrameProbeMode(mode);
+    await f.addSource();
+    await wait(1150);
+    assert.deepEqual(f.sent.filter(event => event.type === 'source-occlusion'), [], String(mode));
+    await wait(1100);
+    assert.deepEqual(f.sent.filter(event => event.type === 'source-occlusion').map(event => [event.occluded, event.engine]),
+      [[true, 'chromium']], String(mode));
+    assert.equal(f.frameProbes.size, 0, String(mode));
+    assert.ok(f.logs.some(entry => entry.message === (mode === 'unavailable'
+      ? 'Native screen source-frame-probe-unavailable' : 'Native screen source-frame-probe failed')), String(mode));
+    assert.deepEqual(f.errors, []);
+  }
+});
+
+test('retiring a covered browser source stops its content frame probe', async t => {
+  const f = fixture(t);
+  await f.join();
+  f.setWindowProcessPath(String.raw`C:\Program Files\Mozilla Firefox\firefox.exe`);
+  f.setWindowOccluded(true);
+  f.setFrameProbeMode('painting');
+  const { source } = await f.addSource();
+  await new Promise(resolve => setTimeout(resolve, 1150));
+  assert.equal(f.frameProbes.size, 1);
+  await f.command({ action: 'source-remove', shareId: source.shareId });
+  assert.equal(f.frameProbes.size, 0);
+  assert.equal(f.startedFrameProbes(), 1);
+});
+
+test('non-browser windows and Chromium browsers are classified at admission without polling unrelated windows', async t => {
+  const f = fixture(t);
+  await f.join();
+  f.setWindowProcessPath(String.raw`C:\Windows\System32\notepad.exe`);
+  f.setWindowOccluded(true);
+  await f.addSource('plain-window');
+  assert.equal(f.logs.find(entry => entry.message === 'Native screen source-admitted').data.occlusionEngine, undefined);
+  await new Promise(resolve => setTimeout(resolve, 2300));
+  assert.deepEqual(f.sent.filter(event => event.type === 'source-occlusion'), []);
+  assert.equal(f.startedFrameProbes(), 0, 'Windows that keep painting while covered are never frame-probed.');
+  assert.equal(occlusion.exports.browserOcclusionEngine(String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`), 'chromium');
+  assert.equal(occlusion.exports.browserOcclusionEngine(String.raw`C:\Program Files (x86)\Microsoft\Edge\Application\MSEDGE.EXE`), 'chromium');
+  assert.equal(occlusion.exports.browserOcclusionEngine(String.raw`C:\Program Files\LibreWolf\librewolf.exe`), 'firefox');
+  assert.equal(occlusion.exports.browserOcclusionEngine(String.raw`C:\Users\x\AppData\Local\Programs\Microsoft VS Code\Code.exe`), null,
+    'Plain Electron apps keep painting while covered and must not warn.');
+  assert.equal(occlusion.exports.browserOcclusionEngine(null), null);
+});
+
 test('minimized and hidden windows retain their identity but a reused process does not', async t => {
   const f = fixture(t);
   await f.join();
@@ -1279,17 +1412,46 @@ test('source visibility resets the preview decoder and updates the same active p
     presentationId: randomUUID() });
   assert.equal(f.endpoints.length, 1);
   const endpoint = f.endpoints[0];
+  const visibility = () => f.sent.filter(event => event.type === 'source-visibility');
+  await new Promise(resolve => setTimeout(resolve, 350));
+  assert.deepEqual(visibility(), [], 'A visible window never reports a visibility change.');
   f.pauseWindow(true);
   await new Promise(resolve => setTimeout(resolve, 350));
   assert.equal(endpoint.paused, true);
   assert.equal(endpoint.closed, false);
   assert.equal(f.sent.filter(event => event.type === 'preview-state').at(-1).state, 'paused');
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert.deepEqual(visibility().map(({ hidden, shareId, sourceInstanceId, publisherSessionId }) =>
+    ({ hidden, shareId, sourceInstanceId, publisherSessionId })),
+  [{ hidden: true, shareId: source.shareId, sourceInstanceId: source.instanceId, publisherSessionId: f.config.sessionId }]);
+  assert.equal(shared.nativeScreenEventSchema.parse(visibility()[0]).type, 'source-visibility');
+  await new Promise(resolve => setTimeout(resolve, 350));
+  assert.equal(visibility().length, 1, 'Only transitions are reported.');
   f.pauseWindow(false);
   await new Promise(resolve => setTimeout(resolve, 350));
   assert.equal(endpoint.paused, false);
   assert.equal(f.sent.filter(event => event.type === 'preview-state').at(-1).state, 'waiting');
+  assert.deepEqual(visibility().map(event => event.hidden), [true, false]);
   assert.equal(f.endpoints.length, 1);
   assert.deepEqual(f.errors, []);
+});
+
+test('a window hidden right before it closes is reported as closed, never as minimized', async t => {
+  const f = fixture(t);
+  await f.join();
+  const { source } = await f.addSource();
+  await f.command({ action: 'preview-start', shareId: source.shareId, sourceInstanceId: source.instanceId,
+    presentationId: randomUUID() });
+  const pausedPreview = () => f.sent.some(event => event.type === 'preview-state' && event.state === 'paused');
+  f.pauseWindow(true);
+  const deadline = Date.now() + 1000;
+  while (!pausedPreview() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 2));
+  assert.ok(pausedPreview(), 'One source check observed the hidden window.');
+  f.closeWindow();
+  await new Promise(resolve => setTimeout(resolve, 350));
+  assert.ok(f.sent.some(event => event.type === 'state' && event.state === 'closed'
+    && event.sourceInstanceId === source.instanceId));
+  assert.deepEqual(f.sent.filter(event => event.type === 'source-visibility'), []);
 });
 
 test('native diagnostics are source-instance scoped and do not start capture when nobody is watching', async t => {

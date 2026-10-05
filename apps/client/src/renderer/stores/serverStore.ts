@@ -3,7 +3,7 @@ import { appEvents, EventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { clientLog } from '../core/ClientLogService';
 import type { ChannelCategory } from '@monky/shared';
-import { getChannelPermissions, hasChannelPermission, resolveLegacyMemberPermissions, resolveMemberPermissions, resolveChannelPermissions, type ChannelAccessRules } from '@monky/shared';
+import { getChannelPermissions, hasChannelPermission, resolveLegacyMemberPermissions, resolveMemberPermissions, resolveRoleDenyMemberPermissions, resolveChannelPermissions, roleModelFor, type ChannelAccessRules, type RoleModel } from '@monky/shared';
 
 export class ServerStore {
   /**
@@ -393,22 +393,25 @@ export class ServerStore {
 
   /**
    * Permissions of any member, resolved the same way the server does it: the
-   * owner/admin gets everything; Everyone is the base and assigned roles allow
-   * or deny on top of it, with any denial winning.
+   * owner/admin gets everything; otherwise Everyone plus whatever any of their
+   * roles grants (36.1 and older servers resolve roles their own way).
    */
   public getUserPermissions(userId: string): number {
     if (this.ownerId && userId === this.ownerId) return 0xFFFFFFFF;
     const roleIds = new Set(this.getUserRoleIds(userId));
     const roles = this.roles.filter((role) => roleIds.has(role.id));
-    return this.rolesUseDeny
-      ? resolveMemberPermissions(this.everyonePermissions, roles)
-      : resolveLegacyMemberPermissions(this.everyonePermissions, roles);
+    switch (this.roleModel) {
+      case 'grants': return resolveMemberPermissions(this.everyonePermissions, roles);
+      case 'deny': return resolveRoleDenyMemberPermissions(this.everyonePermissions, roles);
+      default: return resolveLegacyMemberPermissions(this.everyonePermissions, roles);
+    }
   }
 
-  /** Servers without the negotiated `role-deny` feature send and expect each role as a full switch mask. */
-  public get rolesUseDeny(): boolean {
+  /** How this server reads roles, from the negotiated protocol features. */
+  public get roleModel(): RoleModel {
     const protocol = this.serverDetails?.protocol;
-    return protocol ? protocol.features.includes('role-deny') : this.roles.every((role) => typeof role.deny === 'number');
+    if (protocol) return roleModelFor(protocol.features);
+    return this.roles.length > 0 && this.roles.every((role) => typeof role.deny === 'number') ? 'deny' : 'legacy';
   }
 
   public get everyonePermissions(): number {

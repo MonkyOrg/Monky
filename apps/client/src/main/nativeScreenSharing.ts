@@ -11,7 +11,7 @@ import {
   type NativeScreenEvent, type NativeScreenFailure, type NativeScreenParticipant, type NativeScreenSignalPayload,
   type NativeScreenSource, type NativeScreenAudioPreferences, type NativeScreenCaptureKind, type NativeScreenVideoProfile,
   type NativeScreenCaptureMode, type ScreenEncodingSelection, type ScreenEncodingAvailability,
-  type ScreenEncodingMode, type ScreenCodecPreference, type ScreenEncodingStrategy,
+  type ScreenEncodingMode, type ScreenCodecPreference, type ScreenEncodingStrategy, type BrowserOcclusionEngine,
 } from '@monky/shared';
 import {
   loadRuntime, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription, NativePcmCaptureHub,
@@ -22,6 +22,7 @@ import {
 } from '@monky/screen-share';
 import * as screenAudio from '@monky/screen-audio';
 import type { ClientLogger } from './clientLogger';
+import { browserOcclusionEngine } from './browserOcclusion';
 import { mt } from './i18n';
 import { selectScreenEncoding } from './screenEncodingPolicy';
 
@@ -35,6 +36,7 @@ type SourceRecord = {
   monitor: NodeJS.Timeout | null;
   preview: NativeScreenPreviewBridge | null;
   previewMode: NativeScreenCaptureMode | null;
+  stopFrameProbe: () => void;
 };
 type SubscriptionRecord = { source: NativeScreenSource; publisherSessionId: string; subscription: NativeScreenSubscription };
 type WatchIntent = { presentationId: string; audio: NativeScreenAudioPreferences };
@@ -196,6 +198,18 @@ function documentIdentity(value: string): string {
   const url = new URL(value);
   url.hash = '';
   return url.href;
+}
+/** Browser engine of a captured Windows window, whose capture freezes while other windows fully cover it. */
+function capturedBrowserEngine(target: { hwnd: number; expectedProcessId: number }): BrowserOcclusionEngine | null {
+  if (typeof screenAudio.listWindows !== 'function' || typeof screenAudio.getWindowOcclusion !== 'function') return null;
+  try {
+    const window = screenAudio.listWindows().find(entry =>
+      entry.hwnd === target.hwnd && entry.processId === target.expectedProcessId);
+    return browserOcclusionEngine(window?.processPath);
+  } catch (error) {
+    console.warn('[NativeScreen] Could not identify the captured window browser:', error);
+    return null;
+  }
 }
 
 class SelectedCaptureProbe {
@@ -892,6 +906,8 @@ class NativeScreenSharingService {
       if (target.kind !== kind) throw new Error('Native source resolution changed the requested capture kind.');
       if (command.audio && target.kind !== 'monitor' && target.expectedProcessId === process.pid)
         throw Object.assign(new Error(mt('screenShare.ownWindowAudioUnavailable')), { code: 'ERR_AUDIO_TARGET' });
+      const occlusionEngine = process.platform === 'win32' && target.platform !== 'darwin' && target.kind !== 'monitor'
+        ? capturedBrowserEngine(target) : null;
       let paused = false;
       let sourceFailure: unknown;
       const sourceState = (): void => {
@@ -1030,11 +1046,83 @@ class NativeScreenSharingService {
         },
       });
       const entry: SourceRecord = { desktopSourceId: command.desktopSourceId,
-        source, publisher, captureHub, monitor: null, preview: null, previewMode: null };
+        source, publisher, captureHub, monitor: null, preview: null, previewMode: null, stopFrameProbe: () => undefined };
       call.sources.set(source.shareId, entry);
       // An announcement owns its exact target even without a capture pipeline.
-      let observedPaused = paused;
+      let observedPaused = paused, reportedHidden = false, hiddenChecks = 0;
       let sourceCheckPending = false;
+      let occlusionChecks = 0, occludedSamples = 0, occluded = false, occlusionTracked = occlusionEngine !== null;
+      // Counts the window's own content frames while it is covered; null until the first running sample.
+      let frameProbe: { id: number; frames: number | null; stalledSamples: number } | null = null;
+      let frameProbeUnavailable = false;
+      const stopFrameProbe = (): void => {
+        if (!frameProbe) return;
+        const { id, frames, stalledSamples } = frameProbe;
+        frameProbe = null;
+        try { screenAudio.stopWindowFrameProbe(id); }
+        catch (error) { this.logFailure('source-frame-probe', error, undefined, this.context(call, source.shareId)); }
+        this.log('source-frame-probe', { ...this.context(call, source.shareId), frames, stalledSamples, warned: occluded });
+      };
+      entry.stopFrameProbe = stopFrameProbe;
+      const frameProbeFailed = (error: unknown): void => {
+        frameProbeUnavailable = true;
+        stopFrameProbe();
+        this.logFailure('source-frame-probe', error, undefined, this.context(call, source.shareId));
+      };
+      // Some browsers keep painting a covered window. Only a window whose content also stopped updating for two
+      // samples is frozen; without the probe (old Windows or addon), coverage alone keeps warning as before.
+      const contentStalled = (hwnd: number): boolean => {
+        if (frameProbeUnavailable) return true;
+        try {
+          if (!frameProbe) {
+            const id = typeof screenAudio.startWindowFrameProbe === 'function'
+              ? screenAudio.startWindowFrameProbe(hwnd) : null;
+            if (id === null) {
+              frameProbeUnavailable = true;
+              this.log('source-frame-probe-unavailable', this.context(call, source.shareId), 'WARN');
+              return true;
+            }
+            frameProbe = { id, frames: null, stalledSamples: 0 };
+            return false;
+          }
+          const snapshot = screenAudio.getWindowFrameProbe(frameProbe.id);
+          if (!snapshot || snapshot.state === 'failed' || snapshot.state === 'closed') {
+            frameProbeFailed(new Error(snapshot?.error ?? `Window frame probe ${snapshot?.state ?? 'disappeared'}.`));
+            return true;
+          }
+          if (snapshot.state !== 'running') return false;
+          frameProbe.stalledSamples = frameProbe.frames !== null && snapshot.frames === frameProbe.frames
+            ? frameProbe.stalledSamples + 1 : 0;
+          frameProbe.frames = snapshot.frames;
+          return frameProbe.stalledSamples >= 2;
+        } catch (error) {
+          frameProbeFailed(error);
+          return true;
+        }
+      };
+      // Sampled every second; "covered" must persist across two samples so window animations stay silent.
+      const checkOcclusion = (): void => {
+        if (!occlusionTracked || !occlusionEngine || target.platform === 'darwin' || target.kind === 'monitor'
+          || ++occlusionChecks % 4 !== 0) return;
+        let covered: boolean;
+        try {
+          covered = !paused && screenAudio.getWindowOcclusion(target.hwnd) === true;
+        } catch (error) {
+          occlusionTracked = false;
+          stopFrameProbe();
+          this.logFailure('source-occlusion', error, undefined, this.context(call, source.shareId));
+          return;
+        }
+        occludedSamples = covered ? occludedSamples + 1 : 0;
+        if (!covered) stopFrameProbe();
+        const next = covered && contentStalled(target.hwnd) && occludedSamples >= 2;
+        if (next === occluded) return;
+        occluded = next;
+        this.log('source-occlusion', { ...this.context(call, source.shareId), occluded, engine: occlusionEngine,
+          contentFrames: frameProbeUnavailable ? null : frameProbe?.frames ?? null }, occluded ? 'WARN' : 'INFO');
+        this.emit(call, { type: 'source-occlusion', callId: call.config.callId, publisherSessionId: call.config.sessionId,
+          shareId: source.shareId, sourceInstanceId: source.instanceId, occluded, engine: occlusionEngine });
+      };
       const checkSource = async (): Promise<void> => {
         if (sourceCheckPending || call.stopping || call.sources.get(source.shareId) !== entry) return;
         sourceCheckPending = true;
@@ -1051,6 +1139,16 @@ class NativeScreenSharingService {
             observedPaused = paused;
             entry.preview?.reset(paused || !this.previewAllowed(call, entry) ? 'paused' : 'waiting');
           }
+          // Apps often hide a window right before destroying it; only a hidden state that outlives one check is reported.
+          hiddenChecks = paused ? hiddenChecks + 1 : 0;
+          const hidden = hiddenChecks >= 2;
+          if (reportedHidden !== hidden) {
+            reportedHidden = hidden;
+            this.emit(call, { type: 'source-visibility', callId: call.config.callId,
+              publisherSessionId: call.config.sessionId, shareId: source.shareId,
+              sourceInstanceId: source.instanceId, hidden });
+          }
+          checkOcclusion();
           publisher.refreshSourceState();
         } catch (error) {
           if (call.stopping || call.sources.get(source.shareId) !== entry) return;
@@ -1068,7 +1166,8 @@ class NativeScreenSharingService {
         void checkSource().catch(error => this.error(call, error, call.config.sessionId, source.shareId));
       }, target.platform === 'darwin' ? 1000 : 250);
       entry.monitor.unref();
-      this.log('source-admitted', { ...diagnostic, instance: diagnosticId(source.instanceId) });
+      this.log('source-admitted', { ...diagnostic, instance: diagnosticId(source.instanceId),
+        ...(occlusionEngine ? { occlusionEngine } : {}) });
       return { kind: 'source', source, encoding };
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') this.log('source-admission-cancelled', { ...diagnostic, stage });
@@ -1099,6 +1198,7 @@ class NativeScreenSharingService {
     this.log('source-retirement', this.context(call, shareId));
     if (entry.monitor) clearInterval(entry.monitor);
     entry.monitor = null;
+    entry.stopFrameProbe();
     const errors: unknown[] = [];
     const preview = entry.preview;
     if (preview) this.log('preview-retirement', this.context(call, shareId));

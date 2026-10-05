@@ -312,7 +312,10 @@ dez segundos, 256 entradas e 8 MiB. Ícones vêm da API de arquivos do sistema.
 Desconectar o monitor ou alterar sua identidade, posição ou resolução encerra
 a fonte e exige nova seleção explícita; não se troca para a tela principal.
 Minimizar ou ocultar uma janela/jogo é tratado como pausa, não como perda da
-identidade. Restaurar permite retomar os frames. Fechar ou substituir a
+identidade. Restaurar permite retomar os frames. O título também não faz parte
+da identidade: navegadores, editores e players renomeiam a janela a cada página
+ou arquivo, e o compartilhamento continua. Trocar a classe da janela ou o
+executável encerra a fonte. Fechar ou substituir a
 janela/processo encerra o anúncio mesmo sem espectadores.
 
 Janelas WinUI (por exemplo, WhatsApp) não são bloqueadas apenas pela classe
@@ -985,6 +988,8 @@ A entrega real continua dependendo da cadência da fonte e da carga do sistema.
 WinUI/ApplicationFrameWindow. Verifica captura WGC real com filhos do mesmo
 processo e distingue as duas janelas com títulos duplicados, recusando
 remapeamento para filhos de outro processo e identidade de processo alterada.
+Também renomeia a janela durante a captura (título novo, com mais de 512
+caracteres e vazio) e exige que os frames continuem.
 Não captura janelas pessoais
 nem grava vídeo; `--contracts=<executável_absoluto>` permite outro diretório
 de build.

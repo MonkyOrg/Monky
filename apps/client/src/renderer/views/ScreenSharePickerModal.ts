@@ -258,9 +258,9 @@ export class ScreenSharePickerModal {
     if (aspectInput) aspectInput.disabled = this.isStarting;
     const occlusionTip = this.modalEl?.querySelector<HTMLElement>('#share-occlusion-tip');
     if (occlusionTip) {
-      const sensitive = source?.type === 'window' && source.occlusionSensitive === true;
-      occlusionTip.hidden = !sensitive;
-      occlusionTip.textContent = sensitive ? t('screenShare.browserOcclusionTip') : '';
+      const engine = source?.type === 'window' ? source.occlusionEngine : undefined;
+      occlusionTip.hidden = !engine;
+      occlusionTip.textContent = engine ? t(`screenShare.occlusionTip.${engine}`) : '';
     }
     const audioText = this.modalEl?.querySelector('#share-audio-text');
     if (audioText) audioText.textContent = this.audioToggleLabel(this.activeTab);
@@ -958,7 +958,7 @@ export class ScreenSharePickerModal {
         const restored = tab !== 'screen' && await window.api.prepareScreenShareWindow(sourceId);
         if (restored) await new Promise(resolve => setTimeout(resolve, 350));
         assertCurrent();
-        stream = await webRtcManager.startNativeScreenShare(sourceId, shareAudio, source.thumbnailDataUrl,
+        stream = await webRtcManager.startNativeScreenShare(sourceId, shareAudio,
           () => this.modalEl === modal && call.isCurrent() && this.activeTab === tab
             && this.selectedSourceId === sourceId && this.captureKind() === captureKind,
           captureKind, preserveAspectRatio,

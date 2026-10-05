@@ -63,17 +63,39 @@ export const CHANNEL_PERMISSIONS =
  */
 export const LEGACY_CHANNEL_PERMISSIONS = Permission.MANAGE_EVENTS | Permission.EMIT_LIVE_ACTIONS;
 
-/** A server role: `permissions` holds the allowed bits, `deny` the denied ones; every other bit inherits Everyone. */
+/**
+ * A server role. `permissions` are the bits it grants. Only 36.1 servers
+ * (`role-deny` without `role-grants`) also let a role deny bits over Everyone.
+ */
 export interface RolePermissionRule {
   permissions: number;
   deny?: number;
 }
 
 /**
- * Everyone is the base of every member. Roles allow or deny on top of it and
- * any denial wins; bits a role leaves unset inherit. Administrators bypass it.
+ * How a peer reads server roles: `grants` adds role grants to Everyone, `deny`
+ * is 36.1 (allow/deny over Everyone) and `legacy` is a full mask per role.
  */
-export function resolveMemberPermissions(everyone: number, roles: readonly RolePermissionRule[]): number {
+export type RoleModel = 'grants' | 'deny' | 'legacy';
+
+export function roleModelFor(features: readonly string[] | undefined): RoleModel {
+  if (features?.includes('role-grants')) return 'grants';
+  if (features?.includes('role-deny')) return 'deny';
+  return 'legacy';
+}
+
+/**
+ * Everyone is the base of every member and server roles only grant: a member
+ * has a permission when Everyone or any of their roles grants it. A role never
+ * takes a permission away. Administrators bypass it.
+ */
+export function resolveMemberPermissions(everyone: number, roles: readonly { permissions: number }[]): number {
+  if (roles.some(role => hasPermission(role.permissions, Permission.ADMINISTRATOR))) return ADMIN_PERMISSIONS;
+  return stripAdministrator(roles.reduce((bits, role) => bits | role.permissions, everyone));
+}
+
+/** 36.1 servers let roles allow or deny over Everyone, with any denial winning. */
+export function resolveRoleDenyMemberPermissions(everyone: number, roles: readonly RolePermissionRule[]): number {
   if (roles.some(role => hasPermission(role.permissions, Permission.ADMINISTRATOR))) return ADMIN_PERMISSIONS;
   let allow = 0;
   let deny = 0;
@@ -85,8 +107,8 @@ export function resolveMemberPermissions(everyone: number, roles: readonly RoleP
 }
 
 /**
- * Servers before allow/deny roles stored each role as a full switch mask that
- * replaced Everyone, and intersected the masks of several roles.
+ * Servers before 36.1 stored each role as a full switch mask that replaced
+ * Everyone, and intersected the masks of several roles.
  */
 export function resolveLegacyMemberPermissions(everyone: number, roles: readonly { permissions: number }[]): number {
   if (roles.some(role => hasPermission(role.permissions, Permission.ADMINISTRATOR))) return ADMIN_PERMISSIONS;
@@ -94,21 +116,39 @@ export function resolveLegacyMemberPermissions(everyone: number, roles: readonly
   return stripAdministrator(roles.reduce((bits, role) => bits & role.permissions, ADMIN_PERMISSIONS));
 }
 
-/** Expresses a former full role mask as allow/deny against Everyone without changing what it grants. */
-export function legacyRoleRule(permissions: number, everyone: number): Required<RolePermissionRule> {
-  if (hasPermission(permissions, Permission.ADMINISTRATOR)) return { permissions: permissions >>> 0, deny: 0 };
-  return { permissions: (permissions & ~everyone) >>> 0, deny: stripAdministrator(everyone & ~permissions) };
+/** The full switch mask a client before 36.1 expects for a role: Everyone plus what the role grants. */
+export function legacyRoleMask(permissions: number, everyone: number): number {
+  if (hasPermission(permissions, Permission.ADMINISTRATOR)) return permissions >>> 0;
+  return stripAdministrator(everyone | permissions);
 }
 
-/** The full switch mask an older server expects for an allow/deny role. */
-export function legacyRoleMask(rule: RolePermissionRule, everyone: number): number {
-  if (hasPermission(rule.permissions, Permission.ADMINISTRATOR)) return rule.permissions >>> 0;
-  return stripAdministrator((everyone | rule.permissions) & ~(rule.deny ?? 0));
+/**
+ * Reads back a full switch mask saved by a client before 36.1. Bits beyond
+ * Everyone become grants. A mask cannot tell whether a bit Everyone already
+ * has was also granted by the role, so such a grant is kept only while the
+ * mask still has it on.
+ */
+export function legacyRoleGrants(mask: number, everyone: number, previous = 0): number {
+  if (hasPermission(mask, Permission.ADMINISTRATOR)) return mask >>> 0;
+  return stripAdministrator((mask & ~everyone) | (previous & everyone & mask));
 }
 
-/** Roles as clients without allow/deny support expect them: full masks and no `deny`. */
+/** Roles as clients before 36.1 expect them: full masks and no `deny`. */
 export function toLegacyRoles<T extends RolePermissionRule>(roles: readonly T[], everyone: number): Array<Omit<T, 'deny'>> {
-  return roles.map(({ deny, ...role }) => ({ ...role, permissions: legacyRoleMask({ permissions: role.permissions, deny }, everyone) }));
+  return roles.map(({ deny: _deny, ...role }) => ({ ...role, permissions: legacyRoleMask(role.permissions, everyone) }));
+}
+
+/** Roles as 36.1 clients expect them: grants as allowed bits and nothing denied, which they resolve to the same union. */
+export function toRoleDenyRoles<T extends RolePermissionRule>(roles: readonly T[]): Array<T & { deny: number }> {
+  return roles.map(role => ({ ...role, deny: 0 }));
+}
+
+/** Server roles in the format a peer reading them with `model` expects. */
+export function rolesForModel<T extends RolePermissionRule>(
+  roles: readonly T[], everyone: number, model: RoleModel,
+): Array<Omit<T, 'deny'> & { deny?: number }> {
+  if (model === 'deny') return toRoleDenyRoles(roles);
+  return model === 'legacy' ? toLegacyRoles(roles, everyone) : [...roles];
 }
 
 /** Converts the old privacy form to the same rules used by the permission editor. */
@@ -167,7 +207,11 @@ export function channelPrivacy(overwrites: readonly ChannelPermissionOverwrite[]
   };
 }
 
-/** Role and member rules replace Everyone; any matching explicit denial wins. */
+/**
+ * Everyone sets the base of the place. Role rules override it, with a denial
+ * from any assigned role winning. A rule for the member themself comes last
+ * and overrides their roles in either direction.
+ */
 export function getChannelPermissions(
   rules: ChannelAccessRules, permissions: number, roleIds: readonly string[], limitToBase = false, userId?: string,
 ): number {
@@ -175,16 +219,20 @@ export function getChannelPermissions(
   let result = rules.permissionOverwrites === undefined ? permissions | Permission.VIEW_CHANNEL : permissions;
   let allow = 0;
   let deny = 0;
+  let member: ChannelPermissionOverwrite | undefined;
   for (const overwrite of channelOverwrites(rules)) {
     if (overwrite.roleId === null) {
       result = (result | overwrite.allow) & ~overwrite.deny;
-    } else if (overwrite.userId !== undefined ? overwrite.userId === userId
-      : overwrite.roleId !== undefined && roleIds.includes(overwrite.roleId)) {
+    } else if (overwrite.userId !== undefined) {
+      if (overwrite.userId === userId) member = overwrite;
+    } else if (overwrite.roleId !== undefined && roleIds.includes(overwrite.roleId)) {
       allow |= overwrite.allow;
       deny |= overwrite.deny;
     }
   }
-  result = ((result | allow) & ~deny) >>> 0;
+  result = (result | allow) & ~deny;
+  if (member) result = (result & ~member.deny) | member.allow;
+  result >>>= 0;
   if (limitToBase) result = (result & permissions) >>> 0;
   return result;
 }

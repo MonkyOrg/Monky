@@ -4,7 +4,6 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const { once } = require('node:events');
 const { createInterface } = require('node:readline');
 const { randomBytes } = require('node:crypto');
 const { CaptureBridge, loadCaptureRuntime } = require('..');
@@ -37,29 +36,45 @@ async function fixture(className, nonce = randomBytes(16).toString('hex'), paren
       assert.deepEqual(result, { code: 0, signal: null }, stderr);
       owners.delete(owner);
     },
+    async rename(command) {
+      const acknowledged = nextLine();
+      child.stdin.write(command);
+      assert.deepEqual(JSON.parse(await within(acknowledged, 5000, `Owned fixture did not rename (${command}).`)),
+        { renamed: true });
+    },
   };
   owners.add(owner);
   const lines = createInterface({ input: child.stdout });
-  try {
-    const [line] = await within(Promise.race([
-      once(lines, 'line'),
-      closed.then(result => { throw new Error(`Fixture exited before readiness: ${JSON.stringify(result)} ${stderr}`); }),
-    ]), 5000, 'Owned fixture did not prove its HWND.');
-    owner.target = { kind: 'window', ...JSON.parse(line) };
-    assert.equal(owner.target.expectedProcessId, child.pid);
-    return owner;
-  } finally { lines.close(); }
+  const pending = [];
+  lines.on('line', line => pending.shift()?.(line));
+  const nextLine = () => new Promise(resolve => pending.push(resolve));
+  const [line] = await within(Promise.race([
+    nextLine().then(value => [value]),
+    closed.then(result => { throw new Error(`Fixture exited before readiness: ${JSON.stringify(result)} ${stderr}`); }),
+  ]), 5000, 'Owned fixture did not prove its HWND.');
+  owner.target = { kind: 'window', ...JSON.parse(line) };
+  assert.equal(owner.target.expectedProcessId, child.pid);
+  return owner;
 }
 
-async function probe(runtime, target, label, expectedError, capture = false) {
+async function packetsAfter(read, minimum, label) {
+  const deadline = Date.now() + 5000;
+  while (read() < minimum) {
+    assert.ok(Date.now() < deadline, `${label}: capture stopped delivering packets.`);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
+
+async function probe(runtime, target, label, expectedError, capture = false, renameOwner) {
   const runId = randomBytes(16).toString('hex');
   const runDirectory = path.join(artifacts, `monky-screen-capture-${runId}`);
   fs.mkdirSync(runDirectory);
   let packets = 0;
+  const runtimeErrors = [];
   const bridge = new CaptureBridge({
     host: runtime.host, runtime: runtime.obs, runId, runDirectory, encoder: 'obs_x264',
     video: { width: 1280, height: 720, fps: 30, bitrateKbps: 3000, scaleMode: 'fit' },
-    onError(error) { console.error(`${label}: ${error.code}: ${error.message}`); },
+    onError(error) { runtimeErrors.push(error); console.error(`${label}: ${error.code}: ${error.message}`); },
     onPacket() {
       assert.equal(capture, true, 'Source identity preflight must never capture pixels.');
       packets++;
@@ -76,6 +91,13 @@ async function probe(runtime, target, label, expectedError, capture = false) {
       assert.ok(ready.observation.outputPackets > 0);
       assert.deepEqual(ready.hookedKey, ready.sourceKey);
       assert.equal(ready.sourceKey.className, label.split(':')[0]);
+      // A shared window is identified by HWND/process birth; a page change renaming it must not end the share.
+      for (const command of renameOwner ? ['r', 'l', 'e', 'r'] : []) {
+        const before = packets;
+        await renameOwner.rename(command);
+        await packetsAfter(() => packets, before + 30, `${label}:${command}`);
+        assert.deepEqual(runtimeErrors, [], `${label}: renaming the shared window failed the capture.`);
+      }
     }
   } catch (error) { failure = error; }
   try { await bridge.stop(); }
@@ -108,6 +130,7 @@ async function main() {
       await probe(runtime, selected.target, `${className}:original-window-restored`);
       await probe(runtime, { ...selected.target, expectedProcessCreationTime100ns: '1' },
         `${className}:process-identity-changed`, 'ERR_SCREEN_CAPTURE_PROCESS_IDENTITY');
+      await probe(runtime, selected.target, `${className}:renamed-while-shared`, undefined, true, selected);
       await selected.close();
     }
     console.log(JSON.stringify(report));

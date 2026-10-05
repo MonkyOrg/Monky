@@ -95,20 +95,44 @@ ends that audio reception. Muting is a separate playback preference; it does
 not replace **Stop watching** when you want to save bandwidth.
 
 Changing pages, using a pop-out window or enabling the overlay does not change
-the screens you chose to watch in the call. Leaving the call or ending the
+the screens you chose to watch in the call. Away from the stage, the **You are
+watching** notice above your user bar shows **Back to stage**, which reopens the
+call's stage, and **Stop watching**. Leaving the call or ending the
 source clears that choice; a new broadcast must be selected again. When the
 publisher switches the shared window or screen, you keep watching the new
 source automatically, with the same chosen quality and stage focus, without
 clicking **Watch broadcast** again. This applies to a new source published
 within 15 seconds of the previous one; a second screen that already existed
-never opens on its own. A transport reconnection preserves the choice while
+never opens on its own. If the broadcast was in PiP, PiP closes and the new
+source takes the previous one's stage focus. A transport reconnection preserves the choice while
 the same source remains valid.
 
-On Windows, Chrome, Edge and other Chromium-based browsers stop drawing a
-window that another window fully covers, and its broadcast turns gray until
-the window shows again. The picker warns when you choose one of these windows.
-Keep part of it visible, share the entire screen, or disable **Calculate
-window occlusion on Windows** in `chrome://flags`.
+On Windows, Firefox, Chrome, Edge and browsers based on them stop drawing a
+window that another window fully covers, for example when you maximize another
+window over it on the same monitor. That window's broadcast freezes until it
+shows again. Covering only part of it does not cause the problem. The picker
+warns when you choose one of these windows and, while broadcasting, a yellow
+warning appears over your preview on the stage when it is fully covered and its
+picture stopped changing. The warning suggests moving the other window out of
+the way and, if the picture stays frozen, stopping the share and starting
+again. Sometimes the browser keeps drawing the covered window; the broadcast
+then continues normally and no warning appears. A paused video in a covered
+window also shows the warning, because the still picture looks the same. To
+avoid it, keep part of the window visible, share the entire screen, or turn the
+behavior off in the browser:
+
+- **Firefox:** in `about:config`, set
+  `widget.windows.window_occlusion_tracking.enabled` to `false` and restart
+  Firefox.
+- **Chrome, Edge and similar:** close the browser and start it with
+  `--disable-features=CalculateNativeWinOcclusion` in its shortcut. The option
+  that used to exist in `chrome://flags` has been removed.
+
+A minimized window also freezes the broadcast, in any program: Windows does not
+draw minimized windows, and no application can capture them. Viewers see a
+frozen picture until you restore the window, and the broadcast resumes on its
+own. While the shared window is minimized or hidden, a yellow warning over your
+preview on the stage explains why. Only you see this warning.
 
 On the native path, the last viewer to stop also closes that profile's capture,
 encoder and sending pipeline, including the upload to the SFU.
@@ -542,14 +566,22 @@ or reactivating the window, closes automatic PiP and keeps the same broadcast fo
 without restarting playback. Bringing Monky forward while viewing another
 channel or Home does not close PiP. The manual PiP button remains available.
 If you close automatic PiP while away, it stays closed for that absence and
-upon return; leaving again can open it again. Manually opened PiP remains
-open when switching apps, minimizing or restoring the window, including when
-moved to another monitor.
-The PiP window's **Back to tab** button brings Monky back, even when minimized
-or hidden in the tray, and opens the call's stage with the same broadcast
-focused, without restarting playback. **X** only closes PiP and leaves Monky
-where it is. The PiP pause/play button only pauses the picture you see; the
-broadcast stays live.
+upon return; leaving again can open it again. PiP opened with the manual
+button takes the broadcast off the stage: it leaves focus and its card turns
+black, showing **Playing in Picture-in-Picture** and a **Bring back** button.
+This PiP stays open while navigating the app, switching apps, minimizing or
+restoring the window, including when moved to another monitor. **Bring back**,
+**Back to Monky** or **X** close PiP and return the broadcast to the stage
+without restarting playback, focused if it was focused when PiP opened.
+Opening PiP for another broadcast also returns the previous one to the stage.
+PiP is Monky's own always-on-top window. It appears without taking focus from
+the game or app you are using and keeps showing the broadcast while Monky is
+minimized. Drag it from anywhere to move it and from its edges to resize it; it
+keeps the broadcast's aspect ratio and reopens at its last position and size.
+Hovering reveals its buttons: **Back to Monky** brings Monky back, even when
+minimized or hidden in the tray, and opens the call's stage with the same
+broadcast, without restarting playback. **X** closes PiP without bringing
+Monky forward; with manual PiP, the broadcast returns to the stage.
 
 Under **Settings → Quality & sharing → Screen reception**, choose **Native** or
 **Chromium**. On Windows and macOS, **Native is the default**, using the runtime included

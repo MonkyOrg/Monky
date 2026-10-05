@@ -23,6 +23,9 @@ import type { RemoteMediaRouter } from './RemoteMediaRouter';
 import type { ScreenCodecPreference } from '@monky/shared';
 import { acceptScreenEncoding } from '../screenEncoding';
 
+/** Why viewers see a frozen picture of a local source: its window is minimized or hidden, or a browser stopped drawing it. */
+export type NativeScreenSourceWarning = 'hidden' | 'covered';
+
 export interface NativeScreenCallContext {
   readonly client: NetworkClient;
   readonly participants: ParticipantManager;
@@ -80,6 +83,8 @@ interface Source {
   previewState?: NativeScreenPreviewState;
   captureMode?: NativeScreenCaptureMode;
   fallbackNotified?: boolean;
+  sourceCovered?: boolean;
+  sourceHidden?: boolean;
   failureNotified?: boolean;
   sourceUnavailableNotified?: boolean;
   preview?: {
@@ -378,6 +383,14 @@ export class NativeScreenController {
         entry.fallbackNotified = true;
         videoService.updateNativeScreenCapture({ ...capture, captureKind: 'window' });
         emitOutsideRouting(() => appEvents.emit('native_screen.capture_fallback', { shareId: event.shareId }));
+      } else if (event.type === 'source-occlusion') {
+        if ((entry.sourceCovered ?? false) === event.occluded) return;
+        entry.sourceCovered = event.occluded;
+        this.changed();
+      } else if (event.type === 'source-visibility') {
+        if ((entry.sourceHidden ?? false) === event.hidden) return;
+        entry.sourceHidden = event.hidden;
+        this.changed();
       } else if (event.type === 'error') {
         if (event.reason === 'source-unavailable') {
           if (entry.sourceUnavailableNotified) return;
@@ -390,7 +403,8 @@ export class NativeScreenController {
           reason: event.reason, shareId: event.shareId, ...(event.code ? { code: event.code } : {}),
         }));
       }
-    } else if (event.shareId && event.type !== 'preview-state' && event.type !== 'capture-fallback') {
+    } else if (event.shareId && event.type !== 'preview-state' && event.type !== 'capture-fallback'
+      && event.type !== 'source-occlusion' && event.type !== 'source-visibility') {
       const entry = call.presentations.get(keyOf(event.publisherSessionId, event.shareId));
       if (!entry || entry.stopping || entry.presentationId !== event.presentationId
         || entry.source.instanceId !== event.sourceInstanceId) return;
@@ -408,6 +422,13 @@ export class NativeScreenController {
 
   public getLocalPreviewState(shareId: string): NativeScreenPreviewState {
     return this.call?.sources.get(shareId)?.previewState ?? 'waiting';
+  }
+
+  /** Why viewers currently see a frozen picture of this local source, or null while it is captured normally. */
+  public getLocalSourceWarning(shareId: string): NativeScreenSourceWarning | null {
+    const source = this.call?.sources.get(shareId);
+    if (source?.sourceHidden) return 'hidden';
+    return source?.sourceCovered ? 'covered' : null;
   }
 
   private syncPreviewPreference(call: Call): Promise<void> {

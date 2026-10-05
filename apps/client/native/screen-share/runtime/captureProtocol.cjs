@@ -286,7 +286,13 @@ function validateMessage(message, expected) {
   } else if (message.type === 'ready' || message.type === 'stats') {
     integer(message.sequence, 1);
     if (message.type === 'ready') assert.equal(observation.sourceAttached, true);
-    assert.deepEqual(message.hookedKey, message.sourceKey, 'The backend attached to another OBS window key.');
+    if (message.sourceKey === null) assert.equal(message.hookedKey, null);
+    else {
+      // The HWND/process birth is the identity; a window title (a browser page) may change while it is shared.
+      assert.ok(message.hookedKey !== null, 'The backend did not report the attached OBS window key.');
+      for (const name of ['className', 'executable'])
+        assert.equal(message.hookedKey[name], message.sourceKey[name], 'The backend attached to another OBS window key.');
+    }
     integer(observation.sourceWidth, 1, 32768);
     integer(observation.outputPackets, 1);
     integer(observation.keyframes, 1, observation.outputPackets);

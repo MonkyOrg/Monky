@@ -198,8 +198,9 @@ struct Target {
         "Selected HWND/PID/creation time is no longer live", "ERR_SCREEN_CAPTURE_SOURCE_LOST");
     Require(GetAncestor(window, GA_ROOT) == window,
         "Selected window is no longer top-level", "ERR_SCREEN_CAPTURE_SOURCE_LOST");
-    Require(WindowTitle(window) == title && WindowClass(window) == className && ExecutableBasename(process.Get()) == executable,
-        "Selected source tuple changed; reselection is required", "ERR_SCREEN_CAPTURE_SOURCE_LOST");
+    // The title is not identity: a browser renames its window on every page while it is still the same source.
+    Require(WindowClass(window) == className && ExecutableBasename(process.Get()) == executable,
+        "Selected window class or executable changed; reselection is required", "ERR_SCREEN_CAPTURE_SOURCE_LOST");
   }
 
   bool Paused() const { return kind != CaptureKind::Monitor && (!IsWindowVisible(window) || IsIconic(window)); }
@@ -1196,8 +1197,18 @@ class Host {
         "Window property has unexpected format", "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
     const auto count = api().obs_property_list_item_count(property);
     Require(count <= kMaxWindowCandidates, "Window property exceeds bound", "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
-    std::string result;
-    std::size_t matching = 0;
+    // The bound HWND selects the captured window; this tuple only seeds the stock setting. The window may have been
+    // renamed since selection (a browser loading a page), so its current title is accepted and preferred.
+    std::optional<SourceKey> live;
+    try {
+      live = SourceKey{Utf8(WindowTitle(target_.window)), target_.key.className, target_.key.executable};
+    } catch (const ContractError&) {}
+    std::string selected, current;
+    const auto remember = [](std::string& slot, const std::string& encoded) {
+      Require(slot.empty() || slot == encoded, "Selected window has inconsistent property encodings",
+          "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
+      slot = encoded;
+    };
     for (std::size_t i = 0; i < count; ++i) {
       if (api().obs_property_list_item_disabled(property, i)) continue;
       const auto encoded = BoundedString(api().obs_property_list_item_string(property, i), 4096);
@@ -1207,20 +1218,17 @@ class Host {
       try {
         if (className && title && executable) {
           const SourceKey observed{BoundedString(title, 512), BoundedString(className, 256), BoundedString(executable, 260)};
-          if (observed == target_.key) {
-            Require(result.empty() || result == encoded, "Selected window has inconsistent property encodings",
-                "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
-            ++matching; result = encoded;
-          }
+          if (observed == target_.key) remember(selected, encoded);
+          if (live && observed == *live) remember(current, encoded);
         }
       } catch (...) {
         api().bfree(className); api().bfree(title); api().bfree(executable); throw;
       }
       api().bfree(className); api().bfree(title); api().bfree(executable);
     }
-    Require(matching > 0, "Exact selected window key is absent from stock source properties",
+    Require(!current.empty() || !selected.empty(), "Selected window key is absent from stock source properties",
         "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
-    return result;
+    return current.empty() ? selected : current;
   }
   void SourceSettings() {
     Require(!arguments_.encoderProbe, "Encoder probing cannot enumerate source settings", "ERR_SCREEN_CAPTURE_PROBE_ISOLATION");
@@ -1734,11 +1742,12 @@ class Host {
           Require(api().calldata_get_data(&data, "identity_valid", &identity, sizeof(identity)) && identity,
                   "The capture backend did not bind the exact selected native identity", "ERR_SCREEN_CAPTURE_HOOK_IDENTITY");
           if (arguments_.kind != CaptureKind::Monitor) {
-            const char* title = nullptr; const char* className = nullptr; const char* executable = nullptr;
-            Require(api().calldata_get_string(&data, "title", &title) && api().calldata_get_string(&data, "class", &className) &&
+            const char* className = nullptr; const char* executable = nullptr;
+            Require(api().calldata_get_string(&data, "class", &className) &&
                 api().calldata_get_string(&data, "executable", &executable), "Stock hooked tuple is incomplete",
                 "ERR_SCREEN_CAPTURE_HOOK_IDENTITY");
-            observed = SourceKey{BoundedString(title, 512), BoundedString(className, 256), BoundedString(executable, 260)};
+            // The live title may be renamed, empty or longer than the selection bound; it keeps the selected label.
+            observed = SourceKey{target_.key.title, BoundedString(className, 256), BoundedString(executable, 260)};
           }
           if (arguments_.kind != CaptureKind::Monitor) {
             std::int64_t hwnd = 0, pid = 0, creation = 0;

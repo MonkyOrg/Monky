@@ -119,12 +119,30 @@ int main(int argc, char** argv) {
                 << ",\"expectedProcessId\":" << GetCurrentProcessId()
                 << ",\"expectedProcessCreationTime100ns\":\"" << creation << "\"}\n" << std::flush;
       const auto deadline = GetTickCount64() + 60000;
+      unsigned renames = 0;
       while (IsWindow(window)) {
         Require(GetTickCount64() < deadline, "Window fixture owner did not close its pipe");
         DWORD available = 0;
         if (!PeekNamedPipe(GetStdHandle(STD_INPUT_HANDLE), nullptr, 0, nullptr, &available, nullptr)) {
           Require(GetLastError() == ERROR_BROKEN_PIPE, "Window fixture stdin failed");
           break;
+        }
+        if (available > 0) {
+          // Renames model a browser changing page while it is shared: r=new title, l=over 512 chars, e=empty.
+          std::array<char, 64> commands{};
+          DWORD read = 0;
+          Require(ReadFile(GetStdHandle(STD_INPUT_HANDLE), commands.data(),
+              (std::min)(available, static_cast<DWORD>(commands.size())), &read, nullptr) != 0 && read > 0,
+              "Window fixture command read failed");
+          for (DWORD index = 0; index < read; ++index) {
+            const char command = commands[index];
+            if (command == '\n') continue;
+            Require(command == 'r' || command == 'l' || command == 'e', "Unexpected window fixture command");
+            const auto renamed = command == 'e' ? std::wstring() : command == 'l'
+                ? title + L" " + std::wstring(600, L'x') : title + L" renamed " + std::to_wstring(++renames);
+            Require(SetWindowTextW(window, renamed.c_str()) != 0, "Cannot rename owned window fixture");
+          }
+          std::cout << "{\"renamed\":true}\n" << std::flush;
         }
         MSG message{};
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -298,6 +316,16 @@ int main(int argc, char** argv) {
     rejects([&] { clock.Observe(packet); });
     PacketClock invalid; packet.pts = 2;
     rejects([&] { invalid.Observe(packet); });
+    const SourceKey selectedWindow{"Firefox - page A", "MozillaWindowClass", "firefox.exe"};
+    ValidateHookEvidence(selectedWindow, selectedWindow); check(true);
+    ValidateHookEvidence(selectedWindow, {"Firefox - page B", "MozillaWindowClass", "firefox.exe"}); check(true);
+    for (const auto& foreign : {SourceKey{"Firefox - page A", "Chrome_WidgetWin_1", "firefox.exe"},
+                                SourceKey{"Firefox - page A", "MozillaWindowClass", "chrome.exe"}}) {
+      try {
+        ValidateHookEvidence(selectedWindow, foreign);
+        check(false);
+      } catch (const ContractError& error) { check(error.code == "ERR_SCREEN_CAPTURE_HOOK_IDENTITY"); }
+    }
     rejects([&] { ScaleTime(INT64_MAX, 1, 120); });
     check(ScaleTime(120 * 60 * 60 * 8, 1, 120) == 28800000000LL);
     check(ScaleTime(18000, 1, 30) == 600000000);

@@ -491,7 +491,7 @@ async function runQualitySettingsSmoke() {
         'Changing tabs must preserve telemetry choices.');
       const metadataOnly = new MediaStream();
       videoService.registerNativeScreenShare(metadataOnly, {
-        desktopSourceId: 'window:1:0', thumbnail: '', audioBitrateKbps: 128,
+        desktopSourceId: 'window:1:0', audioBitrateKbps: 128,
         source: { shareId: metadataOnly.id, instanceId: crypto.randomUUID(), audio: true,
           video: { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 } },
       });

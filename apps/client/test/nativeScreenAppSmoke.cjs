@@ -1262,15 +1262,18 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
           top: point(.5, .04), bottom: point(.5, .96), center: point(.5, .5) };
       } finally { frame.close(); }
     },
-    previewClip(state) {
+    async previewClip(state) {
       const capture = videoService.getNativeScreenCaptures()[0];
       const card = capture && [...document.querySelectorAll('[data-kind="screen"]')]
         .find(element => element.dataset.tileKey?.endsWith(':screen:' + capture.source.shareId));
       if (!card || card.dataset.previewState !== state) throw new Error('The local preview is not in its expected state.');
+      // Sample the settled picture, not the standby layer's quick fade.
+      await Promise.all(card.querySelector('.stage-native-thumbnail')?.getAnimations()
+        .map(animation => animation.finished.catch(() => {})) ?? []);
       let area, placeholderVisible = null, backgroundClip = null;
       if (state === 'waiting' || state === 'paused') {
         const placeholder = card.querySelector('.stage-native-thumbnail');
-        if (placeholder.hidden) throw new Error('The standby message is hidden.');
+        if (placeholder.hasAttribute('data-live')) throw new Error('The standby message is hidden.');
         area = placeholder.querySelector('span').getBoundingClientRect();
         placeholderVisible = placeholder.contains(document.elementFromPoint(area.x + area.width / 2, area.y + area.height / 2));
         if (state === 'paused') {

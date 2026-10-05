@@ -2,12 +2,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn, execFile } = require('node:child_process');
-const { promisify } = require('node:util');
+const { spawn } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
 
 if (!process.versions.electron) {
-  require('node:test')('minimizing opens PiP, focus loss does not, and window return closes it without restarting playback', { timeout: 40000 }, async () => {
+  require('node:test')('Monky PiP opens its own floating window on minimize without focus, keeps frames flowing and returns to Monky', { timeout: 45000 }, async () => {
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-pip-window-'));
     const env = { ...process.env, MONKY_PIP_TEST_PROFILE: profile };
     delete env.ELECTRON_RUN_AS_NODE;
@@ -26,169 +25,198 @@ if (!process.versions.electron) {
   const { app, BrowserWindow, ipcMain, screen } = require('electron');
   const ts = require('typescript');
   const vm = require('node:vm');
+  const { ScreenPictureInPictureWindows, handleScreenPictureInPictureOpen } =
+    require(path.join(root, 'dist-electron', 'main', 'screenPictureInPictureWindow.js'));
   app.setPath('userData', process.env.MONKY_PIP_TEST_PROFILE);
   app.disableHardwareAcceleration();
   app.on('window-all-closed', () => {});
   let mainWindow, other, deadline;
   const finish = code => {
     clearTimeout(deadline);
-    other?.destroy();
-    mainWindow?.destroy();
+    for (const window of BrowserWindow.getAllWindows()) window.destroy();
     app.exit(code);
   };
   app.whenReady().then(async () => {
-    deadline = setTimeout(() => { console.error('Native PiP window smoke timeout'); finish(1); }, 30000);
-    mainWindow = new BrowserWindow({ title: 'Monky QA - Native PiP', show: false, width: 480, height: 320,
+    deadline = setTimeout(() => { console.error('Monky PiP window smoke timeout'); finish(1); }, 40000);
+    mainWindow = new BrowserWindow({ title: 'Monky QA - PiP', show: false, width: 480, height: 320,
       webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false,
         preload: path.join(root, 'dist-electron', 'preload', 'preload.js') } });
-    mainWindow.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+    const contents = mainWindow.webContents;
+    contents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+    // Same order as main.ts: the PiP popup first, everything else denied.
+    contents.setWindowOpenHandler(details => handleScreenPictureInPictureOpen(contents, details) ?? { action: 'deny' });
     const file = fs.readFileSync(path.join(root, 'src', 'main', 'ipcHandlers.ts'), 'utf8');
     const start = file.indexOf('const isWindowAway =');
     const end = file.indexOf("ipcMain.handle('window:minimize'", start);
     assert.ok(start >= 0 && end > start);
     vm.runInNewContext(ts.transpileModule(file.slice(start, end), {
       compilerOptions: { target: ts.ScriptTarget.ES2022 },
-    }).outputText, { mainWindow, ipcMain });
-    await mainWindow.loadURL('data:text/html,<body style="background:%2322252d;color:white">Monky QA: PiP<canvas width="160" height="90"></canvas><video muted autoplay></video></body>');
-    const evaluate = code => mainWindow.webContents.executeJavaScript(code, false);
-    const until = async (code, label) => {
+    }).outputText, { mainWindow, ipcMain, ScreenPictureInPictureWindows });
+    const page = path.join(process.env.MONKY_PIP_TEST_PROFILE, 'pip.html');
+    fs.writeFileSync(page, '<!doctype html><body style="background:#22252d;color:white">Monky QA: PiP<canvas width="160" height="90"></canvas><video muted autoplay></video></body>');
+    await mainWindow.loadFile(page);
+    const evaluate = code => contents.executeJavaScript(code, false);
+    const until = async (check, label) => {
       for (let attempt = 0; attempt < 150; attempt++) {
-        if (await evaluate(code)) return;
+        if (await check()) return;
         await new Promise(resolve => setTimeout(resolve, 30));
       }
       throw new Error(label);
     };
+    const untilPage = (code, label) => until(() => evaluate(code), label);
+    const pipWindows = () => BrowserWindow.getAllWindows().filter(window => window !== mainWindow && window !== other
+      && !window.isDestroyed());
     await evaluate(`(() => {
       const canvas = document.querySelector('canvas'), context = canvas.getContext('2d');
       const video = document.querySelector('video');
-      video.dataset.monkyScreenPip = '0bb2238a-3560-4dc1-bb1c-72b6978aa96a';
       video.srcObject = canvas.captureStream(20);
       let frame = 0;
       window.fixtureTimer = setInterval(() => {
         context.fillStyle = ++frame % 2 ? 'orange' : 'blue'; context.fillRect(0, 0, 160, 90);
       }, 50);
-      window.nativeEvents = 0;
+      window.inactiveEvents = 0;
       window.activeEvents = 0;
+      window.pip = null;
+      // The same steps as ScreenPictureInPicture.present(), without the call UI.
+      window.openPip = async (requireInactive, id = crypto.randomUUID()) => {
+        const opened = await window.api.openScreenPictureInPicture(id, requireInactive, video.videoWidth / video.videoHeight);
+        if (!opened) return false;
+        const child = window.open('', 'monky-screen-pip-' + id, 'popup');
+        if (!child) throw new Error('Main refused the authorized popup');
+        const pipVideo = child.document.createElement('video');
+        pipVideo.muted = true;
+        pipVideo.autoplay = true;
+        pipVideo.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000';
+        pipVideo.srcObject = video.srcObject;
+        child.document.body.style.margin = '0';
+        child.document.body.append(pipVideo);
+        child.addEventListener('pagehide', () => { window.pipHidden = (window.pipHidden ?? 0) + 1; });
+        await pipVideo.play();
+        window.pip = child;
+        return true;
+      };
+      window.closePip = () => {
+        window.pip?.document.querySelector('video')?.pause();
+        window.pip?.close();
+        window.pip = null;
+      };
+      window.pipFrames = () => window.pip?.document.querySelector('video')?.getVideoPlaybackQuality().totalVideoFrames ?? -1;
       window.api.onWindowActive(() => {
         window.activeEvents++;
-        if (!window.manualPip && window.nativeEvents && document.pictureInPictureElement) {
-          document.exitPictureInPicture().catch(error => window.pipError = String(error));
-        }
+        if (!window.manualPip) window.closePip();
       });
       window.api.onWindowInactive(() => {
-        window.nativeEvents++;
-        window.inactiveActivation = navigator.userActivation.isActive;
-        if (window.manualPip || document.pictureInPictureElement) return;
-        window.api.openScreenPictureInPicture(video.dataset.monkyScreenPip, true)
-          .then(value => window.opened = value).catch(error => window.pipError = String(error));
+        window.inactiveEvents++;
+        if (window.manualPip || window.pip) return;
+        window.openPip(true).then(value => { window.opened = value; }).catch(error => { window.pipError = String(error); });
       });
       return video.play();
     })()`);
     mainWindow.show(); mainWindow.focus();
-    await until('document.querySelector("video").readyState >= 2', 'Synthetic video must play');
-    assert.equal(await evaluate('navigator.userActivation.isActive'), false);
+    await untilPage('document.querySelector("video").readyState >= 2', 'Synthetic video must play');
+
+    assert.equal(await evaluate(`window.open('', 'monky-screen-pip-${'0'.repeat(8)}-0000-0000-0000-${'0'.repeat(12)}', 'popup') === null`), true,
+      'An unauthorized PiP popup is refused');
+    assert.equal(await evaluate("window.open('https://example.com/', '_blank') === null"), true, 'Other popups stay denied');
+    assert.equal(pipWindows().length, 0);
+
     other = new BrowserWindow({ parent: mainWindow, title: 'Monky QA - Focus target', show: false, width: 280, height: 140,
       webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } });
-    await other.loadURL('data:text/html,<body>Monky QA: native focus target</body>');
+    await other.loadURL('data:text/html,<body>Monky QA: focus target</body>');
     other.show(); other.focus();
     await new Promise(resolve => setTimeout(resolve, 600));
-    assert.equal(await evaluate('window.nativeEvents'), 0, 'Focusing another window is not leaving Monky');
-    assert.equal(await evaluate('!!document.pictureInPictureElement'), false, 'Focus loss alone cannot open PiP');
+    assert.equal(await evaluate('window.inactiveEvents'), 0, 'Focusing another window is not leaving Monky');
+    assert.equal(pipWindows().length, 0, 'Focus loss alone cannot open PiP');
     other.hide(); mainWindow.focus();
-    await until('document.hasFocus()', 'The main window regains focus');
+    await untilPage('document.hasFocus()', 'The main window regains focus');
+
+    const mainArea = screen.getDisplayMatching(mainWindow.getNormalBounds()).workArea;
     mainWindow.minimize();
-    await until('window.nativeEvents > 0', 'Minimizing must notify the renderer of inactivity');
-    await until('!!document.pictureInPictureElement || !!window.pipError', 'Real PiP must open');
+    await untilPage('window.inactiveEvents > 0', 'Minimizing must notify the renderer of inactivity');
+    await untilPage('!!window.pip || !!window.pipError', 'Monky PiP must open while minimized');
     assert.equal(await evaluate('window.pipError ?? null'), null);
-    assert.equal(await evaluate('window.inactiveActivation'), false);
-    assert.equal(await evaluate('!!document.pictureInPictureElement'), true);
-    const frames = await evaluate('document.pictureInPictureElement.getVideoPlaybackQuality().totalVideoFrames');
-    await until(`document.pictureInPictureElement.getVideoPlaybackQuality().totalVideoFrames > ${frames + 3}`, 'PiP must keep playing');
-    const inactiveEvents = await evaluate('window.nativeEvents');
-    await evaluate('document.exitPictureInPicture()');
-    mainWindow.minimize();
-    await until(`document.querySelector('video').getVideoPlaybackQuality().totalVideoFrames > ${frames + 6}`,
-      'The source remains alive after the user dismisses PiP');
-    assert.equal(await evaluate('window.nativeEvents'), inactiveEvents,
-      'Minimizing an already inactive window cannot reopen a dismissed PiP');
-    assert.equal(await evaluate('!!document.pictureInPictureElement'), false);
-    mainWindow.restore(); mainWindow.focus();
-    await until('document.hasFocus()', 'Return to the stage after dismissing PiP');
-    assert.equal(await evaluate('!!document.pictureInPictureElement'), false,
-      'Returning after dismissal cannot flash a PiP window');
-    other.show(); other.focus();
-    await new Promise(resolve => setTimeout(resolve, 600));
-    assert.equal(await evaluate('!!document.pictureInPictureElement'), false, 'Focus loss still cannot open PiP');
-    other.hide(); mainWindow.focus();
-    await until('document.hasFocus()', 'The main window regains focus again');
-    mainWindow.minimize();
-    await until('!!document.pictureInPictureElement', 'The next real departure may open PiP again');
+    const [pip] = pipWindows();
+    assert.ok(pip, 'The PiP popup is a real window');
+    await until(() => pip.isVisible(), 'The PiP popup becomes visible');
+    assert.equal(mainWindow.isMinimized(), true, 'Showing PiP does not restore Monky');
+    assert.equal(pip.isFocused(), false, 'PiP never takes focus from the app in use');
+    assert.equal(pip.isAlwaysOnTop(), true);
+    assert.equal(pip.getParentWindow(), null, 'PiP is not owned by the window it outlives while minimized');
+    assert.equal(pip.webContents.getURL(), 'about:blank');
+    const bounds = pip.getBounds();
+    assert.ok(bounds.x + bounds.width <= mainArea.x + mainArea.width && bounds.x + bounds.width >= mainArea.x + mainArea.width - 40
+      && bounds.y + bounds.height <= mainArea.y + mainArea.height && bounds.y + bounds.height >= mainArea.y + mainArea.height - 40,
+    `The first PiP sits at the bottom right of Monky's display (${JSON.stringify(bounds)} in ${JSON.stringify(mainArea)})`);
+    assert.ok(Math.abs(bounds.height - bounds.width * 9 / 16) <= 0.5, `PiP keeps the broadcast aspect ratio (${bounds.width}x${bounds.height})`);
+    const frames = await evaluate('window.pipFrames()');
+    await untilPage(`window.pipFrames() > ${frames + 3}`, 'PiP must keep rendering while Monky is minimized');
+    const image = await pip.webContents.capturePage();
+    const { width, height } = image.getSize();
+    const pixels = image.toBitmap();
+    const center = (Math.floor(height / 2) * width + Math.floor(width / 2)) * 4;
+    const [blue, green, red] = pixels.subarray(center, center + 3);
+    assert.ok((red > 180 && green > 100 && blue < 80) || (blue > 180 && red < 80),
+      `The PiP window paints the broadcast (center BGR ${blue},${green},${red})`);
+    assert.equal(await evaluate("getComputedStyle(window.pip.document.documentElement).getPropertyValue('--monky-pip-hover').trim()"), '',
+      'Controls start hidden while the cursor is elsewhere');
+    const cursor = screen.getCursorScreenPoint();
+    pip.setBounds({ x: cursor.x - 40, y: cursor.y - 40, width: bounds.width, height: bounds.height });
+    await untilPage("getComputedStyle(window.pip.document.documentElement).getPropertyValue('--monky-pip-hover').trim() === '1'",
+      'Hovering the PiP window reveals its controls');
+    pip.setBounds(bounds);
+    await untilPage("getComputedStyle(window.pip.document.documentElement).getPropertyValue('--monky-pip-hover').trim() === ''",
+      'Leaving the PiP window hides its controls');
+
     const activeEvents = await evaluate('window.activeEvents');
     mainWindow.restore(); mainWindow.focus();
-    await until(`window.activeEvents > ${activeEvents} && !document.pictureInPictureElement`,
-      'Restoring the window must notify the renderer and close real PiP');
-    await until(`document.querySelector('video').getVideoPlaybackQuality().totalVideoFrames > ${frames + 6}`,
-      'Returning to the main window must preserve playback');
-    assert.equal(await evaluate('window.pipError ?? null'), null);
+    await untilPage(`window.activeEvents > ${activeEvents} && !window.pip`, 'Restoring Monky closes automatic PiP');
+    await until(() => pip.isDestroyed(), 'The PiP window is destroyed when Monky closes it');
+
     mainWindow.minimize();
-    await until('!!document.pictureInPictureElement', 'PiP opens before returning through its window');
+    await untilPage('!!window.pip', 'PiP opens before returning through its button');
+    const [returning] = pipWindows();
+    returning.setBounds({ x: mainArea.x + 40, y: mainArea.y + 40, width: 320, height: 180 });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const moved = returning.getBounds();
+    assert.deepEqual({ ...moved }, { x: mainArea.x + 40, y: mainArea.y + 40, width: 320, height: 180 });
     await evaluate('window.api.returnFromScreenPictureInPicture()');
-    await until('document.hasFocus()', 'PiP back to tab must restore and focus the minimized window');
+    await untilPage('document.hasFocus()', 'Back to Monky must restore and focus the minimized window');
     assert.equal(mainWindow.isMinimized(), false);
-    await until('!document.pictureInPictureElement', 'The restored window closes automatic PiP');
-    mainWindow.hide();
-    await until('!!document.pictureInPictureElement', 'Hiding to the tray opens PiP');
-    await evaluate('window.api.returnFromScreenPictureInPicture()');
-    await until('document.hasFocus()', 'PiP back to tab must show a window hidden in the tray');
-    assert.equal(mainWindow.isVisible(), true);
-    await until('!document.pictureInPictureElement', 'The shown window closes automatic PiP');
-    const runPowerShell = async (file, args) => {
-      const { stdout } = await promisify(execFile)('powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-File', path.join(__dirname, 'fixtures', file), ...args],
-        { windowsHide: true, timeout: 10000 });
-      return JSON.parse(stdout.trim());
-    };
-    const ownedWindows = () => runPowerShell('ownedWindowSnapshot.ps1', ['-ProcessId', String(process.pid)]);
-    const beforeManual = process.platform === 'win32' ? await ownedWindows() : [];
-    await mainWindow.webContents.executeJavaScript(`(() => {
-      window.manualPip = true;
-      return document.querySelector('video').requestPictureInPicture().then(() => true);
-    })()`, true);
-    let pipWindow, targetDisplay, targetArea;
-    if (process.platform === 'win32') {
-      const after = await ownedWindows();
-      pipWindow = after.find(window => window.visible
-        && !beforeManual.some(previous => previous.handle === window.handle && previous.visible));
-      assert.ok(pipWindow, 'Identify only the native PiP window owned by this fixture process');
-      const mainDisplay = screen.getDisplayMatching(mainWindow.getBounds());
-      targetDisplay = screen.getAllDisplays().find(display => display.id !== mainDisplay.id) ?? mainDisplay;
-      targetArea = screen.dipToScreenRect(null, targetDisplay.workArea);
-      await runPowerShell('resizeWindow.ps1', [
-        '-Handle', String(pipWindow.handle), '-Edge', '8',
-        '-Left', String(targetArea.x + 24), '-Top', String(targetArea.y + 24),
-        '-Width', String(pipWindow.width), '-Height', String(pipWindow.height),
-        '-AreaLeft', String(targetArea.x), '-AreaTop', String(targetArea.y),
-        '-AreaWidth', String(targetArea.width), '-AreaHeight', String(targetArea.height),
-      ]);
-    }
+    await until(() => returning.isDestroyed(), 'The restored window closes automatic PiP');
+
     mainWindow.minimize();
-    await until('!!document.pictureInPictureElement', 'Manual PiP remains open while minimizing');
-    if (pipWindow) {
-      const minimized = (await ownedWindows()).find(window => window.handle === pipWindow.handle);
-      assert.ok(minimized?.visible, 'The moved native PiP remains visible while its owner is minimized');
-      assert.ok(minimized.x >= targetArea.x && minimized.x < targetArea.x + targetArea.width
-        && minimized.y >= targetArea.y && minimized.y < targetArea.y + targetArea.height,
-      'Minimization preserves the PiP monitor and position');
-      console.log(`Owned native PiP stayed visible after moving to display ${targetDisplay.id} and minimizing its owner.`);
-    }
-    const manualFrames = await evaluate('document.pictureInPictureElement.getVideoPlaybackQuality().totalVideoFrames');
-    await until(`document.pictureInPictureElement?.getVideoPlaybackQuality().totalVideoFrames > ${manualFrames + 3}`,
-      'Minimized manual PiP keeps producing frames');
+    await untilPage('!!window.pip', 'The next PiP opens');
+    const [remembered] = pipWindows();
+    const rememberedBounds = remembered.getBounds();
+    assert.deepEqual({ ...rememberedBounds }, { ...moved }, 'PiP reopens exactly where and as large as the user left it');
     mainWindow.restore(); mainWindow.focus();
-    await until('document.hasFocus()', 'The manual PiP owner can regain focus');
-    assert.equal(await evaluate('!!document.pictureInPictureElement'), true);
-    await evaluate('document.exitPictureInPicture()');
-    console.log('Ignored focus loss, minimize/restore, production preload/IPC, real PiP and uninterrupted frames passed.');
+    await until(() => remembered.isDestroyed(), 'Restoring closes it again');
+
+    mainWindow.hide();
+    await untilPage('!!window.pip', 'Hiding to the tray opens PiP');
+    await evaluate('window.api.returnFromScreenPictureInPicture()');
+    await untilPage('document.hasFocus()', 'Back to Monky must show a window hidden in the tray');
+    assert.equal(mainWindow.isVisible(), true);
+    await untilPage('!window.pip', 'The shown window closes automatic PiP');
+
+    await evaluate('window.manualPip = true');
+    assert.equal(await evaluate('window.openPip(false)'), true, 'The PiP button opens while Monky is focused');
+    const [manual] = pipWindows();
+    await until(() => manual.isVisible(), 'Manual PiP becomes visible');
+    assert.equal(await evaluate('document.hasFocus()'), true, 'Opening manual PiP keeps Monky focused');
+    mainWindow.minimize();
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(manual.isVisible(), true, 'Manual PiP stays visible while its owner is minimized');
+    const manualFrames = await evaluate('window.pipFrames()');
+    await untilPage(`window.pipFrames() > ${manualFrames + 3}`, 'Minimized manual PiP keeps producing frames');
+    mainWindow.restore(); mainWindow.focus();
+    await untilPage('document.hasFocus()', 'The manual PiP owner can regain focus');
+    assert.equal(manual.isDestroyed(), false, 'Restoring Monky keeps an explicitly opened PiP');
+    const hidden = await evaluate('window.pipHidden ?? 0');
+    manual.close();
+    await untilPage(`(window.pipHidden ?? 0) > ${hidden}`, 'Closing the PiP window from the system notifies Monky');
+    assert.equal(pipWindows().length, 0);
+    console.log('Focus-free PiP popup, frames while minimized, hover controls, return/restore/tray and remembered bounds passed.');
     finish(0);
   }).catch(error => { console.error(error); finish(1); });
 }
