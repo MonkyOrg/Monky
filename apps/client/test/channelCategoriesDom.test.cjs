@@ -136,10 +136,12 @@ if (!process.versions.electron) {
       })`);
     };
     const click = async (selector) => {
-      const point = await browser.webContents.executeJavaScript(`(() => {
+      // A real user's scroll is delivered before their click; wait for ours so a scroll-dismissed popup is not closed by it.
+      const point = await browser.webContents.executeJavaScript(`(async () => {
         const element = document.querySelector(${JSON.stringify(selector)});
         if (!element) return { failure: 'Missing pointer target: ' + ${JSON.stringify(selector)} };
         element.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const box = element.getBoundingClientRect();
         const point = { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
         const hit = document.elementFromPoint(point.x, point.y);
