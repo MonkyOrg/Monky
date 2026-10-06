@@ -668,8 +668,10 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     await qualityCaps(producer.rtpSender, 'SFU');
     await testSfuAudioStartDuringRestore(screen.stream.id);
     producer = sfu.producers.get(`screen_video:${screen.stream.id}`);
-    const inbound = await request('fixture.stats', { producerId: producer.id });
-    check(inbound.stats.some(stat => stat.type === 'inbound-rtp' && stat.byteCount > 0), 'SFU received real encoded RTP bytes');
+    // The restore above replaces the producer, so its first RTP bytes reach the SFU asynchronously.
+    await until(async () => (await request('fixture.stats', { producerId: producer.id }))
+      .stats.some(stat => stat.type === 'inbound-rtp' && stat.byteCount > 0), 'SFU received real encoded RTP bytes');
+    check(true, 'SFU received real encoded RTP bytes');
     const startingScreen = source();
     const sendRequest = client.sendRequest;
     let releaseProduce;

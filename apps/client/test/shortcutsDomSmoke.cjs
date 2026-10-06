@@ -21,6 +21,7 @@ if (!process.versions.electron) {
   const { SHORTCUT_IPC } = require('@monky/shared');
   const { UiohookKey: K, EventType } = require('uiohook-napi');
   app.setPath('userData', process.env.MONKY_SHORTCUTS_DOM_PROFILE);
+  app.on('window-all-closed', () => {});
   let window, vite, hook, timeout;
   const finish = async (code) => {
     clearTimeout(timeout);

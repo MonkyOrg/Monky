@@ -77,13 +77,19 @@ function options(argv) {
     seen.add(key);
     if (key === '--version') result.version = value;
     else if (key === '--out') result.output = path.resolve(value);
-    else throw new Error(`Unknown source package option: ${key}`);
+    else if (key === '--architectures') {
+      const architectures = value.split(',');
+      assert.ok(architectures.every(arch => ['arm64', 'x64'].includes(arch)) &&
+        new Set(architectures).size === architectures.length, 'Use --architectures= with distinct arm64/x64 values.');
+      result.architectures = ['arm64', 'x64'].filter(arch => architectures.includes(arch));
+    } else throw new Error(`Unknown source package option: ${key}`);
   }
   assert.match(result.version, /^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/iu, 'Invalid source package version.');
   return result;
 }
 
 async function packSources(config) {
+  assert.equal(config.architectures, undefined, '--architectures only applies to macOS corresponding sources.');
   verifySourceInputs();
   const legal = verifyLegalFiles(root);
   const rtc = JSON.parse(fs.readFileSync(path.join(cache, 'rtc', '.native-rtc-state.json'), 'utf8'));
@@ -105,6 +111,8 @@ async function packSources(config) {
   const archive = path.join(config.output, `${basename}.tar.xz`);
   const manifest = path.join(config.output, `${basename}.json`);
   assert.ok(!fs.existsSync(archive) && !fs.existsSync(manifest), 'Source package already exists; refusing to overwrite it.');
+  // A cached runtime skips compilation, so the module build directory may not exist yet.
+  fs.mkdirSync(path.join(root, 'build'), { recursive: true });
   const temporary = fs.mkdtempSync(path.join(root, 'build', 'source-package-'));
   const partial = archive + '.' + crypto.randomUUID() + '.partial';
   try {

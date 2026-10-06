@@ -43,6 +43,7 @@ if (require.main === module || process.argv[1] === __filename) {
   } else {
     const { app, BrowserWindow } = require('electron');
     app.setPath('userData', process.env.MONKY_TOOLTIP_TEST_PROFILE);
+    app.on('window-all-closed', () => {});
     let vite;
     let window;
     let timeout;

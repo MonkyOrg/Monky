@@ -1,7 +1,11 @@
 import argparse
+import contextlib
 import json
+import os
 import posixpath
 from pathlib import Path, PurePosixPath
+import shutil
+import subprocess
 import sys
 import tarfile
 
@@ -11,6 +15,55 @@ def safe_member(value):
     if not value or member.is_absolute() or ".." in member.parts or ":" in value or "\n" in value or "\r" in value:
         raise ValueError(f"Unsafe source archive member: {value!r}")
     return str(member)
+
+
+def find_xz():
+    mode = os.environ.get("MONKY_SOURCE_XZ")
+    if mode == "python":
+        return None
+    found = shutil.which("xz")
+    if not found and os.name == "nt" and shutil.which("git"):
+        # Git for Windows ships xz, but its tool directories are not always on PATH.
+        install = Path(shutil.which("git")).resolve().parent.parent
+        found = next((str(candidate) for candidate in (install / "mingw64" / "bin" / "xz.exe",
+                                                       install / "usr" / "bin" / "xz.exe") if candidate.is_file()), None)
+    if not found and mode == "required":
+        raise RuntimeError("Corresponding sources require a parallel xz executable (MONKY_SOURCE_XZ=required).")
+    return found
+
+
+@contextlib.contextmanager
+def xz_pipe(xz, filename, write):
+    # Python's lzma uses one thread; xz splits the same single .xz stream into blocks across all cores.
+    with open(filename, "wb" if write else "rb") as file:
+        command = [xz, "--threads=0", "--stdout"] + (["-3", "--compress"] if write else ["--decompress"])
+        process = subprocess.Popen(command, stdin=subprocess.PIPE if write else file,
+                                   stdout=file if write else subprocess.PIPE)
+        pipe = process.stdin if write else process.stdout
+        try:
+            yield pipe
+            if not write:
+                while pipe.read(1 << 20):
+                    pass
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+        finally:
+            pipe.close()
+        if process.wait() != 0:
+            raise RuntimeError(f"xz failed with exit code {process.returncode}")
+
+
+def open_xz_tar(stack, filename, write=False):
+    xz = find_xz()
+    if xz:
+        stream = stack.enter_context(xz_pipe(xz, filename, write))
+        return stack.enter_context(tarfile.open(fileobj=stream, mode="w|" if write else "r|",
+                                                format=tarfile.PAX_FORMAT))
+    if write:
+        return stack.enter_context(tarfile.open(filename, "w:xz", format=tarfile.PAX_FORMAT, preset=3))
+    return stack.enter_context(tarfile.open(filename, "r|xz"))
 
 
 def main():
@@ -42,7 +95,8 @@ def main():
         info.uname = info.gname = ""
         return info
 
-    with tarfile.open(args.output, "w:xz", format=tarfile.PAX_FORMAT, preset=3) as archive:
+    with contextlib.ExitStack() as stack:
+        archive = open_xz_tar(stack, args.output, write=True)
         kinds = []
         for index, (relative, directory) in enumerate(members):
             filename = root.joinpath(*PurePosixPath(relative).parts)
@@ -65,8 +119,8 @@ def main():
     expected = [(relative, directory, alias) for (relative, directory), alias in zip(members, kinds)]
     expected += [(relative, False, False) for relative in extra]
     count = 0
-    with tarfile.open(args.output, "r|xz") as archive:
-        for member in archive:
+    with contextlib.ExitStack() as stack:
+        for member in open_xz_tar(stack, args.output):
             if count >= len(expected) or (member.name, member.isdir(), member.issym()) != expected[count]:
                 raise ValueError(f"Source archive inventory mismatch at entry {count}: {member.name}")
             if not member.isdir() and not member.isfile() and not (args.allow_internal_symlinks and member.issym()):
@@ -76,7 +130,8 @@ def main():
             count += 1
     if count != len(expected):
         raise ValueError("Source archive omitted an input.")
-    print(json.dumps({"sourceArchiveVerified": True, "members": count}), flush=True)
+    print(json.dumps({"sourceArchiveVerified": True, "members": count,
+                      "compressor": "xz --threads=0" if find_xz() else "python-lzma"}), flush=True)
 
 
 def verify_manifest(archive, manifest_file):
@@ -85,7 +140,8 @@ def verify_manifest(archive, manifest_file):
     seen = set()
     found = False
     mac_links = previous.get("platform") == "darwin"
-    with tarfile.open(archive, "r|xz") as source:
+    with contextlib.ExitStack() as stack:
+        source = open_xz_tar(stack, archive)
         for member in source:
             name = safe_member(member.name)
             alias = mac_links and member.issym() and not PurePosixPath(member.linkname).is_absolute()

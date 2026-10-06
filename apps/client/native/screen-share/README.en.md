@@ -758,37 +758,58 @@ unrelated applications. It produces `release\win-unpacked\Monky.exe` and
 `release\Monky-Windows.zip`. Packaging fails when binaries, compiled sources,
 runtime, CRT or third-party notices are inconsistent.
 
-## Windows CI and release reuse
+## CI and release reuse
 
-CI runs the Windows DOM suite on a separate `windows-2022` runner, concurrently
-with native preparation and packaging. Tests remain sequential within that
-runner to avoid competing desktop/audio fixtures. Both existing `Build check`
-checks wait for packaging on both platforms and the Windows DOM lane; failure,
-cancellation or a skipped lane cannot pass those gates. The macOS DOM suite
-still runs in its packaging job.
+CI runs the DOM suite from the start of the run, without waiting for the native
+runtime: on Windows in two shards balanced by measured cost (`MONKY_DOM_SHARD`),
+on macOS as a whole on another runner. Tests remain sequential within each
+runner to avoid competing desktop/audio fixtures, and every shard runs all of
+its commands and lists every failure before failing. Both `Build check` checks
+wait for packaging on both platforms, the DOM suites and native validation on
+macOS hardware; failure, cancellation or a skipped lane cannot pass those gates.
 
-CI and release cache only `.native-screen\downloads`: content-addressed OBS
-runtime/dependency archives and the source archives selected by the pinned
-OBS recipes. The key includes Windows x64, the archive manifests and the
+On macOS the native runtime is compiled (or restored) once in the `mac-native`
+job and validated on both kinds of hardware (`mac-native-sources`): Apple Silicon
+and Intel exercise exactly the binaries that packaging ships instead of
+compiling their own. In parallel, the `mac-sources` job prepares the pinned SDK,
+generates the GN graph for both architectures (`buildMacRtc.cjs --configure`,
+without compiling) for third-party notices and packages the Corresponding
+Source. Packaging verifies the binaries against those sources before exporting
+the artifact.
+
+CI and release cache `.native-screen\downloads`: content-addressed OBS
+runtime/dependency archives and the source archives selected by the pinned OBS
+recipes. The key includes Windows x64, the archive manifests and the
 download/verification recipes, without prefix fallback. CI and release use
-separate cache namespaces. Before use, every restored archive is checked
-against its trusted SHA-256 and any pinned size; corruption fails explicitly,
-not by silently downloading a replacement. A cache miss downloads and verifies
-the inputs normally.
+separate cache namespaces. Before use, every restored archive is checked against
+its trusted SHA-256 and any pinned size; corruption fails explicitly, not by
+silently downloading a replacement.
 
-This is **not a native binary cache**: Electron ABI, compiler and source changes
-still compile afresh. No WebRTC tree, checkout ownership markers, Python venv,
-extracted tools or native build outputs are restored. Python 3.11, VS2022 v143
-and SDK 10.0.26100.0 selection, native contracts, package checks, licenses and
-Corresponding Source generation/publication gates remain in place.
+The compiled runtime (`bin/darwin-*` on macOS; `bin/win32-x64`, `licenses/`,
+`LICENSE` and `THIRD_PARTY_NOTICES` on Windows) is reused only under an exact
+key computed by `scripts/native-cache-key.cjs` from the content of every native
+source, recipe and pin, plus Xcode/SDK or MSVC/Windows SDK, Node, node-gyp,
+Python and the runner image. There is no prefix fallback: any change compiles
+afresh. Restored and freshly built binaries pass the same checks
+(`scripts/verifyOutputs.cjs`): sources and recipe against the manifests, hashes,
+recorded capabilities, the executable self-test and loading the addon. The cache
+is saved only after those checks and, on Windows, after the native tests.
 
-Cold runs gain only the opportunity to overlap Windows DOM with native work,
-at the cost of another runner's installation and workspace build. Warm runs
-can additionally avoid those OBS archive downloads, but still extract,
-validate, compile WebRTC and create the release source archive. This does not
-promise a duration or remove the main native compilation cost; measure actual
-CI/release runs before claiming a speedup.
+PR caches are visible only to their own PR: later rounds that do not change
+native code skip compilation. The release saves to the `main` cache the approved
+runtime it restored from the CI artifact, under the key recorded in its
+manifest, without compiling; later PRs with the same inputs reuse it. The release
+never restores binaries from a cache. The WebRTC tree, checkout ownership
+markers, Python venv and extracted tools remain outside every cache. With a
+restored runtime, Windows still fetches the pinned sources
+(`prepare:native-screen --fetch-only`) to build the source archive.
 
+The source `.tar.xz` uses `xz --threads=0` when available; CI requires it
+(`MONKY_SOURCE_XZ=required`). It is the same tar stream in a single xz stream
+split into blocks and compressed on every core. Without `xz`,
+`sourceArchive.py` uses Python's single-threaded `lzma`, and
+`MONKY_SOURCE_XZ=python` forces that path. Inventory and read-back remain
+verified. Measure actual CI/release runs before claiming a speedup.
 ## License and Corresponding Source
 
 Before refreshing licenses or signing, packaging detaches the hard links created

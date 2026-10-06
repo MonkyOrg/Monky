@@ -9,6 +9,7 @@ const windowsToolchain = require('../windowsToolchain.cjs');
 const OWNER = '.native-rtc-owner.json';
 const STATE = '.native-rtc-state.json';
 const LOCK = '.native-rtc-lock.json';
+const EMPTY_GIT_CONFIG = 'empty-gitconfig';
 const OWNER_NAME = 'monky-native-rtc-source-bootstrap';
 const REPOSITORIES = ['depot_tools', 'webrtc', 'libmediasoupclient', 'libsdptransform'];
 const DIRECTORIES = {
@@ -197,7 +198,7 @@ function childEnvironment(context) {
     CIPD_CACHE_DIR: path.join(cache, 'cipd'),
     VPYTHON_VIRTUALENV_ROOT: path.join(cache, 'vpython'),
     DEPOT_TOOLS_UPDATE: '0', DEPOT_TOOLS_WIN_TOOLCHAIN: '0',
-    GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: 'NUL',
+    GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(cache, EMPTY_GIT_CONFIG),
     GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never',
     GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1',
     GIT_CONFIG_COUNT: '5',
@@ -918,6 +919,12 @@ async function fetchWorkspace(context, checked) {
       if (!exists(context, directory)) createDirectory(context, directory);
       else inspectPath(context, directory);
     }
+    // Git for Windows 2.56 rejects GIT_CONFIG_GLOBAL=NUL. An owned empty file isolates every Git
+    // version; before it exists (preflight), Git treats the absent global configuration as empty.
+    const gitConfig = path.join(workspace, 'cache', EMPTY_GIT_CONFIG);
+    if (!exists(context, gitConfig)) context.fs.closeSync(context.fs.openSync(gitConfig, 'wx'));
+    requireValue(context.fs.lstatSync(gitConfig).isFile() && context.fs.lstatSync(gitConfig).size === 0,
+      'ERR_RTC_GIT_CONFIG', 'The isolated global Git configuration must remain an empty file.');
     requireValue(context.fs.readdirSync(path.join(workspace, '.hooks-disabled')).length === 0,
       'ERR_RTC_HOOKS', 'The disabled-hooks directory changed before acquisition.');
     // Recheck all existing top-level trees/configuration before the first download.
