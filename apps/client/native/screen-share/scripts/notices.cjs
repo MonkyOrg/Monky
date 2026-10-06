@@ -87,15 +87,27 @@ function generateNotices() {
   return record;
 }
 
-function generateMacNotices() {
+function macArchitectures(option) {
+  if (option === undefined) return undefined;
+  const match = /^--architectures=((?:arm64|x64)(?:,(?:arm64|x64))?)$/u.exec(option);
+  assert.ok(match, 'Use --architectures=arm64,x64 with known macOS architectures.');
+  const architectures = match[1].split(',');
+  assert.equal(new Set(architectures).size, architectures.length, 'Repeated macOS architecture.');
+  return ['arm64', 'x64'].filter(arch => architectures.includes(arch));
+}
+
+function generateMacNotices({ architectures } = {}) {
   assert.equal(process.platform, 'darwin');
   const { workspace } = require('./prepareMacRtc.cjs');
   const sdk = path.join(workspace, 'webrtc', 'src');
   const key = digest(fs.realpathSync(root)).slice(0, 8);
-  const outputs = ['arm64', 'x64'].filter(arch =>
-    fs.existsSync(path.join(root, 'bin', `darwin-${arch}`, 'rtc-build.json')))
-    .map(arch => path.join(sdk, 'out', `monky-${key}-${arch}`));
+  // Notices come from the GN dependency graph; an explicit list may use configured, uncompiled targets.
+  const selected = architectures ?? ['arm64', 'x64'].filter(arch =>
+    fs.existsSync(path.join(root, 'bin', `darwin-${arch}`, 'rtc-build.json')));
+  const outputs = selected.map(arch => path.join(sdk, 'out', `monky-${key}-${arch}`));
   assert.ok(outputs.length > 0, 'Build the native macOS RTC target before generating its notices.');
+  for (const output of outputs)
+    assert.ok(fs.existsSync(path.join(output, 'build.ninja')), `Configure the macOS RTC target first: ${output}`);
   const directory = path.join(root, 'licenses');
   execute(path.join(workspace, 'python-3.11', 'bin', 'python3'), ['-I',
     path.join(__dirname, 'native-rtc', 'licenses.py'), `--sdk=${sdk}`,
@@ -133,9 +145,10 @@ function generateMacNotices() {
   return record;
 }
 
-module.exports = { generateNotices, generateMacNotices };
+module.exports = { generateNotices, generateMacNotices, macArchitectures };
 if (require.main === module) {
-  assert.ok(process.argv.length === 2 || process.argv.length === 3 && process.argv[2] === '--mac');
-  if (process.argv[2] === '--mac') generateMacNotices();
+  const [mode, ...rest] = process.argv.slice(2);
+  assert.ok(mode === undefined || (mode === '--mac' && rest.length <= 1), 'Usage: notices.cjs [--mac [--architectures=arm64,x64]]');
+  if (mode === '--mac') generateMacNotices({ architectures: macArchitectures(rest[0]) });
   else generateNotices();
 }

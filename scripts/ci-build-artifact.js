@@ -58,13 +58,20 @@ async function inventory(root, relative = '') {
 export function buildEnvironment(env = process.env) {
   return { platform: process.platform, arch: process.arch, nodeMajor: process.versions.node.split('.')[0],
     image: env.ImageOS ?? '', repository: env.GITHUB_REPOSITORY, runId: Number(env.GITHUB_RUN_ID),
-    runAttempt: Number(env.GITHUB_RUN_ATTEMPT) };
+    runAttempt: Number(env.GITHUB_RUN_ATTEMPT), nativeCacheKey: env.MONKY_NATIVE_CACHE_KEY || undefined };
+}
+
+// Lets the release seed the main-branch cache with the exact native outputs CI tested under this key.
+function validNativeCacheKey(key, variant) {
+  return key === undefined || (['mac', 'win'].includes(variant)
+    && new RegExp(`^native-${variant}-v1-[a-f0-9]{16}-[a-f0-9]{64}$`).test(key));
 }
 
 export async function collectBuild(root, destination, variant, context = buildEnvironment()) {
   assert.ok(Object.hasOwn(roots, variant), 'Unknown build variant.');
   assert.equal(context.platform, platforms[variant]);
   assert.ok(context.repository && positiveId(context.runId) && positiveId(context.runAttempt), 'Missing CI identity.');
+  assert.ok(validNativeCacheKey(context.nativeCacheKey, variant), 'Invalid native cache key for this build variant.');
   assert.equal(git(root, 'status', '--porcelain', '--untracked-files=normal'), '', 'Build export requires a clean source checkout.');
   const files = [];
   for (const directory of roots[variant]) {
@@ -94,6 +101,7 @@ export async function validateBuild(directory, root, variant, expected) {
     assert.equal(manifest[key], expected[key], `Build ${key} does not match the approved CI/environment.`);
   }
   assert.ok(sha(manifest.sourceCommit) && sha(manifest.sourceTree), 'Invalid build source identity.');
+  assert.ok(validNativeCacheKey(manifest.nativeCacheKey, variant), 'Invalid native cache key in the build manifest.');
   assert.equal(manifest.sourceTree, git(root, 'rev-parse', 'HEAD^{tree}'), 'CI did not test the integrated source tree.');
   assert.equal(manifest.lockHash, await hashFile(path.join(root, 'package-lock.json')), 'Dependency lock changed.');
   assert.ok(Array.isArray(manifest.files) && manifest.files.length > 0 && manifest.files.length < 100000);
@@ -260,6 +268,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
         : `**CI build reuse unavailable:** ${selected.reason}\n`);
   } else if (command === 'restore') {
     assert.equal(args.length, 3, 'Usage: restore <cli|win|mac> <run-id> <artifact-id>');
-    await restoreBuild(root, args[0], args[1], args[2]);
+    const manifest = await restoreBuild(root, args[0], args[1], args[2]);
+    if (process.env.GITHUB_OUTPUT) await fs.appendFile(process.env.GITHUB_OUTPUT, `native_cache_key=${manifest.nativeCacheKey ?? ''}\n`);
   } else throw new Error('Choose collect, select or restore.');
 }

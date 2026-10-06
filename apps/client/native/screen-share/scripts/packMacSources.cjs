@@ -12,9 +12,13 @@ const pins = require('./native-rtc/pins.json');
 
 async function packMacSources(config) {
   assert.equal(process.platform, 'darwin');
-  const architectures = ['arm64', 'x64'].filter(arch => fs.existsSync(path.join(root, 'bin', `darwin-${arch}`)));
+  const built = ['arm64', 'x64'].filter(arch => fs.existsSync(path.join(root, 'bin', `darwin-${arch}`)));
+  // A sources-only CI job declares the architectures; packaging then verifies the binaries against these sources.
+  const architectures = config.architectures ?? built;
   assert.ok(architectures.length);
-  for (const arch of architectures) verifyMacSourceInputs(arch);
+  assert.ok(architectures.every(arch => ['arm64', 'x64'].includes(arch)) &&
+    new Set(architectures).size === architectures.length, 'Invalid macOS source architectures.');
+  for (const arch of built) verifyMacSourceInputs(arch);
   verifyLegalFiles(root, 'darwin');
   const omitted = ['webrtc/src/third_party/llvm-build', 'webrtc/src/third_party/ninja',
     'webrtc/src/buildtools/mac', 'webrtc/.gclient_entries', 'webrtc/.gclient_previous_sync_commits'];

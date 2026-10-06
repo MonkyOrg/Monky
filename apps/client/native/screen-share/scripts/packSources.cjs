@@ -77,13 +77,19 @@ function options(argv) {
     seen.add(key);
     if (key === '--version') result.version = value;
     else if (key === '--out') result.output = path.resolve(value);
-    else throw new Error(`Unknown source package option: ${key}`);
+    else if (key === '--architectures') {
+      const architectures = value.split(',');
+      assert.ok(architectures.every(arch => ['arm64', 'x64'].includes(arch)) &&
+        new Set(architectures).size === architectures.length, 'Use --architectures= with distinct arm64/x64 values.');
+      result.architectures = ['arm64', 'x64'].filter(arch => architectures.includes(arch));
+    } else throw new Error(`Unknown source package option: ${key}`);
   }
   assert.match(result.version, /^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/iu, 'Invalid source package version.');
   return result;
 }
 
 async function packSources(config) {
+  assert.equal(config.architectures, undefined, '--architectures only applies to macOS corresponding sources.');
   verifySourceInputs();
   const legal = verifyLegalFiles(root);
   const rtc = JSON.parse(fs.readFileSync(path.join(cache, 'rtc', '.native-rtc-state.json'), 'utf8'));

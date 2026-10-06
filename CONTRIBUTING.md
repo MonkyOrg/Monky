@@ -377,8 +377,10 @@ um botão para os detalhes no GitHub; não tentamos traduzir commits automaticam
 Todo PR roda o workflow de **CI**. Além do build, ele tem verificações que barram
 o merge e costumam pegar de surpresa quem não as conhece:
 
-- **Build check (win/mac)** — build e empacotamento com `electron-builder --dir`,
-  sem publicar. Pega regressão de módulo nativo antes do merge.
+- **Build check (win/mac)** — exige o empacotamento com `electron-builder --dir`
+  nas duas plataformas, sem publicar, a suíte DOM (Windows em duas partes e
+  macOS) e a validação nativa no hardware Apple Silicon e Intel. Pega regressão
+  de módulo nativo antes do merge.
 - **Docs traduzidos em sincronia** — toda página em `docs-site/` precisa do par
   PT/EN. Adicionar só um dos idiomas reprova o PR.
 - **Mudança de protocolo exige release major** — mexer no `PROTOCOL_VERSION` sem
@@ -396,6 +398,25 @@ Quando outro PR entra primeiro, o resultado anterior não basta para liberar o
 merge: atualize a branch e aguarde o novo CI. Isso não apaga o histórico verde
 nem atualiza sua branch automaticamente. A aprovação de outro revisor continua
 obrigatória; um merge administrativo é uma exceção, não o fluxo normal.
+
+### Rode o CI localmente antes de abrir o PR
+
+`npm run ci:local` executa nesta máquina os comandos do CI que fazem sentido
+fora de um runner descartável. Ele lê os passos de `.github/workflows/ci.yml`
+e a suíte DOM de `scripts/test-client-dom.cjs`, continua depois de cada falha e
+termina listando o que falhou, com o caminho do log de cada passo. A base padrão
+é `git merge-base origin/main HEAD`. Passe opções depois de `--`:
+
+- `--title "<título do PR>"` confere a regra de release major do protocolo;
+- `--only <regex>` roda só os passos cujo `estágio rótulo` combina, por exemplo
+  `npm run ci:local -- --only dom`;
+- `--package` inclui o `electron-builder --dir`.
+
+Passos que só rodam num runner descartável, como o clipboard real e a exportação
+do artefato, aparecem como **PULADO (só CI)**. Sem `npm run prepare:native-screen`,
+os testes nativos também aparecem como pulados, não como falha. No CI, cada
+parte da suíte DOM também executa tudo e lista **todas** as falhas no fim
+(`FALHAS: ...`): corrija todas antes do próximo push.
 
 ### Descreva como testar
 
@@ -419,7 +440,10 @@ o SHA-256 do ZIP e de cada arquivo, o lockfile, a plataforma e a árvore Git com
 Assets do renderer sem extensão usam nomes sem ponto final, inclusive as licenças;
 a exportação e a extração rejeitam caminhos ambíguos no Windows.
 Comparar a árvore, e não apenas o SHA do commit, permite o squash sem aceitar
-código diferente do testado.
+código diferente do testado. A release também grava no cache da `main` o
+runtime nativo aprovado, com a chave exata registrada pelo CI, sem compilar: o
+próximo PR com as mesmas fontes nativas o reaproveita depois de verificá-lo de
+novo.
 
 O artefato Windows inclui os arquivos gerados `LICENSE` e
 `THIRD_PARTY_NOTICES` na raiz do módulo `screen-share`, além de `licenses/`,

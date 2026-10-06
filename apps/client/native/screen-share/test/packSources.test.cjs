@@ -65,6 +65,19 @@ test('the source archiver preserves a real file inventory without local-account 
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.equal(JSON.parse(result.stdout.trim()).sourceArchiveVerified, true);
     assert.equal(fs.statSync(path.join(directory, 'source.tar.xz')).size > 0, true);
+    const single = spawnSync(python, [
+      '-I', path.resolve(__dirname, '..', 'scripts', 'sourceArchive.py'),
+      `--root=${path.join(directory, 'input')}`, `--list=${path.join(directory, 'members.txt')}`,
+      `--metadata=${path.join(directory, 'metadata')}`, `--output=${path.join(directory, 'single.tar.xz')}`,
+    ], { encoding: 'utf8', timeout: 30000, env: { ...process.env, MONKY_SOURCE_XZ: 'python' } });
+    assert.equal(single.status, 0, single.stdout + single.stderr);
+    assert.equal(JSON.parse(single.stdout.trim()).compressor, 'python-lzma');
+    const tarBytes = spawnSync(python, ['-I', '-c',
+      'import hashlib, lzma, sys; print(*(hashlib.sha256(lzma.open(name).read()).hexdigest() for name in sys.argv[1:]))',
+      path.join(directory, 'source.tar.xz'), path.join(directory, 'single.tar.xz')], { encoding: 'utf8', timeout: 30000 });
+    assert.equal(tarBytes.status, 0, tarBytes.stderr);
+    const [parallelTar, singleTar] = tarBytes.stdout.trim().split(' ');
+    assert.equal(parallelTar, singleTar, 'Parallel xz must archive exactly the same tar stream as Python lzma.');
     const extracted = path.join(directory, 'extracted');
     const extraction = spawnSync(python, ['-I', '-c',
       "import sys, tarfile; tarfile.open(sys.argv[1], 'r|xz').extractall(sys.argv[2], filter='data')",
