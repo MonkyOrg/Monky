@@ -81,6 +81,37 @@ test('typing with pauses longer than 250ms still sends only after the final 700m
   assert.deepEqual(sent, ['hangar']);
 });
 
+test('flush skips the remaining debounce without bypassing the connection budget', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const sent: Array<{ query: string; time: number }> = [];
+  const controller = new CommandAutocomplete({}, async (query) => async () => {
+    sent.push({ query, time: Date.now() });
+    return { status: 'ok', choices: [] };
+  }, () => {});
+  context.after(() => controller.close());
+  controller.flush();
+  controller.setQuery('https://www.youtube.com/watch?v=first');
+  context.mock.timers.tick(100);
+  controller.flush();
+  context.mock.timers.tick(0);
+  await flush();
+  assert.deepEqual(sent, [{ query: 'https://www.youtube.com/watch?v=first', time: 100 }]);
+  controller.flush();
+  context.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_DEBOUNCE_MS);
+  await flush();
+  assert.equal(sent.length, 1, 'Flushing after the send must not repeat the request');
+  controller.setQuery('second');
+  controller.flush();
+  context.mock.timers.tick(0);
+  await flush();
+  context.mock.timers.tick(299);
+  await flush();
+  assert.equal(sent.length, 1, 'Flushing must still respect the 1s spacing between actual sends');
+  context.mock.timers.tick(1);
+  await flush();
+  assert.deepEqual(sent[1], { query: 'second', time: 100 + AUTOCOMPLETE_REQUEST_INTERVAL_MS });
+});
+
 test('delayed local preparation cannot bunch actual requests that reserved earlier callback slots', async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   const connection = {};
