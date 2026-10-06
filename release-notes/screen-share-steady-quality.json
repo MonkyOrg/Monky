@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Transmitir a tela por placa de vídeo em uma conexão instável não deixa mais a imagem piscando entre nítida e quadriculada. Na AMD isso acontecia o tempo todo; agora a qualidade só muda quando a conexão muda de verdade.",
+  "en": "Sharing your screen through the graphics card on a shaky connection no longer flickers between sharp and blocky. On AMD it happened all the time; now quality only changes when the connection really does."
+}

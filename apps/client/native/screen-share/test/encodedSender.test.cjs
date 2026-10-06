@@ -134,7 +134,7 @@ test('real feedback reserves headroom and rounds down to AMF steps without claim
   m.flow.packet(m.frame(3, true)); assert.equal(m.submitted.length, 3);
   assert.equal(m.flow.snapshot().currentSettingsKbps, 1100);
   assert.equal(m.flow.snapshot().feedback.allocationKbps, 1200);
-  assert.deepEqual(m.flow.snapshot().bitratePolicy, { targetHeadroomPercent: 10, minimumIncreasePercent: 10 });
+  assert.deepEqual(m.flow.snapshot().bitratePolicy, { targetHeadroomPercent: 10, minimumIncreasePercent: 25 });
   assert.equal(m.flow.snapshot().queuedJavaScriptFrames, 0);
   await m.flow.close();
 });
@@ -276,7 +276,7 @@ test('a reduction arriving during growth applies immediately after that acknowle
 test('safe allocation fluctuations keep sending without reinitializing AMF or requesting more IDRs', async () => {
   const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
   m.feedback(1, 1000000); await m.flow.rateWork; m.flow.packet(m.frame(1, true));
-  const allocations = [1010000, 990000, 950000, 900000, 1050000];
+  const allocations = [1010000, 990000, 950000, 900000, 1050000, 1200000];
   for (const [index, bitrate] of allocations.entries()) {
     m.feedback(index + 2, bitrate);
     assert.equal(m.flow.currentKbps, 900); assert.equal(m.flow.desiredKbps, 900);
@@ -284,11 +284,29 @@ test('safe allocation fluctuations keep sending without reinitializing AMF or re
     assert.equal(m.flow.needsIdr, false);
     m.flow.packet(m.frame(index + 2));
   }
-  assert.equal(m.submitted.length, 6);
+  assert.equal(m.submitted.length, 7);
   assert.deepEqual(m.calls, [{ bitrate: 900 }]);
-  m.tick(3100); m.feedback(7, 1250000); await m.flow.rateWork;
-  assert.equal(m.flow.currentKbps, 1100);
-  assert.deepEqual(m.calls.filter(call => 'bitrate' in call).map(call => call.bitrate), [900, 1100]);
+  m.tick(3100); m.feedback(8, 1300000); await m.flow.rateWork;
+  assert.equal(m.flow.currentKbps, 1150);
+  assert.deepEqual(m.calls.filter(call => 'bitrate' in call).map(call => call.bitrate), [900, 1150]);
+  await m.flow.close(); assert.deepEqual(m.errors, []);
+});
+
+test('an oscillating congestion estimate does not restart the hardware encoder on every swing', async () => {
+  // RTC allocations recorded every ~1.5s from a 1080p60 AMF share on an unstable uplink.
+  const recorded = [6759, 5864, 6425, 7104, 7522, 5935, 6398, 7195, 5796, 5900, 5948, 5477, 5832, 5968, 5969,
+    5106, 5064, 5255, 5823, 5989];
+  const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
+  for (const [index, kbps] of recorded.entries()) {
+    m.tick(2000 + index * 1500);
+    m.feedback(index + 1, kbps * 1000); await m.flow.rateWork;
+    assert.ok(m.flow.currentKbps <= kbps, 'An exceeded allocation must still be applied immediately.');
+    m.flow.packet(m.frame(index + 1, index === 0));
+  }
+  // A 10% growth threshold applied eight settings here, restarting AMF/NVENC each time.
+  assert.deepEqual(m.calls.filter(call => 'bitrate' in call).map(call => call.bitrate), [6050, 5250, 6750, 5300, 4550]);
+  assert.equal(m.flow.needsIdr, false);
+  assert.equal(m.calls.filter(call => call.idr).length, 0);
   await m.flow.close(); assert.deepEqual(m.errors, []);
 });
 
@@ -302,7 +320,7 @@ test('feedback during an update uses the pending setting and promptly applies th
   };
   m.feedback(1, 10000000); const first = m.flow.rateWork;
   assert.equal(m.flow.applyingKbps, 9000);
-  m.feedback(2, 12000000); assert.equal(m.flow.desiredKbps, 10800);
+  m.feedback(2, 12500000); assert.equal(m.flow.desiredKbps, 11250);
   m.feedback(3, 9500000); assert.equal(m.flow.desiredKbps, 9000);
   m.feedback(4, 8000000); assert.equal(m.flow.desiredKbps, 7200);
   m.flow.packet(m.frame(1, true)); assert.equal(m.submitted.length, 1);

@@ -11,6 +11,13 @@ const RECOVERY_REASONS = new Set(['rtc-unconsumed', 'input-expired', 'publicatio
 // AUs (three GOPs, tolerating discarded IDRs) instead of elapsed milliseconds.
 const KEYFRAME_INTERVAL_SECONDS = 1;
 const RECOVERY_GOPS = 3;
+// Windows hardware encoders restart on every bitrate setting: stock AMF runs
+// Flush()+ReInit() and NVENC resets with a forced IDR. Each restart emits an
+// extra IDR and a rate-control warm-up, so small congestion-estimate swings must
+// not reach the encoder. Reductions still apply as soon as the allocation is
+// exceeded; growth waits for a 25% gain over the applied setting.
+const TARGET_HEADROOM_PERCENT = 10;
+const MINIMUM_INCREASE_PERCENT = 25;
 
 class LiveSenderFlow {
   constructor({ engine, sourceId, onError, initialBitrateKbps, fps, now = () => performance.now(), onWritable = () => {} }) {
@@ -99,11 +106,11 @@ class LiveSenderFlow {
     if (paused !== this.paused) { this.needsIdr = true; this.awaitedFrames = null; }
     this.paused = paused;
     if (!paused) {
-      // Stock AMF Flush/ReInit is costly. Keep 10% headroom and require a
-      // 10% increase; an exceeded allocation always wins.
       const reference = this.applyingKbps ?? this.currentKbps;
-      const target = Math.max(MINIMUM_CAPTURE_BITRATE_KBPS, Math.floor(data.bitrateBps * 90 / 5000000) * 50);
-      this.desiredKbps = reference > selected || target * 10 >= reference * 11 ? target : reference;
+      const target = Math.max(MINIMUM_CAPTURE_BITRATE_KBPS,
+        Math.floor(data.bitrateBps * (100 - TARGET_HEADROOM_PERCENT) / 5000000) * 50);
+      this.desiredKbps = reference > selected || target * 100 >= reference * (100 + MINIMUM_INCREASE_PERCENT)
+        ? target : reference;
       this.scheduleRate();
     }
     this.lastFeedback = { ...data, allocationKbps: selected, hostSelectedKbps: paused ? null : this.desiredKbps };
@@ -255,7 +262,7 @@ class LiveSenderFlow {
     return { ...this.counts, demand: this.demand, connected: this.connected, paused: this.paused, capturePaused: this.capturePaused,
       awaitingRealIdr: this.needsIdr, awaitedRecoveryFrames: this.awaitedFrames ?? 0,
       recoveryFrameBound: this.recoveryFrameBound, currentSettingsKbps: this.currentKbps, desiredSettingsKbps: this.desiredKbps,
-      bitratePolicy: { targetHeadroomPercent: 10, minimumIncreasePercent: 10 },
+      bitratePolicy: { targetHeadroomPercent: TARGET_HEADROOM_PERCENT, minimumIncreasePercent: MINIMUM_INCREASE_PERCENT },
       feedback: this.lastFeedback ?? null, errors: [...this.errors], queuedJavaScriptFrames: 0,
       peakRtcArrivalFps: this.peakRtcArrivalFps,
       recovery: this.lastRecovery ?? null,
