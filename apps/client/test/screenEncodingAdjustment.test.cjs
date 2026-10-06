@@ -96,8 +96,8 @@ test('an adjusted named preset becomes CUSTOM with that preset camera/audio/bitr
   const f = fixture();
   t.after(() => f.close());
   configure(f);
-  f.settingsStore.qualityPreset = 'ULTRA';
-  const previous = copy(QUALITY_PRESETS.ULTRA);
+  f.settingsStore.qualityPreset = 'UHD120';
+  const previous = copy(QUALITY_PRESETS.UHD120);
   f.controls.encoding = async input => input.video.fps < previous.screenFps ? supported(input) : unsupported();
   f.mountQuality();
   await flush();
@@ -316,7 +316,7 @@ const edits = [
   ['custom FPS', 'custom-screenFps', '120'],
   ['bitrate dropdown', 'q-select-screenBitrate', '30000'],
   ['custom bitrate', 'custom-screenBitrate', '25000'],
-  ['preset', 'select-preset', 'ULTRA'],
+  ['preset', 'select-preset', 'UHD120'],
 ];
 for (const [label, id, value] of edits) {
   test(`${label} validates the entire requested profile BEFORE live preflight/apply/persistence`, async t => {
@@ -327,7 +327,8 @@ for (const [label, id, value] of edits) {
       screenWidth: 1920, screenHeight: 1080, screenFps: label.includes('FPS') || label === 'preset' ? 60 : 120 };
     let editing = false;
     const gate = deferred(), probes = [];
-    const supportedFps = label === 'preset' ? 30 : 60;
+    // A named 4K120 preset on AMD H264 (level 5.2) is the realistic preset rejection.
+    const supportedFps = 60;
     f.controls.encoding = async input => {
       if (!editing) return supported(input);
       probes.push(copy(input));
@@ -360,7 +361,7 @@ for (const [label, id, value] of edits) {
     assert.equal(preflight.screenFps, supportedFps, 'Existing live preflight receives the confirmed candidate, not the rejected request.');
     assert.equal(f.traces.filter(trace => trace[0] === 'preset').length, 1);
     assert.equal(f.saves, saved + 1);
-    const expectedOtherMedia = label === 'preset' ? QUALITY_PRESETS.ULTRA : previous;
+    const expectedOtherMedia = label === 'preset' ? QUALITY_PRESETS.UHD120 : previous;
     for (const key of ['cameraWidth', 'cameraHeight', 'cameraFps', 'cameraBitrateKbps', 'audioBitrateKbps'])
       assert.equal(committed[key], expectedOtherMedia[key], key);
     assert.equal(control(f, 'q-select-screenFps').value, String(supportedFps));
@@ -471,30 +472,40 @@ test('camera/audio numeric clamps retain existing limits and reuse only the iden
   assert.equal(probes, initialProbes, 'Camera/audio changes do not repeat screen discovery or capture the webcam.');
 });
 
-test('newer custom quality edits cancel the old candidate and closing keeps unverified values out of storage', async t => {
-  const f = fixture();
-  t.after(() => f.close());
-  configure(f);
-  f.settingsStore.customProfile.screenFps = 60;
-  const original = copy(f.settingsStore.customProfile), first = deferred(), second = deferred();
-  f.controls.encoding = async input => input.video.maxBitrateKbps === 3500 ? supported(input)
-    : input.video.maxBitrateKbps === 8000 ? first.promise : second.promise;
-  f.mountQuality();
-  await flush();
-  control(f, 'custom-screenBitrate').value = '8000';
-  change(control(f, 'custom-screenBitrate'));
-  control(f, 'custom-screenBitrate').value = '9000';
-  change(control(f, 'custom-screenBitrate'));
-  assert.ok(f.traces.some(trace => trace[0] === 'cancel-encoding'));
-  first.resolve(supported({ encodingMode: 'hardware', codec: 'h264' }));
-  await flush();
-  assert.deepEqual(copy(f.settingsStore.customProfile), original);
-  f.quality.cleanup();
-  second.resolve(supported({ encodingMode: 'hardware', codec: 'h264' }));
-  await flush();
-  assert.deepEqual(copy(f.settingsStore.customProfile), original);
-  assert.equal(f.saves, 0);
-});
+for (const outcome of ['verified', 'rejected']) {
+  test(`newer custom quality edits cancel the old candidate; closing finishes only a ${outcome} latest edit`, async t => {
+    const f = fixture();
+    t.after(() => f.close());
+    configure(f);
+    f.settingsStore.customProfile.screenFps = 60;
+    const original = copy(f.settingsStore.customProfile), first = deferred(), second = deferred();
+    f.controls.encoding = async input => input.video.maxBitrateKbps === 3500 ? supported(input)
+      : input.video.maxBitrateKbps === 8000 ? first.promise : second.promise;
+    f.mountQuality();
+    await flush();
+    control(f, 'custom-screenBitrate').value = '8000';
+    change(control(f, 'custom-screenBitrate'));
+    control(f, 'custom-screenBitrate').value = '9000';
+    change(control(f, 'custom-screenBitrate'));
+    assert.ok(f.traces.some(trace => trace[0] === 'cancel-encoding'));
+    first.resolve(supported({ encodingMode: 'hardware', codec: 'h264' }));
+    await flush();
+    assert.deepEqual(copy(f.settingsStore.customProfile), original);
+    f.quality.cleanup();
+    second.resolve(outcome === 'verified' ? supported({ encodingMode: 'hardware', codec: 'h264' }) : unsupported());
+    await flush();
+    if (outcome === 'verified') {
+      assert.deepEqual(copy(f.settingsStore.customProfile), { ...original, screenBitrateKbps: 9000 });
+      assert.equal(f.saves, 1);
+      assert.equal(f.document.querySelector('.chat-copy-toast-label').textContent,
+        f.i18n.t('settings.qualitySaved', { width: 3840, height: 2160, fps: 60 }));
+    } else {
+      assert.deepEqual(copy(f.settingsStore.customProfile), original, 'An unverified edit never reaches storage.');
+      assert.equal(f.saves, 0);
+      assert.match(f.document.querySelector('.chat-copy-toast-label').textContent, /H264/);
+    }
+  });
+}
 
 test('changing codec during pending resolution validation keeps the new resolution, not the old saved profile', async t => {
   const f = fixture();
@@ -521,7 +532,9 @@ test('changing codec during pending resolution validation keeps the new resoluti
   await flush();
   assert.equal(f.settingsStore.customProfile.screenFps, 120);
   assert.equal(f.settingsStore.preferredScreenCodec, 'av1');
-  assert.equal(f.document.querySelector('.chat-copy-toast'), null);
+  assert.equal(f.document.querySelector('.chat-copy-toast-label').textContent,
+    f.i18n.t('settings.qualitySaved', { width: 3840, height: 2160, fps: 120 }),
+    'Only the applied AV1 resolution is confirmed; the stale H264 candidate adds no FPS notice.');
 });
 
 test('rejected live resolution commit restores both stored profile and requested controls', async t => {
@@ -637,6 +650,53 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(f.settingsStore.preferredScreenCodec, 'h264',
       'The Hardware card explicitly advertised its verified H264 combination before activation.');
     assert.equal(f.settingsStore.customProfile.screenFps, 120);
+  });
+}
+
+for (const start of ['before-open', 'during-discovery']) {
+  test(`Manual alternatives are not probed while the user is sharing (${start}) and resume after the share ends`, async t => {
+    const f = fixture();
+    t.after(() => f.close());
+    configure(f);
+    const events = f.load('core/EventBus').appEvents, probes = [], gate = deferred();
+    const share = sharing => {
+      f.voiceStore.screenShareIds = sharing ? ['live-share'] : [];
+      events.emit('voice.state_updated');
+    };
+    f.controls.encoding = async input => {
+      probes.push(`${input.encodingMode}:${input.codec}`);
+      if (start === 'during-discovery' && input.encodingMode === 'hardware' && input.codec === 'av1') await gate.promise;
+      return supported(input);
+    };
+    if (start === 'before-open') share(true);
+    f.mountQuality();
+    await flush();
+    if (start === 'during-discovery') {
+      assert.deepEqual(probes, ['hardware:h264', 'hardware:av1']);
+      share(true);
+      gate.resolve();
+      await flush();
+    }
+    const checked = start === 'before-open' ? ['hardware:h264'] : ['hardware:h264', 'hardware:av1'];
+    assert.deepEqual(probes, checked, 'A live share keeps exclusive use of the encoder.');
+    const choices = control(f, 'screen-encoding-choices');
+    assert.equal(choices.getAttribute('aria-busy'), 'false');
+    assert.ok(choices.textContent.includes(f.i18n.t('settings.screenEncodingChoicesDeferred')));
+    assert.equal(control(f, 'screen-encoding-software-choice').textContent,
+      f.i18n.t('settings.screenEncodingChoiceDeferred', { codec: 'H264' }));
+    const av1 = control(f, 'select-video-codec').querySelector('[value="av1"]');
+    assert.equal(av1.disabled, false, 'An unchecked choice stays selectable for an explicit check.');
+    if (start === 'before-open') assert.ok(av1.textContent.includes(f.i18n.t('settings.screenEncodingNotChecked')));
+    assert.equal(f.saves, 0);
+    share(false);
+    await flush();
+    assert.deepEqual(probes, ['hardware:h264', 'hardware:av1', 'software:h264', 'software:av1']);
+    assert.ok(!choices.textContent.includes(f.i18n.t('settings.screenEncodingChoicesDeferred')));
+    assert.match(control(f, 'screen-encoding-software-choice').textContent, /H264.*120/);
+    share(false);
+    await flush();
+    assert.equal(probes.length, 4, 'Unrelated voice updates do not repeat discovery.');
+    assert.equal(f.saves, 0);
   });
 }
 
@@ -861,3 +921,81 @@ for (const stage of ['preflight', 'apply']) {
       'The appliedEncoding guard must not mistake the failed transaction for a live applied selection.');
   });
 }
+
+const automaticAv1 = () => ({ selection: { mode: 'hardware', codec: 'av1', encoder: 'av1_texture_amf' },
+  hardware: { available: true, reason: null }, fallback: false });
+const confirmation = (f, key, preset) => f.i18n.t(key, { width: QUALITY_PRESETS[preset].screenWidth,
+  height: QUALITY_PRESETS[preset].screenHeight, fps: QUALITY_PRESETS[preset].screenFps });
+const choosePreset = (f, preset) => {
+  control(f, 'select-preset').value = preset;
+  change(control(f, 'select-preset'));
+};
+
+for (const language of ['en', 'pt-BR']) {
+  test(`closing Settings while a chosen preset is verified still applies and confirms it (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    const root = f.mountQuality();
+    await flush();
+    const gate = deferred();
+    f.controls.encoding = () => gate.promise;
+    choosePreset(f, 'HIGH');
+    await flush();
+    f.quality.cleanup();
+    root.remove();
+    assert.equal(f.traces.some(trace => trace[0] === 'cancel-encoding'), false,
+      'Closing the modal must not cancel the verification of an explicit choice.');
+    gate.resolve(automaticAv1());
+    await flush();
+    assert.equal(f.settingsStore.qualityPreset, 'HIGH');
+    assert.equal(f.saves, 1);
+    assert.deepEqual(f.traces.filter(trace => trace[0] === 'preset'), [['preset', 'HIGH']]);
+    assert.equal(f.document.querySelector('.chat-copy-toast-label').textContent,
+      confirmation(f, 'settings.qualitySaved', 'HIGH'));
+  });
+}
+
+test('reopening Settings during the verification shows the chosen preset and finishes it in place', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  const first = f.mountQuality();
+  await flush();
+  const gate = deferred();
+  f.controls.encoding = () => gate.promise;
+  choosePreset(f, 'GAMING');
+  await flush();
+  f.quality.cleanup();
+  first.remove();
+  f.mountQuality();
+  assert.equal(control(f, 'select-preset').value, 'GAMING', 'The pending choice must not look reverted.');
+  assert.equal(control(f, 'screen-encoding-status').getAttribute('aria-busy'), 'true');
+  gate.resolve(automaticAv1());
+  await flush();
+  assert.equal(f.settingsStore.qualityPreset, 'GAMING');
+  assert.equal(control(f, 'select-preset').value, 'GAMING');
+  assert.equal(control(f, 'screen-encoding-status').getAttribute('aria-busy'), 'false');
+  assert.equal(f.traces.filter(trace => trace[0] === 'preset').length, 1);
+});
+
+test('an active share confirms only after its replacement is live, and a failed one stays silent', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  f.mountQuality();
+  await flush();
+  const live = deferred();
+  f.controls.appliedShares = live.promise;
+  choosePreset(f, 'QHD');
+  await flush();
+  assert.equal(f.settingsStore.qualityPreset, 'QHD');
+  assert.equal(f.document.querySelector('.chat-copy-toast'), null, 'Settings were saved, but the stream has not switched yet.');
+  live.resolve(1);
+  await flush();
+  assert.equal(f.document.querySelector('.chat-copy-toast-label').textContent,
+    confirmation(f, 'settings.qualityAppliedLive', 'QHD'));
+  f.document.querySelector('.chat-copy-toast').remove();
+  f.controls.appliedShares = Promise.resolve(null);
+  choosePreset(f, 'NORMAL');
+  await flush();
+  assert.equal(f.settingsStore.qualityPreset, 'NORMAL');
+  assert.equal(f.document.querySelector('.chat-copy-toast'), null, 'The share already reported its own failure.');
+});

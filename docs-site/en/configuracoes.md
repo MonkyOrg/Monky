@@ -601,11 +601,18 @@ guarantee that sustained rate on every Mac.
 
 | Profile | Audio | Camera | Screen | When to use |
 |---|---|---|---|---|
-| Economy | 24 kbps | 360p | 480p | Slow or unstable internet |
-| Normal | 32 kbps | 480p | 720p | General use |
-| High Quality | 48 kbps | 720p | 1080p | Fast internet and a PC to spare |
-| Gaming | 28 kbps | reduced | smooth (60 FPS) | Gaming: prioritises voice and fluid screen |
-| Ultra | 64 kbps | 1080p / 60 FPS | 1080p / 60 FPS | Sufficient bandwidth and hardware for higher rates |
+| Light | 24 kbps | 360p | 360p / 30 FPS | Slow or unstable internet |
+| Standard | 32 kbps | 480p | 720p / 30 FPS | General use (recommended) |
+| Sharp | 48 kbps | 720p | 1080p / 30 FPS | Text, code and documents |
+| Smooth | 64 kbps | 1080p | 1080p / 60 FPS | Games and video |
+| Ultra | 64 kbps | 1080p | 1440p / 60 FPS | 1440p monitors |
+| Cinema | 64 kbps | 1080p | 4K / 60 FPS | Fast internet and a strong GPU |
+| Extreme | 64 kbps | 1080p | 4K / 120 FPS | The most Monky can do; a GPU with AV1 is recommended |
+
+No profile goes below 30 FPS, and the camera always uses 30 FPS. If the
+encoder rejects a profile (for example AMD hardware H.264 at 4K/120), Monky
+lowers the FPS, says so and saves the result as Custom. Older Gaming or old
+Ultra (1080p at 60 FPS) settings move to Smooth, the same step.
 
 These are configuration targets, not guaranteed observed FPS or bitrate.
 Devices, codecs, networks, participant count and content affect the result.

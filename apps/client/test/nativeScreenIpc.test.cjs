@@ -2471,6 +2471,7 @@ test('Main persists the retired AV1 failure while independently proving H264 har
   assert.equal(discovery.availability.fallback, false);
   assert.equal(f.probes.length, 0);
   const diagnostic = f.logs.find(entry => entry.message === 'Native screen encoder-candidate failed');
+  assert.equal(diagnostic.level, 'INFO', 'A GPU without AV1 is an expected discovery result, not an error.');
   assert.ok(diagnostic.data.nativeCodes.includes(failure.code));
   assert.equal(diagnostic.data.retirementConfirmed, true);
   assert.equal(diagnostic.data.continuingHardwareDiscovery, true);
@@ -2486,6 +2487,22 @@ test('Main persists the retired AV1 failure while independently proving H264 har
   assert.equal(added.encoding.selection.mode, 'hardware');
   assert.equal(f.probes[0].options.encoder, 'h264_texture_amf');
   assert.equal(f.encodingProbes.some(probe => probe.encoder === 'obs_x264'), false);
+});
+
+test('Main logs a failed Manual encoder probe as a discovery warning, not an error', async t => {
+  const unavailable = Object.assign(new Error('AMF AV1 source-free probe; CreateComponent(AV1) status=1'),
+    { code: 'ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE' });
+  const f = fixture(t, {
+    compiledEncoders: ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'],
+    encodingProbe: options => { if (options.encoder === 'av1_texture_amf') throw unavailable; },
+  });
+  const input = { action: 'probe-encoding', probeId: randomUUID(),
+    video, encodingStrategy: 'manual', encodingMode: 'hardware', codec: 'av1' };
+  await assert.rejects(f.invoke(input), /AMF AV1/);
+  const discovery = f.logs.filter(entry => entry.message === 'Native screen IPC failed');
+  assert.deepEqual(discovery.map(entry => [entry.level, entry.data.action]), [['WARN', 'probe-encoding']]);
+  assert.deepEqual(discovery[0].data.nativeCodes, ['ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE']);
+  assert.equal(f.logs.some(entry => entry.level === 'ERROR'), false);
 });
 
 test('Main Automatic source admission ignores dormant manual preferences and independently rediscovers hardware', async t => {

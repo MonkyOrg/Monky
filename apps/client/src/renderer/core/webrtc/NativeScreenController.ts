@@ -67,6 +67,8 @@ interface Presentation {
   browser?: BrowserScreenSubscription;
   audioTrack?: MediaStreamTrack;
   captureMode?: NativeScreenCaptureMode;
+  // undefined: never started; timer: masking a source replacement; null: finished.
+  replacementGrace?: ReturnType<typeof setTimeout> | null;
 }
 
 type SourceInput = Omit<NativeScreenCapture, 'source'> & {
@@ -117,6 +119,9 @@ interface Call {
 const keyOf = (sessionId: string, shareId: string): string => `${sessionId}\0${shareId}`;
 const cancelled = (): DOMException => new DOMException('The native screen call was superseded.', 'AbortError');
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error);
+// A publisher quality change retires its old instance before announcing the
+// replacement; viewers see that gap as source-unavailable for a few hundred ms.
+const SOURCE_REPLACEMENT_GRACE_MS = 8000;
 
 export function nativeScreenProfile(profile: QualityProfile): NativeScreenVideoProfile | null {
   if (profile.screenFps > customVideoFpsLimit(profile.screenWidth, profile.screenHeight)) return null;
@@ -166,6 +171,22 @@ export class NativeScreenController {
 
   private changed(): void {
     emitOutsideRouting(() => appEvents.emit('native_screen.updated'));
+  }
+
+  // Present a retired source as reconnecting until its replacement is announced;
+  // only a source that stays gone becomes a failure with a retry action.
+  private awaitReplacement(entry: Presentation): void {
+    if (entry.replacementGrace !== undefined || entry.state.state !== 'unavailable'
+      || entry.state.reason !== 'source-unavailable') return;
+    entry.replacementGrace = setTimeout(() => {
+      entry.replacementGrace = null;
+      this.changed();
+    }, SOURCE_REPLACEMENT_GRACE_MS);
+  }
+
+  private endReplacementGrace(entry: Presentation): void {
+    if (entry.replacementGrace) clearTimeout(entry.replacementGrace);
+    entry.replacementGrace = null;
   }
 
   public report(error: unknown): void {
@@ -412,6 +433,7 @@ export class NativeScreenController {
       else if (!(event.type === 'state' && event.state === 'closed' && entry.state.state === 'unavailable'))
         entry.state = event.type === 'state' && (event.state === 'playing' || event.state === 'connecting')
           ? { state: event.state } : { state: 'unavailable', reason: event.reason ?? 'connection-failed' };
+      this.awaitReplacement(entry);
       this.changed();
     }
   }
@@ -649,15 +671,16 @@ export class NativeScreenController {
     return task;
   }
 
-  public async applyQuality(profile: QualityProfile): Promise<void> {
+  public async applyQuality(profile: QualityProfile): Promise<number> {
     const captures = videoService.getNativeScreenCaptures();
-    if (!captures.length) return;
+    if (!captures.length) return 0;
     const video = nativeScreenProfile(profile);
     if (!video) throw new Error(t('screenShare.nativeProfileChangeBlocked'));
     const call = await this.ensureCall();
     await Promise.all(captures.map(capture => this.refreshSource(call, capture.source.shareId,
       { video, audioBitrateKbps: profile.audioBitrateKbps })));
     this.changed();
+    return captures.length;
   }
 
   public settingsIssue(profile: QualityProfile, codec: ScreenCodecPreference): 'profile' | 'codec' | null {
@@ -738,6 +761,7 @@ export class NativeScreenController {
       if (previous.state.state === 'unavailable') return;
     }
     if (previous) {
+      this.endReplacementGrace(previous);
       await this.stopPresentation(call, previous);
       if (call.presentations.get(key) === previous) call.presentations.delete(key);
     }
@@ -842,6 +866,7 @@ export class NativeScreenController {
       onUnavailable: reason => {
         if (entry.stopping) return;
         entry.state = { state: 'unavailable', reason };
+        this.awaitReplacement(entry);
         this.changed();
         void this.stopPresentation(call, entry).catch(error => this.report(error));
       },
@@ -918,7 +943,9 @@ export class NativeScreenController {
 
   public getWatchState(sessionId: string, shareId: string): NativeScreenWatchState | null {
     const entry = this.call?.presentations.get(keyOf(sessionId, shareId));
-    return entry ? { ...entry.state, receiver: entry.receiver } : null;
+    if (!entry) return null;
+    if (entry.replacementGrace && entry.state.state === 'unavailable') return { state: 'connecting', receiver: entry.receiver };
+    return { ...entry.state, receiver: entry.receiver };
   }
 
   public getCaptureMode(sessionId: string, shareId: string): NativeScreenCaptureMode | null {
@@ -1048,6 +1075,7 @@ export class NativeScreenController {
       else if (result.kind !== 'ok') throw new Error('Native call retirement returned an invalid acknowledgement.');
       await Promise.allSettled([call.ready, ...call.watchTasks.values(), ...call.sourceTasks.values(),
         ...[...call.sources.values()].map(source => source.ready)]);
+      for (const entry of call.presentations.values()) this.endReplacementGrace(entry);
       await Promise.all([...call.presentations.values()].map(entry => this.releasePresentation(call, entry)));
       await Promise.all([...call.sources.values()].map(entry => this.releaseLocalPreview(call, entry)));
       for (const unbind of call.unbind.splice(0)) unbind();

@@ -371,7 +371,8 @@ class NativeScreenSharingService {
       ...(pipelineId ? { pipeline: diagnosticId(pipelineId) } : {}) };
   }
 
-  logFailure(operation: string, error: unknown, input?: unknown, context: DiagnosticData = {}): void {
+  logFailure(operation: string, error: unknown, input?: unknown, context: DiagnosticData = {},
+    level: 'INFO' | 'WARN' | 'ERROR' = 'ERROR'): void {
     const command = nativeScreenCommandSchema.safeParse(input);
     if (error instanceof Error && error.name === 'AbortError') {
       if (command.success) this.log('command-cancelled', { ...context, action: command.data.action }, 'WARN');
@@ -416,7 +417,9 @@ class NativeScreenSharingService {
     const oldest = this.recentFailures.keys().next().value;
     if (this.recentFailures.size >= 128 && oldest !== undefined) this.recentFailures.delete(oldest);
     this.recentFailures.set(signature, now);
-    this.log(`${operation} failed`, data, 'ERROR');
+    // Discovery outcomes (an encoder this GPU lacks) are expected; unproven retirement is not.
+    const discovery = command.success && command.data.action === 'probe-encoding' && !(error instanceof AggregateError);
+    this.log(`${operation} failed`, data, discovery && level === 'ERROR' ? 'WARN' : level);
   }
 
   private endpointObserver(call: CallRecord, shareId: string, pipelineId: string, role: 'publish' | 'receive',
@@ -610,7 +613,7 @@ class NativeScreenSharingService {
         this.logFailure('encoder-candidate', error, undefined, {
           encoder: selection.encoder, codec: selection.codec, encodingMode: selection.mode,
           retirementConfirmed: true, continuingHardwareDiscovery: true,
-        });
+        }, 'INFO');
       });
     });
     this.encodingQueue = work.catch(() => {});

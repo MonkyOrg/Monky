@@ -824,7 +824,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
   ]);
   setLanguage('en');
   settingsStore.qualityPreset = 'CUSTOM';
-  settingsStore.customProfile = { ...QUALITY_PRESETS.ULTRA, screenWidth: 1920, screenHeight: 1080,
+  settingsStore.customProfile = { ...QUALITY_PRESETS.GAMING, screenWidth: 1920, screenHeight: 1080,
     screenFps: fullHd60 ? 60 : 120, screenBitrateKbps: 20000, audioBitrateKbps: 128 };
   if (sourceQualityChanges) Object.assign(settingsStore.customProfile, {
     screenWidth: 1280, screenHeight: 720, screenFps: 30, screenBitrateKbps: 2000,

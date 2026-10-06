@@ -242,7 +242,7 @@ class App {
     this.setupTraySync();
 
     // Initialize and sync quality preset to WebRtcManager and VideoService (#474)
-    webRtcManager.setQualityPreset(settingsStore.qualityPreset);
+    void webRtcManager.setQualityPreset(settingsStore.qualityPreset);
 
     // Initialize overlay bridge service (#169)
     overlayBridgeService.init((sessionId, shareId) => webRtcManager.getScreenCaptureMode(sessionId, shareId));

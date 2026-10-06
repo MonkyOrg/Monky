@@ -11,7 +11,7 @@ are passing; TURN does not fix the login address.
 | Nickname already in use | Nicknames are unique per server — pick another |
 | I joined, but nobody hears me | Check Settings › Voice and Video, the meter, detection threshold, PTT, personal mute and any administrative restriction |
 | I hear someone, but their avatar does not indicate speech | Update the client. The indicator follows each microphone's decoded audio in P2P and SFU, even when RTP statistics report zero audio level. It is hidden while you are deafened; screen audio must not trigger it |
-| Everyone sounds choppy | Use the Economy profile, ask broadcasters to do the same and prefer cable over Wi-Fi |
+| Everyone sounds choppy | Use the Light profile, ask broadcasters to do the same and prefer cable over Wi-Fi |
 | Shared screen has no sound | Check whether the source/platform supports screen audio, the selected option and sender/receiver volumes |
 | Nothing under Servers on the Network | Discovery only works on the same LAN; click Scan again and check UDP `41234` in the firewall |
 | One participant is silent only for me | Right-click them and set individual volume back to 100% |

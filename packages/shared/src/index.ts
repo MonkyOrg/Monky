@@ -12,6 +12,8 @@ export {
   RECONNECT_DELAYS_MS,
   QUALITY_PRESETS,
   DEFAULT_CUSTOM_PROFILE,
+  isMotionQualityPreset,
+  restoreQualityPreset,
   EVERYONE_MENTION_TOKENS,
   hasEveryoneMention,
 } from './constants.js';
