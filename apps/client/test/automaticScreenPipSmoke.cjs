@@ -286,7 +286,12 @@ async function runAutomaticScreenPipSmoke() {
       const revokedPip = pipVideo();
       session.serverStore.myPermissions = 0;
       appEvents.emit('server.roles_updated');
-      check(revoked.srcObject === null && revokedPip.srcObject === null && !popup(), 'Permission revocation immediately blanks PiP');
+      check(presenting(revoked) && revokedPip.srcObject !== null && popup(),
+        'Losing the view while inside the call keeps PiP: the room stays visible until leaving it');
+      // Leaving the room is what revokes its broadcasts.
+      session.participants.removeVoiceState(remote.sessionId);
+      appEvents.emit('participants.updated');
+      check(revoked.srcObject === null && revokedPip.srcObject === null && !popup(), 'Leaving the room immediately blanks PiP');
       activateWindow();
       check(revoked.srcObject === null && !pip.getStageReturn(session.key, channel.id),
         'Window return cannot resurrect a revoked source');

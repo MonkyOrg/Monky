@@ -166,7 +166,7 @@ if (!process.versions.electron) {
       browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
       await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     };
-    const dragChannelToSelector = async (from, selector, yRatio = 0.5) => {
+    const dragChannelToSelector = async (from, selector, yRatio = 0.5, expectShift = true) => {
       const targetBefore = await browser.webContents.executeJavaScript(`(() => {
         const target = document.querySelector(${JSON.stringify(selector)});
         const box = target.getBoundingClientRect();
@@ -199,7 +199,9 @@ if (!process.versions.electron) {
           const sample = { x: Math.round(box.left + Math.min(80, box.width / 2)), y: Math.round(box.top + box.height * ${yRatio}),
             top: box.top, layoutTop: box.top - target.closest('#channel-categories-list').getBoundingClientRect().top,
             scroll: target.closest('.channels-list-container').scrollTop };
-          if (sample.top > ${JSON.stringify(targetBefore.top)} + 1) {
+          // Older servers reveal Uncategorized above the categories during a drag;
+          // the shared root keeps the layout still and adds its target at the end.
+          if (!${JSON.stringify(expectShift)} || sample.top > ${JSON.stringify(targetBefore.top)} + 1) {
             if (lastTop !== null && Math.abs(sample.top - lastTop) <= 0.5) stableFrames++;
             else stableFrames = 0;
             lastTop = sample.top;
@@ -423,10 +425,10 @@ if (!process.versions.electron) {
         return { x: Math.round(box.left + Math.min(80, box.width / 2)), y: Math.round(box.top + box.height * ${yRatio}) };
       })()`);
       await dragChannelToSelector(await rootPoint('.channel-item[data-channel-id="tail"]'),
-        '[data-category-id="destination"] > .category-title', 0.2);
+        '[data-category-id="destination"] > .category-title', 0.2, false);
       await rootRequest(['category', 'loose', 'tail', 'destination'], 'A loose channel did not move above a category');
       await dragChannelToSelector(await rootPoint('.channel-item[data-channel-id="voice"]'),
-        '[data-category-id="destination"] > .category-title', 0.2);
+        '[data-category-id="destination"] > .category-title', 0.2, false);
       if (!await pageBecomes(`window.categoryTestRequests.some(({ type, payload }) =>
         type === 'CHANNEL_UPDATE' && payload.channelId === 'voice' && payload.categoryId === null)`)) {
         throw new Error('Leaving a category between two categories did not detach the channel first');
@@ -436,11 +438,11 @@ if (!process.versions.electron) {
         await rootPoint('.channel-item[data-channel-id="loose"]', 0.2));
       await rootRequest(['category', 'destination', 'loose', 'tail'], 'A category did not move above a loose channel');
       await browser.webContents.executeJavaScript(`document.querySelector('[data-category-channels=""]').style.minHeight = '96px'`);
-      await dragChannelToSelector(await rootPoint('.channel-item[data-channel-id="text"]'), '[data-category-channels=""]', 0.85);
+      await dragChannelToSelector(await rootPoint('.channel-item[data-channel-id="text"]'), '[data-category-channels=""]', 0.85, false);
       await rootRequest(['category', 'loose', 'text', 'destination', 'tail'],
         'Releasing over the empty part of a loose group did not keep the channel in that group');
       await browser.webContents.executeJavaScript(`document.querySelector('[data-category-channels=""]').style.minHeight = ''`);
-      await dragChannelToSelector(await rootPoint('.channel-item[data-channel-id="loose"]'), '.channel-tree-end-dropzone', 0.5);
+      await dragChannelToSelector(await rootPoint('.channel-item[data-channel-id="loose"]'), '.channel-tree-end-dropzone', 0.5, false);
       await rootRequest(['category', 'destination', 'tail', 'loose'], 'A loose channel did not move to the end of the list');
       console.log(`Category DOM ${locale}: forms, mixed groups, keyboard, menus, scoped persistence passed`);
     }
