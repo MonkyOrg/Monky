@@ -1,4 +1,4 @@
-import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, NativePollRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord, VoiceRestrictions } from './entities';
+import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, NativePollRecord, NativePollVoterRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord, VoiceRestrictions } from './entities';
 import type { BotSelector } from '@monky/shared';
 import type { BotSettingsRecord } from './entities';
 
@@ -106,6 +106,8 @@ export interface INativePollRepository {
   listActiveLiveActions(now: number): NativePollRecord[];
   createWithMessage(poll: NativePollRecord, message: MessageRecord): { poll: NativePollRecord; created: boolean };
   vote(id: string, userId: string, optionIds: string[], now: number): NativePollRecord | undefined;
+  /** Stores an edited open poll; votes for answers outside `poll.options` are discarded. */
+  edit(poll: NativePollRecord, singleAnswer: boolean, now: number): NativePollRecord | undefined;
   closeExpired(now: number): NativePollRecord[];
   closeById(id: string, now: number): NativePollRecord | undefined;
   closeByMessageId(messageId: string, now: number): NativePollRecord | undefined;
@@ -113,6 +115,8 @@ export interface INativePollRepository {
   voteCounts(id: string): Map<string, number>;
   voterCount(id: string): number;
   votesForUser(id: string, userId: string): string[];
+  /** Voters per answer in voting order, at most `limitPerOption` each when given. */
+  votersByOption(id: string, limitPerOption?: number): Map<string, NativePollVoterRecord[]>;
 }
 
 export interface IMentionRepository {

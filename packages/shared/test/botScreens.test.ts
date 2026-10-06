@@ -34,9 +34,9 @@ test('authentication shape allows negotiation while the compatibility floor reje
   }
 });
 
-test('DM relay, role models and the channel tree order negotiate as human-only features without raising the compatibility floor', () => {
+test('DM relay, role models, the channel tree order and poll voters negotiate as human-only features without raising the compatibility floor', () => {
   assert.deepEqual(createProtocolOffer('client'), {
-    minimumVersion: 35, features: ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'channel-tree-order'],
+    minimumVersion: 35, features: ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'channel-tree-order', 'poll-voters', 'poll-edit'],
   });
   assert.deepEqual(createProtocolOffer('bot'), { minimumVersion: 24, features: ['message-length-setting', 'server-community'] });
   assert.deepEqual(negotiateProtocol(36, undefined, 'client'), { version: 36, ...createProtocolOffer('client') });

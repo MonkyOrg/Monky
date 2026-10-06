@@ -190,6 +190,12 @@ pertence ao público: mensagem, histórico, respostas, busca, totais e paginaç�
 não revelam sua existência. O criador e gestores com **Gerenciar servidor**
 mantêm acesso, sempre respeitando a permissão atual de leitura do canal.
 
+Enquanto uma enquete está aberta, quem a criou e quem tem **Gerenciar servidor**
+podem editá-la por completo, inclusive público, duração, limite e votos
+anônimos. Ligar a ação ao vivo numa edição continua exigindo **Emitir ações ao
+vivo**. Quem perde acesso a uma enquete privada após a edição deixa de vê-la ao
+recarregar o canal.
+
 ## Buscar mensagens
 
 Use a busca no topo à direita ou `Ctrl+F` dentro de um chat para começar no

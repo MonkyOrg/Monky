@@ -232,10 +232,31 @@ O botão **+** abre as ações do compositor. **Anexar arquivo** mantém o fluxo
 upload existente; **Criar enquete** abre um fluxo em três etapas para a pergunta,
 de 2 a 10 respostas — cada uma com emoji opcional —, até 5 imagens em carrossel
 selecionáveis de uma só vez, com prévia, navegação animada e reordenação,
-duração e/ou limite de votantes. A enquete pode aceitar uma resposta ou várias;
-nesse caso, cada pessoa confirma em conjunto quantas respostas quiser, inclusive
-todas. O voto pode ser alterado até o encerramento. A enquete fecha no primeiro
-limite atingido e a mensagem permanece com as contagens e percentuais finais.
+duração e/ou limite de votantes. A enquete pode aceitar uma resposta ou várias.
+Clique numa resposta para votar e clique nela de novo para retirar o voto; com
+várias respostas, cada clique adiciona ou retira só aquela, e com uma resposta,
+clicar em outra troca o voto. Isso vale até o encerramento. Cada resposta mostra
+seu número de votos à direita, e a barra cresce ou diminui conforme a
+proporção. A enquete fecha no primeiro limite atingido e a mensagem permanece
+com as contagens finais.
+
+Por padrão, os votos são públicos: os avatares de quem votou aparecem ao lado do
+número de votos e, ao passar o mouse sobre eles, aparecem os nomes. **Ver
+votos** abre a lista completa por resposta. Com **Votos anônimos**, escolhido na
+criação, ninguém vê quem votou, nem quem criou a enquete, e a mensagem mostra o
+selo **Anônima**. Enquetes criadas antes dessa opção mostram quem votou.
+
+Quem criou a enquete e quem tem **Gerenciar servidor** podem editá-la enquanto
+está aberta, pelo menu da mensagem ou da ação ao vivo, com as mesmas etapas da
+criação. Mudar a pergunta zera todos os votos; mudar o texto de uma resposta
+zera só os votos dela; adicionar ou remover respostas e trocar emojis ou imagens
+não altera os outros votos. Tornar públicos votos anônimos também zera todos os
+votos, para não revelar votos secretos, e passar a aceitar só uma resposta retira
+o voto de quem marcou mais de uma. Uma nova duração conta a partir da edição, e
+um limite de votantes já atingido encerra a enquete. Esses efeitos aparecem
+enquanto você edita, e salvar pede confirmação quando algum voto será perdido.
+Se chegarem votos durante a edição, o Monky mostra os efeitos atualizados antes
+de descartar qualquer um deles.
 
 Quem possui **Emitir ações ao vivo** também pode destacar a mesma enquete acima
 dos canais. A mensagem e a ação ao vivo são duas superfícies do mesmo recurso:
