@@ -418,7 +418,9 @@ base is `git merge-base origin/main HEAD`. Pass options after `--`:
 Steps that only run on a disposable runner, such as the real clipboard and the
 artifact export, show as **PULADO (só CI)**. Without
 `npm run prepare:native-screen`, native tests are also reported as skipped,
-not failed. In CI, each DOM shard also runs everything and lists **every**
+not failed. At the end it checks that the steps left no new files in the
+checkout, because CI only exports builds from a clean checkout; this check runs
+even with `--only`. In CI, each DOM shard also runs everything and lists **every**
 failure at the end (`FALHAS: ...`): fix them all before the next push.
 
 ### Describe how to test it

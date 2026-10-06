@@ -38,9 +38,20 @@ function nativeRuntimeReady(platform = process.platform) {
   return arches.every(arch => fs.existsSync(path.join(bin, arch, 'rtc-build.json')));
 }
 
+function gitStatus() {
+  return new Set(execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { cwd: root, encoding: 'utf8' })
+    .split(/\r?\n/u).filter(Boolean));
+}
+
+// CI exports builds only from a clean checkout, so files that the steps leave behind fail there late.
+function checkClean(before, after = gitStatus()) {
+  const created = [...after].filter(entry => !before.has(entry));
+  if (created.length) throw new Error(`Os passos deixaram o checkout sujo (o CI recusa exportar o build): ${created.join(', ')}`);
+}
+
 function plan({ base, head, title = '', packageApp = false, platform = process.platform,
   ci = load(fs.readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8')),
-  nativeReady = nativeRuntimeReady(platform) } = {}) {
+  nativeReady = nativeRuntimeReady(platform), before = gitStatus() } = {}) {
   const shell = (stage, command, extra = {}) => ({ stage, label: command, command, ...extra });
   const bots = ci.jobs['bot-tests'];
   const packaging = ci.jobs[platform === 'darwin' ? 'package-mac' : 'package-win'];
@@ -68,6 +79,7 @@ function plan({ base, head, title = '', packageApp = false, platform = process.p
     shell('package', 'node scripts/ci-build-artifact.js collect', { skip: ciOnly }),
     ...dom.commands.map(command => shell('dom', command.join(' '),
       command.includes('--system-clipboard') ? { skip: ciOnly } : {})),
+    { stage: 'clean', label: 'checkout sem arquivos novos (exigido pela exportação do build no CI)', fn: () => checkClean(before) },
   ];
   return steps;
 }
@@ -128,7 +140,7 @@ async function main(argv = process.argv.slice(2)) {
   console.log(`Base ${config.base.slice(0, 12)}, head ${config.head.slice(0, 12)}. Logs em ${config.logs}`);
   const results = [];
   for (const [index, step] of plan(config).entries()) {
-    if (config.only && !config.only.test(`${step.stage} ${step.label}`)) continue;
+    if (config.only && step.stage !== 'clean' && !config.only.test(`${step.stage} ${step.label}`)) continue;
     const number = String(index + 1).padStart(2, '0');
     const log = path.join(config.logs, `${number}-${step.stage}.log`);
     const started = Date.now();
@@ -149,6 +161,6 @@ async function main(argv = process.argv.slice(2)) {
   return failed.length ? 1 : 0;
 }
 
-module.exports = { plan, pairs, lines };
+module.exports = { plan, pairs, lines, checkClean };
 if (require.main === module) main().then(code => { process.exitCode = code; },
   error => { console.error(error.message ?? error); process.exitCode = 1; });

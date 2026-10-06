@@ -375,8 +375,14 @@ test('ZIP extraction restores archived Unix modes without granting group write o
     'bin/setuid': 0o104755, 'bin/owner-read-only': 0o100400, 'bin/dos': null };
   executePython('-c', 'import json,sys,zipfile\nwith zipfile.ZipFile(sys.argv[1],"w") as z:\n for name,mode in json.loads(sys.argv[2]).items():\n  info=zipfile.ZipInfo(name)\n  if mode is None: info.create_system=0; info.external_attr=0o100755<<16\n  else: info.create_system=3; info.external_attr=mode<<16\n  z.writestr(info,"payload")',
     zip, JSON.stringify(entries));
-  const recorded = JSON.parse(executePython('-c', 'import importlib.util,json,os,sys\nspec=importlib.util.spec_from_file_location("archive",sys.argv[1])\nmodule=importlib.util.module_from_spec(spec)\nspec.loader.exec_module(module)\ncalls={}\nreal=os.chmod\ndef chmod(name,mode):\n calls[os.path.relpath(name,sys.argv[3]).replace(os.sep,"/")]=oct(mode)\n real(name,mode)\nmodule.os.chmod=chmod\nmodule.extract_build(sys.argv[2],sys.argv[3])\nprint(json.dumps(calls))',
+  // -B: importing the extractor must not leave scripts/__pycache__ behind, because CI exports
+  // builds only from a clean checkout.
+  const bytecode = path.join(scripts, '__pycache__');
+  const hadBytecode = await fs.stat(bytecode).then(() => true, () => false);
+  const recorded = JSON.parse(executePython('-B', '-c', 'import importlib.util,json,os,sys\nspec=importlib.util.spec_from_file_location("archive",sys.argv[1])\nmodule=importlib.util.module_from_spec(spec)\nspec.loader.exec_module(module)\ncalls={}\nreal=os.chmod\ndef chmod(name,mode):\n calls[os.path.relpath(name,sys.argv[3]).replace(os.sep,"/")]=oct(mode)\n real(name,mode)\nmodule.os.chmod=chmod\nmodule.extract_build(sys.argv[2],sys.argv[3])\nprint(json.dumps(calls))',
     path.join(scripts, 'ci-build-archive.py'), zip, output));
+  if (!hadBytecode) await assert.rejects(fs.stat(bytecode), { code: 'ENOENT' },
+    'Tests must leave the checkout clean for the CI build export.');
   assert.deepEqual(recorded, { 'bin/monky-screen-mac': '0o755', 'bin/lib.dylib': '0o644', 'bin/open': '0o755',
     'bin/setuid': '0o755', 'bin/owner-read-only': '0o600' }, 'Only Unix-hosted entries change mode, capped at 0755.');
   if (process.platform !== 'win32') {

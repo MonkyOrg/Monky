@@ -652,6 +652,14 @@ test('ci:local mirrors CI commands from ci.yml and the DOM runner, skipping only
   }
   assert.ok(pairs(ci).some(([pt, en]) => pt === 'CONTRIBUTING.md' && en === 'CONTRIBUTING.en.md'));
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).scripts['ci:local'], 'node scripts/ci-local.cjs');
+  const { checkClean } = require('./ci-local.cjs');
+  const last = plan({ base: 'a', head: 'b', platform: 'win32', nativeReady: true, before: new Set() }).at(-1);
+  assert.equal(last.stage, 'clean', 'The clean-checkout check runs after every other step.');
+  assert.match(fs.readFileSync(path.join(root, 'scripts', 'ci-local.cjs'), 'utf8'), /step\.stage !== 'clean'/u,
+    '--only must not skip the clean-checkout check.');
+  checkClean(new Set([' M scripts/edited.js']), new Set([' M scripts/edited.js']));
+  assert.throws(() => checkClean(new Set([' M scripts/edited.js']), new Set([' M scripts/edited.js', '?? scripts/__pycache__/'])),
+    /scripts\/__pycache__/u, 'Files left by the steps must fail locally, as the CI build export does.');
 });
 
 test('native tooltip input requires actual window and renderer focus, not a fixed showInactive delay', async () => {
