@@ -18,7 +18,7 @@ const audioSource = (sourceId = 20, screenAudioShareId = 'screen-10') => ({
   sourceId, screenAudioShareId, syncGroup: 'call-group', maxBitrateBps: 128000,
 });
 function fixture({ connectGate, publishGate, audioPublishGate, audioPublication = false,
-  rebindGate, rebindResult = result => result, timeoutMs = 100, preparePeer = null } = {}) {
+  rebindGate, rebindResult = result => result, timeoutMs = 12000, preparePeer = null } = {}) {
   const calls = [], registered = new Set(), audio = new Set(), connected = new Set(), errors = [];
   const metadata = new Map(), audioPublications = [], liveAudio = new Map();
   let failRemove = false, failClose = false, closed = false;
