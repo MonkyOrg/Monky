@@ -414,7 +414,9 @@ termina listando o que falhou, com o caminho do log de cada passo. A base padrã
 
 Passos que só rodam num runner descartável, como o clipboard real e a exportação
 do artefato, aparecem como **PULADO (só CI)**. Sem `npm run prepare:native-screen`,
-os testes nativos também aparecem como pulados, não como falha. No CI, cada
+os testes nativos também aparecem como pulados, não como falha. No fim, ele
+confere que os passos não deixaram arquivos novos no checkout, porque o CI só
+exporta o build de um checkout limpo; essa conferência roda mesmo com `--only`. No CI, cada
 parte da suíte DOM também executa tudo e lista **todas** as falhas no fim
 (`FALHAS: ...`): corrija todas antes do próximo push.
 
