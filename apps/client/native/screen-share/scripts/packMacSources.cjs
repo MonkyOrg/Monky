@@ -30,6 +30,8 @@ async function packMacSources(config) {
   const archive = path.join(config.output, `${basename}.tar.xz`);
   const manifest = path.join(config.output, `${basename}.json`);
   assert.ok(!fs.existsSync(archive) && !fs.existsSync(manifest), 'macOS source package already exists.');
+  // Sources-only jobs have not compiled anything, so the module build directory may not exist yet.
+  fs.mkdirSync(path.join(root, 'build'), { recursive: true });
   const temporary = fs.mkdtempSync(path.join(root, 'build', 'mac-source-package-'));
   const partial = archive + '.' + randomUUID() + '.partial';
   try {

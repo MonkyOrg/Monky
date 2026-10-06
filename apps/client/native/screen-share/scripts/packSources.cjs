@@ -111,6 +111,8 @@ async function packSources(config) {
   const archive = path.join(config.output, `${basename}.tar.xz`);
   const manifest = path.join(config.output, `${basename}.json`);
   assert.ok(!fs.existsSync(archive) && !fs.existsSync(manifest), 'Source package already exists; refusing to overwrite it.');
+  // A cached runtime skips compilation, so the module build directory may not exist yet.
+  fs.mkdirSync(path.join(root, 'build'), { recursive: true });
   const temporary = fs.mkdtempSync(path.join(root, 'build', 'source-package-'));
   const partial = archive + '.' + crypto.randomUUID() + '.partial';
   try {
