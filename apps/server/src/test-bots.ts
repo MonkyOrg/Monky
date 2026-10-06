@@ -9,6 +9,7 @@ import test, { type TestContext } from 'node:test';
 import { WebSocket } from 'ws';
 import {
   DEFAULT_PERMISSIONS,
+  EVERYONE_ROLE_ID,
   resolveMemberPermissions,
   LIMITS,
   MessageType,
@@ -65,6 +66,23 @@ import { AvatarStorageService } from './infrastructure/security/AvatarStorageSer
 import { BotInteractionHandler, BotInteractionSession } from './infrastructure/websocket/BotInteractionHandler';
 import { ensureServerSeedData } from './server';
 import { createApprovedBotFixture as createFixture, identity, record, records, text, type Received } from './testFixtures/bots';
+
+type Fixture = Awaited<ReturnType<typeof createFixture>>;
+
+/**
+ * Roles only grant, so a member loses a permission only when Everyone and their
+ * role both leave it off. Writing the repositories directly skips the role
+ * broadcast, so the server has to revalidate on its own.
+ */
+async function revokeDirectly(fixture: Fixture, roleId: string, permission: number): Promise<void> {
+  await fixture.serverRepo.updateServer({ everyonePermissions: DEFAULT_PERMISSIONS & ~permission });
+  await fixture.roleRepo.update(roleId, { permissions: DEFAULT_PERMISSIONS & ~permission });
+}
+
+async function restoreDirectly(fixture: Fixture, roleId: string): Promise<void> {
+  await fixture.roleRepo.update(roleId, { permissions: DEFAULT_PERMISSIONS });
+  await fixture.serverRepo.updateServer({ everyonePermissions: DEFAULT_PERMISSIONS });
+}
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
 const AUDIO_PREVIEW = { url: 'https://cdn.example.test/effect.mp3', fileName: 'effect.mp3', durationMs: 1200 };
@@ -1735,11 +1753,11 @@ test('private channel selectors bind invocations and revalidate durable creator 
   brokenNotify.mock.restore();
 
   for (const permission of [Permission.READ_MESSAGES, Permission.SEND_MESSAGES, Permission.USE_BOT_COMMANDS]) {
-    await fixture.roleRepo.update(creatorRole.id, { permissions: creatorRole.permissions & ~permission, deny: permission });
+    await fixture.roleRepo.update(creatorRole.id, { permissions: creatorRole.permissions & ~permission });
     assert.deepEqual(records((await bot.peer.request(MessageType.SELECTOR_LIST, {})).payload.selectors), []);
     assert.equal((await bot.peer.request(MessageType.SELECTOR_UPDATE, { id: liveId, patch: { title: 'Denied' } })).type, MessageType.SERVER_ERROR);
     assert.equal((await bot.peer.request(MessageType.SELECTOR_FINALIZE, { id, content: 'Private final: tie' })).type, MessageType.SERVER_ERROR);
-    await fixture.roleRepo.update(creatorRole.id, { permissions: creatorRole.permissions, deny: 0 });
+    await fixture.roleRepo.update(creatorRole.id, { permissions: creatorRole.permissions });
   }
   await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId, allowedRoleIds: [voterRole.id] });
   const beforeRevokedVote = bot.peer.messages.length;
@@ -2559,12 +2577,14 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     await ask(active.id, 'permissions');
     const member = await fixture.roleRepo.findById(privateRole.id);
     assert.ok(member);
+    await owner.peer.request(MessageType.ROLE_UPDATE, { roleId: EVERYONE_ROLE_ID, permissions: DEFAULT_PERMISSIONS & ~Permission.SEND_MESSAGES });
     const changed = await owner.peer.request(MessageType.ROLE_UPDATE, { roleId: member.id, permissions: DEFAULT_PERMISSIONS & ~Permission.SEND_MESSAGES });
     assert.equal(changed.type, MessageType.ROLES_LIST);
     assert.equal((await alice.peer.wait((m) => hasInvocation(m, MessageType.COMMAND_FINISHED, active.id))).payload.reason, 'cancelled');
     await alice.peer.error(MessageType.COMMAND_INVOKE, { commandName: 'ping', botId, channelId: textChannel }, ProtocolErrorCode.PERMISSION_DENIED);
     await alice.peer.error(MessageType.COMMAND_SUBMIT, { invocationId: active.id, interactionId: 'permissions', values: formValues }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
     await owner.peer.request(MessageType.ROLE_UPDATE, { roleId: member.id, permissions: DEFAULT_PERMISSIONS });
+    await owner.peer.request(MessageType.ROLE_UPDATE, { roleId: EVERYONE_ROLE_ID, permissions: DEFAULT_PERMISSIONS });
     const secret = await invoke(alice.peer, privateChannel);
     await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: privateChannel, allowedRoleIds: [] });
     assert.equal((await alice.peer.wait((m) => hasInvocation(m, MessageType.COMMAND_FINISHED, secret.id))).payload.reason, 'cancelled');
@@ -2612,6 +2632,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     const active = await invoke();
     await ask(active.id, 'revoke-bot-permission');
     try {
+      await owner.peer.request(MessageType.ROLE_UPDATE, { roleId: EVERYONE_ROLE_ID, permissions: DEFAULT_PERMISSIONS & ~Permission.USE_BOT_COMMANDS });
       await owner.peer.request(MessageType.ROLE_UPDATE, {
         roleId: member.id, permissions: DEFAULT_PERMISSIONS & ~Permission.USE_BOT_COMMANDS,
       });
@@ -2626,6 +2647,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       assert.equal(sent.type, MessageType.CHAT_MESSAGE);
     } finally {
       await owner.peer.request(MessageType.ROLE_UPDATE, { roleId: member.id, permissions: DEFAULT_PERMISSIONS });
+      await owner.peer.request(MessageType.ROLE_UPDATE, { roleId: EVERYONE_ROLE_ID, permissions: DEFAULT_PERMISSIONS });
     }
   });
 
@@ -2637,7 +2659,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       await ask(active.id, `direct-${revoked}`);
       try {
         if (revoked === 'permission') {
-          await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS & ~Permission.USE_BOT_COMMANDS, deny: Permission.USE_BOT_COMMANDS });
+          await revokeDirectly(fixture, member.id, Permission.USE_BOT_COMMANDS);
         } else {
           await fixture.channelService.updateChannel({ channelId: textChannel, botCommandsEnabled: false });
         }
@@ -2646,7 +2668,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
         }, ProtocolErrorCode.PERMISSION_DENIED);
         assert.ok(!bot.peer.messages.some((m) => hasInvocation(m, MessageType.COMMAND_SUBMITTED, active.id)));
       } finally {
-        await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS, deny: 0 });
+        await restoreDirectly(fixture, member.id);
         await fixture.channelService.updateChannel({ channelId: textChannel, botCommandsEnabled: true });
       }
     }
@@ -2678,7 +2700,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     assert.ok(member);
     const submission = await invoke();
     await ask(submission.id, 'recheck');
-    await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS & ~Permission.SEND_MESSAGES, deny: Permission.SEND_MESSAGES });
+    await revokeDirectly(fixture, member.id, Permission.SEND_MESSAGES);
     try {
       await alice.peer.error(MessageType.COMMAND_SUBMIT, {
         invocationId: submission.id, interactionId: 'recheck', values: formValues,
@@ -2686,11 +2708,11 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       assert.equal((await bot.peer.wait((m) => hasInvocation(m, MessageType.COMMAND_FINISHED, submission.id))).payload.reason, 'cancelled');
       assert.ok(!bot.peer.messages.some((m) => hasInvocation(m, MessageType.COMMAND_SUBMITTED, submission.id)));
     } finally {
-      await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS, deny: 0 });
+      await restoreDirectly(fixture, member.id);
     }
 
     const publicReply = await invoke();
-    await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS & ~Permission.SEND_MESSAGES, deny: Permission.SEND_MESSAGES });
+    await revokeDirectly(fixture, member.id, Permission.SEND_MESSAGES);
     try {
       await bot.peer.error(MessageType.COMMAND_RESPONSE, {
         invocationId: publicReply.id, content: 'Denied publication', ephemeral: false,
@@ -2699,7 +2721,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       await barrier();
       assert.ok(!bob.peer.messages.some((m) => m.payload.content === 'Denied publication'));
     } finally {
-      await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS, deny: 0 });
+      await restoreDirectly(fixture, member.id);
     }
   });
 
@@ -3226,10 +3248,7 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
       const pending = await search();
       try {
         if (revoked === 'channel') await fixture.channelService.updateChannel({ channelId, botCommandsEnabled: false });
-        else await fixture.roleRepo.update(member.id, {
-          permissions: DEFAULT_PERMISSIONS & ~(revoked === 'permission' ? Permission.USE_BOT_COMMANDS : Permission.SEND_MESSAGES),
-          deny: (revoked === 'permission' ? Permission.USE_BOT_COMMANDS : Permission.SEND_MESSAGES),
-        });
+        else await revokeDirectly(fixture, member.id, revoked === 'permission' ? Permission.USE_BOT_COMMANDS : Permission.SEND_MESSAGES);
         bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, result, pending.botRequestId);
         const denied = await alice.peer.wait((message) => message.requestId === pending.requestId);
         assert.equal(denied.type, MessageType.SERVER_ERROR);
@@ -3237,7 +3256,7 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
         await bot.peer.wait((message) =>
           message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === pending.botRequestId);
       } finally {
-        await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS, deny: 0 });
+        await restoreDirectly(fixture, member.id);
         await fixture.channelService.updateChannel({ channelId, botCommandsEnabled: true });
       }
     }
@@ -3347,7 +3366,7 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
         const nextPage = await lazySearch(alice.peer, { ...query.searchInput, page: 1 });
         const pending = stage === 'result' ? await startPreview(query) : null;
         const before = bot.peer.messages.filter((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length;
-        await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS & ~permission, deny: permission });
+        await revokeDirectly(fixture, member.id, permission);
         try {
           if (pending) {
             bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, previewResult, pending.botRequestId);
@@ -3360,7 +3379,7 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
             assert.equal(bot.peer.messages.filter((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length, before);
           }
         } finally {
-          await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS, deny: 0 });
+          await restoreDirectly(fixture, member.id);
         }
         for (const page of [query, nextPage]) {
           await alice.peer.wait((message) =>
@@ -3536,7 +3555,7 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
       const downloadRequest = await download(active);
       try {
         if (revoked === 'channel') await fixture.channelService.updateChannel({ channelId, botCommandsEnabled: false });
-        else await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS & ~Permission.USE_BOT_COMMANDS, deny: Permission.USE_BOT_COMMANDS });
+        else await revokeDirectly(fixture, member.id, Permission.USE_BOT_COMMANDS);
         await alice.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, {
           invocationId: active, downloadId: downloadRequest.received.downloadId, result: { status: 'downloaded' },
         }, ProtocolErrorCode.PERMISSION_DENIED);
@@ -3544,7 +3563,7 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
         assert.equal((await bot.peer.wait((message) => hasInvocation(message, MessageType.COMMAND_FINISHED, active))).payload.reason, 'cancelled');
         assert.equal(bot.peer.messages.some((message) => hasInvocation(message, MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, active)), false);
       } finally {
-        await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS, deny: 0 });
+        await restoreDirectly(fixture, member.id);
         await fixture.channelService.updateChannel({ channelId, botCommandsEnabled: true });
       }
     }
@@ -3610,7 +3629,7 @@ test('bot permission migration preserves existing roles and channels and runs on
     const roleRepo = new SqliteRoleRepository(migrated.getDb());
     for (const [index, permissions] of previous.entries()) {
       assert.equal(resolveMemberPermissions(DEFAULT_PERMISSIONS, [(await roleRepo.findById(`legacy-${index}`))!]),
-        (permissions | Permission.USE_BOT_COMMANDS | Permission.VIEW_CHANNEL) >>> 0);
+        (DEFAULT_PERMISSIONS | permissions | Permission.USE_BOT_COMMANDS | Permission.VIEW_CHANNEL) >>> 0);
     }
     const channelRepo = new SqliteChannelRepository(migrated.getDb());
     assert.equal((await channelRepo.findById('legacy-channel'))?.botCommandsEnabled, true);

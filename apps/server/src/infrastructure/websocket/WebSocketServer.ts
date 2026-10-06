@@ -57,7 +57,9 @@ import {
   RoleDeletePayload,
   RoleUpdatePayload,
   RolesListPayload,
-  toLegacyRoles,
+  RoleModel,
+  roleModelFor,
+  rolesForModel,
   DEFAULT_PERMISSIONS,
   ServerErrorPayload,
   ServerInviteInfoPayload,
@@ -1453,9 +1455,10 @@ export class WebSocketServer {
         .filter(([, state]) => session.visibleChannelIds?.has(state.channelId))
     );
 
-    // Clients without allow/deny roles resolve full masks; give them the equivalent ones.
-    if (result.serverDetails.roles && !session.protocol?.features.includes('role-deny')) {
-      result.serverDetails.roles = toLegacyRoles(result.serverDetails.roles, result.serverDetails.everyonePermissions ?? DEFAULT_PERMISSIONS);
+    // Each client reads roles in the model it negotiated.
+    if (result.serverDetails.roles) {
+      result.serverDetails.roles = rolesForModel(result.serverDetails.roles,
+        result.serverDetails.everyonePermissions ?? DEFAULT_PERMISSIONS, roleModelFor(session.protocol?.features));
     }
 
     // Send AUTH_SUCCESS to the connecting client
@@ -4746,12 +4749,18 @@ export class WebSocketServer {
       userRoles: state.userRoles,
     };
     const message: ProtocolMessage<RolesListPayload> = { type: MessageType.ROLES_LIST, requestId, payload };
-    const legacy: ProtocolMessage<RolesListPayload> = {
-      ...message, payload: { ...payload, roles: toLegacyRoles(state.roles, state.everyonePermissions) },
+    const byModel = new Map<RoleModel, ProtocolMessage<RolesListPayload>>();
+    const messageFor = (model: RoleModel): ProtocolMessage<RolesListPayload> => {
+      let variant = byModel.get(model);
+      if (!variant) {
+        variant = { ...message, payload: { ...payload, roles: rolesForModel(state.roles, state.everyonePermissions, model) } };
+        byModel.set(model, variant);
+      }
+      return variant;
     };
     for (const [ws, session] of this.sessions.entries()) {
       if (ws.readyState === WebSocket.OPEN && session.user && !session.replaced && this.canDeliverBotEvent(session, message)) {
-        this.send(ws, session.protocol?.features.includes('role-deny') ? message : legacy);
+        this.send(ws, messageFor(roleModelFor(session.protocol?.features)));
       }
     }
 
@@ -4903,7 +4912,7 @@ export class WebSocketServer {
 
   private async handleRoleCreate(session: ClientSession, payload: RoleCreatePayload, requestId?: string): Promise<void> {
     if (!session.user) return;
-    const result = await this.roleService.createRole(session.user.id, payload);
+    const result = await this.roleService.createRole(session.user.id, payload, roleModelFor(session.protocol?.features));
     if (!result.success) {
       this.sendError(session.ws, result.errorCode || ProtocolErrorCode.BAD_REQUEST, result.errorMessage || 'Erro ao criar cargo.', requestId);
       return;
@@ -4913,7 +4922,7 @@ export class WebSocketServer {
 
   private async handleRoleUpdate(session: ClientSession, payload: RoleUpdatePayload, requestId?: string): Promise<void> {
     if (!session.user) return;
-    const result = await this.roleService.updateRole(session.user.id, payload);
+    const result = await this.roleService.updateRole(session.user.id, payload, roleModelFor(session.protocol?.features));
     if (!result.success) {
       this.sendError(session.ws, result.errorCode || ProtocolErrorCode.BAD_REQUEST, result.errorMessage || 'Erro ao atualizar cargo.', requestId);
       return;

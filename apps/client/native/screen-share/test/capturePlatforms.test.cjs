@@ -152,6 +152,27 @@ test('capture scaling is explicit, defaults to stretch and cannot silently chang
     assert.throws(() => protocol.validateVideo({ ...video, scaleMode }));
 });
 
+test('a renamed window keeps its share while another window class or executable is rejected', () => {
+  for (const target of [windowTarget, gameTarget]) {
+    const prepared = message(target, 'h264_texture_amf');
+    const expected = { source: target, video, runId, helperProcessId: 42 };
+    for (const type of ['ready', 'stats']) {
+      const renamed = message(target, 'h264_texture_amf', type);
+      renamed.hookedKey = { ...key, title: 'Another page - Mozilla Firefox' };
+      protocol.validateMessage(renamed, expected);
+      protocol.validateProgress(prepared, renamed);
+      for (const foreign of [{ className: 'Chrome_WidgetWin_1' }, { executable: 'chrome.exe' }]) {
+        const copy = message(target, 'h264_texture_amf', type);
+        copy.hookedKey = { ...key, ...foreign };
+        assert.throws(() => protocol.validateMessage(copy, expected), /another OBS window key/);
+      }
+      const detached = message(target, 'h264_texture_amf', type);
+      detached.hookedKey = null;
+      assert.throws(() => protocol.validateMessage(detached, expected));
+    }
+  }
+});
+
 test('minimized games and temporarily unavailable monitor frames remain distinct from source disappearance', () => {
   for (const target of [gameTarget, monitorTarget]) {
     const ready = message(target, 'obs_nvenc_h264_tex', 'ready');

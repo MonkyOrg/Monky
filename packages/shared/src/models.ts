@@ -207,9 +207,9 @@ export interface Role {
   name: string;
   color: string | null;
   position: number;
-  /** Allowed bits; every bit neither allowed nor denied inherits Everyone. */
+  /** Bits this role grants on top of Everyone. Servers before 36.1 send a full mask instead. */
   permissions: number;
-  /** Denied bits. Servers before allow/deny roles omit it and send a full switch mask. */
+  /** Denied bits; only 36.1 servers send it. */
   deny?: number;
   isDefault: boolean;
 }

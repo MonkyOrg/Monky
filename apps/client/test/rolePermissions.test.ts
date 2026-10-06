@@ -20,20 +20,27 @@ function storeWith(features: string[] | undefined, roles: Role[]) {
   return store;
 }
 
-test('allow/deny roles add grants over Everyone and any denial wins when the server negotiates role-deny', () => {
+test('roles only add grants over Everyone when the server negotiates role-grants', () => {
+  const store = storeWith(['role-deny', 'role-grants'], [role('mod', Permission.KICK_MEMBERS), role('quiet', 0)]);
+  assert.equal(store.roleModel, 'grants');
+  assert.equal(store.getUserPermissions(member.id), DEFAULT_PERMISSIONS | Permission.KICK_MEMBERS,
+    'a role with nothing on never takes away what Everyone or another role grants');
+});
+
+test('36.1 servers keep their allow/deny roles, where any denial wins', () => {
   const store = storeWith(['role-deny'], [role('mod', Permission.KICK_MEMBERS, 0), role('quiet', 0, Permission.SEND_MESSAGES)]);
-  assert.equal(store.rolesUseDeny, true);
+  assert.equal(store.roleModel, 'deny');
   assert.equal(store.getUserPermissions(member.id), (DEFAULT_PERMISSIONS | Permission.KICK_MEMBERS) & ~Permission.SEND_MESSAGES);
 });
 
 test('servers without role-deny keep the former full-mask intersection even before any role exists', () => {
   const empty = storeWith([], []);
-  assert.equal(empty.rolesUseDeny, false, 'role creation on older servers must send full masks');
+  assert.equal(empty.roleModel, 'legacy', 'role creation on older servers must send full masks');
   const store = storeWith([], [role('a', DEFAULT_PERMISSIONS | Permission.KICK_MEMBERS), role('b', DEFAULT_PERMISSIONS)]);
   assert.equal(store.getUserPermissions(member.id), DEFAULT_PERMISSIONS);
 });
 
 test('without negotiated protocol details the role shape decides the format', () => {
-  assert.equal(storeWith(undefined, [role('a', Permission.KICK_MEMBERS, 0)]).rolesUseDeny, true);
-  assert.equal(storeWith(undefined, [role('a', DEFAULT_PERMISSIONS)]).rolesUseDeny, false);
+  assert.equal(storeWith(undefined, [role('a', Permission.KICK_MEMBERS, 0)]).roleModel, 'deny');
+  assert.equal(storeWith(undefined, [role('a', DEFAULT_PERMISSIONS)]).roleModel, 'legacy');
 });

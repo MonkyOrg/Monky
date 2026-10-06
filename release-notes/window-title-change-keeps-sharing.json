@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Compartilhar a janela de um navegador não cai mais ao trocar de site ou de aba. O Monky encerrava a transmissão sempre que o título da janela mudava; agora a janela é reconhecida por ela mesma, e não pelo título.",
+  "en": "Sharing a browser window no longer stops when you change sites or tabs. Monky used to end the broadcast whenever the window title changed; it now recognizes the window itself rather than its title."
+}

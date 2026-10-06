@@ -1,4 +1,4 @@
-import { EVERYONE_ROLE_ID, Permission, MessageType, legacyRoleMask, legacyRoleRule, type Role, type RoleUpdatePayload, type RolesListPayload } from '@monky/shared';
+import { EVERYONE_ROLE_ID, Permission, MessageType, type Role, type RoleUpdatePayload, type RolesListPayload } from '@monky/shared';
 import { serverStore } from '../../../stores/serverStore';
 import { getAvatarUrl } from '../../../utils/avatar';
 import { escapeHtml } from '../../../utils/html';
@@ -19,19 +19,6 @@ interface RoleDialog {
   signal: AbortSignal;
   close: (immediate?: boolean) => void;
 }
-
-interface RoleRule {
-  permissions: number;
-  deny: number;
-}
-
-type PermissionState = 'deny' | 'inherit' | 'allow';
-
-const PERMISSION_STATES = [
-  { value: 'deny', icon: 'close', label: 'channelPermissions.deny' },
-  { value: 'inherit', icon: 'remove', label: 'channelPermissions.inherit' },
-  { value: 'allow', icon: 'check', label: 'channelPermissions.allow' },
-] as const;
 
 export class ServerRolesTab {
   private draggedRoleId: string | null = null;
@@ -137,8 +124,9 @@ export class ServerRolesTab {
             </section>
           </div>`}
           <div id="role-editor-tab-permissions" data-settings-section="role-permissions" data-settings-label="${escapeHtml(t('roles.permissionsTab'))}" class="role-editor-tab-panel" style="display: ${everyone ? 'flex' : 'none'}; flex-direction: column; gap: 10px;">
-            ${everyone ? '' : `<p class="role-dialog-hint" data-role-permission-hint>${t('roles.permissionStatesHint')}</p>`}
-            ${this.renderPermissionControls(everyone)}
+            ${everyone || (this.context?.store ?? serverStore).roleModel === 'legacy' ? ''
+              : `<p class="role-dialog-hint" data-role-permission-hint>${t('roles.permissionSwitchesHint')}</p>`}
+            ${this.renderPermissionSwitches()}
           </div>
           ${everyone ? '' : `<div id="role-editor-tab-members" data-settings-section="role-members" data-settings-label="${escapeHtml(t('roles.membersTab'))}" class="role-editor-tab-panel" style="display: none; flex-direction: column; gap: 10px;">
             <div id="role-editor-members-panel">${this.renderRoleMembersEditorPanel()}</div>
@@ -177,28 +165,19 @@ export class ServerRolesTab {
     if (role.permissions & Permission.ADMINISTRATOR) {
       return t('permissions.administrator');
     }
-    const rule = this.roleRule(role);
-    const labels = this.permissionItems().filter(item => rule.permissions & item.key).map(item => item.label);
-    const denied = this.permissionItems().filter(item => rule.deny & item.key).length;
-    const allowed = labels.slice(0, 3).join(', ');
-    if (!denied) return allowed || t('roles.inheritsEveryone');
-    const deniedLabel = t('roles.deniedCount', { count: denied });
-    return allowed ? `${allowed} · ${deniedLabel}` : deniedLabel;
+    const labels = this.permissionItems().filter(item => role.permissions & item.key).map(item => item.label);
+    return labels.slice(0, 3).join(', ') || t('roles.noExtraPermissions');
   }
 
-  /** Servers before allow/deny roles send full switch masks, shown here as the equivalent rule. */
-  private roleRule(role: Role): RoleRule {
+  /**
+   * A switch grants the permission to whoever has the role. 36.1 servers still
+   * store denials, so a granted bit must not stay denied there.
+   */
+  private permissionPayload(roleId: string, role: Role, permissions: number): RoleUpdatePayload {
     const store = this.context?.store ?? serverStore;
-    return store.rolesUseDeny
-      ? { permissions: role.permissions, deny: role.deny ?? 0 }
-      : legacyRoleRule(role.permissions, store.everyonePermissions);
-  }
-
-  private rulePayload(roleId: string, rule: RoleRule): RoleUpdatePayload {
-    const store = this.context?.store ?? serverStore;
-    return store.rolesUseDeny
-      ? { roleId, permissions: rule.permissions, deny: rule.deny }
-      : { roleId, permissions: legacyRoleMask(rule, store.everyonePermissions) };
+    return roleId !== EVERYONE_ROLE_ID && store.roleModel === 'deny'
+      ? { roleId, permissions, deny: ((role.deny ?? 0) & ~permissions) >>> 0 }
+      : { roleId, permissions };
   }
 
   private permissionItems(): Array<{ key: Permission; label: string; description: string }> {
@@ -225,60 +204,20 @@ export class ServerRolesTab {
     ];
   }
 
-  /** Everyone is the on/off base; roles allow, inherit or deny on top of it. */
-  private renderPermissionControls(everyone: boolean): string {
+  /** Everyone is the base; a role switch grants on top of it and never takes anything away. */
+  private renderPermissionSwitches(): string {
     return this.permissionItems().map((item) => `
       <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-secondary);">
         <div style="min-width: 0;">
           <div style="font-size: 12px; font-weight: 600; color: var(--text-primary);">${item.label}</div>
           <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${item.description}</div>
         </div>
-        ${everyone ? `<label class="permission-switch" aria-label="${item.label}">
+        <label class="permission-switch" aria-label="${item.label}">
           <input type="checkbox" class="role-permission-switch" data-permission="${item.key}">
           <span class="slider"></span>
-        </label>` : `<div class="permission-three-state role-permission-states" role="radiogroup" aria-label="${item.label}">
-          ${PERMISSION_STATES.map(option => `<button type="button" role="radio" aria-checked="${option.value === 'inherit'}"
-            tabindex="${option.value === 'inherit' ? 0 : -1}" class="${option.value === 'inherit' ? 'selected' : ''}"
-            data-role-permission-bit="${item.key}" data-permission-state="${option.value}" title="${t(option.label)}" aria-label="${t(option.label)}">
-            <span class="material-symbols-outlined md-18" aria-hidden="true">${option.icon}</span></button>`).join('')}
-        </div>`}
+        </label>
       </div>
     `).join('');
-  }
-
-  private syncPermissionStates(root: HTMLElement, rule: RoleRule): void {
-    root.querySelectorAll<HTMLButtonElement>('[data-role-permission-bit]').forEach((button) => {
-      const bit = Number(button.dataset.rolePermissionBit);
-      const state: PermissionState = rule.deny & bit ? 'deny' : rule.permissions & bit ? 'allow' : 'inherit';
-      const selected = button.dataset.permissionState === state;
-      button.classList.toggle('selected', selected);
-      button.setAttribute('aria-checked', String(selected));
-      button.tabIndex = selected ? 0 : -1;
-    });
-  }
-
-  private readPermissionStates(root: HTMLElement): RoleRule {
-    const rule = { permissions: 0, deny: 0 };
-    root.querySelectorAll<HTMLButtonElement>('[data-role-permission-bit].selected').forEach((button) => {
-      const bit = Number(button.dataset.rolePermissionBit);
-      if (button.dataset.permissionState === 'allow') rule.permissions |= bit;
-      else if (button.dataset.permissionState === 'deny') rule.deny |= bit;
-    });
-    return rule;
-  }
-
-  private setPermissionState(root: HTMLElement, button: HTMLButtonElement): void {
-    const bit = Number(button.dataset.rolePermissionBit);
-    const state = button.dataset.permissionState as PermissionState;
-    const current = this.readPermissionStates(root);
-    const rule = {
-      permissions: ((current.permissions & ~bit) | (state === 'allow' ? bit : 0)) >>> 0,
-      deny: ((current.deny & ~bit) | (state === 'deny' ? bit : 0)) >>> 0,
-    };
-    this.syncPermissionStates(root, rule);
-    root.querySelector<HTMLButtonElement>(`[data-role-permission-bit="${bit}"][data-permission-state="${state}"]`)?.focus({ preventScroll: true });
-    const roleId = this.editorRoleId();
-    if (roleId) this.updateRole(roleId, () => this.rulePayload(roleId, rule));
   }
 
   public renderRoleMembersEditorPanel(roleId?: string): string {
@@ -450,8 +389,6 @@ export class ServerRolesTab {
           const visible = panel.id === `role-editor-tab-${tab}`;
           panel.style.display = visible ? 'flex' : 'none';
         });
-      } else if (target.dataset.rolePermissionBit && target.dataset.permissionState) {
-        this.setPermissionState(container, target);
       } else if (target.id === 'btn-role-add-members') {
         this.openMemberPicker();
       } else if (target.dataset.roleMemberAction && target.dataset.roleId && target.dataset.userId) {
@@ -480,15 +417,6 @@ export class ServerRolesTab {
         target.closest('.settings-action-submenu-wrap')?.classList.toggle('open');
       } else if (!target.closest('.settings-action-menu-wrap')) closeMenus();
     }, options);
-    container.addEventListener('keydown', (event) => {
-      const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-role-permission-bit]') : null;
-      if (!button || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-      event.preventDefault();
-      const buttons = [...button.parentElement!.querySelectorAll<HTMLButtonElement>('button')];
-      const index = buttons.indexOf(button);
-      const next = event.key === 'Home' ? 0 : event.key === 'End' ? 2 : (index + (event.key === 'ArrowRight' ? 1 : 2)) % 3;
-      buttons[next].click();
-    }, options);
     container.addEventListener('input', (event) => {
       if (event.target instanceof HTMLInputElement && event.target.classList.contains('role-members-search')) {
         this.filterMemberRows(container, event.target.value);
@@ -504,9 +432,8 @@ export class ServerRolesTab {
       } else if (roleId && input.classList.contains('role-permission-switch')) {
         const bit = Number(input.dataset.permission);
         const enabled = input.checked;
-        this.updateRole(roleId, (role) => ({
-          roleId, permissions: enabled ? role.permissions | bit : role.permissions & ~bit,
-        }));
+        this.updateRole(roleId, (role) =>
+          this.permissionPayload(roleId, role, enabled ? role.permissions | bit : role.permissions & ~bit));
       }
     }, options);
   }
@@ -644,7 +571,9 @@ export class ServerRolesTab {
     const auto = root.querySelector<HTMLInputElement>('#role-editor-is-default');
     if (auto) auto.checked = role?.isDefault ?? false;
     this.syncColor(role?.color ?? COLOR_PRESETS[0]);
-    this.syncPermissionStates(root, role ? this.roleRule(role) : { permissions: 0, deny: 0 });
+    root.querySelectorAll<HTMLInputElement>('.role-permission-switch').forEach((input) => {
+      input.checked = Boolean((role?.permissions ?? 0) & Number(input.dataset.permission));
+    });
     const panel = root.querySelector('#role-editor-members-panel');
     if (panel) panel.innerHTML = this.renderRoleMembersEditorPanel(role?.id);
     this.membersSignature = '';
@@ -744,11 +673,13 @@ export class ServerRolesTab {
     const name = root.querySelector<HTMLInputElement>('#role-editor-name')?.value.trim() ?? '';
     const color = root.querySelector<HTMLButtonElement>('#role-editor-color')?.value ?? COLOR_PRESETS[0];
     const isDefault = Boolean(root.querySelector<HTMLInputElement>('#role-editor-is-default')?.checked);
-    const rule = this.readPermissionStates(root);
-    const permissions = context.store.rolesUseDeny ? rule : { permissions: legacyRoleMask(rule, context.store.everyonePermissions) };
+    let permissions = 0;
+    root.querySelectorAll<HTMLInputElement>('.role-permission-switch:checked').forEach((input) => { permissions |= Number(input.dataset.permission); });
+    // Without `deny`, a 36.1 server would read the switches as a full mask and deny everything else.
+    const deny = context.store.roleModel === 'deny' ? { deny: 0 } : {};
     void context.operations.run('role-create', t('roles.createRole'), Permission.MANAGE_ROLES, async () => {
       if (!name || name.length > 32) throw new Error(t('serverSettings.roleNameInvalid'));
-      await context.request<RolesListPayload>(MessageType.ROLE_CREATE, { name, color, isDefault, ...permissions }, Permission.MANAGE_ROLES);
+      await context.request<RolesListPayload>(MessageType.ROLE_CREATE, { name, color, isDefault, permissions, ...deny }, Permission.MANAGE_ROLES);
     }).then(result => {
       if (result.ok && context.isCurrent() && this.editor === editor) editor?.close();
     });
@@ -841,7 +772,7 @@ export class ServerRolesTab {
       if (section) section.hidden = !roleId;
       remove.disabled = !role || operations.pendingCount > 0 || !this.canDeleteRole(role);
     }
-    editor.querySelectorAll<HTMLInputElement | HTMLButtonElement>('#role-editor-name, #role-editor-is-default, .role-permission-switch, [data-role-permission-bit]').forEach((input) => {
+    editor.querySelectorAll<HTMLInputElement | HTMLButtonElement>('#role-editor-name, #role-editor-is-default, .role-permission-switch').forEach((input) => {
       input.disabled = creating;
     });
     this.colorPicker.setDisabled(creating || !store.hasPermission(Permission.MANAGE_ROLES));
@@ -854,7 +785,6 @@ export class ServerRolesTab {
       editor.querySelectorAll<HTMLInputElement>('.role-permission-switch').forEach((input) => {
         input.checked = Boolean(role.permissions & Number(input.dataset.permission));
       });
-      if (roleId !== EVERYONE_ROLE_ID) this.syncPermissionStates(editor, this.roleRule(role));
       const title = editor.querySelector('#role-editor-title');
       if (title) title.textContent = t('roles.editorEditTitle', { name: role.name });
     }

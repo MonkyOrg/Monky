@@ -58,7 +58,7 @@ function desktopEnumerator(sources, { previewError, platform = 'win32', chromium
   const load = vm.runInThisContext(`(function(nativeSources, nativeMonitorDesktopSources,
     nativeWindowIdFromSourceId, isGhostWindow, desktopCapturer, screen, resolveMacAppIcons,
     resolveWindowsAppIcons, process, console, options, NativeThumbnailCapturer, loadThumbnailRuntime, overlayManager,
-    getMacSources, isOcclusionSensitiveProcess) {
+    getMacSources, browserOcclusionEngine) {
       let desktopSourcesFrozen = false, nativeThumbnails;
       ${body}; return enumerateDesktopSources; })`, { filename: handlerFile });
   const enumerate = load(sources, native.nativeMonitorDesktopSources, native.nativeWindowIdFromSourceId,
@@ -87,7 +87,7 @@ function desktopEnumerator(sources, { previewError, platform = 'win32', chromium
         captures.push(id);
         return Buffer.from('owned-native-image');
       },
-    }), () => false);
+    }), () => null);
   return { enumerate, calls, warnings, logs, captures };
 }
 

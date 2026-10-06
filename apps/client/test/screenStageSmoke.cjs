@@ -21,21 +21,33 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
   let mediaRequests = 0;
   let copiedTelemetry = '';
   replace(navigator.clipboard, 'writeText', async text => { copiedTelemetry = text; });
+  const pipRequests = [];
+  const pipPopups = [];
+  let rejectPip = false;
+  const denyMedia = async () => { mediaRequests++; throw new Error('The screen stage UI smoke cannot capture media.'); };
+  replace(navigator.mediaDevices, 'getUserMedia', denyMedia);
+  replace(navigator.mediaDevices, 'getDisplayMedia', denyMedia);
   replace(window, 'api', {
     ...window.api,
     onWindowInactive: () => () => {},
     onWindowActive: () => () => {},
+    openScreenPictureInPicture: async (requestId, requireInactive, aspectRatio) => {
+      if (rejectPip) throw new Error('Expected Picture-in-Picture rejection');
+      pipRequests.push({ requestId, requireInactive, aspectRatio });
+      return true;
+    },
   });
-  const denyMedia = async () => { mediaRequests++; throw new Error('The screen stage UI smoke cannot capture media.'); };
-  replace(navigator.mediaDevices, 'getUserMedia', denyMedia);
-  replace(navigator.mediaDevices, 'getDisplayMedia', denyMedia);
-  const pipRequests = [];
-  let rejectPip = false;
-  replace(document, 'pictureInPictureEnabled', true);
-  replace(HTMLVideoElement.prototype, 'requestPictureInPicture', async function requestPictureInPicture() {
-    if (rejectPip) throw new DOMException('Expected Picture-in-Picture rejection', 'NotAllowedError');
-    pipRequests.push(this);
-    return {};
+  // A same-origin frame stands in for the popup Main allows for the request.
+  replace(window, 'open', (url, name, features) => {
+    const frame = document.createElement('iframe');
+    document.documentElement.append(frame);
+    const popup = {
+      url, name, features, closed: false, document: frame.contentDocument,
+      addEventListener: (type, listener) => frame.contentWindow.addEventListener(type, listener),
+      close() { popup.closed = true; frame.remove(); },
+    };
+    pipPopups.push(popup);
+    return popup;
   });
 
   const [{ VoiceStageView }, { MainView }, { voiceStore: voice }, { settingsStore: settings }, { serverStore: server },
@@ -73,6 +85,8 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
   replace(rtc, 'getNativeScreenSource', (sessionId, shareId) =>
     sessionId === remote.sessionId && shareId === remoteSource.shareId ? remoteSource : null);
   replace(rtc, 'getLocalScreenPreviewState', id => previewStates.get(id) ?? 'waiting');
+  const sourceWarnings = new Map();
+  replace(rtc, 'getLocalScreenSourceWarning', id => sourceWarnings.get(id) ?? null);
   let watchState = null;
   replace(rtc, 'getNativeScreenWatchState', (sessionId, shareId) =>
     sessionId === remote.sessionId && shareId === remoteSource.shareId ? watchState : null);
@@ -166,7 +180,6 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
     streams.set(stream.id, stream);
     captures.set(stream.id, {
       desktopSourceId: `native-window:${stream.id}`,
-      thumbnail: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><path fill="magenta" d="M0 0h4v4H0z"/></svg>'),
       source: { shareId: stream.id, instanceId: crypto.randomUUID(), video: profile, audio: false },
     });
     appEvents.emit('local.screen_started', { shareId: stream.id, stream });
@@ -283,29 +296,93 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       const localBadge = badge(local.sessionId, first.id);
       const localStream = localVideo.srcObject;
       const placeholder = card(local.sessionId, first.id).querySelector('.stage-native-thumbnail');
-      const thumbnail = placeholder.querySelector('img');
-      for (const state of ['paused', 'waiting', 'paused', 'playing']) {
+      check(!placeholder.querySelector('img'), 'The local preview placeholder must not show a stale picker snapshot');
+      const previewLabels = { paused: 'stage.nativePreviewPaused', waiting: 'stage.nativeThumbnail', unavailable: 'stage.nativePreviewUnavailable' };
+      const fadeMs = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--motion-notice-duration')) || 0;
+      const live = () => placeholder.hasAttribute('data-live');
+      let wasLive = live();
+      for (const state of ['paused', 'waiting', 'unavailable', 'paused', 'playing', 'paused', 'playing']) {
         previewStates.set(first.id, state);
         appEvents.emit('native_screen.updated');
         check(video(local.sessionId, first.id) === localVideo && localVideo.srcObject === localStream,
           'Changing the paused preview background must not replace its video or stream');
-        check(placeholder.hidden === (state === 'playing'), 'Resuming preview must reveal the live video');
-        check((getComputedStyle(thumbnail).display === 'none') === (state === 'paused'),
-          'Only paused previews must hide the frozen thumbnail');
-        if (state === 'paused') {
+        check(live() === (state === 'playing'), 'Resuming preview must reveal the live video');
+        const fades = placeholder.getAnimations().filter(animation => animation.transitionProperty === 'opacity');
+        if (live() !== wasLive) {
+          check(fades.length === (fadeMs > 0 ? 1 : 0) && fadeMs <= 200,
+            `Starting or stopping the live preview must use one quick fade that reduced motion disables (${state}: ${fades.length} at ${fadeMs}ms)`);
+        }
+        wasLive = live();
+        for (const animation of placeholder.getAnimations()) animation.finish();
+        const settled = getComputedStyle(placeholder);
+        check(settled.opacity === (state === 'playing' ? '0' : '1')
+          && settled.visibility === (state === 'playing' ? 'hidden' : 'visible'),
+        'After its fade the standby layer must be fully gone for a live preview and fully opaque otherwise');
+        if (state !== 'playing') {
           check(getComputedStyle(placeholder).backgroundColor === 'rgb(0, 0, 0)',
-            'Paused preview must have a fully opaque black background');
-          check(placeholder.querySelector('span').textContent === language.t('stage.nativePreviewPaused'),
-            'The pause message must remain visible in the selected language');
+            `A ${state} preview must cover the last presented frame with an opaque black background`);
+          check(placeholder.querySelector('span').textContent === language.t(previewLabels[state]),
+            `The ${state} preview message must remain visible in the selected language`);
         }
       }
+      const warningEl = card(local.sessionId, first.id).querySelector('.stage-source-warning');
+      const placeholderLabel = placeholder.querySelector('span');
+      check(warningEl && warningEl.hidden && getComputedStyle(warningEl).display === 'none',
+        'A normally captured source must not show the frozen-broadcast warning');
+      const yellow = 'rgb(240, 178, 50)';
+      for (const warning of ['hidden', 'covered']) {
+        for (const state of ['paused', 'playing']) {
+          sourceWarnings.set(first.id, warning);
+          previewStates.set(first.id, state);
+          appEvents.emit('native_screen.updated');
+          const box = warningEl.querySelector('.stage-source-warning-box');
+          const detail = warningEl.querySelector('.stage-source-warning-detail');
+          check(!warningEl.hidden && getComputedStyle(warningEl).display !== 'none'
+            && warningEl.dataset.sourceWarning === warning
+            && warningEl.querySelector('.stage-source-warning-title').textContent === language.t(`stage.sourceWarningTitle.${warning}`)
+            && detail.textContent === language.t(`stage.sourceWarning.${warning}`),
+          `The publisher's tile must explain why viewers see a frozen picture (${warning}, ${state})`);
+          check(getComputedStyle(box).backgroundColor === yellow && getComputedStyle(warningEl).borderTopColor === yellow
+            && getComputedStyle(warningEl).borderTopWidth === '3px',
+          'The frozen-broadcast warning must be yellow and outline the tile');
+          const boxBounds = box.getBoundingClientRect();
+          const cardBounds = card(local.sessionId, first.id).getBoundingClientRect();
+          check(boxBounds.width > 0 && boxBounds.height > 0 && boxBounds.left >= cardBounds.left && boxBounds.right <= cardBounds.right
+            && boxBounds.top >= cardBounds.top && boxBounds.bottom <= cardBounds.bottom,
+          'The frozen-broadcast warning must be visible inside the tile');
+          check((getComputedStyle(detail).display === 'none') === (warningEl.clientHeight - 16 <= 150),
+            'Only tiles too short for the explanation may hide it');
+          check(placeholderLabel.hidden && getComputedStyle(placeholderLabel).display === 'none',
+            'The preview label must never claim viewers keep receiving normally while the picture is frozen');
+          check(card(local.sessionId, first.id).hasAttribute('data-source-hidden') === (warning === 'hidden'),
+            'Only a minimized source is marked hidden');
+          check(live() === (warning !== 'hidden' && state === 'playing'),
+            'A minimized source covers the stale preview while a covered browser keeps its last frame visible');
+          if (warning === 'hidden') {
+            check(getComputedStyle(placeholder).backgroundColor === 'rgb(0, 0, 0)',
+            'A minimized shared window must hide the stale preview behind an opaque background');
+          }
+          check(video(local.sessionId, first.id) === localVideo && localVideo.srcObject === localStream,
+            'Reporting a frozen source must not replace the preview video or stream');
+        }
+      }
+      sourceWarnings.delete(first.id);
+      previewStates.set(first.id, 'paused');
+      appEvents.emit('native_screen.updated');
+      check(warningEl.hidden && !placeholderLabel.hidden
+        && placeholderLabel.textContent === language.t('stage.nativePreviewPaused'),
+      'Clearing the warning restores the ordinary preview label');
+      previewStates.set(first.id, 'playing');
+      appEvents.emit('native_screen.updated');
+      check(live() && warningEl.hidden && !card(local.sessionId, first.id).hasAttribute('data-source-hidden'),
+        'Restoring the shared window must reveal the live preview again');
       modes.set(modeKey(local.sessionId, first.id), 'game');
       previewStates.set(first.id, 'playing');
       for (let i = 0; i < 5; i++) appEvents.emit('native_screen.updated');
       verifyBadge(local.sessionId, first.id, 'game');
       check(video(local.sessionId, first.id) === localVideo && localVideo.srcObject === localStream
         && badge(local.sessionId, first.id) === localBadge, 'Mode updates must preserve the video, stream and badge node identities');
-      check(focused().length === 0 && card(local.sessionId, first.id).querySelector('.stage-native-thumbnail').hidden,
+      check(focused().length === 0 && card(local.sessionId, first.id).querySelector('.stage-native-thumbnail').hasAttribute('data-live'),
         'Frames becoming ready must update the placeholder without refocusing the preview');
       modes.set(modeKey(local.sessionId, first.id), 'normal');
       appEvents.emit('native_screen.updated');
@@ -324,15 +401,16 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
         && !document.querySelector('[data-kind="camera"] .stage-pip-btn')
         && !card(local.sessionId, first.id).querySelector('.stage-pip-btn'),
       'Picture-in-Picture is limited to viewers of live screen broadcasts');
-      document.pictureInPictureEnabled = false;
+      const openPip = window.api.openScreenPictureInPicture;
+      window.api.openScreenPictureInPicture = undefined;
       stage.renderParticipants();
-      check(!root.querySelector('.stage-pip-btn'), 'Picture-in-Picture stays hidden when Chromium reports it unavailable');
-      document.pictureInPictureEnabled = true;
+      check(!root.querySelector('.stage-pip-btn'), 'Picture-in-Picture stays hidden when Monky cannot open its window');
+      window.api.openScreenPictureInPicture = openPip;
       stage.renderParticipants();
       const remoteVideo = video(remote.sessionId, remoteSource.shareId);
       const remoteStream = remoteVideo.srcObject;
-      const remoteCard = card(remote.sessionId, remoteSource.shareId);
-      const pipButton = remoteCard.querySelector('.stage-pip-btn');
+      let remoteCard = card(remote.sessionId, remoteSource.shareId);
+      let pipButton = remoteCard.querySelector('.stage-pip-btn');
       const pipStyle = getComputedStyle(pipButton);
       const fullscreenButton = remoteCard.querySelector('.stage-fullscreen-btn');
       const fullscreenStyle = getComputedStyle(fullscreenButton);
@@ -350,9 +428,27 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       'The Picture-in-Picture glyph is centered, full-sized and retains the clickable cursor');
       pipButton.click();
       await settle();
-      check(pipRequests.at(-1) === remoteVideo && remoteVideo.srcObject === remoteStream
-        && !pipButton.disabled && !pipButton.hasAttribute('aria-busy'),
-      'Manual Picture-in-Picture targets the watched broadcast without disturbing playback');
+      const manualPopup = pipPopups.at(-1);
+      const popupVideo = manualPopup?.document.querySelector('video');
+      const pipPlaceholder = card(remote.sessionId, remoteSource.shareId)?.querySelector('.stage-pip-placeholder');
+      check(pipRequests.at(-1)?.requireInactive === false && manualPopup.name === `monky-screen-pip-${pipRequests.at(-1).requestId}`
+        && manualPopup.url === '' && manualPopup.features === 'popup'
+        && popupVideo?.srcObject === remoteStream && popupVideo.muted
+        && remoteVideo.srcObject === remoteStream && !remoteVideo.paused && remoteVideo.closest('.screen-pip-host')
+        && !video(remote.sessionId, remoteSource.shareId)
+        && pipPlaceholder?.textContent.includes(language.t('stage.pictureInPictureShowing'))
+        && pipPlaceholder.querySelector('.stage-pip-return-btn')?.textContent.includes(language.t('stage.pictureInPictureBringBack')),
+      'Manual Picture-in-Picture moves the watched broadcast to its own window, leaving a localized placeholder, without disturbing playback');
+      check(getComputedStyle(pipPlaceholder).backgroundColor === 'rgb(0, 0, 0)'
+        && getComputedStyle(pipPlaceholder.querySelector('.stage-pip-return-btn')).cursor === 'pointer',
+      'The Picture-in-Picture placeholder is a black tile with a clickable bring-back button');
+      manualPopup.document.querySelector('[data-action="close"]').click();
+      remoteCard = card(remote.sessionId, remoteSource.shareId);
+      pipButton = remoteCard.querySelector('.stage-pip-btn');
+      check(manualPopup.closed && popupVideo.srcObject === null && video(remote.sessionId, remoteSource.shareId) === remoteVideo
+        && remoteVideo.srcObject === remoteStream && !remoteVideo.paused && !remoteCard.querySelector('.stage-pip-placeholder')
+        && !document.querySelector('.screen-pip-host') && pipButton && !pipButton.disabled,
+      'Closing the Picture-in-Picture window returns the same live broadcast to the stage');
       rejectPip = true;
       pipButton.click();
       await settle();
@@ -422,6 +518,8 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
 
       const noticeHost = document.createElement('div');
       noticeHost.innerHTML = '<div id="screenshare-notice-slot"></div>';
+      // The user bar under the channel list is about this wide.
+      noticeHost.style.width = '280px';
       document.body.append(noticeHost);
       const mainView = new MainView(noticeHost);
       mainView.activeContentView = 'chat';
@@ -432,6 +530,24 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
         && noticeHost.querySelector('#screenshare-viewer-stop-btn')?.textContent
         === (locale === 'pt-BR' ? 'Parar de assistir' : 'Stop watching'),
       'Navigating away shows the localized viewer status and stop affordance');
+      const backToStage = noticeHost.querySelector('#screenshare-viewer-stage-btn');
+      const stopFromNotice = noticeHost.querySelector('#screenshare-viewer-stop-btn');
+      const noticeText = notice.querySelector('.screenshare-notice-text').getBoundingClientRect();
+      const backBounds = backToStage?.getBoundingClientRect();
+      const stopBounds = stopFromNotice.getBoundingClientRect();
+      const noticeBounds = notice.getBoundingClientRect();
+      check(backToStage?.textContent === (locale === 'pt-BR' ? 'Voltar ao palco' : 'Back to stage')
+        && backToStage.closest('.screenshare-notice') === notice && backToStage.type === 'button'
+        && Math.abs(backBounds.top - stopBounds.top) < 1 && backBounds.top >= noticeText.bottom
+        && backBounds.left >= noticeBounds.left && stopBounds.right <= noticeBounds.right
+        && [backToStage, stopFromNotice].every(button => button.scrollWidth <= button.clientWidth),
+      'The watching notice offers a localized way back to the stage, both actions fully visible on their own row');
+      const stageOpens = [];
+      mainView.openVoiceStage = (...args) => stageOpens.push(args);
+      backToStage.click();
+      delete mainView.openVoiceStage;
+      check(stageOpens.length === 1 && stageOpens[0].length === 0 && voice.isWatchingScreen(remote.sessionId, remoteSource.shareId),
+        'Back to stage opens the call stage and keeps watching');
 
       stage = new VoiceStageView(root);
       stage.setChannel(channel.id);
@@ -453,6 +569,34 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       check(card(remote.sessionId, remoteSource.shareId).querySelector('.screen-locked'),
         'Returning after stopping keeps the publisher live behind the viewer gate');
       verifyBadge(remote.sessionId, remoteSource.shareId, null);
+      // The first watch renders the tile before the track arrives; the router
+      // then attaches the stream straight to the tile video, bypassing the stage.
+      card(remote.sessionId, 'remote-browser').querySelector('.stage-watch-btn').click();
+      await settle();
+      await frame();
+      const lateVideo = video(remote.sessionId, 'remote-browser');
+      const lateOverlay = card(remote.sessionId, 'remote-browser').querySelector('.stage-loading-overlay');
+      check(lateVideo && !lateVideo.srcObject && lateOverlay?.isConnected,
+        'Watching a screen whose track has not arrived shows the loading overlay');
+      const lateCanvas = document.createElement('canvas');
+      lateCanvas.width = lateCanvas.height = 16;
+      const paintLate = setInterval(() => lateCanvas.getContext('2d').fillRect(0, 0, 16, 16), 20);
+      const lateStream = lateCanvas.captureStream(30);
+      lateVideo.muted = true;
+      lateVideo.srcObject = lateStream;
+      void lateVideo.play().catch(() => {});
+      const lateReady = await Promise.race([
+        new Promise(resolve => lateVideo.readyState >= 2 ? resolve(true)
+          : lateVideo.addEventListener('loadeddata', () => resolve(true), { once: true })),
+        new Promise(resolve => setTimeout(() => resolve(false), 5000)),
+      ]);
+      await settle();
+      clearInterval(paintLate);
+      check(lateReady, 'The late screen stream must render in the smoke');
+      check(!lateOverlay.isConnected || lateOverlay.hasAttribute('data-ui-closing'),
+        'A screen track arriving after the first watch must clear the loading overlay');
+      lateStream.getTracks().forEach(track => track.stop());
+      rtc.setRemoteScreenWatching(remote.sessionId, 'remote-browser', false);
 
       const camera = document.querySelector(`[data-tile-key="${remote.sessionId}:camera"] video`);
       const cameraStream = new MediaStream();

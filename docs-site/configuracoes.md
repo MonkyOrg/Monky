@@ -95,21 +95,46 @@ encerra também esse recebimento de áudio. Mutar o som é uma preferência de
 reprodução separada; não substitui **Parar de assistir** para economizar banda.
 
 Trocar de página, usar a janela destacada ou ativar a sobreposição não altera
-as telas que você escolheu assistir na chamada. Sair da chamada ou encerrar a
+as telas que você escolheu assistir na chamada. Fora do palco, o aviso **Você
+está assistindo**, acima da sua barra de usuário, mostra **Voltar ao palco**, que
+reabre o palco da chamada, e **Parar de assistir**. Sair da chamada ou encerrar a
 fonte remove essa escolha; uma nova transmissão precisa ser escolhida novamente.
 Quando quem transmite troca a janela ou a tela compartilhada, você continua
 assistindo à nova fonte automaticamente, com a mesma qualidade escolhida e o
 mesmo foco no palco, sem clicar em **Assistir transmissão** de novo. Isso vale
 para a fonte nova publicada em até 15 segundos depois da anterior; uma segunda
-tela que já existia não é aberta sozinha.
+tela que já existia não é aberta sozinha. Se a transmissão estava no PiP, ele
+fecha e a nova fonte fica no palco com o foco que a anterior tinha.
 Uma reconexão de transporte preserva a escolha enquanto a mesma fonte continuar
 válida.
 
-No Windows, Chrome, Edge e outros navegadores baseados no Chromium param de
-desenhar uma janela que fica totalmente coberta por outra, e a transmissão dela
-fica cinza até a janela voltar a aparecer. O seletor avisa ao escolher uma
-dessas janelas. Deixe uma parte dela visível, compartilhe a tela inteira ou
-desative **Calculate window occlusion on Windows** em `chrome://flags`.
+No Windows, o Firefox, o Chrome, o Edge e outros navegadores baseados neles
+param de desenhar uma janela que fica totalmente coberta por outra, por exemplo
+quando você maximiza outra janela por cima dela no mesmo monitor. A transmissão
+dessa janela congela até ela voltar a aparecer. Cobrir só uma parte não causa o
+problema. O seletor avisa ao escolher uma dessas janelas e, durante a
+transmissão, um aviso amarelo aparece sobre a sua prévia no palco quando ela
+está totalmente coberta e a imagem parou de mudar. O aviso sugere tirar a outra
+janela da frente e, se a imagem continuar parada, parar o compartilhamento e
+começar de novo. Às vezes o navegador continua desenhando a janela coberta;
+nesse caso a transmissão segue normal e o aviso não aparece. Um vídeo pausado
+numa janela coberta também mostra o aviso, porque a imagem parada é igual. Para
+evitar, deixe uma parte da janela visível, compartilhe a tela inteira ou
+desative o comportamento no navegador:
+
+- **Firefox:** em `about:config`, mude
+  `widget.windows.window_occlusion_tracking.enabled` para `false` e reinicie o
+  Firefox.
+- **Chrome, Edge e parecidos:** feche o navegador e abra-o com
+  `--disable-features=CalculateNativeWinOcclusion` no atalho. A opção que
+  existia em `chrome://flags` foi removida.
+
+Uma janela minimizada também congela a transmissão, em qualquer programa: o
+Windows não desenha janelas minimizadas, e nenhum aplicativo consegue
+capturá-las. Quem assiste vê a imagem parada até você restaurar a janela, e a
+transmissão volta sozinha. Enquanto a janela transmitida estiver minimizada ou
+oculta, um aviso amarelo sobre a sua prévia no palco explica o motivo. Só você
+vê esse aviso.
 
 No caminho nativo, a última pessoa que para de assistir encerra também o
 pipeline de captura, encoder e envio daquele perfil, inclusive ao SFU.
@@ -552,13 +577,22 @@ reiniciar a reprodução. Trazer o Monky para frente enquanto estiver em outro
 canal ou na Home não fecha o PiP. O botão manual de PiP continua disponível.
 Se você fechar o PiP automático enquanto estiver fora, ele não reabre no mesmo
 período de ausência nem ao retornar; uma nova saída pode abri-lo novamente.
-O PiP aberto manualmente permanece ao trocar de aplicativo, minimizar e
-restaurar a janela, inclusive quando movido para outro monitor.
-O botão **Voltar à guia** da janela do PiP traz o Monky de volta, mesmo
-minimizado ou escondido na bandeja, e abre o palco da chamada com a mesma
-transmissão em foco, sem reiniciar a reprodução. O **X** só fecha o PiP e
-deixa o Monky onde está. O botão de pausar/reproduzir do PiP pausa apenas a
-imagem que você vê; a transmissão continua ao vivo.
+O PiP aberto pelo botão manual tira a transmissão do palco: ela sai do foco e
+o card fica preto, com **Exibindo em Picture-in-Picture** e o botão **Trazer de
+volta**. Esse PiP permanece ao navegar pelo app, trocar de aplicativo,
+minimizar e restaurar a janela, inclusive quando movido para outro monitor.
+**Trazer de volta**, **Voltar ao Monky** ou o **X** fecham o PiP e devolvem a
+transmissão ao palco sem reiniciar a reprodução, em foco se ela estava em foco
+quando o PiP foi aberto. Abrir o PiP de outra transmissão também devolve a
+anterior ao palco.
+O PiP é uma janela do próprio Monky que fica sempre por cima, aparece sem
+roubar o foco do jogo ou app em uso e continua exibindo a transmissão com o
+Monky minimizado. Arraste-a por qualquer ponto para mover e pelas bordas para
+redimensionar; ela mantém a proporção da transmissão e reabre na última posição
+e tamanho. Ao passar o mouse aparecem os botões: **Voltar ao Monky** traz o Monky
+de volta, mesmo minimizado ou escondido na bandeja, e abre o palco da chamada
+com a mesma transmissão, sem reiniciar a reprodução. O **X** fecha o PiP sem
+trazer o Monky para frente; no PiP manual, a transmissão volta para o palco.
 
 Em **Configurações → Qualidade e compartilhamento → Recepção de tela**, escolha
 **Nativo** ou **Chromium**. No Windows e macOS, **Nativo é o padrão**, usando o runtime

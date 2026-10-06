@@ -17,6 +17,11 @@ const char* platform_get_last_error();
 int platform_get_status();
 Napi::Value platform_list_windows(Napi::Env env);
 Napi::Value platform_get_window_state(const Napi::CallbackInfo& info);
+Napi::Value platform_get_window_occlusion(const Napi::CallbackInfo& info);
+Napi::Value platform_start_window_frame_probe(const Napi::CallbackInfo& info);
+Napi::Value platform_get_window_frame_probe(const Napi::CallbackInfo& info);
+Napi::Value platform_stop_window_frame_probe(const Napi::CallbackInfo& info);
+void platform_register_window_frame_probes(Napi::Env env);
 Napi::Value platform_list_monitors(const Napi::CallbackInfo& info);
 Napi::Value platform_get_monitor_state(const Napi::CallbackInfo& info);
 bool platform_restore_window(int64_t hwnd);
@@ -209,6 +214,11 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("restoreWindow", Napi::Function::New(env, RestoreWindow));
 #if defined(_WIN32)
   exports.Set("getWindowState", Napi::Function::New(env, platform_get_window_state));
+  exports.Set("getWindowOcclusion", Napi::Function::New(env, platform_get_window_occlusion));
+  exports.Set("startWindowFrameProbe", Napi::Function::New(env, platform_start_window_frame_probe));
+  exports.Set("getWindowFrameProbe", Napi::Function::New(env, platform_get_window_frame_probe));
+  exports.Set("stopWindowFrameProbe", Napi::Function::New(env, platform_stop_window_frame_probe));
+  platform_register_window_frame_probes(env);
   exports.Set("listMonitors", Napi::Function::New(env, platform_list_monitors));
   exports.Set("getMonitorState", Napi::Function::New(env, platform_get_monitor_state));
   exports.Set("getKeyboardLayout", Napi::Function::New(env, GetKeyboardLayoutSnapshot));

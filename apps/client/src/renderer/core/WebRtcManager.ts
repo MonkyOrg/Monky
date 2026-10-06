@@ -38,7 +38,7 @@ import { applyMediaEncodingPolicy, getMediaEncodingPolicy } from './webrtc/media
 import { updateRtpSenderParameters } from './webrtc/rtpSenderParameters';
 import {
   NativeScreenController, nativeScreenProfile, type NativeScreenCallContext, type NativeScreenWatchState,
-  type ScreenVideoDiagnostics,
+  type ScreenVideoDiagnostics, type NativeScreenSourceWarning,
 } from './webrtc/NativeScreenController';
 import { overlayBridgeService } from './OverlayBridgeService';
 
@@ -425,12 +425,16 @@ export class WebRtcManager {
     return this.nativeScreens.getLocalPreviewState(shareId);
   }
 
+  public getLocalScreenSourceWarning(shareId: string): NativeScreenSourceWarning | null {
+    return this.nativeScreens.getLocalSourceWarning(shareId);
+  }
+
   public getScreenCaptureMode(sessionId: string, shareId: string): NativeScreenCaptureMode | null {
     return this.nativeScreens.getCaptureMode(sessionId, shareId);
   }
 
   public async startNativeScreenShare(
-    desktopSourceId: string, audio: boolean, thumbnail: string, isWanted: () => boolean,
+    desktopSourceId: string, audio: boolean, isWanted: () => boolean,
     captureKind: NativeScreenCaptureKind = 'window',
     preserveAspectRatio = true,
     audioReplacement?: { shareId?: string; retirePrevious: () => Promise<void> },
@@ -448,13 +452,13 @@ export class WebRtcManager {
     const stream = new MediaStream();
     try {
       const source = await this.nativeScreens.addSource({
-        shareId: stream.id, desktopSourceId, captureKind, preserveAspectRatio, video, audio, thumbnail, audience,
+        shareId: stream.id, desktopSourceId, captureKind, preserveAspectRatio, video, audio, audience,
         audioBitrateKbps: profile.audioBitrateKbps,
         ...(audioReplacement?.shareId ? { replacesAudioShareId: audioReplacement.shareId } : {}),
       });
       if (!isWanted()) throw new DOMException('Screen selection was cancelled.', 'AbortError');
       videoService.registerNativeScreenShare(stream, {
-        source, desktopSourceId, captureKind, preserveAspectRatio, thumbnail, audioBitrateKbps: profile.audioBitrateKbps,
+        source, desktopSourceId, captureKind, preserveAspectRatio, audioBitrateKbps: profile.audioBitrateKbps,
       });
       // Admission/preflight does not acquire PCM. Retire its exact former owner
       // before preview demand can activate the replacement's selected capture.

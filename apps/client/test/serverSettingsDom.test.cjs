@@ -209,7 +209,7 @@ async function* runRegression(language, sharedModule) {
     turnAvailability: { supported: false, reason: 'not-installed', autoInstallable: true },
     allowSoundboard: true, recentSoundCacheEnabled: true, recentSoundCacheLimit: 20, dmRelayEnabled: true,
     allowEveryoneMention: true, allowMessageEdit: true, showRoleBadgesToEveryone: true,
-    messageDeleteUndoSeconds: 60, protocol: { version: 36, minimumVersion: 35, features: ['message-delete-undo', 'recent-sounds', 'dm-relay', 'role-deny'] },
+    messageDeleteUndoSeconds: 60, protocol: { version: 36, minimumVersion: 35, features: ['message-delete-undo', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants'] },
     channels: [], members: [member('admin'), member('bob')],
     knownMembers: [member('admin'), member('bob'), { ...member('carol'), status: 'DISCONNECTED' }, { ...member('helper'), isBot: true }],
     voiceStates: {}, roles: [role], userRoles: [], ownerId: 'admin', myPermissions: 0xFFFFFFFF,
@@ -689,48 +689,56 @@ async function* runRegression(language, sharedModule) {
   const normalPanelStyle = getComputedStyle(field('#role-editor-tab-permissions'));
   check(normalPanelStyle.display === everyoneDisplay && normalPanelStyle.gap === everyoneGap,
     'Normal roles and Everyone use the same permission panel layout and spacing');
-  const roleStates = (permission) => field(`[data-role-editor] .role-permission-states:has([data-role-permission-bit="${permission}"])`);
-  const selectedState = (permission) =>
-    field(`[data-role-editor] [data-role-permission-bit="${permission}"].selected`)?.dataset.permissionState;
-  check(!field('[data-role-editor] .role-permission-switch'), 'Normal roles do not use Everyone on/off switches');
+  const roleSwitch = (permission) => field(`[data-role-editor] .role-permission-switch[data-permission="${permission}"]`);
+  const switchRole = (permission, enabled) => change(`[data-role-editor] .role-permission-switch[data-permission="${permission}"]`, enabled);
+  check(!field('[data-role-editor] [data-role-permission-bit]') && !field('[data-role-editor] .permission-three-state'),
+    'Normal roles use on/off switches like Everyone, not Deny/Inherit/Allow');
   for (const permission of [Permission.MANAGE_BOTS, Permission.USE_BOT_COMMANDS, Permission.VIEW_SERVER_MONITOR]) {
-    const states = roleStates(permission);
-    check(states?.getAttribute('role') === 'radiogroup' &&
-      [...states.querySelectorAll('[role="radio"]')].map(button => button.dataset.permissionState).join() === 'deny,inherit,allow',
-      `The opened role editor exposes permission ${permission} as Deny/Inherit/Allow`);
+    check(roleSwitch(permission)?.type === 'checkbox' && roleSwitch(permission).closest('.permission-switch'),
+      `The opened role editor exposes permission ${permission} as an on/off switch`);
   }
-  check(selectedState(Permission.SPEAK) === 'allow' && selectedState(Permission.MANAGE_BOTS) === 'inherit',
-    'Role permission states reflect the stored allow and inherit bits');
-  check(roleStates(Permission.VIEW_SERVER_MONITOR).getAttribute('aria-label') === t('permissions.viewServerMonitor'),
+  check(roleSwitch(Permission.SPEAK).checked && !roleSwitch(Permission.MANAGE_BOTS).checked,
+    'Role switches reflect the permissions the role grants');
+  check(roleSwitch(Permission.VIEW_SERVER_MONITOR).closest('.permission-switch').getAttribute('aria-label') === t('permissions.viewServerMonitor'),
     'The monitor permission in the actual role dialog has a localized accessible label');
-  check(field('[data-role-editor] #role-editor-tab-permissions').textContent.includes(t('roles.permissionStatesHint')),
-    'Normal roles explain how Inherit, Allow and Deny combine with Everyone');
-  const managementCopy = roleStates(8192).parentElement.textContent;
+  check(field('[data-role-editor] #role-editor-tab-permissions').textContent.includes(t('roles.permissionSwitchesHint')),
+    'Normal roles explain that a switch only grants on top of Everyone');
+  const managementCopy = roleSwitch(8192).closest('.permission-switch').parentElement.textContent;
   check(managementCopy.includes(t('permissions.manageBotsDesc')) && managementCopy.includes('token') &&
     !/editar o perfil|editing their profiles/i.test(managementCopy),
   'MANAGE_BOTS permission copy no longer claims admins can edit bot profiles');
-  field('[data-role-editor] [data-role-permission-bit="32"][data-permission-state="allow"]').click();
+  switchRole(32, true);
+  await flush();
+  check(Object.keys(pendingRequest('ROLE_UPDATE').payload).sort().join() === 'permissions,roleId' &&
+    pendingRequest('ROLE_UPDATE').payload.permissions === 48,
+    'Turning a switch on grants only that bit, with no denial involved');
+  acknowledge('ROLE_UPDATE');
+  await flush();
+  switchRole(16, false);
+  await flush();
+  check(pendingRequest('ROLE_UPDATE').payload.permissions === 32 && !('deny' in pendingRequest('ROLE_UPDATE').payload) &&
+    !roleSwitch(16).checked, 'Turning a switch off only stops granting the bit');
+  acknowledge('ROLE_UPDATE');
+  await flush();
+  check(store.getRole('editors').permissions === 32 && roleSwitch(32).checked,
+    'Acknowledged role grants persist in the store and the editor');
+  const grantFeatures = store.serverDetails.protocol.features;
+  store.serverDetails.protocol.features = grantFeatures.filter(feature => feature !== 'role-grants');
+  store.updateRoles(store.roles.map(entry => entry.id === 'editors' ? { ...entry, deny: 16 } : entry), store.userRoles);
+  await flush();
+  switchRole(16, true);
   await flush();
   check(pendingRequest('ROLE_UPDATE').payload.permissions === 48 && pendingRequest('ROLE_UPDATE').payload.deny === 0,
-    'Allow applies only the requested bit against current role rules');
+    'On a 36.1 server a switch turned on also lifts the stored denial of that bit');
   acknowledge('ROLE_UPDATE');
   await flush();
-  field('[data-role-editor] [data-role-permission-bit="16"][data-permission-state="deny"]').click();
+  switchRole(16, false);
   await flush();
-  check(pendingRequest('ROLE_UPDATE').payload.permissions === 32 && pendingRequest('ROLE_UPDATE').payload.deny === 16 &&
-    selectedState(16) === 'deny', 'Deny moves the bit out of the allowed set and into the denied set');
+  check(pendingRequest('ROLE_UPDATE').payload.permissions === 32 && pendingRequest('ROLE_UPDATE').payload.deny === 0,
+    'On a 36.1 server a switch turned off never becomes a denial');
   acknowledge('ROLE_UPDATE');
   await flush();
-  field('[data-role-editor] [data-role-permission-bit="16"][data-permission-state="deny"]')
-    .dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
-  await flush();
-  check(pendingRequest('ROLE_UPDATE').payload.deny === 0 && selectedState(16) === 'inherit' &&
-    document.activeElement === field('[data-role-editor] [data-role-permission-bit="16"][data-permission-state="inherit"]'),
-    'Arrow keys move between permission states and Inherit clears allow and deny');
-  acknowledge('ROLE_UPDATE');
-  await flush();
-  check(store.getRole('editors').permissions === 32 && store.getRole('editors').deny === 0,
-    'Acknowledged role rules persist in the store');
+  store.serverDetails.protocol.features = grantFeatures;
   field('[data-role-editor-tab="general"]').click();
   field('#role-editor-color').click();
   field('[data-color-preset="#57f287"]').click();
@@ -860,8 +868,8 @@ async function* runRegression(language, sharedModule) {
   field('#btn-role-save').click();
   await flush();
   check(locked(), 'Explicit role creation remains tracked');
-  check(pendingRequest('ROLE_CREATE').payload.permissions === 0 && pendingRequest('ROLE_CREATE').payload.deny === 0,
-    'New roles start with every permission inheriting Everyone');
+  check(pendingRequest('ROLE_CREATE').payload.permissions === 0 && !('deny' in pendingRequest('ROLE_CREATE').payload),
+    'New roles start granting nothing beyond Everyone');
   acknowledge('ROLE_CREATE');
   await flush();
   check(store.getRole('created-role') && field('[data-role-menu="created-role"]') && !field('[data-role-editor]') && !mainBackdrop().inert,

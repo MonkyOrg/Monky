@@ -385,9 +385,10 @@ async function runMediaSettingsPopoverSmoke() {
     settings.save = original.save;
     devices = devices.filter(device => device.deviceId !== 'camera-b');
     navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
-    await wait(100);
-    check(panel().querySelector('select option[value="camera-b"]')?.disabled
-      && panel().querySelector('select').value === 'camera-b', 'Quick camera hotplug preserves an explicitly unavailable choice');
+    const hotplugged = () => panel()?.querySelector('select option[value="camera-b"]')?.disabled
+      && panel().querySelector('select').value === 'camera-b';
+    await until(hotplugged, 'Quick camera hotplug marks the removed choice unavailable');
+    check(hotplugged(), 'Quick camera hotplug preserves an explicitly unavailable choice');
     devices.push({ kind: 'videoinput', deviceId: 'camera-b', label: 'Fixture camera B' });
     navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
 
@@ -429,12 +430,14 @@ async function runMediaSettingsPopoverSmoke() {
     await openCamera();
     const beforeStop = requests.length;
     video.stopCamera();
-    await wait(160);
+    const previewStopped = () => !preview()?.srcObject
+      && panel()?.querySelector('[data-camera-preview-toggle]')?.getAttribute('aria-checked') === 'false';
+    await until(previewStopped, 'External stop clears the still-open preview');
     window.dispatchEvent(new Event('resize'));
+    // Absence check: give a wrongful layout-driven restart time to happen.
     await wait(100);
-    check(requests.length === beforeStop && !preview().srcObject
-      && panel().querySelector('[data-camera-preview-toggle]').getAttribute('aria-checked') === 'false',
-    'Call end or external stop cannot automatically reacquire a still-open preview');
+    check(requests.length === beforeStop && previewStopped(),
+      'Call end or external stop cannot automatically reacquire a still-open preview');
     panel().querySelector('.audio-device-settings').click();
     check(navigations.at(-1)?.join(':') === 'voice_video:camera' && !panel(),
       'Camera settings navigation targets the camera section and releases the popup lease');
@@ -447,6 +450,8 @@ async function runMediaSettingsPopoverSmoke() {
     pendingCapture = null;
     pauseCapture = false;
     await video.cameraJobs;
+    await until(() => !late.active && video.getCameraState().stream === null, 'A late default preview capture is retired');
+    // Absence check: the dismissed UI must not reopen.
     await wait(80);
     check(!late.active && video.getCameraState().stream === null && !panel(),
       'Dismissing a pending default preview retires late hardware tracks without reopening UI');
@@ -586,7 +591,10 @@ async function runMediaSettingsPopoverSmoke() {
     offStop();
     video.stopCamera();
     await video.cameraJobs;
-    await wait(300);
+    // Closing popovers stay in the DOM (data-ui-closing) until their exit animation ends.
+    await until(() => captures.every(stream => !stream.active), 'Final teardown stops every captured track');
+    await until(() => !document.querySelector('.audio-device-popover, .audio-device-options'),
+      'Final teardown removes popovers and submenu portals after their exit');
     check(captures.every(stream => !stream.active) && !document.querySelector('.audio-device-popover, .audio-device-options'),
       'Final teardown leaves no captured tracks, popovers or submenu portals');
     check(listenerCount() === initialListeners, 'Quick and settings controls leave no EventBus listeners');

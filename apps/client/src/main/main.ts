@@ -30,6 +30,7 @@ import { initializeMainLanguage, mt } from './i18n';
 import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
 import { ServerInviteInbox, registerServerInviteProtocol } from './serverInvites';
 import { configureVideoPresentation } from './videoPresentation';
+import { handleScreenPictureInPictureOpen } from './screenPictureInPictureWindow';
 
 import fs from 'fs';
 
@@ -220,8 +221,12 @@ function bindMainWindowNavigationGuards(): void {
   if (!mainWindow) return;
   bindBotScreenIsolation(mainWindow.webContents);
 
-  mainWindow.webContents.setWindowOpenHandler(({ url, referrer }) => {
-    if (!isBotScreenUrl(referrer.url)) openExternalIfWebUrl(url);
+  const contents = mainWindow.webContents;
+  contents.setWindowOpenHandler((details) => {
+    const fromBotScreen = isBotScreenUrl(details.referrer.url);
+    const screenPip = fromBotScreen ? null : handleScreenPictureInPictureOpen(contents, details);
+    if (screenPip) return screenPip;
+    if (!fromBotScreen) openExternalIfWebUrl(details.url);
     return { action: 'deny' };
   });
 

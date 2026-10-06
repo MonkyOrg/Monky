@@ -222,6 +222,32 @@ export interface NativeWindowState {
 export function getWindowState(hwnd: number): NativeWindowState | null;
 
 /**
+ * Whether other windows fully cover this top-level window, using the same rule
+ * Chromium/Firefox apply before they stop painting it. Null when the window is
+ * gone, hidden, minimized or the platform does not support it.
+ */
+export function getWindowOcclusion(hwnd: number): boolean | null;
+
+export interface WindowFrameProbeSnapshot {
+  /** `failed` when Windows cannot capture the window without its cursor; `closed` after the window is destroyed. */
+  state: 'starting' | 'running' | 'failed' | 'closed';
+  /** Frames Windows composed for the window content since the probe started, cursor excluded. */
+  frames: number;
+  error: string | null;
+}
+
+/**
+ * Starts counting the content frames of a top-level window in the background
+ * (Windows only). A covered browser window that stopped painting produces no
+ * frames. Returns the probe id, or null when the window is gone or unsupported.
+ */
+export function startWindowFrameProbe(hwnd: number): number | null;
+/** Null for an unknown or stopped probe. */
+export function getWindowFrameProbe(id: number): WindowFrameProbeSnapshot | null;
+/** Stops the probe without waiting; returns whether it was running. */
+export function stopWindowFrameProbe(id: number): boolean;
+
+/**
  * Restores (un-minimizes) and foregrounds a window by handle so a capture can
  * start on it — the WGC capturer cannot start on a minimized window (#560).
  * Returns `true` when it actually un-minimized the window; only implemented on

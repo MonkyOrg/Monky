@@ -314,7 +314,10 @@ seconds, 256 entries and 8 MiB. Icons use the system file-icon API.
 Disconnecting the monitor or changing its identity, position or resolution
 ends the source and requires explicit reselection; it never switches to the
 primary display. Minimizing or hiding a window/game is treated as a pause,
-not an identity loss. Restoring it allows frames to resume. Closing or
+not an identity loss. Restoring it allows frames to resume. The title is not
+part of the identity either: browsers, editors and players rename their window
+for every page or file, and sharing continues. A changed window class or
+executable ends the source. Closing or
 replacing the window/process withdraws its announcement even without viewers.
 
 WinUI windows (for example, WhatsApp) are not blocked solely because their class
@@ -949,7 +952,8 @@ build-generated `capture-contract-test.exe` to create owned
 WinUI/ApplicationFrameWindow windows. It verifies real WGC capture with
 same-process children and distinguishes both windows with duplicate titles,
 while rejecting remapping to another process's child and changed process
-identity. It does not capture personal
+identity. It also renames the window while it is captured (a new title, one
+over 512 characters and an empty one) and requires frames to keep flowing. It does not capture personal
 windows or record video; `--contracts=<absolute_executable>` allows a different
 build directory.
 

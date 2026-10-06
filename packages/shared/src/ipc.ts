@@ -11,7 +11,7 @@ import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } fr
 import type { ReleaseCompatibilityResult } from './releaseCompatibility.js';
 import type { ServerInviteResult } from './serverInvites.js';
 import type { EventCalendarExport, EventCalendarSaveResult } from './serverEventCalendar.js';
-import type { NativeScreenCommand, NativeScreenCommandResult, NativeScreenEvent, NativeScreenReply } from './nativeScreenIpc.js';
+import type { NativeScreenCommand, NativeScreenCommandResult, NativeScreenEvent, NativeScreenReply, BrowserOcclusionEngine } from './nativeScreenIpc.js';
 import type { NativeScreenCaptureMode } from './screenSharing.js';
 import type {
   LocalExecutionMutationResult,
@@ -94,8 +94,8 @@ export interface DesktopSource {
   name: string;
   type: 'screen' | 'window';
   isOwnWindow?: boolean;
-  /** Chromium-based browsers stop painting a fully covered window, so its capture freezes gray. */
-  occlusionSensitive?: boolean;
+  /** Browser engine that stops painting this window once other windows fully cover it, freezing its capture. */
+  occlusionEngine?: BrowserOcclusionEngine;
   displayNumber?: number;
   thumbnailDataUrl: string;
   appIconDataUrl: string | null;

@@ -732,10 +732,13 @@ export class MainView {
 
     if (watchedScreens.length > 0 && this.activeContentView !== 'stage') {
       parts.push(`
-        <div class="screenshare-notice screenshare-notice--self">
+        <div class="screenshare-notice screenshare-notice--self screenshare-notice--stacked">
           <span class="material-symbols-outlined md-16 screenshare-notice-icon">visibility</span>
           <span class="screenshare-notice-text">${t('main.screenShareWatchingNotice')}</span>
-          <button type="button" id="screenshare-viewer-stop-btn" class="screenshare-notice-btn screenshare-notice-btn--danger">${t('stage.stopWatching')}</button>
+          <div class="screenshare-notice-actions">
+            <button type="button" id="screenshare-viewer-stage-btn" class="screenshare-notice-btn">${t('main.screenShareBackToStage')}</button>
+            <button type="button" id="screenshare-viewer-stop-btn" class="screenshare-notice-btn screenshare-notice-btn--danger">${t('stage.stopWatching')}</button>
+          </div>
         </div>
       `);
     }
@@ -809,6 +812,8 @@ export class MainView {
       }
       this.updateScreenShareNotice();
     });
+
+    document.getElementById('screenshare-viewer-stage-btn')?.addEventListener('click', () => this.openVoiceStage());
 
     document.getElementById('screenshare-viewer-stop-btn')?.addEventListener('click', () => {
       for (const [sessionId, shareIds] of voiceStore.getScreenWatchers()) {

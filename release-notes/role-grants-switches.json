@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Cargos do servidor voltam a ser switches de liga/desliga: um cargo só concede, e basta um deles conceder. Negar, Herdar e Permitir seguem nos canais, onde a negação entre cargos vence e a regra da pessoa vale acima dos cargos. Permitir vira ligado; Herdar e Negar, desligado.",
+  "en": "Server roles are on/off switches again: a role only grants, and one role granting is enough. Deny, Inherit and Allow stay in channels, where a denial between roles wins and the member's own rule overrides their roles. Allow becomes on; Inherit and Deny become off."
+}

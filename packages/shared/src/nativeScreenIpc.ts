@@ -211,6 +211,9 @@ export type NativeScreenCommandResult =
 const request = callScope.extend({ requestId: uuid });
 export const nativeScreenPreviewStateSchema = z.enum(['waiting', 'playing', 'paused', 'unavailable']);
 export type NativeScreenPreviewState = z.infer<typeof nativeScreenPreviewStateSchema>;
+/** Browser engines whose windows stop painting while other windows fully cover them. */
+export const browserOcclusionEngineSchema = z.enum(['chromium', 'firefox']);
+export type BrowserOcclusionEngine = z.infer<typeof browserOcclusionEngineSchema>;
 export const nativeScreenEventSchema = z.discriminatedUnion('type', [
   request.extend({ type: z.literal('signal'), signal: nativeScreenSignalSchema }).strict(),
   request.extend({ type: z.literal('rpc'), method: nativeScreenRpcMethodSchema, payload: z.record(json).refine(isBoundedJson) }).strict(),
@@ -221,6 +224,15 @@ export const nativeScreenEventSchema = z.discriminatedUnion('type', [
   }).strict(),
   callScope.extend({
     type: z.literal('capture-fallback'), publisherSessionId: reference, shareId: screenShareIdSchema, sourceInstanceId: uuid,
+  }).strict(),
+  callScope.extend({
+    type: z.literal('source-occlusion'), publisherSessionId: reference, shareId: screenShareIdSchema,
+    sourceInstanceId: uuid, occluded: z.boolean(), engine: browserOcclusionEngineSchema,
+  }).strict(),
+  /** The selected window is minimized or hidden: the OS draws nothing, so capture pauses until it returns. */
+  callScope.extend({
+    type: z.literal('source-visibility'), publisherSessionId: reference, shareId: screenShareIdSchema,
+    sourceInstanceId: uuid, hidden: z.boolean(),
   }).strict(),
   callScope.extend({
     type: z.literal('capture-mode'), publisherSessionId: reference, shareId: screenShareIdSchema,

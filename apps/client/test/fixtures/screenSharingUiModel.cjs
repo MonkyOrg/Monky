@@ -319,9 +319,9 @@ function fixture(language = 'en') {
   };
   const webRtcManager = {
     getNativeScreenCapabilities: () => controls.capabilities(),
-    async startNativeScreenShare(id, audio, thumbnail, isWanted, kind, preserveAspectRatio, audioReplacement, audience) {
-      traces.push(['native-start', id, audio, thumbnail, kind, preserveAspectRatio, ...(audience ? [audience] : [])]);
-      if (controls.start) return controls.start({ id, audio, thumbnail, isWanted, kind, preserveAspectRatio, audioReplacement });
+    async startNativeScreenShare(id, audio, isWanted, kind, preserveAspectRatio, audioReplacement, audience) {
+      traces.push(['native-start', id, audio, kind, preserveAspectRatio, ...(audience ? [audience] : [])]);
+      if (controls.start) return controls.start({ id, audio, isWanted, kind, preserveAspectRatio, audioReplacement });
       if (audioReplacement) {
         traces.push(['audio-replacement', audioReplacement.shareId]);
         await audioReplacement.retirePrevious();

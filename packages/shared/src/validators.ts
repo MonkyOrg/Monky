@@ -351,7 +351,7 @@ const roleRuleConflict = (role: { permissions?: number; deny?: number }) =>
   role.permissions === undefined || role.deny === undefined || (role.permissions & role.deny) === 0;
 const roleRuleConflictMessage = 'Uma permissão não pode ser permitida e negada ao mesmo tempo';
 
-/** `permissions` are the allowed bits; without `deny` they are an older client's full switch mask. */
+/** `permissions` are granted bits, or a full mask from a client before 36.1; `deny` comes only from 36.1 clients. */
 export const roleCreateSchema = z.object({
   name: roleNameSchema,
   color: roleColorSchema.default(null),

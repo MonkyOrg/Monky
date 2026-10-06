@@ -993,7 +993,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     } };
     videoService.setQualityPreset('NORMAL');
     captureWith(async () => { browserAcquisitions++; throw new Error('The picker must not fall back to Chromium capture.'); });
-    globalRtc.startNativeScreenShare = async (desktopSourceId, audio, thumbnail, isWanted, captureKind, preserveAspectRatio) => {
+    globalRtc.startNativeScreenShare = async (desktopSourceId, audio, isWanted, captureKind, preserveAspectRatio) => {
       nativeSelections.push({ desktopSourceId, isWanted, captureKind, preserveAspectRatio });
       check(captureKind === 'monitor' && desktopSourceId === picker.selectedSourceId,
         'The picker forwards exactly the selected native source and method');
@@ -1004,7 +1004,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
       // Deliberately return even an obsolete descriptor to exercise the
       // picker's cleanup independently of the native controller's own guard.
       videoService.registerNativeScreenShare(stream, {
-        desktopSourceId, captureKind, preserveAspectRatio, thumbnail, audioBitrateKbps: 128,
+        desktopSourceId, captureKind, preserveAspectRatio, audioBitrateKbps: 128,
         source: { shareId: stream.id, instanceId: crypto.randomUUID(), audio,
           video: { width: 1280, height: 720, fps: 30, maxBitrateKbps: 6000 } },
       });

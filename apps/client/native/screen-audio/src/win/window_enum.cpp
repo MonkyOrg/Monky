@@ -12,6 +12,7 @@
 #include <napi.h>
 #include <windows.h>
 #include <dwmapi.h>
+#include <algorithm>
 #include <vector>
 #include <string>
 #include <cmath>
@@ -292,6 +293,120 @@ Napi::Value platform_get_monitor_state(const Napi::CallbackInfo& info) {
   for (const auto& monitor : enumeration.records)
     if (WideToUtf8(monitor.deviceId) == id) return MonitorObject(info.Env(), monitor);
   return info.Env().Null();
+}
+
+namespace {
+// Mirrors Firefox/Chromium IsWindowVisibleAndFullyOpaque: only these windows
+// make the browser stop painting the windows underneath them.
+bool OccludingWindowRect(HWND hwnd, RECT& rect) {
+  if (!IsWindow(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return false;
+  const auto exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+  if (exStyle & WS_EX_TRANSPARENT) return false;
+  wchar_t className[32] = {};
+  const bool taskbar = GetClassNameW(hwnd, className, 32) > 0 && wcscmp(className, L"Shell_TrayWnd") == 0;
+  if ((exStyle & WS_EX_TOOLWINDOW) && !taskbar) return false;
+  if (exStyle & WS_EX_LAYERED) {
+    BYTE alpha = 0;
+    DWORD flags = 0;
+    if (!GetLayeredWindowAttributes(hwnd, nullptr, &alpha, &flags)) return false;
+    if (((flags & LWA_ALPHA) && alpha < 255) || (flags & LWA_COLORKEY)) return false;
+  }
+  HRGN region = CreateRectRgn(0, 0, 0, 0);
+  const int regionType = region ? GetWindowRgn(hwnd, region) : ERROR;
+  if (region) DeleteObject(region);
+  if (regionType == COMPLEXREGION) return false;
+  DWORD cloaked = 0;
+  if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) return false;
+  if (!GetWindowRect(hwnd, &rect) || IsRectEmpty(&rect)) return false;
+  if ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_POPUP) && !taskbar) return false;
+  WINDOWPLACEMENT placement{};
+  placement.length = sizeof(placement);
+  if (GetWindowPlacement(hwnd, &placement) && placement.showCmd == SW_MAXIMIZE) {
+    MONITORINFO monitor{};
+    monitor.cbSize = sizeof(monitor);
+    const auto handle = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    if (handle && GetMonitorInfoW(handle, &monitor)) {
+      const auto& work = monitor.rcWork;
+      const LONG width = (std::min)(work.right - work.left, rect.right - rect.left);
+      const LONG height = (std::min)(work.bottom - work.top, rect.bottom - rect.top);
+      const LONG left = rect.left < work.left ? work.left : (std::min)(work.right, rect.left + width) - width;
+      const LONG top = rect.top < work.top ? work.top : (std::min)(work.bottom, rect.top + height) - height;
+      rect = {left, top, left + width, top + height};
+    }
+  }
+  return true;
+}
+
+void SubtractRect(std::vector<RECT>& regions, const RECT& cover) {
+  std::vector<RECT> next;
+  next.reserve(regions.size() + 4);
+  for (const auto& area : regions) {
+    RECT overlap{};
+    if (!IntersectRect(&overlap, &area, &cover)) {
+      next.push_back(area);
+      continue;
+    }
+    if (area.top < overlap.top) next.push_back({area.left, area.top, area.right, overlap.top});
+    if (overlap.bottom < area.bottom) next.push_back({area.left, overlap.bottom, area.right, area.bottom});
+    if (area.left < overlap.left) next.push_back({area.left, overlap.top, overlap.left, overlap.bottom});
+    if (overlap.right < area.right) next.push_back({overlap.right, overlap.top, area.right, overlap.bottom});
+  }
+  regions.swap(next);
+}
+}  // namespace
+
+// Browsers stop painting a window once other windows fully cover it, which
+// freezes a capture of it. Returns null when the window is gone, hidden or
+// minimized, otherwise whether the browser rule considers it fully covered.
+Napi::Value platform_get_window_occlusion(const Napi::CallbackInfo& info) {
+  const auto env = info.Env();
+  if (info.Length() != 1 || !info[0].IsNumber()) {
+    Napi::TypeError::New(env, "A positive safe-integer HWND is required").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  const auto value = info[0].As<Napi::Number>().DoubleValue();
+  if (!std::isfinite(value) || value < 1 || value > 9007199254740991.0 || std::floor(value) != value) {
+    Napi::TypeError::New(env, "A positive safe-integer HWND is required").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  const auto target = reinterpret_cast<HWND>(static_cast<uintptr_t>(value));
+  if (!IsWindow(target) || !IsWindowVisible(target) || IsIconic(target) || GetAncestor(target, GA_ROOT) != target)
+    return env.Null();
+  const auto previous = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  std::vector<HWND> handles;
+  EnumWindows(EnumProc, reinterpret_cast<LPARAM>(&handles));
+  const LONG screenLeft = GetSystemMetrics(SM_XVIRTUALSCREEN), screenTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+  std::vector<RECT> unoccluded{{screenLeft, screenTop, screenLeft + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+      screenTop + GetSystemMetrics(SM_CYVIRTUALSCREEN)}};
+  bool found = false, occluded = false;
+  for (const auto hwnd : handles) {
+    RECT rect{};
+    const bool occluding = OccludingWindowRect(hwnd, rect);
+    if (hwnd == target) {
+      if (!occluding && !GetWindowRect(hwnd, &rect)) break;
+      found = true;
+      occluded = std::none_of(unoccluded.begin(), unoccluded.end(), [&rect](const RECT& area) {
+        RECT overlap{};
+        return IntersectRect(&overlap, &area, &rect) != FALSE;
+      });
+      break;
+    }
+    if (!occluding) continue;
+    SubtractRect(unoccluded, rect);
+    // A pathological fragmentation cannot prove full coverage; report visible.
+    if (unoccluded.size() > 8192) {
+      found = true;
+      break;
+    }
+    if (unoccluded.empty()) {
+      found = std::find(handles.begin(), handles.end(), target) != handles.end();
+      occluded = true;
+      break;
+    }
+  }
+  if (previous) SetThreadDpiAwarenessContext(previous);
+  if (!found) return env.Null();
+  return Napi::Boolean::New(env, occluded);
 }
 
 // Restaura (desminimiza) e traz uma janela para o primeiro plano pelo handle, para

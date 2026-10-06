@@ -616,9 +616,15 @@ inline void ValidateKey(const SourceKey& key) {
           "Selected window key is missing, overlong or not an executable basename", "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
 }
 
+// HWND/PID/process creation identify a window, and its class and executable never change. The title is only a
+// label: browsers, editors and players rename their window while it is shared.
+inline bool SameWindowKind(const SourceKey& a, const SourceKey& b) {
+  return a.className == b.className && a.executable == b.executable;
+}
+
 inline void ValidateHookEvidence(const SourceKey& selected, const SourceKey& observed) {
   ValidateKey(selected); ValidateKey(observed);
-  Require(selected == observed, "Stock get_hooked tuple differs from the explicitly selected source",
+  Require(SameWindowKind(selected, observed), "Stock get_hooked class or executable differs from the explicitly selected source",
           "ERR_SCREEN_CAPTURE_HOOK_IDENTITY");
 }
 

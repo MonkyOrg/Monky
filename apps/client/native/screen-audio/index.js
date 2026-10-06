@@ -66,6 +66,26 @@ function getWindowState(hwnd) {
   return binding.getWindowState(hwnd);
 }
 
+function getWindowOcclusion(hwnd) {
+  if (!binding || typeof binding.getWindowOcclusion !== 'function') return null;
+  return binding.getWindowOcclusion(hwnd);
+}
+
+function startWindowFrameProbe(hwnd) {
+  if (!binding || typeof binding.startWindowFrameProbe !== 'function') return null;
+  return binding.startWindowFrameProbe(hwnd);
+}
+
+function getWindowFrameProbe(id) {
+  if (!binding || typeof binding.getWindowFrameProbe !== 'function') return null;
+  return binding.getWindowFrameProbe(id);
+}
+
+function stopWindowFrameProbe(id) {
+  if (!binding || typeof binding.stopWindowFrameProbe !== 'function') return false;
+  return binding.stopWindowFrameProbe(id);
+}
+
 function listMonitors() {
   if (!binding || typeof binding.listMonitors !== 'function')
     throw new Error('Native monitor enumeration is unavailable. Rebuild the native audio module.');
@@ -91,6 +111,7 @@ function setWindowResizeAspect(handle, ratio, extraWidth, extraHeight) {
 
 module.exports = {
   isSupported, isPacketCaptureSupported, start, stop, getLastError, getStatus, createPacketCapture,
-  listWindowOwners, listWindows, restoreWindow, getWindowState, getKeyboardLayout, listMonitors, getMonitorState,
-  setWindowResizeAspect,
+  listWindowOwners, listWindows, restoreWindow, getWindowState, getWindowOcclusion, startWindowFrameProbe,
+  getWindowFrameProbe, stopWindowFrameProbe, getKeyboardLayout, listMonitors,
+  getMonitorState, setWindowResizeAspect,
 };

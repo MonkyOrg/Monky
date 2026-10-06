@@ -234,9 +234,9 @@ enforce the same access.
 
 Each permission for **Everyone**, a role or an individual member has three states:
 **X — Deny**, **— — Inherit**, and **✓ — Allow**. Inherit neither grants nor
-denies access: it keeps the server-level result. Role and member rules override
-Everyone; between assigned roles and the individual rule, **Deny wins**,
-regardless of order.
+denies access: it keeps the server-level result. Role rules override Everyone;
+between assigned roles, **Deny wins**, regardless of order. A member's own rule
+wins over their roles' rules, whether it allows or denies.
 Owners and administrators retain full access.
 
 Use **Add roles and members** to search and select targets in the same dropdown
@@ -245,7 +245,8 @@ a target in the list to edit or remove its rule; changes only take effect when s
 
 For an announcements channel, deny **Send messages** for Everyone while
 allowing **Read messages**, then allow sending for the roles that may publish.
-A second assigned role explicitly denying sending still blocks it.
+A second assigned role explicitly denying sending still blocks it, unless the
+member has an individual rule allowing it.
 **View channel** is independent of **Read messages**: revoking only reading
 keeps the channel visible but removes history, search results and message
 notifications. Mute/deafen permissions remain server-wide because those
@@ -280,23 +281,26 @@ actions. Its server-level permissions use on/off switches.
 Everyone opens the same editor as ordinary roles, with only the **Permissions**
 tab and no **General** or **Members** tabs.
 
-In every other role, each permission has three states: **Deny**, **Inherit**
-and **Allow**. Inherit follows Everyone; Allow grants the permission even when
-Everyone has it off; Deny removes it even when Everyone has it on. A new role
-starts with everything on Inherit, so it only changes what you set.
+In every other role, each permission is also an on/off switch. On grants the
+permission to members with the role; off neither grants nor removes it, so the
+member may still get it from Everyone or another role. A role cannot take away
+what Everyone allows: to limit something to a few members, turn it off for
+Everyone and on only for the roles that should have it. A new role starts with
+everything off, which means the same permissions as Everyone.
 
 New servers do not create a Member role. Members without roles use Everyone.
-With several roles, granted permissions add up and any **Deny** wins over an
-Allow from another role. The owner and administrators have full access. The
+With several roles, permissions add up: a single role granting a permission is
+enough. The owner and administrators have full access. The
 original unmodified Member role is converted to Everyone; customized roles and
 roles used in private event/action audiences are preserved.
 
-On update, roles that used on/off switches are converted automatically:
-whatever matched Everyone becomes Inherit, extra enabled permissions become
-Allow and disabled ones become Deny. Each role keeps the same effect as before.
-The difference is for members with several roles: previously a permission only
-applied if every role had it; now role permissions add up and only an explicit
-Deny removes them.
+On update, roles that used **Deny**, **Inherit** and **Allow** go back to
+switches: Allow becomes on, and Inherit and Deny become off. Server role
+denials no longer exist, so members who only lost a permission because of a
+role get it back from Everyone. To block something in a specific place, use
+**Deny** in the channel or category permissions. On servers still using
+switches with the old rule, a permission only applied if every role had it;
+now one role is enough.
 
 This change requires updated clients (protocol 35 or later). Older clients are
 asked to update before connecting so that cached content is also removed when

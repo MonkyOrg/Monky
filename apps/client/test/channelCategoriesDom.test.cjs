@@ -60,6 +60,16 @@ if (!process.versions.electron) {
       contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true,
     } });
     browser.webContents.debugger.attach('1.3');
+    // Native input and its effects land asynchronously; poll instead of trusting a fixed sleep.
+    const pageBecomes = (expression, timeout = 5000) => browser.webContents.executeJavaScript(`new Promise(resolve => {
+      const started = performance.now();
+      const probe = () => {
+        if (${expression}) resolve(true);
+        else if (performance.now() - started > ${timeout}) resolve(false);
+        else requestAnimationFrame(probe);
+      };
+      probe();
+    })`);
     const drag = async (from, to) => {
       browser.webContents.sendInputEvent({ type: 'mouseMove', ...from });
       await new Promise(resolve => setTimeout(resolve, 20));
@@ -136,10 +146,12 @@ if (!process.versions.electron) {
       })`);
     };
     const click = async (selector) => {
-      const point = await browser.webContents.executeJavaScript(`(() => {
+      // A real user's scroll is delivered before their click; wait for ours so a scroll-dismissed popup is not closed by it.
+      const point = await browser.webContents.executeJavaScript(`(async () => {
         const element = document.querySelector(${JSON.stringify(selector)});
         if (!element) return { failure: 'Missing pointer target: ' + ${JSON.stringify(selector)} };
         element.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const box = element.getBoundingClientRect();
         const point = { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
         const hit = document.elementFromPoint(point.x, point.y);
@@ -223,9 +235,9 @@ if (!process.versions.electron) {
       browser.webContents.focus();
       browser.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'SPACE' });
       browser.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'SPACE' });
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      const expanded = await browser.webContents.executeJavaScript(`document.querySelector('[data-collapse-category="category"]').getAttribute('aria-expanded')`);
-      if (expanded !== 'true') throw new Error('Space did not expand the focused category button');
+      if (!await pageBecomes(`document.querySelector('[data-collapse-category="category"]')?.getAttribute('aria-expanded') === 'true'`)) {
+        throw new Error('Space did not expand the focused category button');
+      }
       const points = await browser.webContents.executeJavaScript(`(() => {
         const point = (selector, yRatio = 0.5) => {
           const box = document.querySelector(selector).getBoundingClientRect();
@@ -246,7 +258,7 @@ if (!process.versions.electron) {
         throw new Error('The Uncategorized target did not push existing categories down during channel drag: ' +
           JSON.stringify(channelDragGeometry));
       }
-      const channelMoved = await browser.webContents.executeJavaScript(`window.categoryTestRequests.some(({ type, payload }) =>
+      const channelMoved = await pageBecomes(`window.categoryTestRequests.some(({ type, payload }) =>
         type === 'CHANNEL_UPDATE' && payload.channelId === 'voice' && payload.categoryId === 'destination')`);
       if (!channelMoved) {
         const diagnostic = await browser.webContents.executeJavaScript(`({
@@ -260,7 +272,7 @@ if (!process.versions.electron) {
       }
       await browser.webContents.executeJavaScript('window.categoryTestRequests.length = 0');
       await drag(points.category, points.destination);
-      const categoryMoved = await browser.webContents.executeJavaScript(`window.categoryTestRequests.some(({ type, payload }) =>
+      const categoryMoved = await pageBecomes(`window.categoryTestRequests.some(({ type, payload }) =>
         type === 'CATEGORY_REORDER' && payload.orderedIds.join(',') === 'destination,category')`);
       if (!categoryMoved) throw new Error('A real Chromium pointer drag did not reorder categories');
       await browser.webContents.executeJavaScript('window.openChannelSettingsProbe(); document.fonts.ready');
