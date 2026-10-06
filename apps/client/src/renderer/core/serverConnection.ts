@@ -299,6 +299,11 @@ export async function joinCallOnSession(
   audioProcessor.stopMicrophone();
   webRtcManager.suspendForVoiceReconnect(true);
   const stoppedScreens = changingChannel ? stopLocalScreenShares(screenAudioService, { teardown: true }) : null;
+  // The camera belongs to the room it was turned on in. Stopping it while the
+  // old call is still current lets the publication binding announce it off to
+  // that room before the departure, and drops the cached track so admission
+  // into the destination cannot republish it.
+  if (changingChannel && previousChannelId) videoService.stopCamera();
   if (previousKey && previousKey !== sessionKey && previousChannelId) {
     sessionManager.get(previousKey)?.client.send(MessageType.VOICE_LEAVE, { channelId: previousChannelId });
   }
