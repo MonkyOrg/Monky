@@ -515,6 +515,24 @@ limites de configuração, não garantia de FPS, bitrate entregue ou desempenho.
 O feedback de bitrate confirma configurações, não a aplicação medida no
 hardware (`hardwareApplicationConfirmed: false`, `fpsApplied: null`).
 
+Todos os encoders usam controle de taxa CBR, inclusive o H.264 por AMF. O plugin
+AMF fixado aplica cada bitrate ao vivo com `Flush()` + `ReInit()`, o que reinicia o
+controle de taxa e emite um IDR. Com `VBR_LAT`, o VBV de ~1 quadro produzia um IDR
+pequeno e quadriculado, que levava vários quadros para recuperar a nitidez. Em
+redes instáveis, a imagem pulsava a cada ajuste de bitrate. Com CBR, o reinício gera
+um IDR completo, como já acontecia no AV1 por AMF. Em troca, o AMF completa com
+*filler* os quadros abaixo do bitrate alvo, como o x264 e o AV1 por AMF já faziam.
+
+Mesmo em CBR, todo ajuste reinicia os encoders de hardware do Windows: o AV1 por
+AMF ainda emite, após o `ReInit()`, um quadro-chave com cerca de metade do tamanho
+normal e leva de 10 a 20 quadros para recuperar a nitidez. O NVENC reinicia com
+`resetEncoder` e IDR forçado. Por isso, o transmissor mantém 10% de folga sobre a
+alocação do RTC e só aumenta o bitrate quando o novo alvo supera o atual em
+**25%**. Reduções continuam imediatas assim que a alocação fica abaixo do valor
+aplicado. Na banda registrada de uma conexão instável, as mudanças caíram de oito
+para cinco em 30 segundos. x264, libaom e VideoToolbox ajustam o bitrate sem
+reiniciar e seguem a mesma regra.
+
 A captura só começa após selecionar uma fonte e existir **demanda de prévia
 local ou de espectador**. A prévia funciona sem espectadores: nesse caso usa
 um pipeline local no perfil da fonte, sem publicar mídia na rede. Quando há

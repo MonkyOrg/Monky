@@ -744,7 +744,10 @@ int main(int argc, char** argv) {
     rejects([&] { ValidateEncoderAdmission(true, true, true, true, false, false, EncoderKind::Nvenc, false); });
     ValidateEncoderAdmission(true, true, true, true, false, false, EncoderKind::Nvenc, true); check(true);
     check(ConfigurationJson(Method::GameHook, game.video, EncoderKind::Nvenc).find("\"rateControl\":\"CBR\"") != std::string::npos);
-    check(ConfigurationJson(Method::Wgc, game.video).find("\"rateControl\":\"VBR_LAT\"") != std::string::npos);
+    check(ConfigurationJson(Method::Wgc, game.video).find("\"rateControl\":\"CBR\"") != std::string::npos);
+    for (const auto encoder : {EncoderKind::Amf, EncoderKind::AmfAv1, EncoderKind::Nvenc, EncoderKind::NvencAv1,
+                               EncoderKind::X264, EncoderKind::AomAv1})
+      check(std::string_view(EncoderRateControl(encoder)) == "CBR");
     EncoderCapability capability{EncoderKind::Nvenc, 0, 0x10de, 123, 456, true};
     check(CapabilityJson(capability).find("nvenc-d3d11-session") != std::string::npos);
     capability.vendorId = 0x1002;
