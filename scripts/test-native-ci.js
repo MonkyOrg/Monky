@@ -676,6 +676,55 @@ test('ci:local mirrors CI commands from ci.yml and the DOM runner, skipping only
     /scripts\/__pycache__/u, 'Files left by the steps must fail locally, as the CI build export does.');
 });
 
+test('the mediasoup worker cache pins the locked package, host and compiler, and restores only verified workers', async t => {
+  const { workerKey, verifyWorker, binary } = require('./mediasoup-worker.cjs');
+  const base = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'monky-mediasoup-key-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const writeLock = (version, integrity) => fs.writeFileSync(path.join(base, 'package-lock.json'),
+    JSON.stringify({ packages: { 'node_modules/mediasoup': { version, integrity } } }));
+  const writeXcode = version => {
+    fs.mkdirSync(path.join(base, 'apps', 'light'), { recursive: true });
+    fs.writeFileSync(path.join(base, 'apps', 'light', 'dependencies.json'), JSON.stringify({ buildTools: { ciXcode: version } }));
+  };
+  writeLock('3.26.0', 'sha512-a'); writeXcode('16.4');
+  const key = (overrides = {}) => workerKey({ base, platform: 'darwin', arch: 'x64', image: 'macos15', ...overrides });
+  const original = key();
+  assert.match(original, /^mediasoup-worker-v1-darwin-x64-[a-f0-9]{12}-3\.26\.0-[a-f0-9]{16}$/u);
+  assert.equal(key(), original);
+  for (const changed of [{ arch: 'arm64' }, { platform: 'linux' }, { image: 'macos26' }])
+    assert.notEqual(key(changed), original, JSON.stringify(changed));
+  writeXcode('26.0'); assert.notEqual(key(), original, 'The compiler selection is part of the key.'); writeXcode('16.4');
+  writeLock('3.26.0', 'sha512-b'); assert.notEqual(key(), original, 'The exact locked package is part of the key.');
+  writeLock('3.27.0', 'sha512-a'); assert.notEqual(key(), original);
+  writeLock('3.26.0', undefined); assert.throws(() => key(), /integrity/u);
+
+  assert.equal(binary, `node_modules/mediasoup/worker/out/Release/mediasoup-worker${process.platform === 'win32' ? '.exe' : ''}`);
+  const job = ci.jobs['light-native'];
+  const id = step(job, 'Identify the mediasoup worker build');
+  const restore = step(job, 'Restore the verified mediasoup worker');
+  const install = step(job, 'Install the mediasoup worker');
+  const verify = step(job, 'Verify the mediasoup worker on this host');
+  const tests = step(job, 'Exercise native and Chromium voice through a real isolated server');
+  const save = step(job, 'Save the verified mediasoup worker');
+  assert.equal(id.run, 'node scripts/mediasoup-worker.cjs key');
+  assert.equal(restore.uses, 'actions/cache/restore@v4');
+  assert.deepEqual(restore.with, { path: '${{ steps.mediasoup.outputs.path }}', key: '${{ steps.mediasoup.outputs.key }}' });
+  assert.equal(install.if, "steps.mediasoup-cache.outputs.cache-hit != 'true'");
+  assert.equal(install.run, 'npm rebuild mediasoup');
+  assert.equal(verify.if, undefined, 'Restored and freshly installed workers pass the same checks.');
+  assert.equal(save.if, "steps.mediasoup-cache.outputs.cache-hit != 'true'");
+  assert.deepEqual(save.with, restore.with);
+  const order = [id, restore, install, verify, tests, save].map(candidate => job.steps.indexOf(candidate));
+  assert.deepEqual(order, [...order].sort((a, b) => a - b), 'A worker is cached only after it ran the real interop tests.');
+  assert.doesNotMatch(step(job, 'Prepare disposable voice interoperability fixtures').run, /mediasoup/u);
+
+  const fake = path.join(base, ...binary.split('/'));
+  await assert.rejects(verifyWorker({ base }), /ENOENT|Missing mediasoup worker/u);
+  fs.mkdirSync(path.dirname(fake), { recursive: true });
+  fs.copyFileSync(process.execPath, fake);
+  await assert.rejects(verifyWorker({ base }), /does not run on this host/u, 'A binary that is not the worker is rejected.');
+});
+
 test('native tooltip input requires actual window and renderer focus, not a fixed showInactive delay', async () => {
   const calls = [];
   let shown = false, nativeFocused = false, rendererFocused = false;

@@ -83,14 +83,37 @@ jobs:
       - name: Exercise native components without media devices
         # Keep the realtime audio clock check isolated from the other native processes.
         run: node --test --test-concurrency=1 scripts/test-light-contracts.js scripts/test-light-build.js apps/light/test/platform_components.test.cjs apps/light/test/identity_key_interop.test.cjs apps/light/test/console_control.test.cjs apps/light/test/websocket_transport.test.cjs
+      # mediasoup has no prebuilt worker for every host (darwin-x64 compiles it for ~8 min). The
+      # key pins the exact locked package, host image and compiler; a restored worker passes the
+      # same checks as a fresh one and is saved only after the real interoperability tests.
+      - name: Identify the mediasoup worker build
+        id: mediasoup
+        run: node scripts/mediasoup-worker.cjs key
+      - name: Restore the verified mediasoup worker
+        id: mediasoup-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.mediasoup.outputs.path }}
+          key: ${{ steps.mediasoup.outputs.key }}
       - name: Prepare disposable voice interoperability fixtures
         run: |
-          npm rebuild mediasoup esbuild
+          npm rebuild esbuild
           npm run build --workspace=apps/server
+      - name: Install the mediasoup worker
+        if: steps.mediasoup-cache.outputs.cache-hit != 'true'
+        run: npm rebuild mediasoup
+      - name: Verify the mediasoup worker on this host
+        run: node scripts/mediasoup-worker.cjs verify
       - name: Install Electron runtime before tests
         run: npm exec --no -- install-electron
       - name: Exercise native and Chromium voice through a real isolated server
         run: node --test apps/light/test/server_fixture.test.cjs apps/light/test/headless_interop.test.cjs apps/light/test/audio_devices.test.cjs apps/light/test/browser_interop.test.cjs
+      - name: Save the verified mediasoup worker
+        if: steps.mediasoup-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.mediasoup.outputs.path }}
+          key: ${{ steps.mediasoup.outputs.key }}
       - name: Restore macOS Keychain configuration
         if: always() && runner.os == 'macOS'
         run: python scripts/macos-test-keychain.py restore
