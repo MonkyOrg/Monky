@@ -1,3 +1,4 @@
+import { isMotionQualityPreset } from '@monky/shared';
 import { settingsStore } from '../../stores/settingsStore';
 import { t } from '../../i18n';
 
@@ -6,7 +7,7 @@ import { t } from '../../i18n';
  *
  * Automatic mode can negotiate fallback codecs. An explicit screen codec is
  * a constraint, not just a position in an SDP preference list (#566):
- * - auto: prioritized as AV1 -> VP9 -> VP8 -> H.264, except on the Gaming preset
+ * - auto: prioritized as AV1 -> VP9 -> VP8 -> H.264, except on 60+ FPS presets
  *   (see below)
  * - av1 / vp9 / vp8 / h264: screens advertise only that codec and its RTX;
  *   WebRtcManager also selects the outgoing encoder with encodings.codec
@@ -108,10 +109,12 @@ function compatibleSendingVideoCodecs(): RTCRtpCodec[] {
  * AV1 and VP9 have no hardware encoder on most desktops, so WebRTC encodes them
  * on the CPU — at 1080p60 that is enough work to steal frames from the game
  * being shared (#526). H.264 is the only codec with near-universal NVENC /
- * QuickSync / AMF support, which is also what Discord and OBS lean on.
+ * QuickSync / AMF support, which is also what Discord and OBS lean on. Every
+ * named preset from 60 FPS up (1080p60 to 4K120) is at least that demanding.
  */
 export function shouldPreferHardwareEncoding(): boolean {
-  return settingsStore?.qualityPreset === 'GAMING';
+  const preset = settingsStore?.qualityPreset;
+  return preset !== undefined && isMotionQualityPreset(preset);
 }
 
 export function getPriorityListForCodec(

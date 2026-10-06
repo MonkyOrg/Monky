@@ -44,6 +44,7 @@ permissions:
 jobs:
   version:
     name: Resolve Version
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.bump.outputs.version }}
@@ -120,6 +121,8 @@ jobs:
   build:
     name: Build (${{ matrix.platform }})
     needs: version
+    # Generous: a legacy/expired-artifact release recompiles both native runtimes.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -170,10 +173,46 @@ jobs:
         run: npm run build
 
       - name: Restore approved desktop build
+        id: restore
         if: needs.version.outputs.reuse_build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/ci-build-artifact.js restore ${{ matrix.platform }} "${{ needs.version.outputs.ci_run_id }}" "${{ fromJSON(needs.version.outputs.ci_artifacts)[matrix.platform] }}"
+
+      # PR caches are visible only to their own PR. Saving the approved, hash-verified runtime
+      # under the exact key CI recorded lets the next PRs skip an identical native build; it never
+      # compiles anything here and the release itself does not restore from this cache. The same
+      # acceptance checks as CI run first, so an unusable runtime (for example one that lost its
+      # execute bit) can never be shared with every later PR.
+      - name: Verify the approved native runtime before sharing it (macOS)
+        if: needs.version.outputs.reuse_build == 'true' && runner.os == 'macOS' && steps.restore.outputs.native_cache_key != ''
+        run: |
+          arch -x86_64 /usr/bin/true
+          node apps/client/native/screen-share/scripts/verifyOutputs.cjs mac
+
+      - name: Share the approved native runtime with later CI (macOS)
+        if: needs.version.outputs.reuse_build == 'true' && runner.os == 'macOS' && steps.restore.outputs.native_cache_key != ''
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            apps/client/native/screen-share/bin/darwin-arm64
+            apps/client/native/screen-share/bin/darwin-x64
+          key: ${{ steps.restore.outputs.native_cache_key }}
+
+      - name: Verify the approved native runtime before sharing it (Windows)
+        if: needs.version.outputs.reuse_build == 'true' && runner.os == 'Windows' && steps.restore.outputs.native_cache_key != ''
+        run: node apps/client/native/screen-share/scripts/verifyOutputs.cjs win
+
+      - name: Share the approved native runtime with later CI (Windows)
+        if: needs.version.outputs.reuse_build == 'true' && runner.os == 'Windows' && steps.restore.outputs.native_cache_key != ''
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            apps/client/native/screen-share/bin/win32-x64
+            apps/client/native/screen-share/licenses
+            apps/client/native/screen-share/LICENSE
+            apps/client/native/screen-share/THIRD_PARTY_NOTICES
+          key: ${{ steps.restore.outputs.native_cache_key }}
 
       - name: Verify macOS DMG packaging dependencies
         if: runner.os == 'macOS'
@@ -284,6 +323,7 @@ jobs:
   cli:
     name: Pack CLI tarball
     needs: version
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -385,6 +425,7 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [version, build, cli]
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     permissions:
       contents: write

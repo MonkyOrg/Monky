@@ -38,6 +38,7 @@ struct Options {
   std::optional<std::string> channel;
   bool muted = false;
   bool deafened = false;
+  bool tray = false;
 };
 
 std::int64_t unixMilliseconds() {
@@ -53,6 +54,7 @@ Options parseOptions(const std::vector<std::string>& arguments) {
     if (!seen.insert(flag).second) throw std::invalid_argument("Duplicate command-line option");
     if (flag == "--muted") result.muted = true;
     else if (flag == "--deafened") result.deafened = true;
+    else if (flag == "--tray") result.tray = true;
     else {
       if (flag != "--profile" && flag != "--server" && flag != "--nickname" && flag != "--channel") {
         throw std::invalid_argument("Unknown command-line option; use --help");
@@ -102,7 +104,7 @@ const char* mediaEventName(media::EventKind kind) {
   throw std::logic_error("Unknown media event");
 }
 
-void output(Json event) {
+void writeEvent(const Json& event) {
   std::cout << event.dump() << '\n' << std::flush;
   if (!std::cout) throw std::runtime_error("Headless output stream is unavailable");
 }
@@ -142,6 +144,21 @@ class Application final {
                     const auto attempt = attempt_;
                     loop_.post([this, attempt, event] { onSession(attempt, event); }, event.payload.dump().size());
                   }}) {}
+
+  // The interface is notified before the console stream, so an unusable stdout
+  // cannot keep the tray from learning that the core is failing.
+  void observeEvents(std::function<void(const Json&)> observer) { observer_ = std::move(observer); }
+
+  CoreCommands commands() {
+    return {
+        [this](Json value) {
+          auto line = value.dump();
+          const auto bytes = line.size();
+          loop_.post([this, line = std::move(line)] { command(line); }, bytes);
+        },
+        [this] { loop_.post([this] { quit(); }); },
+    };
+  }
 
   ~Application() {
     stopWatchingDevices();
@@ -212,6 +229,11 @@ class Application final {
     std::atomic_bool cancelled = false;
     std::string id;  // Owned only by the application loop.
   };
+
+  void output(Json event) {
+    if (observer_) observer_(event);
+    writeEvent(event);
+  }
 
   void closeSocket() {
     if (socket_) {
@@ -468,6 +490,7 @@ class Application final {
           const auto& auth = *session_.authentication();
           output({{"event", "authenticated"}, {"userId", auth.userId}, {"sessionId", auth.sessionId},
                   {"voiceMode", session_.voiceMode() == VoiceMode::sfu ? "sfu" : "p2p"},
+                  {"serverName", auth.server.at("name")},
                   {"channels", auth.server.at("channels")}});
         }
         break;
@@ -525,6 +548,11 @@ class Application final {
         }
         output({{"event", "disconnected"}, {"reconnecting", !closing_ && session_.phase() == SessionPhase::offline}});
         finishOperations(Clock::now());
+        break;
+      case SessionEventKind::channelsChanged:
+        // Channel creation, renaming and deletion used to be visible only by
+        // polling the state snapshot, which an interface must not do.
+        if (!closing_) output({{"event", "channels-changed"}, {"channels", event.payload.at("channels")}});
         break;
       case SessionEventKind::kicked:
         output({{"event", "kicked"}, {"type", event.type}});
@@ -710,6 +738,7 @@ class Application final {
   bool microphoneAuthorized_ = false;
   bool microphoneRequestPending_ = false;
   CancelMicrophoneAccess cancelMicrophoneAccess_;
+  std::function<void(const Json&)> observer_;
   int exitCode_ = 0;
 };
 
@@ -720,7 +749,7 @@ int runHeadless(std::vector<std::string> arguments, HeadlessConfiguration audio)
     if (arguments == std::vector<std::string>{"--help"}) {
       std::cout << "Monky Light native voice core (development)\n"
                    "  --profile <absolute-path> --server <ws[s]://host:port> --nickname <name>\n"
-                   "  [--channel <voice-channel-id>] [--muted] [--deafened]\n"
+                   "  [--channel <voice-channel-id>] [--muted] [--deafened] [--tray]\n"
                    "The profile parent must exist. Password: MONKY_LIGHT_PASSWORD environment variable.\n"
                    "Control: one JSON object per line on stdin; events are JSON lines on stdout.\n"
                    "{\"command\":\"join\",\"channelId\":\"...\"}\n"
@@ -730,15 +759,40 @@ int runHeadless(std::vector<std::string> arguments, HeadlessConfiguration audio)
                    "{\"command\":\"set-output\",\"deviceId\":\"...\"|null}\n"
                    "{\"command\":\"stats\"} / {\"command\":\"channels\"}\n"
                    "{\"command\":\"leave\"} / {\"command\":\"reconnect\"} / {\"command\":\"quit\"}\n"
-                   "EOF and Ctrl+C release the connection and media resources.\n";
+                   "EOF and Ctrl+C release the connection and media resources.\n"
+                   "--tray adds the native tray interface; the console control stays available.\n";
       return 0;
     }
     const auto options = parseOptions(arguments);
     if (!audio.create) throw std::invalid_argument("An explicit audio device factory is required");
     webrtc::LogMessage::LogToDebug(webrtc::LS_ERROR);
     webrtc::LogMessage::SetLogToStderr(true);
+    auto createInterface = std::move(audio.createInterface);
     Application application(options, std::move(audio));
-    return application.run();
+    if (!options.tray) return application.run();
+    if (!createInterface) throw std::invalid_argument("This build has no native tray interface");
+    // The platform event loops own the main thread, so the core loop moves to a
+    // worker. Without --tray the core keeps the main thread as it always has.
+    auto tray = createInterface(application.commands());
+    application.observeEvents([&tray](const Json& event) { tray->observe(event); });
+    int core = 0;
+    std::thread worker([&] {
+      try {
+        core = application.run();
+      } catch (const std::exception& error) {
+        std::cerr << Json{{"event", "fatal-error"}, {"detail", error.what()}}.dump() << '\n';
+        core = 1;
+      }
+      // Always reached, so a failing core can never leave the interface waiting.
+      tray->stopped();
+    });
+    const auto ui = tray->run();
+    // The interface may also close on its own, through the window manager.
+    application.commands().quit();
+    worker.join();
+    // The observer outlives neither thread; the interface is released first.
+    application.observeEvents(nullptr);
+    return core != 0 ? core : ui;
   } catch (const std::exception& error) {
     std::cerr << Json{{"event", "fatal-error"}, {"detail", error.what()}}.dump() << '\n';
     return 1;

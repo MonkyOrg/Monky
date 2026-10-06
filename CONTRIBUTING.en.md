@@ -380,8 +380,10 @@ as a summary and a button for GitHub details; we do not automatically translate 
 Every PR runs the **CI** workflow. Beyond the build, it has checks that block the
 merge and tend to catch people off guard:
 
-- **Build check (win/mac)** — build and packaging with `electron-builder --dir`,
-  without publishing. Catches native build regressions before the merge.
+- **Build check (win/mac)** — requires packaging with `electron-builder --dir`
+  on both platforms, without publishing, the DOM suite (Windows in two shards and
+  macOS) and native validation on Apple Silicon and Intel hardware. Catches
+  native build regressions before the merge.
 - **Docs traduzidos em sincronia** — every page in `docs-site/` needs its PT/EN
   counterpart. Adding only one of the languages fails the PR.
 - **Mudanca de protocolo exige release major** — touching `PROTOCOL_VERSION`
@@ -399,6 +401,27 @@ When another PR merges first, the previous result is no longer sufficient to
 allow merging: update the branch and wait for the new CI. This does not erase
 the green history or update your branch automatically. Another reviewer's approval
 is still required; an administrator merge is an exception, not the normal flow.
+
+### Run CI locally before opening the PR
+
+`npm run ci:local` runs on this machine the CI commands that make sense outside
+a disposable runner. It reads the steps from `.github/workflows/ci.yml` and the
+DOM suite from `scripts/test-client-dom.cjs`, keeps going after each failure
+and ends by listing what failed, with the log path of each step. The default
+base is `git merge-base origin/main HEAD`. Pass options after `--`:
+
+- `--title "<PR title>"` checks the protocol major-release rule;
+- `--only <regex>` runs only the steps whose `stage label` matches, for example
+  `npm run ci:local -- --only dom`;
+- `--package` includes `electron-builder --dir`.
+
+Steps that only run on a disposable runner, such as the real clipboard and the
+artifact export, show as **PULADO (só CI)**. Without
+`npm run prepare:native-screen`, native tests are also reported as skipped,
+not failed. At the end it checks that the steps left no new files in the
+checkout, because CI only exports builds from a clean checkout; this check runs
+even with `--only`. In CI, each DOM shard also runs everything and lists **every**
+failure at the end (`FALHAS: ...`): fix them all before the next push.
 
 ### Describe how to test it
 
@@ -424,6 +447,9 @@ credentials or signed installers. Release reuses only artifacts from a successfu
 run of the merged PR: it verifies provenance, run attempt, the ZIP and per-file
 SHA-256 digests, lockfile, platform and complete Git tree. Comparing trees rather
 than just commit SHAs supports squash merges without accepting untested code.
+Release also saves the approved native runtime to the `main` cache under the
+exact key CI recorded, without compiling: the next PR with the same native
+sources reuses it after verifying it again.
 Extensionless renderer assets, including licenses, use names without a trailing
 dot; export and extraction reject ambiguous Windows paths.
 

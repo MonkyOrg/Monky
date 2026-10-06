@@ -7486,7 +7486,7 @@ input:focus, textarea:focus, select:focus {
   flex: 1;
   position: relative;
   background-color: var(--bg-card);
-  border: 2px solid var(--accent-primary);
+  border: 2px solid var(--border-color);
   border-radius: var(--radius-lg);
   display: flex;
   align-items: center;
@@ -7495,6 +7495,12 @@ input:focus, textarea:focus, select:focus {
   cursor: pointer;
   min-height: 0;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* Like the grid cards, the accent border is hover feedback, not a permanent frame. */
+.stage-focused-main:hover {
+  border-color: rgba(88, 101, 242, 0.6);
 }
 
 .stage-focused-main.speaking {
@@ -8450,8 +8456,12 @@ input:focus, textarea:focus, select:focus {
   width: 100vw;
   height: 100vh;
   margin: 0;
+  border: 0;
   border-radius: 0;
   background: #000;
+  transform: none;
+  /* Fullscreen shows only the media: no hover frame or speaking glow (cards force that glow). */
+  box-shadow: none !important;
 }
 
 .stage-card:fullscreen .stage-video-element,

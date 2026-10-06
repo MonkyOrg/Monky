@@ -194,8 +194,27 @@ if(MONKY_LIGHT_WITH_RTC)
   target_link_libraries(monky_light_application PUBLIC
     monky_light_media monky_light_session monky_light_profile monky_light_console monky_light_loop
     monky_light_platform)
+  # The tray state machine is platform-free, so it is covered without a display.
+  add_executable(monky-light-tray-test test/tray_model_test.cpp)
+  target_include_directories(monky-light-tray-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(monky-light-tray-test PRIVATE monky_light_json)
+  set_target_properties(monky-light-tray-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/bin")
+  if(WIN32)
+    add_library(monky_light_ui STATIC src/ui/tray_windows.cpp)
+    target_link_libraries(monky_light_ui PUBLIC Shell32 User32 Gdi32)
+    target_compile_definitions(monky_light_ui PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  else()
+    find_library(MONKY_APPKIT_FRAMEWORK AppKit REQUIRED)
+    add_library(monky_light_ui STATIC src/ui/tray_macos.mm)
+    set_source_files_properties(src/ui/tray_macos.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(monky_light_ui PUBLIC "${MONKY_APPKIT_FRAMEWORK}")
+  endif()
+  target_include_directories(monky_light_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(monky_light_ui PUBLIC monky_light_json)
   add_executable(monky-light src/main.cpp)
-  target_link_libraries(monky-light PRIVATE monky_light_application)
+  target_link_libraries(monky-light PRIVATE monky_light_application monky_light_ui)
   if(APPLE)
     set_target_properties(monky-light PROPERTIES
       MACOSX_BUNDLE TRUE
@@ -213,7 +232,7 @@ if(MONKY_LIGHT_WITH_RTC)
       monky_light_profile monky-light-profile-test monky_light_fixture_audio monky-light-audio-fixture-test
       monky_light_session monky-light-session-test monky_light_media
       monky-light-media-lifecycle-test monky-light-media-loopback-test
-      monky_light_application monky-light monky-light-fixture)
+      monky_light_application monky_light_ui monky-light-tray-test monky-light monky-light-fixture)
     if(MSVC)
       target_compile_options(${target} PRIVATE /W4 /WX /EHsc /utf-8 /permissive-)
     else()

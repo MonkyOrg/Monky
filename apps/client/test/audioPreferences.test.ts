@@ -113,6 +113,21 @@ test('old custom preferences and saved profiles cannot bypass current ceilings',
   });
 });
 
+test('saved quality presets survive the 1440p/4K ladder: the old 1080p60 Ultra becomes Smooth and unknown values fall back', () => {
+  withSettingsStorage(storage => {
+    for (const [saved, expected] of [
+      ['ULTRA', 'GAMING'], ['GAMING', 'GAMING'], ['UHD120', 'UHD120'], ['QHD', 'QHD'], ['CUSTOM', 'CUSTOM'],
+      ['ECONOMIC', 'ECONOMIC'], [undefined, 'NORMAL'], ['constructor', 'NORMAL'], [42, 'NORMAL'],
+    ] as const) {
+      storage.setItem('monky_settings', JSON.stringify({ qualityPreset: saved }));
+      const store = new SettingsStore();
+      assert.equal(store.qualityPreset, expected, String(saved));
+      store.save();
+      assert.equal(JSON.parse(storage.getItem('monky_settings')!).qualityPreset, expected);
+    }
+  });
+});
+
 function withSettingsStorage(run: (storage: Storage) => void): void {
   const values = new Map<string, string>();
   const storage: Storage = {

@@ -71,6 +71,27 @@ if (!process.versions.electron) {
     }
     throw new Error(`Timed out: ${description}`);
   };
+  const waitForQuiet = async (sample, description, quietMs = 250, timeoutMs = 5000) => {
+    const started = Date.now();
+    let lastValue = await sample();
+    let lastSerialized = JSON.stringify(lastValue);
+    let quietSince = Date.now();
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const value = await sample();
+      const serialized = JSON.stringify(value);
+      if (serialized !== lastSerialized) {
+        lastValue = value;
+        lastSerialized = serialized;
+        quietSince = Date.now();
+      } else if (Date.now() - quietSince >= quietMs) {
+        return lastValue;
+      }
+      if (Date.now() - started > timeoutMs) {
+        throw new Error(`Timed out waiting for quiet state: ${description}; last=${lastSerialized}`);
+      }
+    }
+  };
   const run = async (window, script) => {
     try { return await window.webContents.executeJavaScript(script, true); }
     catch (error) {
@@ -451,15 +472,22 @@ if (!process.versions.electron) {
     })()`);
     // Wait for the allowed image instead of racing it; blocked navigations then get the same window to show up.
     await waitFor(() => leaks >= requestsBefore + 1, 'the miniapp image request reaches the web');
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    assert.ok(alice.url.startsWith('monky-miniapp:'));
-    assert.equal(aliceWindow.webContents.getURL(), url);
-    assert.equal(leaks, requestsBefore + 1, 'Web assets are allowed, application navigation is not');
-    assert.equal(popups, 0);
+    const blockedNavigation = await waitForQuiet(() => ({
+      aliceUrl: frameUrl(alice),
+      ownerUrl: aliceWindow.webContents.getURL(),
+      leaks,
+      popups,
+    }), 'blocked miniapp navigation');
+    assert.ok(blockedNavigation.aliceUrl?.startsWith('monky-miniapp:'));
+    assert.equal(blockedNavigation.ownerUrl, url);
+    assert.equal(blockedNavigation.leaks, requestsBefore + 1, 'Web assets are allowed, application navigation is not');
+    assert.equal(blockedNavigation.popups, 0);
 
     await alice.executeJavaScript(`location.href = ${JSON.stringify(url)}`);
-    await new Promise(resolve => setTimeout(resolve, 100));
-    assert.ok(alice.url.startsWith('monky-miniapp:'), 'A miniapp cannot navigate into the privileged development origin');
+    const privilegedNavigation = await waitForQuiet(() => ({ aliceUrl: frameUrl(alice) }),
+      'privileged development-origin navigation remains blocked');
+    assert.ok(privilegedNavigation.aliceUrl?.startsWith('monky-miniapp:'),
+      'A miniapp cannot navigate into the privileged development origin');
     const destination = `http://localhost:${http.address().port}/__destination`;
     await alice.executeJavaScript(`location.href = ${JSON.stringify(destination)}`);
     let navigated;

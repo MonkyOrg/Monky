@@ -523,5 +523,5 @@ export interface ScreenWatchSignalPayload extends WebRtcSignalPayload {
 export interface BandwidthSettings {
   maxUploadKbps: number;
   maxDownloadKbps: number;
-  qualityPreset: 'ECONOMIC' | 'NORMAL' | 'HIGH' | 'GAMING' | 'ULTRA';
+  qualityPreset: 'ECONOMIC' | 'NORMAL' | 'HIGH' | 'GAMING' | 'QHD' | 'UHD' | 'UHD120';
 }

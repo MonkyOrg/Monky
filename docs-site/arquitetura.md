@@ -618,24 +618,32 @@ configuram o pipeline real de captura/encoder/transporte:
 
 | Perfil | Áudio | Câmera | Tela |
 |---|---|---|---|
-| **Econômico** | 24 kbps | 640×360 @ 24fps · 250 kbps | 854×480 @ 15fps · 900 kbps |
-| **Normal** | 32 kbps | 854×480 @ 30fps · 450 kbps | 1280×720 @ 30fps · 2000 kbps |
-| **Alta Qualidade** | 48 kbps | 1280×720 @ 30fps · 600 kbps | 1920×1080 @ 30fps · 3500 kbps |
-| **Gaming Mode** | 28 kbps | 640×360 @ 20fps · 300 kbps | 1920×1080 @ 60fps · 6000 kbps |
+| **Leve** | 24 kbps | 640×360 @ 30fps · 300 kbps | 640×360 @ 30fps · 700 kbps |
+| **Padrão** | 32 kbps | 854×480 @ 30fps · 500 kbps | 1280×720 @ 30fps · 2500 kbps |
+| **Nítido** | 48 kbps | 1280×720 @ 30fps · 1000 kbps | 1920×1080 @ 30fps · 4500 kbps |
+| **Fluido** | 64 kbps | 1920×1080 @ 30fps · 2000 kbps | 1920×1080 @ 60fps · 8000 kbps |
+| **Ultra** | 64 kbps | 1920×1080 @ 30fps · 2000 kbps | 2560×1440 @ 60fps · 12000 kbps |
+| **Cinema** | 64 kbps | 1920×1080 @ 30fps · 2000 kbps | 3840×2160 @ 60fps · 25000 kbps |
+| **Extremo** | 64 kbps | 1920×1080 @ 30fps · 2000 kbps | 3840×2160 @ 120fps · 40000 kbps |
 
-O **Gaming Mode** é o mais revelador: ele *reduz* a câmera para gastar tudo na
-tela em 60fps. E, só nele, a preferência de degradação vira
-`maintain-framerate` — sob banda apertada o Monky sacrifica resolução para
-segurar os 60fps, porque num jogo a fluidez importa mais que a nitidez. Nos
-outros perfis é o contrário no caminho Chromium. O nativo solicita o perfil
-real escolhido e não esconde degradação como se a configuração garantisse FPS.
+Cada degrau melhora a tela sem piorar câmera ou áudio, e nenhum fica abaixo de
+30fps. Os tetos ficam acima do usual em streaming porque os encoders de captura
+emitem um quadro-chave por segundo. 4K a 120fps exige H.264 nível 6.0 ou AV1;
+ao escolher o perfil, o Monky verifica o encoder e reduz o FPS se ele recusar.
 
-O perfil Personalizado permite solicitar até 1080p120 no caminho nativo.
+Nos perfis nomeados a partir de 60fps (Fluido até Extremo), a preferência de
+degradação vira `maintain-framerate`: sob banda apertada o Monky sacrifica
+resolução para segurar o FPS, porque em jogos e vídeos a fluidez importa mais
+que a nitidez. Nos outros perfis é o contrário no caminho Chromium. O nativo
+solicita o perfil real escolhido e não esconde degradação como se a
+configuração garantisse FPS.
+
+O perfil Personalizado aceita até 3840×2160 e 240 FPS (120 FPS em 4K).
 O espectador pode pedir Fonte, 1080p60, 720p60 ou 480p30 (852×480); perfis
 diferentes alocam pipelines separados, e não um redimensionamento só no player.
 
-Lembre que esses números são **por par**. Compartilhar tela em Alta Qualidade
-para 4 pessoas pede ~14 Mbps de upload.
+Lembre que esses números são **por par**. Compartilhar tela no perfil Nítido
+para 4 pessoas pede ~18 Mbps de upload.
 
 ### Telemetria
 

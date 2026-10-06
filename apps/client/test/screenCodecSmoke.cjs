@@ -291,8 +291,9 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     try {
       settings.customProfile = { ...profile, screenFps: 120, screenBitrateKbps: 20000 };
       for (const [name, bitrate, fps, degradation] of [
-        ['NORMAL', 2000000, 30, 'maintain-resolution'],
-        ['GAMING', 6000000, 60, 'maintain-framerate'],
+        ['NORMAL', 2500000, 30, 'maintain-resolution'],
+        ['GAMING', 8000000, 60, 'maintain-framerate'],
+        ['UHD120', 40000000, 120, 'maintain-framerate'],
         ['CUSTOM', 20000000, 120, 'maintain-resolution'],
       ]) {
         rtc.currentPreset = name;
@@ -667,8 +668,10 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     await qualityCaps(producer.rtpSender, 'SFU');
     await testSfuAudioStartDuringRestore(screen.stream.id);
     producer = sfu.producers.get(`screen_video:${screen.stream.id}`);
-    const inbound = await request('fixture.stats', { producerId: producer.id });
-    check(inbound.stats.some(stat => stat.type === 'inbound-rtp' && stat.byteCount > 0), 'SFU received real encoded RTP bytes');
+    // The restore above replaces the producer, so its first RTP bytes reach the SFU asynchronously.
+    await until(async () => (await request('fixture.stats', { producerId: producer.id }))
+      .stats.some(stat => stat.type === 'inbound-rtp' && stat.byteCount > 0), 'SFU received real encoded RTP bytes');
+    check(true, 'SFU received real encoded RTP bytes');
     const startingScreen = source();
     const sendRequest = client.sendRequest;
     let releaseProduce;
@@ -1399,9 +1402,10 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
 
   async function testForegroundAdmission() {
     const [{ joinCallOnSession }, { sessionManager }, { audioProcessor: audio },
-      { webRtcManager: globalRtc }, { soundEffects }] = await Promise.all([
+      { webRtcManager: globalRtc }, { soundEffects }, { bindCameraPublication }] = await Promise.all([
       import('/core/serverConnection.ts'), import('/core/SessionManager.ts'),
       import('/core/AudioProcessor.ts'), import('/core/WebRtcManager.ts'), import('/core/SoundEffects.ts'),
+      import('/core/CameraPublication.ts'),
     ]);
     const sessions = ['a', 'b'].map(name => {
       const session = sessionManager.create(`voice-admission-${name}`, 0, 'Alice');
@@ -1531,14 +1535,41 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
         stream: screen.stream, track: screen.stream.getVideoTracks()[0], pending: false,
       });
       voice.addScreenShare(screen.stream.id);
+      // A published camera, as left by the stage toggle and the publication binding.
+      const camera = source();
+      const cameraTrack = camera.stream.getVideoTracks()[0];
+      Object.assign(videoService, {
+        cameraStream: camera.stream, cameraStatus: 'ready', cameraRequested: true, announcedCameraStream: camera.stream,
+      });
+      globalRtc.localCameraTrack = cameraTrack;
+      voice.setCameraOn(true);
+      const unbindCameraPublication = bindCameraPublication();
+      const beforeMoveMessages = messages.length;
       const beforeMove = views.length;
-      const moving = view.rejoinVoiceChannel('moved-room');
-      sessionManager.activate(a.key);
-      await until(() => pending.length === 1, 'Administrative move must await destination admission');
-      check(pending[0].key === b.key && screen.stream.getTracks().every(track => track.readyState === 'ended')
-        && !voice.isScreenSharing, 'A move uses the call server and ends screen sharing before admission');
-      pending.shift().resolve(reply(b, 'moved-room', true));
-      await moving;
+      let moving;
+      try {
+        moving = view.rejoinVoiceChannel('moved-room');
+        sessionManager.activate(a.key);
+        await until(() => pending.length === 1, 'Administrative move must await destination admission');
+        check(pending[0].key === b.key && screen.stream.getTracks().every(track => track.readyState === 'ended')
+          && !voice.isScreenSharing, 'A move uses the call server and ends screen sharing before admission');
+        const moveMessages = messages.slice(beforeMoveMessages);
+        const cameraOff = moveMessages.findIndex(message => message.key === b.key
+          && message.type === MessageType.VOICE_STATE_UPDATE && message.payload.isCameraOn === false);
+        const destinationJoin = moveMessages.findIndex(message => message.type === MessageType.VOICE_JOIN
+          && message.payload.channelId === 'moved-room');
+        check(cameraTrack.readyState === 'ended' && !voice.isCameraOn && globalRtc.localCameraTrack === null
+          && videoService.getCameraState().status === 'idle' && !videoService.getCameraState().publishing,
+        'Changing voice channels turns the camera off and drops its cached track before admission');
+        check(cameraOff >= 0 && destinationJoin > cameraOff,
+          'The old room is told the camera is off before the destination admission is requested');
+        pending.shift().resolve(reply(b, 'moved-room', true));
+        await moving;
+      } finally {
+        unbindCameraPublication();
+      }
+      check(!voice.isCameraOn && globalRtc.localCameraTrack === null && videoService.getCameraStream() === null,
+        'Admission into the destination never republishes the previous room camera');
       check(voice.voiceSessionKey === b.key && voice.currentVoiceChannelId === 'moved-room'
         && sessionManager.getActiveKey() === a.key && views.length === beforeMove,
       'A delayed foreground rejoin never changes the newly visible server stage');

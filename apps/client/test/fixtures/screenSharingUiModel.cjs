@@ -253,7 +253,7 @@ function fixture(language = 'en') {
   const capabilities = { capture: true, captureAudio: true, receive: true, captureKinds: ['window', 'monitor', 'game'], backend: 'libobs-amf', reason: null };
   const controls = {
     capabilities: async () => capabilities, sources: async () => sources,
-    current: true, confirm: true, capturingAudio: false, settingsError: null, screenPermission: async () => true,
+    current: true, confirm: true, capturingAudio: false, settingsError: null, appliedShares: 0, screenPermission: async () => true,
     start: null, stop: null, reapply: async () => {},
     openExternal: async () => ({ success: true }),
     encoding: async input => ({
@@ -335,7 +335,7 @@ function fixture(language = 'en') {
       traces.push(['assert-settings', profile, codec]);
       if (controls.settingsError) throw controls.settingsError;
     },
-    setQualityPreset: value => traces.push(['preset', value]),
+    setQualityPreset: value => { traces.push(['preset', value]); return Promise.resolve(controls.appliedShares); },
     reapplyCodecPreferences: () => controls.reapply(),
   };
   const stopLocalScreenShares = async (_, { shareIds, notify }) => {

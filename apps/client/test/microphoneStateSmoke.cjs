@@ -16,6 +16,7 @@ if (!process.versions.electron) {
 } else {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_MICROPHONE_TEST_PROFILE);
+  app.on('window-all-closed', () => {});
   let vite;
   let window;
   let timeout;

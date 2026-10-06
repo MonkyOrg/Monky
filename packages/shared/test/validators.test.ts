@@ -7,6 +7,9 @@ import {
   Permission,
   LIMITS,
   QUALITY_PRESETS,
+  isMotionQualityPreset,
+  restoreQualityPreset,
+  type QualityPresetType,
   PROTOCOL_VERSION,
   canAccessChannel,
   channelCreateSchema,
@@ -46,10 +49,31 @@ assert.equal(isValidMessageContent('a'.repeat(16000)), true);
 console.log('✔ Validações de Mensagem passaram');
 
 // Test Quality Presets
-console.assert(QUALITY_PRESETS.ECONOMIC.audioBitrateKbps === 24, 'Preset Econômico de áudio');
-console.assert(QUALITY_PRESETS.NORMAL.audioBitrateKbps === 32, 'Preset Normal de áudio');
-console.assert(QUALITY_PRESETS.HIGH.audioBitrateKbps === 48, 'Preset Alta de áudio');
-console.assert(QUALITY_PRESETS.GAMING.name === 'Gaming Mode', 'Preset Gaming Mode');
+console.assert(QUALITY_PRESETS.ECONOMIC.audioBitrateKbps === 24, 'Preset Leve de áudio');
+console.assert(QUALITY_PRESETS.NORMAL.audioBitrateKbps === 32, 'Preset Padrão de áudio');
+console.assert(QUALITY_PRESETS.HIGH.audioBitrateKbps === 48, 'Preset Nítido de áudio');
+assert.deepEqual(Object.values(QUALITY_PRESETS).map(profile => profile.name),
+  ['Leve', 'Padrão', 'Nítido', 'Fluido', 'Ultra', 'Cinema', 'Extremo']);
+const presetLadder = Object.values(QUALITY_PRESETS);
+for (const [index, profile] of presetLadder.entries()) {
+  assert.ok(profile.screenFps >= 30 && profile.cameraFps >= 30, `${profile.name} não fica abaixo de 30 FPS`);
+  const previous = presetLadder[index - 1];
+  if (!previous) continue;
+  for (const key of ['audioBitrateKbps', 'cameraBitrateKbps', 'screenBitrateKbps', 'screenFps'] as const)
+    assert.ok(profile[key] >= previous[key], `${profile.name} não reduz ${key} em relação a ${previous.name}`);
+  assert.ok(profile.screenWidth * profile.screenHeight * profile.screenFps
+    > previous.screenWidth * previous.screenHeight * previous.screenFps, `${profile.name} sobe a tela`);
+}
+assert.deepEqual([QUALITY_PRESETS.UHD120.screenWidth, QUALITY_PRESETS.UHD120.screenHeight, QUALITY_PRESETS.UHD120.screenFps],
+  [3840, 2160, 120]);
+assert.equal(restoreQualityPreset('ULTRA'), 'GAMING', 'O antigo ULTRA era o degrau 1080p60, hoje Fluido');
+assert.equal(restoreQualityPreset('UHD120'), 'UHD120');
+assert.equal(restoreQualityPreset('CUSTOM'), 'CUSTOM');
+for (const invalid of [undefined, null, 'toString', 'unknown', 3]) assert.equal(restoreQualityPreset(invalid), 'NORMAL');
+const steady: QualityPresetType[] = ['ECONOMIC', 'NORMAL', 'HIGH', 'CUSTOM'];
+const motion: QualityPresetType[] = ['GAMING', 'QHD', 'UHD', 'UHD120'];
+assert.deepEqual(steady.filter(isMotionQualityPreset), []);
+assert.deepEqual(motion.filter(isMotionQualityPreset), motion);
 console.log('✔ Presets de Qualidade verificados');
 
 // Test Protocol Version

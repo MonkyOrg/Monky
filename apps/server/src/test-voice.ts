@@ -79,6 +79,18 @@ test('administrative voice restrictions belong to the user on this server, not a
   assert.equal(cleared.voiceState?.serverDeafened, false, 'explicit administrative removal persists too');
 });
 
+test('changing voice channels turns the camera off, while a same-channel rejoin keeps it', async () => {
+  const service = signaling();
+  await service.joinVoiceChannel('alice', 'alice', 'room');
+  assert.equal(service.updateVoiceState('alice', { isCameraOn: true })?.isCameraOn, true);
+  const rejoined = await service.joinVoiceChannel('alice', 'alice', 'room');
+  assert.equal(rejoined.voiceState?.isCameraOn, true, 'reconnecting into the same room keeps the camera');
+  const moved = await service.joinVoiceChannel('alice', 'alice', 'other-room');
+  assert.equal(moved.previousVoiceState?.isCameraOn, true);
+  assert.equal(moved.voiceState?.isCameraOn, false, 'the camera does not follow the user into another room');
+  assert.equal(service.getVoiceState('alice')?.isCameraOn, false);
+});
+
 test('authentication supplies the current identity restriction before voice, after asynchronous ICE setup', async () => {
   const restrictions = memoryRestrictions();
   const service = signaling(restrictions);

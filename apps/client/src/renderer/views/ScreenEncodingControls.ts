@@ -1,5 +1,6 @@
 import type { NativeScreenVideoProfile, ScreenEncodingAvailability, ScreenEncodingMode, ScreenCodec } from '@monky/shared';
 import { settingsStore } from '../stores/settingsStore';
+import { voiceStore } from '../stores/voiceStore';
 import { probeScreenEncoding, type ScreenEncodingPreferences } from '../core/screenEncoding';
 import { t } from '../i18n';
 import { escapeHtml } from '../utils/html';
@@ -29,11 +30,17 @@ export class ScreenEncodingControls {
   private choices = new Map<string, CheckedEncoding>();
   private choicesProfile = '';
   private checkingChoices = false;
+  // Alternatives wait for the share to end instead of competing with the live encoder.
+  private choicesDeferred = false;
+  private unbindVoice: (() => void) | null = null;
+  private userRequest = false;
+  private handoff = false;
 
   constructor(private readonly profile: () => NativeScreenVideoProfile | null,
     private readonly changed: () => void = () => {},
     private readonly applyCompatibleProfile?: (profile: NativeScreenVideoProfile) => void,
-    private readonly rejected?: () => void) {}
+    private readonly rejected?: () => void,
+    private readonly handedOffSettled?: () => void) {}
 
   static html(): string {
     return `<div class="form-group" data-settings-section="screen-encoding"
@@ -81,7 +88,11 @@ export class ScreenEncodingControls {
   }
 
   attach(container: HTMLElement): void {
-    this.cleanup();
+    // A change the user requested before closing keeps its verification; reopening shows it as pending.
+    const resume = this.handoff && this.pending;
+    if (resume) this.unbindUi();
+    else this.cleanup();
+    this.handoff = false;
     this.container = container;
     this.events = new AbortController();
     this.unbindSettings = appEvents.on('settings.updated', () => {
@@ -91,6 +102,7 @@ export class ScreenEncodingControls {
       }
       void this.refresh();
     });
+    this.unbindVoice = appEvents.on('voice.state_updated', () => this.resumeDeferredChoices());
     for (const strategy of ['automatic', 'manual'] as const) {
       const button = container.querySelector<HTMLButtonElement>(`#screen-encoding-${strategy}`);
       button?.addEventListener('click', () => {
@@ -119,6 +131,7 @@ export class ScreenEncodingControls {
       this.requested = { ...this.preferences(), codec: codec.value === 'av1' ? 'av1' : 'h264' };
       void this.refresh();
     }, { signal: this.events.signal });
+    if (resume) this.render();
     void this.refresh();
   }
 
@@ -161,6 +174,7 @@ export class ScreenEncodingControls {
 
   private choiceText(mode: ScreenEncodingMode, codec: ScreenCodec, choice?: CheckedEncoding): string {
     if (!choice && (this.pending || this.checkingChoices)) return t('common.loading');
+    if (!choice && this.choicesDeferred) return t('settings.screenEncodingChoiceDeferred', { codec: codec.toUpperCase() });
     if (!choice || 'error' in choice) return t('settings.screenEncodingChoiceRetry', { codec: codec.toUpperCase() });
     return choice.availability.selection
       ? t('settings.screenEncodingChoiceReady', { codec: codec.toUpperCase(), fps: choice.profile.fps })
@@ -196,7 +210,7 @@ export class ScreenEncodingControls {
     availability: ScreenEncodingAvailability): void {
     const probe = this.probe, container = this.container;
     const current = () => this.probe === probe && !probe?.signal.aborted
-      && this.container === container && !!container?.isConnected;
+      && (this.handoff || this.container === container && !!container?.isConnected);
     const previous = this.savedPreferences(), preferences = this.preferences();
     this.committing = true;
     try {
@@ -265,7 +279,9 @@ export class ScreenEncodingControls {
     const probe = new AbortController();
     this.probe = probe;
     this.pending = true;
+    this.userRequest = applyRequested || this.requested !== null;
     this.checkingChoices = false;
+    this.choicesDeferred = false;
     this.error = '';
     this.availability = null;
     if (this.choicesProfile !== JSON.stringify(profile)) {
@@ -275,7 +291,8 @@ export class ScreenEncodingControls {
     this.render();
     this.changed();
     const current = () => !probe.signal.aborted && this.probe === probe
-      && !!this.container?.isConnected && this.key() === key && JSON.stringify(this.savedPreferences()) === saved;
+      && (this.handoff || !!this.container?.isConnected) && this.key() === key
+      && JSON.stringify(this.savedPreferences()) === saved;
     let checkedCurrent = false;
     try {
       if (!profile) throw new Error(t('screenShare.nativeProfileChangeBlocked'));
@@ -314,10 +331,14 @@ export class ScreenEncodingControls {
     } finally {
       if (!probe.signal.aborted && this.probe === probe) {
         this.pending = false;
-        this.render();
-        this.changed();
-        if (checkedCurrent && this.preferences().encodingStrategy === 'manual')
-          await this.discoverChoices(probe);
+        this.userRequest = false;
+        if (this.handoff) this.finishHandoff();
+        else {
+          this.render();
+          this.changed();
+          if (checkedCurrent && this.preferences().encodingStrategy === 'manual')
+            await this.discoverChoices(probe);
+        }
       }
     }
   }
@@ -333,12 +354,17 @@ export class ScreenEncodingControls {
     const current = () => !probe.signal.aborted && this.probe === probe && !!this.container?.isConnected
       && JSON.stringify(this.profile()) === profileKey && this.key() === key
       && JSON.stringify(this.savedPreferences()) === saved;
+    const defer = (): boolean => {
+      this.choicesDeferred = voiceStore.isScreenSharing;
+      return this.choicesDeferred;
+    };
+    if (defer()) { this.render(); return; }
     this.checkingChoices = true;
     this.render();
     try {
       for (const mode of ['hardware', 'software'] as const) {
         for (const codec of ['h264', 'av1'] as const) {
-          if (!current()) return;
+          if (!current() || defer()) return;
           if (this.choice(mode, codec)) continue;
           let result: CheckedEncoding;
           try { result = await this.check(profile, { encodingStrategy: 'manual', encodingMode: mode, codec }, probe.signal); }
@@ -355,6 +381,13 @@ export class ScreenEncodingControls {
     } finally {
       if (current()) { this.checkingChoices = false; this.render(); }
     }
+  }
+
+  private resumeDeferredChoices(): void {
+    const probe = this.probe;
+    if (!this.choicesDeferred || voiceStore.isScreenSharing || this.pending || !probe || !this.container?.isConnected)
+      return;
+    void this.discoverChoices(probe);
   }
 
   get ready(): boolean { return !this.pending && this.availability?.selection !== null && !!this.availability; }
@@ -392,7 +425,8 @@ export class ScreenEncodingControls {
         const label = t(value === 'av1' ? 'settings.codecAv1' : 'settings.codecH264');
         const explanation = automatic ? '' : this.choiceText(preferences.encodingMode, value, choice);
         option.textContent = !automatic && (!choice || 'error' in choice || !choice.availability.selection)
-          ? `${label} — ${!choice && (this.pending || this.checkingChoices) ? t('common.loading') : !choice || 'error' in choice
+          ? `${label} — ${!choice && (this.pending || this.checkingChoices) ? t('common.loading')
+            : !choice && this.choicesDeferred ? t('settings.screenEncodingNotChecked') : !choice || 'error' in choice
             ? t('settings.screenEncodingRetry') : t('screenShare.unavailable')}` : label;
         option.title = explanation;
       }
@@ -407,11 +441,12 @@ export class ScreenEncodingControls {
     if (choices) {
       choices.setAttribute('aria-busy', String(this.checkingChoices));
       choices.textContent = automatic ? '' : this.checkingChoices ? t('settings.screenEncodingCheckingChoices')
-        : (['h264', 'av1'] as const).flatMap(codec => {
-          const choice = this.choice(preferences.encodingMode, codec);
-          return choice && ('error' in choice || !choice.availability.selection)
-            ? [this.choiceText(preferences.encodingMode, codec, choice)] : [];
-        }).join(' ');
+        : [...(this.choicesDeferred ? [t('settings.screenEncodingChoicesDeferred')] : []),
+          ...(['h264', 'av1'] as const).flatMap(codec => {
+            const choice = this.choice(preferences.encodingMode, codec);
+            return choice && ('error' in choice || !choice.availability.selection)
+              ? [this.choiceText(preferences.encodingMode, codec, choice)] : [];
+          })].join(' ');
     }
     const status = this.container?.querySelector<HTMLElement>('#screen-encoding-status');
     if (status) {
@@ -429,20 +464,50 @@ export class ScreenEncodingControls {
     }
   }
 
-  cleanup(): void {
-    this.clearToast?.();
-    this.clearToast = null;
-    this.unbindSettings?.();
-    this.unbindSettings = null;
+  get hasPendingRequest(): boolean { return this.pending && this.userRequest; }
+
+  // Closing the owner UI keeps a pending user request verifying in the background.
+  release(): void {
+    if (!this.hasPendingRequest) { this.cleanup(); return; }
+    this.handoff = true;
+    this.unbindUi();
+  }
+
+  private finishHandoff(): void {
+    this.handoff = false;
+    this.probe = null;
     this.selectionKey = null;
     this.requested = null;
     this.choices.clear();
     this.choicesProfile = '';
     this.checkingChoices = false;
+    this.choicesDeferred = false;
+    this.handedOffSettled?.();
+  }
+
+  private unbindUi(): void {
+    this.unbindSettings?.();
+    this.unbindSettings = null;
+    this.unbindVoice?.();
+    this.unbindVoice = null;
     this.events?.abort();
-    this.probe?.abort();
     this.events = null;
-    this.probe = null;
     this.container = null;
+  }
+
+  cleanup(): void {
+    this.clearToast?.();
+    this.clearToast = null;
+    this.unbindUi();
+    this.selectionKey = null;
+    this.requested = null;
+    this.choices.clear();
+    this.choicesProfile = '';
+    this.checkingChoices = false;
+    this.choicesDeferred = false;
+    this.handoff = false;
+    this.userRequest = false;
+    this.probe?.abort();
+    this.probe = null;
   }
 }

@@ -173,7 +173,7 @@ export function hasEveryoneMention(content: string): boolean {
   });
 }
 
-export type QualityPresetType = 'ECONOMIC' | 'NORMAL' | 'HIGH' | 'GAMING' | 'ULTRA' | 'CUSTOM';
+export type QualityPresetType = 'ECONOMIC' | 'NORMAL' | 'HIGH' | 'GAMING' | 'QHD' | 'UHD' | 'UHD120' | 'CUSTOM';
 
 export interface QualityProfile {
   name: string;
@@ -188,68 +188,114 @@ export interface QualityProfile {
   screenBitrateKbps: number;
 }
 
+/**
+ * Ladder from the lightest to the heaviest profile: every step raises the screen
+ * without lowering camera or audio, and none drops below 30 FPS. Ceilings sit
+ * above streaming norms because capture encoders emit an IDR every second.
+ * 4K120 needs H264 level 6.0 or AV1; unsupported encoders lower the FPS first.
+ */
 export const QUALITY_PRESETS: Record<Exclude<QualityPresetType, 'CUSTOM'>, QualityProfile> = {
   ECONOMIC: {
-    name: 'Econômico',
+    name: 'Leve',
     audioBitrateKbps: 24,
     cameraWidth: 640,
     cameraHeight: 360,
-    cameraFps: 24,
-    cameraBitrateKbps: 250,
-    screenWidth: 854,
-    screenHeight: 480,
-    screenFps: 15,
-    screenBitrateKbps: 900,
+    cameraFps: 30,
+    cameraBitrateKbps: 300,
+    screenWidth: 640,
+    screenHeight: 360,
+    screenFps: 30,
+    screenBitrateKbps: 700,
   },
   NORMAL: {
-    name: 'Normal',
+    name: 'Padrão',
     audioBitrateKbps: 32,
     cameraWidth: 854,
     cameraHeight: 480,
     cameraFps: 30,
-    cameraBitrateKbps: 450,
+    cameraBitrateKbps: 500,
     screenWidth: 1280,
     screenHeight: 720,
     screenFps: 30,
-    screenBitrateKbps: 2000,
+    screenBitrateKbps: 2500,
   },
   HIGH: {
-    name: 'Alta Qualidade',
+    name: 'Nítido',
     audioBitrateKbps: 48,
     cameraWidth: 1280,
     cameraHeight: 720,
     cameraFps: 30,
-    cameraBitrateKbps: 600,
+    cameraBitrateKbps: 1000,
     screenWidth: 1920,
     screenHeight: 1080,
     screenFps: 30,
-    screenBitrateKbps: 3500,
+    screenBitrateKbps: 4500,
   },
   GAMING: {
-    name: 'Gaming Mode',
-    audioBitrateKbps: 28,
-    cameraWidth: 640,
-    cameraHeight: 360,
-    cameraFps: 20,
-    cameraBitrateKbps: 300,
-    screenWidth: 1920,
-    screenHeight: 1080,
-    screenFps: 60,
-    screenBitrateKbps: 6000,
-  },
-  ULTRA: {
-    name: 'Ultra',
+    name: 'Fluido',
     audioBitrateKbps: 64,
     cameraWidth: 1920,
     cameraHeight: 1080,
-    cameraFps: 60,
-    cameraBitrateKbps: 4000,
+    cameraFps: 30,
+    cameraBitrateKbps: 2000,
     screenWidth: 1920,
     screenHeight: 1080,
     screenFps: 60,
     screenBitrateKbps: 8000,
   },
+  QHD: {
+    name: 'Ultra',
+    audioBitrateKbps: 64,
+    cameraWidth: 1920,
+    cameraHeight: 1080,
+    cameraFps: 30,
+    cameraBitrateKbps: 2000,
+    screenWidth: 2560,
+    screenHeight: 1440,
+    screenFps: 60,
+    screenBitrateKbps: 12000,
+  },
+  UHD: {
+    name: 'Cinema',
+    audioBitrateKbps: 64,
+    cameraWidth: 1920,
+    cameraHeight: 1080,
+    cameraFps: 30,
+    cameraBitrateKbps: 2000,
+    screenWidth: 3840,
+    screenHeight: 2160,
+    screenFps: 60,
+    screenBitrateKbps: 25000,
+  },
+  UHD120: {
+    name: 'Extremo',
+    audioBitrateKbps: 64,
+    cameraWidth: 1920,
+    cameraHeight: 1080,
+    cameraFps: 30,
+    cameraBitrateKbps: 2000,
+    screenWidth: 3840,
+    screenHeight: 2160,
+    screenFps: 120,
+    screenBitrateKbps: 40000,
+  },
 };
+
+/** Named profiles from 60 FPS up favour motion: smooth frame rate and hardware-friendly codecs. */
+export function isMotionQualityPreset(preset: QualityPresetType): boolean {
+  return preset !== 'CUSTOM' && (QUALITY_PRESETS[preset]?.screenFps ?? 0) >= 60;
+}
+
+/** Saved settings from before 1440p/4K: the old ULTRA id was the 1080p60 tier now called Fluido (GAMING). */
+export function restoreQualityPreset(value: unknown): QualityPresetType {
+  if (value === 'ULTRA') return 'GAMING';
+  if (value === 'CUSTOM' || isNamedQualityPreset(value)) return value;
+  return 'NORMAL';
+}
+
+function isNamedQualityPreset(value: unknown): value is Exclude<QualityPresetType, 'CUSTOM'> {
+  return typeof value === 'string' && Object.hasOwn(QUALITY_PRESETS, value);
+}
 
 export const DEFAULT_CUSTOM_PROFILE: QualityProfile = {
   name: 'Personalizado',

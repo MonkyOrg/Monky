@@ -96,7 +96,7 @@ export class VideoService {
   public async applyQualityPreset(preset: QualityPresetType): Promise<void> {
     this.currentPreset = preset;
     const profile = this.getProfile();
-    const isHighFps = profile.screenFps >= 60 || preset === 'GAMING' || preset === 'ULTRA';
+    const isHighFps = profile.screenFps >= 60;
 
     this.cameraProcessor?.setProfile(profile);
     if (this.cameraRawStream) {
@@ -555,7 +555,7 @@ export class VideoService {
 
     // Hint the encoder about the content type so it optimizes correctly:
     // gaming / 60+ fps favors fluid motion, desktop sharing favors sharp detail.
-    screenTrack.contentHint = (profile.screenFps >= 60 || this.currentPreset === 'GAMING' || this.currentPreset === 'ULTRA') ? 'motion' : 'detail';
+    screenTrack.contentHint = profile.screenFps >= 60 ? 'motion' : 'detail';
 
     screenTrack.onended = () => {
       screenTrack.onended = null;

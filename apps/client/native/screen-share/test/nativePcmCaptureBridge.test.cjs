@@ -16,7 +16,7 @@ const format = {
   sourceBitsPerSample: 32, sourceValidBitsPerSample: 32,
 };
 
-function fixture({ autoReady = true, holdInputs = false, createSource, timeoutMs = 50 } = {}) {
+function fixture({ autoReady = true, holdInputs = false, createSource, timeoutMs = 12000 } = {}) {
   const commandsSeen = [], submissions = [], errors = [], nativeSources = new Set(), nativeEpochs = new Map();
   const ready = defer(), closed = defer();
   let callback, captureCalls = 0, captureStops = 0, nextSequence = 0, nextFrame = 0;
@@ -412,7 +412,8 @@ test('correlated rejection retires processing without pretending the packet was 
 });
 
 test('processingPending=true is not retirement even though the JS buffer was copied synchronously', async () => {
-  const f = fixture({ holdInputs: true });
+  // Expects the retirement deadline to expire; earlier stop phases settle immediately.
+  const f = fixture({ holdInputs: true, timeoutMs: 250 });
   await f.start();
   await f.activate();
   f.reject(0, { processingPending: true });
@@ -425,7 +426,8 @@ test('processingPending=true is not retirement even though the JS buffer was cop
 });
 
 test('a wrong retirement identity remains owned through source-close ACK and a forged full-close Promise', async () => {
-  const f = fixture({ holdInputs: true });
+  // Expects the retirement deadline to expire; earlier stop phases settle immediately.
+  const f = fixture({ holdInputs: true, timeoutMs: 250 });
   await f.start();
   await f.activate();
   f.retire(0, { sourceId: 99 });

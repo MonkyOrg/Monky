@@ -44,7 +44,7 @@ function deferred() {
 const video = { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 };
 const input = { shareId: 'local-screen', desktopSourceId: 'window:123:0', video, audio: true, audioBitrateKbps: 128 };
 const profile = (width = 1280, height = 720, fps = 60) => ({
-  ...shared.QUALITY_PRESETS.ULTRA, screenWidth: width, screenHeight: height, screenFps: fps, screenBitrateKbps: 6000,
+  ...shared.QUALITY_PRESETS.GAMING, screenWidth: width, screenHeight: height, screenFps: fps, screenBitrateKbps: 6000,
 });
 const cancelled = () => new DOMException('Modeled operation was cancelled.', 'AbortError');
 
@@ -672,6 +672,7 @@ test('capture badge updates are presentation/source scoped for local preview and
 
 for (const reason of ['capture-failed', 'source-unavailable', 'unsupported', 'capacity-exceeded']) {
   test(`remote ${reason} survives closure; retry starts a fresh presentation`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
     const f = fixture(t);
     f.watching(true);
     await f.controller.sync();
@@ -681,6 +682,16 @@ for (const reason of ['capture-failed', 'source-unavailable', 'unsupported', 'ca
     f.emit({ ...scope, state: 'unavailable', reason });
     f.emit({ ...scope, state: 'closed' });
     f.emit({ ...scope, state: 'closed' });
+    if (reason === 'source-unavailable') {
+      assert.deepEqual(f.controller.getWatchState('publisher', f.remote.shareId), { state: 'connecting', receiver: 'native' },
+        'A retired source waits for its announced replacement before offering a retry.');
+      const updates = f.events.filter(([name]) => name === 'native_screen.updated').length;
+      t.mock.timers.tick(7999);
+      assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'connecting');
+      t.mock.timers.tick(1);
+      assert.ok(f.events.filter(([name]) => name === 'native_screen.updated').length > updates,
+        'The stage must be told when the replacement wait expires.');
+    }
     assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).reason, reason);
     await f.controller.retry('publisher', f.remote.shareId);
     assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
@@ -688,6 +699,32 @@ for (const reason of ['capture-failed', 'source-unavailable', 'unsupported', 'ca
     assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
   });
 }
+
+test('a publisher quality replacement reconnects the viewer without presenting a failure', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(t);
+  f.watching(true);
+  await f.controller.sync();
+  const watch = f.commands.findLast(command => command.action === 'watch');
+  const scope = { type: 'state', publisherSessionId: 'publisher', shareId: f.remote.shareId,
+    sourceInstanceId: f.remote.instanceId, presentationId: watch.presentationId };
+  // Main reports the retired instance before the publisher announces its replacement.
+  f.emit({ ...scope, state: 'unavailable', reason: 'source-unavailable' });
+  f.emit({ ...scope, state: 'closed' });
+  assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'connecting');
+  await f.controller.sync();
+  assert.equal(f.commands.filter(command => command.action === 'watch').length, 1,
+    'The same retired instance must not be watched again while its replacement is pending.');
+  f.replaceRemote({ ...f.remote, instanceId: randomUUID() });
+  await f.controller.sync();
+  const replacement = f.commands.findLast(command => command.action === 'watch');
+  assert.notEqual(replacement.presentationId, watch.presentationId);
+  assert.ok(f.stopped.includes(watch.presentationId));
+  assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
+  t.mock.timers.tick(8000);
+  assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing',
+    'The retired presentation wait cannot fail its replacement.');
+});
 
 test('active local Game Capture errors preserve the typed code, public reason and raw diagnostics without fallback', async t => {
   const f = fixture(t);

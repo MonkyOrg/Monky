@@ -80,6 +80,7 @@ class Fixture {
     };
     this.failSync = false;
     this.failFetch = false;
+    this.transientFetchFailures = 0;
     this.mutateAfterSync = false;
     this.pythonPointerBits = 64;
     this.runtimeFailure = null;
@@ -270,6 +271,10 @@ class Fixture {
     }
     if (command === 'fetch') {
       if (this.failFetch) return this.answer('', 1, 'Explicit injected fetch failure');
+      if (this.transientFetchFailures > 0) {
+        this.transientFetchFailures--;
+        return this.answer('', 128, 'error: RPC failed; HTTP 504 curl 22 The requested URL returned error: 504');
+      }
       repo.fetched = rest.at(-1);
       return this.answer();
     }
@@ -559,7 +564,8 @@ test('child environment freezes tools and isolates caches without mutating the c
     assert.equal(call.env.GIT_DIR, undefined);
     assert.equal(call.env.PYTHONPATH, undefined);
     assert.equal(call.env.GCLIENT_FILE, undefined);
-    assert.equal(call.env.GIT_CONFIG_GLOBAL, 'NUL');
+    assert.equal(call.env.GIT_CONFIG_GLOBAL, path.join(fixture.workspace, 'cache', 'empty-gitconfig'),
+      'Git for Windows 2.56 rejects NUL; an owned empty file isolates every Git version.');
     assert.equal(call.env.GIT_CONFIG_COUNT, '5');
     assert.equal(call.env.GIT_TERMINAL_PROMPT, '0');
     assert.equal(call.env.HOME, path.join(fixture.workspace, 'cache', 'home'));
@@ -570,6 +576,18 @@ test('child environment freezes tools and isolates caches without mutating the c
       assert.deepEqual(call.args.slice(0, 3), ['-I', '-S', '-B']);
     }
   }
+});
+
+test('fetch isolates Git with an owned empty global configuration instead of the NUL device', async t => {
+  const fixture = new Fixture(t);
+  const report = await execute(fixture.context, { action: 'fetch', commandTimeoutSeconds: 60 });
+  assert.equal(report.canFetch, true, JSON.stringify(report.issues));
+  const gitConfig = path.join(fixture.workspace, 'cache', 'empty-gitconfig');
+  assert.ok(fs.lstatSync(gitConfig).isFile());
+  assert.equal(fs.statSync(gitConfig).size, 0);
+  const operations = fixture.operations();
+  assert.ok(operations.length > 0);
+  for (const operation of operations) assert.equal(operation.call.env.GIT_CONFIG_GLOBAL, gitConfig);
 });
 
 test('explicit fetch uses immutable SHAs, private jobs and initial pinned no-history sync', async t => {
@@ -839,6 +857,27 @@ test('failed acquisition retains its exact owned lock/partial tree and does not 
     });
 
   }
+});
+
+test('a transient upstream failure retries only the pinned fetch, with backoff, and keeps the lock when it persists', async t => {
+  await t.test('recovers', async child => {
+    const fixture = new Fixture(child), sleeps = [];
+    fixture.context.sleep = async ms => { sleeps.push(ms); };
+    fixture.transientFetchFailures = 2;
+    const report = await execute(fixture.context, { action: 'fetch' });
+    assert.equal(report.status, 'sources-complete');
+    assert.deepEqual(sleeps, [10_000, 30_000]);
+    assert.equal(fs.existsSync(path.join(fixture.workspace, constants.LOCK)), false);
+  });
+  await t.test('persists', async child => {
+    const fixture = new Fixture(child), sleeps = [];
+    fixture.context.sleep = async ms => { sleeps.push(ms); };
+    fixture.transientFetchFailures = 99;
+    await assert.rejects(execute(fixture.context, { action: 'fetch' }), /HTTP 504/u);
+    assert.deepEqual(sleeps, [10_000, 30_000, 60_000], 'Network retries are bounded.');
+    assert.equal(fs.existsSync(path.join(fixture.workspace, constants.LOCK)), true, 'A failed fetch keeps its lock for review.');
+    assert.equal(fs.existsSync(path.join(fixture.workspace, constants.STATE)), false);
+  });
 });
 
 test('changes during sync cannot be sealed into a completed state', async t => {
