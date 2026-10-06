@@ -181,7 +181,15 @@ jobs:
 
       # PR caches are visible only to their own PR. Saving the approved, hash-verified runtime
       # under the exact key CI recorded lets the next PRs skip an identical native build; it never
-      # compiles anything here and the release itself does not restore from this cache.
+      # compiles anything here and the release itself does not restore from this cache. The same
+      # acceptance checks as CI run first, so an unusable runtime (for example one that lost its
+      # execute bit) can never be shared with every later PR.
+      - name: Verify the approved native runtime before sharing it (macOS)
+        if: needs.version.outputs.reuse_build == 'true' && runner.os == 'macOS' && steps.restore.outputs.native_cache_key != ''
+        run: |
+          arch -x86_64 /usr/bin/true
+          node apps/client/native/screen-share/scripts/verifyOutputs.cjs mac
+
       - name: Share the approved native runtime with later CI (macOS)
         if: needs.version.outputs.reuse_build == 'true' && runner.os == 'macOS' && steps.restore.outputs.native_cache_key != ''
         uses: actions/cache/save@v4
@@ -190,6 +198,10 @@ jobs:
             apps/client/native/screen-share/bin/darwin-arm64
             apps/client/native/screen-share/bin/darwin-x64
           key: ${{ steps.restore.outputs.native_cache_key }}
+
+      - name: Verify the approved native runtime before sharing it (Windows)
+        if: needs.version.outputs.reuse_build == 'true' && runner.os == 'Windows' && steps.restore.outputs.native_cache_key != ''
+        run: node apps/client/native/screen-share/scripts/verifyOutputs.cjs win
 
       - name: Share the approved native runtime with later CI (Windows)
         if: needs.version.outputs.reuse_build == 'true' && runner.os == 'Windows' && steps.restore.outputs.native_cache_key != ''

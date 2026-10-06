@@ -1,8 +1,19 @@
+import os
 import stat
 import re
 import sys
 import zipfile
 from pathlib import Path, PurePosixPath
+
+UNIX_ZIP_HOST = 3
+
+
+def restore_mode(entry, filename):
+    # extractall drops the Unix modes stored in the archive, so the macOS capture host would
+    # lose its execute bit. Keep owner read/write and never grant group/other write or setuid.
+    mode = (entry.external_attr >> 16) & 0o777
+    if entry.create_system == UNIX_ZIP_HOST and mode and not entry.is_dir():
+        os.chmod(filename, (mode & 0o755) | 0o600)
 
 
 def extract_build(archive, destination):
@@ -30,6 +41,8 @@ def extract_build(archive, destination):
             seen.add(key)
         destination.mkdir()
         source.extractall(destination)
+        for entry in entries:
+            restore_mode(entry, destination.joinpath(*PurePosixPath(entry.orig_filename).parts))
 
 
 if __name__ == "__main__":

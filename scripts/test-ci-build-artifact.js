@@ -308,6 +308,9 @@ for (const variant of ['cli', 'mac', 'win']) for (const artifactAttempt of [1, 2
   const expected = new Map(await Promise.all(f.manifest.files.map(async entry =>
     [entry.path, await fs.readFile(path.join(f.root, entry.path))])));
   const zip = path.join(f.directory, 'build.zip');
+  // The release must restore the macOS capture host with its execute bit, as CI archived it.
+  const executable = variant === 'mac' ? 'apps/client/native/screen-share/bin/darwin-arm64/index.js' : null;
+  if (executable) await fs.chmod(path.join(f.staged, executable), 0o755);
   executePython('-c', 'import pathlib,sys,zipfile\nroot=pathlib.Path(sys.argv[1])\nwith zipfile.ZipFile(sys.argv[2],"w") as z:\n for p in root.rglob("*"):\n  if p.is_file(): z.write(p,p.relative_to(root).as_posix())',
     f.staged, zip);
   const bytes = await fs.readFile(zip), digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
@@ -350,6 +353,10 @@ for (const variant of ['cli', 'mac', 'win']) for (const artifactAttempt of [1, 2
   const restored = await restore();
   assert.equal(restored.runAttempt, artifactAttempt);
   for (const [relative, bytes] of expected) assert.deepEqual(await fs.readFile(path.join(f.root, relative)), bytes, relative);
+  if (executable && process.platform !== 'win32') {
+    assert.equal((await fs.stat(path.join(f.root, executable))).mode & 0o777, 0o755,
+      'A restored macOS runtime must stay executable before it can seed the shared native cache.');
+  }
   if (variant === 'win' || variant === 'mac') {
     for (const relative of nativeLegalFiles) {
       assert.ok(expected.has(relative));
@@ -357,6 +364,25 @@ for (const variant of ['cli', 'mac', 'win']) for (const artifactAttempt of [1, 2
     }
   }
   await assert.rejects(restore(), /overlay existing/);
+});
+
+test('ZIP extraction restores archived Unix modes without granting group write or setuid', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'monky-ci-zip-modes-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const zip = path.join(directory, 'modes.zip'), output = path.join(directory, 'out');
+  // GitHub artifact ZIPs are written by a Unix host (create_system 3) and keep st_mode in external_attr.
+  const entries = { 'bin/monky-screen-mac': 0o100755, 'bin/lib.dylib': 0o100644, 'bin/open': 0o100777,
+    'bin/setuid': 0o104755, 'bin/owner-read-only': 0o100400, 'bin/dos': null };
+  executePython('-c', 'import json,sys,zipfile\nwith zipfile.ZipFile(sys.argv[1],"w") as z:\n for name,mode in json.loads(sys.argv[2]).items():\n  info=zipfile.ZipInfo(name)\n  if mode is None: info.create_system=0; info.external_attr=0o100755<<16\n  else: info.create_system=3; info.external_attr=mode<<16\n  z.writestr(info,"payload")',
+    zip, JSON.stringify(entries));
+  const recorded = JSON.parse(executePython('-c', 'import importlib.util,json,os,sys\nspec=importlib.util.spec_from_file_location("archive",sys.argv[1])\nmodule=importlib.util.module_from_spec(spec)\nspec.loader.exec_module(module)\ncalls={}\nreal=os.chmod\ndef chmod(name,mode):\n calls[os.path.relpath(name,sys.argv[3]).replace(os.sep,"/")]=oct(mode)\n real(name,mode)\nmodule.os.chmod=chmod\nmodule.extract_build(sys.argv[2],sys.argv[3])\nprint(json.dumps(calls))',
+    path.join(scripts, 'ci-build-archive.py'), zip, output));
+  assert.deepEqual(recorded, { 'bin/monky-screen-mac': '0o755', 'bin/lib.dylib': '0o644', 'bin/open': '0o755',
+    'bin/setuid': '0o755', 'bin/owner-read-only': '0o600' }, 'Only Unix-hosted entries change mode, capped at 0755.');
+  if (process.platform !== 'win32') {
+    for (const [name, mode] of Object.entries(recorded))
+      assert.equal((await fs.stat(path.join(output, name))).mode & 0o7777, Number(mode), name);
+  }
 });
 
 test('ZIP extraction refuses traversal, aliases, reserved devices and duplicate paths before extraction', async t => {

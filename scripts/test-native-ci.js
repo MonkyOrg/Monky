@@ -303,15 +303,24 @@ test('download caches stay download-only; compiled native outputs reuse only exa
   const build = release.jobs.build;
   const restored = step(build, 'Restore approved desktop build');
   assert.equal(restored.id, 'restore');
-  for (const [os, paths] of [['macOS', macPaths], ['Windows', winPaths]]) {
+  const guarded = os => `needs.version.outputs.reuse_build == 'true' && runner.os == '${os}' && steps.restore.outputs.native_cache_key != ''`;
+  const order = [];
+  for (const [os, paths, platform] of [['macOS', macPaths, 'mac'], ['Windows', winPaths, 'win']]) {
+    const verify = step(build, `Verify the approved native runtime before sharing it (${os})`);
+    assert.equal(verify.if, guarded(os));
+    assert.match(verify.run, new RegExp(`verifyOutputs\\.cjs ${platform}$`, 'mu'));
+    if (os === 'macOS') assert.match(verify.run, /^arch -x86_64 \/usr\/bin\/true$/mu, 'x64 self-tests need Rosetta.');
     const share = step(build, `Share the approved native runtime with later CI (${os})`);
     assert.equal(share.uses, 'actions/cache/save@v4');
-    assert.equal(share.if, `needs.version.outputs.reuse_build == 'true' && runner.os == '${os}' && steps.restore.outputs.native_cache_key != ''`);
+    assert.equal(share.if, guarded(os));
     assert.equal(share.with.key, '${{ steps.restore.outputs.native_cache_key }}');
     assert.deepEqual(lines(share.with.path), paths, 'Release seeds exactly the paths CI restores.');
-    assert.ok(build.steps.indexOf(share) === build.steps.indexOf(restored) + (os === 'macOS' ? 1 : 2),
-      'Seed the cache straight from the verified artifact, before any release step can touch the outputs.');
+    assert.equal(build.steps.indexOf(share), build.steps.indexOf(verify) + 1,
+      'A runtime is shared only right after passing the same acceptance checks as CI.');
+    order.push(build.steps.indexOf(verify), build.steps.indexOf(share));
   }
+  assert.deepEqual(order, order.map((_, index) => build.steps.indexOf(restored) + 1 + index),
+    'Verify and seed straight from the restored artifact, before any release step can touch the outputs.');
 });
 
 test('the native cache key changes with every compiled input and toolchain, and ignores unrelated files', t => {
