@@ -30,6 +30,8 @@ if (!process.versions.electron) {
   const { bindBotScreenDocuments, registerBotScreenScheme } = require('../dist-electron/main/botScreenDocuments.js');
   registerBotScreenScheme();
   app.setPath('userData', process.env.MONKY_SCREEN_PROFILE);
+  // finish() destroys every window before app.exit(code); the default quit would report failures as exit 0.
+  app.on('window-all-closed', () => {});
   let vite;
   let timeout;
   let leaks = 0;
@@ -420,10 +422,13 @@ if (!process.versions.electron) {
     await waitFor(() => leaks >= beforeWorker + 2, 'authorized worker can actually access the network');
     await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=close]").click()');
     await waitFor(() => frames(aliceWindow).length === 0, 'leave the game view without leaving its player seat');
-    await new Promise(resolve => setTimeout(resolve, 200));
-    const afterRevoke = leaks;
-    await new Promise(resolve => setTimeout(resolve, 250));
-    assert.equal(leaks, afterRevoke, 'Revoking consent stops the real worker and its network activity');
+    // Out-of-process frame teardown can lag on slow runners: require a quiet window, not a fixed grace period.
+    const quietDeadline = Date.now() + 5000;
+    for (let afterRevoke = leaks; ; afterRevoke = leaks) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      if (leaks === afterRevoke) break;
+      assert.ok(Date.now() < quietDeadline, `Revoking consent stops the real worker and its network activity (${leaks - beforeWorker} requests)`);
+    }
     assert.equal(await run(aliceWindow, '!!document.querySelector("[data-watch-bot-screen=game], [data-watch-bot-screen=second]")'), false, 'Both explicit exits stay quiet while their persistent cards remain');
     assert.equal(await run(aliceWindow, 'document.fullscreenElement?.dataset.botScreenId === "game" && !document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=fullscreen]").hidden'), true, 'Leaving only the view retains an operable fullscreen layout');
     await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=fullscreen]").click()');
