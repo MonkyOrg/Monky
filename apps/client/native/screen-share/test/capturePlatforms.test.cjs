@@ -110,7 +110,7 @@ test('codec and encoding-mode schemas cannot be relabelled or enabled without a 
         value => { value.capability.adapterIndex = 1; },
         value => { value.capability.probe = 'vendor-name'; },
         value => { value.capability.hardwareQualified = true; },
-        value => { value.configuration.rateControl = encoder === 'h264_texture_amf' ? 'CBR' : 'VBR_LAT'; },
+        value => { value.configuration.rateControl = 'VBR_LAT'; },
         value => { value.configuration.encoderId = 'x264'; },
         value => { value.configuration.method = target.kind === 'game' ? 'wgc' : 'game-hook'; },
         value => { value.target.kind = 'any-fullscreen'; },

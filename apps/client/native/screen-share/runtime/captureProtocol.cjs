@@ -6,11 +6,11 @@ const MAX_PACKET_BYTES = 4194304;
 const RETIREMENT_FIELDS = Object.freeze(['outputStopped', 'callbacksQuiesced', 'sourceReleased', 'encoderReleased', 'obsShutdownReturned']);
 const CONFIGURATION = Object.freeze({
   obsVersion: '32.1.1', fpsDenominator: 1, method: 'wgc', scaleMode: 'stretch',
-  rateControl: 'VBR_LAT', codec: 'h264', encoderId: 'h264_texture_amf', profile: 'main',
+  rateControl: 'CBR', codec: 'h264', encoderId: 'h264_texture_amf', profile: 'main',
   bFrames: 0, keyframeIntervalSeconds: 1,
 });
 const ENCODERS = Object.freeze({
-  h264_texture_amf: Object.freeze({ codec: 'h264', mode: 'hardware', rateControl: 'VBR_LAT', vendorId: 0x1002, probe: 'obs-amf-test' }),
+  h264_texture_amf: Object.freeze({ codec: 'h264', mode: 'hardware', rateControl: 'CBR', vendorId: 0x1002, probe: 'obs-amf-test' }),
   obs_nvenc_h264_tex: Object.freeze({ codec: 'h264', mode: 'hardware', rateControl: 'CBR', vendorId: 0x10de, probe: 'nvenc-d3d11-session' }),
   obs_x264: Object.freeze({ codec: 'h264', mode: 'software', rateControl: 'CBR', probe: 'software-encoder' }),
   av1_texture_amf: Object.freeze({ codec: 'av1', mode: 'hardware', rateControl: 'CBR', vendorId: 0x1002, probe: 'obs-amf-test' }),

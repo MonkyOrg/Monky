@@ -233,9 +233,10 @@ inline const char* EncoderId(EncoderKind kind) {
     default: return kEncoderId;
   }
 }
-inline const char* EncoderRateControl(EncoderKind kind) {
-  return kind == EncoderKind::Amf ? "VBR_LAT" : "CBR";
-}
+// Pinned texture-amf.cpp applies every live bitrate through Flush()+ReInit(). Under VBR_LAT
+// (VBV of ~1.1 frames) each restart emits a starved, blocky IDR that takes many frames to
+// recover, so congestion feedback made AMF H.264 pulse. CBR restarts with a full IDR, as AV1 AMF does.
+inline const char* EncoderRateControl(EncoderKind) { return "CBR"; }
 // OBS supplies the output colour description; AMF's input primaries otherwise default to undefined.
 inline const char* EncoderExtraOptions(EncoderKind kind) { return kind == EncoderKind::Nvenc ? "" : "InColorPrimaries=1"; }
 inline std::string EncoderProfileOptions(EncoderKind kind, const VideoConfiguration& video,

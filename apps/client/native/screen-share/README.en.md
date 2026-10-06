@@ -503,6 +503,24 @@ These are configuration limits, not guaranteed FPS, delivered bitrate or
 performance. Bitrate feedback confirms settings, not measured hardware
 application (`hardwareApplicationConfirmed: false`, `fpsApplied: null`).
 
+Every encoder uses CBR rate control, including AMF H.264. The pinned AMF plugin
+applies each live bitrate through `Flush()` + `ReInit()`, which restarts rate
+control and emits an IDR. Under `VBR_LAT`, its ~1-frame VBV produced a small,
+blocky IDR that took many frames to sharpen again. On unstable networks the
+picture pulsed on every bitrate adjustment. CBR restarts with a full IDR, as AV1
+AMF already did. In exchange, AMF pads frames below the target bitrate with
+filler, as x264 and AV1 AMF already did.
+
+Even under CBR, every adjustment restarts the Windows hardware encoders: after
+`ReInit()`, AV1 AMF still emits a keyframe about half the usual size and takes
+10 to 20 frames to sharpen again. NVENC restarts with `resetEncoder` and a forced
+IDR. The sender therefore keeps 10% headroom below the RTC allocation and raises
+the bitrate only when the new target exceeds the current one by **25%**.
+Reductions still apply as soon as the allocation falls below the applied value.
+On the recorded bandwidth of an unstable connection, changes dropped from eight
+to five in 30 seconds. x264, libaom and VideoToolbox adjust bitrate without
+restarting and follow the same rule.
+
 Capture starts only after source selection and **local-preview or viewer
 demand**. Preview works without viewers: it then uses a local pipeline at
 the source profile, without publishing network media. When viewers exist,
