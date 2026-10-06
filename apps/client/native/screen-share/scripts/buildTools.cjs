@@ -21,6 +21,36 @@ function execute(executable, args, { cwd = root, env = process.env, capture = fa
   return result.stdout?.trim() ?? '';
 }
 
+// Upstream source hosts (GitHub, googlesource, gitlab.xiph.org) intermittently answer 5xx or drop
+// connections. Pinned fetches are idempotent and verified afterwards, so only these transient
+// transport failures are retried; missing revisions, auth and certificate errors fail at once.
+const TRANSIENT_NETWORK_FAILURE = new RegExp([
+  'RPC failed', 'returned error: (?:408|429|5\\d\\d)', 'HTTP (?:408|429|5\\d\\d)\\b', 'Could not resolve host',
+  'Failed to connect', 'Connection (?:timed out|reset|refused)', 'Operation timed out', 'early EOF',
+  'unexpected disconnect', 'expected flush after ref listing', 'remote end hung up', 'Recv failure',
+  'TLS connection was non-properly terminated', 'gnutls_handshake\\(\\) failed',
+].join('|'), 'iu');
+
+function transientNetworkFailure(error) {
+  return TRANSIENT_NETWORK_FAILURE.test(String(error?.message ?? error ?? ''));
+}
+
+const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+function withNetworkRetries(run, { label, attempts = 4, delaysMs = [10_000, 30_000, 60_000],
+  sleep = sleepSync, log = console.warn } = {}) {
+  assert.ok(Number.isInteger(attempts) && attempts >= 1 && delaysMs.length > 0);
+  for (let attempt = 1; ; attempt++) {
+    try { return run(); }
+    catch (error) {
+      if (attempt >= attempts || !transientNetworkFailure(error)) throw error;
+      const delay = delaysMs[Math.min(attempt - 1, delaysMs.length - 1)];
+      log(`${label}: transient network failure on attempt ${attempt}/${attempts}; retrying in ${delay / 1000}s.`);
+      sleep(delay);
+    }
+  }
+}
+
 function write(filename, bytes) {
   if (fs.existsSync(filename) && fs.readFileSync(filename).equals(Buffer.from(bytes))) return;
   fs.mkdirSync(path.dirname(filename), { recursive: true });
@@ -61,4 +91,5 @@ function regularFiles(directory, base = directory) {
   }).sort();
 }
 
-module.exports = { root, execute, write, digest, fingerprint, verify, redistributableCrt, regularFiles };
+module.exports = { root, execute, write, digest, fingerprint, verify, redistributableCrt, regularFiles,
+  transientNetworkFailure, withNetworkRetries };

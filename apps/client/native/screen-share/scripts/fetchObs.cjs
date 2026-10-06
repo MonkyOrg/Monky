@@ -7,7 +7,7 @@ const https = require('node:https');
 const path = require('node:path');
 const { finished, pipeline } = require('node:stream/promises');
 const timers = require('node:timers/promises');
-const { root, execute, write, verify, fingerprint } = require('./buildTools.cjs');
+const { root, execute, write, verify, fingerprint, withNetworkRetries } = require('./buildTools.cjs');
 
 const repository = path.resolve(root, '..', '..', '..', '..');
 const cache = path.join(repository, '.native-screen');
@@ -63,9 +63,11 @@ function checkout(url, revision, directory, { submodules = true } = {}) {
     for (const [name, value] of [['core.autocrlf', 'false'], ['core.eol', 'lf'], ['core.fsmonitor', 'false']])
       git(directory, ['config', '--local', name, value]);
     git(directory, ['remote', 'add', 'origin', url]);
-    git(directory, ['fetch', '--quiet', '--depth=1', 'origin', revision]);
+    withNetworkRetries(() => git(directory, ['fetch', '--quiet', '--depth=1', 'origin', revision]),
+      { label: `Source fetch ${url}` });
     git(directory, ['checkout', '--quiet', '--detach', 'FETCH_HEAD']);
-    if (submodules) git(directory, ['submodule', 'update', '--quiet', '--init', '--recursive', '--depth=1']);
+    if (submodules) withNetworkRetries(() => git(directory, ['submodule', 'update', '--quiet', '--init', '--recursive', '--depth=1']),
+      { label: `Source submodules ${url}` });
   }
   assert.ok(fs.lstatSync(directory).isDirectory() && !fs.lstatSync(directory).isSymbolicLink());
   assert.ok(fs.lstatSync(path.join(directory, '.git')).isDirectory());

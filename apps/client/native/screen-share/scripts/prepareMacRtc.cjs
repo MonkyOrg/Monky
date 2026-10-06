@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { root, execute, write } = require('./buildTools.cjs');
+const { root, execute, write, withNetworkRetries } = require('./buildTools.cjs');
 const pins = require('./native-rtc/pins.json');
 
 const workspace = path.resolve(root, '..', '..', '..', '..', '.native-screen', 'mac-rtc');
@@ -69,7 +69,8 @@ function prepare({ python = 'python3.11' } = {}) {
         pins.repositories[name].url);
       assert.equal(execute('git', ['-C', directory, 'status', '--porcelain', '--untracked-files=no'],
         { env, capture: true }), '', `Native SDK source has local modifications: ${name}`);
-      execute('git', ['-C', directory, 'fetch', '--quiet', '--depth=1', 'origin', pins.repositories[name].commit], { env });
+      withNetworkRetries(() => execute('git', ['-C', directory, 'fetch', '--quiet', '--depth=1', 'origin',
+        pins.repositories[name].commit], { env, capture: true }), { label: `Source fetch ${name}` });
       checkout(name, directory, env);
     }
     const solution = path.join(workspace, 'webrtc');

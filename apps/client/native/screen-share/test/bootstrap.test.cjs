@@ -80,6 +80,7 @@ class Fixture {
     };
     this.failSync = false;
     this.failFetch = false;
+    this.transientFetchFailures = 0;
     this.mutateAfterSync = false;
     this.pythonPointerBits = 64;
     this.runtimeFailure = null;
@@ -270,6 +271,10 @@ class Fixture {
     }
     if (command === 'fetch') {
       if (this.failFetch) return this.answer('', 1, 'Explicit injected fetch failure');
+      if (this.transientFetchFailures > 0) {
+        this.transientFetchFailures--;
+        return this.answer('', 128, 'error: RPC failed; HTTP 504 curl 22 The requested URL returned error: 504');
+      }
       repo.fetched = rest.at(-1);
       return this.answer();
     }
@@ -852,6 +857,27 @@ test('failed acquisition retains its exact owned lock/partial tree and does not 
     });
 
   }
+});
+
+test('a transient upstream failure retries only the pinned fetch, with backoff, and keeps the lock when it persists', async t => {
+  await t.test('recovers', async child => {
+    const fixture = new Fixture(child), sleeps = [];
+    fixture.context.sleep = async ms => { sleeps.push(ms); };
+    fixture.transientFetchFailures = 2;
+    const report = await execute(fixture.context, { action: 'fetch' });
+    assert.equal(report.status, 'sources-complete');
+    assert.deepEqual(sleeps, [10_000, 30_000]);
+    assert.equal(fs.existsSync(path.join(fixture.workspace, constants.LOCK)), false);
+  });
+  await t.test('persists', async child => {
+    const fixture = new Fixture(child), sleeps = [];
+    fixture.context.sleep = async ms => { sleeps.push(ms); };
+    fixture.transientFetchFailures = 99;
+    await assert.rejects(execute(fixture.context, { action: 'fetch' }), /HTTP 504/u);
+    assert.deepEqual(sleeps, [10_000, 30_000, 60_000], 'Network retries are bounded.');
+    assert.equal(fs.existsSync(path.join(fixture.workspace, constants.LOCK)), true, 'A failed fetch keeps its lock for review.');
+    assert.equal(fs.existsSync(path.join(fixture.workspace, constants.STATE)), false);
+  });
 });
 
 test('changes during sync cannot be sealed into a completed state', async t => {

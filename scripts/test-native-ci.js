@@ -303,15 +303,24 @@ test('download caches stay download-only; compiled native outputs reuse only exa
   const build = release.jobs.build;
   const restored = step(build, 'Restore approved desktop build');
   assert.equal(restored.id, 'restore');
-  for (const [os, paths] of [['macOS', macPaths], ['Windows', winPaths]]) {
+  const guarded = os => `needs.version.outputs.reuse_build == 'true' && runner.os == '${os}' && steps.restore.outputs.native_cache_key != ''`;
+  const order = [];
+  for (const [os, paths, platform] of [['macOS', macPaths, 'mac'], ['Windows', winPaths, 'win']]) {
+    const verify = step(build, `Verify the approved native runtime before sharing it (${os})`);
+    assert.equal(verify.if, guarded(os));
+    assert.match(verify.run, new RegExp(`verifyOutputs\\.cjs ${platform}$`, 'mu'));
+    if (os === 'macOS') assert.match(verify.run, /^arch -x86_64 \/usr\/bin\/true$/mu, 'x64 self-tests need Rosetta.');
     const share = step(build, `Share the approved native runtime with later CI (${os})`);
     assert.equal(share.uses, 'actions/cache/save@v4');
-    assert.equal(share.if, `needs.version.outputs.reuse_build == 'true' && runner.os == '${os}' && steps.restore.outputs.native_cache_key != ''`);
+    assert.equal(share.if, guarded(os));
     assert.equal(share.with.key, '${{ steps.restore.outputs.native_cache_key }}');
     assert.deepEqual(lines(share.with.path), paths, 'Release seeds exactly the paths CI restores.');
-    assert.ok(build.steps.indexOf(share) === build.steps.indexOf(restored) + (os === 'macOS' ? 1 : 2),
-      'Seed the cache straight from the verified artifact, before any release step can touch the outputs.');
+    assert.equal(build.steps.indexOf(share), build.steps.indexOf(verify) + 1,
+      'A runtime is shared only right after passing the same acceptance checks as CI.');
+    order.push(build.steps.indexOf(verify), build.steps.indexOf(share));
   }
+  assert.deepEqual(order, order.map((_, index) => build.steps.indexOf(restored) + 1 + index),
+    'Verify and seed straight from the restored artifact, before any release step can touch the outputs.');
 });
 
 test('the native cache key changes with every compiled input and toolchain, and ignores unrelated files', t => {
@@ -643,6 +652,14 @@ test('ci:local mirrors CI commands from ci.yml and the DOM runner, skipping only
   }
   assert.ok(pairs(ci).some(([pt, en]) => pt === 'CONTRIBUTING.md' && en === 'CONTRIBUTING.en.md'));
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).scripts['ci:local'], 'node scripts/ci-local.cjs');
+  const { checkClean } = require('./ci-local.cjs');
+  const last = plan({ base: 'a', head: 'b', platform: 'win32', nativeReady: true, before: new Set() }).at(-1);
+  assert.equal(last.stage, 'clean', 'The clean-checkout check runs after every other step.');
+  assert.match(fs.readFileSync(path.join(root, 'scripts', 'ci-local.cjs'), 'utf8'), /step\.stage !== 'clean'/u,
+    '--only must not skip the clean-checkout check.');
+  checkClean(new Set([' M scripts/edited.js']), new Set([' M scripts/edited.js']));
+  assert.throws(() => checkClean(new Set([' M scripts/edited.js']), new Set([' M scripts/edited.js', '?? scripts/__pycache__/'])),
+    /scripts\/__pycache__/u, 'Files left by the steps must fail locally, as the CI build export does.');
 });
 
 test('native tooltip input requires actual window and renderer focus, not a fixed showInactive delay', async () => {

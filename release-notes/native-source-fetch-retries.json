@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "Novas versões do Monky não travam mais quando um dos servidores das bibliotecas usadas no compartilhamento de tela fica instável por alguns instantes.",
+  "en": "New Monky versions no longer get stuck when one of the servers hosting the screen sharing libraries is briefly unstable."
+}

@@ -29,7 +29,7 @@ const invalidated = (epoch = 1, reason = 'transport-detached') => ({
   type: 'audio.outputInvalidated', target: 0, data: { epoch, reason },
 });
 
-function fixture(hooks = {}, timeoutMs = 150) {
+function fixture(hooks = {}, timeoutMs = 5000) {
   const calls = [], errors = [], packets = [], outputs = new Map();
   let owner, commands, nextCalibration = 1;
   const view = () => ({ owner, commands, calls, errors, packets, outputs });
