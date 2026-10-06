@@ -4,7 +4,7 @@ import {
   ADMIN_PERMISSIONS, CHANNEL_PERMISSIONS, DEFAULT_PERMISSIONS, Permission,
   canAccessChannel, channelPrivacy, getChannelPermissions, hasChannelPermission, resolveChannelPermissions, withChannelPrivacy,
   resolveMemberPermissions, resolveRoleDenyMemberPermissions, resolveLegacyMemberPermissions, legacyRoleMask, legacyRoleGrants,
-  toLegacyRoles, toRoleDenyRoles, type ChannelPermissionOverwrite,
+  toLegacyRoles, toRoleDenyRoles, withVoicePresence, type ChannelPermissionOverwrite,
 } from '../src/permissions';
 import { channelPermissionOverwritesSchema, roleCreateSchema, roleUpdateSchema } from '../src/validators';
 
@@ -218,4 +218,23 @@ test('unrelated permission changes preserve the bot exclusion of migrated Member
   assert.equal(channelPrivacy(changed, previous).isPrivate, true);
   assert.equal(channelPrivacy(changed, { ...previous, isPrivate: false }).isPrivate, false);
   assert.equal(channelPrivacy([], previous).isPrivate, false, 'an explicit visibility change replaces the legacy flag');
+});
+
+test('a member inside a voice room keeps seeing it while every other rule still applies', () => {
+  const hidden = rules([
+    { roleId: null, allow: 0, deny: Permission.VIEW_CHANNEL },
+    { userId: 'guest', allow: Permission.READ_MESSAGES, deny: Permission.SPEAK | Permission.VIEW_CHANNEL },
+  ]);
+  assert.equal(canAccessChannel(hidden, DEFAULT_PERMISSIONS, [], false, 'guest'), false);
+  const present = withVoicePresence(hidden, 'guest');
+  assert.equal(canAccessChannel(present, DEFAULT_PERMISSIONS, [], false, 'guest'), true);
+  assert.equal(hasChannelPermission(present, DEFAULT_PERMISSIONS, [], Permission.READ_MESSAGES, false, 'guest'), true);
+  assert.equal(hasChannelPermission(present, DEFAULT_PERMISSIONS, [], Permission.SPEAK, false, 'guest'), false, 'their own denial is kept');
+  assert.equal(canAccessChannel(present, DEFAULT_PERMISSIONS, [], false, 'other'), false, 'nobody else gains the view');
+  const legacyPrivate = { isPrivate: true, allowedRoleIds: ['vip'] };
+  assert.equal(canAccessChannel(withVoicePresence(legacyPrivate, 'guest'), DEFAULT_PERMISSIONS, [], false, 'guest'), true);
+  assert.equal(canAccessChannel(withVoicePresence(legacyPrivate, 'guest'), DEFAULT_PERMISSIONS, [], true, 'guest'), false,
+    'bots never enter private rooms through presence');
+  assert.equal(hasChannelPermission(withVoicePresence({ isPrivate: false, allowedRoleIds: [] }, 'guest'),
+    DEFAULT_PERMISSIONS, [], Permission.SPEAK, false, 'guest'), true, 'legacy public rooms keep their base permissions');
 });

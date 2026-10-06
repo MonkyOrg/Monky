@@ -2418,6 +2418,14 @@ async function* regression(locale, inviteModule) {
       mainRoot.querySelector('#chat-edit-composer').hidden &&
       mainRoot.querySelector('#chat-messages-feed').textContent.includes(t('channelPermissions.readDenied')),
     'Read revocation clears the visible compositor as well as the message feed');
+    const deniedComposer = mainRoot.querySelector('.chat-input-container');
+    const deniedState = mainRoot.querySelector('#chat-messages-feed .chat-feed-state');
+    check((deniedComposer.hidden || deniedComposer.hasAttribute('data-ui-closing'))
+      && deniedState?.querySelector('.chat-feed-state-icon')?.textContent === 'lock'
+      && deniedState.querySelector('.chat-feed-state-title')?.textContent === t('channelPermissions.readDeniedTitle')
+      && getComputedStyle(deniedState).alignItems === 'center'
+      && !mainRoot.querySelector('#chat-messages-feed .bot-error'),
+    'Read denial shows the themed locked state alone, without a composer or loose errors repeating it');
     acknowledgeRetiredSend(outgoingMessage);
     await lateSend;
     client.sendRequest = originalSendRequest;
@@ -2429,6 +2437,9 @@ async function* regression(locale, inviteModule) {
     chatServer.myPermissions = oldPermissions;
     check(!mainRoot.querySelector('#chat-messages-feed').textContent.includes(t('channelPermissions.readDenied')),
       'Restoring reading removes the denied state and resumes the normal chat');
+    const restoredComposer = mainRoot.querySelector('.chat-input-container');
+    check(!restoredComposer.hidden && !restoredComposer.hasAttribute('data-ui-closing'),
+      'Restoring reading brings the composer back');
     const stage = mainRoot.querySelector('#main-center-stage');
     main.voiceStageView = new VoiceStageView(stage);
     let voiceJoinRequests = 0;
@@ -2505,6 +2516,19 @@ async function* regression(locale, inviteModule) {
     mainRoot.querySelector('.voice-chat-close').click();
     check(main.voiceChatChannelId === null && voiceJoinRequests === 0,
       'Closing the panel never changes voice admission');
+    main.openVoiceChannelChat('voice');
+    await flush();
+    const voiceIndex = chatServer.serverDetails.channels.findIndex(channel => channel.id === 'voice');
+    const [deletedVoice] = chatServer.serverDetails.channels.splice(voiceIndex, 1);
+    chatServer.serverDetails.channels.push({ ...deletedVoice, id: 'other-voice', name: 'Other voice' });
+    // The stage moved to another room while this room's chat stayed open.
+    main.viewedVoiceChannelId = 'other-voice';
+    main.handleChannelDeleted({ channelId: 'voice' });
+    check(main.voiceChatChannelId === null && voicePanel.hidden && !voicePanel.querySelector('.chat-feed-state'),
+      'Deleting a voice room closes its open chat instead of leaving a denied conversation behind');
+    chatServer.serverDetails.channels = chatServer.serverDetails.channels.filter(channel => channel.id !== 'other-voice');
+    chatServer.serverDetails.channels.splice(voiceIndex, 0, deletedVoice);
+    main.viewedVoiceChannelId = null;
     const sidebar = document.createElement('aside');
     check(main.clampSidebarWidth(100000) === Math.max(280, Math.floor(window.innerWidth * 0.175))
       && main.clampSidebarWidth(1) === 280, 'Sidebar halves its maximum width while preserving the readable minimum');

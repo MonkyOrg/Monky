@@ -131,9 +131,14 @@ test('category CRUD/mixed ordering and revocation cover auth, voice, chat, attac
   const marker = member.peer.messages.length;
   const updated = await owner.peer.request(MessageType.CATEGORY_UPDATE, { categoryId, allowedRoleIds: [] });
   assert.equal(updated.type, MessageType.CATEGORIES_UPDATED);
+  await member.peer.wait((message) => message.type === MessageType.CHANNEL_DELETED && message.payload.channelId === chatId, marker);
+  assert.equal(f.signalingService.getParticipantsInChannel(voiceId).length, 1, 'losing the view never drops someone already inside');
+  assert.equal(member.peer.messages.slice(marker).some((message) =>
+    message.type === MessageType.CHANNEL_DELETED && message.payload.channelId === voiceId), false);
+  await member.peer.error(MessageType.CHAT_SEND, { channelId: chatId, content: 'Revoked' }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  member.peer.send(MessageType.VOICE_LEAVE, { channelId: voiceId });
   await member.peer.wait((message) => message.type === MessageType.CHANNEL_DELETED && message.payload.channelId === voiceId, marker);
   assert.equal(f.signalingService.getParticipantsInChannel(voiceId).length, 0);
-  await member.peer.error(MessageType.CHAT_SEND, { channelId: chatId, content: 'Revoked' }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
   const rejoined = await f.human('Category member', member.keys);
   assert.equal(records(record(rejoined.auth.payload.server).channels).some((channel) => channel.id === chatId), false);
   const order = await owner.peer.request(MessageType.CHANNEL_REORDER, { categoryId, orderedIds: [voiceId, chatId, voiceId, 'missing'] });

@@ -49,9 +49,14 @@ export class SoundboardModal {
 
     const voiceServer = voiceStore.voiceSessionKey ? sessionManager.get(voiceStore.voiceSessionKey)?.serverStore : undefined;
     const permissionStore = voiceServer ?? serverStore;
-    const serverAllows = permissionStore.serverDetails?.allowSoundboard !== false;
-    const hasSoundboardPermission = permissionStore.hasPermission(Permission.USE_SOUNDBOARD,
-      voiceServer ? voiceStore.currentVoiceChannelId : undefined);
+    const voiceChannelId = voiceServer ? voiceStore.currentVoiceChannelId : null;
+    const serverGrantsSoundboard = permissionStore.hasPermission(Permission.USE_SOUNDBOARD);
+    // A channel can deny the soundboard on its own; the notice names where the
+    // denial comes from, and SPEAK also keeps sounds out of the call.
+    const restriction = permissionStore.serverDetails?.allowSoundboard === false ? 'soundboard.disabledByAdmin'
+      : !(voiceChannelId ? permissionStore.hasPermission(Permission.USE_SOUNDBOARD, voiceChannelId) : serverGrantsSoundboard)
+        ? (voiceChannelId && serverGrantsSoundboard ? 'soundboard.noChannelPermission' : 'soundboard.noPermission')
+        : voiceChannelId && voiceStore.permissionMuted ? 'soundboard.noSpeakPermission' : null;
 
     this.modalEl = document.createElement('div');
     this.modalEl.className = 'modal-backdrop';
@@ -153,24 +158,17 @@ export class SoundboardModal {
           </div>
         </div>
 
-        <!-- Server disabled alert banner -->
-        ${!serverAllows ? `
-          <div style="margin: 12px 20px 0; padding: 8px 12px; background: rgba(237, 66, 69, 0.15); border: 1px solid rgba(237, 66, 69, 0.3); border-radius: var(--radius-md); color: var(--danger); font-size: 12px; display: flex; align-items: center; gap: 8px;">
-            <span class="material-symbols-outlined md-16">block</span>
-            <span>${t('soundboard.disabledByAdmin')}</span>
-          </div>
-        ` : ''}
-        ${serverAllows && !hasSoundboardPermission ? `
-          <div style="margin: 12px 20px 0; padding: 8px 12px; background: rgba(237, 66, 69, 0.15); border: 1px solid rgba(237, 66, 69, 0.3); border-radius: var(--radius-md); color: var(--danger); font-size: 12px; display: flex; align-items: center; gap: 8px;">
-            <span class="material-symbols-outlined md-16">block</span>
-            <span>${t('soundboard.noPermission')}</span>
+        ${restriction ? `
+          <div class="sb-modal-notice sb-modal-notice--danger" role="status">
+            <span class="material-symbols-outlined md-16" aria-hidden="true">block</span>
+            <span>${t(restriction)}</span>
           </div>
         ` : ''}
 
         <!-- Voice channel warning if not in call -->
         ${!voiceStore.currentVoiceChannelId ? `
-          <div class="sb-modal-local-warning" style="margin: 12px 20px 6px; padding: 8px 12px; background: rgba(240, 178, 50, 0.15); border: 1px solid rgba(240, 178, 50, 0.3); border-radius: var(--radius-md); color: #f0b232; font-size: 12px; display: flex; align-items: center; gap: 8px;">
-            <span class="material-symbols-outlined md-16">info</span>
+          <div class="sb-modal-notice sb-modal-notice--warning sb-modal-local-warning" role="status">
+            <span class="material-symbols-outlined md-16" aria-hidden="true">info</span>
             <span>${t('soundboard.localPreviewOnly')}</span>
           </div>
         ` : ''}

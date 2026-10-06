@@ -51,6 +51,7 @@ function fixture() {
   const handler = new BotScreenHandler(service, {
     getRoleAccessVersion: () => roleVersion,
     getChannelSummary: async (id) => id === 'voice' && exists ? { ...channel } : null,
+    rulesFor: (rules) => rules,
     getAccessContext: async (id) => {
       const result = { userId: id, permissions: permissions.get(id) ?? defaults, roleIds: roles.get(id) ?? [] };
       accessHook?.(id);

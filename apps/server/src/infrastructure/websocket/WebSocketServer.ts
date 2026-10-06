@@ -5,6 +5,8 @@ import { WebSocket, WebSocketServer as WSServer } from 'ws';
 import {
   hasChannelPermission,
   type ChannelAccessRules,
+  type ChannelCategory,
+  type ChannelSummary,
   AdminDeafenUserPayload,
   AdminKickVoicePayload,
   AdminMoveUserPayload,
@@ -251,6 +253,8 @@ interface ClientSession {
    * changes.
    */
   visibleChannelIds?: Set<string>;
+  /** Voice rooms this connection was last shown because its person is inside them. */
+  voicePresenceKey?: string;
   /**
    * Hostname this client used to reach the server, from the upgrade request's
    * `Host` header (#425).
@@ -290,6 +294,13 @@ export class WebSocketServer {
     expiresAt: number;
     inFlight: boolean;
   }>();
+  /**
+   * The room a dropped connection was in, kept through the reconnection grace
+   * period: a member moved into a room they cannot see must still find it to
+   * rejoin by themselves after a network blip.
+   */
+  private voiceReturnGrants = new Map<string, { userId: string; channelId: string; timer: NodeJS.Timeout }>();
+  private voicePresenceSync: Promise<void> = Promise.resolve();
   /** Last "ask to join" per requester/host pair, for the spam guard (#675). */
   private botInteractions: BotInteractionHandler;
   private botLocalExecution: BotLocalExecutionService<BotInteractionSession>;
@@ -524,6 +535,7 @@ export class WebSocketServer {
       });
     }
     this.signalingService.setVoiceMembershipListener(() => this.voiceMembershipChanged());
+    this.channelService.setVoicePresence((userId, channelId) => this.voicePresenceChannelIds(userId).has(channelId));
     this.wss = new WSServer({ server: this.server, maxPayload: LIMITS.WS_MAX_PAYLOAD_BYTES });
     this.setupWss();
     this.startHeartbeat();
@@ -1006,6 +1018,8 @@ export class WebSocketServer {
         }
         this.voiceReconnectGrants?.delete(session);
         await this.handleVoiceJoin(session, payload as VoiceJoinPayload, requestId);
+        if (session.sessionId) this.clearVoiceReturn(session.sessionId);
+        void this.syncVoicePresenceVisibility();
         break;
 
       case MessageType.VOICE_RECONNECT: {
@@ -1024,7 +1038,9 @@ export class WebSocketServer {
           return;
         }
         this.voiceReconnectGrants?.delete(session);
+        if (session.sessionId) this.clearVoiceReturn(session.sessionId);
         await this.handleVoiceLeave(session, payload as VoiceLeavePayload, requestId);
+        void this.syncVoicePresenceVisibility();
         break;
 
       case MessageType.VOICE_STATE_UPDATE:
@@ -1140,6 +1156,7 @@ export class WebSocketServer {
 
       case MessageType.ADMIN_KICK_VOICE:
         if (!(await this.requirePermission(session, Permission.KICK_MEMBERS, requestId))) return;
+        this.clearVoiceReturn((payload as AdminKickVoicePayload).targetSessionId);
         if (this.cancelVoiceReconnect((payload as AdminKickVoicePayload).targetSessionId)
           && !this.signalingService.getVoiceState((payload as AdminKickVoicePayload).targetSessionId)) {
           this.broadcast({ type: MessageType.ADMIN_KICK_VOICE, requestId, payload });
@@ -1166,6 +1183,7 @@ export class WebSocketServer {
         // as an intentional leave (immediate USER_LEFT, no reconnecting grace).
         session.intentionalLogout = true;
         this.voiceReconnectGrants?.delete(session);
+        void this.syncVoicePresenceVisibility();
         this.botLocalExecution.disconnect(session);
         this.botInteractions.disconnect(session);
         this.disconnectBotScreens(session);
@@ -1456,7 +1474,10 @@ export class WebSocketServer {
 
     // Remember exactly which channels this client was told about, so later role
     // or privacy changes can be reconciled into deltas (#384).
+    const voicePresenceKey = this.voicePresenceKey(result.user.id);
+    await this.includeVoicePresenceChannels(result.user.id, result.serverDetails);
     session.visibleChannelIds = new Set(result.serverDetails.channels.map((c) => c.id));
+    session.voicePresenceKey = voicePresenceKey;
     result.serverDetails.voiceStates = Object.fromEntries(
       Object.entries(this.signalingService.getAllVoiceStates())
         .filter(([, state]) => session.visibleChannelIds?.has(state.channelId))
@@ -2767,7 +2788,7 @@ export class WebSocketServer {
       payload: { categories: categories.filter(category =>
         canAccessChannel(category, context.permissions, context.roleIds, context.isBot, context.userId) ||
         channels.some(channel => channel.categoryId === category.id &&
-          canAccessChannel(channel, context.permissions, context.roleIds, context.isBot, context.userId))) },
+          canAccessChannel(this.channelService.rulesFor(channel, context), context.permissions, context.roleIds, context.isBot, context.userId))) },
     });
   }
 
@@ -3229,6 +3250,7 @@ export class WebSocketServer {
     if (changedMode) {
       this.botLocalExecution.voiceModeChanged();
       this.voiceReconnectGrants.clear();
+      void this.syncVoicePresenceVisibility();
       for (const session of this.sessions.values()) {
         if (!session.isBot) continue;
         session.botVoiceJoinAttempt = undefined;
@@ -3243,13 +3265,14 @@ export class WebSocketServer {
       // each exact connection, never to a user ID shared by several devices.
       this.sfuManager.close();
       const evictedStates = this.signalingService.clearAllVoiceStates();
+      const grantMs = 30000;
       for (const vs of evictedStates) {
         const participant = this.findSessionById(vs.sessionId);
         if (participant) {
           this.voiceReconnectGrants.set(participant, {
             transitionId: voiceTransition.id,
             channelId: vs.channelId,
-            expiresAt: Date.now() + 30000,
+            expiresAt: Date.now() + grantMs,
             inFlight: false,
           });
         }
@@ -3263,6 +3286,8 @@ export class WebSocketServer {
           },
         });
       }
+      // Unused grants lapse silently; withdraw rooms only they kept listed.
+      if (evictedStates.length > 0) setTimeout(() => void this.syncVoicePresenceVisibility(), grantMs + 50).unref();
     }
 
     let relayError: string | undefined;
@@ -3337,6 +3362,7 @@ export class WebSocketServer {
         cancelled = true;
       }
     }
+    if (cancelled) void this.syncVoicePresenceVisibility();
     return cancelled;
   }
 
@@ -3408,6 +3434,7 @@ export class WebSocketServer {
       if (admitted && this.signalingService.getVoiceState(session.sessionId)?.channelId === payload.channelId) {
         await this.handleVoiceLeave(session, { channelId: payload.channelId });
       }
+      void this.syncVoicePresenceVisibility();
     }
   }
 
@@ -5141,13 +5168,14 @@ export class WebSocketServer {
       return;
     }
     if (!(await this.requirePermission(session, Permission.MOVE_MEMBERS, requestId))) return;
+    // Whoever moves must be able to reach the room themselves. The member being
+    // moved does not need to see it: VIEW_CHANNEL only gates seeing a room and
+    // joining it by oneself, so being brought in by someone allowed is fine.
+    if (!(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
 
-    const targetCanView = await this.channelService.canUserAccessChannel(previous.userId, payload.channelId, Permission.VIEW_CHANNEL);
-    const targetCanSpeak = await this.channelService.canUserAccessChannel(previous.userId, payload.channelId, Permission.SPEAK);
-    // Moving someone into a private channel they cannot access would drop them
-    // into a room that is not even in their channel list (#384). Bots still
-    // need voice publish permission; humans without it enter permission-muted.
-    if (!targetCanView || (target.isBot && !targetCanSpeak)) {
+    // Bots never enter private rooms through someone else, and still need voice
+    // publish permission. Humans without SPEAK enter permission-muted.
+    if (target.isBot && !(await this.channelService.canUserAccessChannel(previous.userId, payload.channelId, Permission.SPEAK))) {
       this.sendError(
         session.ws,
         ProtocolErrorCode.PERMISSION_DENIED,
@@ -5162,9 +5190,13 @@ export class WebSocketServer {
       this.sendError(session.ws, joinResult.errorCode || ProtocolErrorCode.BAD_REQUEST, joinResult.errorMessage || 'Não foi possível mover o usuário.', requestId);
       return;
     }
+    const targetCanSpeak = await this.channelService.canUserAccessChannel(previous.userId, payload.channelId, Permission.SPEAK);
     joinResult.voiceState = await this.applyPermissionMuted(payload.targetSessionId, !target.isBot && !targetCanSpeak) ?? joinResult.voiceState;
 
     this.closeSfuSession(previous.sessionId, previous.channelId);
+    // The destination has to be in the member's list before they are told to
+    // follow the move, or their client would have no room to join.
+    await this.syncVoicePresenceVisibility();
     this.broadcast({ type: MessageType.ADMIN_MOVE_USER, requestId, payload });
     this.broadcast({
       type: MessageType.VOICE_USER_LEFT,
@@ -5282,6 +5314,8 @@ export class WebSocketServer {
     session.botVoiceJoinAttempt = undefined;
     session.botVoiceGrant = undefined;
     this.voiceReconnectGrants?.delete(session);
+    // Runs after this synchronous teardown, so it sees any return grant below.
+    void this.syncVoicePresenceVisibility();
     const wasConnected = this.sessions.delete(session.ws);
     this.authService.clearChallenge(session.ws);
     this.botLocalExecution.disconnect(session);
@@ -5327,6 +5361,7 @@ export class WebSocketServer {
     // Presence in the member list keeps that grace period (#44): the person is
     // still shown as "reconnecting", and the client rejoins the voice channel by
     // itself as soon as it reconnects.
+    if (!session.intentionalLogout && !session.isBot) this.grantVoiceReturn(user.id, sessionId);
     this.announceVoiceLeave(user, sessionId);
 
     // Graceful logout (user clicked disconnect / switched servers): remove them
@@ -5424,6 +5459,7 @@ export class WebSocketServer {
   private finalizeSessionLeave(user: UserSummary, sessionId: string, invisible?: boolean): void {
     // Normally already done by handleDisconnect; kept for the paths that
     // finalize a session without going through it.
+    this.clearVoiceReturn(sessionId);
     this.announceVoiceLeave(user, sessionId);
 
     // Invisible users were never announced as online, so don't announce
@@ -5499,7 +5535,7 @@ export class WebSocketServer {
    * allowed to see its content. Even public channels may deny message reading.
    */
   private async broadcastToChannelAudience(
-    channel: ChannelAccessRules,
+    channel: ChannelAccessRules & { id: string },
     message: ProtocolMessage,
     ignoreWs?: WebSocket,
     canSend?: () => boolean,
@@ -5528,7 +5564,9 @@ export class WebSocketServer {
    * connections (#309), and the whole set is settled before anything is sent so
    * the delivery loop itself stays synchronous.
    */
-  private async resolveChannelAudience(channel: ChannelAccessRules, permission: Permission = Permission.VIEW_CHANNEL): Promise<Set<string>> {
+  private async resolveChannelAudience(
+    channel: ChannelAccessRules & { id: string }, permission: Permission = Permission.VIEW_CHANNEL,
+  ): Promise<Set<string>> {
     const userIds = new Set<string>();
     for (const session of this.sessions.values()) {
       if (session.user) userIds.add(session.user.id);
@@ -5538,8 +5576,9 @@ export class WebSocketServer {
     await Promise.all(
       Array.from(userIds).map(async (userId) => {
         const context = await this.channelService.getAccessContext(userId);
-        if (canAccessChannel(channel, context.permissions, context.roleIds, context.isBot, context.userId) &&
-            hasChannelPermission(channel, context.permissions, context.roleIds, permission, context.isBot, context.userId)) {
+        const rules = this.channelService.rulesFor(channel, context);
+        if (canAccessChannel(rules, context.permissions, context.roleIds, context.isBot, context.userId) &&
+            hasChannelPermission(rules, context.permissions, context.roleIds, permission, context.isBot, context.userId)) {
           allowed.add(userId);
         }
       })
@@ -5692,8 +5731,9 @@ export class WebSocketServer {
    * see (#384), pushing only the difference: channels that just became visible
    * arrive as CHANNEL_CREATED, ones that no longer are leave as CHANNEL_DELETED.
    *
-   * Anyone who loses access while sitting in that voice channel is disconnected
-   * from it, otherwise they would keep talking in a room they can no longer see.
+   * A bot that loses access while sitting in a voice channel is disconnected
+   * from it. A person stays: VIEW_CHANNEL only gates finding a room and joining
+   * it by oneself, so they keep seeing the room until they leave.
    */
   private async reconcileChannelVisibility(refreshChannels = false): Promise<void> {
     this.botSettingsPermissionVersion++;
@@ -5750,45 +5790,18 @@ export class WebSocketServer {
       const context = contexts.get(session.user.id);
       if (!context) continue;
 
-      const previouslyVisible = session.visibleChannelIds ?? new Set<string>();
-      const nowVisible = new Set(
-        channels
-          .filter((channel) => canAccessChannel(channel, context.permissions, context.roleIds, context.isBot, context.userId))
-          .map((channel) => channel.id)
-      );
-
-      this.send(ws, {
-        type: MessageType.CATEGORIES_UPDATED,
-        payload: { categories: categories.filter((category) =>
-          canAccessChannel(category, context.permissions, context.roleIds, context.isBot, context.userId) ||
-          channels.some((channel) => channel.categoryId === category.id && nowVisible.has(channel.id))) },
+      const nowVisible = this.visibleChannelIdsFor(channels, context);
+      if (!session.isBot) session.voicePresenceKey = this.voicePresenceKey(session.user.id);
+      this.sendChannelVisibility(session, nowVisible, channels, categories, context, refreshChannels, (channelId) => {
+        if (session.sessionId && !this.hasBotVoiceGrant(session, channelId)) this.evictFromVoiceChannel(session.sessionId, channelId);
       });
 
-      for (const channelId of nowVisible) {
-        if (previouslyVisible.has(channelId) && !refreshChannels) continue;
-        const channel = channelsById.get(channelId);
-        if (!channel) continue;
-        this.send(ws, {
-          type: previouslyVisible.has(channelId) ? MessageType.CHANNEL_UPDATED : MessageType.CHANNEL_CREATED,
-          payload: { channel } as ChannelCreatedPayload,
-        });
-      }
-
-      for (const channelId of previouslyVisible) {
-        if (nowVisible.has(channelId)) continue;
-        if (session.sessionId && !this.hasBotVoiceGrant(session, channelId)) this.evictFromVoiceChannel(session.sessionId, channelId);
-        this.send(ws, {
-          type: MessageType.CHANNEL_DELETED,
-          payload: { channelId } as ChannelDeletedPayload,
-        });
-      }
-
-      session.visibleChannelIds = nowVisible;
       const voiceState = session.sessionId && this.signalingService.getVoiceState(session.sessionId);
       const voiceChannel = voiceState && channelsById.get(voiceState.channelId);
       if (voiceState && voiceChannel && !this.hasBotVoiceGrant(session, voiceState.channelId)) {
-        const canView = hasChannelPermission(voiceChannel, context.permissions, context.roleIds, Permission.VIEW_CHANNEL, context.isBot, context.userId);
-        const canSpeak = hasChannelPermission(voiceChannel, context.permissions, context.roleIds, Permission.SPEAK, context.isBot, context.userId);
+        const rules = this.channelService.rulesFor(voiceChannel, context);
+        const canView = hasChannelPermission(rules, context.permissions, context.roleIds, Permission.VIEW_CHANNEL, context.isBot, context.userId);
+        const canSpeak = hasChannelPermission(rules, context.permissions, context.roleIds, Permission.SPEAK, context.isBot, context.userId);
         if (!canView || (session.isBot && !canSpeak)) {
           this.evictFromVoiceChannel(voiceState.sessionId, voiceState.channelId);
         } else {
@@ -5812,6 +5825,140 @@ export class WebSocketServer {
     this.botInteractions.voiceChanged();
     void this.botScreens?.revokeInvalid()
       .catch((error: unknown) => Logger.error('BOT', 'Failed to reconcile voice miniapp access.', error));
+    void this.syncVoicePresenceVisibility();
+  }
+
+  /**
+   * Voice rooms a person is inside, or is returning to after a dropped socket
+   * or a voice mode switch. They see those rooms even without VIEW_CHANNEL.
+   */
+  private voicePresenceChannelIds(userId: string): Set<string> {
+    const rooms = new Set(this.signalingService.getSessionsOfUser(userId).map((state) => state.channelId));
+    const now = Date.now();
+    for (const [session, grant] of this.voiceReconnectGrants ?? []) {
+      if (session.user?.id === userId && grant.expiresAt > now) rooms.add(grant.channelId);
+    }
+    for (const grant of this.voiceReturnGrants?.values() ?? []) {
+      if (grant.userId === userId) rooms.add(grant.channelId);
+    }
+    return rooms;
+  }
+
+  private voicePresenceKey(userId: string): string {
+    return [...this.voicePresenceChannelIds(userId)].sort().join('\n');
+  }
+
+  private grantVoiceReturn(userId: string, sessionId: string): void {
+    const state = this.signalingService.getVoiceState(sessionId);
+    if (!state || !this.voiceReturnGrants) return;
+    const previous = this.voiceReturnGrants.get(sessionId);
+    if (previous) clearTimeout(previous.timer);
+    const timer = setTimeout(() => this.clearVoiceReturn(sessionId), LIMITS.RECONNECT_GRACE_MS);
+    this.voiceReturnGrants.set(sessionId, { userId, channelId: state.channelId, timer });
+  }
+
+  private clearVoiceReturn(sessionId: string): void {
+    const grant = this.voiceReturnGrants?.get(sessionId);
+    if (!grant) return;
+    clearTimeout(grant.timer);
+    this.voiceReturnGrants.delete(sessionId);
+    void this.syncVoicePresenceVisibility();
+  }
+
+  private visibleChannelIdsFor(channels: readonly ChannelSummary[], context: ChannelAccessContext): Set<string> {
+    return new Set(channels
+      .filter((channel) => canAccessChannel(this.channelService.rulesFor(channel, context),
+        context.permissions, context.roleIds, context.isBot, context.userId))
+      .map((channel) => channel.id));
+  }
+
+  /**
+   * Sends one connection the difference between the channels it was told about
+   * and `nowVisible` (#384). `beforeRemoval` runs before a channel is withdrawn,
+   * so a voice eviction still reaches the client while it knows the room.
+   */
+  private sendChannelVisibility(
+    session: ClientSession,
+    nowVisible: Set<string>,
+    channels: readonly ChannelSummary[],
+    categories: readonly ChannelCategory[],
+    context: ChannelAccessContext,
+    refreshChannels: boolean,
+    beforeRemoval?: (channelId: string) => void,
+  ): void {
+    const previouslyVisible = session.visibleChannelIds ?? new Set<string>();
+    this.send(session.ws, {
+      type: MessageType.CATEGORIES_UPDATED,
+      payload: { categories: categories.filter((category) =>
+        canAccessChannel(category, context.permissions, context.roleIds, context.isBot, context.userId) ||
+        channels.some((channel) => channel.categoryId === category.id && nowVisible.has(channel.id))) },
+    });
+
+    for (const channel of channels) {
+      if (!nowVisible.has(channel.id) || (previouslyVisible.has(channel.id) && !refreshChannels)) continue;
+      this.send(session.ws, {
+        type: previouslyVisible.has(channel.id) ? MessageType.CHANNEL_UPDATED : MessageType.CHANNEL_CREATED,
+        payload: { channel } as ChannelCreatedPayload,
+      });
+    }
+
+    for (const channelId of previouslyVisible) {
+      if (nowVisible.has(channelId)) continue;
+      beforeRemoval?.(channelId);
+      this.send(session.ws, {
+        type: MessageType.CHANNEL_DELETED,
+        payload: { channelId } as ChannelDeletedPayload,
+      });
+    }
+    session.visibleChannelIds = nowVisible;
+  }
+
+  /**
+   * Lists the voice room a person is inside even when their own access would
+   * not, and withdraws it once they leave. One pass runs at a time, so the
+   * deltas sent to a connection never interleave.
+   */
+  private syncVoicePresenceVisibility(): Promise<void> {
+    const run = (this.voicePresenceSync ?? Promise.resolve()).then(() => this.applyVoicePresenceVisibility());
+    this.voicePresenceSync = run.catch((error: unknown) => Logger.error('NETWORK', 'Failed to sync voice room visibility.', error));
+    return this.voicePresenceSync;
+  }
+
+  private async applyVoicePresenceVisibility(): Promise<void> {
+    const stale = [...this.sessions.values()].filter((session) => !!session.user && !session.isBot &&
+      !!session.visibleChannelIds && session.voicePresenceKey !== this.voicePresenceKey(session.user.id));
+    if (this.closing || stale.length === 0) return;
+    const [channels, categories] = await Promise.all([this.channelService.listChannels(), this.channelService.listCategories()]);
+    const contexts = new Map<string, ChannelAccessContext>();
+    for (const session of stale) {
+      const userId = session.user?.id;
+      if (!userId || !this.isCurrentSession(session)) continue;
+      const context = contexts.get(userId) ?? await this.channelService.getAccessContext(userId);
+      contexts.set(userId, context);
+      if (!this.isCurrentSession(session)) continue;
+      const previouslyVisible = session.visibleChannelIds ?? new Set<string>();
+      const nowVisible = this.visibleChannelIdsFor(channels, context);
+      session.voicePresenceKey = this.voicePresenceKey(userId);
+      if (nowVisible.size === previouslyVisible.size && [...nowVisible].every((id) => previouslyVisible.has(id))) continue;
+      this.sendChannelVisibility(session, nowVisible, channels, categories, context, false);
+    }
+  }
+
+  /** A person signing in while inside a room they cannot see by themselves still gets it listed. */
+  private async includeVoicePresenceChannels(
+    userId: string, details: { channels: ChannelSummary[]; categories?: ChannelCategory[] },
+  ): Promise<void> {
+    const missing = [...this.voicePresenceChannelIds(userId)].filter((id) => !details.channels.some((channel) => channel.id === id));
+    if (missing.length === 0) return;
+    const [channels, categories] = await Promise.all([this.channelService.listChannels(), this.channelService.listCategories()]);
+    for (const channel of channels) {
+      if (!missing.includes(channel.id)) continue;
+      details.channels.push(channel);
+      const category = categories.find((entry) => entry.id === channel.categoryId);
+      if (category && !details.categories?.some((entry) => entry.id === category.id)) {
+        details.categories = [...(details.categories ?? []), category];
+      }
+    }
   }
 
   private disconnectBotScreens(session: BotInteractionSession): void {
@@ -5898,6 +6045,7 @@ export class WebSocketServer {
       this.messageSearch?.close();
       this.shutdownResources.defer('server community', () => this.community?.close());
       this.signalingService.setVoiceMembershipListener(undefined);
+      this.channelService.setVoicePresence(() => false);
       this.signalingService.configureScreenAccess(() => null, undefined);
       this.permissionService.setRoleMutationListener(undefined);
       for (const session of this.sessions.values()) {
@@ -5918,6 +6066,8 @@ export class WebSocketServer {
       this.shutdownResources.defer('bot interactions', () => this.botInteractions.close());
       this.shutdownResources.defer('WebSocket timers', () => {
         this.voiceReconnectGrants.clear();
+        for (const grant of this.voiceReturnGrants.values()) clearTimeout(grant.timer);
+        this.voiceReturnGrants.clear();
         if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
         this.heartbeatTimer = undefined;
         for (const timer of this.reconnectTimers.values()) clearTimeout(timer);

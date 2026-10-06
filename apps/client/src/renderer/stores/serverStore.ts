@@ -3,7 +3,7 @@ import { appEvents, EventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { clientLog } from '../core/ClientLogService';
 import type { ChannelCategory } from '@monky/shared';
-import { getChannelPermissions, hasChannelPermission, resolveLegacyMemberPermissions, resolveMemberPermissions, resolveRoleDenyMemberPermissions, resolveChannelPermissions, roleModelFor, type ChannelAccessRules, type RoleModel } from '@monky/shared';
+import { getChannelPermissions, hasChannelPermission, resolveLegacyMemberPermissions, resolveMemberPermissions, resolveRoleDenyMemberPermissions, resolveChannelPermissions, roleModelFor, withVoicePresence, type ChannelAccessRules, type RoleModel } from '@monky/shared';
 
 export class ServerStore {
   /**
@@ -26,6 +26,11 @@ export class ServerStore {
   public knownMembers: Map<string, UserSummary> = new Map();
   /** Slash commands registered by online bots (#569). */
   public slashCommands: SlashCommand[] = [];
+  /**
+   * The voice room this connection is in. VIEW_CHANNEL only gates finding a
+   * room and joining it alone, so the room stays visible while inside it.
+   */
+  public connectedVoiceChannelId: () => string | null = () => null;
 
   public setServerDetails(details: ServerDetails, currentUser: UserSummary): void {
     clientLog.info('SERVER_HOST', `Server details received: "${details.name}"`, {
@@ -535,8 +540,9 @@ export class ServerStore {
     }
     if (channelId) {
       const channel = this.channelAccessRules(channelId);
-      return !!channel && !!this.currentUser &&
-        hasChannelPermission(channel, this.myPermissions, this.getUserRoleIds(this.currentUser.id), permission, false, this.currentUser.id);
+      if (!channel || !this.currentUser) return false;
+      const rules = this.connectedVoiceChannelId() === channelId ? withVoicePresence(channel, this.currentUser.id) : channel;
+      return hasChannelPermission(rules, this.myPermissions, this.getUserRoleIds(this.currentUser.id), permission, false, this.currentUser.id);
     }
     return hasPermission(this.myPermissions, permission);
   }

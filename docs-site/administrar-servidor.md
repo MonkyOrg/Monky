@@ -264,7 +264,16 @@ ao vivo** também são permissões gerais do servidor: elas não aparecem no edi
 de permissões de canal ou categoria e não podem ser concedidas nem negadas por
 regras locais. Regras antigas com essas permissões são ignoradas. **Falar** não bloqueia a entrada em
 um canal de voz; quem tem **Ver canal** entra, mas fica sem microfone,
-soundboard e áudio da tela até receber **Falar** naquele canal.
+soundboard e áudio da tela até receber **Falar** naquele canal. **Usar
+soundboard** também pode ser negado só em um canal; nesse caso, a soundboard
+avisa que o bloqueio vem daquele canal.
+
+**Ver canal** decide quem encontra um canal de voz e entra nele por conta
+própria. Quem tem **Mover membros** e consegue acessar o canal ainda pode trazer
+qualquer pessoa para ele, mesmo que ela não veja o canal; bots são a exceção e
+nunca entram assim em canais privados. Quem está dentro de um canal de voz
+continua vendo o canal, com o chat dele, até sair, mesmo que perca **Ver canal**
+nesse meio-tempo. Depois de sair, só volta sozinho se puder ver o canal.
 
 ### Canal privado
 

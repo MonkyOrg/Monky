@@ -257,7 +257,15 @@ category permission editor and cannot be granted or denied by local rules.
 Older rules containing them are ignored. **Speak** no longer blocks joining a voice
 channel; anyone with **View channel** can enter, but without **Speak** they are
 muted for microphone, soundboard and screen-share audio until that permission
-applies in the channel.
+applies in the channel. **Use soundboard** can also be denied for a single
+channel; the soundboard then says the block comes from that channel.
+
+**View channel** decides who finds a voice channel and joins it on their own.
+Someone with **Move members** who can reach a channel may still bring any member
+into it, even if that member cannot see it; bots are the exception and never
+enter private channels this way. Anyone inside a voice channel keeps seeing it,
+with its chat, until they leave, even after losing **View channel** meanwhile.
+Once they leave, they can only come back on their own if they can view it.
 
 ### Private channel
 

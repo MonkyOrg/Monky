@@ -172,6 +172,7 @@ export class ChatView {
     const channel = serverDetails.channels.find((c) => c.id === this.currentChannelId);
     const channelName = channel ? channel.name : 'geral';
     const isVoiceChannel = channel?.type === 'VOICE';
+    const readDenied = !this.server.hasPermission(Permission.READ_MESSAGES, this.currentChannelId);
 
     const markup = `
       <div class="chat-container">
@@ -194,7 +195,7 @@ export class ChatView {
         <div id="chat-messages-feed" class="chat-messages-feed"></div>
         <button type="button" id="chat-return-latest" class="btn btn-secondary" hidden>${t('chat.returnLatest')}</button>
 
-        <div class="chat-input-container">
+        <div class="chat-input-container" ${readDenied ? 'hidden' : ''}>
           <div id="chat-edit-composer" class="chat-edit-composer" hidden>
             <div class="chat-edit-heading">
               <span class="material-symbols-outlined md-18" aria-hidden="true">edit</span>
@@ -249,7 +250,7 @@ export class ChatView {
     `;
     this.container.innerHTML = markup;
 
-    if (!this.server.hasPermission(Permission.READ_MESSAGES, this.currentChannelId)) this.store.revokeChannel(this.currentChannelId);
+    if (readDenied) this.store.revokeChannel(this.currentChannelId);
     this.renderMessages({ forceScroll: true });
     this.attachEvents();
     const forumId = channel?.forumId;
@@ -271,7 +272,13 @@ export class ChatView {
     contextMenu.close();
     this.reactionPicker?.close();
     if (!this.server.hasPermission(Permission.READ_MESSAGES, this.currentChannelId)) {
-      feed.innerHTML = `<div class="chat-empty-placeholder" role="status">${t('channelPermissions.readDenied')}</div>`;
+      feed.innerHTML = `
+        <div class="chat-feed-state" role="status">
+          <span class="material-symbols-outlined chat-feed-state-icon" aria-hidden="true">lock</span>
+          <div class="chat-feed-state-title">${t('channelPermissions.readDeniedTitle')}</div>
+          <div class="chat-feed-state-text">${t('channelPermissions.readDenied')}</div>
+        </div>
+      `;
       return;
     }
 
@@ -282,13 +289,13 @@ export class ChatView {
     const messages = chatStore.getMessages(this.currentChannelId);
     if (messages.length === 0 && chatStore.getInvocations(this.currentChannelId).length === 0) {
       feed.innerHTML = `
-        <div id="chat-empty-placeholder" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); gap: 10px;">
-          <span class="material-symbols-outlined" style="color: var(--text-dim); font-size: 44px;">forum</span>
-          <div style="font-size: 15px; font-weight: 600; color: var(--text-secondary);">${t(
+        <div id="chat-empty-placeholder" class="chat-feed-state">
+          <span class="material-symbols-outlined chat-feed-state-icon" aria-hidden="true">forum</span>
+          <div class="chat-feed-state-title">${t(
             serverStore.getChannel(this.currentChannelId)?.type === 'VOICE' ? 'chat.voiceEmptyTitle' : 'chat.emptyTitle',
             { channel: escapeHtml(serverStore.serverDetails?.channels.find((c) => c.id === this.currentChannelId)?.name || 'geral') },
           )}</div>
-          <div style="font-size: 13px;">${t('chat.emptySubtitle')}</div>
+          <div class="chat-feed-state-text">${t('chat.emptySubtitle')}</div>
         </div>
       `;
       return;
@@ -862,6 +869,13 @@ export class ChatView {
     const btnEmoji = this.container.querySelector('#btn-emoji') as HTMLButtonElement | null;
     const btnCode = this.container.querySelector('#btn-code') as HTMLButtonElement | null;
     if (!input || !inputWrapper) return;
+
+    // Without reading there is no conversation to answer: the feed explains the
+    // denial on its own, so the composer steps aside instead of repeating it.
+    const inputContainer = this.container.querySelector<HTMLElement>('.chat-input-container');
+    if (inputContainer && this.currentChannelId) {
+      setSurfaceVisible(inputContainer, serverStore.hasPermission(Permission.READ_MESSAGES, this.currentChannelId));
+    }
 
     const edit = this.messageEdit;
     const editError = edit ? this.messageEditDeniedReason(edit) ??

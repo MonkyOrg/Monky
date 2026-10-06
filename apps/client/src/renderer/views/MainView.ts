@@ -1,4 +1,4 @@
-import { MessageType, Permission, UserSummary, canAccessChannel, type ChannelDeletedPayload } from '@monky/shared';
+import { MessageType, Permission, UserSummary, type ChannelDeletedPayload } from '@monky/shared';
 import { categoryModal } from './CategoryModal';
 import './channelCategories.css';
 import { escapeHtml } from '../utils/html';
@@ -1170,6 +1170,11 @@ export class MainView {
   }
 
   private handleChannelDeleted(payload: ChannelDeletedPayload): void {
+    // The side chat may belong to another room than the stage on screen: a
+    // voice room that disappears takes its chat with it, wherever it is shown.
+    if (this.voiceChatChannelId && !serverStore.getChannel(this.voiceChatChannelId)) {
+      this.closeVoiceChannelChat(false);
+    }
     if (this.viewedVoiceChannelId && !serverStore.getChannel(this.viewedVoiceChannelId)) {
       this.viewedVoiceChannelId = null;
       this.viewedVoiceSessionKey = null;
@@ -2233,11 +2238,9 @@ export class MainView {
 
     // For private channel visibility: determine which voice channels the local
     // user can see, so members in invisible private channels appear as offline.
-    const myRoleIds = serverStore.getUserRoleIds(serverStore.currentUser?.id ?? '');
-    const myPerms = serverStore.myPermissions;
     const visibleChannelIds = new Set(
       (serverStore.serverDetails.channels ?? [])
-        .filter((ch) => canAccessChannel(ch, myPerms, myRoleIds, false, serverStore.currentUser?.id))
+        .filter((ch) => serverStore.hasPermission(Permission.VIEW_CHANNEL, ch.id))
         .map((ch) => ch.id)
     );
 

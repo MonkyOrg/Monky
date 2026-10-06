@@ -13,6 +13,8 @@ import {
   channelOverwrites,
   channelPrivacy,
   withChannelPrivacy,
+  withVoicePresence,
+  type ChannelAccessRules,
   type ChannelPermissionOverwrite,
   channelCreateSchema,
   channelReorderSchema,
@@ -41,6 +43,9 @@ export interface ChannelAccessContext {
 }
 
 export class ChannelService {
+  /** Answered by the voice layer, which knows who is inside each room. */
+  private voicePresence: (userId: string, channelId: string) => boolean = () => false;
+
   constructor(
     private channelRepo: IChannelRepository,
     private serverRepo: IServerRepository,
@@ -50,6 +55,19 @@ export class ChannelService {
     private userRepo: IUserRepository,
     private categoryRepo?: ICategoryRepository,
   ) {}
+
+  public setVoicePresence(provider: (userId: string, channelId: string) => boolean): void {
+    this.voicePresence = provider;
+  }
+
+  /**
+   * Rules that apply to one member. VIEW_CHANNEL only decides who finds a voice
+   * room and joins it by themselves: someone already inside keeps seeing it
+   * until they leave, even when they were moved in or lost access meanwhile.
+   */
+  public rulesFor<T extends ChannelAccessRules & { id: string }>(channel: T, context: ChannelAccessContext): ChannelAccessRules {
+    return !context.isBot && this.voicePresence(context.userId, channel.id) ? withVoicePresence(channel, context.userId) : channel;
+  }
 
   private toSummary(record: ChannelRecord): ChannelSummary {
     return {
@@ -113,7 +131,8 @@ export class ChannelService {
     ]);
     const roleIds = roles.map(role => role.id);
     const channel = channelId ? await this.channelRepo.findById(channelId) : null;
-    return { userId, permissions: channelId ? channel ? getChannelPermissions(channel, permissions, roleIds, false, userId) : 0 : permissions, roleIds };
+    return { userId, permissions: channelId ? channel
+      ? getChannelPermissions(this.rulesFor(channel, { userId, permissions, roleIds }), permissions, roleIds, false, userId) : 0 : permissions, roleIds };
   }
 
   public async listChannels(): Promise<ChannelSummary[]> {
@@ -132,8 +151,9 @@ export class ChannelService {
     if (permission === Permission.MANAGE_CHANNELS || permission === Permission.MOVE_MEMBERS) {
       return hasPermission(context.permissions, permission);
     }
-    return canAccessChannel(channel, context.permissions, context.roleIds, context.isBot, userId) &&
-      hasChannelPermission(channel, context.permissions, context.roleIds, permission, context.isBot, userId);
+    const rules = this.rulesFor(channel, context);
+    return canAccessChannel(rules, context.permissions, context.roleIds, context.isBot, userId) &&
+      hasChannelPermission(rules, context.permissions, context.roleIds, permission, context.isBot, userId);
   }
 
   public async canUserAccessCategory(userId: string, categoryId: string, permission: Permission): Promise<boolean> {
