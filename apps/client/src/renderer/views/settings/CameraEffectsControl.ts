@@ -9,7 +9,9 @@ import { ColorPicker } from '../ColorPicker';
 import { escapeHtml } from '../../utils/html';
 import { t, type TranslationKey } from '../../i18n';
 import licenseUrl from '../../assets/camera-effects/LICENSE?url';
-import sourcesUrl from '../../assets/camera-effects/SOURCES.json?url';
+import rvmLicenseUrl from '../../assets/camera-effects/RVM-LICENSE?url';
+import sourcesUrl from '../../assets/camera-effects/SOURCES.json?url&no-inline';
+import { openFileInputPicker } from '../../utils/buttonLoading';
 import './cameraEffects.css';
 
 const modeLabels: Record<CameraEffectMode, TranslationKey> = {
@@ -34,8 +36,6 @@ const icons: Record<CameraEffectMode, string> = {
 
 const ranges = [
   { setting: 'blurRadius', label: 'cameraEffects.blurStrength', help: 'cameraEffects.blurStrengthHelp', min: 4, max: 32, unit: 'cameraEffects.pixels' },
-  { setting: 'personThreshold', label: 'cameraEffects.personThreshold', help: 'cameraEffects.personThresholdHelp', min: 30, max: 90, unit: 'cameraEffects.percentage' },
-  { setting: 'edgeSoftness', label: 'cameraEffects.edgeSoftness', help: 'cameraEffects.edgeSoftnessHelp', min: 0, max: 20, unit: 'cameraEffects.percentage' },
   { setting: 'keyTolerance', label: 'cameraEffects.keyTolerance', help: 'cameraEffects.keyToleranceHelp', min: 5, max: 60, unit: 'cameraEffects.percentage' },
   { setting: 'keySoftness', label: 'cameraEffects.keySoftness', help: 'cameraEffects.keySoftnessHelp', min: 1, max: 30, unit: 'cameraEffects.percentage' },
   { setting: 'spillReduction', label: 'cameraEffects.spillReduction', help: 'cameraEffects.spillReductionHelp', min: 0, max: 100, unit: 'cameraEffects.percentage' },
@@ -137,7 +137,7 @@ export class CameraEffectsControl {
         <p id="${this.id('camera-effects-description')}" class="camera-effects-hint">${t(modeDescriptions[settings.mode])}</p>
         <div data-camera-panel="blur" hidden>${range('blurRadius')}</div>
         <div data-camera-panel="person" hidden>
-          ${range('personThreshold')}${range('edgeSoftness')}
+          <p class="camera-effects-hint">${t('cameraEffects.mattingHint')}</p>
           <p class="camera-effects-hint">${t('cameraEffects.approximation')}</p>
         </div>
         <div data-camera-panel="chroma" hidden>
@@ -201,7 +201,8 @@ export class CameraEffectsControl {
           <p class="camera-effects-hint">${t('cameraEffects.performanceHint')}</p>
         </div>
         <div class="camera-effects-notices">
-          <a href="${escapeHtml(licenseUrl)}" download="MediaPipe-LICENSE.txt">${t('cameraEffects.license')}</a>
+          <a href="${escapeHtml(rvmLicenseUrl)}" download="RVM-LICENSE.txt">${t('cameraEffects.license')} (RVM)</a>
+          <a href="${escapeHtml(licenseUrl)}" download="TensorFlow-LICENSE.txt">${t('cameraEffects.license')} (TensorFlow.js)</a>
           <a href="${escapeHtml(sourcesUrl)}" download="camera-effects-sources.json">${t('cameraEffects.sources')}</a>
         </div>
         </div>
@@ -226,7 +227,7 @@ export class CameraEffectsControl {
             videoService.stopCamera();
             throw new CameraEffectError('settings');
           }
-          await videoService.setCameraEffects({ mode });
+          await this.changeEffects({ mode });
         });
       });
     }
@@ -238,7 +239,7 @@ export class CameraEffectsControl {
             videoService.stopCamera();
             throw new CameraEffectError('settings');
           }
-          await videoService.setCameraEffects({ backgroundSource });
+          await this.changeEffects({ backgroundSource });
         });
       });
     }
@@ -264,7 +265,8 @@ export class CameraEffectsControl {
     onClick('[data-camera-quality-limit]', () => {
       void this.apply(() => videoService.setCameraEffects({ limitQuality: !cameraEffectsStore.snapshot.settings.limitQuality }));
     });
-    onClick('[data-camera-pick-image]', () => fileInput?.click());
+    const imagePicker = root.querySelector<HTMLButtonElement>('[data-camera-pick-image]');
+    onClick('[data-camera-pick-image]', () => openFileInputPicker(fileInput, imagePicker));
     onClick('[data-camera-remove-image]', () => { void this.apply(() => videoService.removeCameraBackgroundImage()); });
     onClick('[data-camera-preview-toggle]', () => {
       if (this.previewEnabled) this.stopPreview();
@@ -294,7 +296,10 @@ export class CameraEffectsControl {
     this.unbind.push(() => observer.disconnect(), () => document.removeEventListener('visibilitychange', visibility));
     this.unbind.push(videoService.subscribeCameraState((state) => this.cameraStateChanged(state)));
     void cameraEffectsStore.load().then(() => {
-      if (generation === this.generation) this.refresh();
+      if (generation === this.generation) {
+        this.refresh();
+        this.updatePreviewVisibility();
+      }
     }).catch((error: unknown) => {
       if (generation === this.generation) {
         this.failure = error;
@@ -306,6 +311,21 @@ export class CameraEffectsControl {
 
   public async changeDevice(deviceId: string): Promise<void> {
     await this.apply(() => selectCameraDevice(deviceId));
+  }
+
+  private get missingBackground(): boolean {
+    const { settings, image } = cameraEffectsStore.snapshot;
+    return cameraEffectsStore.isLoaded && needsBackgroundImage(settings) && !image;
+  }
+
+  private async changeEffects(patch: Partial<CameraEffectSettings>): Promise<void> {
+    const { settings, image } = cameraEffectsStore.snapshot;
+    if (needsBackgroundImage({ ...settings, ...patch }) && !image) {
+      // An unfinished preference is editable, not a failed camera operation.
+      this.stopPreview();
+      videoService.stopCamera();
+    }
+    await videoService.setCameraEffects(patch);
   }
 
   public activate(): void {
@@ -321,16 +341,18 @@ export class CameraEffectsControl {
 
   private showPreview(): void {
     this.active = true;
-    this.previewEnabled = true;
+    this.previewEnabled = !this.missingBackground;
     this.updatePreviewVisibility();
   }
 
   private previewIsVisible(): boolean {
-    return this.active && this.previewEnabled && this.intersecting && document.visibilityState === 'visible'
+    return cameraEffectsStore.isLoaded && !this.missingBackground
+      && this.active && this.previewEnabled && this.intersecting && document.visibilityState === 'visible'
       && !!this.root?.isConnected && this.root.checkVisibility({ checkVisibilityCSS: true });
   }
 
   private updatePreviewVisibility(): void {
+    if (this.missingBackground) this.previewEnabled = false;
     if (!this.previewIsVisible()) this.releasePreview();
     else if (!this.previewWanted) void this.startPreview();
     this.refreshStatus();
@@ -514,20 +536,23 @@ export class CameraEffectsControl {
 
   private refreshStatus(): void {
     if (!this.root) return;
+    const missingBackground = this.missingBackground;
+    if (missingBackground) this.previewEnabled = false;
     const state = videoService.getCameraState();
     const status = this.element<HTMLElement>('camera-effects-status');
     if (status) {
-      status.textContent = this.failure ? cameraDeviceSelectionError(this.failure)
+      status.textContent = missingBackground ? t('cameraEffects.errorImageMissing')
+        : this.failure ? cameraDeviceSelectionError(this.failure)
         : this.busy ? t('cameraEffects.applying')
           : !cameraEffectsStore.isLoaded ? t('cameraEffects.loading')
             : this.previewWanted ? t(state.status === 'ready' ? 'cameraEffects.previewActive' : 'cameraEffects.previewStarting')
               : '';
-      status.classList.toggle('is-error', !!this.failure);
+      status.classList.toggle('is-error', missingBackground || !!this.failure);
     }
     const toggle = this.root.querySelector<HTMLButtonElement>('[data-camera-preview-toggle]');
     if (toggle) {
       toggle.setAttribute('aria-checked', String(this.previewEnabled));
-      if (this.previewEnabled) toggle.disabled = false;
+      toggle.disabled = missingBackground || (!this.previewEnabled && (this.busy || !cameraEffectsStore.isLoaded));
     }
     const placeholder = this.root.querySelector<HTMLElement>('[data-camera-preview-placeholder]');
     if (placeholder) {
@@ -536,7 +561,7 @@ export class CameraEffectsControl {
         ? 'cameraEffects.previewStarting' : 'cameraEffects.previewOff');
     }
     const actions = this.root.querySelector<HTMLElement>('[data-camera-error-actions]');
-    if (actions) actions.hidden = !this.failure || this.failure instanceof CameraPreferenceError;
+    if (actions) actions.hidden = missingBackground || !this.failure || this.failure instanceof CameraPreferenceError;
   }
 
   private releaseThumbnail(): void {

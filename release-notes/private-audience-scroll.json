@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A lista de visibilidade privada rola sem fechar o dropdown. Rolar o modal, pela roda ou pela barra, fecha o seletor sem puxar a posição de volta. A busca vazia tem texto e espaçamento discretos, separador neutro e botão de limpar com cursor de clique.",
+  "en": "The private visibility list scrolls without closing the dropdown. Scrolling the modal by wheel or scrollbar closes the picker without pulling it back. Empty search results use subtler text and spacing, a neutral separator and a clickable clear button."
+}

@@ -65,6 +65,28 @@ test('path and address identities normalize only meaningful platform differences
   assert.notEqual(savedServerFavoriteKey(saved('example.test', 1, 3000)), savedServerFavoriteKey(saved('example.test', 1, 3001)));
 });
 
+test('renaming and deleting sound files move only that favorite and persist atomically', () => {
+  const storage = memoryStorage();
+  const store = new FavoritesStore(storage);
+  store.toggleSound('C:\\Sounds\\original.wav');
+  store.toggleSound('C:\\Other\\original.wav');
+  const changes: string[] = [];
+  store.subscribe(kind => changes.push(kind));
+  store.moveSound('c:\\sounds\\ORIGINAL.wav', 'C:\\Sounds\\renamed.wav');
+  assert.equal(store.isSoundFavorite('C:\\Sounds\\original.wav'), false);
+  assert.equal(new FavoritesStore(storage).isSoundFavorite('C:\\Sounds\\renamed.wav'), true);
+  assert.equal(store.isSoundFavorite('C:\\Other\\original.wav'), true);
+  store.moveSound('C:\\Sounds\\renamed.wav', null);
+  assert.equal(new FavoritesStore(storage).isSoundFavorite('C:\\Sounds\\renamed.wav'), false);
+  store.moveSound('not-favorite.wav', 'still-not-favorite.wav');
+  assert.equal(store.isSoundFavorite('still-not-favorite.wav'), false);
+  assert.deepEqual(changes, ['sounds', 'sounds']);
+  storage.setItem = () => { throw new Error('Storage full'); };
+  assert.throws(() => store.moveSound('C:\\Other\\original.wav', null), /Storage full/);
+  assert.equal(store.isSoundFavorite('C:\\Other\\original.wav'), true);
+  assert.deepEqual(changes, ['sounds', 'sounds']);
+});
+
 test('favorites validate storage, tolerate legacy/malformed data and do not touch unrelated preferences', () => {
   const storage = memoryStorage();
   storage.setItem('monky_settings', '{"soundboardShortcuts":{"Hello":{"accelerator":"Q"}}}');

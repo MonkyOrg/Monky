@@ -46,6 +46,20 @@ export function explicitScreenCodecMime(preferred: PreferredVideoCodec): string 
   return preferred === 'auto' ? null : `video/${preferred}`;
 }
 
+/** Both transports enforce the chosen media codec; repair codecs are not encoders. */
+export function assertScreenCodecAccepted(
+  mimeTypes: Iterable<string>,
+  preferred: PreferredVideoCodec,
+): void {
+  const required = explicitScreenCodecMime(preferred);
+  if (!required) return;
+  const media = [...mimeTypes].map(mime => mime.toLowerCase())
+    .filter(mime => !/^video\/(?:rtx|red|ulpfec|flexfec(?:-03)?)$/.test(mime));
+  if (!media.length || media.some(mime => mime !== required)) {
+    throw new ScreenCodecError(preferred, 'incompatible');
+  }
+}
+
 /** Capabilities omit RTX's apt in Chromium; RTP/router capabilities may include it. */
 export function selectScreenVideoCodecs<T extends CodecCapabilityLike>(
   codecs: T[],
@@ -242,8 +256,8 @@ export function assertScreenCodecNegotiated(
   // Chromium can send a codec from the remote offer that is absent here;
   // the sender must also select its encoding.codec explicitly.
   const primary = getSdpVideoCodecOrder(answerSdp, transceiver.mid);
-  if ((transceiver.currentDirection !== 'sendonly' && transceiver.currentDirection !== 'sendrecv')
-    || primary.length === 0 || primary.some((codec) => `video/${codec}` !== mime)) {
+  if (transceiver.currentDirection !== 'sendonly' && transceiver.currentDirection !== 'sendrecv') {
     throw new ScreenCodecError(preferred, 'incompatible');
   }
+  assertScreenCodecAccepted(primary.map(codec => `video/${codec}`), preferred);
 }

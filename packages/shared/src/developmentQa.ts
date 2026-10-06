@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { botPermissionsSchema } from './botPermissions.js';
 
-export const DEVELOPMENT_QA_SCENARIOS = ['connected', 'server-settings', 'voice', 'music', 'home', 'login', 'bot-install', 'tool-consent'] as const;
+export const DEVELOPMENT_QA_SCENARIOS = ['connected', 'empty-forum', 'server-settings', 'voice', 'voice-receive', 'music', 'home', 'login', 'bot-install', 'tool-consent'] as const;
 export type DevelopmentQaScenario = typeof DEVELOPMENT_QA_SCENARIOS[number];
 
 const loopbackManifest = z.string().max(2048).refine((value) => {
@@ -16,6 +16,7 @@ export const developmentQaConfigSchema = z.object({
   runId: z.string().uuid(),
   scenario: z.enum(DEVELOPMENT_QA_SCENARIOS),
   smoke: z.boolean(),
+  realMedia: z.boolean().optional(),
   nickname: z.string().min(2).max(32),
   server: z.object({
     host: z.literal('127.0.0.1'),
@@ -28,11 +29,17 @@ export const developmentQaConfigSchema = z.object({
     manifestUrl: loopbackManifest,
   }).strict().optional(),
 }).strict().superRefine((value, context) => {
-  if (['voice', 'music', 'bot-install', 'tool-consent'].includes(value.scenario) && !value.bot) {
+  if (value.smoke && value.realMedia) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Real capture devices require interactive QA; smoke must remain synthetic.' });
+  }
+  if (['voice', 'voice-receive', 'music', 'bot-install', 'tool-consent'].includes(value.scenario) && !value.bot) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'This QA scenario requires a bot.' });
   }
   if (value.scenario === 'music' && value.bot?.kind !== 'production') {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Music QA requires the explicit production MonkyBot checkout, never an SDK fixture.' });
+  }
+  if (value.scenario === 'voice-receive' && value.bot?.kind !== 'sdk-fixture') {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Voice reception QA requires the explicit listening SDK fixture.' });
   }
   if (['home', 'login'].includes(value.scenario) && value.bot) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Home/login QA must not install a bot before the tested login.' });

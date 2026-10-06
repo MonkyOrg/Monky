@@ -33,6 +33,9 @@ Todo código produzido deve seguir as melhores práticas da indústria, com foco
 - **Limpeza de Event Listeners:** Sempre remova listeners vinculados a `window`, `document`, elementos do DOM ou ao `EventBus` quando uma view, modal ou componente for desmontado/fechado.
 - **Gerenciamento de Estado Previsível:** Concentre estados nas Stores dedicadas (`chatStore`, `voiceStore`, `serverStore`, `settingsStore`, `connectionStore`), aplicando mutações claras e sem dependências circulares.
 - **Performance de Renderização:** Evite reflows e repaints desnecessários no DOM; prefira mutações cirúrgicas a recriações massivas de HTML.
+- **Movimento e Consistência Visual:** Toda superfície controlada pelo Monky deve abrir, fechar, expandir, recolher e transicionar suavemente, reutilizando os helpers e tokens de movimento do renderer. Wizards devem manter uma estrutura estável e deslizar entre etapas, com direção de avançar/voltar. Toda navegação automática por scroll deve usar `utils/scroll.ts`, animar o deslocamento e respeitar `prefers-reduced-motion`; não use `scrollIntoView()` ou atribuição de `scrollTop` diretamente para navegação visível. Restauração exata de estado, sincronização de editores e autoscroll durante drag podem permanecer instantâneos. Preserve foco, teclado, ARIA, cancelamento e `prefers-reduced-motion`; interrompa efeitos obsoletos em vez de acumulá-los. Animações nunca podem atrasar consentimento, revogação de acesso ou liberação de recursos de mídia. Campos e popups devem seguir tema, fonte, ícones e estados do aplicativo, sem controles nativos visualmente destoantes.
+- **Feedback de Erro:** Erros acionados por uma operação devem surgir em balões ou toasts compartilhados, com semântica acessível de alerta; nunca deixe uma mensagem de erro solta aparecer dentro do layout. Validação preventiva pode destacar o controle inválido, mas a explicação deve usar a superfície de feedback do aplicativo.
+- **Lifecycle de Movimento:** Use `utils/surfaceMotion.ts` para entrada/saída e ownership de popups, `utils/modalSurface.ts` para a pilha de modais, `utils/surfaceVisibility.ts` para expansões reversíveis e `utils/modalSteps.ts` para etapas que substituem o conteúdo do card. Conteúdo revogado deve desaparecer imediatamente. Transições de views devem usar o tipo `view` (somente opacidade), sem transformar ancestrais de menus com posição fixa; atualizações de dados não devem reiniciar a animação da view.
 - **Controles de Escolha:** Nunca apresente checkbox ou radio button nativos na interface. Use **switch buttons** para opções de liga/desliga e **cards selecionáveis** para escolhas mutuamente exclusivas, como modo de entrada do microfone ou modo de voz do servidor. Reutilize os componentes e estilos existentes, com estado selecionado e operação por teclado acessíveis. O `input type="checkbox"` interno do componente `toggle-switch` é apenas um detalhe de implementação: não pode aparecer como checkbox isolado.
 
 #### 🔹 Backend / Servidor (Clean Architecture Pragmática)
@@ -90,6 +93,29 @@ npm run start --workspace=apps/client -- --user-data-dir="C:\Projetos\Monky-qa\p
 
 ---
 
+## ✅ Validação local obrigatória antes de abrir PR
+
+- **Nunca abra um PR sem executar antes as validações locais correspondentes ao CI.** Leia `.github/workflows/ci.yml`, os scripts chamados pelos jobs e os testes dos arquivos alterados; não use o CI como primeira rodada de testes.
+- Rode o build e as suítes afetadas sobre a revisão que será enviada. Mudanças em contratos compartilhados, protocolo ou compatibilidade exigem conferir **shared, servidor, cliente e SDK**, inclusive testes com versões fixadas, negociação e fallback. Para alterações de interface, rode também os testes DOM e de teclado/pointer relevantes; somente type-check ou inspeção visual não substituem esses testes.
+- **Falha local bloqueia a abertura do PR.** Corrija a causa, acrescente a regressão aplicável e repita os testes antes de publicar. A mesma regra vale para enviar correções a um PR já aberto.
+- Verifique diferenças de Windows/macOS e caminhos de falha, como downloads interrompidos, quando a alteração os afetar. Registre no PR os comandos executados e os cenários que dependem de outro sistema operacional; testes locais reduzem falhas evitáveis, mas não garantem disponibilidade de serviços externos nem substituem o CI multiplataforma.
+- Preserve a máquina do desenvolvedor: use perfis e servidores descartáveis. Variantes reservadas a runners descartáveis, como testes do clipboard real, continuam exclusivas do CI; nunca altere `GITHUB_ACTIONS` para contornar essa proteção.
+
+---
+
+## 🚢 Publicação de Releases: Somente por Merge de PR
+
+- **Inclua o changelog do aplicativo no mesmo PR.** Mudanças de aplicação/dependências exigem um arquivo novo `release-notes/*.json` com `group`, `pt-BR` e `en`, conforme o `CONTRIBUTING.md`. O changelog técnico dos commits não substitui essas notas. Rode `node scripts/test-changelog.js` e, após os commits, `node scripts/check-client-release-notes.js --base origin/main --head HEAD --merge-base`; CI e release bloqueiam a ausência de notas.
+- **NUNCA publique releases a partir de branches de trabalho ou de integração.** Aprovar um teste local ou pedir uma release não autoriza publicar diretamente da branch.
+- **Novas versões devem sair exclusivamente do merge de um PR na `main`**, pelo workflow automático de release. Não use `workflow_dispatch`, `gh release create`, tags manuais ou upload de artefatos para contornar esse fluxo, mesmo que o CI da branch esteja aprovado.
+- O código publicado deve estar integrado à `main`. Não deixe a implementação apenas em uma branch com um PR aberto depois de anunciar a release.
+- PRs empilhados devem ser integrados na ordem correta. Antes de mergear o PR seguinte, ajuste sua base para `main`; nunca faça merge do lote na branch de outro colaborador.
+- Quando vários PRs compõem a mesma entrega, coordene os merges para publicar o conjunto completo uma única vez, sem uma versão intermediária que perca funcionalidades já publicadas.
+- Merge exige autorização explícita do desenvolvedor e as verificações aplicáveis aprovadas. Não confunda aprovação local, autorização de merge e aprovação formal de review.
+- Não promova beta para stable sem pedido explícito. Uma promoção também deve ter como origem código já integrado por PR na `main`, nunca uma beta publicada de uma branch de trabalho.
+
+---
+
 ## 🔄 Fluxo de Trabalho a partir do Board
 
 > ⚠️ **Esta seção só se aplica a quem tem acesso ao board da organização.**
@@ -134,6 +160,7 @@ flowchart TD
    - **O que foi implementado & Por quê (Explicação Didática):** Resumo claro da solução, motivação técnica e arquivos/módulos alterados.
    - **Como testar (Guia para QA/Dev):** Passo a passo reprodutível, cenários principais, casos de borda e resultados esperados.
 8. **Após o merge, aguarde a release ser gerada.**
+   - Siga a regra de **Publicação de Releases: Somente por Merge de PR** acima. Não substitua o merge por uma publicação manual da branch.
    - O push na `main` dispara automaticamente o workflow **Release** (GitHub Actions), que gera a versão SemVer (`v<MAJOR>.<MINOR>.<PATCH>`) baseada na convenção de commits:
      - **Patch** (`1.0.X`): Correções de bugs (`fix:`, `fix(...)`, `bugfix:`).
      - **Minor** (`1.X.0`): Novas funcionalidades (`feat:`, `feat(...)`, `feature:`).

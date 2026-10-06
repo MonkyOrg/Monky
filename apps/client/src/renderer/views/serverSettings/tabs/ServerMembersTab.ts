@@ -22,7 +22,7 @@ export class ServerMembersTab {
     // Admin is toggled through its own action, never listed as a role (#265).
     const manageableRoles = roles.filter((role) => !role.isDefault && !serverStore.isAdminRole(role));
     const adminRole = serverStore.getAdminRole();
-    const members = [...(serverStore.serverDetails?.members ?? [])].sort((a, b) => a.nickname.localeCompare(b.nickname));
+    const members = serverStore.getHumanMembersInDisplayOrder().sort((a, b) => a.nickname.localeCompare(b.nickname));
     const canKickMembers = serverStore.hasPermission(Permission.KICK_MEMBERS);
 
     return `
@@ -64,6 +64,7 @@ export class ServerMembersTab {
                           <span style="font-size: 13px; font-weight: 600; color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(member.nickname)}</span>
                           ${member.id === serverStore.currentUser?.id ? `<span class="member-badge-you">${t('common.you')}</span>` : ''}
                           ${isOwner ? `<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
+                          ${member.status === 'DISCONNECTED' ? `<span class="member-badge-offline">${t('roles.offlineBadge')}</span>` : ''}
                           ${isAdmin ? `<span class="member-badge-you" style="background: rgba(88, 101, 242, 0.18); color: var(--accent-primary);">${t('roles.adminBadge')}</span>` : ''}
                         </div>
                       </div>

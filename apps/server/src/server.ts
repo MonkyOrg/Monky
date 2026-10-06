@@ -4,9 +4,17 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ProtocolErrorCode, ServerStats, UserSummary, VoiceMode, stripAdministrator, type ServerShutdownReason } from '@monky/shared';
 import { AuthService } from './application/services/AuthService';
-import { AttachmentService } from './application/services/AttachmentService';
+import { AttachmentService, type FinalizeUploadResult } from './application/services/AttachmentService';
 import { BotService } from './application/services/BotService';
 import { BotSelectorService } from './application/services/BotSelectorService';
+import { CommunityService } from './application/services/CommunityService';
+import { MessageSearchService } from './application/services/MessageSearchService';
+import { NativePollService } from './application/services/NativePollService';
+import { SqliteCommunityRepository } from './infrastructure/database/SqliteCommunityRepository';
+import { SqliteMessageSearchRepository } from './infrastructure/database/SqliteMessageSearchRepository';
+import { SqliteNativePollRepository } from './infrastructure/database/SqliteNativePollRepository';
+import { SqliteForumRepository } from './infrastructure/database/SqliteForumRepository';
+import { ForumService } from './application/services/ForumService';
 import { BotSettingsService } from './application/services/BotSettingsService';
 import { SqliteBotSettingsRepository } from './infrastructure/database/SqliteBotSettingsRepository';
 import { SqliteBotPermissionRepository } from './infrastructure/database/SqliteBotPermissionRepository';
@@ -17,6 +25,7 @@ import { ChannelService } from './application/services/ChannelService';
 import { ChatService } from './application/services/ChatService';
 import { PermissionService } from './application/services/PermissionService';
 import { ServerMonitorService } from './application/services/ServerMonitorService';
+import { RecentSoundCacheService } from './application/services/RecentSoundCacheService';
 import { RoleService } from './application/services/RoleService';
 import { SignalingService } from './application/services/SignalingService';
 import { UserService } from './application/services/UserService';
@@ -59,11 +68,12 @@ export interface ServerConfig {
   voiceMode?: VoiceMode;
   initialVoiceChannel?: string;
   initialTextChannel?: string;
+  categoryLocale?: 'pt-BR' | 'en';
 }
 
 type ServerSeedConfig = Pick<
   ServerConfig,
-  'serverName' | 'password' | 'maxUsers' | 'voiceMode' | 'initialVoiceChannel' | 'initialTextChannel'
+  'serverName' | 'password' | 'maxUsers' | 'voiceMode' | 'initialVoiceChannel' | 'initialTextChannel' | 'categoryLocale'
 >;
 
 export async function ensureServerSeedData(
@@ -90,7 +100,17 @@ export async function ensureServerSeedData(
       voiceMode: config.voiceMode || 'p2p',
     });
 
+    const textCategoryId = uuidv4();
+    const voiceCategoryId = uuidv4();
+    for (const [id, name, position] of [
+      [textCategoryId, config.categoryLocale === 'en' ? 'Text channels' : 'Canais de texto', 0],
+      [voiceCategoryId, config.categoryLocale === 'en' ? 'Voice channels' : 'Canais de voz', 1],
+    ] as const) {
+      await channelRepo.categories.create({ id, serverId, name, position, createdAt: now, isPrivate: false, allowedRoleIds: [] });
+    }
     await channelRepo.create({
+      categoryId: textCategoryId,
+      inheritCategoryPermissions: true,
       id: uuidv4(),
       serverId,
       name: config.initialTextChannel || 'geral',
@@ -107,6 +127,8 @@ export async function ensureServerSeedData(
       id: uuidv4(),
       serverId,
       name: config.initialVoiceChannel || 'Geral',
+      categoryId: voiceCategoryId,
+      inheritCategoryPermissions: true,
       botCommandsEnabled: true,
       type: 'VOICE',
       position: 1,
@@ -128,19 +150,6 @@ export async function ensureServerSeedData(
       position: 100,
       permissions: ADMIN_PERMISSIONS,
       isDefault: false,
-      createdAt: now,
-    });
-  }
-
-  const memberRole = await roleRepo.findByName('Membro');
-  if (!memberRole) {
-    await roleRepo.create({
-      id: uuidv4(),
-      name: 'Membro',
-      color: '#5865f2',
-      position: 0,
-      permissions: DEFAULT_PERMISSIONS,
-      isDefault: true,
       createdAt: now,
     });
   }
@@ -261,6 +270,7 @@ export class MonkyServer {
     const mentionRepo = new SqliteMentionRepository(db);
     const attachmentRepo = new SqliteAttachmentRepository(db);
     const roleRepo = new SqliteRoleRepository(db);
+    let communityService!: CommunityService;
 
     const attachmentService = new AttachmentService(attachmentRepo, serverRepo, attachmentStorage, rateLimiter);
     const permissionService = new PermissionService(serverRepo, roleRepo);
@@ -268,7 +278,17 @@ export class MonkyServer {
 
     const signalingService = new SignalingService(channelRepo, new SqliteVoiceRestrictionRepository(db));
     const botPermissions = new BotPermissionService(new SqliteBotPermissionRepository(db));
-    const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissionService, botPermissions);
+    const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissionService, botPermissions, userRepo, channelRepo.categories);
+    const pollService = new NativePollService(new SqliteNativePollRepository(db), {
+      consume: (refs, userId, channelId) => communityService.consumeImageAssets(refs, userId, channelId)
+        .map(url => url.split('/').pop()!),
+      delete: paths => communityService.deleteImagePaths(paths),
+    }, {
+      canView: async (userId, poll) =>
+        await channelService.canUserAccessChannel(userId, poll.channelId, Permission.READ_MESSAGES) &&
+        await permissionService.canAccessAudience(userId, poll.creatorUserId, poll.audience),
+      canRevealAudience: (userId, poll) => permissionService.canRevealAudience(userId, poll.creatorUserId),
+    });
     const chatService = new ChatService(
       messageRepo,
       channelRepo,
@@ -278,7 +298,9 @@ export class MonkyServer {
       rateLimiter,
       attachmentService,
       serverRepo,
-      (userId, channelId) => channelService.canUserAccessChannel(userId, channelId)
+      (userId, channelId, permission) => channelService.canUserAccessChannel(userId, channelId, permission),
+      (userId, channelId) => channelService.canUserAccessChannel(userId, channelId, Permission.READ_MESSAGES),
+      pollService,
     );
 
     let getOnlineUsers: () => Map<string, { user: UserSummary }> = () => new Map();
@@ -292,7 +314,8 @@ export class MonkyServer {
       () => getOnlineUsers(),
       attachmentService,
       permissionService,
-      roleService
+      roleService,
+      channelRepo.categories
     );
 
     const userService = new UserService(
@@ -432,7 +455,9 @@ export class MonkyServer {
         return;
       }
       if (req.url && req.url.split('?')[0] === '/attachments' && req.method === 'POST') {
-        void MonkyServer.handleAttachmentUpload(req, res, attachmentService, attachmentStorage);
+        void MonkyServer.handleAttachmentUpload(req, res, attachmentService, attachmentStorage, async (userId, channelId) =>
+          await channelService.canUserAccessChannel(userId, channelId, Permission.ATTACH_FILES) &&
+          await channelService.canUserAccessChannel(userId, channelId, Permission.SEND_MESSAGES));
         return;
       }
       if (req.url && req.url.startsWith('/attachments/') && (req.method === 'GET' || req.method === 'HEAD')) {
@@ -462,8 +487,37 @@ export class MonkyServer {
       if (!instance) throw new Error('The server monitor is not ready.');
       return instance.getStats();
     }, rateLimiter);
+    let recentSoundCache: RecentSoundCacheService | undefined;
+    try {
+      const cache = new RecentSoundCacheService(config.dataDir);
+      const recovery = await cache.initialize();
+      if (recovery.recoveredCorruptIndex) {
+        Logger.warn('SOUNDBOARD', 'Recovered a corrupt recent sound cache index.');
+      }
+      const configuration = await cache.configure(
+        Boolean(serverRecord.recentSoundCacheEnabled),
+        serverRecord.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT,
+      );
+      if (configuration.cleanupError) {
+        Logger.warn('SOUNDBOARD', 'Could not remove every unreferenced recent sound during startup.',
+          configuration.cleanupError);
+      }
+      recentSoundCache = cache;
+    } catch (error) {
+      Logger.error('SOUNDBOARD', 'Recent sound cache is unavailable; the server will continue without it.', error);
+    }
 
-    const wsServer = new WebSocketServer(
+    const selectorService = new BotSelectorService(new SqliteBotSelectorRepository(db));
+    communityService = new CommunityService(
+      new SqliteCommunityRepository(db), channelService, permissionService, avatarStorage, selectorService,
+      botId => botPermissions.allows(botId, 'live_actions', 'commands'),
+      pollService,
+    );
+    const messageSearchService = new MessageSearchService(
+      new SqliteMessageSearchRepository(db), messageRepo, channelService, permissionService, chatService,
+      () => wsServer.getChannelAccessVersion(),
+    );
+    const wsServer: WebSocketServer = new WebSocketServer(
       httpServer,
       authService,
       userService,
@@ -475,13 +529,25 @@ export class MonkyServer {
       permissionService,
       roleService,
       coturnManager,
+      rateLimiter,
       sfuManager,
       botService,
       commandRegistry,
-      new BotSelectorService(new SqliteBotSelectorRepository(db)),
+      selectorService,
       new BotSettingsService(new SqliteBotSettingsRepository(db), botPermissions),
       monitorService,
       resolveServerVersion(config.version),
+      communityService,
+      messageSearchService,
+      new ForumService(
+        new SqliteForumRepository(db),
+        channelService,
+        permissionService,
+        chatService,
+        channelId => communityService.prepareChannelDeletion(channelId),
+      ),
+      pollService,
+      recentSoundCache,
     );
     resources.defer('WebSocket server', () => wsServer.close(instance?.shutdownReason ?? 'stopped'));
 
@@ -509,7 +575,8 @@ export class MonkyServer {
     req: http.IncomingMessage,
     res: http.ServerResponse,
     attachmentService: AttachmentService,
-    attachmentStorage: AttachmentStorageService
+    attachmentStorage: AttachmentStorageService,
+    canUpload: (userId: string, channelId: string) => Promise<boolean>,
   ): Promise<void> {
     const send = (status: number, obj: unknown) => {
       if (res.headersSent) return;
@@ -521,7 +588,7 @@ export class MonkyServer {
       const url = new URL(req.url || '', 'http://localhost');
       const token = url.searchParams.get('token');
       const binding = attachmentService.consumeUploadToken(token);
-      if (!binding) {
+      if (!binding || !await canUpload(binding.userId, binding.channelId)) {
         send(401, { error: 'unauthorized' });
         return;
       }
@@ -571,8 +638,14 @@ export class MonkyServer {
       req.on('end', () => {
         if (aborted) return;
         out.end(() => {
-          void attachmentService
-            .finalizeUpload({ tempPath, sizeBytes: received, userId: binding.userId, channelId: binding.channelId, originalName })
+          void canUpload(binding.userId, binding.channelId)
+            .then((allowed): Promise<FinalizeUploadResult> | FinalizeUploadResult => {
+              if (!allowed) {
+                attachmentStorage.discardTemp(tempPath);
+                return { success: false, errorCode: ProtocolErrorCode.CHANNEL_NOT_FOUND };
+              }
+              return attachmentService.finalizeUpload({ tempPath, sizeBytes: received, userId: binding.userId, channelId: binding.channelId, originalName });
+            })
             .then((result) => {
               if (!result.success || !result.meta) {
                 const status =

@@ -21,6 +21,7 @@ export const hamachiTutorial: TutorialDefinition = {
     {
       title: 'tutorial.hamachi.step4.title',
       content: 'tutorial.hamachi.step4.content',
+      images: [{ shot: 'add-server-create', alt: 'tutorial.shotCreateAlt' }, { shot: 'invite-hamachi', alt: 'tutorial.shotInviteAlt' }],
       tip: 'tutorial.hamachi.step4.tip',
     },
   ],

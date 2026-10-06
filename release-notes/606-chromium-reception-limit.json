@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "Escolha o receptor de tela nas configurações: Windows usa Nativo por padrão, sem fallback automático. Chromium é opcional, com aviso de quedas de FPS e congelamentos conhecidos. No macOS, Chromium é o padrão e Nativo fica como Em breve.",
+  "en": "Choose screen reception in settings: Windows defaults to Native with no automatic fallback. Chromium is optional, with a warning about known FPS drops and freezes. On macOS, Chromium is the default and Native is marked Coming soon."
+}

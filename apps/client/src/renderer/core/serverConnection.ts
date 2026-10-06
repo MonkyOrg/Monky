@@ -11,6 +11,7 @@ import { t } from '../i18n';
 import { videoService } from './VideoService';
 import { screenAudioService } from './ScreenAudioService';
 import { currentEventOrigin } from './sessionRouting';
+import { stopLocalScreenShares } from './screenShareControls';
 
 interface ClientIdentity {
   publicKey: string;
@@ -53,10 +54,29 @@ export function assertServerBrowseAvailable(host: string, port: number): void {
   }
 }
 
+export async function updateSessionAvatar(host: string, port: number, avatar: string): Promise<void> {
+  const session = getServerSessionForAddress(host, port);
+  if (!avatar || !session || session.client.getStatus() !== 'CONNECTED') return;
+  try {
+    await session.client.sendRequest(MessageType.USER_UPDATE_AVATAR, { avatarBase64: avatar, mimeType: 'image/png' });
+  } catch (error: unknown) {
+    clientLog.warn('CONNECTION', 'Could not update the avatar on the opened server session', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 export function captureServerBrowseIntent(): () => boolean {
   const generation = serverNavigationGeneration;
   const previous = sessionManager.getActive();
-  return () => generation === serverNavigationGeneration && sessionManager.getActive() === previous;
+  const wasHome = sessionManager.isHome();
+  return () => generation === serverNavigationGeneration && sessionManager.getActive() === previous
+    && sessionManager.isHome() === wasHome;
+}
+
+export function showHome(): void {
+  serverNavigationGeneration++;
+  sessionManager.showHome();
 }
 
 async function connectServerSession(
@@ -104,9 +124,6 @@ export async function openServerSession(
 ): Promise<AuthSuccessPayload> {
   clientLog.info('CONNECTION', `Opening server session: ${host}:${port}`, { nickname });
   const foreground = !options.background;
-  // Until a foreground bundle exists, routing a background event cannot
-  // restore the global stores. The first startup entry must use the normal path.
-  if (!foreground && !sessionManager.getActive()) throw new DOMException('No foreground session', 'AbortError');
   const existing = getServerSessionForAddress(host, port);
   const key = existing?.key ?? sessionKeyFor(host, port);
   if (existing?.client.getStatus() === 'CONNECTED') {
@@ -126,6 +143,7 @@ export async function openServerSession(
   }
 
   const generation = foreground ? ++serverNavigationGeneration : serverNavigationGeneration;
+  const previousHome = sessionManager.isHome();
   const pending = pendingServerOpens.get(key);
   const reusable = pending && pending.session === existing ? pending : undefined;
   const active = sessionManager.getActive();
@@ -136,6 +154,7 @@ export async function openServerSession(
   const session = reusable?.session
     ?? sessionManager.create(existing?.host ?? host, existing?.port ?? port, nickname, password);
   if (foreground) sessionManager.activate(session.key);
+  else sessionManager.primeBackground(session.key);
   const operation = reusable ?? {
     session,
     previous,
@@ -160,7 +179,10 @@ export async function openServerSession(
         && (previous.client.getStatus() === 'CONNECTED' || previous.serverStore.serverDetails);
       const fallback = previousSurvives ? previous : sessionManager.getAll()
         .find(candidate => candidate.client.getStatus() === 'CONNECTED');
-      if (fallback) sessionManager.activate(fallback.key);
+      if (fallback) {
+        sessionManager.activate(fallback.key);
+        if (previousHome) sessionManager.showHome();
+      }
     }
     throw err;
   } finally {
@@ -195,13 +217,11 @@ export function leaveCurrentCall(notifyServer = true): void {
   if (sessionId) session.participants.removeVoiceState(sessionId);
   audioProcessor.stopMicrophone();
   videoService.stopCamera();
-  videoService.stopScreenShare();
-  void screenAudioService.stop().catch((error: unknown) => {
-    clientLog.error('SCREEN_SHARE', 'Failed to stop screen audio after leaving voice', {
+  void stopLocalScreenShares(screenAudioService, { teardown: true }).catch((error: unknown) => {
+    clientLog.error('SCREEN_SHARE', 'Failed to stop screen sharing after leaving voice', {
       error: error instanceof Error ? error.message : String(error),
     });
   });
-  webRtcManager.clearLocalScreenTracks();
   webRtcManager.closeAllPeers();
   voiceStore.reset();
 }
@@ -278,21 +298,16 @@ export async function joinCallOnSession(
   audioProcessor.setMuted(true);
   audioProcessor.stopMicrophone();
   webRtcManager.suspendForVoiceReconnect(true);
-  const stoppedScreenAudio = changingChannel ? screenAudioService.stop() : null;
-  if (changingChannel) {
-    videoService.stopScreenShare();
-    webRtcManager.clearLocalScreenTracks();
-    voiceStore.setScreenSharing(false);
-    if (previousKey && previousKey !== sessionKey && previousChannelId) {
-      sessionManager.get(previousKey)?.client.send(MessageType.VOICE_LEAVE, { channelId: previousChannelId });
-    }
+  const stoppedScreens = changingChannel ? stopLocalScreenShares(screenAudioService, { teardown: true }) : null;
+  if (previousKey && previousKey !== sessionKey && previousChannelId) {
+    sessionManager.get(previousKey)?.client.send(MessageType.VOICE_LEAVE, { channelId: previousChannelId });
   }
   voiceStore.setChannel(channelId, sessionKey);
   voiceStore.setConnectionHealth('connecting');
   activeVoiceAdmission = { generation, sessionKey, channelId };
 
   try {
-    if (stoppedScreenAudio) await stoppedScreenAudio;
+    if (stoppedScreens) await stoppedScreens;
     assertCurrent();
     // Two requests on one socket must not race the server's async admission.
     // Other servers remain independent, and a superseded queued join never
@@ -334,11 +349,13 @@ export async function joinCallOnSession(
     const joined = await admission;
     assertCurrent();
     if (joined.participants) session.participants.reconcileVoiceChannel(channelId, joined.participants);
+    webRtcManager.reconcileScreenSources();
     session.participants.updateVoiceState({
       ...joined.voiceState, isMuted: voiceStore.isMuted, isDeafened: voiceStore.isDeafened,
     });
     voiceStore.setServerMuted(joined.voiceState.serverMuted);
     voiceStore.setServerDeafened(joined.voiceState.serverDeafened);
+    voiceStore.setPermissionMuted(!!joined.voiceState.permissionMuted);
     if (joined.voiceState.isMuted !== voiceStore.isMuted || joined.voiceState.isDeafened !== voiceStore.isDeafened) {
       session.client.send(MessageType.VOICE_STATE_UPDATE, {
         isMuted: voiceStore.isMuted, isDeafened: voiceStore.isDeafened,
@@ -393,14 +410,12 @@ export async function joinCallOnSession(
     session.client.send(MessageType.VOICE_LEAVE, { channelId });
     session.participants.removeVoiceState(mySessionId);
     audioProcessor.stopMicrophone();
-    const stopAudio = screenAudioService.stop();
+    const stoppedScreens = stopLocalScreenShares(screenAudioService, { teardown: true });
     videoService.stopCamera();
-    videoService.stopScreenShare();
-    webRtcManager.clearLocalScreenTracks();
     webRtcManager.closeAllPeers();
     voiceStore.reset();
-    await stopAudio.catch((stopError: unknown) => {
-      clientLog.error('AUDIO', 'Failed to stop screen audio after rejected admission', {
+    await stoppedScreens.catch((stopError: unknown) => {
+      clientLog.error('SCREEN_SHARE', 'Failed to stop screen sharing after rejected admission', {
         error: stopError instanceof Error ? stopError.message : String(stopError),
       });
     });

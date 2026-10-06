@@ -1,6 +1,8 @@
+import { setMainStdioLogger } from './mainStdio';
 import { app, BrowserWindow, dialog, ipcMain, IpcMainEvent, Menu, screen, session, shell } from 'electron';
 import path from 'path';
 import { setupIpcHandlers } from './ipcHandlers';
+import { flushDirectMessages } from './dm/dmIpc';
 import { setupUpdater } from './updater';
 import {
   handleLaunchDuringUpdate,
@@ -19,13 +21,21 @@ import { bindRendererDiagnostics } from './rendererDiagnostics';
 import { OverlayManager } from './overlayManager';
 import { HOME_MIN_HEIGHT, HOME_MIN_WIDTH } from './windowSizing';
 import { bindBotScreenIsolation, installBotScreenRequestGuard, isBotScreenFrame, isBotScreenUrl } from './botScreenIsolation';
+import { bindBotScreenDocuments, registerBotScreenScheme } from './botScreenDocuments';
 import { resolveDevelopmentProfile } from './developmentProfile';
-import { bindDevelopmentQa, loadDevelopmentQa } from './developmentQa';
+import { bindDevelopmentQa, configureDevelopmentQaMedia, loadDevelopmentQa } from './developmentQa';
 import { CrashRecovery } from './crashRecovery';
-import type { LocalExecutionIpc } from './localExecution/ipc';
+import { hasIdentity } from './identityService';
 import { initializeMainLanguage, mt } from './i18n';
+import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
+import { ServerInviteInbox, registerServerInviteProtocol } from './serverInvites';
+import { configureVideoPresentation } from './videoPresentation';
+import { handleScreenPictureInPictureOpen } from './screenPictureInPictureWindow';
 
 import fs from 'fs';
+
+configureVideoPresentation(app.commandLine, process.platform);
+registerBotScreenScheme();
 
 const developmentQa = loadDevelopmentQa({
   packaged: app.isPackaged,
@@ -35,12 +45,7 @@ const developmentQa = loadDevelopmentQa({
   parentPid: process.ppid,
   supervised: typeof process.send === 'function',
 });
-if (developmentQa) {
-  // Prepared QA never opens physical capture devices, including after unmute.
-  app.commandLine.appendSwitch('use-fake-device-for-media-stream');
-  app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
-  if (developmentQa.smoke) app.commandLine.appendSwitch('mute-audio');
-}
+configureDevelopmentQaMedia(app.commandLine, developmentQa);
 
 const developmentProfile = resolveDevelopmentProfile({
   isPackaged: app.isPackaged,
@@ -83,6 +88,9 @@ if (process.platform === 'win32' && process.env.MONKY_DISABLE_WGC !== '1') {
 }
 
 let mainWindow: BrowserWindow | null = null;
+const unbindBotScreenDocuments = bindBotScreenDocuments(contents => mainWindow?.webContents === contents);
+app.once('will-quit', unbindBotScreenDocuments);
+const serverInviteInbox = new ServerInviteInbox();
 let overlayManager: OverlayManager | null = null;
 let trayManager: TrayManager | null = null;
 const serverManager = new ServerManager();
@@ -92,69 +100,133 @@ let isShuttingDown = false;
 let isQuitting = false;
 /** Whether the renderer has already been asked to leave the call (#458). */
 let leaveAnnounced = false;
-let localExecution: LocalExecutionIpc | null = null;
+let localExecution: ReturnType<typeof setupIpcHandlers> | null = null;
 let localExecutionStopping = false;
 let localExecutionStopped = false;
 
-/**
- * How long the quit waits for the renderer to say goodbye to the servers.
- *
- * It only has to cover sending a frame on an already open socket, so the ack
- * normally arrives in a few milliseconds; this bound just guarantees that a
- * renderer which is wedged cannot hold the app open.
- */
-const LEAVE_ANNOUNCE_TIMEOUT_MS = 1000;
-
-/**
- * Asks the renderer to leave every call and disconnect before the process dies,
- * then quits (#458).
- *
- * Without this, closing the app just dropped the WebSocket: the server could not
- * tell that apart from a network blip, so the person stayed listed in the voice
- * channel and nobody heard them leave. Telling the server explicitly makes the
- * departure immediate and deliberate. A crash obviously cannot run this — that
- * case is covered on the server, which now takes a session out of voice as soon
- * as its socket dies.
- */
-function announceLeaveThenQuit(): void {
-  if (leaveAnnounced) {
-    app.quit();
-    return;
+function notifyServerInvite(): void {
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(SERVER_INVITE_AVAILABLE);
   }
-  leaveAnnounced = true;
-
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    app.quit();
-    return;
-  }
-
-  let settled = false;
-  const finish = (): void => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timer);
-    onLeaveComplete = null;
-    app.quit();
-  };
-
-  const timer = setTimeout(finish, LEAVE_ANNOUNCE_TIMEOUT_MS);
-  onLeaveComplete = finish;
-  mainWindow.webContents.send('app:before-quit');
 }
 
-/** Set only while a quit is waiting for the renderer's goodbye. */
-let onLeaveComplete: (() => void) | null = null;
-
-ipcMain.handle('app:leave-complete', () => {
-  onLeaveComplete?.();
+const onOpenInviteUrl = (event: Electron.Event, url: string): void => {
+  if (!serverInviteInbox.receive(url)) return;
+  event.preventDefault();
+  notifyServerInvite();
+  if (mainWindow && !mainWindow.isDestroyed() && !isInstallSplashActive()) {
+    if (!mainWindow.isVisible()) mainWindow.show();
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+};
+app.on('open-url', onOpenInviteUrl);
+serverInviteInbox.receiveArguments(process.argv);
+ipcMain.handle(SERVER_INVITE_IPC.take, (event: Electron.IpcMainInvokeEvent, ...args: unknown[]): ServerInviteResult | null => {
+  const window = mainWindow;
+  if (!window || window.isDestroyed() || event.sender !== window.webContents
+    || event.senderFrame !== window.webContents.mainFrame || args.length !== 0) {
+    console.warn('[Invites] Rejected an invitation read outside the main application frame.');
+    throw new Error(mt('error.serverInviteUnavailable'));
+  }
+  return serverInviteInbox.take();
 });
+app.once('will-quit', () => {
+  flushDirectMessages();
+  ipcMain.removeHandler(SERVER_INVITE_IPC.take);
+  app.removeListener('open-url', onOpenInviteUrl);
+});
+
+/**
+ * How long each renderer shutdown phase may retain the window.
+ *
+ * Native preparation retains signaling; farewell follows verified native
+ * retirement. A missing acknowledgement must never authorize window closure.
+ */
+const LEAVE_ANNOUNCE_TIMEOUT_MS = 15000;
+
+/**
+ * Correlates each renderer phase independently, including retries (#458).
+ *
+ * Native controls quiesce before Main drains owners. Only the later farewell
+ * disconnects sockets; an old native-phase acknowledgement cannot authorize it.
+ */
+function requestRendererShutdown(phase: AppShutdownRequest['phase']): Promise<void> {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) {
+    return Promise.resolve();
+  }
+  const request: AppShutdownRequest = { requestId: ++shutdownRequestId, phase };
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      onLeaveComplete = null;
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => finish(new Error(`Renderer ${phase} did not acknowledge shutdown.`)), LEAVE_ANNOUNCE_TIMEOUT_MS);
+    onLeaveComplete = acknowledgement => {
+      if (typeof acknowledgement !== 'object' || acknowledgement === null
+        || !('requestId' in acknowledgement) || acknowledgement.requestId !== request.requestId
+        || !('phase' in acknowledgement) || acknowledgement.phase !== request.phase) {
+        console.warn('[LocalExecution] Rejected an expired or mismatched shutdown acknowledgement.');
+        return;
+      }
+      finish();
+    };
+    try { window.webContents.send(APP_SHUTDOWN_EVENT, request); }
+    catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+  });
+}
+
+async function announceLeave(): Promise<void> {
+  if (leaveAnnounced) return;
+  await requestRendererShutdown('farewell');
+  leaveAnnounced = true;
+}
+
+/** Set only while a quit is waiting for its exact renderer phase. */
+let onLeaveComplete: ((request: unknown) => void) | null = null;
+let shutdownRequestId = 0;
+let rendererNativeRetired = false;
+
+ipcMain.handle(APP_SHUTDOWN_IPC.acknowledge, (event, request: unknown) => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
+    || event.senderFrame !== mainWindow.webContents.mainFrame)
+    throw new Error('Shutdown acknowledgement belongs to a different renderer.');
+  onLeaveComplete?.(request);
+});
+
+/**
+ * Hands a URL to the OS only when it is a plain web link. Both guards below used
+ * to forward whatever they were given, so a link with another scheme — file://,
+ * or one of the Windows handlers that take arguments — would have been opened
+ * by the system (#372). The `app:open-external` IPC channel already checked
+ * this; the guards did not.
+ */
+function openExternalIfWebUrl(url: string): void {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
+    void shell.openExternal(parsed.toString());
+  } catch {
+    // Not a URL we can make sense of: leaving it to the OS is the risk itself.
+  }
+}
 
 function bindMainWindowNavigationGuards(): void {
   if (!mainWindow) return;
   bindBotScreenIsolation(mainWindow.webContents);
 
-  mainWindow.webContents.setWindowOpenHandler(({ url, referrer }) => {
-    if (!isBotScreenUrl(referrer.url) && /^https?:\/\//i.test(url)) void shell.openExternal(url);
+  const contents = mainWindow.webContents;
+  contents.setWindowOpenHandler((details) => {
+    const fromBotScreen = isBotScreenUrl(details.referrer.url);
+    const screenPip = fromBotScreen ? null : handleScreenPictureInPictureOpen(contents, details);
+    if (screenPip) return screenPip;
+    if (!fromBotScreen) openExternalIfWebUrl(details.url);
     return { action: 'deny' };
   });
 
@@ -163,7 +235,7 @@ function bindMainWindowNavigationGuards(): void {
     if (isBotScreenFrame(event.initiator)) { event.preventDefault(); return; }
     if (url === mainWindow.webContents.getURL()) return;
     event.preventDefault();
-    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+    openExternalIfWebUrl(url);
   });
 }
 
@@ -204,17 +276,25 @@ function getCrashRecovery(): CrashRecovery {
 function stopLocalExecutionThenQuit(): void {
   if (!localExecution || localExecutionStopping) return;
   localExecutionStopping = true;
-  void localExecution.dispose().then(() => {
+  const owner = localExecution;
+  owner.freezeAdmissions();
+  void (async () => {
+    if (!rendererNativeRetired) {
+      await requestRendererShutdown('native');
+      rendererNativeRetired = true;
+    }
+    await owner.prepareShutdown();
+    await announceLeave();
+    await owner.dispose();
+  })().then(() => {
     localExecutionStopping = false;
     localExecutionStopped = true;
     app.quit();
   }, (error: unknown) => {
     console.error('[LocalExecution] Could not finish local task shutdown:', error);
-    localExecutionStopping = false;
     isQuitting = false;
-    leaveAnnounced = false;
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
-    void dialog.showMessageBox({
+    void Promise.resolve().then(() => dialog.showMessageBox({
       type: 'error',
       title: mt('localExecution.shutdownFailedTitle'),
       message: mt('localExecution.shutdownFailedMessage'),
@@ -222,9 +302,13 @@ function stopLocalExecutionThenQuit(): void {
       defaultId: 1,
       cancelId: 1,
       noLink: true,
-    }).then(({ response }) => {
+    })).then(({ response }) => {
+      localExecutionStopping = false;
       if (response === 0) quitApplication();
+      else { isQuitting = false; }
     }).catch((dialogError: unknown) => {
+      localExecutionStopping = false;
+      isQuitting = false;
       console.error('[LocalExecution] Could not display the shutdown error:', dialogError);
     });
   });
@@ -246,6 +330,11 @@ function createWindow(deferShow = false): void {
 
   const { width: screenW } = screen.getPrimaryDisplay().workAreaSize;
   const winWidth = Math.min(700, Math.round(screenW * 0.85));
+  // Monky always opens maximized once an identity exists. Only the first-launch
+  // identity card keeps the compact window; the renderer maximizes right after
+  // the identity is created or imported. Automated QA keeps its own sizing.
+  const openMaximized = !developmentQa && hasIdentity();
+  const showNow = !deferShow && !developmentQa?.smoke;
 
   mainWindow = new BrowserWindow({
     width: winWidth,
@@ -255,8 +344,10 @@ function createWindow(deferShow = false): void {
     backgroundColor: '#0e1117',
     // Right after an update install the window is held back (show: false) and
     // only revealed once it has painted, so the "finishing" splash hands off to
-    // a fully-drawn UI with no dark gap in between (#498).
-    show: !deferShow && !developmentQa?.smoke,
+    // a fully-drawn UI with no dark gap in between (#498). A maximized launch is
+    // also created hidden: maximize() reveals it already at full size instead of
+    // flashing the compact window first.
+    show: showNow && !openMaximized,
     // Windows/Linux: fully frameless (custom title bar in the renderer).
     // macOS: keep the native traffic-light buttons but hide the title bar.
     frame: isMac,
@@ -276,6 +367,11 @@ function createWindow(deferShow = false): void {
       additionalArguments: developmentQa ? ['--monky-prepared-qa'] : [],
     },
   });
+
+  if (showNow && openMaximized) {
+    mainWindow.maximize();
+    mainWindow.focus();
+  }
 
   getCrashRecovery().watch(mainWindow);
   const disposeQa = bindDevelopmentQa(mainWindow, developmentQa, quitApplication);
@@ -302,6 +398,7 @@ function createWindow(deferShow = false): void {
   let minimizeToTray = !developmentQa;
 
   clientLogger = new ClientLogger();
+  setMainStdioLogger(clientLogger);
   clientLogger.write({
     timestamp: new Date().toISOString(),
     level: 'INFO',
@@ -316,8 +413,10 @@ function createWindow(deferShow = false): void {
     },
     clientLogger,
     overlayManager,
+    quitApplication,
   });
   localExecutionStopped = false;
+  rendererNativeRetired = false;
   setupUpdater(mainWindow);
 
   // A launch straight after an update install keeps the "finishing" splash up
@@ -347,7 +446,8 @@ function createWindow(deferShow = false): void {
       cleanupReveal();
       updateLog('reveal main window after update', { reason });
       if (!window.isDestroyed() && !window.isVisible()) {
-        window.show();
+        if (openMaximized) window.maximize();
+        else window.show();
         window.focus();
       }
       dismissTimer = setTimeout(() => dismissInstallSplash(), 80);
@@ -407,11 +507,10 @@ function createWindow(deferShow = false): void {
       return;
     }
 
-    // Quitting from the tray or the menu: same rule, the goodbye needs a live
-    // renderer. Once it has been sent, the window is free to go.
-    if (!leaveAnnounced) {
+    // Tray/menu close must also preserve the renderer through every retirement phase.
+    if (!leaveAnnounced || (localExecution && !localExecutionStopped)) {
       event.preventDefault();
-      announceLeaveThenQuit();
+      quitApplication();
     }
   });
 
@@ -433,7 +532,8 @@ const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, commandLine) => {
+    if (serverInviteInbox.receiveArguments(commandLine)) notifyServerInvite();
     if (crashRecovery?.focus()) return;
     if (mainWindow) {
       if (!mainWindow.isVisible()) mainWindow.show();
@@ -443,6 +543,7 @@ if (!gotTheLock) {
   });
 
   app.whenReady().then(() => {
+    registerServerInviteProtocol(app);
     initializeMainLanguage(app.getPath('userData'), app.getPreferredSystemLanguages());
     getCrashRecovery();
     // TEST-ONLY (Bancada A): simulate the update install UX without a real
@@ -495,11 +596,18 @@ if (!gotTheLock) {
     // Allow media/DRM permissions required by embedded players.
     installBotScreenRequestGuard(session.defaultSession);
     session.defaultSession.setPermissionCheckHandler((_contents, permission, origin, details) => {
+      if (isBotScreenUrl(details.requestingUrl ?? '')) {
+        return ['fullscreen', 'pointerLock', 'mediaKeySystem'].includes(permission);
+      }
       const allowed = ['media', 'mediaKeySystem', 'fullscreen', 'clipboard-read', 'clipboard-sanitized-write'];
       return allowed.includes(permission) &&
         !(isBotScreenUrl(details.requestingUrl ?? '') || (!details.isMainFrame && (!origin || origin === 'null')));
     });
     session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+      if (isBotScreenUrl(details.requestingUrl)) {
+        callback(['fullscreen', 'pointerLock', 'mediaKeySystem'].includes(permission));
+        return;
+      }
       const allowed = ['media', 'mediaKeySystem', 'fullscreen', 'clipboard-read', 'clipboard-sanitized-write'];
       callback(!isBotScreenUrl(details.requestingUrl) && allowed.includes(permission));
     });
@@ -537,17 +645,18 @@ app.on('window-all-closed', () => {
 app.on('before-quit', (event) => {
   isQuitting = true;
 
-  // Say goodbye to the servers while the renderer is still alive, then quit for
-  // real on the second pass (#458).
-  if (!leaveAnnounced && mainWindow && !mainWindow.isDestroyed()) {
-    event.preventDefault();
-    announceLeaveThenQuit();
-    return;
-  }
-
   if (localExecution && !localExecutionStopped) {
     event.preventDefault();
     stopLocalExecutionThenQuit();
+    return;
+  }
+
+  if (!leaveAnnounced && mainWindow && !mainWindow.isDestroyed()) {
+    event.preventDefault();
+    void announceLeave().then(() => app.quit(), error => {
+      isQuitting = false;
+      console.error('[LocalExecution] Could not announce application shutdown:', error);
+    });
     return;
   }
 

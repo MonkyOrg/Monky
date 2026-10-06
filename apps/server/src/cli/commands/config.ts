@@ -61,6 +61,8 @@ export async function showConfig(ctx: CliContext): Promise<void> {
   console.log(`${configKeyLabel('port')}: ${localConfig.port || LIMITS.DEFAULT_PORT}`);
   console.log(`${t('label.hasPassword')}: ${formatBool(Boolean(server.passwordHash))}`);
   console.log(`${configKeyLabel('maxUsers')}: ${server.maxUsers > LIMITS.MAX_USERS_UNLIMITED ? server.maxUsers : t('config.noLimit')}`);
+  console.log(`${configKeyLabel('maxMessageLength')}: ${server.maxMessageLength === 0 ? t('config.noLimit') : server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH}`);
+  console.log(`${configKeyLabel('messageDeleteUndoSeconds')}: ${server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS}`);
   console.log(`${t('label.ownerUserId')}: ${server.ownerUserId ?? '-'}`);
   console.log(`${t('label.ownerNickname')}: ${owner?.nickname ?? '-'}`);
   console.log(`${configKeyLabel('allowSoundboard')}: ${formatBool(server.allowSoundboard !== false)}`);
@@ -113,6 +115,8 @@ export async function setConfig(
     port: String(localConfig.port || LIMITS.DEFAULT_PORT),
     icon: server.iconPath ?? '',
     maxUsers: String(server.maxUsers),
+    maxMessageLength: String(server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH),
+    messageDeleteUndoSeconds: String(server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS),
     allowSoundboard: String(server.allowSoundboard !== false),
     allowEveryoneMention: String(server.allowEveryoneMention !== false),
     showRoleBadgesToEveryone: String(server.showRoleBadgesToEveryone !== false),
@@ -153,6 +157,8 @@ export async function setConfig(
         nextValue = await ask(t('config.askMaxUsers'), currentValues.maxUsers);
         break;
       case 'maxAttachmentFileBytes':
+      case 'maxMessageLength':
+      case 'messageDeleteUndoSeconds':
       case 'maxAttachmentStorageBytes':
         nextValue = await ask(t('config.askValue', { key: configKeyLabel(normalizedKey) }), currentValues[normalizedKey]);
         break;
@@ -235,6 +241,21 @@ export async function setConfig(
         }
       }
       await ctx.serverRepo.updateServer({ maxUsers: nextMax });
+      break;
+    }
+    case 'maxMessageLength': {
+      if (!/^\d+$/.test(nextValue.trim()) || !Number.isSafeInteger(Number(nextValue))) {
+        throw new Error(t('config.invalidMessageLimit'));
+      }
+      await ctx.serverRepo.updateServer({ maxMessageLength: Number(nextValue) });
+      break;
+    }
+    case 'messageDeleteUndoSeconds': {
+      const seconds = Number(nextValue);
+      if (!/^\d+$/.test(nextValue.trim()) || !Number.isSafeInteger(seconds) || seconds < 1 || seconds > LIMITS.MAX_MESSAGE_DELETE_UNDO_SECONDS) {
+        throw new Error(t('config.invalidDeleteUndo'));
+      }
+      await ctx.serverRepo.updateServer({ messageDeleteUndoSeconds: seconds });
       break;
     }
     case 'allowSoundboard':

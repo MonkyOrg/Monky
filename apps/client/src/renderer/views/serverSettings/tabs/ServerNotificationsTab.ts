@@ -1,6 +1,6 @@
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
-import { Permission } from '@monky/shared';
+import { LIMITS, Permission } from '@monky/shared';
 import { serverStore } from '../../../stores/serverStore';
 
 export class ServerNotificationsTab {
@@ -22,6 +22,14 @@ export class ServerNotificationsTab {
             </label>
           </div>
         `).join('')}
+        <div class="dialog-text-field" data-settings-section="delete-undo" data-settings-label="${escapeHtml(t('serverSettings.deleteUndo'))}">
+          <label for="input-delete-undo">${t('serverSettings.deleteUndo')}</label>
+          <input id="input-delete-undo" class="input-field" type="number" min="1" max="${LIMITS.MAX_MESSAGE_DELETE_UNDO_SECONDS}" step="1"
+            value="${serverStore.serverDetails?.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS}"
+            ${serverStore.serverDetails?.protocol?.features.includes('message-delete-undo') ? '' : 'disabled'}>
+          <small>${t('serverSettings.deleteUndoHint')}</small>
+          ${serverStore.serverDetails?.protocol?.features.includes('message-delete-undo') ? '' : `<small>${t('chat.featureUpdateRequired')}</small>`}
+        </div>
       </fieldset>
       <div data-settings-section="chat-sound" data-settings-label="${escapeHtml(t('serverSettings.chatSoundLabel'))}" style="background: var(--bg-card); padding: 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
         <label for="select-server-chat-sound" style="font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; margin-bottom: 6px; cursor: pointer;">

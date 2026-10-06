@@ -1,4 +1,5 @@
 import { MessageType, type UserActivity } from '@monky/shared';
+import { CommunityFeed } from './CommunityFeed';
 import { BotScreenStore, setActiveBotScreenStore } from '../stores/botScreenStore';
 import { appEvents } from './EventBus';
 import { clientLog } from './ClientLogService';
@@ -50,6 +51,7 @@ export interface ServerSession {
   botScreenStore: BotScreenStore;
   participants: ParticipantManager;
   localExecution: LocalExecutionController;
+  community: CommunityFeed;
   /** Credentials kept so the rail can show the session and reconnect it. */
   host: string;
   port: number;
@@ -74,6 +76,7 @@ export function sessionKeyFor(host: string, port: number): string {
 export class SessionManager {
   private sessions: Map<string, ServerSession> = new Map();
   private activeKey: string | null = null;
+  private viewingHome = false;
   /** Session the global proxies currently resolve to — not always the visible
    * one, since `route()` borrows them while a background event is handled. */
   private installedBundle: ServerSession | null = null;
@@ -93,6 +96,23 @@ export class SessionManager {
 
   public getActiveKey(): string | null {
     return this.activeKey;
+  }
+
+  public isHome(): boolean {
+    return this.viewingHome;
+  }
+
+  public showHome(): void {
+    if (this.viewingHome) return;
+    this.viewingHome = true;
+    if (!this.activeKey) {
+      const remaining = this.getAll()[0];
+      this.activeKey = remaining?.key ?? null;
+      if (remaining) this.applyBundle(remaining);
+    }
+    const active = this.getActive();
+    if (active) this.mute(active);
+    appEvents.emit('navigation.home');
   }
 
   public get(key: string): ServerSession | undefined {
@@ -169,6 +189,7 @@ export class SessionManager {
       botScreenStore: new BotScreenStore(key),
       participants,
       localExecution,
+      community: new CommunityFeed(client, server),
       host,
       port,
       nickname,
@@ -179,19 +200,30 @@ export class SessionManager {
     return session;
   }
 
+  public primeBackground(key: string): void {
+    const session = this.sessions.get(key);
+    if (!session || this.activeKey) return;
+    this.activeKey = key;
+    this.viewingHome = true;
+    this.mute(session);
+    this.applyBundle(session);
+    emitOutsideRouting(() => appEvents.emit('session.connections_changed'));
+  }
+
   /**
    * Points the global stores at `key`. The previously visible session is not
    * torn down: it keeps its socket and its data, muted, ready to be shown again.
    */
   public activate(key: string): void {
     const session = this.sessions.get(key);
-    if (!session || this.activeKey === key) return;
+    if (!session || (this.activeKey === key && !this.viewingHome)) return;
     clientLog.info('CONNECTION', `Activating session: ${key}`);
 
     const previous = this.getActive();
     if (previous) this.mute(previous);
 
     this.activeKey = key;
+    this.viewingHome = false;
     session.serverStore.bus = appEvents;
     session.chatStore.bus = appEvents;
     session.botScreenStore.bus = appEvents;
@@ -208,29 +240,41 @@ export class SessionManager {
     if (!session) return;
     clientLog.info('CONNECTION', `Removing session: ${key}`);
     const wasActive = this.activeKey === key;
-    session.localExecution.dispose();
+    void session.localExecution.dispose().catch((error: unknown) => {
+      clientLog.error('CONNECTION', 'Failed to dispose a removed session', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    session.community.dispose();
     session.client.dispose();
     this.sessions.delete(key);
     // The disconnect above may have already handed the screen to another
     // session, and clearing the key then would undo it.
     if (wasActive && this.activeKey === key) {
-      this.activeKey = null;
-      appEvents.emit('session.changed', { key: null });
+      const next = this.viewingHome ? this.getAll().find(candidate => candidate.client.getStatus() === 'CONNECTED')
+        ?? this.getAll()[0] : undefined;
+      this.activeKey = next?.key ?? null;
+      if (next) this.applyBundle(next);
+      appEvents.emit('session.changed', { key: this.activeKey });
     }
+    emitOutsideRouting(() => appEvents.emit('session.connections_changed'));
   }
 
-  public removeAll(): void {
+  public async removeAll(): Promise<void> {
     clientLog.info('CONNECTION', `Removing all sessions (${this.sessions.size} active)`);
     // Background first: closing the visible one is what sends the user back to
     // the connection screen, so it has to be the last thing to happen.
-    for (const session of this.getBackground()) this.remove(session.key);
-    if (this.activeKey) this.remove(this.activeKey);
+    const active = this.getActive();
+    for (const session of [...this.getBackground(), ...(active ? [active] : [])]) {
+      await session.localExecution.dispose();
+      this.remove(session.key);
+    }
   }
 
-  public dispose(): void {
+  public async dispose(): Promise<void> {
     this.unbindLocalVoice?.();
     this.unbindLocalVoice = null;
-    this.removeAll();
+    await this.removeAll();
   }
 
   /** Points the global proxies at a session's bundle of state. */
@@ -267,11 +311,13 @@ export class SessionManager {
     const previousForeground = isForegroundEvent();
     const previousOrigin = currentEventOrigin();
 
-    if (!session || session.key === this.activeKey) {
+    if (!session || (session.key === this.activeKey && !this.viewingHome)) {
+      if (this.viewingHome) setForegroundContext(false);
       setEventOrigin(sessionKey || this.activeKey);
       try {
         emit();
       } finally {
+        setForegroundContext(previousForeground);
         setEventOrigin(previousOrigin);
       }
       this.notifyVoiceContext(sessionKey, event);
@@ -287,7 +333,7 @@ export class SessionManager {
     } finally {
       setForegroundContext(previousForeground);
       setEventOrigin(previousOrigin);
-      this.applyBundle(previousBundle);
+      this.applyBundle(previousBundle && this.sessions.has(previousBundle.key) ? previousBundle : this.getActive());
     }
     this.notifyVoiceContext(sessionKey, event);
 

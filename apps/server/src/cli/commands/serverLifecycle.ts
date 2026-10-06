@@ -166,7 +166,7 @@ export async function startServerCommand(globalArgs: GlobalArgs, args: string[])
   console.log(`${t('label.dataDir')}: ${plan.dataDir}`);
   console.log(`${t('label.name')}: ${plan.serverName}`);
   console.log(`${t('label.pm2Process')}: ${processName}`);
-  await printBotCompatibilityWarning(plan.port);
+  await printBotCompatibilityWarning(plan.port, { waitForStartup: true });
   console.log();
   console.log(color(t('lifecycle.helpTitle'), ANSI.bold));
   console.log(t('lifecycle.helpStatus'));
@@ -256,7 +256,7 @@ export async function restartServerCommand(globalArgs: GlobalArgs, args: string[
 
   console.log(color(t('lifecycle.restarted'), ANSI.green));
   console.log(t('target.portSuffix', { port: plan.port }));
-  await printBotCompatibilityWarning(plan.port);
+  await printBotCompatibilityWarning(plan.port, { waitForStartup: true });
 }
 
 /**

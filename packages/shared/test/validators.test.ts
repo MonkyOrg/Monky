@@ -10,18 +10,23 @@ import {
   PROTOCOL_VERSION,
   canAccessChannel,
   channelCreateSchema,
+  channelPermissionOverwritesSchema,
   channelUpdateSchema,
   hasPermission,
   adminVoiceRestrictionsGetSchema,
   adminMuteUserSchema,
   adminDeafenUserSchema,
   voiceRestrictionsUpdatedSchema,
+  dmRelaySendSchema,
+  ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX,
   userActivitySchema,
   userUpdateActivitySchema,
 } from '../src/index.js';
 import './botInteractions.test.js';
 import './botSettings.test.js';
 import './reactions.test.js';
+import './screenSubscriptions.test.js';
+import './nativeAudioIpc.test.js';
 
 console.log('=== Início dos Testes Unitários de @monky/shared ===');
 
@@ -36,8 +41,8 @@ console.log('✔ Validações de Nickname passaram');
 // Test Message validation
 console.assert(isValidMessageContent('Olá mundo') === true, 'Mensagem normal válida');
 console.assert(isValidMessageContent('') === false, 'Mensagem vazia inválida');
-console.assert(isValidMessageContent('a'.repeat(2001)) === false, 'Mensagem acima de 2000 chars inválida');
-console.assert(isValidMessageContent('a'.repeat(2000)) === true, 'Mensagem de 2000 chars válida');
+assert.equal(isValidMessageContent('a'.repeat(16001)), false);
+assert.equal(isValidMessageContent('a'.repeat(16000)), true);
 console.log('✔ Validações de Mensagem passaram');
 
 // Test Quality Presets
@@ -48,7 +53,7 @@ console.assert(QUALITY_PRESETS.GAMING.name === 'Gaming Mode', 'Preset Gaming Mod
 console.log('✔ Presets de Qualidade verificados');
 
 // Test Protocol Version
-if (PROTOCOL_VERSION !== 21) throw new Error('Versão do protocolo deve ser 21');
+assert.equal(PROTOCOL_VERSION, 36);
 console.assert(LIMITS.SFU_DEFAULT_MIN_PORT === 40000, 'Porta mínima padrão SFU');
 console.assert(LIMITS.SFU_DEFAULT_MAX_PORT === 49151, 'Porta máxima padrão SFU');
 console.assert(
@@ -68,9 +73,27 @@ for (const targetUserId of [undefined, null, {}, '', 'x'.repeat(129)]) {
 assert.equal(voiceRestrictionsUpdatedSchema.safeParse({ userId: 'member', serverMuted: true, serverDeafened: false }).success, true);
 assert.equal(voiceRestrictionsUpdatedSchema.safeParse({ userId: 'member', serverMuted: true }).success, false);
 
+const dmKey = `${ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX}${'ab'.repeat(32)}`;
+const dmRelay = dmRelaySendSchema.parse({
+  relayId: 'relay-1',
+  items: [{ to: dmKey.toUpperCase(), kind: 'friend', data: 'opaque' }],
+});
+assert.equal(dmRelay.items[0].to, dmKey);
+assert.equal(dmRelaySendSchema.safeParse({ relayId: 'relay-1', items: [] }).success, false);
+assert.equal(dmRelaySendSchema.safeParse({ relayId: 'relay-1', items: Array.from({ length: LIMITS.DM_RELAY_MAX_ITEMS + 1 }, () => ({ to: dmKey, kind: 'signal', data: '' })) }).success, false);
+assert.equal(dmRelaySendSchema.safeParse({ relayId: 'relay-1', items: [{ to: 'ab'.repeat(32), kind: 'signal', data: '' }] }).success, false);
+assert.equal(dmRelaySendSchema.safeParse({ relayId: 'relay-1', items: [{ to: dmKey, kind: 'envelope', data: 'x'.repeat(LIMITS.DM_RELAY_DATA_MAX_LENGTH + 1) }] }).success, false);
+assert.equal(dmRelaySendSchema.safeParse({ relayId: 'relay-1', items: [{ to: dmKey, kind: 'file', data: 'x'.repeat(LIMITS.DM_RELAY_FILE_DATA_MAX_LENGTH) }] }).success, true);
+assert.equal(dmRelaySendSchema.safeParse({ relayId: 'relay-1', items: Array.from({ length: 50 }, () => ({ to: dmKey, kind: 'file', data: 'x'.repeat(132_000) })) }).success, false);
+assert.equal(voiceRestrictionsUpdatedSchema.safeParse({
+  userId: 'member', serverMuted: true, serverDeafened: false, permissionMuted: true,
+}).success, true);
+
 console.assert(hasPermission(DEFAULT_PERMISSIONS, Permission.SPEAK) === true, 'Cargo padrão deve poder falar');
 console.assert(hasPermission(DEFAULT_PERMISSIONS, Permission.MANAGE_SERVER) === false, 'Cargo padrão não administra servidor');
 console.assert(hasPermission(ADMIN_PERMISSIONS, Permission.MOVE_MEMBERS) === true, 'Admin deve ter todas permissões');
+assert.equal(channelPermissionOverwritesSchema.safeParse([{ roleId: null, allow: Permission.MANAGE_CHANNELS, deny: 0 }]).success, false);
+assert.equal(channelPermissionOverwritesSchema.safeParse([{ roleId: null, allow: 0, deny: Permission.MOVE_MEMBERS }]).success, false);
 console.log('✔ Permissões verificadas');
 
 // Visibilidade de canais privados (#384)
@@ -94,8 +117,8 @@ console.assert(
   'Ter outro cargo não dá acesso ao canal privado'
 );
 console.assert(
-  canAccessChannel(privateChannel, Permission.MANAGE_CHANNELS, []) === true,
-  'Quem gerencia canais acessa mesmo sem o cargo'
+  canAccessChannel(privateChannel, Permission.MANAGE_CHANNELS, []) === false,
+  'Gerenciar canais não ignora a visibilidade do canal'
 );
 console.assert(
   canAccessChannel(privateChannel, ADMIN_PERMISSIONS, []) === true,
@@ -106,8 +129,8 @@ console.assert(
   'Canal privado sem cargos fica restrito a quem gerencia canais'
 );
 console.assert(
-  canAccessChannel({ isPrivate: true, allowedRoleIds: [] }, Permission.MANAGE_CHANNELS, []) === true,
-  'Canal privado sem cargos continua acessível a quem gerencia canais'
+  canAccessChannel({ isPrivate: true, allowedRoleIds: [] }, Permission.MANAGE_CHANNELS, []) === false,
+  'Canal privado sem cargos continua fechado sem VIEW_CHANNEL local'
 );
 console.log('✔ Regras de visibilidade de canal privado verificadas (#384)');
 

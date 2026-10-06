@@ -1,0 +1,274 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const { assertNativeRtcEngineClosed } = require('./nativeRtcCommands.cjs');
+const STARTUP_BITRATE_KBPS = 150;
+const MINIMUM_CAPTURE_BITRATE_KBPS = 50;
+const RECOVERY_REASONS = new Set(['rtc-unconsumed', 'input-expired', 'publication-expired', 'codec-expired', 'clock-sample-uncertain']);
+// Every capture encoder runs with keyint_sec=1, so a real IDR follows within
+// one configured-rate GOP of encoded AUs. Encoders skip frames under CPU load,
+// which stretches that GOP in wall time; the recovery bound therefore counts
+// AUs (three GOPs, tolerating discarded IDRs) instead of elapsed milliseconds.
+const KEYFRAME_INTERVAL_SECONDS = 1;
+const RECOVERY_GOPS = 3;
+// Windows hardware encoders restart on every bitrate setting: stock AMF runs
+// Flush()+ReInit() and NVENC resets with a forced IDR. Each restart emits an
+// extra IDR and a rate-control warm-up, so small congestion-estimate swings must
+// not reach the encoder. Reductions still apply as soon as the allocation is
+// exceeded; growth waits for a 25% gain over the applied setting.
+const TARGET_HEADROOM_PERCENT = 10;
+const MINIMUM_INCREASE_PERCENT = 25;
+
+class LiveSenderFlow {
+  constructor({ engine, sourceId, onError, initialBitrateKbps, fps, now = () => performance.now(), onWritable = () => {} }) {
+    assert.equal(typeof engine?.submitEncodedFrame, 'function');
+    assert.ok(Number.isSafeInteger(sourceId) && sourceId > 0);
+    assert.equal(typeof onError, 'function');
+    assert.ok(Number.isInteger(initialBitrateKbps) && initialBitrateKbps >= 50 &&
+      initialBitrateKbps <= 80000 && initialBitrateKbps % 50 === 0);
+    assert.ok(Number.isInteger(fps) && fps >= 1 && fps <= 240, 'Live sender requires the configured encoder frame rate.');
+    Object.assign(this, { engine, sourceId, onError, now, onWritable });
+    this.recoveryFrameBound = fps * KEYFRAME_INTERVAL_SECONDS * RECOVERY_GOPS;
+    this.demand = false; this.connected = false; this.needsIdr = true; this.paused = false;
+    this.capturePaused = false;
+    this.currentKbps = initialBitrateKbps; this.desiredKbps = initialBitrateKbps; this.lastUpdateAt = -Infinity;
+    this.applyingKbps = null;
+    this.feedbackSequence = 0; this.awaitedFrames = null; this.peakRtcArrivalFps = null;
+    this.counts = { observed: 0, admitted: 0, notWatched: 0, pausedPackets: 0, awaitingIdr: 0,
+      bitrateSettingsUpdates: 0, keyframeRequests: 0, actualIdrsAdmitted: 0, cancelledFeedbackRequests: 0,
+      nativeCopiesReleased: 0, inputBackpressure: 0, nativeRecoveryRequests: 0, nativeRecoveryRejections: 0,
+      sourcePausedPackets: 0 };
+    this.inFlight = new Set();
+    this.errors = [];
+  }
+  fail(error) {
+    this.errors.push(error.message); this.onError(error);
+  }
+  bind(host) {
+    assert.equal(this.host, undefined);
+    assert.equal(typeof host.setBitrate, 'function'); assert.equal(typeof host.requestKeyFrame, 'function');
+    this.host = host; this.scheduleRate();
+  }
+  setDemand(value) {
+    assert.equal(typeof value, 'boolean');
+    if (this.demand !== value) { this.needsIdr = true; this.awaitedFrames = null; }
+    this.demand = value;
+  }
+  setConnected(value) {
+    assert.equal(typeof value, 'boolean');
+    if (this.connected !== value) { this.needsIdr = true; this.awaitedFrames = null; }
+    this.connected = value;
+  }
+  setCapturePaused(value) {
+    assert.equal(typeof value, 'boolean');
+    if (this.capturePaused !== value) { this.needsIdr = true; this.awaitedFrames = null; }
+    this.capturePaused = value;
+  }
+  feedback(event) {
+    if (this.closing) return;
+    const data = event.data;
+    assert.equal(event.target, this.sourceId); assert.equal(data.sourceId, this.sourceId);
+    assert.ok(Number.isSafeInteger(data.sequence) && data.sequence > this.feedbackSequence);
+    this.feedbackSequence = data.sequence;
+    assert.equal(data.keyframeConfirmed, false);
+    if (data.kind === 'keyframe' || data.kind === 'recovery') {
+      assert.equal(data.mode, 'next-real-idr'); assert.equal(data.maximumWaitMs, 1500);
+      if (data.kind === 'recovery') {
+        assert.ok(RECOVERY_REASONS.has(data.reason));
+        assert.ok(Number.isSafeInteger(data.frameId) && data.frameId > 0);
+        assert.ok(Number.isSafeInteger(data.generation) && data.generation > 0);
+        this.counts.nativeRecoveryRequests++; this.lastRecovery = { ...data };
+        this.needsIdr = true; this.awaitedFrames ??= 0;
+      }
+      // A receiver PLI does not invalidate the publisher's existing picture chain.
+      this.requestIdr();
+      return;
+    }
+    assert.ok(data.kind === 'rate' || data.kind === 'encoder-closed');
+    assert.equal(data.fpsApplied, null); assert.equal(data.bitrateCeilingBps, 80000000);
+    assert.ok(Number.isFinite(data.requestedFps) && data.requestedFps >= 0 && data.requestedFps <= 0xffffffff,
+      'RTC arrival-rate estimate is outside the finite uint32 bound.');
+    this.peakRtcArrivalFps = Math.max(this.peakRtcArrivalFps ?? 0, data.requestedFps);
+    assert.equal(typeof data.paused, 'boolean');
+    assert.ok(Number.isInteger(data.bitrateBps) && data.bitrateBps >= 0 && data.bitrateBps <= 80000000);
+    if (data.kind === 'encoder-closed' && data.bitrateBps === 0 && !data.paused) {
+      // A new codec is initialized by its first frame. No remaining encoder is
+      // not a zero-rate network allocation; retain the applied setting for IDR bootstrap.
+      this.paused = false; this.needsIdr = true; this.awaitedFrames = null;
+      this.desiredKbps = this.applyingKbps ?? this.currentKbps;
+      this.lastFeedback = { ...data, hostSelectedKbps: this.desiredKbps };
+      return;
+    }
+    const selected = Math.floor(data.bitrateBps / 50000) * 50;
+    // Keep real media reaching RTC's pacer while it has a positive allocation.
+    // The encoder's property minimum must not become a network pause/floor.
+    const paused = data.paused || data.bitrateBps === 0;
+    if (paused !== this.paused) { this.needsIdr = true; this.awaitedFrames = null; }
+    this.paused = paused;
+    if (!paused) {
+      const reference = this.applyingKbps ?? this.currentKbps;
+      const target = Math.max(MINIMUM_CAPTURE_BITRATE_KBPS,
+        Math.floor(data.bitrateBps * (100 - TARGET_HEADROOM_PERCENT) / 5000000) * 50);
+      this.desiredKbps = reference > selected || target * 100 >= reference * (100 + MINIMUM_INCREASE_PERCENT)
+        ? target : reference;
+      this.scheduleRate();
+    }
+    this.lastFeedback = { ...data, allocationKbps: selected, hostSelectedKbps: paused ? null : this.desiredKbps };
+  }
+  scheduleRate() {
+    if (this.closing || !this.host || this.paused || this.rateWork ||
+        this.desiredKbps === this.currentKbps) return;
+    const reduction = this.desiredKbps < this.currentKbps;
+    if (this.rateTimer) {
+      if (!reduction) return;
+      clearTimeout(this.rateTimer); this.rateTimer = null;
+    }
+    // Coalesce growth only; never delay a reduction to the current budget.
+    const wait = reduction ? 0 : Math.max(0, 1000 - (this.now() - this.lastUpdateAt));
+    if (wait > 0) {
+      this.rateTimer = setTimeout(() => { this.rateTimer = null; this.scheduleRate(); }, wait);
+      return;
+    }
+    const selected = this.desiredKbps;
+    this.applyingKbps = selected;
+    const work = (async () => {
+      const result = await this.host.setBitrate(selected);
+      assert.equal(result.bitrateKbps, selected); assert.equal(result.settingsAccepted, true);
+      assert.equal(result.hardwareApplicationConfirmed, false);
+      // Already emitted AUs remain a valid chain through Flush/ReInit and its
+      // new IDR. RTC paces them; a settings acknowledgement is not a lost frame.
+      this.currentKbps = selected; this.lastUpdateAt = this.now(); this.counts.bitrateSettingsUpdates++;
+    })();
+    this.rateWork = work;
+    void work.then(() => {
+      this.rateWork = null; this.applyingKbps = null; this.scheduleRate();
+    }, error => {
+      this.rateWork = null; this.applyingKbps = null;
+      if (!this.closing || error.name !== 'AbortError') this.fail(error);
+    });
+  }
+  requestIdr() {
+    if (this.closing || !this.host) return Promise.resolve();
+    if (this.idrWork) return this.idrWork;
+    const work = this.host.requestKeyFrame().then(result => {
+      assert.equal(result.mode, 'next-real-idr'); assert.equal(result.keyframeConfirmed, false);
+      this.counts.keyframeRequests++;
+    });
+    this.idrWork = work;
+    void work.then(() => { this.idrWork = null; }, error => {
+      this.idrWork = null; if (!this.closing || error.name !== 'AbortError') this.fail(error);
+    });
+    return work;
+  }
+  packet(frame) {
+    // The capture pipe retains this one AU until the child acknowledges its
+    // native copy. A replay consumes the receipt, never submits a second copy.
+    if (this.admission) {
+      assert.equal(this.admission.frameId, frame.frameId);
+      if (!this.admission.settled) return false;
+      const { error } = this.admission;
+      this.admission = null;
+      if (error) return this.rejectFrame(frame, error);
+      return;
+    }
+    if (this.closing || !this.connected || !this.demand) {
+      this.counts.observed++; this.counts.notWatched++; this.needsIdr = true; this.awaitedFrames = null; return;
+    }
+    assert.deepEqual(this.errors, [], 'Live source admission follows an earlier failure.');
+    if (this.capturePaused) {
+      this.counts.observed++; this.counts.sourcePausedPackets++; this.needsIdr = true; this.awaitedFrames = null; return;
+    }
+    if (this.paused) {
+      this.counts.observed++; this.counts.pausedPackets++; this.needsIdr = true; this.awaitedFrames = null; return;
+    }
+    if (this.needsIdr && !frame.keyframe) {
+      this.awaitedFrames = (this.awaitedFrames ?? 0) + 1;
+      assert.ok(this.awaitedFrames <= this.recoveryFrameBound, 'No real IDR arrived within the live recovery bound.');
+      this.counts.observed++; this.counts.awaitingIdr++; return;
+    }
+    if (this.inFlight.size === 16) { this.counts.inputBackpressure++; return false; }
+    assert.ok(!this.inFlight.has(frame.frameId), 'An already admitted AU cannot be submitted twice.');
+    let result;
+    try {
+      result = this.engine.submitEncodedFrame(this.sourceId, {
+        frameId: frame.frameId, data: frame.data, keyframe: frame.keyframe, timestampUs: frame.timestampUs,
+        durationUs: frame.durationUs, ntpTimeMs: frame.ntpTimeMs, pts: frame.pts, dts: frame.dts,
+        timebaseNumerator: frame.timebaseNumerator, timebaseDenominator: frame.timebaseDenominator,
+      });
+    } catch (error) {
+      return this.rejectFrame(frame, error);
+    }
+    if (this.engine.asynchronousNative === true) {
+      assert.equal(typeof result?.then, 'function');
+      const admission = { frameId: frame.frameId, settled: false, error: null };
+      this.admission = admission;
+      // Retain metadata only; serialized IPC and the bounded capture pipe own
+      // their separate byte copies. No timestamp or copy receipt is invented.
+      const identity = { frameId: frame.frameId, keyframe: frame.keyframe };
+      admission.work = result.then(receipt => this.admitFrame(identity, receipt)).catch(error => {
+        admission.error = error;
+      }).then(() => {
+        admission.settled = true;
+        this.onWritable();
+      });
+      void admission.work.catch(error => this.fail(error));
+      return false;
+    }
+    this.admitFrame(frame, result);
+  }
+  rejectFrame(frame, error) {
+    if (error.code === 'ERR_RTC_ENCODED_RECOVERY' && error.status === 8) {
+      this.counts.observed++; this.counts.nativeRecoveryRejections++;
+      this.needsIdr = true; this.awaitedFrames = (this.awaitedFrames ?? 0) + 1;
+      assert.ok(this.awaitedFrames <= this.recoveryFrameBound,
+        'Native input did not recover through a fresh IDR within the live recovery bound.');
+      this.requestIdr();
+      return;
+    }
+    if (error.code !== 'ERR_RTC_ENCODED_INPUT' || error.status !== 3 || !this.inFlight.size) throw error;
+    this.counts.inputBackpressure++;
+    return false;
+  }
+  admitFrame(frame, result) {
+    assert.equal(result.copied, true); assert.equal(result.frameId, frame.frameId);
+    assert.equal(result.sourceId, this.sourceId); assert.equal(result.networkDeliveryConfirmed, false);
+    this.inFlight.add(frame.frameId);
+    this.counts.observed++; this.counts.admitted++; if (frame.keyframe) this.counts.actualIdrsAdmitted++;
+    this.needsIdr = false; this.awaitedFrames = null;
+  }
+  released(event) {
+    assert.equal(event.target, this.sourceId); assert.equal(event.data.sourceId, this.sourceId);
+    assert.equal(event.data.nativeCopyRetired, true); assert.equal(event.data.networkDeliveryConfirmed, false);
+    assert.equal(this.inFlight.delete(event.data.frameId), true, 'Unknown or duplicate native copy retirement.');
+    this.counts.nativeCopiesReleased++;
+  }
+  async close() {
+    this.closing = true; clearTimeout(this.rateTimer); this.rateTimer = null;
+    const outcomes = await Promise.allSettled([this.rateWork, this.idrWork, this.admission?.work].filter(Boolean));
+    const rejected = outcomes.filter(result => result.status === 'rejected').map(result => result.reason);
+    this.counts.cancelledFeedbackRequests = rejected.filter(error => error.name === 'AbortError').length;
+    const failures = rejected.filter(error => error.name !== 'AbortError');
+    if (failures.length) throw new AggregateError(failures, 'Live feedback did not retire cleanly.');
+  }
+  finishAfterEngineClose(commands) {
+    assertNativeRtcEngineClosed(commands, this.engine);
+    if (this.engine.asynchronousNative !== true) return;
+    assert.equal(this.engine.snapshot().process.exited, true);
+    this.counts.copiesDisposedWithHost = this.inFlight.size;
+    this.inFlight.clear();
+    this.admission = null;
+  }
+  snapshot() {
+    return { ...this.counts, demand: this.demand, connected: this.connected, paused: this.paused, capturePaused: this.capturePaused,
+      awaitingRealIdr: this.needsIdr, awaitedRecoveryFrames: this.awaitedFrames ?? 0,
+      recoveryFrameBound: this.recoveryFrameBound, currentSettingsKbps: this.currentKbps, desiredSettingsKbps: this.desiredKbps,
+      bitratePolicy: { targetHeadroomPercent: TARGET_HEADROOM_PERCENT, minimumIncreasePercent: MINIMUM_INCREASE_PERCENT },
+      feedback: this.lastFeedback ?? null, errors: [...this.errors], queuedJavaScriptFrames: 0,
+      peakRtcArrivalFps: this.peakRtcArrivalFps,
+      recovery: this.lastRecovery ?? null,
+      retainedNativeCopies: this.inFlight.size,
+      transmitterDecoding: false, transmitterReencoding: false, nativeCopyAdmissionIsDeliveryProof: false };
+  }
+}
+
+module.exports = { LiveSenderFlow, STARTUP_BITRATE_KBPS };

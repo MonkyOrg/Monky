@@ -1,10 +1,12 @@
 import { appEvents } from '../core/EventBus';
+import { animateEnter, ownSurface, removeWithMotion, topModal } from '../utils/surfaceMotion';
 
 export interface ContextMenuItem {
   label: string;
   icon?: string;
   danger?: boolean;
   shortcut?: string;
+  disabled?: boolean;
   onClick: () => void;
 }
 
@@ -12,6 +14,7 @@ export interface ContextMenuSubmenu {
   label: string;
   icon?: string;
   submenu: ContextMenuItem[];
+  onClick?: () => void;
 }
 
 export type ContextMenuEntry = ContextMenuItem | ContextMenuSubmenu;
@@ -39,9 +42,12 @@ export class ContextMenu {
     document.body.appendChild(menu);
     this.menuEl = menu;
     this.positionMenu(menu, x, y);
+    const owner = anchor ?? topModal();
+    if (owner) this.unbindGlobalListeners.push(ownSurface(menu, owner));
+    animateEnter(menu);
 
     this.attachDismiss();
-    menu.querySelector('button')?.focus({ preventScroll: true });
+    menu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true });
   }
 
   private createMenu(items: ContextMenuEntry[]): HTMLElement {
@@ -54,6 +60,7 @@ export class ContextMenu {
       btn.tabIndex = -1;
       btn.setAttribute('role', 'menuitem');
       btn.className = 'server-dropdown-item' + ('danger' in item && item.danger ? ' danger' : '');
+      btn.disabled = 'disabled' in item && item.disabled === true;
       if (item.icon) {
         const icon = document.createElement('span');
         icon.className = 'material-symbols-outlined md-18';
@@ -90,14 +97,15 @@ export class ContextMenu {
       });
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        if ('submenu' in item) {
+        if ('submenu' in item && (!item.onClick ||
+            (e.target instanceof Element && e.target.closest('.context-menu-trailing')))) {
           this.openSubmenu(btn, item.submenu, true);
           return;
         }
         const anchor = this.returnFocus;
         this.close();
         if (e.detail === 0 && anchor?.isConnected) anchor.focus({ preventScroll: true });
-        item.onClick();
+        item.onClick?.();
       });
       menu.appendChild(btn);
     }
@@ -122,8 +130,10 @@ export class ContextMenu {
       const width = submenu.getBoundingClientRect().width;
       const x = parent.right + width > window.innerWidth - 12 ? parent.left - width : parent.right;
       this.positionMenu(submenu, x, rect.top);
+      ownSurface(submenu, trigger);
+      animateEnter(submenu);
     }
-    if (focus) this.submenuEl?.querySelector('button')?.focus({ preventScroll: true });
+    if (focus) this.submenuEl?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true });
   }
 
   private positionMenu(menu: HTMLElement, x: number, y: number): void {
@@ -143,7 +153,7 @@ export class ContextMenu {
     const handleOutsideClick = (e: Event) => {
       if (e.target instanceof Node && this.menuEl
         && !this.menuEl.contains(e.target) && !this.submenuEl?.contains(e.target)
-        && !this.returnFocus?.contains(e.target)) this.close();
+        && !(this.returnFocus instanceof HTMLButtonElement && this.returnFocus.contains(e.target))) this.close();
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.key === 'Escape' || e.key === 'ArrowLeft') && this.submenuEl) {
@@ -166,7 +176,8 @@ export class ContextMenu {
         e.preventDefault();
         const activeMenu = this.submenuEl?.contains(document.activeElement) ? this.submenuEl : this.menuEl;
         if (activeMenu === this.menuEl) this.closeSubmenu();
-        const buttons = Array.from(activeMenu.querySelectorAll('button'));
+        const buttons = Array.from(activeMenu.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+        if (!buttons.length) return;
         const current = buttons.findIndex((button) => button === document.activeElement);
         const next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1
           : (current + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
@@ -206,7 +217,7 @@ export class ContextMenu {
     this.unbindGlobalListeners.forEach((u) => u());
     this.unbindGlobalListeners = [];
     if (this.menuEl) {
-      this.menuEl.remove();
+      removeWithMotion(this.menuEl);
       this.menuEl = null;
     }
   }
@@ -215,7 +226,7 @@ export class ContextMenu {
     this.submenuTrigger?.setAttribute('aria-expanded', 'false');
     this.submenuTrigger?.removeAttribute('aria-controls');
     this.submenuTrigger = null;
-    this.submenuEl?.remove();
+    if (this.submenuEl) removeWithMotion(this.submenuEl);
     this.submenuEl = null;
   }
 }

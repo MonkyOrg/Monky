@@ -15,14 +15,21 @@ const ERROR_KEYS: Record<ProtocolErrorCode, TranslationKey> = {
   [ProtocolErrorCode.CHANNEL_FULL]: 'protocolError.channelFull',
   [ProtocolErrorCode.MESSAGE_TOO_LONG]: 'protocolError.messageTooLong',
   [ProtocolErrorCode.RATE_LIMITED]: 'protocolError.rateLimited',
+  [ProtocolErrorCode.AUTH_RATE_LIMITED]: 'protocolError.authRateLimited',
   [ProtocolErrorCode.AVATAR_TOO_LARGE]: 'protocolError.avatarTooLarge',
   [ProtocolErrorCode.AVATAR_INVALID_TYPE]: 'protocolError.avatarInvalidType',
   [ProtocolErrorCode.SERVER_FULL]: 'protocolError.serverFull',
   [ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED]: 'protocolError.protocolVersionUnsupported',
+  [ProtocolErrorCode.FEATURE_REQUIRES_UPDATE]: 'chat.featureUpdateRequired',
+  [ProtocolErrorCode.DM_RELAY_DISABLED]: 'protocolError.dmRelayDisabled',
   [ProtocolErrorCode.INTERNAL_ERROR]: 'protocolError.internalError',
   [ProtocolErrorCode.UNAUTHORIZED]: 'protocolError.unauthorized',
   [ProtocolErrorCode.PERMISSION_DENIED]: 'protocolError.permissionDenied',
   [ProtocolErrorCode.BAD_REQUEST]: 'protocolError.badRequest',
+  [ProtocolErrorCode.COMMUNITY_INVALID]: 'community.invalidRequest',
+  [ProtocolErrorCode.COMMUNITY_CONFLICT]: 'community.changed',
+  [ProtocolErrorCode.FORUM_INVALID]: 'forum.invalidRequest',
+  [ProtocolErrorCode.MESSAGE_SEARCH_INVALID]: 'community.invalidSearch',
   [ProtocolErrorCode.ATTACHMENT_TOO_LARGE]: 'protocolError.attachmentTooLarge',
   [ProtocolErrorCode.ATTACHMENT_INVALID_TYPE]: 'protocolError.attachmentInvalidType',
   [ProtocolErrorCode.STORAGE_FULL]: 'protocolError.storageFull',
@@ -60,6 +67,9 @@ const LEGACY_EXPECTED_VERSION = /esperado:\s*(\d+)/i;
 const BOT_ADDRESS_ERRORS = new Map<string, TranslationKey>([
   ['Não foi possível determinar o endereço do servidor para o bot. Reconecte usando a URL completa do servidor.', 'bots.serverAddressUnavailable'],
   ['Um bot remoto não pode usar localhost para acessar este servidor. Reconecte pelo IP ou domínio acessível ao bot e tente novamente.', 'bots.serverAddressLoopback'],
+]);
+const COMMUNITY_ERRORS = new Map<string, TranslationKey>([
+  ['Live actions are disabled.', 'poll.liveActionsDisabled'],
 ]);
 
 /**
@@ -101,6 +111,9 @@ export function translateProtocolError(
   const botAddressKey = code === ProtocolErrorCode.BAD_REQUEST && serverMessage
     ? BOT_ADDRESS_ERRORS.get(serverMessage) : undefined;
   if (botAddressKey) return t(botAddressKey);
+  const communityKey = code === ProtocolErrorCode.COMMUNITY_INVALID && serverMessage
+    ? COMMUNITY_ERRORS.get(serverMessage) : undefined;
+  if (communityKey) return t(communityKey);
 
   const key = code ? ERROR_KEYS[code as ProtocolErrorCode] : undefined;
   // For BAD_REQUEST, prefer the server's specific message (e.g. bot install

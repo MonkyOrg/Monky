@@ -1,6 +1,9 @@
 import { LIMITS, type ServerDetails, type ServerUpdateSettingsPayload } from '@monky/shared';
 
 type ValidationError =
+  | 'serverSettings.deleteUndoInvalid'
+  | 'serverSettings.messageLimitInvalid'
+  | 'chat.featureUpdateRequired'
   | 'serverSettings.nameInvalid'
   | 'serverSettings.passwordInvalid'
   | 'serverSettings.memberLimitInvalid'
@@ -10,13 +13,34 @@ type ValidationError =
   | 'serverSettings.turnBlockedBySfu'
   | 'serverSettings.turnUnknownSupport'
   | 'serverSettings.turnUnsupportedPlatform'
-  | 'serverSettings.turnNotInstalled';
+  | 'serverSettings.turnNotInstalled'
+  | 'serverSettings.recentSoundsLimitInvalid';
 
 export function serverSettingsValidationError(
   patch: ServerUpdateSettingsPayload,
   persisted: ServerDetails,
   registeredMembers?: number,
 ): ValidationError | null {
+  if (patch.messageDeleteUndoSeconds !== undefined) {
+    if (!persisted.protocol?.features.includes('message-delete-undo')) return 'chat.featureUpdateRequired';
+    if (!Number.isSafeInteger(patch.messageDeleteUndoSeconds) || patch.messageDeleteUndoSeconds < 1
+      || patch.messageDeleteUndoSeconds > LIMITS.MAX_MESSAGE_DELETE_UNDO_SECONDS) return 'serverSettings.deleteUndoInvalid';
+  }
+  if (patch.maxMessageLength !== undefined) {
+    if (!persisted.protocol?.features.includes('message-length-setting')) return 'chat.featureUpdateRequired';
+    if (!Number.isSafeInteger(patch.maxMessageLength) || patch.maxMessageLength < 0) return 'serverSettings.messageLimitInvalid';
+  }
+  if (patch.recentSoundCacheEnabled !== undefined || patch.recentSoundCacheLimit !== undefined) {
+    if (!persisted.protocol?.features.includes('recent-sounds')) return 'chat.featureUpdateRequired';
+    if (patch.recentSoundCacheLimit !== undefined && (!Number.isSafeInteger(patch.recentSoundCacheLimit)
+      || patch.recentSoundCacheLimit < LIMITS.RECENT_SOUND_CACHE_MIN_LIMIT
+      || patch.recentSoundCacheLimit > LIMITS.RECENT_SOUND_CACHE_MAX_LIMIT)) {
+      return 'serverSettings.recentSoundsLimitInvalid';
+    }
+  }
+  if (patch.dmRelayEnabled !== undefined && !persisted.protocol?.features.includes('dm-relay')) {
+    return 'chat.featureUpdateRequired';
+  }
   if (patch.name !== undefined && (patch.name.trim().length < 2 || patch.name.trim().length > 50)) {
     return 'serverSettings.nameInvalid';
   }

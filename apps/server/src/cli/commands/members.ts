@@ -11,7 +11,13 @@ export async function resolveUser(ctx: CliContext, query: string): Promise<UserR
     throw new Error(t('members.enterQuery'));
   }
 
-  const byClientId = await ctx.userRepo.findByClientId(normalized);
+  const byPublicKey = /^[a-fA-F0-9]{64,128}$/.test(normalized)
+    ? await ctx.userRepo.findByPublicKey(normalized.toLowerCase()) : null;
+  if (byPublicKey) {
+    return byPublicKey;
+  }
+
+  const byClientId = normalized.length === 32 ? await ctx.userRepo.findByClientId(normalized.toLowerCase()) : null;
   if (byClientId) {
     return byClientId;
   }

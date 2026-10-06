@@ -137,18 +137,18 @@ export class BotService {
     return {
       protocolVersion: PROTOCOL_VERSION,
       incompatibleBots: bots.filter((bot) =>
-        bot.lastProtocolVersion != null && bot.lastProtocolVersion !== PROTOCOL_VERSION).length,
+        bot.lastProtocolVersion != null && !negotiateProtocol(bot.lastProtocolVersion, undefined, 'bot')).length,
       uncheckedBots: bots.filter((bot) =>
         bot.boundPublicKey !== null && bot.lastProtocolVersion == null).length,
     };
   }
 
-  async recordCompatibleConnection(botId: string): Promise<boolean> {
+  async recordCompatibleConnection(botId: string, protocolVersion: number = PROTOCOL_VERSION): Promise<boolean> {
     return this.mutate(async () => {
       const record = await this.botRepo.findById(botId);
       if (!record) return false;
-      if (record.lastProtocolVersion !== PROTOCOL_VERSION) {
-        await this.botRepo.update(botId, { lastProtocolVersion: PROTOCOL_VERSION });
+      if (record.lastProtocolVersion !== protocolVersion) {
+        await this.botRepo.update(botId, { lastProtocolVersion: protocolVersion });
       }
       return true;
     });
@@ -477,6 +477,9 @@ export class BotService {
       profilePending: record.profilePending,
       lastProtocolVersion: record.lastProtocolVersion ?? null,
       requiredProtocolVersion: PROTOCOL_VERSION,
+      minimumProtocolVersion: MIN_BOT_PROTOCOL,
+      protocolCompatible: record.lastProtocolVersion != null
+        ? onlineBots.has(record.id) || !!negotiateProtocol(record.lastProtocolVersion, undefined, 'bot') : undefined,
       permissions: this.permissions?.get(record.id) ?? unreviewedBotPermissions(),
     };
   }
@@ -519,3 +522,4 @@ export class BotService {
     }
   }
 }
+import { negotiateProtocol, MIN_BOT_PROTOCOL } from '@monky/shared';

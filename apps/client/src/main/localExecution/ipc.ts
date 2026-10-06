@@ -14,6 +14,7 @@ export interface LocalExecutionNotifications {
 
 export interface LocalExecutionIpc {
   service: LocalExecutionService;
+  freezeAdmissions: () => void;
   dispose: () => Promise<void>;
 }
 
@@ -27,6 +28,7 @@ export function setupLocalExecutionIpc(
   let dirty = false;
   let closed = false;
   let disposal: Promise<void> | null = null;
+  let admissionsFrozen = false;
   const usable = (): boolean => !closed && !window.isDestroyed() && !contents.isDestroyed();
   const owns = (event: Electron.IpcMainInvokeEvent): boolean =>
     usable() && event.sender === contents && event.senderFrame === contents.mainFrame;
@@ -61,10 +63,14 @@ export function setupLocalExecutionIpc(
     },
   });
 
-  async function invoke<T>(event: Electron.IpcMainInvokeEvent, action: () => Promise<T>): Promise<T | LocalExecutionFailedResult> {
+  async function invoke<T>(event: Electron.IpcMainInvokeEvent, action: () => Promise<T>, admission = false): Promise<T | LocalExecutionFailedResult> {
     if (!owns(event)) {
       console.warn('[LocalExecution] Rejected IPC from a non-owner frame.');
       return { status: 'failed', reason: 'invalid_request' };
+    }
+    if (admission && admissionsFrozen) {
+      console.warn('[LocalExecution] Rejected new work during application shutdown.');
+      return { status: 'failed', reason: 'executor_unavailable' };
     }
     try {
       return await action();
@@ -87,16 +93,16 @@ export function setupLocalExecutionIpc(
     }
   });
   ipcMain.handle(LOCAL_EXECUTION_IPC.setPermission, (event, input: unknown) =>
-    invoke(event, () => service.setPermission(input)));
+    invoke(event, () => service.setPermission(input), true));
   ipcMain.handle(LOCAL_EXECUTION_IPC.removeTool, (event, input: unknown) =>
-    invoke(event, () => service.removeTool(input)));
-  ipcMain.handle(LOCAL_EXECUTION_IPC.clearCache, (event) => invoke(event, () => service.clearCache()));
+    invoke(event, () => service.removeTool(input), true));
+  ipcMain.handle(LOCAL_EXECUTION_IPC.clearCache, (event) => invoke(event, () => service.clearCache(), true));
   ipcMain.handle(LOCAL_EXECUTION_IPC.cancelTask, (event, taskId: unknown) =>
     invoke(event, () => service.cancelTask(taskId)));
   ipcMain.handle(LOCAL_EXECUTION_IPC.prepare, (event, input: unknown) =>
-    invoke(event, () => service.prepare(input)));
+    invoke(event, () => service.prepare(input), true));
   ipcMain.handle(LOCAL_EXECUTION_IPC.startTask, (event, input: unknown) =>
-    invoke(event, () => service.startTask(input)));
+    invoke(event, () => service.startTask(input), true));
   ipcMain.handle(LOCAL_EXECUTION_IPC.readFrames, (event, input: unknown) =>
     invoke(event, () => service.readFrames(input)));
   ipcMain.handle(LOCAL_EXECUTION_IPC.acknowledgeFrames, (event, input: unknown) =>
@@ -142,5 +148,5 @@ export function setupLocalExecutionIpc(
   contents.on('did-start-navigation', navigation);
   contents.on('render-process-gone', cancelOwner);
   contents.once('destroyed', onDestroyed);
-  return { service, dispose };
+  return { service, freezeAdmissions: () => { admissionsFrozen = true; }, dispose };
 }

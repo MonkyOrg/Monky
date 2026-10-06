@@ -12,8 +12,11 @@
 #include <napi.h>
 #include <windows.h>
 #include <dwmapi.h>
+#include <algorithm>
 #include <vector>
 #include <string>
+#include <cmath>
+#include <set>
 
 namespace {
 
@@ -51,6 +54,18 @@ std::wstring GetProcessImagePath(DWORD pid) {
   return result;
 }
 
+std::string GetProcessCreation(DWORD pid) {
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+  if (!process) return {};
+  FILETIME creation{}, exit{}, kernel{}, user{};
+  const bool observed = WaitForSingleObject(process, 0) == WAIT_TIMEOUT &&
+      GetProcessTimes(process, &creation, &exit, &kernel, &user);
+  CloseHandle(process);
+  if (!observed) return {};
+  const auto born = (static_cast<uint64_t>(creation.dwHighDateTime) << 32) | creation.dwLowDateTime;
+  return born ? std::to_string(born) : std::string{};
+}
+
 BOOL CALLBACK EnumProc(HWND hwnd, LPARAM lParam) {
   auto* handles = reinterpret_cast<std::vector<HWND>*>(lParam);
   handles->push_back(hwnd);
@@ -58,6 +73,48 @@ BOOL CALLBACK EnumProc(HWND hwnd, LPARAM lParam) {
 }
 
 }  // namespace
+
+Napi::Value platform_get_window_state(const Napi::CallbackInfo& info) {
+  const auto env = info.Env();
+  if (info.Length() != 1 || !info[0].IsNumber()) {
+    Napi::TypeError::New(env, "A positive safe-integer HWND is required").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  const auto value = info[0].As<Napi::Number>().DoubleValue();
+  if (!std::isfinite(value) || value < 1 || value > 9007199254740991.0 || std::floor(value) != value) {
+    Napi::TypeError::New(env, "A positive safe-integer HWND is required").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  const auto hwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(value));
+  DWORD pid = 0;
+  if (!IsWindow(hwnd) || !GetWindowThreadProcessId(hwnd, &pid)) return env.Null();
+  const auto process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+  if (!process) {
+    const auto error = GetLastError();
+    if (!IsWindow(hwnd) || error == ERROR_INVALID_PARAMETER) return env.Null();
+    Napi::Error::New(env, "Cannot inspect selected window process: " + std::to_string(error)).ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  FILETIME creation{}, exit{}, kernel{}, user{};
+  const auto alive = WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+  const auto observed = GetProcessTimes(process, &creation, &exit, &kernel, &user);
+  const auto error = observed ? ERROR_SUCCESS : GetLastError();
+  CloseHandle(process);
+  DWORD current = 0;
+  if (!alive || !IsWindow(hwnd) || !GetWindowThreadProcessId(hwnd, &current) || current != pid) return env.Null();
+  if (!observed) {
+    Napi::Error::New(env, "Cannot inspect selected process creation time: " + std::to_string(error)).ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  const auto born = (static_cast<uint64_t>(creation.dwHighDateTime) << 32) | creation.dwLowDateTime;
+  auto result = Napi::Object::New(env);
+  result.Set("processId", pid);
+  result.Set("processCreationTime100ns", std::to_string(born));
+  result.Set("isVisible", IsWindowVisible(hwnd) != 0);
+  result.Set("isIconic", IsIconic(hwnd) != 0);
+  result.Set("isTopLevel", GetAncestor(hwnd, GA_ROOT) == hwnd);
+  return result;
+}
 
 Napi::Value platform_list_windows(Napi::Env env) {
   std::vector<HWND> handles;
@@ -106,11 +163,15 @@ Napi::Value platform_list_windows(Napi::Env env) {
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
     std::wstring procPath = GetProcessImagePath(pid);
+    const auto creation = GetProcessCreation(pid);
+    DWORD observedPid = 0;
+    if (!IsWindow(hwnd) || !GetWindowThreadProcessId(hwnd, &observedPid) || observedPid != pid) continue;
 
     Napi::Object obj = Napi::Object::New(env);
     obj.Set("hwnd", Napi::Number::New(env, static_cast<double>(reinterpret_cast<uintptr_t>(hwnd))));
     obj.Set("title", Napi::String::New(env, WideToUtf8(title)));
     obj.Set("processId", Napi::Number::New(env, static_cast<double>(pid)));
+    obj.Set("processCreationTime100ns", creation.empty() ? env.Null() : Napi::String::New(env, creation));
     obj.Set("processPath", Napi::String::New(env, WideToUtf8(procPath)));
     obj.Set("isIconic", Napi::Boolean::New(env, iconic));
     obj.Set("isVisible", Napi::Boolean::New(env, true));
@@ -127,6 +188,225 @@ Napi::Value platform_list_windows(Napi::Env env) {
   }
 
   return arr;
+}
+
+namespace {
+struct MonitorRecord {
+  std::wstring deviceId, deviceName, name;
+  RECT bounds{};
+  bool primary = false;
+};
+
+struct MonitorEnumeration {
+  std::vector<MonitorRecord> records;
+  bool failed = false;
+};
+
+BOOL CALLBACK EnumMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM parameter) noexcept {
+  auto& enumeration = *reinterpret_cast<MonitorEnumeration*>(parameter);
+  try {
+    if (enumeration.records.size() >= 64) {
+      enumeration.failed = true;
+      return FALSE;
+    }
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    DISPLAY_DEVICEW device{};
+    device.cb = sizeof(device);
+    if (!GetMonitorInfoW(monitor, &info) ||
+        !EnumDisplayDevicesW(info.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME) ||
+        !device.DeviceID[0]) {
+      enumeration.failed = true;
+      return FALSE;
+    }
+    const auto width = info.rcMonitor.right - info.rcMonitor.left;
+    const auto height = info.rcMonitor.bottom - info.rcMonitor.top;
+    if (width < 1 || width > 32768 || height < 1 || height > 32768) {
+      enumeration.failed = true;
+      return FALSE;
+    }
+    enumeration.records.push_back({device.DeviceID, info.szDevice, device.DeviceString,
+        info.rcMonitor, (info.dwFlags & MONITORINFOF_PRIMARY) != 0});
+    return TRUE;
+  } catch (...) {
+    enumeration.failed = true;
+    return FALSE;
+  }
+}
+
+Napi::Object MonitorObject(Napi::Env env, const MonitorRecord& monitor) {
+  auto bounds = Napi::Object::New(env);
+  bounds.Set("x", monitor.bounds.left);
+  bounds.Set("y", monitor.bounds.top);
+  bounds.Set("width", monitor.bounds.right - monitor.bounds.left);
+  bounds.Set("height", monitor.bounds.bottom - monitor.bounds.top);
+  auto result = Napi::Object::New(env);
+  result.Set("deviceId", WideToUtf8(monitor.deviceId));
+  result.Set("deviceName", WideToUtf8(monitor.deviceName));
+  result.Set("name", WideToUtf8(monitor.name));
+  result.Set("bounds", bounds);
+  result.Set("isPrimary", monitor.primary);
+  return result;
+}
+
+bool ReadMonitors(Napi::Env env, MonitorEnumeration& enumeration) {
+  // Win32 metadata only: this does not create a graphics device or acquire pixels.
+  const auto previous = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  if (!previous) {
+    Napi::Error::New(env, "Cannot obtain physical monitor coordinates").ThrowAsJavaScriptException();
+    return false;
+  }
+  const auto ok = EnumDisplayMonitors(nullptr, nullptr, EnumMonitor, reinterpret_cast<LPARAM>(&enumeration));
+  SetThreadDpiAwarenessContext(previous);
+  std::set<std::wstring> ids;
+  for (const auto& monitor : enumeration.records)
+    if (!ids.insert(monitor.deviceId).second) enumeration.failed = true;
+  if (!ok || enumeration.failed) {
+    Napi::Error::New(env, "Cannot enumerate unambiguous monitor device identities").ThrowAsJavaScriptException();
+    return false;
+  }
+  return true;
+}
+}  // namespace
+
+Napi::Value platform_list_monitors(const Napi::CallbackInfo& info) {
+  MonitorEnumeration enumeration;
+  if (!ReadMonitors(info.Env(), enumeration)) return info.Env().Undefined();
+  auto result = Napi::Array::New(info.Env(), enumeration.records.size());
+  for (uint32_t index = 0; index < enumeration.records.size(); ++index)
+    result.Set(index, MonitorObject(info.Env(), enumeration.records[index]));
+  return result;
+}
+
+Napi::Value platform_get_monitor_state(const Napi::CallbackInfo& info) {
+  if (info.Length() != 1 || !info[0].IsString()) {
+    Napi::TypeError::New(info.Env(), "A monitor device interface identity is required").ThrowAsJavaScriptException();
+    return info.Env().Undefined();
+  }
+  const auto id = info[0].As<Napi::String>().Utf8Value();
+  if (id.empty() || id.size() >= 128 || id.find('\0') != std::string::npos || id.rfind("\\\\?\\DISPLAY#", 0) != 0) {
+    Napi::TypeError::New(info.Env(), "Invalid monitor device interface identity").ThrowAsJavaScriptException();
+    return info.Env().Undefined();
+  }
+  MonitorEnumeration enumeration;
+  if (!ReadMonitors(info.Env(), enumeration)) return info.Env().Undefined();
+  for (const auto& monitor : enumeration.records)
+    if (WideToUtf8(monitor.deviceId) == id) return MonitorObject(info.Env(), monitor);
+  return info.Env().Null();
+}
+
+namespace {
+// Mirrors Firefox/Chromium IsWindowVisibleAndFullyOpaque: only these windows
+// make the browser stop painting the windows underneath them.
+bool OccludingWindowRect(HWND hwnd, RECT& rect) {
+  if (!IsWindow(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return false;
+  const auto exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+  if (exStyle & WS_EX_TRANSPARENT) return false;
+  wchar_t className[32] = {};
+  const bool taskbar = GetClassNameW(hwnd, className, 32) > 0 && wcscmp(className, L"Shell_TrayWnd") == 0;
+  if ((exStyle & WS_EX_TOOLWINDOW) && !taskbar) return false;
+  if (exStyle & WS_EX_LAYERED) {
+    BYTE alpha = 0;
+    DWORD flags = 0;
+    if (!GetLayeredWindowAttributes(hwnd, nullptr, &alpha, &flags)) return false;
+    if (((flags & LWA_ALPHA) && alpha < 255) || (flags & LWA_COLORKEY)) return false;
+  }
+  HRGN region = CreateRectRgn(0, 0, 0, 0);
+  const int regionType = region ? GetWindowRgn(hwnd, region) : ERROR;
+  if (region) DeleteObject(region);
+  if (regionType == COMPLEXREGION) return false;
+  DWORD cloaked = 0;
+  if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) return false;
+  if (!GetWindowRect(hwnd, &rect) || IsRectEmpty(&rect)) return false;
+  if ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_POPUP) && !taskbar) return false;
+  WINDOWPLACEMENT placement{};
+  placement.length = sizeof(placement);
+  if (GetWindowPlacement(hwnd, &placement) && placement.showCmd == SW_MAXIMIZE) {
+    MONITORINFO monitor{};
+    monitor.cbSize = sizeof(monitor);
+    const auto handle = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    if (handle && GetMonitorInfoW(handle, &monitor)) {
+      const auto& work = monitor.rcWork;
+      const LONG width = (std::min)(work.right - work.left, rect.right - rect.left);
+      const LONG height = (std::min)(work.bottom - work.top, rect.bottom - rect.top);
+      const LONG left = rect.left < work.left ? work.left : (std::min)(work.right, rect.left + width) - width;
+      const LONG top = rect.top < work.top ? work.top : (std::min)(work.bottom, rect.top + height) - height;
+      rect = {left, top, left + width, top + height};
+    }
+  }
+  return true;
+}
+
+void SubtractRect(std::vector<RECT>& regions, const RECT& cover) {
+  std::vector<RECT> next;
+  next.reserve(regions.size() + 4);
+  for (const auto& area : regions) {
+    RECT overlap{};
+    if (!IntersectRect(&overlap, &area, &cover)) {
+      next.push_back(area);
+      continue;
+    }
+    if (area.top < overlap.top) next.push_back({area.left, area.top, area.right, overlap.top});
+    if (overlap.bottom < area.bottom) next.push_back({area.left, overlap.bottom, area.right, area.bottom});
+    if (area.left < overlap.left) next.push_back({area.left, overlap.top, overlap.left, overlap.bottom});
+    if (overlap.right < area.right) next.push_back({overlap.right, overlap.top, area.right, overlap.bottom});
+  }
+  regions.swap(next);
+}
+}  // namespace
+
+// Browsers stop painting a window once other windows fully cover it, which
+// freezes a capture of it. Returns null when the window is gone, hidden or
+// minimized, otherwise whether the browser rule considers it fully covered.
+Napi::Value platform_get_window_occlusion(const Napi::CallbackInfo& info) {
+  const auto env = info.Env();
+  if (info.Length() != 1 || !info[0].IsNumber()) {
+    Napi::TypeError::New(env, "A positive safe-integer HWND is required").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  const auto value = info[0].As<Napi::Number>().DoubleValue();
+  if (!std::isfinite(value) || value < 1 || value > 9007199254740991.0 || std::floor(value) != value) {
+    Napi::TypeError::New(env, "A positive safe-integer HWND is required").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  const auto target = reinterpret_cast<HWND>(static_cast<uintptr_t>(value));
+  if (!IsWindow(target) || !IsWindowVisible(target) || IsIconic(target) || GetAncestor(target, GA_ROOT) != target)
+    return env.Null();
+  const auto previous = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  std::vector<HWND> handles;
+  EnumWindows(EnumProc, reinterpret_cast<LPARAM>(&handles));
+  const LONG screenLeft = GetSystemMetrics(SM_XVIRTUALSCREEN), screenTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+  std::vector<RECT> unoccluded{{screenLeft, screenTop, screenLeft + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+      screenTop + GetSystemMetrics(SM_CYVIRTUALSCREEN)}};
+  bool found = false, occluded = false;
+  for (const auto hwnd : handles) {
+    RECT rect{};
+    const bool occluding = OccludingWindowRect(hwnd, rect);
+    if (hwnd == target) {
+      if (!occluding && !GetWindowRect(hwnd, &rect)) break;
+      found = true;
+      occluded = std::none_of(unoccluded.begin(), unoccluded.end(), [&rect](const RECT& area) {
+        RECT overlap{};
+        return IntersectRect(&overlap, &area, &rect) != FALSE;
+      });
+      break;
+    }
+    if (!occluding) continue;
+    SubtractRect(unoccluded, rect);
+    // A pathological fragmentation cannot prove full coverage; report visible.
+    if (unoccluded.size() > 8192) {
+      found = true;
+      break;
+    }
+    if (unoccluded.empty()) {
+      found = std::find(handles.begin(), handles.end(), target) != handles.end();
+      occluded = true;
+      break;
+    }
+  }
+  if (previous) SetThreadDpiAwarenessContext(previous);
+  if (!found) return env.Null();
+  return Napi::Boolean::New(env, occluded);
 }
 
 // Restaura (desminimiza) e traz uma janela para o primeiro plano pelo handle, para

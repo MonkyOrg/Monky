@@ -10,7 +10,7 @@ export function bindFooterControlsMotion(root: HTMLElement): () => void {
 
 export function bindChatComposerMotion(root: HTMLElement): () => void {
   return bindControlGlyphMotion(Array.from(root.querySelectorAll<HTMLButtonElement>(
-    '.chat-input-container .chat-input-wrapper > button:is(#btn-attach, #btn-emoji, #btn-code)',
+    '.chat-input-container .chat-input-wrapper > button:is(#btn-attach, #btn-emoji, #btn-format), .chat-format-toolbar > button',
   )));
 }
 
@@ -236,6 +236,10 @@ function playHover(glyph: HTMLElement, play: Play, decorate: Decorate): Animatio
       return transform(['rotate(0)', 'translateY(-2px) rotate(-18deg)', 'translateY(1px) rotate(15deg)',
         'translateY(-2px) rotate(-12deg)', 'rotate(0)']);
     }
+    case 'attach_file':
+      return transform(['rotate(0deg)', 'rotate(-18deg) translateY(-2px)', 'rotate(12deg)', 'rotate(0deg)']);
+    case 'format_size':
+      return transform(['scale(1)', 'scale(1.17)', 'scale(0.96)', 'scale(1)']);
     case 'add_circle': {
       const layer = decorate('attachment', '<circle cx="12" cy="12" r="9"/><path data-plus d="M12 7v10m-5-5h10"/>');
       part(layer, '[data-plus]', [{ transform: 'rotate(0deg)' }, { transform: 'rotate(180deg)' }]);
@@ -329,6 +333,9 @@ function playHover(glyph: HTMLElement, play: Play, decorate: Decorate): Animatio
         'translateY(3px) rotate(0)', 'translateY(0) rotate(0)'], 620);
     case 'logout':
       return transform(['translateX(0)', 'translateX(3px)', 'translateX(0)'], 520);
+    case 'chat_bubble':
+      return transform(['translateY(0) scale(1)', 'translateY(-2px) scale(1.08)',
+        'translateY(1px) scale(0.98)', 'translateY(0) scale(1)'], 620);
     default:
       return transform(['translateY(0)', 'translateY(-3px)', 'translateY(0)'], 480);
   }

@@ -1,5 +1,6 @@
 import { t, type TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { animateEnter, cancelSurfaceMotion, ownSurface, removeWithMotion } from '../utils/surfaceMotion';
 import { COLOR_PRESETS, hexToHsv, hsvToHex, normalizeHexColor, type HsvColor } from '../utils/colors';
 import { isScreenColorPickerAvailable, pickScreenColor, ScreenColorPickerError } from '../core/ScreenColorPicker';
 import '../styles/colorPicker.css';
@@ -101,8 +102,7 @@ export class ColorPicker {
     this.opened = null;
     this.unwatch?.();
     this.unwatch = null;
-    if (this.panel.isConnected && this.panel.matches(':popover-open')) this.panel.hidePopover();
-    this.panel.remove();
+    removeWithMotion(this.panel);
     this.panel = null;
     this.pointer = null;
     this.draftChanged = false;
@@ -130,6 +130,10 @@ export class ColorPicker {
     const root = this.root;
     if (!trigger?.isConnected || !root || trigger.matches(':disabled') || this.panel) return;
     if (openPicker && !openPicker.close(false)) return;
+    root.querySelectorAll<HTMLElement>('.color-picker-popover[data-ui-closing]').forEach(closing => {
+      cancelSurfaceMotion(closing);
+      closing.remove();
+    });
     const panel = document.createElement('section');
     panel.id = `${this.options.id}-picker`;
     panel.className = 'color-picker-popover';
@@ -149,6 +153,8 @@ export class ColorPicker {
     this.renderDraft();
     panel.showPopover();
     this.position();
+    ownSurface(panel, trigger);
+    animateEnter(panel);
     this.watchOwner();
     this.field('hex')?.focus({ preventScroll: true });
     this.field('hex')?.select();

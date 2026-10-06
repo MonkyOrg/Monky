@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { WebSocket } from 'ws';
 import {
+  hasChannelPermission,
   BotCommandMessagePayload,
   BotForm,
   BotSettingsContext,
@@ -52,6 +53,7 @@ import {
   type LocalPreviewReference,
   type LocalRequestContext,
   type LocalTaskCancellationCause,
+  type BotMessageComponent,
 } from '@monky/shared';
 import { ChannelAccessContext, ChannelService } from '../../application/services/ChannelService';
 import { CommandRegistry } from '../../application/services/CommandRegistry';
@@ -69,6 +71,7 @@ export interface BotInteractionSession {
   botId?: string;
   botPublicKey?: string;
   botSettingsReady?: boolean;
+  protocol?: import('@monky/shared').ProtocolAgreement;
 }
 
 export interface SelectorInvocationAuthorization {
@@ -88,6 +91,7 @@ interface InteractionTransport {
   sendError(ws: WebSocket, code: ProtocolErrorCode, message: string, requestId?: string): void;
   broadcastToChannel(channelId: string, message: ProtocolMessage, canSend: () => boolean): Promise<void>;
   publishResponse(session: BotInteractionSession, response: BotCommandMessagePayload, canSend: () => boolean, requestId?: string): Promise<void>;
+  resolveImageAssets?(userId: string, channelId: string, refs: string[]): string[];
   localContextEnded?(context: Exclude<LocalRequestContext, { kind: 'source' }>, cause: LocalTaskCancellationCause): void;
   consumeLocalPreview?(
     bot: BotInteractionSession, origin: BotInteractionSession, contextId: string, requestId: string, result: LocalPreviewReference,
@@ -183,7 +187,8 @@ export class BotInteractionHandler {
     private channelService: ChannelService,
     private userService: UserService,
     private registry: CommandRegistry,
-    private settings?: BotSettingsService
+    private settings?: BotSettingsService,
+    private messageLimit: () => Promise<number> = async () => LIMITS.MAX_MESSAGE_LENGTH,
   ) {}
 
   async autocomplete(session: BotInteractionSession, payload: unknown, requestId?: string): Promise<void> {
@@ -716,10 +721,37 @@ export class BotInteractionHandler {
       this.error(session, ProtocolErrorCode.BOT_INTERACTION_INVALID, requestId);
       return;
     }
+    const contentSchema = createMessageContentSchema(await this.messageLimit());
+    if (![parsed.data.content, ...Object.values(parsed.data.localizations ?? {})].every(content => contentSchema.safeParse(content).success)) {
+      this.error(session, ProtocolErrorCode.MESSAGE_TOO_LONG, requestId);
+      return;
+    }
     const invocation = this.findOwned(session, parsed.data.invocationId, 'bot', requestId);
     if (!invocation || !(await this.authorize(invocation, session, requestId))) return;
     const botUser = invocation.bot.user;
     if (!botUser) return;
+    if (parsed.data.components && parsed.data.ephemeral === false) {
+      this.error(session, ProtocolErrorCode.BOT_INTERACTION_INVALID, requestId);
+      return;
+    }
+    let components: BotMessageComponent[] | undefined;
+    try {
+      components = parsed.data.components?.map(component => ({
+        type: 'carousel',
+        label: component.label,
+        presentation: component.presentation,
+        imageUrls: this.transport.resolveImageAssets?.(
+          invocation.invokerId, invocation.channelId, component.imageAssetRefs,
+        ) ?? [],
+      }));
+      if (components?.some(component => component.imageUrls.length === 0)) {
+        this.error(session, ProtocolErrorCode.BOT_INTERACTION_INVALID, requestId);
+        return;
+      }
+    } catch {
+      this.error(session, ProtocolErrorCode.BOT_INTERACTION_INVALID, requestId);
+      return;
+    }
 
     const response: BotCommandMessagePayload = {
       invocationId: invocation.id,
@@ -728,6 +760,8 @@ export class BotInteractionHandler {
       invokerNickname: invocation.invokerNickname,
       invokerAvatarUrl: invocation.invokerAvatarUrl,
       content: parsed.data.content,
+      localizations: parsed.data.localizations,
+      components,
       ephemeral: parsed.data.ephemeral !== false,
       messageId: randomUUID(),
       channelId: invocation.channelId,
@@ -854,11 +888,11 @@ export class BotInteractionHandler {
     const canContinue = (invokerId: string, channelId: string): boolean => {
       const channel = channels.get(channelId);
       const context = contexts.get(invokerId);
-      return !!channel && channel.type === 'TEXT' && !!context &&
+      return !!channel && (channel.type === 'TEXT' || channel.type === 'VOICE') && !!context &&
         channel.botCommandsEnabled &&
-        hasPermission(context.permissions, Permission.USE_BOT_COMMANDS) &&
-        hasPermission(context.permissions, Permission.SEND_MESSAGES) &&
-        canAccessChannel(channel, context.permissions, context.roleIds);
+        hasChannelPermission(channel, context.permissions, context.roleIds, Permission.USE_BOT_COMMANDS, false, context.userId) &&
+        hasChannelPermission(channel, context.permissions, context.roleIds, Permission.SEND_MESSAGES, false, context.userId) &&
+        canAccessChannel(channel, context.permissions, context.roleIds, false, context.userId);
     };
     for (const pending of this.autocompletes.values()) {
       if (!canContinue(pending.invokerId, pending.channelId)) {
@@ -968,10 +1002,10 @@ export class BotInteractionHandler {
     if (await this.getAccessError(invocation.invokerId, invocation.channelId)) return undefined;
     const [channel, context] = await Promise.all([
       this.channelService.getChannelSummary(channelId),
-      this.channelService.getAccessContext(invocation.invokerId),
+      this.channelService.getAccessContext(invocation.invokerId, channelId),
     ]);
     if (!channel || channel.type !== 'VOICE' || (requireSpeak && !hasPermission(context.permissions, Permission.SPEAK)) ||
-        !canAccessChannel(channel, context.permissions, context.roleIds)) return undefined;
+        !canAccessChannel(channel, context.permissions, context.roleIds, false, context.userId)) return undefined;
     const isCurrent = () => this.isActive(invocation) &&
       this.transport.getVoiceChannelId?.(originSessionId) === channelId;
     return isCurrent() ? { creatorUserId: invocation.invokerId, originChannelId: invocation.channelId, isCurrent } : undefined;
@@ -1214,14 +1248,15 @@ export class BotInteractionHandler {
   private async getAccessError(userId: string, channelId: string): Promise<ProtocolErrorCode | undefined> {
     const [channel, context, isMember] = await Promise.all([
       this.channelService.getChannelSummary(channelId),
-      this.channelService.getAccessContext(userId),
+      this.channelService.getAccessContext(userId, channelId),
       this.userService.isMember(userId),
     ]);
     if (!isMember) return ProtocolErrorCode.UNAUTHORIZED;
-    if (!hasPermission(context.permissions, Permission.SEND_MESSAGES)) return ProtocolErrorCode.PERMISSION_DENIED;
-    if (!channel || channel.type !== 'TEXT' || !canAccessChannel(channel, context.permissions, context.roleIds)) {
+    if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE') ||
+        !canAccessChannel(channel, context.permissions, context.roleIds, false, context.userId)) {
       return ProtocolErrorCode.CHANNEL_NOT_FOUND;
     }
+    if (!hasPermission(context.permissions, Permission.SEND_MESSAGES)) return ProtocolErrorCode.PERMISSION_DENIED;
     if (!channel.botCommandsEnabled || !hasPermission(context.permissions, Permission.USE_BOT_COMMANDS)) {
       return ProtocolErrorCode.PERMISSION_DENIED;
     }
@@ -1294,3 +1329,4 @@ export class BotInteractionHandler {
     this.transport.sendError(session.ws, code, message ?? 'Não foi possível processar a interação com o bot.', requestId);
   }
 }
+import { createMessageContentSchema } from '@monky/shared';

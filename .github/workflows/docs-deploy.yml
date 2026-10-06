@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - 'docs-site/**'
+      - 'packages/bot-sdk/src/tooling/install.ts'
+      - 'scripts/prepare-sdk-installer.js'
   # A pagina de download resolve os links das releases durante o build, entao o
   # site precisa ser regerado quando sai uma release nova. O gatilho escuta a
   # conclusao do workflow Release em vez do evento `release: published` porque a

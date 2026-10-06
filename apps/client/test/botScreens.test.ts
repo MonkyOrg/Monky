@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { BOT_SCREEN_LIMITS, MessageType, ProtocolErrorCode, type BotScreen, type BotScreenRemoved, type SlashCommand, type VoiceParticipantState } from '@monky/shared';
+import { BOT_SCREEN_LIMITS, BOT_SCREEN_PERMISSION_POLICY_VERSION, botScreenDocumentConsentSchema, MessageType, ProtocolErrorCode, type BotScreen, type BotScreenDocumentConsent, type BotScreenRemoved, type SlashCommand, type VoiceParticipantState } from '@monky/shared';
 import { EventBus, appEvents } from '../src/renderer/core/EventBus';
 import { sessionManager, type ServerSession } from '../src/renderer/core/SessionManager';
 import { bindBotScreenEvents } from '../src/renderer/core/botScreenEvents';
 import { BotScreenStore, type VoiceBotScreensUpdated } from '../src/renderer/stores/botScreenStore';
 import { isForegroundEvent, routeSessionEvent } from '../src/renderer/core/sessionRouting';
-import { botScreenDocument } from '../src/renderer/views/BotScreenFrame';
+import { BotScreenFrame, botScreenDocument } from '../src/renderer/views/BotScreenFrame';
 import { voiceStore } from '../src/renderer/stores/voiceStore';
 import { commandVoiceError, commandVoiceContextKey, getBotVoiceContext } from '../src/renderer/utils/botVoice';
 
@@ -16,6 +16,22 @@ const snapshot = (id = 'game', revision = 0): BotScreen => ({
 });
 const removal = (id = 'game', channelId = 'voice', instanceId = `${id}-instance`): BotScreenRemoved => ({
   id, instanceId, channelId, reason: 'ended', endedByUserId: 'alice',
+});
+
+test('miniapp consent requires the current policy and exact bot/screen instance before any document creation', () => {
+  const consent: BotScreenDocumentConsent = {
+    policyVersion: BOT_SCREEN_PERMISSION_POLICY_VERSION, serverKey: 'server',
+    botId: 'bot', screenId: 'game', instanceId: 'game-instance',
+  };
+  assert.deepEqual(botScreenDocumentConsentSchema.parse(consent), consent);
+  for (const invalid of [
+    undefined, null, {}, { ...consent, policyVersion: 0 },
+    { ...consent, serverKey: '' }, { ...consent, instanceId: '' }, { ...consent, allowEverything: true },
+  ]) assert.equal(botScreenDocumentConsentSchema.safeParse(invalid).success, false);
+  for (const field of ['botId', 'screenId', 'instanceId'] as const) {
+    assert.throws(() => new BotScreenFrame(snapshot(), { id: 'alice', nickname: 'Alice', locale: 'en' },
+      { ...consent, [field]: 'another-instance' }, () => {}, () => {}), /consent does not match/);
+  }
 });
 
 test('screen stores preserve revisions, bind channel ownership and have a finite cache', () => {
@@ -96,8 +112,10 @@ test('screen init JSON cannot break out into the trusted or author script docume
   const document = botScreenDocument({ ...snapshot(), state: { text: '</script><script>ESCAPE()</script>' } }, { id: 'alice', nickname: '</script>', locale: 'en' });
   assert.equal(document.includes('<script>ESCAPE()'), false);
   assert.ok(document.includes('\\u003c/script>'));
-  assert.ok(document.includes("default-src 'none'"));
-  assert.ok(document.includes("connect-src 'none'"));
+  assert.ok(document.includes("connect-src 'self' http: https: ws: wss: data: blob:"));
+  assert.ok(document.includes("worker-src 'self' http: https: data: blob:"));
+  assert.ok(document.includes("'unsafe-eval'"), 'WASM and ordinary web libraries may compile code');
+  assert.equal(document.includes("value: undefined"), false, 'WebRTC remains available');
   assert.ok(document.includes('"locale":"en"'));
 });
 
@@ -186,7 +204,7 @@ test('background voice snapshots notify global UI only after restoring the visib
     assert.equal(repaints, 2);
     assert.equal(b.botScreenStore.list('voice').length, 0);
   } finally {
-    off(); unbind(); voiceStore.reset(); sessionManager.removeAll();
+    off(); unbind(); voiceStore.reset(); await sessionManager.removeAll();
   }
 });
 
@@ -215,11 +233,11 @@ test('end of an unseen instance invalidates an in-flight room list before it can
     assert.equal(session.botScreenStore.get('game'), undefined);
     assert.equal(session.botScreenStore.isInvitationDismissed('game'), false);
   } finally {
-    unbind(); voiceStore.reset(); sessionManager.removeAll();
+    unbind(); voiceStore.reset(); await sessionManager.removeAll();
   }
 });
 
-test('voice-required commands authorize the originating device and bot room, not active text or account presence', (testContext) => {
+test('voice-required commands authorize the originating device and bot room, not active text or account presence', async (testContext) => {
   const a = sessionManager.create('command-a', 7800, 'alice');
   const b = sessionManager.create('command-b', 7800, 'alice');
   seed(a); seed(b);
@@ -251,6 +269,6 @@ test('voice-required commands authorize the originating device and bot room, not
     assert.equal(commandVoiceError(command, a.client, a.serverStore), ProtocolErrorCode.BOT_VOICE_REQUIRED);
     assert.equal(commandVoiceError({ ...command, voiceRequirement: undefined }, a.client, a.serverStore), undefined);
   } finally {
-    voiceStore.reset(); sessionManager.removeAll();
+    voiceStore.reset(); await sessionManager.removeAll();
   }
 });

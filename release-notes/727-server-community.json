@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Servidores podem manter uma fila configurável de áudios recentes da Soundboard. Membros podem consultar, ouvir uma prévia local e baixar o histórico, inclusive de usos fora de chamadas; o mesmo áudio ocupa uma única linha e os mais antigos são removidos automaticamente.",
+  "en": "Servers can retain a configurable queue of recently played Soundboard audio. Members can browse, locally preview, and download the history, including uses outside calls; identical audio occupies one row and the oldest entries are removed automatically."
+}

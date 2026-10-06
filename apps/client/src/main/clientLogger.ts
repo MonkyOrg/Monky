@@ -6,8 +6,8 @@
  * exceeds the budget, the oldest file is deleted. Each file corresponds to one
  * app session (identified by its start timestamp).
  *
- * Sensitive data (passwords, tokens) must never reach this layer — the renderer
- * sanitises payloads before sending them over IPC.
+ * Sensitive data (passwords, tokens) must never reach this layer — renderer and
+ * main-process callers select safe diagnostic fields before writing.
  */
 
 import { app, dialog } from 'electron';
@@ -91,6 +91,15 @@ export class ClientLogger {
       this.writeStream.end();
       this.writeStream = null;
     }
+  }
+
+  private async flushWrites(): Promise<void> {
+    const stream = this.writeStream;
+    if (!stream) return;
+    // A queued empty write is a flush barrier without closing the live sink.
+    await new Promise<void>((resolve, reject) => {
+      stream.write('', error => { if (error) reject(error); else resolve(); });
+    });
   }
 
   /**
@@ -204,13 +213,11 @@ export class ClientLogger {
    */
   public async exportLogs(): Promise<{ success: boolean; filePath?: string; error?: string }> {
     try {
-      const files = this.listLogFiles();
-      if (files.length === 0) {
+      await this.flushWrites();
+      if (this.listLogFiles().length === 0) {
+        if (this.config.enabled) this.openStream();
         return { success: false, error: 'no-logs' };
       }
-
-      // Flush current writes before reading
-      this.closeStream();
 
       const result = await dialog.showSaveDialog({
         title: 'Exportar logs do Monky',
@@ -222,22 +229,31 @@ export class ClientLogger {
       });
 
       if (result.canceled || !result.filePath) {
-        // Re-open stream
         if (this.config.enabled) this.openStream();
         return { success: false, error: 'cancelled' };
       }
 
-      // Concatenate all log files with session separators
-      const output = fs.createWriteStream(result.filePath, { encoding: 'utf8' });
-      for (const file of files) {
-        const fileName = path.basename(file.path);
-        output.write(`\n--- ${fileName} (${(file.size / 1024).toFixed(1)} KB) ---\n`);
-        const content = fs.readFileSync(file.path, 'utf8');
-        output.write(content);
-      }
-      output.end();
+      // Include events produced while the save dialog was open, without
+      // suspending logging or using a stale list after rotation.
+      await this.flushWrites();
+      const files = this.listLogFiles();
+      await new Promise<void>((resolve, reject) => {
+        const output = fs.createWriteStream(result.filePath, { encoding: 'utf8' });
+        output.once('error', reject);
+        output.once('finish', resolve);
+        try {
+          for (const file of files) {
+            const fileName = path.basename(file.path);
+            output.write(`\n--- ${fileName} (${(file.size / 1024).toFixed(1)} KB) ---\n`);
+            output.write(fs.readFileSync(file.path, 'utf8'));
+          }
+          output.end();
+        } catch (error) {
+          output.destroy();
+          reject(error);
+        }
+      });
 
-      // Re-open stream
       if (this.config.enabled) this.openStream();
 
       return { success: true, filePath: result.filePath };

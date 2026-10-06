@@ -2,7 +2,7 @@ import { appEvents } from '../core/EventBus';
 import { emitOutsideRouting } from '../core/sessionRouting';
 import { settingsStore } from './settingsStore';
 import { clientLog } from '../core/ClientLogService';
-import type { VoiceConnectionHealth } from '@monky/shared';
+import { screenShareQualitySchema, type ScreenShareQuality, type VoiceConnectionHealth } from '@monky/shared';
 
 export class VoiceStore {
   public currentVoiceChannelId: string | null = null;
@@ -16,6 +16,7 @@ export class VoiceStore {
   public isDeafened: boolean = settingsStore.isDeafened;
   public serverMuted: boolean = false;
   public serverDeafened: boolean = false;
+  public permissionMuted: boolean = false;
   private micMutedBeforeDeafen: boolean = false;
   public isSpeaking: boolean = false;
   public microphoneOpen: boolean = false;
@@ -30,6 +31,131 @@ export class VoiceStore {
   public isScreenSharing: boolean = false;
   /** Share whose system audio is being captured, if any (#253: at most one). */
   public screenAudioShareId: string | null = null;
+  /** Explicit receive intent belongs to the call, never to a mounted view. */
+  private watchedScreenShares = new Map<string, Set<string>>();
+  /** Last published share ids per participant of the call, to tell new sources from old ones. */
+  private screenShareRosters = new Map<string, Set<string>>();
+  /**
+   * Switching the shared source publishes a new share id and retires the old
+   * one. A watched share that retires leaves its intent here, so the source the
+   * same publisher publishes next keeps playing without a second Watch click.
+   */
+  private screenWatchHandoffs = new Map<string, {
+    expiresAt: number; known: Set<string>; retired: Array<{ shareId: string; quality: ScreenShareQuality }>;
+  }>();
+  public static readonly SCREEN_WATCH_HANDOFF_MS = 15_000;
+  private mutedScreenAudioSessions = new Set<string>();
+  private screenQualities = new Map<string, Map<string, ScreenShareQuality>>();
+
+  public getScreenQuality(sessionId: string, shareId: string): ScreenShareQuality {
+    return this.screenQualities.get(sessionId)?.get(shareId) ?? 'source';
+  }
+
+  public setScreenQuality(sessionId: string, shareId: string, quality: ScreenShareQuality): void {
+    const selected = screenShareQualitySchema.parse(quality);
+    if (!this.currentVoiceChannelId || this.getScreenQuality(sessionId, shareId) === selected) return;
+    const shares = this.screenQualities.get(sessionId) ?? new Map<string, ScreenShareQuality>();
+    shares.set(shareId, selected);
+    this.screenQualities.set(sessionId, shares);
+    emitOutsideRouting(() => appEvents.emit('voice.screen_quality_changed', { sessionId, shareId, quality: selected }));
+  }
+
+  public isWatchingScreen(sessionId: string, shareId: string): boolean {
+    return this.watchedScreenShares.get(sessionId)?.has(shareId) ?? false;
+  }
+
+  public isWatchingAnyScreen(sessionId: string): boolean {
+    return (this.watchedScreenShares.get(sessionId)?.size ?? 0) > 0;
+  }
+
+  public getScreenWatchers(): ReadonlyArray<readonly [string, readonly string[]]> {
+    return [...this.watchedScreenShares].map(([sessionId, ids]) => [sessionId, [...ids]] as const);
+  }
+
+  public setScreenWatching(sessionId: string, shareId: string, watching: boolean): void {
+    if (watching && !this.currentVoiceChannelId) return;
+    if (this.isWatchingScreen(sessionId, shareId) === watching) return;
+    if (watching) {
+      const shares = this.watchedScreenShares.get(sessionId) ?? new Set<string>();
+      shares.add(shareId);
+      this.watchedScreenShares.set(sessionId, shares);
+    } else {
+      const shares = this.watchedScreenShares.get(sessionId);
+      shares?.delete(shareId);
+      if (!shares?.size) this.watchedScreenShares.delete(sessionId);
+    }
+    emitOutsideRouting(() => appEvents.emit('voice.screen_watch_changed', { sessionId, shareId, watching }));
+  }
+
+  public retainScreenShares(sessionId: string, shareIds: readonly string[]): void {
+    const qualities = this.screenQualities.get(sessionId);
+    for (const id of qualities?.keys() ?? []) if (!shareIds.includes(id)) qualities?.delete(id);
+    if (!qualities?.size) this.screenQualities.delete(sessionId);
+    for (const shareId of [...(this.watchedScreenShares.get(sessionId) ?? [])]) {
+      if (!shareIds.includes(shareId)) this.setScreenWatching(sessionId, shareId, false);
+    }
+    if (shareIds.length === 0) this.mutedScreenAudioSessions.delete(sessionId);
+  }
+
+  /**
+   * Applies every call participant's published shares. Intent of a retired
+   * watched share moves to a share the same publisher had not published
+   * before (a source switch), within SCREEN_WATCH_HANDOFF_MS.
+   */
+  public reconcileScreenShares(rosters: ReadonlyMap<string, readonly string[]>, now = Date.now()): void {
+    const sessions = new Set([...rosters.keys(), ...this.watchedScreenShares.keys(), ...this.screenWatchHandoffs.keys()]);
+    for (const sessionId of sessions) {
+      const shareIds = rosters.get(sessionId) ?? [];
+      const current = new Set(shareIds);
+      let handoff = this.screenWatchHandoffs.get(sessionId);
+      if (handoff && handoff.expiresAt < now) {
+        this.screenWatchHandoffs.delete(sessionId);
+        handoff = undefined;
+      }
+      const retired = [...(this.watchedScreenShares.get(sessionId) ?? [])].filter(id => !current.has(id));
+      if (retired.length > 0 && rosters.has(sessionId)) {
+        handoff ??= { expiresAt: 0, known: new Set(), retired: [] };
+        handoff.expiresAt = now + VoiceStore.SCREEN_WATCH_HANDOFF_MS;
+        // Without a previous roster nothing proves which current share is new.
+        for (const id of this.screenShareRosters.get(sessionId) ?? [...retired, ...shareIds]) handoff.known.add(id);
+        for (const id of retired) handoff.retired.push({ shareId: id, quality: this.getScreenQuality(sessionId, id) });
+        this.screenWatchHandoffs.set(sessionId, handoff);
+      }
+      this.retainScreenShares(sessionId, shareIds);
+      if (!handoff?.retired.length || !rosters.has(sessionId)) continue;
+      for (const shareId of shareIds) {
+        if (handoff.known.has(shareId) || this.isWatchingScreen(sessionId, shareId)) continue;
+        const previous = handoff.retired.shift();
+        if (!previous) break;
+        handoff.known.add(shareId);
+        if (previous.quality !== 'source') this.setScreenQuality(sessionId, shareId, previous.quality);
+        this.setScreenWatching(sessionId, shareId, true);
+        emitOutsideRouting(() => appEvents.emit('voice.screen_watch_handoff',
+          { sessionId, fromShareId: previous.shareId, shareId }));
+      }
+      if (!handoff.retired.length) this.screenWatchHandoffs.delete(sessionId);
+    }
+    this.screenShareRosters = new Map([...rosters].map(([sessionId, ids]) => [sessionId, new Set(ids)]));
+  }
+
+  public isScreenAudioMuted(sessionId: string): boolean {
+    return this.mutedScreenAudioSessions.has(sessionId);
+  }
+
+  public setScreenAudioMuted(sessionId: string, muted: boolean): void {
+    if (this.isScreenAudioMuted(sessionId) === muted) return;
+    if (muted) this.mutedScreenAudioSessions.add(sessionId);
+    else this.mutedScreenAudioSessions.delete(sessionId);
+    emitOutsideRouting(() => appEvents.emit('voice.screen_audio_mute_changed', { sessionId, muted }));
+  }
+
+  private clearScreenWatching(): void {
+    for (const [sessionId] of this.getScreenWatchers()) this.retainScreenShares(sessionId, []);
+    this.screenWatchHandoffs.clear();
+    this.screenShareRosters.clear();
+    this.mutedScreenAudioSessions.clear();
+    this.screenQualities.clear();
+  }
 
   /**
    * True while the active call is trying to re-establish its link (#553).
@@ -46,13 +172,15 @@ export class VoiceStore {
     clientLog.info('CONNECTION', `Voice channel ${channelId ? 'joined' : 'left'}`, { channelId, sessionKey });
     const wasReconnecting = this.isReconnecting;
     if (!channelId || channelId !== this.currentVoiceChannelId || sessionKey !== this.voiceSessionKey) {
+      this.clearScreenWatching();
       this.setSpeaking(false);
     }
     const clearedModeration = (!channelId || sessionKey !== this.voiceSessionKey)
-      && (this.serverMuted || this.serverDeafened);
+      && (this.serverMuted || this.serverDeafened || this.permissionMuted);
     if (!channelId || sessionKey !== this.voiceSessionKey) {
       this.serverMuted = false;
       this.serverDeafened = false;
+      this.permissionMuted = false;
     }
     if (channelId !== this.currentVoiceChannelId || sessionKey !== this.voiceSessionKey) {
       this.isConnecting = false;
@@ -121,8 +249,15 @@ export class VoiceStore {
     emitOutsideRouting(() => appEvents.emit('voice.state_updated'));
   }
 
+  public setPermissionMuted(muted: boolean): void {
+    clientLog.warn('AUDIO', `Permission muted: ${muted}`);
+    this.permissionMuted = muted;
+    if (this.getEffectiveMuted()) this.setSpeaking(false);
+    emitOutsideRouting(() => appEvents.emit('voice.state_updated'));
+  }
+
   public getEffectiveMuted(): boolean {
-    return this.isMuted || this.serverMuted || this.isDeafened || this.serverDeafened;
+    return this.isMuted || this.serverMuted || this.permissionMuted || this.isDeafened || this.serverDeafened;
   }
 
   public getEffectiveDeafened(): boolean {
@@ -216,6 +351,7 @@ export class VoiceStore {
   }
 
   public reset(): void {
+    this.clearScreenWatching();
     const hadChannel = this.currentVoiceChannelId !== null;
     const wasReconnecting = this.isReconnecting;
     this.setSpeaking(false);
@@ -225,6 +361,7 @@ export class VoiceStore {
     // and are deliberately NOT reset when leaving a channel, server, or call.
     this.serverMuted = false;
     this.serverDeafened = false;
+    this.permissionMuted = false;
     this.isSpeaking = false;
     this.isCameraOn = false;
     this.screenShareIds = [];

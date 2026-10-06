@@ -1,0 +1,16 @@
+{
+  "revision": "36ea4535a500ac137dbf1f577ce40dc1aaa774ef",
+  "license": "BSD-3-Clause",
+  "standard": "ITU-T H.264 Table A-1: Level 6 MaxMBPS=4177920, MaxFS=139264, Main MaxBR=240000 Kbps",
+  "reference": "https://github.com/FFmpeg/FFmpeg/blob/n7.1.1/libavcodec/h264_levels.c",
+  "files": [
+    {
+      "path": "api/video_codecs/h264_profile_level_id.h",
+      "sha256": "04917886a1dfbb6f5f53205470c6da5ed4dbcedb84467b7cb8257bd3d99a5f56"
+    },
+    {
+      "path": "api/video_codecs/h264_profile_level_id.cc",
+      "sha256": "327e73be27eb9dd36c07a264df9c263dc866b475be1b6c1ea4bfc0af33444c3b"
+    }
+  ]
+}

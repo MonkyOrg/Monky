@@ -1,5 +1,13 @@
-import { contextBridge, ipcRenderer } from 'electron';
-import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
+import { contextBridge, ipcRenderer, sharedTexture } from 'electron';
+import { readFileSync } from 'node:fs';
+import {
+  createNativeScreenPresentation, registerNativeAudioPortReceiver, type NativeScreenPresentationController,
+} from '@monky/screen-share';
+import * as nativeAudioProtocol from '@monky/shared';
+import { BOT_SCREEN_DOCUMENT_IPC, SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, DESKTOP_SOURCES_IPC, EVENT_CALENDAR_IPC, type BotScreenDocumentConsent, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
+import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenEventSchema } from '@monky/shared';
+import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
+import { DM_EVENT, DM_IPC, type DmApi, type DmEvent, type DmExportMode } from '@monky/shared';
 import type {
   ActionShortcutBinding,
   AudioPreviewCancellation,
@@ -11,6 +19,9 @@ import type {
   ClientLogConfig,
   ClientLogEntry,
   DesktopSource,
+  DesktopSourcesOptions,
+  DesktopSourcePreview,
+  DesktopSourcePreviewsRequest,
   DevelopmentQaConfig,
   DevelopmentQaReport,
   DiscoveredLanServer,
@@ -42,6 +53,7 @@ import type {
   PttKeyBinding,
   ScreenAudioDiagnostics,
   ServerProbeResult,
+  ServerInviteResult,
   ServerStats,
   SoundboardShortcutBinding,
   SoundboardSoundData,
@@ -61,12 +73,30 @@ import type {
   UpdateOutcome,
   ReleaseNotesResult,
   RendererBootstrapFailure,
+  NativeScreenCommand,
+  NativeScreenCommandResult,
+  NativeScreenEvent,
+  NativeScreenReply,
+  NativeScreenPresentation,
+  NativeScreenPresentationSample,
   UpdateSimpleResult,
 } from '@monky/shared';
 
 export type { LinkPreviewData, OverlayBounds, OverlayConfig, OverlayMode, OverlayLayout, OverlayPosition, OverlayParticipantState, OverlaySyncState } from '@monky/shared';
 
 export interface ElectronApi {
+  createBotScreenDocument: (html: string, consent: BotScreenDocumentConsent) => Promise<string>;
+  removeBotScreenDocument: (url: string) => Promise<void>;
+  nativeScreenCommand: (command: NativeScreenCommand) => Promise<NativeScreenCommandResult>;
+  nativeScreenReply: (reply: NativeScreenReply) => Promise<void>;
+  onNativeScreenEvent: (callback: (event: NativeScreenEvent) => void) => () => void;
+  attachNativeScreenPresentation: (input: NativeScreenPresentation) => Promise<void>;
+  attachNativeScreenPreview: (input: NativeScreenPresentation) => Promise<void>;
+  stopNativeScreenPresentation: (presentationId: string) => Promise<void>;
+  sampleNativeScreenPresentation: (presentationId: string) => Promise<NativeScreenPresentationSample | null>;
+  onNativeScreenPresentationError: (callback: (value: { presentationId: string | null; message: string }) => void) => () => void;
+  takeServerInvite: () => Promise<ServerInviteResult | null>;
+  onServerInviteAvailable: (callback: () => void) => () => void;
   getDevelopmentQaConfig: () => Promise<DevelopmentQaConfig | null>;
   reportDevelopmentQaState: (report: DevelopmentQaReport) => Promise<boolean>;
   startLanDiscovery: () => Promise<void>;
@@ -78,8 +108,11 @@ export interface ElectronApi {
   getIdentity: () => Promise<AppIdentityResult>;
   getClientId: () => Promise<string>;
   signChallenge: (nonceHex: string) => Promise<string>;
-  exportIdentity: (password: string, extras?: string) => Promise<string>;
+  exportIdentity: (password: string, extras?: string, dmMode?: DmExportMode) => Promise<string>;
   importIdentity: (exportedIdentity: string, password: string) => Promise<AppIdentityImportResult>;
+  /** Deletes the identity, friends and DMs from this computer, then relaunches Monky. */
+  logOut: () => Promise<{ success: boolean; error?: string }>;
+  dm: DmApi;
   saveBackupFile: (contents: string, suggestedName: string) => Promise<{ success: boolean; filePath?: string; error?: string }>;
   openBackupFile: () => Promise<{ success: boolean; contents?: string; error?: string }>;
   encryptBackup: (contents: string, password: string) => Promise<BackupCryptoResult>;
@@ -95,14 +128,24 @@ export interface ElectronApi {
   onHostServerStatusChanged: (
     callback: (status: { isRunning: boolean; port: number | null; serverId: string | null }) => void
   ) => () => void;
-  getDesktopSources: () => Promise<DesktopSource[]>;
+  getDesktopSources: (options?: DesktopSourcesOptions) => Promise<DesktopSource[]>;
+  getDesktopSourcePreviews: (request: DesktopSourcePreviewsRequest) => Promise<DesktopSourcePreview[]>;
+  cancelDesktopSourcePreviews: () => Promise<void>;
   prepareScreenShareWindow: (sourceId: string) => Promise<boolean>;
   ensureScreenPermission: () => Promise<boolean>;
   selectImageDialog: () => Promise<ImageSelectionResult | null>;
+  selectImagesDialog: (maxFiles: number) => Promise<ImageSelectionResult[]>;
   selectSoundFile: () => Promise<string | null>;
   selectSoundboardFolder: () => Promise<string | null>;
+  getDefaultSoundboardFolder: () => Promise<string | null>;
   listSoundboardSounds: (folderPath: string) => Promise<SoundboardSoundEntry[]>;
   readSoundboardSound: (filePath: string) => Promise<SoundboardSoundData | null>;
+  readSoundboardEdit: (input: IpcInvokeChannels['soundboard:edit-read']['args'][0]) => Promise<IpcInvokeChannels['soundboard:edit-read']['returnType']>;
+  openSoundboardEditor: (input: IpcInvokeChannels['soundboard:open-editor']['args'][0]) => Promise<IpcInvokeChannels['soundboard:open-editor']['returnType']>;
+  overwriteSoundboardAudio: (input: IpcInvokeChannels['soundboard:overwrite-audio']['args'][0]) => Promise<IpcInvokeChannels['soundboard:overwrite-audio']['returnType']>;
+  renameSoundboardFile: (input: IpcInvokeChannels['soundboard:rename-file']['args'][0]) => Promise<IpcInvokeChannels['soundboard:rename-file']['returnType']>;
+  deleteSoundboardFile: (input: IpcInvokeChannels['soundboard:delete-file']['args'][0]) => Promise<IpcInvokeChannels['soundboard:delete-file']['returnType']>;
+  saveSoundboardEdit: (input: IpcInvokeChannels['soundboard:save-edited-copy']['args'][0]) => Promise<IpcInvokeChannels['soundboard:save-edited-copy']['returnType']>;
   soundDownloadAvailability: (configuredFolder: string) => Promise<SoundboardDownloadAvailability>;
   confirmSoundboardFolder: (configuredFolder: string) => Promise<boolean>;
   authorizeSoundDownload: (input: SoundboardDownloadAuthorization) => Promise<SoundboardDownloadPermit>;
@@ -140,6 +183,10 @@ export interface ElectronApi {
   onPttStateChanged: (cb: (active: boolean) => void) => () => void;
   onPttCaptured: (cb: (binding: PttKeyBinding) => void) => () => void;
   minimize: () => Promise<void>;
+  openScreenPictureInPicture: (requestId: string, requireInactive: boolean, aspectRatio: number) => Promise<boolean>;
+  returnFromScreenPictureInPicture: () => Promise<void>;
+  onWindowInactive: (cb: () => void) => () => void;
+  onWindowActive: (cb: () => void) => () => void;
   maximize: () => Promise<void>;
   toggleMaximize: () => Promise<void>;
   setWindowInServer: (inServer: boolean) => Promise<void>;
@@ -158,8 +205,12 @@ export interface ElectronApi {
   onUpdateDownloaded: (cb: (info: { manual: boolean }) => void) => () => void;
   onUpdateError: (cb: (message: string) => void) => () => void;
   openExternal: (url: string) => Promise<{ success: boolean }>;
+  editorCommand: (command: EditorCommand) => Promise<{ success: boolean }>;
   fetchLinkPreview: (url: string) => Promise<LinkPreviewData | null>;
   downloadFile: (url: string, fileName: string) => Promise<{ success: boolean; error?: string }>;
+  saveRecentSound: (input: IpcInvokeChannels['app:save-recent-sound']['args'][0]) => Promise<IpcInvokeChannels['app:save-recent-sound']['returnType']>;
+  saveCsvFile: (content: string, fileName: string) => Promise<{ success: boolean; error?: string }>;
+  saveEventCalendar: (input: IpcInvokeChannels['community:save-event-calendar']['args'][0]) => Promise<IpcInvokeChannels['community:save-event-calendar']['returnType']>;
   probeServer: (host: string, port: number) => Promise<ServerProbeResult>;
   screenAudioSupported: () => Promise<boolean>;
   screenAudioDiagnose: () => Promise<ScreenAudioDiagnostics>;
@@ -170,8 +221,8 @@ export interface ElectronApi {
   onScreenAudioError: (cb: (errorMsg: string) => void) => () => void;
   updateTrayVoiceStatus: (status: TrayVoiceStatus) => Promise<void>;
   // Encerramento gracioso: sair das chamadas antes do processo morrer (#458)
-  onAppBeforeQuit: (cb: () => void) => () => void;
-  notifyLeaveComplete: () => Promise<void>;
+  onAppBeforeQuit: (cb: (request: AppShutdownRequest) => void) => () => void;
+  notifyLeaveComplete: (request: AppShutdownRequest) => Promise<void>;
   onTrayToggleMute: (cb: () => void) => () => void;
   onTrayToggleDeafen: (cb: () => void) => () => void;
   getAutoStart: () => Promise<boolean>;
@@ -189,6 +240,7 @@ export interface ElectronApi {
   setOverlayConfig: (config: Partial<OverlayConfig>) => Promise<void>;
   saveOverlayBounds: (bounds: OverlayBounds) => Promise<void>;
   resetOverlayBounds: () => Promise<void>;
+  layoutOverlayCards: (layout: IpcInvokeChannels['overlay:layout-cards']['args'][0]) => Promise<OverlayBounds>;
   sendOverlaySignal: (payload: OverlaySignalPayload) => Promise<void>;
   sendOverlaySyncState: (state: OverlaySyncState) => Promise<void>;
   onOverlayStateChanged: (cb: (isOpen: boolean) => void) => () => void;
@@ -196,7 +248,8 @@ export interface ElectronApi {
   onOverlaySignalReceived: (cb: (signal: string) => void) => () => void;
   onOverlaySyncStateReceived: (cb: (state: OverlaySyncState) => void) => () => void;
   onOverlayCloseRequested: (cb: () => void) => () => void;
-  onOverlayHoverChanged: (cb: (hovered: boolean) => void) => () => void;
+  onOverlayHoverChanged: (cb: (hovered: boolean, point?: { x: number; y: number }) => void) => () => void;
+  onOverlayResizeStateChanged: (cb: (resizing: boolean) => void) => () => void;
 
   // Client Logging (#444)
   writeClientLog: (entry: ClientLogEntry) => Promise<void>;
@@ -209,7 +262,57 @@ export interface ElectronApi {
 }
 
 const preparedQa = process.argv.includes('--monky-prepared-qa');
+let nativePresentation: NativeScreenPresentationController | null = null;
+let nativeAudio: ReturnType<typeof registerNativeAudioPortReceiver> | null = null;
+let nativeAudioWorkletUrl: string | null = null;
+function prepareNativeAudio(): void {
+  if (nativeAudio) return;
+  const code = readFileSync(require.resolve('@monky/screen-share/runtime/nativePcmPlayout.worklet.js'), 'utf8');
+  const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+  try {
+    nativeAudio = registerNativeAudioPortReceiver(ipcRenderer, nativeAudioProtocol, {
+      workletUrl: url, onError: error => console.error('[NativeScreen] Audio output failed:', error),
+    });
+    nativeAudioWorkletUrl = url;
+  } catch (error) { URL.revokeObjectURL(url); throw error; }
+}
+const nativePresentationErrors = new Set<(value: { presentationId: string | null; message: string }) => void>();
+function presentationController(): NativeScreenPresentationController {
+  if (!nativePresentation) nativePresentation = createNativeScreenPresentation(sharedTexture, document, (presentationId, error) => {
+    console.error('[NativeScreen] Presentation failed:', error);
+    for (const callback of nativePresentationErrors) {
+      try { callback({ presentationId, message: error.message }); }
+      catch (observerError) { console.error('[NativeScreen] Presentation error observer failed:', observerError); }
+    }
+  }, ipcRenderer);
+  return nativePresentation;
+}
+window.addEventListener('beforeunload', () => {
+  void nativePresentation?.close().catch(error => console.error('[NativeScreen] Document presentation cleanup failed:', error));
+  void nativeAudio?.dispose().catch(error => console.error('[NativeScreen] Document audio cleanup failed:', error)).finally(() => {
+    if (nativeAudioWorkletUrl) URL.revokeObjectURL(nativeAudioWorkletUrl);
+  });
+  nativePresentationErrors.clear();
+});
 const api: ElectronApi = {
+  nativeScreenCommand: command => {
+    if (command?.action === 'watch') prepareNativeAudio();
+    return ipcRenderer.invoke(NATIVE_SCREEN_IPC.invoke, command);
+  },
+  nativeScreenReply: reply => ipcRenderer.invoke(NATIVE_SCREEN_IPC.reply, reply),
+  onNativeScreenEvent: callback => {
+    const listener = (_event: Electron.IpcRendererEvent, value: unknown): void => callback(nativeScreenEventSchema.parse(value));
+    ipcRenderer.on(NATIVE_SCREEN_EVENT, listener);
+    return () => ipcRenderer.removeListener(NATIVE_SCREEN_EVENT, listener);
+  },
+  attachNativeScreenPresentation: input => presentationController().attach(input),
+  attachNativeScreenPreview: input => presentationController().attachPreview(input),
+  stopNativeScreenPresentation: presentationId => presentationController().stop(presentationId),
+  sampleNativeScreenPresentation: presentationId => presentationController().sample(presentationId),
+  onNativeScreenPresentationError: callback => {
+    nativePresentationErrors.add(callback);
+    return () => { nativePresentationErrors.delete(callback); };
+  },
   getDevelopmentQaConfig: () => preparedQa ? ipcRenderer.invoke(DEVELOPMENT_QA_IPC.config) : Promise.resolve(null),
   reportDevelopmentQaState: (report) => ipcRenderer.invoke(DEVELOPMENT_QA_IPC.report, report),
   startLanDiscovery: () => preparedQa ? Promise.resolve() : ipcRenderer.invoke('lan:start'),
@@ -233,10 +336,55 @@ const api: ElectronApi = {
   getIdentity: () => ipcRenderer.invoke('identity:get'),
   getClientId: () => ipcRenderer.invoke('identity:get-client-id'),
   signChallenge: (nonceHex) => ipcRenderer.invoke('identity:sign-challenge', nonceHex),
-  exportIdentity: (password, extras) => ipcRenderer.invoke('identity:export', password, extras),
+  exportIdentity: (password, extras, dmMode) => ipcRenderer.invoke('identity:export', password, extras, dmMode),
   importIdentity: (exportedIdentity, password) => ipcRenderer.invoke('identity:import', exportedIdentity, password),
+  logOut: () => ipcRenderer.invoke('identity:logout'),
+  dm: {
+    snapshot: () => ipcRenderer.invoke(DM_IPC.snapshot),
+    conversation: (peer, before, limit) => ipcRenderer.invoke(DM_IPC.conversation, peer, before ?? null, limit),
+    openConversation: peer => ipcRenderer.invoke(DM_IPC.openConversation, peer),
+    closeConversation: peer => ipcRenderer.invoke(DM_IPC.closeConversation, peer),
+    sendFriendRequest: (peer, nickname) => ipcRenderer.invoke(DM_IPC.sendFriendRequest, peer, nickname),
+    acceptFriend: peer => ipcRenderer.invoke(DM_IPC.acceptFriend, peer),
+    declineFriend: peer => ipcRenderer.invoke(DM_IPC.declineFriend, peer),
+    cancelFriendRequest: peer => ipcRenderer.invoke(DM_IPC.cancelFriendRequest, peer),
+    removeFriend: peer => ipcRenderer.invoke(DM_IPC.removeFriend, peer),
+    block: (peer, nickname) => ipcRenderer.invoke(DM_IPC.block, peer, nickname),
+    unblock: peer => ipcRenderer.invoke(DM_IPC.unblock, peer),
+    sendMessage: input => ipcRenderer.invoke(DM_IPC.sendMessage, input),
+    editMessage: (peer, messageId, content) => ipcRenderer.invoke(DM_IPC.editMessage, peer, messageId, content),
+    deleteMessage: (peer, messageId) => ipcRenderer.invoke(DM_IPC.deleteMessage, peer, messageId),
+    react: (peer, messageId, emoji, add) => ipcRenderer.invoke(DM_IPC.react, peer, messageId, emoji, add),
+    markRead: peer => ipcRenderer.invoke(DM_IPC.markRead, peer),
+    typing: peer => ipcRenderer.invoke(DM_IPC.typing, peer),
+    ingest: item => ipcRenderer.invoke(DM_IPC.ingest, item),
+    outgoing: (peers, force) => ipcRenderer.invoke(DM_IPC.outgoing, peers, force === true),
+    hello: (toFriends, announce) => ipcRenderer.invoke(DM_IPC.hello, toFriends, announce !== false),
+    helloTo: peer => ipcRenderer.invoke(DM_IPC.helloTo, peer),
+    pendingPeers: () => ipcRenderer.invoke(DM_IPC.pendingPeers),
+    observePeer: peer => ipcRenderer.invoke(DM_IPC.observePeer, peer),
+    setSelfNickname: nickname => ipcRenderer.invoke(DM_IPC.setSelfNickname, nickname),
+    setSelfProfile: input => ipcRenderer.invoke(DM_IPC.setSelfProfile, input),
+    updateSettings: settings => ipcRenderer.invoke(DM_IPC.updateSettings, settings),
+    readAttachment: (peer, messageId, fileId) => ipcRenderer.invoke(DM_IPC.readAttachment, peer, messageId, fileId),
+    saveAttachment: (peer, messageId, fileId) => ipcRenderer.invoke(DM_IPC.saveAttachment, peer, messageId, fileId),
+    retryAttachment: (peer, messageId, fileId) => ipcRenderer.invoke(DM_IPC.retryAttachment, peer, messageId, fileId),
+    onEvent: callback => {
+      const listener = (_event: Electron.IpcRendererEvent, value: DmEvent) => callback(value);
+      ipcRenderer.on(DM_EVENT, listener);
+      return () => { ipcRenderer.removeListener(DM_EVENT, listener); };
+    },
+  },
   saveBackupFile: (contents, suggestedName) => ipcRenderer.invoke('backup:save-file', contents, suggestedName),
   openBackupFile: () => ipcRenderer.invoke('backup:open-file'),
+  takeServerInvite: () => ipcRenderer.invoke(SERVER_INVITE_IPC.take),
+  createBotScreenDocument: (html, consent) => ipcRenderer.invoke(BOT_SCREEN_DOCUMENT_IPC.create, html, consent),
+  removeBotScreenDocument: url => ipcRenderer.invoke(BOT_SCREEN_DOCUMENT_IPC.remove, url),
+  onServerInviteAvailable: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on(SERVER_INVITE_AVAILABLE, listener);
+    return () => ipcRenderer.removeListener(SERVER_INVITE_AVAILABLE, listener);
+  },
   encryptBackup: (contents, password) => ipcRenderer.invoke('backup:encrypt', contents, password),
   decryptBackup: (payload, password) => ipcRenderer.invoke('backup:decrypt', payload, password),
   hostServerStart: (options) => ipcRenderer.invoke('server-host:start', options),
@@ -259,14 +407,24 @@ const api: ElectronApi = {
     ipcRenderer.on('server-host:status-changed', listener);
     return () => ipcRenderer.removeListener('server-host:status-changed', listener);
   },
-  getDesktopSources: () => ipcRenderer.invoke('screen-share:get-sources'),
+  getDesktopSources: (options) => ipcRenderer.invoke(DESKTOP_SOURCES_IPC.list, options),
+  getDesktopSourcePreviews: (request) => ipcRenderer.invoke(DESKTOP_SOURCES_IPC.previews, request),
+  cancelDesktopSourcePreviews: () => ipcRenderer.invoke(DESKTOP_SOURCES_IPC.cancelPreviews),
   prepareScreenShareWindow: (sourceId: string) => ipcRenderer.invoke('screen-share:prepare-window', sourceId),
   ensureScreenPermission: (): Promise<boolean> => ipcRenderer.invoke('screen-share:ensure-permission'),
   selectImageDialog: () => ipcRenderer.invoke('dialog:select-image'),
+  selectImagesDialog: (maxFiles) => ipcRenderer.invoke('dialog:select-images', maxFiles),
   selectSoundFile: () => ipcRenderer.invoke('dialog:select-sound-file'),
   selectSoundboardFolder: () => ipcRenderer.invoke('dialog:select-soundboard-folder'),
+  getDefaultSoundboardFolder: () => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.defaultFolder),
   listSoundboardSounds: (folderPath) => ipcRenderer.invoke('soundboard:list-sounds', folderPath),
   readSoundboardSound: (filePath) => ipcRenderer.invoke('soundboard:read-sound', filePath),
+  readSoundboardEdit: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.read, input),
+  openSoundboardEditor: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.open, input),
+  overwriteSoundboardAudio: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.overwrite, input),
+  renameSoundboardFile: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.rename, input),
+  deleteSoundboardFile: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.delete, input),
+  saveSoundboardEdit: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.edit, input),
   soundDownloadAvailability: (folder) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.availability, folder),
   confirmSoundboardFolder: (folder) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.confirmFolder, folder),
   authorizeSoundDownload: (input) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.authorize, input),
@@ -340,6 +498,19 @@ const api: ElectronApi = {
     };
   },
   minimize: () => ipcRenderer.invoke('window:minimize'),
+  openScreenPictureInPicture: (requestId, requireInactive, aspectRatio) =>
+    ipcRenderer.invoke('screen-pip:open', requestId, requireInactive, aspectRatio),
+  returnFromScreenPictureInPicture: () => ipcRenderer.invoke('screen-pip:return'),
+  onWindowInactive: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('window:inactive', listener);
+    return () => ipcRenderer.removeListener('window:inactive', listener);
+  },
+  onWindowActive: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('window:active', listener);
+    return () => ipcRenderer.removeListener('window:active', listener);
+  },
   maximize: () => ipcRenderer.invoke('window:maximize'),
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
   setWindowInServer: (inServer) => ipcRenderer.invoke('window:set-in-server', inServer),
@@ -381,8 +552,12 @@ const api: ElectronApi = {
     };
   },
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
+  editorCommand: (command) => ipcRenderer.invoke(EDITOR_COMMAND_IPC, command),
   fetchLinkPreview: (url) => ipcRenderer.invoke('link-preview:fetch', url),
   downloadFile: (url, fileName) => ipcRenderer.invoke('app:download-file', url, fileName),
+  saveRecentSound: (input) => ipcRenderer.invoke('app:save-recent-sound', input),
+  saveCsvFile: (content, fileName) => ipcRenderer.invoke('app:save-csv-file', content, fileName),
+  saveEventCalendar: (input) => ipcRenderer.invoke(EVENT_CALENDAR_IPC, input),
   probeServer: (host, port) => ipcRenderer.invoke('net:probe-server', host, port),
   screenAudioSupported: () => ipcRenderer.invoke('screen-audio:is-supported'),
   screenAudioDiagnose: () => ipcRenderer.invoke('screen-audio:diagnose'),
@@ -405,13 +580,13 @@ const api: ElectronApi = {
   },
   updateTrayVoiceStatus: (status) => ipcRenderer.invoke('tray:update-voice-status', status),
   onAppBeforeQuit: (cb) => {
-    const listener = () => cb();
-    ipcRenderer.on('app:before-quit', listener);
+    const listener = (_event: Electron.IpcRendererEvent, request: AppShutdownRequest) => cb(request);
+    ipcRenderer.on(APP_SHUTDOWN_EVENT, listener);
     return () => {
-      ipcRenderer.removeListener('app:before-quit', listener);
+      ipcRenderer.removeListener(APP_SHUTDOWN_EVENT, listener);
     };
   },
-  notifyLeaveComplete: () => ipcRenderer.invoke('app:leave-complete'),
+  notifyLeaveComplete: request => ipcRenderer.invoke(APP_SHUTDOWN_IPC.acknowledge, request),
   onTrayToggleMute: (cb) => {
     const listener = () => cb();
     ipcRenderer.on('tray:toggle-mute', listener);
@@ -446,6 +621,7 @@ const api: ElectronApi = {
   setOverlayConfig: (config) => ipcRenderer.invoke('overlay:set-config', config),
   saveOverlayBounds: (bounds) => ipcRenderer.invoke('overlay:save-bounds', bounds),
   resetOverlayBounds: () => ipcRenderer.invoke('overlay:reset-bounds'),
+  layoutOverlayCards: (layout) => ipcRenderer.invoke('overlay:layout-cards', layout),
   sendOverlaySignal: (payload) => ipcRenderer.invoke('overlay:send-signal', payload),
   sendOverlaySyncState: (state) => ipcRenderer.invoke('overlay:send-sync-state', state),
   onOverlayStateChanged: (cb) => {
@@ -484,11 +660,16 @@ const api: ElectronApi = {
     };
   },
   onOverlayHoverChanged: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, hovered: boolean) => cb(hovered);
+    const listener = (_e: Electron.IpcRendererEvent, hovered: boolean, point?: { x: number; y: number }) => cb(hovered, point);
     ipcRenderer.on('overlay:hover-changed', listener);
     return () => {
       ipcRenderer.removeListener('overlay:hover-changed', listener);
     };
+  },
+  onOverlayResizeStateChanged: (cb) => {
+    const listener = (_e: Electron.IpcRendererEvent, resizing: boolean) => cb(resizing);
+    ipcRenderer.on('overlay:resize-state-changed', listener);
+    return () => ipcRenderer.removeListener('overlay:resize-state-changed', listener);
   },
 
   // Client Logging (#444)

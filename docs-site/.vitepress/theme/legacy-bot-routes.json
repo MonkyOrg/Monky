@@ -1,0 +1,446 @@
+[
+  {
+    "locale": 0,
+    "hash": "modo-marketplace-multi-servidor",
+    "route": "/bots-conexao#modo-marketplace-multi-servidor",
+    "title": "Modo Marketplace (multi-servidor)"
+  },
+  {
+    "locale": 0,
+    "hash": "persistencia-dos-vinculos",
+    "route": "/bots-conexao#persistencia-dos-vinculos",
+    "title": "Persistência dos vínculos"
+  },
+  {
+    "locale": 0,
+    "hash": "requisitos-de-rede",
+    "route": "/bots-conexao#requisitos-de-rede",
+    "title": "Requisitos de rede"
+  },
+  {
+    "locale": 0,
+    "hash": "propriedades-uteis",
+    "route": "/bots-conexao#propriedades-uteis",
+    "title": "Propriedades úteis"
+  },
+  {
+    "locale": 0,
+    "hash": "eventos",
+    "route": "/bots-conexao#eventos",
+    "title": "Eventos"
+  },
+  {
+    "locale": 0,
+    "hash": "seguranca-tofu-trust-on-first-use",
+    "route": "/bots-conexao#seguranca-tofu-trust-on-first-use",
+    "title": "Segurança: TOFU (Trust On First Use)"
+  },
+  {
+    "locale": 0,
+    "hash": "fotos-dos-bots",
+    "route": "/bots-conexao#fotos-dos-bots",
+    "title": "Fotos dos bots"
+  },
+  {
+    "locale": 0,
+    "hash": "cli-e-pacote-automatico-do-bot",
+    "route": "/bots-distribuicao#cli-e-pacote-automatico-do-bot",
+    "title": "CLI e pacote automático do bot"
+  },
+  {
+    "locale": 0,
+    "hash": "atualizacoes-opcionais-do-cli",
+    "route": "/bots-distribuicao#atualizacoes-opcionais-do-cli",
+    "title": "Atualizações opcionais do CLI"
+  },
+  {
+    "locale": 0,
+    "hash": "anatomia-de-um-comando",
+    "route": "/bots-comandos#anatomia-de-um-comando",
+    "title": "Anatomia de um comando"
+  },
+  {
+    "locale": 0,
+    "hash": "idioma-dos-comandos-e-preferencias",
+    "route": "/bots-comandos#idioma-dos-comandos-e-preferencias",
+    "title": "Idioma dos comandos e preferências"
+  },
+  {
+    "locale": 0,
+    "hash": "parametros-guiados-no-chat",
+    "route": "/bots-comandos#parametros-guiados-no-chat",
+    "title": "Parâmetros guiados no chat"
+  },
+  {
+    "locale": 0,
+    "hash": "autocomplete-antes-de-executar",
+    "route": "/bots-comandos#autocomplete-antes-de-executar",
+    "title": "Autocomplete antes de executar"
+  },
+  {
+    "locale": 0,
+    "hash": "respostas-privadas-e-publicacao",
+    "route": "/bots-interacoes#respostas-privadas-e-publicacao",
+    "title": "Respostas privadas e publicação"
+  },
+  {
+    "locale": 0,
+    "hash": "formularios-e-conversas-em-etapas",
+    "route": "/bots-interacoes#formularios-e-conversas-em-etapas",
+    "title": "Formulários e conversas em etapas"
+  },
+  {
+    "locale": 0,
+    "hash": "seletores-privados",
+    "route": "/bots-interacoes#seletores-privados",
+    "title": "Seletores privados"
+  },
+  {
+    "locale": 0,
+    "hash": "seletores-publicos-e-votacoes",
+    "route": "/bots-interacoes#seletores-publicos-e-votacoes",
+    "title": "Seletores públicos e votações"
+  },
+  {
+    "locale": 0,
+    "hash": "reacoes-e-respostas-por-emoji",
+    "route": "/bots-interacoes#reacoes-e-respostas-por-emoji",
+    "title": "Reações e respostas por emoji"
+  },
+  {
+    "locale": 0,
+    "hash": "configuracoes-por-bot-e-servidor",
+    "route": "/bots-configuracao#configuracoes-por-bot-e-servidor",
+    "title": "Configurações por bot e servidor"
+  },
+  {
+    "locale": 0,
+    "hash": "permissoes-e-canais",
+    "route": "/bots-permissoes#permissoes-e-canais",
+    "title": "Permissões e canais"
+  },
+  {
+    "locale": 0,
+    "hash": "capacidades-solicitadas-e-consentimento",
+    "route": "/bots-permissoes#capacidades-solicitadas-e-consentimento",
+    "title": "Capacidades solicitadas e consentimento"
+  },
+  {
+    "locale": 0,
+    "hash": "selecao-com-previa-de-audio",
+    "route": "/bots-audio#selecao-com-previa-de-audio",
+    "title": "Seleção com prévia de áudio"
+  },
+  {
+    "locale": 0,
+    "hash": "audio-gerado-somente-ao-ouvir",
+    "route": "/bots-audio#audio-gerado-somente-ao-ouvir",
+    "title": "Áudio gerado somente ao ouvir"
+  },
+  {
+    "locale": 0,
+    "hash": "downloads-locais-autorizados",
+    "route": "/bots-audio#downloads-locais-autorizados",
+    "title": "Downloads locais autorizados"
+  },
+  {
+    "locale": 0,
+    "hash": "voz-para-bots",
+    "route": "/bots-voz#voz-para-bots",
+    "title": "Voz para bots"
+  },
+  {
+    "locale": 0,
+    "hash": "execucao-local-de-capacidades",
+    "route": "/bots-execucao-local#execucao-local-de-capacidades",
+    "title": "Execução local de capacidades"
+  },
+  {
+    "locale": 0,
+    "hash": "contratos-do-sdk",
+    "route": "/bots-execucao-local#contratos-do-sdk",
+    "title": "Contratos do SDK"
+  },
+  {
+    "locale": 0,
+    "hash": "validacao-integrada-no-checkout",
+    "route": "/bots-execucao-local#validacao-integrada-no-checkout",
+    "title": "Validação integrada no checkout"
+  },
+  {
+    "locale": 0,
+    "hash": "telas-programaveis-compartilhadas",
+    "route": "/bots-miniapps#telas-programaveis-compartilhadas",
+    "title": "Telas programáveis compartilhadas"
+  },
+  {
+    "locale": 1,
+    "hash": "marketplace-mode-multi-server",
+    "route": "/en/bots-conexao#marketplace-mode-multi-server",
+    "title": "Marketplace mode (multi-server)"
+  },
+  {
+    "locale": 1,
+    "hash": "persistent-registrations",
+    "route": "/en/bots-conexao#persistent-registrations",
+    "title": "Persistent registrations"
+  },
+  {
+    "locale": 1,
+    "hash": "network-requirements",
+    "route": "/en/bots-conexao#network-requirements",
+    "title": "Network requirements"
+  },
+  {
+    "locale": 1,
+    "hash": "useful-properties",
+    "route": "/en/bots-conexao#useful-properties",
+    "title": "Useful properties"
+  },
+  {
+    "locale": 1,
+    "hash": "events",
+    "route": "/en/bots-conexao#events",
+    "title": "Events"
+  },
+  {
+    "locale": 1,
+    "hash": "security-tofu-trust-on-first-use",
+    "route": "/en/bots-conexao#security-tofu-trust-on-first-use",
+    "title": "Security: TOFU (Trust On First Use)"
+  },
+  {
+    "locale": 1,
+    "hash": "bot-photos",
+    "route": "/en/bots-conexao#bot-photos",
+    "title": "Bot photos"
+  },
+  {
+    "locale": 1,
+    "hash": "automatic-bot-cli-and-packaging",
+    "route": "/en/bots-distribuicao#automatic-bot-cli-and-packaging",
+    "title": "Automatic bot CLI and packaging"
+  },
+  {
+    "locale": 1,
+    "hash": "optional-cli-updates",
+    "route": "/en/bots-distribuicao#optional-cli-updates",
+    "title": "Optional CLI updates"
+  },
+  {
+    "locale": 1,
+    "hash": "anatomy-of-a-command",
+    "route": "/en/bots-comandos#anatomy-of-a-command",
+    "title": "Anatomy of a command"
+  },
+  {
+    "locale": 1,
+    "hash": "command-language-and-individual-preferences",
+    "route": "/en/bots-comandos#command-language-and-individual-preferences",
+    "title": "Command language and individual preferences"
+  },
+  {
+    "locale": 1,
+    "hash": "guided-parameters-in-chat",
+    "route": "/en/bots-comandos#guided-parameters-in-chat",
+    "title": "Guided parameters in chat"
+  },
+  {
+    "locale": 1,
+    "hash": "autocomplete-before-execution",
+    "route": "/en/bots-comandos#autocomplete-before-execution",
+    "title": "Autocomplete before execution"
+  },
+  {
+    "locale": 1,
+    "hash": "private-replies-and-publishing",
+    "route": "/en/bots-interacoes#private-replies-and-publishing",
+    "title": "Private replies and publishing"
+  },
+  {
+    "locale": 1,
+    "hash": "forms-and-multi-step-conversations",
+    "route": "/en/bots-interacoes#forms-and-multi-step-conversations",
+    "title": "Forms and multi-step conversations"
+  },
+  {
+    "locale": 1,
+    "hash": "private-selectors",
+    "route": "/en/bots-interacoes#private-selectors",
+    "title": "Private selectors"
+  },
+  {
+    "locale": 1,
+    "hash": "public-selectors-and-voting",
+    "route": "/en/bots-interacoes#public-selectors-and-voting",
+    "title": "Public selectors and voting"
+  },
+  {
+    "locale": 1,
+    "hash": "reactions-and-emoji-responses",
+    "route": "/en/bots-interacoes#reactions-and-emoji-responses",
+    "title": "Reactions and emoji responses"
+  },
+  {
+    "locale": 1,
+    "hash": "per-bot-settings-on-each-server",
+    "route": "/en/bots-configuracao#per-bot-settings-on-each-server",
+    "title": "Per-bot settings on each server"
+  },
+  {
+    "locale": 1,
+    "hash": "permissions-and-channels",
+    "route": "/en/bots-permissoes#permissions-and-channels",
+    "title": "Permissions and channels"
+  },
+  {
+    "locale": 1,
+    "hash": "requested-capabilities-and-consent",
+    "route": "/en/bots-permissoes#requested-capabilities-and-consent",
+    "title": "Requested capabilities and consent"
+  },
+  {
+    "locale": 1,
+    "hash": "selections-with-audio-previews",
+    "route": "/en/bots-audio#selections-with-audio-previews",
+    "title": "Selections with audio previews"
+  },
+  {
+    "locale": 1,
+    "hash": "generate-audio-only-when-listening",
+    "route": "/en/bots-audio#generate-audio-only-when-listening",
+    "title": "Generate audio only when listening"
+  },
+  {
+    "locale": 1,
+    "hash": "authorized-local-downloads",
+    "route": "/en/bots-audio#authorized-local-downloads",
+    "title": "Authorized local downloads"
+  },
+  {
+    "locale": 1,
+    "hash": "bot-voice",
+    "route": "/en/bots-voz#bot-voice",
+    "title": "Bot voice"
+  },
+  {
+    "locale": 1,
+    "hash": "local-capability-execution",
+    "route": "/en/bots-execucao-local#local-capability-execution",
+    "title": "Local capability execution"
+  },
+  {
+    "locale": 1,
+    "hash": "sdk-contracts",
+    "route": "/en/bots-execucao-local#sdk-contracts",
+    "title": "SDK contracts"
+  },
+  {
+    "locale": 1,
+    "hash": "integrated-checkout-validation",
+    "route": "/en/bots-execucao-local#integrated-checkout-validation",
+    "title": "Integrated checkout validation"
+  },
+  {
+    "locale": 1,
+    "hash": "shared-programmable-screens",
+    "route": "/en/bots-miniapps#shared-programmable-screens",
+    "title": "Shared programmable screens"
+  },
+  {
+    "locale": 0,
+    "hash": "criando-seu-proprio-bot",
+    "route": "/bots-desenvolvimento",
+    "title": "Criando seu próprio bot"
+  },
+  {
+    "locale": 0,
+    "hash": "pre-requisitos",
+    "route": "/bots-desenvolvimento#antes-de-comecar",
+    "title": "Pré-requisitos"
+  },
+  {
+    "locale": 0,
+    "hash": "instalacao-do-sdk",
+    "route": "/bots-desenvolvimento#_1-prepare-o-projeto",
+    "title": "Instalação do SDK"
+  },
+  {
+    "locale": 0,
+    "hash": "exemplo-basico",
+    "route": "/bots-desenvolvimento#_2-escreva-o-comando",
+    "title": "Exemplo básico"
+  },
+  {
+    "locale": 0,
+    "hash": "referencia-rapida-da-api",
+    "route": "/bots-api",
+    "title": "Referência rápida da API"
+  },
+  {
+    "locale": 0,
+    "hash": "botclient",
+    "route": "/bots-api-cliente#botclient",
+    "title": "BotClient"
+  },
+  {
+    "locale": 0,
+    "hash": "botoptions",
+    "route": "/bots-api-cliente#botoptions",
+    "title": "BotOptions"
+  },
+  {
+    "locale": 0,
+    "hash": "serveoptions",
+    "route": "/bots-api-cliente#serveoptions",
+    "title": "ServeOptions"
+  },
+  {
+    "locale": 1,
+    "hash": "creating-your-own-bot",
+    "route": "/en/bots-desenvolvimento",
+    "title": "Creating your own bot"
+  },
+  {
+    "locale": 1,
+    "hash": "prerequisites",
+    "route": "/en/bots-desenvolvimento#before-you-start",
+    "title": "Prerequisites"
+  },
+  {
+    "locale": 1,
+    "hash": "sdk-installation",
+    "route": "/en/bots-desenvolvimento#_1-prepare-the-project",
+    "title": "SDK Installation"
+  },
+  {
+    "locale": 1,
+    "hash": "basic-example",
+    "route": "/en/bots-desenvolvimento#_2-write-the-command",
+    "title": "Basic example"
+  },
+  {
+    "locale": 1,
+    "hash": "quick-api-reference",
+    "route": "/en/bots-api",
+    "title": "Quick API reference"
+  },
+  {
+    "locale": 1,
+    "hash": "botclient",
+    "route": "/en/bots-api-cliente#botclient",
+    "title": "BotClient"
+  },
+  {
+    "locale": 1,
+    "hash": "botoptions",
+    "route": "/en/bots-api-cliente#botoptions",
+    "title": "BotOptions"
+  },
+  {
+    "locale": 1,
+    "hash": "serveoptions",
+    "route": "/en/bots-api-cliente#serveoptions",
+    "title": "ServeOptions"
+  }
+]

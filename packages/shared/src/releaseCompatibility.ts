@@ -1,4 +1,6 @@
 import type { BotCompatibilitySummary } from './models.js';
+import { PROTOCOL_VERSION } from './constants.js';
+import { MIN_BOT_PROTOCOL, MIN_CLIENT_PROTOCOL } from './protocolCompatibility.js';
 
 const RELEASE_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/;
 const RELEASE_HOSTS = new Set(['github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com']);
@@ -9,6 +11,8 @@ export interface ReleaseCompatibility {
   version: string;
   protocolVersion: number;
   botSdkVersion: string;
+  minimumClientProtocol?: number;
+  minimumBotProtocol?: number;
 }
 
 export type ReleaseCompatibilityResult =
@@ -26,7 +30,22 @@ export function parseReleaseCompatibility(value: unknown, version: string): Rele
       !('protocolVersion' in value) || typeof value.protocolVersion !== 'number' ||
       !Number.isSafeInteger(value.protocolVersion) || value.protocolVersion <= 0 ||
       !('botSdkVersion' in value) || value.botSdkVersion !== version) return null;
-  return { schemaVersion: 1, version, protocolVersion: value.protocolVersion, botSdkVersion: version };
+  const floors: Pick<ReleaseCompatibility, 'minimumClientProtocol' | 'minimumBotProtocol'> = {};
+  for (const key of ['minimumClientProtocol', 'minimumBotProtocol'] as const) {
+    if (!(key in value)) continue;
+    const floor = key === 'minimumClientProtocol' && 'minimumClientProtocol' in value
+      ? value.minimumClientProtocol : 'minimumBotProtocol' in value ? value.minimumBotProtocol : undefined;
+    if (typeof floor !== 'number' || !Number.isSafeInteger(floor) || floor < 1 || floor > value.protocolVersion) return null;
+    floors[key] = floor;
+  }
+  return { schemaVersion: 1, version, protocolVersion: value.protocolVersion, botSdkVersion: version, ...floors };
+}
+
+export function releaseRequiresProtocolUpdate(manifest: ReleaseCompatibility, kind: 'client' | 'bot'): boolean {
+  const floor = kind === 'bot' ? manifest.minimumBotProtocol : manifest.minimumClientProtocol;
+  if (floor === undefined) return manifest.protocolVersion !== PROTOCOL_VERSION;
+  const localFloor = kind === 'bot' ? MIN_BOT_PROTOCOL : MIN_CLIENT_PROTOCOL;
+  return floor > PROTOCOL_VERSION || manifest.protocolVersion < localFloor;
 }
 
 export function parseBotCompatibility(value: unknown): BotCompatibilitySummary | null {

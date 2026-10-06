@@ -8,14 +8,15 @@ import { startOwnedProcess } from './qa/process.js';
 
 const require = createRequire(import.meta.url);
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const scenarios = ['connected', 'server-settings', 'voice', 'music', 'home', 'login', 'bot-install', 'tool-consent'];
+export const scenarios = ['connected', 'empty-forum', 'server-settings', 'voice', 'voice-receive', 'music', 'home', 'login', 'bot-install', 'tool-consent'];
 
 export function parseQaArguments(args) {
-  const result = { scenario: 'connected', smoke: false, bot: null, botRoot: null };
+  const result = { scenario: 'connected', smoke: false, realMedia: false, bot: null, botRoot: null };
   let selected = false;
   for (let index = 0; index < args.length; index++) {
     const argument = args[index];
     if (argument === '--smoke') result.smoke = true;
+    else if (argument === '--real-media') result.realMedia = true;
     else if (argument === '--bot=fixture') {
       if (result.bot) throw new Error('Choose one explicit bot source.');
       result.bot = 'sdk-fixture';
@@ -31,7 +32,9 @@ export function parseQaArguments(args) {
     } else throw new Error(`Unknown QA argument/scenario: ${argument}. Use --help.`);
   }
   if (['home', 'login'].includes(result.scenario) && result.bot) throw new Error('Home/login QA must not install a bot before the tested login.');
-  if (result.scenario === 'voice' && !result.bot) result.bot = 'sdk-fixture';
+  if (result.smoke && result.realMedia) throw new Error('--real-media requires interactive QA; it cannot be combined with --smoke.');
+  if (['voice', 'voice-receive'].includes(result.scenario) && !result.bot) result.bot = 'sdk-fixture';
+  if (result.scenario === 'voice-receive' && result.bot !== 'sdk-fixture') throw new Error('Voice reception QA uses its explicit SDK fixture.');
   if (['bot-install', 'tool-consent'].includes(result.scenario) && !result.bot) throw new Error('Choose --bot=fixture or an explicit --bot-root for this scenario.');
   if (result.scenario === 'music' && result.bot !== 'production') throw new Error('Music QA requires --bot-root. An SDK fixture is never production music.');
   return result;
@@ -55,9 +58,11 @@ export function isolatedEnvironment(root, extra = {}, { useSystemKeychain = fals
 }
 
 export const scenarioPreparation = {
-  connected: 'Fresh identity, authenticated owner, seeded chat; no voice or local consent.',
+  connected: 'Fresh identity, authenticated owner, 100 QA respondents, seeded chat, and identified plus anonymous all-field QA forms with 100 varied responses each; no voice or local consent.',
+  'empty-forum': 'Empty forum and chat, 20 members including the authenticated owner, 10 roles including built-in roles, and events enabled; no threads, messages or forms are seeded.',
   'server-settings': 'Connected owner and real General settings; no setting is edited for the test.',
   voice: 'Connected owner, muted synthetic input and real P2P SDK peer. The SDK fixture is not production music.',
+  'voice-receive': 'Listening-only SDK fixture, muted synthetic input and a listening indicator without a block for unrequested publication. /qa-listen toggles reception; no audio is recorded.',
   music: 'Explicit production MonkyBot and real voice; waits for actual local consent and verified tools before ready. Playback itself is not invoked.',
   home: 'Fresh identity and completed introductory wizard only; no saved server or authentication.',
   login: 'Home with loopback address, nickname and test password filled; login is deliberately not submitted.',
@@ -67,6 +72,7 @@ export const scenarioPreparation = {
 
 export async function runQa(options, hooks = {}) {
   if (!scenarios.includes(options.scenario)) throw new Error('Unsupported QA scenario.');
+  if (options.smoke && options.realMedia) throw new Error('Real capture devices require interactive QA.');
   if (options.bot === 'production' ? !options.botRoot : options.botRoot) throw new Error('Production QA requires its explicit bot checkout; no fixture will be substituted.');
   const { developmentQaConfigSchema, developmentQaReportSchema, botManifestSchema, PROTOCOL_VERSION } = require('../packages/shared/dist/index.js');
   for (const filename of ['apps/client/dist/index.html', 'apps/client/dist-electron/main/main.js', 'apps/server/dist/server.js']) {
@@ -115,11 +121,28 @@ export async function runQa(options, hooks = {}) {
       }
     }
     const serviceEnv = role => isolatedEnvironment(path.join(root, role), {
-      MONKY_QA_SERVICE: JSON.stringify({ root, role, runId, scenario: options.scenario, password, botRoot: options.botRoot ?? undefined }),
+      MONKY_QA_SERVICE: JSON.stringify({
+        root, role, runId, scenario: options.scenario, smoke: options.smoke,
+        password, botRoot: options.botRoot ?? undefined,
+      }),
     });
     const server = spawn('QA server', process.execPath, [serviceFile], path.join(root, 'server'), serviceEnv('server'));
     const serverReady = await startup(server.ready);
     if (serverReady.protocol !== PROTOCOL_VERSION) throw new Error('QA server/client build protocol mismatch.');
+    if (options.scenario === 'empty-forum') {
+      const fixture = await startup(server.call('qa-seed-empty-forum'));
+      if (!fixture.id || fixture.members !== 19 || fixture.roles !== 10 || fixture.threads !== 0) {
+        throw new Error('The empty forum and audience fixture was not prepared.');
+      }
+    }
+    if (options.scenario === 'connected') {
+      const seeded = await startup(server.call('qa-seed-members', ['QA Ana', 'QA Bruno', 'QA Carla']));
+      if (seeded.members !== 3) throw new Error('Connected QA member fixtures were not prepared.');
+      if (!options.smoke) {
+        const forum = await startup(server.call('qa-seed-forum', { count: 200 }));
+        if (!forum.id || forum.threads !== 200) throw new Error('Connected QA forum fixture was not prepared.');
+      }
+    }
     const healthUrl = `http://127.0.0.1:${serverReady.port}/health`;
     if (!(await fetch(healthUrl, { signal: AbortSignal.timeout(5000), redirect: 'error' })).ok) throw new Error('The QA server health endpoint is not responsive.');
     let bot, botReady, joining = Promise.resolve();
@@ -138,6 +161,7 @@ export async function runQa(options, hooks = {}) {
     }
     const config = developmentQaConfigSchema.parse({
       runId, scenario: options.scenario, smoke: options.smoke, nickname: 'QA Tester',
+      realMedia: options.realMedia === true,
       server: { host: '127.0.0.1', port: serverReady.port, name: serverReady.name, password },
       ...(botReady ? { bot: botReady } : {}),
     });
@@ -162,6 +186,15 @@ export async function runQa(options, hooks = {}) {
     }, options.smoke === true);
     const ready = await startup(client.ready);
     await startup(joining);
+    if (options.scenario === 'connected') {
+      const form = await startup(server.call('qa-seed-live-form', {
+        userId: ready.userId,
+        channelId: ready.textChannelId,
+      }));
+      if (!form.id || !form.anonymousId || form.forms !== 2 || form.fields !== 8 || form.responses !== 100) {
+        throw new Error('Connected QA live-form fixture was not prepared.');
+      }
+    }
     let windowVisible;
     for (const child of children) {
       const state = await startup(child.call('qa-ping'));
@@ -173,7 +206,10 @@ export async function runQa(options, hooks = {}) {
     }
     const stats = await startup(server.call('qa-snapshot'));
     const expectsLogin = !['home', 'login'].includes(options.scenario);
-    if (ready.connected !== expectsLogin || (expectsLogin && (stats.onlineUsers !== 1 || stats.messages < 1)) ||
+    const expectedMembers = options.scenario === 'connected' ? 101 : options.scenario === 'empty-forum' ? 20 : 1;
+    const messagesReady = options.scenario === 'empty-forum' ? stats.messages === 0 : stats.messages >= 1;
+    if (ready.connected !== expectsLogin || (expectsLogin &&
+        (stats.onlineUsers !== 1 || stats.members !== expectedMembers || !messagesReady)) ||
         (!expectsLogin && (stats.members !== 0 || stats.messages !== 0))) throw new Error('QA readiness disagrees with the real authenticated server state.');
     if (bot) {
       const state = await startup(bot.call('qa-snapshot'));
@@ -185,13 +221,20 @@ export async function runQa(options, hooks = {}) {
           JSON.stringify(state.permissions) !== JSON.stringify(ready.botPermissions))) {
         throw new Error('The SDK and administrator disagree about the real reviewed bot permissions.');
       }
-      if (['voice', 'music'].includes(options.scenario) && (!state.voice || state.humanPeers < 1 || !ready.peers)) {
+      if (['voice', 'voice-receive', 'music'].includes(options.scenario) && (!state.voice || state.humanPeers < 1 || !ready.peers)) {
         throw new Error('The required real voice connection is no longer ready.');
       }
+      if (options.scenario === 'voice-receive' && !state.receiving) throw new Error('The SDK fixture is not receiving voice.');
     }
     result = { scenario: options.scenario, root, runId, serverUrl: `ws://127.0.0.1:${serverReady.port}`,
       botManifestUrl: botReady?.manifestUrl, botKind: botReady?.kind, pids: children.map(child => child.child.pid),
-      prepared: scenarioPreparation[options.scenario], windowVisible, ready, stats, reports };
+      prepared: (options.realMedia
+        ? `${scenarioPreparation[options.scenario].replace('synthetic input', 'real input')} Real capture devices enabled explicitly; camera starts only on user action.`
+        : scenarioPreparation[options.scenario]) +
+        (options.scenario === 'connected' && !options.smoke
+          ? ' Example forum opened with 200 seeded threads for lazy-loading checks.'
+          : ''),
+      mediaDevices: options.realMedia ? 'real' : 'synthetic', windowVisible, ready, stats, reports };
     await hooks.onReady?.(result);
     hooks.log?.(`QA_READY ${JSON.stringify(result)}`);
     if (!options.smoke) await Promise.race([client.closed, failure]);
@@ -218,9 +261,10 @@ export async function runQa(options, hooks = {}) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   if (process.argv.includes('--help')) {
-    console.log('Usage: npm run qa -- [scenario] [--bot=fixture | --bot-root <absolute MonkyBot checkout>] [--smoke]\n');
+    console.log('Usage: npm run qa -- [scenario] [--bot=fixture | --bot-root <absolute MonkyBot checkout>] [--smoke | --real-media]\n');
     for (const scenario of scenarios) console.log(`${scenario}: ${scenarioPreparation[scenario]}`);
     console.log('\nFresh isolated data is removed on shutdown. Ctrl+C closes owned processes. Normal npm start is unchanged.');
+    console.log('--real-media explicitly enables physical camera/microphone devices for interactive evaluation. Default and smoke use synthetic capture.');
   } else {
     runQa(parseQaArguments(process.argv.slice(2)), { log: console.log })
       .catch(error => { console.error(error); process.exitCode = 1; });

@@ -19,6 +19,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
+import { license, copyMonkyLicenses } from './legal.cjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER_DIR = path.join(ROOT, 'apps', 'server');
@@ -47,6 +48,7 @@ export function buildSharedPackageJson(sharedPkg) {
   return {
     name: sharedPkg.name,
     version: sharedPkg.version,
+    license,
     main: sharedPkg.main,
     types: sharedPkg.types,
   };
@@ -60,12 +62,14 @@ export function buildCliPackageJson(serverPkg, sharedPkg, version) {
     ...sharedPkg.dependencies,
     ...serverPkg.dependencies,
     '@monky/shared': sharedPkg.version,
+    'h264-profile-level-id': '2.3.3',
+    debug: '^4.4.3',
   };
   return {
     name: serverPkg.name,
     version,
     description: 'Monky CLI — self-hosted voice, video and chat server',
-    license: 'MIT',
+    license,
     repository: { type: 'git', url: 'https://github.com/MonkyOrg/Monky.git' },
     homepage: 'https://github.com/MonkyOrg/Monky#readme',
     main: serverPkg.main,
@@ -75,8 +79,19 @@ export function buildCliPackageJson(serverPkg, sharedPkg, version) {
     // supports-color) declare `>=22`, so the CLI cannot honestly claim Node 20.
     engines: { node: '>=22' },
     dependencies,
-    bundleDependencies: ['@monky/shared'],
+    bundleDependencies: ['@monky/shared', 'h264-profile-level-id'],
   };
+}
+
+export function bundleH264Dependency(staging, dependencyRoot) {
+  const require = createRequire(import.meta.url);
+  const source = dependencyRoot ?? path.dirname(require.resolve('h264-profile-level-id/package.json'));
+  const manifest = readJson(path.join(source, 'package.json'));
+  const h264 = require(path.join(source, 'lib', 'index.js'));
+  if (manifest.version !== '2.3.3' || h264.parseProfileLevelId('4d003c')?.level !== 60) {
+    throw new Error('CLI packaging requires the maintained H264 Level 6 dependency patch. Run npm install.');
+  }
+  fs.cpSync(source, path.join(staging, 'node_modules', 'h264-profile-level-id'), { recursive: true });
 }
 
 function main() {
@@ -94,12 +109,14 @@ function main() {
   }
   const require = createRequire(import.meta.url);
   const { PROTOCOL_VERSION } = require(path.join(sharedDist, 'constants.js'));
+  const { MIN_CLIENT_PROTOCOL, MIN_BOT_PROTOCOL } = require(path.join(sharedDist, 'protocolCompatibility.js'));
 
   const staging = path.join(ROOT, 'release', 'cli-pack');
   fs.rmSync(staging, { recursive: true, force: true });
   fs.mkdirSync(staging, { recursive: true });
 
   fs.cpSync(serverDist, path.join(staging, 'dist'), { recursive: true });
+  copyMonkyLicenses(staging);
 
   // tsc leaves the .sql files behind, and DatabaseConnection looks for them
   // next to the compiled output first.
@@ -113,6 +130,7 @@ function main() {
 
   const bundledShared = path.join(staging, 'node_modules', '@monky', 'shared');
   fs.mkdirSync(bundledShared, { recursive: true });
+  copyMonkyLicenses(bundledShared);
   fs.cpSync(sharedDist, path.join(bundledShared, 'dist'), { recursive: true });
   fs.writeFileSync(
     path.join(bundledShared, 'package.json'),
@@ -123,6 +141,7 @@ function main() {
     path.join(staging, 'package.json'),
     JSON.stringify(buildCliPackageJson(serverPkg, sharedPkg, version), null, 2) + '\n'
   );
+  bundleH264Dependency(staging);
 
   // The CLI reference lives in the documentation site, which is also what the
   // published package shows on npm.
@@ -156,6 +175,8 @@ function main() {
     version,
     protocolVersion: PROTOCOL_VERSION,
     botSdkVersion: version,
+    minimumClientProtocol: MIN_CLIENT_PROTOCOL,
+    minimumBotProtocol: MIN_BOT_PROTOCOL,
   }, null, 2) + '\n');
 
   console.log(`[pack-cli] ${migrations.length} migration(s) bundled`);

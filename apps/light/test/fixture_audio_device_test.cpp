@@ -1,8 +1,11 @@
 #include "fixture_audio_device.hpp"
 #include "fixture_audio_clock.hpp"
+#include "media/policy_audio_device.hpp"
 
+#include <api/make_ref_counted.h>
 #include <media/engine/adm_helpers.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -298,7 +301,7 @@ void CheckDuplexAndStop() {
               device->StartRecording() == -1, "Termination releases the borrowed transport");
 }
 
-void CheckRealtimeCadence() {
+void CheckRealtimeCadence(std::chrono::milliseconds stall = 0ms) {
   const std::chrono::steady_clock::time_point epoch{};
   auto clock = AdvanceFixtureAudioDeadline(epoch, epoch + 1ms);
   Require(clock.next == epoch + 10ms && clock.discarded_frames == 0,
@@ -322,24 +325,40 @@ void CheckRealtimeCadence() {
   Transport transport;
   auto device = FixtureAudioDevice::Create();
   Prepare(*device, transport);
+  if (stall > 0ms) transport.Block(Transport::Direction::recording);
   const auto started = std::chrono::steady_clock::now();
   Require(device->StartRecording() == 0 && device->StartPlayout() == 0,
           "Start realtime synthetic PCM");
+  if (stall > 0ms) {
+    const bool entered = transport.WaitBlocked();
+    if (entered) std::this_thread::sleep_for(stall);
+    transport.Release();
+    Require(entered, "Inject a bounded stall in the real synthetic audio worker");
+  }
   const bool reached = transport.WaitFor(200, 200);
+  Require(device->Terminate() == 0, "Release synthetic timing and device worker");
   const auto elapsed = std::chrono::steady_clock::now() - started;
   const auto observed = transport.Snapshot();
-  Require(device->Terminate() == 0, "Release synthetic timing and device worker");
-  if (!reached || elapsed < 1750ms || elapsed > 2600ms) {
-    const auto timing = device->Snapshot();
+  const auto timing = device->Snapshot();
+  // The device clock also advances through frames discarded during scheduler stalls.
+  const auto scheduled = kFixtureAudioPeriod *
+      (std::max(timing.recording_callbacks, timing.playout_callbacks) +
+       timing.discarded_clock_frames);
+  const bool paced = elapsed + 250ms >= scheduled && elapsed <= scheduled + 600ms;
+  if (!reached || !paced) {
     std::cerr << "Synthetic cadence: " << observed.recording << " capture / "
               << observed.playout << " playout callbacks in "
               << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
+              << " ms; scheduled=" << scheduled.count()
               << " ms; waiting=" << timing.waiting_ms << " ms; processing="
               << timing.processing_ms << " ms; discarded="
               << timing.discarded_clock_frames << " frames\n";
   }
-  Require(reached && elapsed >= 1750ms && elapsed <= 2600ms,
+  Require(reached && paced,
           "Synthetic PCM must maintain its realtime 10 ms device clock");
+  Require(stall == 0ms ||
+              kFixtureAudioPeriod * timing.discarded_clock_frames >= stall - kFixtureAudioPeriod,
+          "A forced stall must discard expired device frames, not slow the clock");
 }
 
 void CheckCallbackRemovalAndReplacement() {
@@ -399,6 +418,56 @@ void CheckInflightStopAndTerminate(bool terminate) {
   std::this_thread::sleep_for(30ms);
   Require(device->Snapshot().playout_callbacks == stopped.playout_callbacks,
           "No counter updates after draining stop/terminate");
+}
+
+void CheckDeviceSelection() {
+  const auto catalog = std::make_shared<FixtureDeviceCatalog>();
+  catalog->Set({{"mic-a", "Mic A"}, {"mic-b", "Mic B"}}, {{"out-a", "Out A"}, {"out-b", "Out B"}});
+  Transport transport;
+  auto device = FixtureAudioDevice::Create(catalog);
+  const auto listed = media::EnumerateDevices(*device);
+  Require(listed.inputs.size() == 2 && listed.inputs[1].id == "mic-b" && listed.inputs[1].name == "Mic B" &&
+              listed.outputs.size() == 2 && listed.outputs[0].id == "out-a",
+          "Enumeration must report catalog IDs and names");
+  webrtc::adm_helpers::Init(device.get());
+  auto policy = webrtc::make_ref_counted<media::PolicyAudioDevice>(device);
+  transport.device = device.get();
+  Require(policy->RegisterAudioCallback(&transport) == 0, "Register policy transport");
+
+  Require(policy->SelectDevices({std::string("mic-b"), std::nullopt}) == 0 &&
+              device->Snapshot().selected_input == "mic-b" && device->Snapshot().selected_output == "out-a" &&
+              policy->input_selection().id == "mic-b" && policy->input_selection().name == "Mic B" &&
+              !policy->input_selection().fallback && policy->output_selection().id.empty(),
+          "A present device is selected; nullopt uses the default");
+  Require(policy->SetPolicy(true, true) == 0 && policy->StartRecording() == 0 &&
+              policy->StartPlayout() == 0 && transport.WaitFor(3, 3),
+          "Selected devices start");
+
+  Require(policy->SelectDevices({std::string("mic-a"), std::string("out-b")}) == 0 &&
+              device->Recording() && device->Playing() &&
+              device->Snapshot().selected_input == "mic-a" && device->Snapshot().selected_output == "out-b",
+          "Switching running directions restarts them on the new devices");
+  const auto switched = transport.Snapshot();
+  Require(transport.WaitFor(switched.recording + 3, switched.playout + 3), "Audio continues after a switch");
+
+  catalog->Set({{"mic-b", "Mic B"}}, {{"out-a", "Out A"}, {"out-b", "Out B"}});
+  Require(policy->SelectDevices({std::string("mic-a"), std::string("out-b")}) == 0 &&
+              device->Recording() && device->Snapshot().selected_input == "mic-b" &&
+              policy->input_selection().fallback && policy->input_selection().id.empty() &&
+              policy->input_selection().requested == std::optional<std::string>("mic-a"),
+          "A removed device falls back to the default and keeps capturing");
+  catalog->Set({{"mic-b", "Mic B"}, {"mic-a", "Mic A"}}, {{"out-a", "Out A"}, {"out-b", "Out B"}});
+  Require(policy->SelectDevices({std::string("mic-a"), std::string("out-b")}) == 0 &&
+              device->Snapshot().selected_input == "mic-a" && !policy->input_selection().fallback,
+          "A reconnected preferred device is selected again");
+
+  Require(policy->SetPolicy(false, true) == 0 && !device->Recording(), "Mute stops capture");
+  Require(policy->SelectDevices({std::string("mic-b"), std::string("out-b")}) == 0 &&
+              !device->Recording() && device->Snapshot().selected_input == "mic-b",
+          "Switching the input while muted must not reopen capture");
+  Require(policy->SetPolicy(true, true) == 0 && device->Recording(), "Unmute resumes on the new device");
+  Require(policy->SetPolicy(false, false) == 0 && policy->Terminate() == 0, "Release the selection device");
+  Require(policy->RegisterAudioCallback(nullptr) == 0, "Detach the policy transport");
 }
 
 void CheckFailures() {
@@ -471,9 +540,11 @@ int main() {
     CheckNativeInitialization();
     CheckDuplexAndStop();
     CheckRealtimeCadence();
+    CheckRealtimeCadence(std::chrono::milliseconds(700));
     CheckCallbackRemovalAndReplacement();
     CheckInflightStopAndTerminate(false);
     CheckInflightStopAndTerminate(true);
+    CheckDeviceSelection();
     CheckFailures();
     CheckDestruction();
     CheckTransportDestructionAfterRemoval();

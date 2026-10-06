@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Comandos exibem uma indicação de carregamento enquanto verificam permissões e ferramentas locais, deixando claro por que os campos ainda não estão disponíveis.",
+  "en": "Commands show a loading indicator while checking local permissions and tools, making it clear why their fields are not available yet."
+}

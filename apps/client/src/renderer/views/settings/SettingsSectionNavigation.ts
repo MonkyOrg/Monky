@@ -1,4 +1,5 @@
-import { scrollWithin } from '../../utils/scroll';
+import { scrollWithin, smoothScrollTo } from '../../utils/scroll';
+import { animateEnter, cancelSurfaceMotion, motionDuration } from '../../utils/surfaceMotion';
 
 interface SectionLink {
   target: HTMLElement;
@@ -124,16 +125,21 @@ export class SettingsSectionNavigation {
     if (!panel || !this.menus.has(tab)) return;
     const changed = this.activeTab !== tab;
     if (this.panel !== panel) {
-      if (this.panel) this.resizeObserver.unobserve(this.panel);
+      const previousPanel = this.panel;
+      if (this.panel) {
+        cancelSurfaceMotion(this.panel);
+        this.resizeObserver.unobserve(this.panel);
+      }
       this.panel = panel;
       this.resizeObserver.observe(panel);
+      if (changed && previousPanel) animateEnter(panel, 'panel');
     }
     this.activeTab = tab;
     this.scrollingTo = null;
     for (const [key, group] of this.menus) {
       if (key !== tab) this.setExpanded(group, false);
     }
-    if (changed) this.body.scrollTo({ top: 0, behavior: 'instant' });
+    if (changed) smoothScrollTo(this.body, { top: 0 });
     this.refresh();
   }
 
@@ -177,7 +183,7 @@ export class SettingsSectionNavigation {
       opacity: expanded ? '1' : '0',
       marginTop: expanded ? natural.marginTop : `${collapsedMargin}px`,
       marginBottom: expanded ? natural.marginBottom : `${collapsedMargin}px`,
-    }], { duration: 240, easing: 'cubic-bezier(0.2, 0, 0, 1)', fill: 'both' });
+    }], { duration: motionDuration('step'), easing: 'cubic-bezier(0.2, 0, 0, 1)', fill: 'both' });
     group.animation = animation;
     animation.onfinish = () => {
       if (group.animation === animation) this.finishMenuMotion(group);
@@ -295,6 +301,7 @@ export class SettingsSectionNavigation {
     if (this.frame !== null) cancelAnimationFrame(this.frame);
     this.frame = null;
     this.observer.disconnect();
+    if (this.panel) cancelSurfaceMotion(this.panel);
     this.resizeObserver.disconnect();
     for (const group of this.menus.values()) this.finishMenuMotion(group);
     this.unbind.forEach((off) => off());

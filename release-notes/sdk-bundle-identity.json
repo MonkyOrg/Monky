@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Corrigida a inicialização de voz de bots criados ou distribuídos com o SDK. O empacotamento agora preserva corretamente as dependências compartilhadas.",
+  "en": "Fixed voice startup for bots created or distributed with the SDK. Packaging now correctly preserves shared dependencies."
+}

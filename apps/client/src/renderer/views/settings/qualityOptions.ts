@@ -78,7 +78,7 @@ export const ASPECT_RATIO_GROUPS: AspectRatioGroup[] = [
 ];
 
 /** From the least to the most demanding, all of them realistic for WebRTC. */
-export const FPS_OPTIONS = [5, 10, 15, 20, 24, 30, 48, 60, 90, 120];
+export const FPS_OPTIONS = [5, 10, 15, 20, 24, 30, 48, 60, 90, 120, 144, 165, 240];
 
 /** Opus does the work here, so the range mirrors what Opus is usually run at. */
 export const AUDIO_BITRATE_OPTIONS = [16, 24, 32, 48, 64, 96, 128, 192, 256, 320];
@@ -86,6 +86,8 @@ export const AUDIO_BITRATE_OPTIONS = [16, 24, 32, 48, 64, 96, 128, 192, 256, 320
 export const VIDEO_BITRATE_OPTIONS = [
   250, 500, 800, 1200, 1500, 2000, 2500, 3500, 5000, 6000, 8000, 12000, 16000, 20000,
 ];
+
+export const SCREEN_BITRATE_OPTIONS = [...VIDEO_BITRATE_OPTIONS, 30000, 40000, 60000, 80000];
 
 export function formatResolution(option: ResolutionOption): string {
   return option.tag ? `${option.width}×${option.height} (${option.tag})` : `${option.width}×${option.height}`;

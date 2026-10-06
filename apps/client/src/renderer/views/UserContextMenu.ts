@@ -1,4 +1,4 @@
-import { AdminDeafenUserPayload, AdminMuteUserPayload, AdminVoiceRestrictionsGetPayload, MessageType, Permission, UserSummary, voiceRestrictionsUpdatedSchema } from '@monky/shared';
+import { AdminDeafenUserPayload, AdminMuteUserPayload, AdminVoiceRestrictionsGetPayload, MessageType, normalizePublicKeyHex, Permission, UserSummary, voiceRestrictionsUpdatedSchema } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { activityIconSrc } from '../utils/activityIcon';
 import { avatarFileExtension, getAvatarUrl } from '../utils/avatar';
@@ -16,8 +16,11 @@ import { showAlert } from './Dialog';
 import { downloadLightboxFile, lightboxModal } from './LightboxModal';
 import { warnIfMoveBlocked } from '../utils/channelAccess';
 import { t } from '../i18n';
+import { animateEnter, ownSurface, removeWithMotion, topModal } from '../utils/surfaceMotion';
+import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { botSettingsMenuItem } from './BotSettingsModal';
-import { showInfoToast } from './CopyToast';
+import { dmStore } from '../stores/dmStore';
+import { confirmBlock, openDirectMessage, reportDmFailure, sendFriendRequest } from './home/friendActions';
 
 export class UserContextMenu {
   private menuEl: HTMLElement | null = null;
@@ -35,7 +38,9 @@ export class UserContextMenu {
     const hasAvatar = !!user.avatarUrl;
     // Kick and move still require a live voice connection; mute/deafen target the identity.
     const targetState = this.resolveVoiceTarget(user)?.voiceState;
-    const voiceChannels = (serverStore.serverDetails?.channels ?? []).filter((channel) => channel.type === 'VOICE');
+    const targetPermissionMuted = !!targetState?.permissionMuted;
+    const voiceChannels = (serverStore.serverDetails?.channels ?? []).filter((channel) =>
+      channel.type === 'VOICE' && serverStore.hasPermission(Permission.MOVE_MEMBERS));
     const roleIds = new Set(serverStore.getUserRoleIds(user.id));
     const manageableRoles = serverStore.roles
       .filter((role) => !role.isDefault && !serverStore.isAdminRole(role))
@@ -98,6 +103,8 @@ export class UserContextMenu {
         </div>
       </div>
       ` : ''}
+
+      ${this.renderFriendSection(user, isSelf)}
 
       ${user.isBot ? `<button type="button" class="btn btn-secondary" data-action="bot-settings">
         <span class="material-symbols-outlined md-18" aria-hidden="true">settings</span>
@@ -218,9 +225,12 @@ export class UserContextMenu {
 
     this.menuEl.style.left = `${posX}px`;
     this.menuEl.style.top = `${posY}px`;
+    const owner = topModal();
+    if (owner) this.unbindGlobalListeners.push(ownSurface(this.menuEl, owner));
+    animateEnter(this.menuEl);
 
     this.syncSubmenuPlacement();
-    this.attachEvents(user);
+    this.attachEvents(user, targetPermissionMuted);
   }
 
   private syncSubmenuPlacement(): void {
@@ -315,7 +325,7 @@ export class UserContextMenu {
     }
   }
 
-  private async attachModerationEvents(user: UserSummary): Promise<void> {
+  private async attachModerationEvents(user: UserSummary, targetPermissionMuted = false): Promise<void> {
     const menu = this.menuEl;
     const mute = menu?.querySelector<HTMLButtonElement>('[data-action="server-mute"]');
     const deafen = menu?.querySelector<HTMLButtonElement>('[data-action="server-deafen"]');
@@ -335,8 +345,10 @@ export class UserContextMenu {
         if (this.menuEl !== menu) return;
         if (mute) {
           mute.textContent = t(restrictions.serverMuted ? 'userMenu.serverUnmute' : 'userMenu.serverMute');
-          mute.disabled = busy;
+          const blockedUnmute = targetPermissionMuted && restrictions.serverMuted;
+          mute.disabled = busy || blockedUnmute;
           mute.setAttribute('aria-busy', String(busy));
+          mute.title = blockedUnmute ? t('permissions.permissionMuted') : '';
         }
         if (deafen) {
           deafen.textContent = t(restrictions.serverDeafened ? 'userMenu.serverUndeafen' : 'userMenu.serverDeafen');
@@ -385,6 +397,71 @@ export class UserContextMenu {
       );
   }
 
+  /** Public key of a person who can be befriended from this menu (#743). */
+  private friendTarget(user: UserSummary, isSelf: boolean): string | null {
+    if (isSelf || user.isBot || !user.publicKey || !dmStore.available) return null;
+    try {
+      const key = normalizePublicKeyHex(user.publicKey);
+      return key === dmStore.snapshot.me?.publicKey ? null : key;
+    } catch {
+      return null;
+    }
+  }
+
+  private renderFriendSection(user: UserSummary, isSelf: boolean): string {
+    const key = this.friendTarget(user, isSelf);
+    if (!key) return '';
+    const peer = dmStore.peer(key);
+    const button = (action: string, icon: string, label: string, danger = false) => `
+      <button type="button" class="btn btn-secondary context-menu-friend-action${danger ? ' context-menu-friend-action--danger' : ''}" data-friend-action="${action}">
+        <span class="material-symbols-outlined md-16" aria-hidden="true">${icon}</span>
+        <span>${escapeHtml(label)}</span>
+      </button>`;
+    const buttons: string[] = [];
+    if (peer?.blocked) {
+      buttons.push(button('unblock', 'lock_open', t('home.unblockUser')));
+    } else {
+      switch (peer?.relation) {
+        case 'friend':
+          buttons.push(button('message', 'chat', t('dm.sendMessage')));
+          break;
+        case 'incoming':
+          buttons.push(button('accept', 'person_add', t('home.acceptRequest')), button('decline', 'person_remove', t('home.declineRequest')));
+          break;
+        case 'outgoing':
+          buttons.push(button('cancel', 'close', t('home.cancelRequest')));
+          break;
+        default:
+          buttons.push(button('add', 'person_add', t('dm.addFriend')));
+      }
+      buttons.push(button('block', 'block', t('home.blockUser'), true));
+    }
+    return `<div class="context-menu-friend-actions">${buttons.join('')}</div><div class="context-menu-divider"></div>`;
+  }
+
+  private attachFriendEvents(user: UserSummary): void {
+    const key = this.friendTarget(user, this.isSelf(user));
+    if (!key || !this.menuEl) return;
+    const avatar = user.avatarUrl ? getAvatarUrl(user.avatarUrl) : null;
+    this.menuEl.querySelectorAll<HTMLButtonElement>('[data-friend-action]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const action = button.dataset.friendAction;
+        this.close();
+        // Keeps the server nickname/avatar so Home can show this person later.
+        dmStore.observe(key, user.nickname, avatar);
+        switch (action) {
+          case 'add': void sendFriendRequest(key, user.nickname); break;
+          case 'message': openDirectMessage(key); break;
+          case 'accept': void reportDmFailure(dmStore.acceptFriend(key), key, user.nickname); break;
+          case 'decline': void reportDmFailure(dmStore.declineFriend(key), key, user.nickname); break;
+          case 'cancel': void reportDmFailure(dmStore.cancelFriendRequest(key), key, user.nickname); break;
+          case 'unblock': void reportDmFailure(dmStore.unblock(key), key, user.nickname); break;
+          case 'block': void confirmBlock({ publicKey: key, nickname: user.nickname }); break;
+        }
+      });
+    });
+  }
+
   private updateSelfControls(): void {
     const mute = this.menuEl?.querySelector<HTMLButtonElement>('[data-action="self-mute"]');
     const deafen = this.menuEl?.querySelector<HTMLButtonElement>('[data-action="self-deafen"]');
@@ -392,6 +469,7 @@ export class UserContextMenu {
       mute.textContent = t(voiceStore.isMuted ? 'stage.unmuteMic' : 'stage.muteMic');
       mute.setAttribute('aria-pressed', String(voiceStore.isMuted));
       mute.title = getVoiceControlModeration().muteReason ?? mute.textContent;
+      mute.disabled = voiceStore.permissionMuted;
     }
     if (deafen) {
       deafen.textContent = t(voiceStore.isDeafened ? 'main.undeafen' : 'main.deafen');
@@ -425,8 +503,9 @@ export class UserContextMenu {
     return user.sessionId || this.resolveVoiceTarget(user)?.user.sessionId || '';
   }
 
-  private attachEvents(user: UserSummary): void {
+  private attachEvents(user: UserSummary, targetPermissionMuted = false): void {
     if (!this.menuEl) return;
+    this.attachFriendEvents(user);
 
     if (user.isBot) {
       const settingsAction = botSettingsMenuItem(user.id, getActiveNetworkClient(), getActiveServerStore());
@@ -480,18 +559,32 @@ export class UserContextMenu {
     // never leaves "Roles" hanging open next to it (#258).
     this.menuEl.querySelectorAll<HTMLElement>('.ctx-submenu-wrap').forEach((wrap) => {
       const trigger = wrap.querySelector<HTMLButtonElement>('.ctx-submenu-trigger');
+      const submenu = wrap.querySelector<HTMLElement>('.ctx-submenu');
+      if (submenu) { submenu.hidden = true; submenu.style.display = 'flex'; }
+      const setOpen = (open: boolean) => {
+        wrap.classList.toggle('open', open);
+        trigger?.setAttribute('aria-expanded', String(open));
+        if (submenu) setSurfaceVisible(submenu, open, 'popover');
+        if (open) this.syncSubmenuVerticalOffset(wrap);
+      };
       trigger?.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
         const willOpen = !wrap.classList.contains('open');
-        this.menuEl?.querySelectorAll('.ctx-submenu-wrap').forEach((other) => other.classList.remove('open'));
-        wrap.classList.toggle('open', willOpen);
-        if (willOpen) this.syncSubmenuVerticalOffset(wrap);
+        this.menuEl?.querySelectorAll<HTMLElement>('.ctx-submenu-wrap').forEach((other) => {
+          if (other === wrap) return;
+          other.classList.remove('open');
+          other.querySelector('.ctx-submenu-trigger')?.setAttribute('aria-expanded', 'false');
+          const panel = other.querySelector<HTMLElement>('.ctx-submenu');
+          if (panel) setSurfaceVisible(panel, false, 'popover');
+        });
+        setOpen(willOpen);
       });
-      wrap.addEventListener('mouseenter', () => this.syncSubmenuVerticalOffset(wrap));
+      wrap.addEventListener('mouseenter', () => setOpen(true));
+      wrap.addEventListener('mouseleave', () => setOpen(false));
     });
 
-    void this.attachModerationEvents(user);
+    void this.attachModerationEvents(user, targetPermissionMuted);
 
     this.menuEl.querySelector('[data-action="kick-voice"]')?.addEventListener('click', () => {
       const state = this.resolveVoiceTarget(user)?.voiceState;
@@ -548,7 +641,9 @@ export class UserContextMenu {
     const handleOutsideClick = (e: MouseEvent | PointerEvent) => {
       if (this.menuEl && !this.menuEl.contains(e.target as Node)) this.close();
     };
-    const handleKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') this.close(); };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); this.close(); }
+    };
     const handleWindowResize = () => this.close();
 
     const listenerTimer = window.setTimeout(() => {
@@ -584,7 +679,7 @@ export class UserContextMenu {
     this.unbindGlobalListeners.forEach((u) => u());
     this.unbindGlobalListeners = [];
     if (this.menuEl) {
-      this.menuEl.remove();
+      removeWithMotion(this.menuEl);
       this.menuEl = null;
     }
   }

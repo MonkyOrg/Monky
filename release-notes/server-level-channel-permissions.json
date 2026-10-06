@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Permissões de canal: Gerenciar canais e Mover membros agora são só do servidor. Ver canal controla quem entra em canais de voz; sem Falar em voz, a pessoa entra com mute administrativo.",
+  "en": "Channel permissions: Manage channels and Move members are now server-only. View channel controls who joins voice channels; without Speak in voice, people join with an administrative mute."
+}

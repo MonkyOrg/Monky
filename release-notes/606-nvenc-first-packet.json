@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Corrigidos o início da captura NVIDIA, o áudio ao substituir uma transmissão e um erro ao parar com vários espectadores. Oscilações pontuais na leitura do relógio agora tentam recuperar o vídeo; avisos de conexão não bloqueiam o jogo.",
+  "en": "Fixed NVIDIA capture startup, audio when replacing a screen share, and a shutdown error with multiple viewers. Transient clock-sampling delays now attempt video recovery; connection notices no longer block the game."
+}

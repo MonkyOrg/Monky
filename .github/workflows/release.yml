@@ -29,7 +29,7 @@ on:
   workflow_dispatch:
     inputs:
       promote_tag:
-        description: 'Beta tag to promote to a stable release (e.g. v1.8.0-beta). Leave empty to build a beta from the current ref.'
+        description: 'Beta tag to promote to stable (e.g. v1.8.0-beta). Run only from main with explicit approval. New betas require a PR merge.'
         required: false
         default: ''
 
@@ -39,6 +39,7 @@ concurrency:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   version:
@@ -51,7 +52,22 @@ jobs:
       channel: ${{ steps.bump.outputs.channel }}
       prerelease: ${{ steps.bump.outputs.prerelease }}
       checkout_ref: ${{ steps.ref.outputs.checkout_ref }}
+      reuse_build: ${{ steps.ci.outputs.reuse }}
+      ci_run_id: ${{ steps.ci.outputs.run_id }}
+      ci_artifacts: ${{ steps.ci.outputs.artifacts }}
     steps:
+      - name: Require merged-main release flow
+        env:
+          RELEASE_EVENT: ${{ github.event_name }}
+          RELEASE_REF: ${{ github.ref }}
+          PROMOTE_TAG: ${{ github.event.inputs.promote_tag }}
+        shell: bash
+        run: |
+          if [ "$RELEASE_REF" != "refs/heads/main" ] || { [ "$RELEASE_EVENT" != "push" ] && [ -z "$PROMOTE_TAG" ]; }; then
+            echo "::error::Publish betas by merging a PR into main, never from a working branch or a manual beta dispatch."
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -62,8 +78,8 @@ jobs:
         with:
           node-version: 22
 
-      # push to main / manual dispatch (no tag) -> beta prerelease.
-      # manual dispatch with a beta tag -> promote that beta to a clean stable.
+      # A PR merge into main produces a beta. Manual dispatch only promotes
+      # an explicitly selected beta from main; it never builds a branch beta.
       - name: Calculate Semantic Version
         id: bump
         env:
@@ -81,6 +97,26 @@ jobs:
             echo "checkout_ref=${{ github.sha }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Require bilingual client release notes before building
+        if: github.event_name == 'push'
+        env:
+          PREV_TAG: ${{ steps.bump.outputs.prev_tag }}
+          CHECKOUT_REF: ${{ steps.ref.outputs.checkout_ref }}
+        run: node scripts/check-client-release-notes.js --base "$PREV_TAG" --head "$CHECKOUT_REF"
+
+      - name: Select approved CI build
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKOUT_REF: ${{ steps.ref.outputs.checkout_ref }}
+          PROMOTE_TAG: ${{ github.event.inputs.promote_tag }}
+        shell: bash
+        run: |
+          commit=$(git rev-parse "${CHECKOUT_REF}^{commit}")
+          args=("$commit")
+          if [ -n "$PROMOTE_TAG" ]; then args+=(--promotion); fi
+          node scripts/ci-build-artifact.js select "${args[@]}"
+
   build:
     name: Build (${{ matrix.platform }})
     needs: version
@@ -90,7 +126,7 @@ jobs:
         include:
           - os: windows-2022
             platform: win
-          - os: macos-latest
+          - os: macos-15
             platform: mac
     runs-on: ${{ matrix.os }}
     steps:
@@ -113,20 +149,75 @@ jobs:
       - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
+        with:
+          vsversion: '2022'
+          toolset: '14.44'
+          sdk: '10.0.26100.0'
 
       - name: Install dependencies
         run: npm ci
 
-      # Upgrade node-gyp so @electron/rebuild can find VS 2022
-      - name: Install node-gyp globally (Windows)
+      - name: Use lockfile node-gyp (Windows)
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          npm install -g node-gyp@latest
-          echo "NODE_GYP_PATH=$(npm prefix -g)/node_modules/node-gyp/bin/node-gyp.js" >> $GITHUB_ENV
+          $NodeGyp = node -p "require.resolve('node-gyp/bin/node-gyp.js')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "NODE_GYP_PATH=$NodeGyp" >> $env:GITHUB_ENV
 
       - name: Build workspaces
+        if: needs.version.outputs.reuse_build != 'true'
         run: npm run build
+
+      - name: Restore approved desktop build
+        if: needs.version.outputs.reuse_build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci-build-artifact.js restore ${{ matrix.platform }} "${{ needs.version.outputs.ci_run_id }}" "${{ fromJSON(needs.version.outputs.ci_artifacts)[matrix.platform] }}"
+
+      - name: Verify macOS DMG packaging dependencies
+        if: runner.os == 'macOS'
+        run: node -e "require('dmg-builder/out/dmgLicense.js')"
+
+      # Legacy/expired artifacts use the original build. Caches remain download-only;
+      # compiled outputs arrive exclusively through the verified CI artifact path.
+      - name: Cache verified native screen archives (Windows)
+        if: needs.version.outputs.reuse_build != 'true' && runner.os == 'Windows' && hashFiles('apps/client/native/screen-share/scripts/prepare.cjs') != ''
+        uses: actions/cache@v4
+        with:
+          path: .native-screen\downloads
+          key: native-screen-archives-v1-release-windows-x64-${{ hashFiles('apps/client/native/screen-share/scripts/fetchObs.cjs', 'apps/client/native/screen-share/scripts/buildTools.cjs', 'apps/client/native/screen-share/src/vendor/obs/sources.json', 'apps/client/native/screen-share/src/vendor/obs/runtime-inputs.json', 'apps/client/native/screen-share/src/capture/runtime-additions.json') }}
+
+      - name: Build native screen runtime and corresponding sources (Windows)
+        if: needs.version.outputs.reuse_build != 'true' && runner.os == 'Windows' && hashFiles('apps/client/native/screen-share/scripts/prepare.cjs') != ''
+        shell: pwsh
+        run: |
+          $env:PYTHON = (Get-Command python).Source
+          "PYTHON=$env:PYTHON" >> $env:GITHUB_ENV
+          $Git = (Get-Command git -CommandType Application | Select-Object -First 1).Source
+          npm run prepare:native-screen -- --python="$env:PYTHON" --git="$Git" --jobs=4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run pack:native-sources -- --version=${{ needs.version.outputs.version }}
+
+      - name: Bind approved corresponding sources to release (Windows)
+        if: needs.version.outputs.reuse_build == 'true' && runner.os == 'Windows'
+        run: npm run pack:native-sources -- --from-ci --version=${{ needs.version.outputs.version }}
+
+      - name: Build native media and corresponding sources (macOS)
+        if: needs.version.outputs.reuse_build != 'true' && runner.os == 'macOS' && hashFiles('apps/client/native/screen-share/scripts/prepareMacRtc.cjs') != ''
+        run: |
+          arch -x86_64 /usr/bin/true
+          node apps/client/native/screen-share/scripts/prepareMacRtc.cjs
+          for architecture in arm64 x64; do
+            node apps/client/native/screen-share/scripts/buildMac.cjs --arch=$architecture
+            node apps/client/native/screen-share/scripts/buildMacRtc.cjs --arch=$architecture
+          done
+          node apps/client/native/screen-share/scripts/notices.cjs --mac
+          node apps/client/native/screen-share/scripts/packMacSources.cjs --version=${{ needs.version.outputs.version }}
+
+      - name: Bind approved corresponding sources to release (macOS)
+        if: needs.version.outputs.reuse_build == 'true' && runner.os == 'macOS'
+        run: node apps/client/native/screen-share/scripts/packMacSources.cjs --from-ci --version=${{ needs.version.outputs.version }}
 
       - name: Set build version
         shell: bash
@@ -183,6 +274,10 @@ jobs:
             release/*.exe
             release/*.dmg
             release/*.zip
+            release/monky-native-sources-*.tar.xz
+            release/monky-native-sources-*.json
+            release/monky-native-macos-sources-*.tar.xz
+            release/monky-native-macos-sources-*.json
             release/*.blockmap
             release/latest*.yml
 
@@ -202,25 +297,40 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Setup Python 3.11 (artifact extraction)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       # The tarball only needs shared + server, so the Electron/native download
       # triggered by the Client's install scripts is skipped here.
       - name: Install dependencies
-        run: npm ci --ignore-scripts
+        run: |
+          npm ci --ignore-scripts
+          npm run postinstall
 
       - name: Build shared and server
+        if: needs.version.outputs.reuse_build != 'true'
         run: |
           npm run build --workspace=packages/shared
           npm run build --workspace=apps/server
 
       - name: Build bot-sdk
+        if: needs.version.outputs.reuse_build != 'true'
         run: npm run build --workspace=packages/bot-sdk
 
+      - name: Restore approved CLI build
+        if: needs.version.outputs.reuse_build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci-build-artifact.js restore cli "${{ needs.version.outputs.ci_run_id }}" "${{ fromJSON(needs.version.outputs.ci_artifacts).cli }}"
+
       - name: Prepare the SFU worker for SDK voice tests
-        if: hashFiles('packages/bot-sdk/test/voice-transport.test.js') != ''
+        if: needs.version.outputs.reuse_build != 'true' && hashFiles('packages/bot-sdk/test/voice-transport.test.js') != ''
         run: npm rebuild mediasoup
 
       - name: Test bot-sdk interactions
-        if: hashFiles('packages/bot-sdk/test/client.test.cjs') != ''
+        if: needs.version.outputs.reuse_build != 'true' && hashFiles('packages/bot-sdk/test/client.test.cjs') != ''
         run: npm run test --workspace=packages/bot-sdk
 
       - name: Pack CLI
@@ -328,13 +438,29 @@ jobs:
       - name: List artifacts
         run: ls -R artifacts
 
+      - name: Verify corresponding sources before publishing binaries
+        id: native_sources
+        run: |
+          if [ -f apps/client/native/screen-share/scripts/packSources.cjs ]; then
+            node scripts/check-native-source-release.js artifacts \
+              "${{ needs.version.outputs.version }}" "${{ steps.changelog.outputs.commit }}"
+            echo "required=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "required=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f apps/client/native/screen-share/scripts/packMacSources.cjs ]; then
+            node scripts/check-native-source-release.js artifacts \
+              "${{ needs.version.outputs.version }}" "${{ steps.changelog.outputs.commit }}" --mac
+            echo "mac_required=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
       - name: Generate checksums and sign artifacts
         run: |
           cd artifacts
-          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.tgz' -o -name 'monky-compatibility-*.json' \) \
+          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.tgz' -o -name '*.tar.xz' -o -name 'monky-native*-sources-*.json' -o -name 'monky-compatibility-*.json' \) \
             -exec sha256sum {} + | sort > checksums-sha256.txt
           echo "=== Checksums ==="
           cat checksums-sha256.txt
@@ -374,6 +500,10 @@ jobs:
               npm install https://github.com/MonkyOrg/Monky/releases/download/v${{ needs.version.outputs.version }}/monky-bot-sdk-${{ needs.version.outputs.version }}.tgz
               ```
 
+            ${{ steps.native_sources.outputs.required == 'true' && format('**Fontes correspondentes (GPL)**: código Monky da mesma tag e `monky-native-sources-{0}.tar.xz`, acompanhado do manifesto JSON. O arquivo inclui fontes nativas, bibliotecas OBS/FFmpeg, receitas e patches; os checksums abaixo também cobrem esses arquivos.', needs.version.outputs.version) || '' }}
+
+            ${{ steps.native_sources.outputs.mac_required == 'true' && format('**Fontes nativas macOS**: `monky-native-macos-sources-{0}.tar.xz` e seu manifesto incluem o SDK WebRTC utilizado nas duas arquiteturas e as modificações nativas correspondentes.', needs.version.outputs.version) || '' }}
+
             ### Verificação de autenticidade
             Todos os artefatos são assinados com [Sigstore Cosign](https://docs.sigstore.dev/) (keyless, via OIDC do GitHub Actions).
 
@@ -391,7 +521,7 @@ jobs:
             ```
 
             ${{ steps.changelog.outputs.notes }}
-          draft: false
+          draft: true
           prerelease: ${{ needs.version.outputs.prerelease }}
           fail_on_unmatched_files: false
 
@@ -408,7 +538,7 @@ jobs:
         run: |
           cd artifacts
           shopt -s nullglob
-          FILES=( *.exe *.dmg *.zip *.tgz *.blockmap latest*.yml monky-compatibility-*.json checksums-sha256.txt* )
+          FILES=( *.exe *.dmg *.zip *.tgz *.tar.xz *.blockmap latest*.yml monky-native*-sources-*.json monky-compatibility-*.json checksums-sha256.txt* )
           if [ ${#FILES[@]} -eq 0 ]; then
             echo "No artifacts to upload." >&2
             exit 1
@@ -437,3 +567,9 @@ jobs:
             exit 1
           fi
           echo "All ${#FILES[@]} assets published."
+
+      - name: Publish the verified release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.version.outputs.version }}
+        run: gh release edit "$TAG" --draft=false

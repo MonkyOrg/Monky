@@ -2,6 +2,9 @@
 
 Ferramenta de linha de comando para criar e administrar servidores Monky.
 
+Este é o **CLI do servidor**, não o CLI gerado para um bot. Para empacotar
+e operar seu próprio bot, consulte [Distribuição de bots](/bots-distribuicao).
+
 ```
 monky <comando> [subcomando] [opções]
 ```
@@ -83,18 +86,23 @@ monky --data /srv/monky-amigos restart
 
 ## Idioma do CLI
 
-O primeiro comando executado em um terminal interativo pergunta **English** ou
+O primeiro comando executado em um terminal interativo pergunta **English (US)** ou
 **Português (Brasil)** e salva a escolha em `~/.monky/cli-config.json`.
 `monky`, `--help` e `--version` não fazem essa pergunta nem salvam preferências.
 Comandos em scripts ou com entrada/saída redirecionada também não perguntam
 nem alteram o idioma salvo.
 
-Para trocar a preferência depois, use o comando explícito:
+Para trocar depois, abra `monky config` e escolha **Idioma / Language**, ou use:
 
 ```bash
-monky --lang pt-BR
-monky --lang en-US
+monky config language pt-BR
+monky config language en-US
 ```
+
+Essa configuração funciona sem criar ou escolher um servidor. O menu seguinte
+já usa o novo idioma; identidade, banco e configuração do servidor não mudam.
+`monky config language` sem código abre a escolha em um terminal; em scripts,
+apenas consulta. O atalho `monky --lang pt-BR|en-US` continua disponível.
 
 `en-US` é normalizado para `en`; variantes de inglês e português, incluindo
 `pt_BR.UTF-8`, usam os catálogos `en` e `pt-BR`. Um código não suportado,
@@ -154,7 +162,7 @@ valores como `true`, `false`, `p2p` e `sfu` não são traduzidos.
 
 ---
 
-# Referência de comandos
+## Referência de comandos
 
 ## `monky create`
 
@@ -170,7 +178,8 @@ Após a escolha inicial de idioma, quando necessária, o comando pergunta:
 1. **Onde guardar os dados** — sugere `./data`, mas você pode informar qualquer
    caminho. Se já houver um servidor na pasta escolhida, ele pede outra.
 2. **Código de identidade do dono** (`MONKY-ID:...`) — exporte pelo app Monky em
-   *Configurações → Identidade → Exportar*.
+   *Configurações → Meu Perfil → Identidade*. Trate o backup e a senha como
+   credenciais: use-os somente em uma máquina de administração confiável.
 3. **Senha da identidade** — a que você definiu ao exportar.
 4. **Nome do servidor**
 5. **Porta do servidor** (padrão: `3000`)
@@ -363,8 +372,11 @@ uma consulta não tem efeito colateral, então não faz sentido perguntar.
 O status detalhado de um servidor em execução também informa se há bots com
 protocolo incompatível ou ainda não verificado. Esses avisos aparecem após
 `monky start` e `monky restart` e orientam a atualizar ou conferir o SDK dos
-bots. Se o servidor ainda estiver iniciando ou `/preview` não responder, o CLI
-informa que não conseguiu consultar a compatibilidade; consulte novamente com
+bots. Após iniciar ou reiniciar (inclusive depois de `monky update`), o CLI
+repete a consulta por até 10 segundos enquanto `/preview` não responde,
+encerrando a espera assim que recebe os dados. Se o prazo esgotar ou a resposta
+não incluir dados válidos de compatibilidade, informa que não conseguiu
+consultá-la; consulte novamente com
 `monky status --data <pasta>`.
 
 O `monky list` e a tabela de vários servidores mantêm esses avisos junto ao
@@ -524,10 +536,13 @@ do servidor não pode ser removido de um membro.
 
 ## `monky config`
 
-Exibe ou altera a configuração do servidor.
+Em um terminal, abre as configurações do CLI, incluindo idioma e acesso à
+configuração do servidor. Sem TTY ou em CI, mantém a consulta direta do servidor.
 
 ```bash
-monky config                        # exibe tudo
+monky config                        # menu de configurações em um terminal
+monky config show                   # exibe diretamente os dados do servidor
+monky config language en-US         # idioma do CLI, mesmo sem servidor
 monky config set                    # escolhe a chave interativamente
 monky config set <chave> [valor]    # altera direto
 ```
@@ -541,6 +556,7 @@ monky config set <chave> [valor]    # altera direto
 | `port` | Porta TCP | `3000` |
 | `icon` | Caminho de uma imagem, copiada para a pasta de dados. Vazio ou `clear` remove | sem ícone |
 | `maxUsers` | Máximo de membros cadastrados. `0` remove o limite | `20` |
+| `maxMessageLength` | Caracteres por mensagem. `0` remove o limite de caracteres; o teto técnico de 8 MiB por pacote permanece | `16000` |
 | `allowSoundboard` | Permite o soundboard (`true`/`false`) | `true` |
 | `allowEveryoneMention` | Permite `@todos`/`@everyone` no chat (`true`/`false`) | `true` |
 | `maxAttachmentFileBytes` | Tamanho máximo por anexo, em bytes | sem limite |
@@ -556,7 +572,7 @@ Alterar `voiceMode` aplica dinamicamente e notifica todos os clientes conectados
 ### Exemplos
 
 ```bash
-monky config
+monky config show
 monky config set name "Servidor dos Amigos"
 monky config set voiceMode sfu      # ativa modo SFU com estimativa de capacidade
 monky config set password           # digitada de forma oculta

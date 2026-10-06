@@ -21,6 +21,7 @@ export const zerotierTutorial: TutorialDefinition = {
     {
       title: 'tutorial.zerotier.step4.title',
       content: 'tutorial.zerotier.step4.content',
+      images: [{ shot: 'add-server-create', alt: 'tutorial.shotCreateAlt' }, { shot: 'invite-zerotier', alt: 'tutorial.shotInviteAlt' }],
       tip: 'tutorial.zerotier.step4.tip',
     },
   ],

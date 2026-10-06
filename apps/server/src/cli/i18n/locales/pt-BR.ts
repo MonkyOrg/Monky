@@ -59,6 +59,7 @@ export const ptBR = {
   'create.serverNotFound': 'Servidor não encontrado.',
   'create.alreadyHasOwner': 'Este servidor já possui um owner configurado.',
   'create.bootstrapFailed': 'Falha ao atualizar o usuário bootstrap.',
+  'create.identityCollision': 'O clientId desta identidade coincide com outro membro, mas a chave pública é diferente. A entrada foi recusada por segurança.',
   'create.adminRoleNotFound': 'Cargo Admin não encontrado.',
   'create.ownerConfigured': 'Dono do servidor configurado com sucesso.',
   'create.askDataDir': 'Onde guardar os dados do servidor',
@@ -198,7 +199,7 @@ export const ptBR = {
   'roles.deleted': 'Cargo {name} removido com sucesso.',
   'roles.selectToRemove': 'Selecione o cargo para remover:',
   'roles.selectToAssign': 'Selecione o cargo para atribuir:',
-  'roles.permissionsLabel': 'Permissões do cargo:',
+  'roles.permissionsLabel': 'Permissões que o cargo concede (somam-se às de Todos):',
 
   // ── Server Lifecycle ───────────────────────────────────────────────────
   'lifecycle.migratingPm2': 'Migrando o processo PM2 antigo ("monky-server") para o novo formato...',
@@ -347,6 +348,10 @@ export const ptBR = {
   'label.password': 'Senha do servidor',
   'label.hasPassword': 'Protegido por senha',
   'label.maxUsers': 'Limite de membros',
+  'label.maxMessageLength': 'Caracteres por mensagem (0 = sem limite)',
+  'label.messageDeleteUndoSeconds': 'Prazo para desfazer exclusões (segundos)',
+  'config.invalidDeleteUndo': 'Informe um número inteiro entre 1 e 86400 segundos.',
+  'config.invalidMessageLimit': 'Informe um inteiro não negativo; 0 remove o limite de caracteres.',
   'label.ownerUserId': 'ID do dono',
   'label.ownerNickname': 'Apelido do dono',
   'label.allowSoundboard': 'Permitir soundboard',
@@ -388,6 +393,7 @@ export const ptBR = {
   'validation.roleColor': 'Cor inválida. Use o formato #RRGGBB.',
   'validation.voiceMode': 'Modo de voz inválido: {value}. Use p2p ou sfu.',
   'permission.MANAGE_CHANNELS': 'Gerenciar canais',
+  'permission.VIEW_CHANNEL': 'Ver canais',
   'permission.MANAGE_SERVER': 'Gerenciar servidor',
   'permission.MANAGE_ROLES': 'Gerenciar cargos',
   'permission.KICK_MEMBERS': 'Expulsar membros',
@@ -404,6 +410,8 @@ export const ptBR = {
   'permission.USE_BOT_COMMANDS': 'Usar comandos de bots',
   'permission.CONFIGURE_BOTS': 'Configurar bots',
   'permission.VIEW_SERVER_MONITOR': 'Visualizar monitor do servidor',
+  'permission.MANAGE_EVENTS': 'Gerenciar eventos',
+  'permission.EMIT_LIVE_ACTIONS': 'Emitir live actions',
 
   // ── Voice mode comparison ──────────────────────────────────────────────
   'voice.data': 'Dado',
@@ -425,6 +433,12 @@ export const ptBR = {
 
   // ── Language setup ─────────────────────────────────────────────────────
   'language.selectPrompt': 'Select your language / Selecione seu idioma:',
+  'language.current': 'Idioma do CLI: {language}.',
+  'language.configUsage': 'Use monky config language [pt-BR|en-US].',
+  'cliSettings.title': 'Configurações',
+  'cliSettings.language': 'Idioma / Language',
+  'cliSettings.server': 'Mostrar configuração do servidor',
+  'cliSettings.back': 'Voltar',
   'language.invalidSelection': 'Escolha 1 (English), 2 (Português) ou um código: en, en-US, pt-BR.',
   'language.saved': 'Idioma do CLI salvo: {language}.',
   'language.missingValue': 'Informe um idioma após --lang (en, en-US ou pt-BR).',

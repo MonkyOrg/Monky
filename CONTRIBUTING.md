@@ -5,7 +5,7 @@
 Obrigado pelo interesse! Este documento explica como propor ideias, votar no que
 vem primeiro e — se você quiser codar — como abrir um PR que entra sem atrito.
 
-O Monky é MIT e o desenvolvimento acontece todo em público, nas
+O Monky é GPL-3.0-or-later e o desenvolvimento acontece todo em público, nas
 [Issues](https://github.com/MonkyOrg/Monky/issues).
 
 ---
@@ -94,17 +94,48 @@ primeiro* — num bug a pergunta é apenas *isso está quebrado?*.
 
 ### Rodando o projeto
 
-Requisitos: **Node.js 22+** e as ferramentas de build nativas da sua plataforma
-(o módulo de captura de áudio de tela é C++: MSVC no Windows, Xcode Command Line
-Tools no macOS).
+Requisitos: **Node.js 22+**, npm e as ferramentas de build nativas da sua
+plataforma (os módulos nativos usam C++: Python 3.11 x64 e Visual Studio
+**2022 (17.x)** no Windows, Xcode Command Line Tools no macOS). O preparo de
+captura usa um seletor compartilhado de v143/MSVC 14.30–14.44, ATL/MFC e SDK
+10.0.26100.0 com servicing mínimo 10.0.26100.3323; não escolhe VS2026/latest.
 
 ```bash
 git clone https://github.com/MonkyOrg/Monky.git
 cd Monky
-npm install
+npm ci
 npm run build
 npm start
 ```
+
+Na UI, use as duas abas **Telas** e **Janelas**. Selecione uma janela antes de
+escolher **Captura de janela (WGC)** (padrão) ou **Captura de jogo (hook)**.
+Não há aba Jogos nem detecção automática de jogos; selecionar fonte ou método
+não executa probe/hook antes de confirmar o compartilhamento.
+
+O compartilhamento nativo no Windows x64 implementa janela/monitor por WGC e
+Game Capture explícito, com H.264 por AMD AMF ou NVIDIA NVENC e WebRTC fixado.
+Consulte o [guia do módulo](apps/client/native/screen-share/README.md) para
+ATL/MFC/Windows SDK, recompilar os addons para o Electron correto e executar
+`prepare:native-screen` antes de testar ou empacotar. `npm ci` e
+`npm run build` sozinhos não preparam o SDK/runtime. O Main verifica a fonte
+somente após confirmação; hardware desconhecido aparece com probe pendente,
+não qualificado. Não há fallback automático de captura para Chromium/software,
+AV1 ou outra fonte; o limite atual de adapter 0 também vale para NVENC.
+No primeiro preparo, ou se mudarem as fontes do addon ou o Electron, siga
+`buildScreenAudio.cjs` no guia, depois de `prepare:native-screen`: ele usa
+`node-gyp` local, o Electron instalado e a mesma seleção VS2022/MSVC/SDK.
+O preparo de `screen-share` não gera esse addon; um `screen_audio.node` antigo
+pode não ter as funções de monitor/identidade ou ACKs PCM. Se já está compatível,
+uma atualização somente de scripts/TypeScript não exige recompilá-lo novamente.
+
+Para redistribuir um build, inclua as licenças, o código da mesma tag e
+`monky-native-sources-<versao>.tar.xz` com seu manifesto JSON, gerados por
+`npm run pack:native-sources -- --version=<versao>` após o preparo completo.
+O guia detalha o conteúdo OBS/NVENC/hooks, a reconstrução e o requisito de
+`publicationReady: true`; não substitua os helpers fixados por downloads
+autônomos de compatibilidade. `npm run package` usa electron-builder e gera
+`release\win-unpacked\Monky.exe` e `release\Monky-Windows.zip`.
 
 Durante o desenvolvimento, em dois terminais:
 
@@ -139,8 +170,10 @@ instalação continuam inalterados. Nada é copiado do perfil instalado.
 | Cenário | O que já fica preparado | O que não é pulado |
 |---|---|---|
 | `connected` (padrão) | Identidade nova, autenticação como primeiro administrador, canais e mensagem de exemplo | A funcionalidade que será exercitada no chat |
+| `empty-forum` | Fórum e chat vazios, 20 membros incluindo você, 10 cargos incluindo os padrões e eventos habilitados | Busca sem threads e rolagem de membros/cargos na visibilidade privada |
 | `server-settings` | O mesmo, com Geral nas configurações reais aberto | Alterar/aplicar configurações |
 | `voice` | Usuário mutado, dispositivos sintéticos e segundo participante SDK por P2P real | Teste de voz; a fixture é identificada e não simula música de produção |
+| `voice-receive` | Fixture SDK com permissão somente para ouvir, usuário mutado e indicadores reais na sala | `/qa-listen` alterna a escuta; desmutar envia áudio sintético, sem captura física nem gravação |
 | `home` | Identidade nova e introdução concluída; Home sem servidores salvos | Navegação/adição na Home e entrada no servidor |
 | `login` | Home com endereço local, apelido e senha de teste preenchidos | Enviar o formulário e autenticar |
 | `bot-install` | Servidor conectado e URL do bot preenchida nas configurações | Instalar/vincular o bot |
@@ -149,11 +182,14 @@ instalação continuam inalterados. Nada é copiado do perfil instalado.
 
 ```powershell
 npm run qa -- server-settings
+npm run qa -- empty-forum
 npm run qa -- voice
+npm run qa -- voice-receive
 npm run qa -- bot-install --bot=fixture
 npm run qa -- tool-consent --bot=fixture
 npm run qa -- music --bot-root="C:\Projetos\MonkyBot"
 npm run qa -- connected --smoke
+npm run qa -- connected --real-media
 ```
 
 `--bot=fixture` é uma fixture SDK claramente identificada, nunca substituição do
@@ -167,11 +203,16 @@ O módulo compilado `dist\commands\index.js` do MonkyBot precisa exportar
 `BotClient`: QA não inventa a declaração de produção. Nos cenários preparados,
 o owner realiza o preview real e aprova as capacidades declaradas via instalação
 autorizada. A fixture solicita apenas comandos e execução local, mais publicação
-de voz em `voice`. `bot-install` deixa instalação e revisão pendentes; permissão
+de voz em `voice` ou recepção em `voice-receive`. Neste último, o bot conta pacotes
+sem guardar seu conteúdo e não mostra proibição de transmitir, pois não solicita
+essa capacidade. Mute/deafen administrativo ainda exibe o respectivo bloqueio.
+`/qa-local-consent` também permite exercitar a preparação de comandos
+sem conceder consentimento local automaticamente. `bot-install` deixa instalação
+e revisão pendentes; permissão
 do servidor nunca substitui o consentimento local de `tool-consent`/`music`.
 
 Para testar a admissão do bot na chamada, use `connected --bot-root=...`, não
-`voice`/`music`: esses dois cenários já colocam o bot na voz.
+`voice`/`voice-receive`/`music`: esses cenários já colocam o bot na voz.
 
 Aguarde **QA_READY**, não apenas a abertura da janela. O launcher confere que a
 janela está visível no modo interativo e oculta em `--smoke`. Servidor, autenticação,
@@ -193,9 +234,15 @@ O processo Electron preserva `HOME` no macOS para acessar esse serviço do siste
 Perfil, identidade, cache e `MONKY_HOME` continuam nos caminhos explícitos de QA;
 os workers de servidor/bot mantêm também `HOME` isolado.
 
-Esse modo desliga atualizações automáticas, descoberta LAN e atalhos globais e
-usa captura sintética. **Não o use para testar essas etapas, identidade,
-onboarding ou hardware real**: use `npm start` com outro `--user-data-dir` isolado
+Por padrão, esse modo usa captura sintética, inclusive na janela interativa.
+Para avaliar câmera e microfone físicos, use explicitamente `--real-media`:
+o perfil e o servidor continuam isolados, a câmera só abre por ação do usuário
+e o microfone começa mutado. A opção não pode ser combinada com `--smoke`;
+não encerre outro aplicativo para liberar um dispositivo ocupado.
+
+Esse modo desliga atualizações automáticas, descoberta LAN e atalhos globais.
+**Não o use para testar essas etapas, identidade ou onboarding**:
+use `npm start` com outro `--user-data-dir` isolado
 e realize explicitamente a etapa sob teste. O cenário `voice` não substitui QA
 com duas máquinas para problemas de rede, dispositivos ou SFU.
 
@@ -242,6 +289,10 @@ sozinho:
 | `feat:`, `feature:`, `minor:` | **minor** — `1.X.0` |
 | qualquer tipo com `!` (`feat!:`, `fix!:`, …), `major:`, ou `BREAKING CHANGE:` no corpo | **major** — `X.0.0` |
 | qualquer outra coisa (`fix:`, `docs:`, `chore:`, `refactor:`…) | **patch** — `1.0.X` |
+
+Com escopo, prefira a forma convencional `feat(chat)!:`. O cálculo também aceita
+o marcador antes do escopo (`feat!(chat):`) em mensagens existentes, inclusive nos
+itens de squash, para não perder uma mudança incompatível nem seu `BREAKING CHANGE`.
 
 Repare que **patch é o padrão**: todo merge na `main` publica alguma versão, nem
 que seja um commit de documentação.
@@ -298,6 +349,23 @@ Para uma mudança visível no app, adicione um arquivo novo em
   Arquivos ainda não commitados não entram na geração de uma release.
 
 `node scripts/test-changelog.js` valida o formato e os arquivos de notas.
+O CI também exige pelo menos **uma nota nova e bilíngue no próprio PR** quando
+ele altera arquivos de aplicação em `apps/` ou `packages/`, dependências da raiz
+ou patches. A regra é conservadora e independe do título do PR: editar uma nota
+antiga não conta. Documentação, testes/fixtures e infraestrutura isolados não
+precisam inventar novidades. Descreva o efeito real e inclua notas para todas
+as mudanças relevantes; o CI verifica presença e formato, não a qualidade do texto.
+Confira os commits da sua branch com:
+
+```bash
+node scripts/check-client-release-notes.js --base origin/main --head HEAD --merge-base
+```
+
+A comparação usa o ancestral comum para não confundir mudanças recentes da
+`main` com alterações do PR. A release repete a checagem no intervalo da tag
+anterior antes de compilar; promoções de betas antigas preservam o fluxo legado.
+Falhas ao ler o Git ou notas inválidas interrompem a checagem.
+
 `scripts/generate-changelog.js` publica as traduções em um bloco de dados oculto
 na descrição da release, separado do `Changelog` técnico. O cliente continua
 buscando a tag instalada pela API do GitHub, sem serviço de tradução.
@@ -323,6 +391,12 @@ Um limite conhecido: **configuração de assinatura do macOS não é validável 
 CI**, porque o `Build check (mac)` roda `--dir`, que pula a assinatura por
 completo. Só a release exercita esse caminho.
 
+Os checks obrigatórios da `main` exigem que o PR esteja atualizado com a base.
+Quando outro PR entra primeiro, o resultado anterior não basta para liberar o
+merge: atualize a branch e aguarde o novo CI. Isso não apaga o histórico verde
+nem atualiza sua branch automaticamente. A aprovação de outro revisor continua
+obrigatória; um merge administrativo é uma exceção, não o fluxo normal.
+
 ### Descreva como testar
 
 No PR (ou na issue), inclua duas seções em PT-BR:
@@ -337,9 +411,43 @@ publicado**, não do seu ambiente. Sem o passo a passo, a validação trava.
 
 ### Depois do merge
 
-O push na `main` dispara o workflow **Release** automaticamente, que builda e
-publica a nova versão com os artefatos de Windows e macOS. A validação só
-começa **depois que a release estiver publicada** — nunca só após o merge.
+O push na `main` dispara o workflow **Release** automaticamente. O CI guarda por
+sete dias builds separados de Windows, macOS e CLI/SDK, sem `node_modules`,
+credenciais ou instaladores assinados. A release reutiliza somente artefatos de
+uma execução aprovada do PR integrado: confere a origem, a tentativa da execução,
+o SHA-256 do ZIP e de cada arquivo, o lockfile, a plataforma e a árvore Git completa.
+Assets do renderer sem extensão usam nomes sem ponto final, inclusive as licenças;
+a exportação e a extração rejeitam caminhos ambíguos no Windows.
+Comparar a árvore, e não apenas o SHA do commit, permite o squash sem aceitar
+código diferente do testado.
+
+O artefato Windows inclui os arquivos gerados `LICENSE` e
+`THIRD_PARTY_NOTICES` na raiz do módulo `screen-share`, além de `licenses/`,
+binários e fontes correspondentes. Todos são obrigatórios e têm hashes
+verificados: um checkout limpo da release não pode depender de avisos legais
+que sobraram da compilação no runner do CI.
+
+A release ainda instala dependências, aplica a versão final, gera os instaladores
+e tarballs, testa o SDK empacotado e assina/publica os arquivos. As fontes nativas
+correspondentes também vêm do CI: o `.tar.xz` é verificado e reutilizado byte a byte,
+sem recompilar o runtime nem recomprimir os fontes. O manifesto externo de esquema
+2 vincula a versão/commit da release ao `archiveManifest` original do CI, que
+permanece dentro do arquivo. Ambos precisam representar a mesma árvore Git.
+
+Artefatos ausentes ou expirados usam o build original com aviso no resumo do
+workflow; promoções de betas anteriores à otimização também são suportadas.
+Falhas de API, integridade, ambiente ou divergência de código interrompem a release,
+sem fallback silencioso. Uma nova beta sem PR integrado ou sem CI aprovado não
+é publicada. Reexecutar apenas jobs que falharam pode deixar artefatos de tentativas
+diferentes. A release seleciona a maior tentativa disponível por variante dentro
+da mesma execução aprovada e valida o manifesto contra a tentativa que produziu
+cada artefato, não contra a última tentativa global. Não é preciso reexecutar o
+CI inteiro apenas para manter o reaproveitamento.
+
+A validação do usuário só começa **depois que a release estiver publicada** —
+nunca só após o merge. A otimização reduz trabalho duplicado na release; o PR
+continua executando todos os testes e pode precisar de nova execução ao atualizar
+a base.
 
 > 🤖 Se você é um agente de IA trabalhando neste repositório, o fluxo completo e
 > obrigatório está em [`AGENTS.md`](AGENTS.md).
@@ -368,4 +476,5 @@ abstrato.
 ## 📜 Licença
 
 Ao contribuir, você concorda que sua contribuição será licenciada sob a
-[licença MIT](LICENSE) do projeto.
+[GNU GPL versão 3 ou posterior](LICENSE) do projeto. Preserve os avisos de
+copyright e as licenças de terceiros; a integração com libobs não os substitui.

@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Desfaça exclusões durante o prazo do servidor: um minuto por padrão, ajustável nas configurações. Anexos, reações e respostas são preservados, mesmo ao trocar de canal ou reconectar.",
+  "en": "Undo deletions within the server's time limit: one minute by default, adjustable in settings. Attachments, reactions and replies are preserved, even after switching channels or reconnecting."
+}

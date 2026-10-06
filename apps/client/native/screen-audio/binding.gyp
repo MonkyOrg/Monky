@@ -13,18 +13,49 @@
         [
           "OS=='win'",
           {
-            "sources": ["src/win/wasapi_loopback.cpp", "src/win/window_enum.cpp", "src/win/keyboard_layout.cpp"],
+            "configurations": {
+              "Release": {
+                "msbuild_toolset": "v143",
+                "msvs_settings": {
+                  "VCCLCompilerTool": { "RuntimeLibrary": 2, "RuntimeTypeInfo": "true" }
+                }
+              },
+              "Debug": {
+                "msbuild_toolset": "v143",
+                "msvs_settings": {
+                  "VCCLCompilerTool": { "RuntimeTypeInfo": "true" }
+                }
+              }
+            },
+            "sources": [
+              "src/win/wasapi_loopback.cpp",
+              "src/win/wasapi_capture.cpp",
+              "src/win/wasapi_format.cpp",
+              "src/packet_capture.cpp",
+              "src/win/window_enum.cpp",
+              "src/win/window_frames.cpp",
+              "src/win/window_resize.cpp",
+              "src/win/keyboard_layout.cpp"
+            ],
+            "defines!": ["_HAS_EXCEPTIONS=0"],
+            "defines": ["NAPI_VERSION=8", "_HAS_EXCEPTIONS=1", "WIN32_LEAN_AND_MEAN", "NOMINMAX"],
             "libraries": [
               "-lMmdevapi",
               "-lOle32",
               "-lAvrt",
               "-lKsuser",
               "-lUser32",
-              "-lDwmapi"
+              "-lGdi32",
+              "-lComctl32",
+              "-lDwmapi",
+              "-lD3d11",
+              "-lDxgi",
+              "-lWindowsApp"
             ],
             "msvs_settings": {
               "VCCLCompilerTool": {
                 "ExceptionHandling": 1,
+                "RuntimeTypeInfo": "true",
                 "AdditionalOptions": ["/std:c++17"]
               }
             }
@@ -33,9 +64,10 @@
         [
           "OS=='mac'",
           {
-            "sources": ["src/mac/sc_capture.mm", "src/mac/window_owners.mm"],
+            "sources": ["src/mac/sc_capture.mm", "src/mac/window_owners.mm", "src/packet_capture.cpp", "src/mac/packet_source.mm"],
             "xcode_settings": {
               "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
+              "GCC_ENABLE_CPP_RTTI": "YES",
               "CLANG_ENABLE_OBJC_ARC": "YES",
               "OTHER_CPLUSPLUSFLAGS": ["-std=c++17"],
               "OTHER_LDFLAGS": [
@@ -48,7 +80,7 @@
                 "-framework CoreAudio"
               ]
             },
-            "defines": ["__MACOS__"]
+            "defines": ["__MACOS__", "NAPI_VERSION=8"]
           }
         ]
       ]

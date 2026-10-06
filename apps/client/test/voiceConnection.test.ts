@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
-import { aggregateTransportHealth, VoiceConnectionHealth, VoiceRosterParticipant, SfuConsumedPayload, MessageType } from '@monky/shared';
+import { aggregateTransportHealth, VoiceConnectionHealth, VoiceRosterParticipant, SfuConsumedPayload, MessageType, DEFAULT_CUSTOM_PROFILE, ProtocolErrorCode } from '@monky/shared';
 import { ParticipantManager } from '../src/renderer/core/ParticipantManager';
-import { NetworkClient } from '../src/renderer/core/NetworkClient';
+import { NetworkClient, ProtocolRequestError } from '../src/renderer/core/NetworkClient';
 import { SfuClientEngine } from '../src/renderer/core/webrtc/SfuClientEngine';
 import { RemoteMediaRouter } from '../src/renderer/core/webrtc/RemoteMediaRouter';
 import { RemoteVadMonitor } from '../src/renderer/core/webrtc/RemoteVadMonitor';
@@ -48,7 +48,7 @@ test('human and bot speaking share the same muted/deafened and departed-session 
     assert.ok(model);
     manager.setSpeaking(entry.voiceState.sessionId, true);
     assert.equal(model.isSpeaking, true);
-    for (const flag of ['isMuted', 'isDeafened', 'serverMuted', 'serverDeafened'] as const) {
+    for (const flag of ['isMuted', 'isDeafened', 'serverMuted', 'serverDeafened', 'permissionMuted'] as const) {
       manager.updateVoiceState({ ...entry.voiceState, isSpeaking: true, [flag]: true });
       assert.equal(model.isSpeaking, false, `${flag} clears a published speaking state`);
       manager.setSpeaking(entry.voiceState.sessionId, true);
@@ -452,6 +452,131 @@ function engineFixture() {
   return { engine, client, health, failures: () => failures, connected: () => connected };
 }
 
+function captureTrack(kind: 'video' | 'audio'): MediaStreamTrack {
+  const events = new EventTarget();
+  let state: MediaStreamTrackState = 'live';
+  return {
+    id: 'screen-capture', kind, label: 'screen', enabled: true, muted: false, contentHint: '',
+    get readyState() { return state; },
+    onended: null, onmute: null, onunmute: null,
+    getCapabilities: () => ({}), getConstraints: () => ({}), getSettings: () => ({}),
+    applyConstraints: async () => {}, clone: () => captureTrack(kind),
+    stop: () => { state = 'ended'; },
+    addEventListener: events.addEventListener.bind(events),
+    removeEventListener: events.removeEventListener.bind(events),
+    dispatchEvent: events.dispatchEvent.bind(events),
+  };
+}
+
+class ScreenProducer {
+  closed = false;
+  private onTransportClose = () => {};
+  readonly rtpParameters = { codecs: [{ mimeType: 'video/H264' }] };
+  parameters: RTCRtpSendParameters = {
+    transactionId: 'screen', encodings: [{ active: true }], codecs: [], headerExtensions: [], rtcp: {},
+  };
+  readonly rtpSender = {
+    getParameters: () => structuredClone(this.parameters),
+    setParameters: async (parameters: RTCRtpSendParameters) => { this.parameters = structuredClone(parameters); },
+  };
+  constructor(readonly id: string) {}
+  on(event: string, listener: () => void) {
+    if (event === 'transportclose') this.onTransportClose = listener;
+  }
+  close() { this.closed = true; }
+  transportClosed() { this.close(); this.onTransportClose(); }
+}
+
+function screenProducerFixture(t: TestContext) {
+  const { engine, client } = engineFixture();
+  const preferred = settingsStore.preferredVideoCodec;
+  settingsStore.preferredVideoCodec = 'auto';
+  t.after(() => { engine.leave(); client.dispose(); settingsStore.preferredVideoCodec = preferred; });
+  t.mock.method(engine, 'canProduceKind', () => true);
+  const closed: unknown[] = [];
+  t.mock.method(client, 'send', (type: MessageType, payload: unknown) => {
+    if (type === MessageType.SFU_PRODUCER_CLOSED) closed.push(payload);
+  });
+  const pending: {
+    options: { track: MediaStreamTrack; stopTracks?: boolean; encodings?: RTCRtpEncodingParameters[] };
+    resolve: (producer: ScreenProducer) => void;
+    reject: (error: Error) => void;
+  }[] = [];
+  Object.defineProperties(engine, {
+    channelId: { writable: true, value: 'room' },
+    sendTransport: { writable: true, value: {
+      close() {},
+      produce(options: typeof pending[number]['options']) {
+        return new Promise<ScreenProducer>((resolve, reject) => { pending.push({ options, resolve, reject }); });
+      },
+    } },
+  });
+  return { engine, pending, closed };
+}
+
+for (const kind of ['video', 'audio'] as const) {
+  test(`SFU screen ${kind}: stop during publish retires late producers without stopping capture`, async t => {
+    const { engine, pending, closed } = screenProducerFixture(t);
+    const track = captureTrack(kind);
+    const result = (kind === 'video' ? engine.produceScreenVideo(track, 'share')
+      : engine.produceScreenAudio(track, 'share')).then(value => value, (error: unknown) => error);
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].options.stopTracks, false);
+    engine.closeProducer(`screen_${kind}:share`);
+    const late = new ScreenProducer('late');
+    pending[0].resolve(late);
+    const outcome = await result;
+    if (kind === 'video') assert.ok(outcome instanceof Error && outcome.name === 'AbortError');
+    else assert.equal(outcome, null);
+    assert.equal(late.closed, true);
+    assert.equal(engine['producers'].size, 0);
+    assert.equal(engine['pendingScreenProducers'].size, 0);
+    assert.equal(track.readyState, 'live');
+    assert.deepEqual(closed, [{ channelId: 'room', producerId: 'late' }]);
+  });
+
+  test(`SFU screen ${kind}: superseded failure and old close events never remove the replacement`, async t => {
+    const { engine, pending } = screenProducerFixture(t);
+    const track = captureTrack(kind);
+    const produce = () => kind === 'video' ? engine.produceScreenVideo(track, 'share')
+      : engine.produceScreenAudio(track, 'share');
+    const first = produce().then(value => value, (error: unknown) => error);
+    const second = produce();
+    const replacement = new ScreenProducer('replacement');
+    pending[1].resolve(replacement);
+    assert.equal(await second, replacement);
+    pending[0].reject(new Error('obsolete transport error'));
+    const obsolete = await first;
+    if (kind === 'video') assert.ok(obsolete instanceof Error && obsolete.name === 'AbortError');
+    else assert.equal(obsolete, null);
+    assert.equal(engine['producers'].get(`screen_${kind}:share`), replacement);
+    const third = produce();
+    const latest = new ScreenProducer('latest');
+    pending[2].resolve(latest);
+    await third;
+    replacement.transportClosed();
+    assert.equal(engine['producers'].get(`screen_${kind}:share`), latest);
+    assert.equal(latest.closed, false);
+    assert.equal(track.readyState, 'live');
+  });
+
+  test(`SFU screen ${kind}: common quality caps apply before and after producer creation`, async t => {
+    const { engine, pending } = screenProducerFixture(t);
+    const profile = { ...DEFAULT_CUSTOM_PROFILE, screenFps: 120, screenBitrateKbps: 20000 };
+    await engine.applyQualityParams('CUSTOM', profile);
+    const track = captureTrack(kind);
+    const result = kind === 'video' ? engine.produceScreenVideo(track, 'share') : engine.produceScreenAudio(track, 'share');
+    const encoding = kind === 'video'
+      ? { maxBitrate: 20000000, maxFramerate: 120 } : { maxBitrate: profile.audioBitrateKbps * 1000 };
+    assert.deepEqual(pending[0].options.encodings, [encoding]);
+    const producer = new ScreenProducer('configured');
+    pending[0].resolve(producer);
+    await result;
+    assert.deepEqual(producer.parameters.encodings, [{ active: true, ...encoding }]);
+    assert.equal(producer.parameters.degradationPreference, kind === 'video' ? 'maintain-resolution' : undefined);
+  });
+}
+
 test('aggregate health never hides a failed/disconnected direction behind a healthy one', () => {
   assert.equal(aggregateTransportHealth(['new', 'new']), 'connecting');
   assert.equal(aggregateTransportHealth(['new', 'connected']), 'connected');
@@ -552,6 +677,37 @@ test('failed microphone publication cannot be hidden by a healthy receive transp
   assert.equal(engine.isChannelConnected(), false);
   engine.closeProducer('mic');
   assert.equal(engine.isChannelConnected(), true, 'explicit receive-only mode no longer requires microphone publication');
+});
+
+test('a microphone refused for denied Speak keeps the SFU call and publishes once Speak returns', async (t) => {
+  const { engine, client, failures, connected, health } = engineFixture();
+  t.after(() => { engine.leave(); client.dispose(); });
+  t.mock.method(engine, 'canProduceKind', () => true);
+  t.mock.method(client, 'send', () => {});
+  engine['channelId'] = 'room';
+  engine['sendTransportState'] = 'connected';
+  engine['recvTransportState'] = 'connected';
+  let allowed = false;
+  Object.defineProperty(engine, 'sendTransport', { writable: true, value: {
+    close() {},
+    async produce({ track }: { track: MediaStreamTrack }) {
+      if (!allowed) throw new ProtocolRequestError('Sem permissão para falar neste canal.', ProtocolErrorCode.PERMISSION_DENIED);
+      return { id: 'mic-producer', track, closed: false, on() {}, close() { this.closed = true; } };
+    },
+  } });
+  const track = { id: 'mic', kind: 'audio', readyState: 'live' } as MediaStreamTrack;
+  assert.equal(await engine.produceMic(track), null);
+  assert.equal(engine.isMicrophoneDenied(), true);
+  assert.equal(engine.hasMicrophonePublication(), false);
+  assert.equal(failures(), 0, 'a permission mute must not tear the call down');
+  assert.equal(health.at(-1), 'connected');
+  assert.equal(engine.isChannelConnected(), true);
+  allowed = true;
+  assert.ok(await engine.produceMic(track));
+  assert.equal(engine.isMicrophoneDenied(), false);
+  assert.equal(engine.hasMicrophonePublication(), true);
+  assert.equal(failures(), 0);
+  assert.ok(connected() > 0);
 });
 
 test('pending microphone publication stays connecting and a cancelled producer cannot replace its successor', async (t) => {
@@ -785,13 +941,14 @@ test('remote WebRTC output changes keep default voice separate from screen speak
     async close() { this.state = 'closed'; }
     async setSinkId(id: string) { this.sinkId = id; }
   }
+  const restoreMediaGlobals: Array<() => void> = [];
   for (const [key, value] of Object.entries({
     document: { createElement: () => new RemoteAudioElement(), body: { appendChild() {} } },
     MediaStream: Stream, AudioContext: Context,
   })) {
     const previous = Object.getOwnPropertyDescriptor(globalThis, key);
     Object.defineProperty(globalThis, key, { configurable: true, value });
-    t.after(() => previous ? Object.defineProperty(globalThis, key, previous) : Reflect.deleteProperty(globalThis, key));
+    restoreMediaGlobals.push(() => { if (previous) Object.defineProperty(globalThis, key, previous); else Reflect.deleteProperty(globalThis, key); });
   }
   const previousSettings = {
     selectedSpeakerId: settingsStore.selectedSpeakerId,
@@ -804,9 +961,13 @@ test('remote WebRTC output changes keep default voice separate from screen speak
   const manager = new ParticipantManager();
   const router = new RemoteMediaRouter(() => manager);
   t.after(() => {
-    router.closeAllMedia();
-    Object.assign(settingsStore, previousSettings);
-    voiceStore.isDeafened = previousDeafened;
+    try {
+      router.closeAllMedia();
+      Object.assign(settingsStore, previousSettings);
+      voiceStore.isDeafened = previousDeafened;
+    } finally {
+      for (const restore of restoreMediaGlobals.reverse()) restore();
+    }
   });
   settingsStore.selectedSpeakerId = '';
   settingsStore.advancedAudioOutputs = false;
@@ -885,11 +1046,13 @@ test('remote WebRTC output changes keep default voice separate from screen speak
   assert.deepEqual([voice.sinkId, otherVoice.sinkId, router.getScreenAudioElement('peer')?.sinkId],
     ['latest-headset', 'latest-headset', 'latest-headset'],
     'delayed native switches across different elements all finish on the latest voice device');
-  router.cleanupScreenAudio('peer');
+  await router.cleanupScreenAudio('peer');
   assert.equal(router.getAudioElement('peer'), voice, 'ending a share preserves both voice players');
   assert.equal(router.getAudioElement('other-peer'), otherVoice);
   await router.setOutputDeviceIds('', '');
-  assert.deepEqual(contexts.map(context => context.sinkId), ['', '']);
+  assert.equal(contexts[0].sinkId, '');
+  assert.equal(contexts[1].state, 'closed', 'ending the last screen retires its output context');
+  assert.equal(router['audioContexts'].has('screen'), false, 'output changes never revive a retired screen context');
   const contextCount = contexts.length;
   const closingRouter = new RemoteMediaRouter(() => manager);
   closingRouter.ensureVoiceAudioElement('closing', new MediaStream([microphone]));
@@ -920,18 +1083,27 @@ test('screen audio opt-in and 0–200% volume stay independent of voice deafen i
     async close() { this.state = 'closed'; }
     async setSinkId(sinkId: string) { this.sinkId = sinkId; }
   }
+  const restoreMediaGlobals: Array<() => void> = [];
   for (const [key, value] of Object.entries({
     document: { createElement: () => new AudioElement(), body: { appendChild() {} } },
     MediaStream: Stream, AudioContext: Context, window: { AudioContext: Context },
   })) {
     const previous = Object.getOwnPropertyDescriptor(globalThis, key);
     Object.defineProperty(globalThis, key, { configurable: true, value });
-    t.after(() => previous ? Object.defineProperty(globalThis, key, previous) : Reflect.deleteProperty(globalThis, key));
+    restoreMediaGlobals.push(() => { if (previous) Object.defineProperty(globalThis, key, previous); else Reflect.deleteProperty(globalThis, key); });
   }
   const manager = new ParticipantManager();
   const router = new RemoteMediaRouter(() => manager);
   const track = { id: 'screen-track', kind: 'audio', stop() {} } as MediaStreamTrack;
-  t.after(() => { router.closeAllMedia(); settingsStore.screenAudioVolumes = {}; voiceStore.isDeafened = false; });
+  t.after(() => {
+    try {
+      router.closeAllMedia();
+      settingsStore.screenAudioVolumes = {};
+      voiceStore.isDeafened = false;
+    } finally {
+      for (const restore of restoreMediaGlobals.reverse()) restore();
+    }
+  });
   settingsStore.screenAudioVolumes = { peer: 150 };
   voiceStore.isDeafened = true;
   router.setDeafened(true);

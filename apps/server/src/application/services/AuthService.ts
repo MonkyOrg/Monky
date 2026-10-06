@@ -1,11 +1,12 @@
 import { createPublicKey, randomBytes, verify } from 'crypto';
-import type { WebSocket } from 'ws';
+import { WebSocket } from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import {
   AttachmentStorageInfo,
   AuthConnectPayload,
   LIMITS,
   PROTOCOL_VERSION,
+  negotiateProtocol,
   ProtocolErrorCode,
   ServerDetails,
   UserSummary,
@@ -18,7 +19,7 @@ import {
 } from '@monky/shared';
 import { ServerRecord, UserRecord } from '../../domain/entities';
 import { CapacityEstimator } from '../../domain/services/CapacityEstimator';
-import { IChannelRepository, IMentionRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
+import { ICategoryRepository, IChannelRepository, IMentionRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
 import { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
 import { PasswordService } from '../../infrastructure/security/PasswordService';
 import { Logger } from '../../infrastructure/logger/Logger';
@@ -87,6 +88,8 @@ export function resolveTurnSfuExclusion(
 
 export class AuthService {
   private pendingChallenges = new Map<WebSocket, PendingAuthChallenge>();
+  private attempts = new WeakMap<WebSocket, symbol>();
+  private challengeTimers = new Map<WebSocket, ReturnType<typeof setTimeout>>();
 
   constructor(
     private serverRepo: IServerRepository,
@@ -97,7 +100,8 @@ export class AuthService {
     private getActiveOnlineUsers: () => Map<string, { user: UserSummary }>,
     private attachmentService: AttachmentService,
     private permissionService: PermissionService,
-    private roleService: RoleService
+    private roleService: RoleService,
+    private categoryRepo?: ICategoryRepository
   ) {}
 
   public async createChallenge(
@@ -114,7 +118,7 @@ export class AuthService {
     // The schema would flatten it into a generic BAD_REQUEST, and the client
     // then showed "invalid request" for what is really "one of you is outdated"
     // (#355).
-    if (payload?.protocolVersion !== PROTOCOL_VERSION) {
+    if (!negotiateProtocol(payload?.protocolVersion, payload?.protocolOffer, 'client')) {
       return {
         success: false,
         errorCode: ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED,
@@ -144,7 +148,13 @@ export class AuthService {
       };
     }
 
+    this.clearChallenge(ws);
+    const attempt = Symbol();
+    this.attempts.set(ws, attempt);
+    const isCurrent = () => this.attempts.get(ws) === attempt && ws.readyState === WebSocket.OPEN;
+    const cancelled = { success: false, errorCode: ProtocolErrorCode.UNAUTHORIZED, errorMessage: 'Conexão encerrada.' };
     const server = await this.serverRepo.getServer();
+    if (!isCurrent()) return cancelled;
     if (!server) {
       return {
         success: false,
@@ -154,7 +164,8 @@ export class AuthService {
     }
 
     if (server.passwordHash && server.passwordHash.length > 0) {
-      const isValid = PasswordService.verifyPassword(parseResult.data.password || '', server.passwordHash);
+      const isValid = await PasswordService.verifyPassword(parseResult.data.password || '', server.passwordHash);
+      if (!isCurrent()) return cancelled;
       if (!isValid) {
         Logger.security(`Failed authentication attempt for nickname: ${parseResult.data.nickname}`);
         return {
@@ -177,6 +188,9 @@ export class AuthService {
       deviceId: parseResult.data.deviceId || randomBytes(16).toString('hex'),
       appearOffline: parseResult.data.appearOffline === true,
     });
+    const timer = setTimeout(() => this.clearChallenge(ws), 30_000);
+    timer.unref();
+    this.challengeTimers.set(ws, timer);
 
     return {
       success: true,
@@ -197,7 +211,7 @@ export class AuthService {
 
     const parseResult = authChallengeResponseSchema.safeParse({ signature });
     if (!parseResult.success) {
-      this.pendingChallenges.delete(ws);
+      this.clearChallenge(ws);
       return {
         success: false,
         errorCode: ProtocolErrorCode.BAD_REQUEST,
@@ -220,7 +234,7 @@ export class AuthService {
     }
 
     if (!isValidSignature) {
-      this.pendingChallenges.delete(ws);
+      this.clearChallenge(ws);
       return {
         success: false,
         authFailed: true,
@@ -229,11 +243,15 @@ export class AuthService {
       };
     }
 
-    this.pendingChallenges.delete(ws);
+    this.clearChallenge(ws);
     return await this.finishAuthentication(pending);
   }
 
   public clearChallenge(ws: WebSocket): void {
+    this.attempts.delete(ws);
+    const timer = this.challengeTimers.get(ws);
+    if (timer) clearTimeout(timer);
+    this.challengeTimers.delete(ws);
     this.pendingChallenges.delete(ws);
   }
 
@@ -262,7 +280,16 @@ export class AuthService {
     // members (#403): we must know whether this person already has a record.
     let userRecord = await this.userRepo.findByPublicKey(pending.publicKey);
     if (!userRecord) {
-      userRecord = await this.userRepo.findByClientId(pending.clientId);
+      const byClientId = await this.userRepo.findByClientId(pending.clientId);
+      if (byClientId?.publicKey && normalizePublicKeyHex(byClientId.publicKey) !== pending.publicKey) {
+        return {
+          success: false,
+          authFailed: true,
+          errorCode: ProtocolErrorCode.UNAUTHORIZED,
+          errorMessage: 'Esta identidade não corresponde ao membro registrado neste servidor.',
+        };
+      }
+      userRecord = byClientId;
     }
 
     // Only a brand-new member consumes a slot — an existing member must never be
@@ -315,13 +342,14 @@ export class AuthService {
       };
       await this.userRepo.create(userRecord);
     } else {
-      await this.userRepo.update(userRecord.id, {
+      const updates: Partial<UserRecord> = {
         nickname: trimmedNick,
-        publicKey: pending.publicKey,
         lastSeenAt: now,
-      });
+      };
+      if (!userRecord.publicKey) updates.publicKey = pending.publicKey;
+      await this.userRepo.update(userRecord.id, updates);
       userRecord.nickname = trimmedNick;
-      userRecord.publicKey = pending.publicKey;
+      userRecord.publicKey = userRecord.publicKey ?? pending.publicKey;
       userRecord.lastSeenAt = now;
     }
 
@@ -381,17 +409,25 @@ export class AuthService {
     // Private channels are filtered out here rather than on the client, so a
     // channel the member cannot access never reaches them — not even its name (#384).
     const myRoleIds = roleState.userRoles.find((ur) => ur.userId === userRecord.id)?.roleIds ?? [];
-    const visibleChannels = channels.filter((c) => canAccessChannel(c, myPermissions, myRoleIds));
+    const visibleChannels = channels.filter((c) => canAccessChannel(c, myPermissions, myRoleIds, false, userRecord.id));
+    const categories = (await this.categoryRepo?.listByServerId(server.id) ?? []).filter((category) =>
+      canAccessChannel(category, myPermissions, myRoleIds, false, userRecord.id) || visibleChannels.some((channel) => channel.categoryId === category.id));
 
     const serverDetails: ServerDetails = {
+      everyonePermissions: roleState.everyonePermissions,
       id: server.id,
       name: server.name,
       createdAt: server.createdAt,
       maxUsers: server.maxUsers,
+      maxMessageLength: server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
       hasPassword: !!(server.passwordHash && server.passwordHash.length > 0),
       allowSoundboard: server.allowSoundboard !== false,
+      dmRelayEnabled: server.dmRelayEnabled !== false,
+      recentSoundCacheEnabled: Boolean(server.recentSoundCacheEnabled),
+      recentSoundCacheLimit: server.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT,
       allowEveryoneMention: server.allowEveryoneMention !== false,
       allowMessageEdit: server.allowMessageEdit !== false,
+      messageDeleteUndoSeconds: server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,
       showRoleBadgesToEveryone: server.showRoleBadgesToEveryone !== false,
       voiceMode: server.voiceMode || 'p2p',
       hostSpecs: CapacityEstimator.getHostSpecs(),
@@ -399,6 +435,12 @@ export class AuthService {
       maxBots: server.maxBots ?? LIMITS.MAX_BOTS_DEFAULT,
       iconUrl: this.avatarStorage.getPublicUrl(server.iconPath),
       channels: visibleChannels.map((c) => ({
+        permissionOverwrites: c.permissionOverwrites,
+        categoryId: c.categoryId ?? null,
+        forumId: c.forumId ?? null,
+        forumLocked: c.forumLocked ?? false,
+        forumClosed: c.forumClosed ?? false,
+        inheritCategoryPermissions: c.inheritCategoryPermissions ?? true,
         id: c.id,
         serverId: c.serverId,
         name: c.name,
@@ -410,6 +452,7 @@ export class AuthService {
         botCommandsEnabled: c.botCommandsEnabled,
         allowedRoleIds: c.allowedRoleIds,
       })),
+      categories,
       members,
       knownMembers,
       mentionedChannelIds,
@@ -438,6 +481,7 @@ export class AuthService {
     return {
       id: user.id,
       clientId: user.clientId,
+      publicKey: user.publicKey ? normalizePublicKeyHex(user.publicKey) : undefined,
       nickname: user.nickname,
       avatarUrl: this.avatarStorage.getPublicUrl(user.avatarPath),
       status,
@@ -456,11 +500,16 @@ export class AuthService {
   }
 
   public async updateServerSettings(payload: {
+    maxMessageLength?: number;
     name?: string;
     password?: string | null;
     allowSoundboard?: boolean;
+    dmRelayEnabled?: boolean;
+    recentSoundCacheEnabled?: boolean;
+    recentSoundCacheLimit?: number;
     allowEveryoneMention?: boolean;
     allowMessageEdit?: boolean;
+    messageDeleteUndoSeconds?: number;
     showRoleBadgesToEveryone?: boolean;
     voiceMode?: VoiceMode;
     iconBase64?: string | null;
@@ -469,12 +518,17 @@ export class AuthService {
     maxUsers?: number;
     turnEnabled?: boolean;
   }): Promise<{
+    maxMessageLength?: number;
     success: boolean;
     name?: string;
     hasPassword?: boolean;
     allowSoundboard?: boolean;
+    dmRelayEnabled?: boolean;
+    recentSoundCacheEnabled?: boolean;
+    recentSoundCacheLimit?: number;
     allowEveryoneMention?: boolean;
     allowMessageEdit?: boolean;
+    messageDeleteUndoSeconds?: number;
     showRoleBadgesToEveryone?: boolean;
     voiceMode?: VoiceMode;
     iconUrl?: string | null;
@@ -489,6 +543,19 @@ export class AuthService {
     }
 
     const updates: Partial<ServerRecord> = {};
+    if (payload.messageDeleteUndoSeconds !== undefined) {
+      if (!Number.isSafeInteger(payload.messageDeleteUndoSeconds) || payload.messageDeleteUndoSeconds < 1
+        || payload.messageDeleteUndoSeconds > LIMITS.MAX_MESSAGE_DELETE_UNDO_SECONDS) {
+        return { success: false, errorMessage: 'O prazo para desfazer deve ser um inteiro entre 1 e 86400 segundos.' };
+      }
+      updates.messageDeleteUndoSeconds = payload.messageDeleteUndoSeconds;
+    }
+    if (payload.maxMessageLength !== undefined) {
+      if (!Number.isSafeInteger(payload.maxMessageLength) || payload.maxMessageLength < 0) {
+        return { success: false, errorMessage: 'O limite de caracteres deve ser um inteiro positivo ou zero (sem limite).' };
+      }
+      updates.maxMessageLength = payload.maxMessageLength;
+    }
 
     if (payload.name && payload.name.trim().length >= 2) {
       updates.name = payload.name.trim();
@@ -539,6 +606,24 @@ export class AuthService {
 
     if (payload.allowSoundboard !== undefined) {
       updates.allowSoundboard = Boolean(payload.allowSoundboard);
+      if (!updates.allowSoundboard) updates.recentSoundCacheEnabled = false;
+    }
+    if (payload.dmRelayEnabled !== undefined) {
+      updates.dmRelayEnabled = Boolean(payload.dmRelayEnabled);
+    }
+    if (payload.recentSoundCacheEnabled !== undefined) {
+      updates.recentSoundCacheEnabled = Boolean(payload.recentSoundCacheEnabled);
+    }
+    if (payload.recentSoundCacheLimit !== undefined) {
+      if (!Number.isSafeInteger(payload.recentSoundCacheLimit)
+        || payload.recentSoundCacheLimit < LIMITS.RECENT_SOUND_CACHE_MIN_LIMIT
+        || payload.recentSoundCacheLimit > LIMITS.RECENT_SOUND_CACHE_MAX_LIMIT) {
+        return {
+          success: false,
+          errorMessage: `O cache de áudios deve manter entre ${LIMITS.RECENT_SOUND_CACHE_MIN_LIMIT} e ${LIMITS.RECENT_SOUND_CACHE_MAX_LIMIT} itens.`,
+        };
+      }
+      updates.recentSoundCacheLimit = payload.recentSoundCacheLimit;
     }
     if (payload.allowEveryoneMention !== undefined) {
       updates.allowEveryoneMention = Boolean(payload.allowEveryoneMention);
@@ -612,13 +697,18 @@ export class AuthService {
       name: updatedServer?.name || server.name,
       hasPassword: !!(updatedServer?.passwordHash && updatedServer.passwordHash.length > 0),
       allowSoundboard: updatedServer?.allowSoundboard !== false,
+      dmRelayEnabled: updatedServer?.dmRelayEnabled !== false,
+      recentSoundCacheEnabled: Boolean(updatedServer?.recentSoundCacheEnabled),
+      recentSoundCacheLimit: updatedServer?.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT,
       allowEveryoneMention: updatedServer?.allowEveryoneMention !== false,
       allowMessageEdit: updatedServer?.allowMessageEdit !== false,
+      messageDeleteUndoSeconds: updatedServer?.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,
       showRoleBadgesToEveryone: updatedServer?.showRoleBadgesToEveryone !== false,
       voiceMode: updatedServer?.voiceMode || 'p2p',
       iconUrl: this.avatarStorage.getPublicUrl(updatedServer?.iconPath),
       attachmentStorage: await this.attachmentService.getStorageInfo(),
       maxUsers: updatedServer?.maxUsers ?? server.maxUsers,
+      maxMessageLength: updatedServer?.maxMessageLength ?? server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
       turnEnabled: Boolean(updatedServer?.turnEnabled),
     };
   }

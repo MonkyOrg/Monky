@@ -9,7 +9,7 @@ import {
   LIMITS, MessageType, type SlashCommand, type CommandSoundDownloadReceivedPayload,
   type SoundboardDownloadInput, type SoundboardDownloadProgress, type SoundDownloadResult,
 } from '@monky/shared';
-import { SoundboardDownloads, soundDownloadUrl, isPublicSoundAddress, type SoundDownloadTransport } from '../src/main/soundboardDownload';
+import { SoundboardDownloads, SoundDownloadError, soundDownloadUrl, isPublicSoundAddress, type SoundDownloadTransport } from '../src/main/soundboardDownload';
 import { isSoundAudio, isSoundFileName } from '../src/main/soundAudioValidation';
 import { AudioPreviews } from '../src/main/audioPreviews';
 import type { SoundDownloadApproval, SoundDownloadConfirmationDetails } from '../src/renderer/utils/soundDownloadConfirmation';
@@ -68,6 +68,63 @@ async function fixture(context: TestContext, overrides: Partial<SoundDownloadTra
   };
   return { root, folder, manager, request, requests, transport };
 }
+
+test('a new profile creates and restores its own soundboard folder without a picker', async (context) => {
+  const f = await fixture(context);
+  const preparation = f.manager.getDefaultFolder();
+  assert.equal(f.manager.getDefaultFolder(), preparation, 'concurrent initialization shares the same operation');
+  const folder = await preparation;
+  assert.equal(folder, path.join(await fs.realpath(f.root), 'soundboard'));
+  assert.ok(folder);
+  assert.equal((await fs.stat(folder)).isDirectory(), true);
+  assert.equal(await f.manager.availability(folder), 'ready');
+  await fs.writeFile(path.join(folder, 'authored.mp3'), mp3());
+  const config = path.join(f.root, 'soundboard-folder.json');
+  const saved = await fs.readFile(config, 'utf8');
+  const restored = new SoundboardDownloads(config, f.transport);
+  assert.equal(await restored.getDefaultFolder(), folder);
+  assert.equal(await fs.readFile(config, 'utf8'), saved);
+  assert.deepEqual(await fs.readFile(path.join(folder, 'authored.mp3')), mp3());
+  assert.equal(f.requests.length, 0, 'preparing a local library does not contact bots or providers');
+});
+
+test('default folder initialization preserves an existing native selection and its files', async (context) => {
+  const f = await fixture(context);
+  await f.manager.confirmFolder(f.folder);
+  await fs.writeFile(path.join(f.folder, 'authored.mp3'), mp3());
+  const restored = new SoundboardDownloads(path.join(f.root, 'soundboard-folder.json'), f.transport);
+  assert.equal(await restored.getDefaultFolder(), await fs.realpath(f.folder));
+  await assert.rejects(fs.stat(path.join(f.root, 'soundboard')), { code: 'ENOENT' });
+  assert.deepEqual(await fs.readFile(path.join(f.folder, 'authored.mp3')), mp3());
+});
+
+test('default folder initialization does not override a concurrent native selection', async (context) => {
+  const f = await fixture(context);
+  const [defaultFolder, selectedFolder] = await Promise.all([
+    f.manager.getDefaultFolder(),
+    f.manager.confirmFolder(f.folder),
+  ]);
+  assert.equal(selectedFolder, await fs.realpath(f.folder));
+  assert.ok(defaultFolder === null || defaultFolder === selectedFolder);
+  assert.equal(await f.manager.getDefaultFolder(), selectedFolder);
+  assert.equal(await f.manager.availability(f.folder), 'ready');
+});
+
+test('default folder initialization rejects corrupt configuration and redirected managed folders', async (context) => {
+  const corrupt = await fixture(context);
+  await fs.writeFile(path.join(corrupt.root, 'soundboard-folder.json'), '{broken');
+  await assert.rejects(corrupt.manager.getDefaultFolder(), (error: unknown) =>
+    error instanceof SoundDownloadError && error.reason === 'write_failed');
+  assert.equal(await fs.readFile(path.join(corrupt.root, 'soundboard-folder.json'), 'utf8'), '{broken');
+
+  const redirected = await fixture(context);
+  const alias = path.join(redirected.root, 'soundboard');
+  await fs.symlink(redirected.folder, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(redirected.manager.getDefaultFolder(), (error: unknown) =>
+    error instanceof SoundDownloadError && error.reason === 'write_failed');
+  assert.equal(await redirected.manager.availability(redirected.folder), 'confirmation_required');
+  assert.deepEqual(await fs.readdir(redirected.folder), []);
+});
 
 test('a previously selected folder alias resolves to the confirmed directory without another picker', async (context) => {
   const f = await fixture(context);

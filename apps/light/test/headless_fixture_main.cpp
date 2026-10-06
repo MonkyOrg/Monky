@@ -15,6 +15,26 @@
 namespace {
 
 using monky::light::test::FixtureAudioDevice;
+using monky::light::test::FixtureDeviceCatalog;
+
+std::vector<FixtureDeviceCatalog::Device> fixtureDevices(const nlohmann::json& values) {
+  std::vector<FixtureDeviceCatalog::Device> result;
+  for (const auto& value : values) {
+    result.push_back({value.at("id").get<std::string>(), value.at("name").get<std::string>()});
+  }
+  return result;
+}
+
+// Simulates the operating system's endpoint notifications for scenarios.
+struct DeviceNotifications {
+  std::mutex mutex;
+  monky::light::AudioDevicesChanged changed;
+
+  void notify() {
+    std::lock_guard lock(mutex);
+    if (changed) changed();
+  }
+};
 
 struct Devices {
   std::mutex mutex;
@@ -34,7 +54,8 @@ struct Devices {
             {"nonzeroPlayoutCallbacks", current.nonzero_playout_callbacks},
             {"recordingErrors", current.recording_errors}, {"playoutErrors", current.playout_errors},
             {"inputEnergy", current.input_energy}, {"outputEnergy", current.output_energy},
-            {"outputRms", current.output_rms}, {"workerRunning", current.worker_running}};
+            {"outputRms", current.output_rms}, {"workerRunning", current.worker_running},
+            {"selectedInput", current.selected_input}, {"selectedOutput", current.selected_output}};
   }
 };
 
@@ -63,8 +84,26 @@ int run(std::vector<std::string> arguments) {
       return monky::light::CancelMicrophoneAccess{};
     };
   }
-  audio.create = [devices](const webrtc::Environment&) -> webrtc::scoped_refptr<webrtc::AudioDeviceModule> {
-    const auto device = FixtureAudioDevice::Create();
+  const auto catalog = std::make_shared<FixtureDeviceCatalog>();
+  const auto notifications = std::make_shared<DeviceNotifications>();
+  audio.enumerateDevices = [catalog] {
+    return monky::light::media::EnumerateDevices(*FixtureAudioDevice::Create(catalog));
+  };
+  audio.watchDevices = [notifications](monky::light::AudioDevicesChanged changed) {
+    std::lock_guard lock(notifications->mutex);
+    notifications->changed = std::move(changed);
+    return monky::light::StopWatchingAudioDevices([notifications] {
+      std::lock_guard lock(notifications->mutex);
+      notifications->changed = nullptr;
+    });
+  };
+  audio.fixtureCommand = [catalog, notifications](const nlohmann::json& command) {
+    if (command.at("command") != "fixture-audio-devices") throw std::invalid_argument("Unknown fixture command");
+    catalog->Set(fixtureDevices(command.at("inputs")), fixtureDevices(command.at("outputs")));
+    notifications->notify();
+  };
+  audio.create = [devices, catalog](const webrtc::Environment&) -> webrtc::scoped_refptr<webrtc::AudioDeviceModule> {
+    const auto device = FixtureAudioDevice::Create(catalog);
     std::lock_guard lock(devices->mutex);
     devices->values.push_back(device);
     return device;

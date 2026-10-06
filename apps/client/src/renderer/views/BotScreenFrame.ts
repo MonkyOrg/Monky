@@ -1,13 +1,15 @@
-import { BOT_SCREEN_LIMITS, botScreenActionSchema, type BotScreen, type BotScreenAction, type BotScreenJson } from '@monky/shared';
+import { BOT_SCREEN_LIMITS, botScreenActionSchema, botScreenDocumentConsentSchema, type BotScreen, type BotScreenAction, type BotScreenDocumentConsent, type BotScreenJson } from '@monky/shared';
 import type { SupportedLanguage } from '../i18n';
 
 export interface BotScreenViewer { id: string; nickname: string; locale: SupportedLanguage }
 
 export const BOT_SCREEN_CSP = [
-  "default-src 'none'", "script-src 'none'", "script-src-elem 'unsafe-inline'", "script-src-attr 'none'", "style-src 'unsafe-inline'",
-  'img-src data:', 'font-src data:', "connect-src 'none'", "frame-src 'none'",
-  "worker-src 'none'", "object-src 'none'", "base-uri 'none'", "form-action 'none'",
-  "media-src 'none'",
+  "default-src 'self' http: https: data: blob:",
+  "script-src 'self' http: https: data: blob: 'unsafe-inline' 'unsafe-eval'",
+  "style-src 'self' http: https: data: blob: 'unsafe-inline'",
+  "connect-src 'self' http: https: ws: wss: data: blob:",
+  "worker-src 'self' http: https: data: blob:",
+  "object-src 'none'", "base-uri 'self' http: https:", "form-action http: https:",
 ].join('; ');
 
 interface FrameSeed {
@@ -20,13 +22,8 @@ interface FrameSeed {
 
 type FrameUpdate = { type: 'state'; state: BotScreenJson; revision: number } | { type: 'locale'; locale: SupportedLanguage };
 
-/** Self-contained because its source executes in the opaque, unprivileged document. */
+/** Self-contained because its source executes in a separate, unprivileged origin. */
 function screenBootstrap(seed: FrameSeed): void {
-  // ICE is not covered by connect-src. Opaque child realms cannot reach this realm;
-  // workers/child documents are denied by CSP, so do not expose peer networking here.
-  for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'WebTransport']) {
-    Object.defineProperty(window, name, { value: undefined, writable: false, configurable: false });
-  }
   let state = seed.state;
   let revision = seed.revision;
   let port: MessagePort | null = null;
@@ -101,7 +98,7 @@ export function botScreenDocument(screen: BotScreen, viewer: BotScreenViewer): s
     `<script>(${screenBootstrap.toString()})(${serialized});</script></head><body>${screen.html}</body></html>`;
 }
 
-/** One port is bound to one opaque frame and one captured server/channel/screen. */
+/** One port is bound to one isolated origin and one captured server/channel/screen. */
 export class BotScreenFrame {
   private static active = new Set<BotScreenFrame>();
   readonly element: HTMLIFrameElement;
@@ -112,8 +109,17 @@ export class BotScreenFrame {
   private count = 0;
   private snapshot: BotScreen;
   private locale: SupportedLanguage;
+  private documentUrl: string | null = null;
 
-  constructor(screen: BotScreen, viewer: BotScreenViewer, private onAction: (action: BotScreenAction) => void) {
+  constructor(screen: BotScreen, viewer: BotScreenViewer, private consent: BotScreenDocumentConsent,
+    private onAction: (action: BotScreenAction) => void,
+    private onError: (error: unknown) => void) {
+    if (!botScreenDocumentConsentSchema.safeParse(consent).success || consent.screenId !== screen.id ||
+        consent.instanceId !== screen.instanceId || consent.botId !== screen.botId) {
+      this.channel.port1.close();
+      this.channel.port2.close();
+      throw new Error('Miniapp consent does not match this instance.');
+    }
     if (BotScreenFrame.active.size >= 2) {
       this.channel.port1.close();
       this.channel.port2.close();
@@ -126,13 +132,25 @@ export class BotScreenFrame {
     this.element.className = 'bot-screen-frame';
     this.element.name = `monky-bot-screen-${crypto.randomUUID()}`;
     this.element.title = screen.title;
-    this.element.setAttribute('sandbox', 'allow-scripts');
+    this.element.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-modals allow-pointer-lock allow-downloads allow-presentation');
     this.element.setAttribute('referrerpolicy', 'no-referrer');
-    this.element.setAttribute('allow', "camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'; fullscreen 'none'; autoplay 'none'; encrypted-media 'none'; usb 'none'; serial 'none'; hid 'none'");
-    this.element.addEventListener('load', this.onLoad);
+    this.element.setAttribute('allow', "camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'; fullscreen *; autoplay *; encrypted-media *; gamepad *; usb 'none'; serial 'none'; hid 'none'");
     this.channel.port1.onmessage = this.onMessage;
     this.channel.port1.start();
-    this.element.srcdoc = botScreenDocument(screen, viewer);
+    void this.loadDocument(botScreenDocument(screen, viewer)).catch(error => {
+      if (!this.destroyed) this.onError(error);
+    });
+  }
+
+  private async loadDocument(html: string): Promise<void> {
+    const url = await window.api.createBotScreenDocument(html, this.consent);
+    if (this.destroyed) {
+      await window.api.removeBotScreenDocument(url);
+      return;
+    }
+    this.documentUrl = url;
+    this.element.addEventListener('load', this.onLoad);
+    this.element.src = url;
   }
 
   update(screen: BotScreen): void {
@@ -157,12 +175,23 @@ export class BotScreenFrame {
     this.channel.port1.close();
     this.channel.port2.close();
     this.element.remove();
+    if (this.documentUrl) {
+      void window.api.removeBotScreenDocument(this.documentUrl).catch(error => {
+        console.error('[Bot screens] Could not release miniapp document.', error);
+      });
+      this.documentUrl = null;
+    }
   }
 
   private onLoad = (): void => {
-    // A second load invalidates the bridge even if Chromium reports a local navigation.
+    // Navigation is allowed, but the new page cannot inherit the authenticated bridge.
     if (this.destroyed) return;
-    if (this.connected) { this.destroy(); return; }
+    if (this.connected) {
+      this.channel.port1.onmessage = null;
+      this.channel.port1.close();
+      this.element.removeEventListener('load', this.onLoad);
+      return;
+    }
     this.connected = true;
     this.element.contentWindow?.postMessage('monky-screen-connect', '*', [this.channel.port2]);
     this.channel.port1.postMessage({ type: 'state', state: this.snapshot.state, revision: this.snapshot.revision } satisfies FrameUpdate);

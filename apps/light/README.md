@@ -70,6 +70,9 @@ Digite um objeto JSON por linha no terminal, usando o ID recebido:
 {"command":"join","channelId":"ID-DO-CANAL"}
 {"command":"mute","enabled":true}
 {"command":"deafen","enabled":false}
+{"command":"devices"}
+{"command":"set-input","deviceId":"ID-DO-DISPOSITIVO"}
+{"command":"set-output","deviceId":null}
 {"command":"stats","id":"minha-consulta"}
 {"command":"leave"}
 {"command":"reconnect"}
@@ -79,6 +82,30 @@ Digite um objeto JSON por linha no terminal, usando o ID recebido:
 `enabled:false` desfaz mute/deafen. Restrições impostas pelo servidor continuam
 valendo. `stats` consulta dispositivos e RTP sob demanda; não há coleta periódica
 de telemetria no núcleo. EOF, Ctrl+C e `quit` encerram conexão e mídia.
+
+### Dispositivos de áudio
+
+`devices` responde com `audio-devices`: entradas e saídas físicas (`id` e
+`name`) e a preferência salva. A lista é criada sob demanda, em uma thread
+temporária, e libera o módulo de áudio logo em seguida; fora de uma chamada
+nenhum dispositivo permanece aberto. No Windows, o `id` é o endpoint ID do Core
+Audio. O ADM do macOS não expõe identificador, então o nome é usado nesse caso.
+
+`set-input`/`set-output` recebem o `id` de um dispositivo listado, ou `null` para
+seguir o dispositivo padrão do sistema. A escolha é salva em
+`monky-light-settings.json` no perfil e vale imediatamente se houver chamada,
+reiniciando apenas a direção alterada. Mute e deafen continuam valendo: a troca
+nunca reabre um microfone interrompido. Cada mudança efetiva gera
+`audio-device-selected` com o dispositivo pedido, o dispositivo em uso e `fallback`.
+
+Se o dispositivo escolhido não estiver presente (removido, desativado ou nunca
+conectado), a chamada usa o padrão do sistema com `fallback:true`, sem falhar.
+As notificações de dispositivos do Windows e do macOS são por evento, sem
+polling; após uma rajada de mudanças o núcleo emite `audio-devices-changed`,
+reaplica a preferência e volta ao dispositivo escolhido quando ele é
+reconectado. O Windows usa o ADM Core Audio (`kWindowsCoreAudio2`) com reinício
+automático do fluxo. Remoção e reconexão de dispositivos no macOS ainda precisam
+de qualificação em um Mac.
 
 No macOS, a autorização do microfone é solicitada apenas quando uma chamada
 precisa transmitir. Enquanto a permissão está pendente, é possível receber
@@ -104,6 +131,12 @@ npm run test:light:scripts
 O CI prepara execuções nativas em Windows, macOS Intel e macOS Apple Silicon.
 As versões das ferramentas vêm de `buildTools` em `dependencies.json`; o cache
 contém os arquivos de download, que continuam sujeitos à validação por hash.
+O código fixado de `FieldTrials` também usa esse cache: falhas de transporte
+têm até três tentativas, e somente conteúdo com o SHA-256 esperado é aceito.
+O download usa uma revisão imutável do espelho WebRTC no GitHub, com o mesmo
+blob Git e os mesmos bytes qualificados da origem Google registrada no manifesto.
+Os testes de scripts exercitam o download real do CMake contra um servidor local,
+incluindo falhas HTTP, cache corrompido e rejeição de conteúdo diferente.
 
 ## Identidade e isolamento de perfil
 
@@ -116,6 +149,12 @@ um `deviceId` aleatório independente da chave. Não contém seed, chave privada
 senha. Metadados inconsistentes, arquivos pendentes ou a ausência de um dos
 componentes da identidade exigem recuperação explícita, nunca recriação silenciosa.
 Diretórios com arquivos de outros aplicativos são recusados.
+
+`monky-light-settings.json` guarda apenas preferências do usuário (hoje, os
+dispositivos de áudio) e nunca participa da validação da identidade. É
+substituído de forma atômica sob o lock do perfil. Configurações inválidas ou
+ilegíveis geram `warning`, usam os padrões e são substituídas no próximo
+salvamento; uma gravação interrompida das configurações não exige recuperação.
 
 `IdentityStore` requer um diretório de perfil absoluto e já existente. Mantém um
 lock exclusivo durante sua vida e armazena uma seed Ed25519 de 32 bytes com
@@ -237,8 +276,8 @@ npm run test:light:hardware
 ```
 
 O cenário usa o executável de produção e um receptor sintético em loopback.
-O outro participante não transmite som. Confere entrega de PCM e interrupção
-da captura; não salva áudio nem envia dados para um servidor externo. Exige
+O outro participante não transmite som. Confere entrega de PCM, troca para uma
+entrada listada e interrupção da captura; não salva áudio nem envia dados para um servidor externo. Exige
 dispositivo disponível e permissão do sistema; não substitui avaliação auditiva
 por duas pessoas, dispositivos diferentes ou redes reais.
 
@@ -250,12 +289,47 @@ npm run measure:light
 
 São intervalos de aproximadamente 10 segundos em idle conectado, chamada P2P,
 chamada SFU, deafen e após sair. A fonte é sintética, mas AEC, ganho automático
-e supressão de ruído usam a política padrão. A medição cobre somente o PID do
-cliente nativo, excluindo o servidor e o executor. `oneCoreCpuPercent` usa
-**100% = um processador lógico**; `workingSetMiB` e `privateMiB` são medidas distintas
-do Windows, não uma soma. Não há limiar de aprovação nem comparação automática
-com Electron. Drivers, outros computadores e uso prolongado ainda precisam de
-medição; memória residente pode reter páginas do alocador mesmo após o teardown.
+e supressão de ruído usam a política padrão. A medição cobre a árvore de processos
+do cliente nativo, excluindo o servidor e o executor. `oneCoreCpuPercent` usa
+**100% = um processador lógico**; `systemCpuPercent` divide pelo total de
+processadores lógicos, como o Gerenciador de Tarefas. `workingSetMiB` e
+`privateMiB` são medidas distintas do Windows, não uma soma; os valores `peak*`
+são os maiores entre as amostras. Não há limiar de aprovação. Memória residente
+pode reter páginas do alocador mesmo após o teardown.
+
+Para uso prolongado e ciclos repetidos de chamada, que revelam memória ou threads
+que sobrevivem ao teardown:
+
+```powershell
+$env:MONKY_LIGHT_MEASURE_SECONDS = 60   # duração de cada fase, mínimo 10
+$env:MONKY_LIGHT_MEASURE_CYCLES = 20    # entradas/saídas antes da última fase
+npm run measure:light
+```
+
+Referência local (Windows x64, áudio sintético): 20 ciclos de chamada não deixaram
+crescimento relevante após sair. No SFU, a memória privada **enquanto o Light
+transmite** sobe cerca de 16 MiB nos primeiros 2 a 6 minutos e então estabiliza
+(aprox. 25 MiB privados e 39 MiB residentes em uma chamada de 12 minutos); apenas
+recebendo, ou em P2P, a chamada estabiliza em cerca de 1 minuto. A origem desse
+buffer de envio ainda não foi identificada.
+
+### Comparar com o Monky completo
+
+`measure:client` apenas lê a contabilidade de um cliente já aberto (Light ou Monky
+completo) e soma todos os processos da árvore: no Electron, renderer, GPU, rede e
+áudio ficam em processos separados. Não inicia, encerra nem controla o aplicativo.
+
+```powershell
+npm run measure:client -- --name Monky --label completo-sfu --seconds 300 --output medições.jsonl
+npm run measure:client -- --name monky-light --label light-sfu --seconds 300 --output medições.jsonl
+```
+
+`--name` escolhe o único processo de topo com esse nome; use `--pid` quando houver
+mais de um. Para uma comparação válida, meça as duas edições no mesmo computador,
+servidor descartável, canal, topologia, participantes, dispositivos e política de
+áudio, uma de cada vez, com a outra fechada. Registre cada fase (conectado sem
+chamada, chamada P2P, chamada SFU, deafen, após sair) por pelo menos 5 minutos.
+O roteiro completo está em [QA.md](QA.md).
 
 Chat, soundboard, miniapps, assistir transmissões, bandeja e hospedagem pela CLI
 ficam para marcos posteriores, com recursos opcionais carregados sob demanda.

@@ -19,7 +19,7 @@ export type CliTranslationMap = Record<CliTranslationKey, string>;
 export type SupportedCliLanguage = 'pt-BR' | 'en';
 
 export const SUPPORTED_CLI_LANGUAGES: Array<{ code: SupportedCliLanguage; label: string }> = [
-  { code: 'en', label: 'English' },
+  { code: 'en', label: 'English (US)' },
   { code: 'pt-BR', label: 'Português (Brasil)' },
 ];
 

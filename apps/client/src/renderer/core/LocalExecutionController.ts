@@ -906,12 +906,14 @@ export class LocalExecutionController {
     if (previous) this.setNativeConnection({ connectionId: previous, connected: false, voiceChannelId: null });
   }
 
-  public dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
-    this.invalidateConnection();
-    for (const off of this.unbind) off();
-    this.unbind = [];
-    controllers.delete(this.client);
+  public async dispose(): Promise<void> {
+    if (!this.disposed) {
+      this.disposed = true;
+      this.invalidateConnection();
+      for (const off of this.unbind) off();
+      this.unbind = [];
+      controllers.delete(this.client);
+    }
+    await this.nativeUpdate;
   }
 }

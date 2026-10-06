@@ -1,15 +1,21 @@
-export const PROTOCOL_VERSION = 21;
+export const PROTOCOL_VERSION = 36;
+export const ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX = '302a300506032b6570032100';
+export const ED25519_SPKI_PUBLIC_KEY_DER_HEX_LENGTH = ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX.length + 64;
 
 /**
- * Default size of the floating overlay window (#169). Shared so the renderer can
- * tell whether the user resized it away from the default — the "reset size"
- * control is only worth showing once the size actually changed (#543).
+ * Initial shell size; populated overlays size themselves from readable cards,
+ * rather than dividing this rectangle among an arbitrary participant count.
  */
-export const OVERLAY_DEFAULT_WIDTH = 340;
-export const OVERLAY_DEFAULT_HEIGHT = 240;
+export const OVERLAY_DEFAULT_WIDTH = 514;
+export const OVERLAY_DEFAULT_HEIGHT = 334;
+export const OVERLAY_DEFAULT_CARD_WIDTH = 240;
+export const OVERLAY_DEFAULT_CARD_HEIGHT = 135;
+export const OVERLAY_MINIMALIST_CARD_HEIGHT = 36;
 
 export const LIMITS = {
-  MAX_MESSAGE_LENGTH: 2000,
+  MESSAGE_DELETE_UNDO_SECONDS: 60,
+  MAX_MESSAGE_DELETE_UNDO_SECONDS: 86400,
+  MAX_MESSAGE_LENGTH: 16000,
   // Game titles come from Steam's own manifests (#675); the cap only guards
   // against a tampered manifest, not against normal names.
   MAX_ACTIVITY_NAME_LENGTH: 128,
@@ -52,6 +58,24 @@ export const LIMITS = {
   MAX_HISTORY_MESSAGES_INITIAL: 100,
   RATE_LIMIT_MAX_MESSAGES: 10,
   RATE_LIMIT_WINDOW_MS: 5000,
+  /** Tentativas de autenticação por IP antes de o servidor parar de responder (#372). */
+  RATE_LIMIT_MAX_AUTH_ATTEMPTS: 8,
+  RATE_LIMIT_AUTH_WINDOW_MS: 60_000,
+  /**
+   * Teto de um frame de WebSocket. O maior payload legítimo é um avatar em
+   * base64 (MAX_AVATAR_SIZE cresce ~33% na codificação), e o padrão da lib ws
+   * são 100 MiB, que qualquer cliente não autenticado podia mandar (#372).
+   */
+  WS_MAX_PAYLOAD_BYTES: 8 * 1024 * 1024,
+  DM_RELAY_MAX_ITEMS: 50,
+  DM_RELAY_DATA_MAX_LENGTH: 65_536,
+  DM_RELAY_FILE_DATA_MAX_LENGTH: 196_608,
+  DM_RELAY_TOTAL_DATA_MAX_LENGTH: 6 * 1024 * 1024,
+  DM_RELAY_RATE_ITEMS_PER_SECOND: 40,
+  DM_RELAY_RATE_ITEMS_BURST: 200,
+  DM_RELAY_RATE_BYTES_PER_SECOND: 1_572_864,
+  DM_RELAY_RATE_BYTES_BURST: 6 * 1024 * 1024,
+  DM_RELAY_FILE_BACKPRESSURE_BYTES: 8 * 1024 * 1024,
   HEARTBEAT_INTERVAL_MS: 5000,
   HEARTBEAT_TIMEOUT_MS: 35000,
   RECONNECT_GRACE_MS: 20000,
@@ -79,6 +103,8 @@ export const LIMITS = {
   MAX_BOT_FORM_FIELDS: 10,
   MAX_BOT_FORM_CHOICES: 20,
   MAX_BOT_FORM_LIST_ITEMS: 20,
+  MAX_LIVE_ACTION_IMAGES: 5,
+  MAX_LIVE_ACTION_IMAGE_DATA_LENGTH: 7_000_000,
   MAX_BOT_SETTINGS_VALUES_BYTES: 16 * 1024,
   MAX_BOT_SETTINGS_DEFINITION_BYTES: 64 * 1024,
   MAX_BOT_SETTINGS_CATALOG: 1000,
@@ -100,6 +126,13 @@ export const LIMITS = {
   MAX_BOT_AUDIO_PREVIEW_REQUESTS: 100,
   MAX_BOT_AUDIO_PREVIEW_HANDLERS: 4,
   MAX_SOUNDBOARD_FILE_SIZE: 3 * 1024 * 1024,
+  RECENT_SOUND_CACHE_DEFAULT_LIMIT: 20,
+  RECENT_SOUND_CACHE_MIN_LIMIT: 1,
+  RECENT_SOUND_CACHE_MAX_LIMIT: 100,
+  RECENT_SOUND_CACHE_MAX_BYTES: 256 * 1024 * 1024,
+  RECENT_SOUND_DOWNLOAD_RATE_LIMIT: 10,
+  RECENT_SOUND_DOWNLOAD_RATE_WINDOW_MS: 60_000,
+  RECENT_SOUND_DOWNLOAD_TIMEOUT_MS: 120_000,
   BOT_SOUND_DOWNLOAD_TIMEOUT_MS: 120_000,
   // Chat attachments (#11). Both size limits are server-configurable; these are
   // only the initial defaults applied when a server is first created.

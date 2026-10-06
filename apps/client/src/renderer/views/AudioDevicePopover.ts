@@ -2,11 +2,13 @@ import { appEvents } from '../core/EventBus';
 import { audioDeviceError, populateAudioDeviceSelect, selectAudioDevice, selectedAudioDevice } from '../core/AudioDeviceService';
 import { bindMicrophoneLevelMeter } from '../core/MicrophoneLevelMeter';
 import { t, type TranslationKey } from '../i18n';
+import { animateEnter, hasOwnedSurface, hideWithMotion, ownSurface, ownsSurface, removeWithMotion, showWithMotion } from '../utils/surfaceMotion';
 import { settingsStore } from '../stores/settingsStore';
 import { settingsModal } from './SettingsModal';
 import { CameraEffectsControl } from './settings/CameraEffectsControl';
 import { NoiseSuppressionControl } from './settings/NoiseSuppressionControl';
 import { cameraDeviceSelectionError, populateCameraDeviceSelect } from './settings/CameraDeviceSelection';
+import { smoothScrollIntoView } from '../utils/scroll';
 import '../styles/mediaPopovers.css';
 
 let nextId = 0;
@@ -80,6 +82,14 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       if (kind !== 'noise') panel.append(deviceRow, select);
 
       let meter: HTMLElement | null = null;
+      const inputModeButtons: HTMLButtonElement[] = [];
+      const refreshInputMode = () => {
+        for (const button of inputModeButtons) {
+          const selected = button.dataset.inputMode === settingsStore.inputMode;
+          button.setAttribute('aria-pressed', String(selected));
+          button.querySelector<HTMLElement>('.audio-input-mode-check')!.textContent = selected ? 'check' : '';
+        }
+      };
       if (kind === 'input') {
         const level = document.createElement('div');
         level.className = 'audio-device-level';
@@ -90,7 +100,30 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
         meter.setAttribute('aria-label', t('audioDevices.inputLevel'));
         meter.innerHTML = '<div class="vad-meter-fill"></div>';
         level.append(heading, meter);
-        panel.append(level);
+        const inputMode = document.createElement('div');
+        inputMode.className = 'audio-input-mode';
+        const modeHeading = document.createElement('strong');
+        modeHeading.textContent = t('settings.inputMode');
+        const modeOptions = document.createElement('div');
+        modeOptions.className = 'audio-input-mode-options';
+        modeOptions.setAttribute('role', 'group');
+        modeOptions.setAttribute('aria-label', modeHeading.textContent);
+        for (const [mode, icon, key] of [
+          ['voice_activity', 'graphic_eq', 'settings.inputModeVad'],
+          ['push_to_talk', 'keyboard', 'settings.inputModePtt'],
+        ] as const) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'audio-input-mode-option';
+          button.dataset.inputMode = mode;
+          button.innerHTML = `<span class="material-symbols-outlined md-16" aria-hidden="true">${icon}</span><span></span><span class="material-symbols-outlined md-16 audio-input-mode-check" aria-hidden="true"></span>`;
+          button.children[1].textContent = t(key);
+          modeOptions.append(button);
+          inputModeButtons.push(button);
+        }
+        inputMode.append(modeHeading, modeOptions);
+        refreshInputMode();
+        panel.append(level, inputMode);
       }
       panel.append(status);
       const camera = kind === 'camera' ? new CameraEffectsControl(id) : null;
@@ -110,6 +143,8 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       panel.append(configure);
       document.body.append(panel);
       if (kind !== 'noise') document.body.append(options);
+      const releasePanel = ownSurface(panel, trigger);
+      let releaseOptions: (() => void) | null = null;
       trigger.setAttribute('aria-expanded', 'true');
 
       let closed = false;
@@ -127,9 +162,12 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       const position = () => {
         if (!trigger.isConnected) { close(); return; }
         const rect = trigger.getBoundingClientRect();
-        panel.style.maxHeight = `${Math.max(0, rect.top - 16)}px`;
+        const availableAbove = rect.top - 16;
+        const availableBelow = innerHeight - rect.bottom - 16;
+        const opensAbove = availableAbove >= panel.offsetHeight || availableAbove >= availableBelow;
+        panel.style.maxHeight = `${Math.max(0, opensAbove ? availableAbove : availableBelow)}px`;
         panel.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - panel.offsetWidth - 8))}px`;
-        panel.style.top = `${Math.max(8, rect.top - panel.offsetHeight - 8)}px`;
+        panel.style.top = `${Math.max(8, opensAbove ? rect.top - panel.offsetHeight - 8 : rect.bottom + 8)}px`;
         if (!options.hidden) {
           options.style.maxHeight = `${Math.min(360, innerHeight - 16)}px`;
           const row = deviceRow.getBoundingClientRect();
@@ -145,21 +183,26 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       };
       const hideOptions = (restoreFocus = false) => {
         clearSubmenuTimer();
-        options.hidden = true;
+        releaseOptions?.();
+        releaseOptions = null;
+        hideWithMotion(options, 'popover');
         deviceRow.setAttribute('aria-expanded', 'false');
         if (restoreFocus) deviceRow.focus();
       };
       const openOptions = (focus = false) => {
         clearSubmenuTimer();
         if (select.disabled) return;
-        options.hidden = false;
+        if (deviceRow.getAttribute('aria-expanded') !== 'true') {
+          showWithMotion(options, 'popover');
+          releaseOptions = ownSurface(options, deviceRow);
+        }
         deviceRow.setAttribute('aria-expanded', 'true');
         position();
         if (focus) {
           const buttons = optionButtons();
           const selected = buttons.find((button) => button.getAttribute('aria-selected') === 'true') ?? buttons[0];
-          selected?.focus();
-          selected?.scrollIntoView({ block: 'nearest' });
+          selected?.focus({ preventScroll: true });
+          if (selected) smoothScrollIntoView(selected, { block: 'nearest' });
         }
       };
       const deferHideOptions = (event: MouseEvent) => {
@@ -246,15 +289,16 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
         deviceRow.focus();
         void change();
       };
-      const contains = (target: Node) => panel.contains(target) || options.contains(target) || trigger.contains(target);
+      const contains = (target: Node) => ownsSurface(panel, target) || options.contains(target) || trigger.contains(target);
       const outside = (event: PointerEvent | FocusEvent) => {
         if (event.target instanceof Node && !contains(event.target)) close();
       };
       const keydown = (event: KeyboardEvent) => {
         if (event.key === 'Escape') {
+          if (hasOwnedSurface(panel) && deviceRow.getAttribute('aria-expanded') !== 'true') return;
           event.preventDefault();
           event.stopPropagation();
-          if (!options.hidden) hideOptions(true);
+          if (deviceRow.getAttribute('aria-expanded') === 'true') hideOptions(true);
           else close(true);
           return;
         }
@@ -263,7 +307,7 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
           openOptions(true);
           return;
         }
-        if (options.hidden || !options.contains(document.activeElement)) return;
+        if (deviceRow.getAttribute('aria-expanded') !== 'true' || !options.contains(document.activeElement)) return;
         if (event.key === 'ArrowLeft') {
           event.preventDefault();
           hideOptions(true);
@@ -283,11 +327,14 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
         }
         if (next) {
           event.preventDefault();
-          next.focus();
-          next.scrollIntoView({ block: 'nearest' });
+          next.focus({ preventScroll: true });
+          smoothScrollIntoView(next, { block: 'nearest' });
         }
       };
-      const offSettings = appEvents.on('settings.updated', () => { void refresh(); });
+      const offSettings = appEvents.on('settings.updated', () => {
+        refreshInputMode();
+        void refresh();
+      });
       const offConnection = appEvents.on('network.disconnected', () => close());
       const offChannel = appEvents.on('voice.channel_changed', (channel: string | null) => { if (!channel) close(); });
       const offMeter = meter ? bindMicrophoneLevelMeter(meter, (error) => {
@@ -300,6 +347,11 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       observer.observe(document.body, { childList: true, subtree: true });
       const size = new ResizeObserver(position);
       size.observe(panel);
+      let positionFrame = 0;
+      const schedulePosition = () => {
+        cancelAnimationFrame(positionFrame);
+        positionFrame = requestAnimationFrame(position);
+      };
       function close(restoreFocus = false): void {
         if (closed) return;
         closed = true;
@@ -311,6 +363,7 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
         offChannel();
         observer.disconnect();
         size.disconnect();
+        cancelAnimationFrame(positionFrame);
         camera?.cleanup();
         noise?.cleanup();
         navigator.mediaDevices?.removeEventListener('devicechange', onDevices);
@@ -320,8 +373,10 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
         window.removeEventListener('resize', position);
         window.removeEventListener('scroll', position, true);
         select.removeEventListener('change', change);
-        panel.remove();
-        options.remove();
+        releasePanel();
+        releaseOptions?.();
+        removeWithMotion(panel);
+        removeWithMotion(options);
         trigger.setAttribute('aria-expanded', 'false');
         if (closePanel === close) closePanel = null;
         if (restoreFocus && trigger.isConnected) trigger.focus();
@@ -334,6 +389,21 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       options.addEventListener('mouseenter', clearSubmenuTimer);
       options.addEventListener('mouseleave', deferHideOptions);
       options.addEventListener('click', choose);
+      panel.addEventListener('click', (event) => {
+        const button = event.target instanceof Element
+          ? event.target.closest<HTMLButtonElement>('[data-input-mode]') : null;
+        const mode = button?.dataset.inputMode;
+        if (mode !== 'voice_activity' && mode !== 'push_to_talk') return;
+        try {
+          settingsStore.setInputMode(mode);
+          selectionStatus = '';
+        } catch {
+          selectionStatus = t('settings.inputModeSaveFailed');
+        }
+        refreshInputMode();
+        showStatus();
+        schedulePosition();
+      });
       configure.addEventListener('click', () => {
         close();
         void settingsModal.open('voice_video', kind === 'camera' ? 'camera' : kind === 'noise' ? 'noise-suppression' : undefined);
@@ -345,10 +415,13 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       window.addEventListener('resize', position);
       window.addEventListener('scroll', position, true);
       select.addEventListener('change', change);
+      panel.addEventListener('click', schedulePosition);
       camera?.attachEvents(panel);
       noise?.attachEvents(panel);
       position();
+      animateEnter(panel);
       camera?.activate();
+      schedulePosition();
       if (noise) panel.querySelector<HTMLButtonElement>('[data-noise-mode][aria-selected="true"]')?.focus();
       else deviceRow.focus();
       void refresh();

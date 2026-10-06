@@ -12,6 +12,8 @@ import {
   normalizeBotLocale,
   type BotFormValues,
   type BotLocale,
+  type ScreenEncodingMode,
+  type ScreenCodec, type ScreenEncodingStrategy,
 } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
 import {
@@ -19,6 +21,7 @@ import {
   type AudioOutputCategory, type AudioOutputDevices, type NoiseSuppressionMode,
 } from '../utils/audioPreferences';
 import { autoEntryServerKey, restoreAutoEntryServerKeys, type AutoEntryServerAddress } from '../utils/autoEntry';
+import { normalizeCustomQualityProfile } from '../utils/qualityProfileLimits';
 
 /**
  * Chat-notification-sound mode for the 3-level configuration (#153).
@@ -31,6 +34,7 @@ export type ChatSoundMode = 'inherit' | 'all' | 'mentions' | 'none';
 
 /** The resolved (effective) mode, after `inherit` has been resolved away. */
 export type ResolvedChatSoundMode = 'all' | 'mentions' | 'none';
+export type ScreenShareReceiver = 'native' | 'chromium';
 
 const CHAT_SOUND_MODES: ChatSoundMode[] = ['inherit', 'all', 'mentions', 'none'];
 const MAX_BOT_PREFERENCE_SCOPES = 256;
@@ -57,6 +61,9 @@ function restoreBotLocalePreferences(value: unknown): Record<string, BotLocale> 
 export class SettingsStore {
   public qualityPreset: QualityPresetType = 'NORMAL';
   public preferredVideoCodec: 'auto' | 'av1' | 'vp9' | 'vp8' | 'h264' = 'auto';
+  public screenEncodingMode: ScreenEncodingMode = 'hardware';
+  public screenEncodingStrategy: ScreenEncodingStrategy = 'automatic';
+  public preferredScreenCodec: ScreenCodec = 'h264';
   public customProfile: QualityProfile = { ...DEFAULT_CUSTOM_PROFILE };
   public inputMode: 'voice_activity' | 'push_to_talk' = 'voice_activity'; // #186
   public pttKey: PttKeyBinding = { code: 'KeyV', display: 'V', keyType: 'keyboard', keyCode: 47 };
@@ -98,10 +105,15 @@ export class SettingsStore {
   public botLocalePreferences: Record<string, BotLocale> = {};
   public soundboardVolume: number = 80; // 0 - 100
   public soundboardMuted: boolean = false;
+  public soundboardLimiterEnabled: boolean = false;
+  public soundboardLoudnessLimit: number = 6;
   /** Folder the user picked for custom chat stickers (#356). */
   public stickersFolderPath: string = '';
   public screenAudioVolumes: Record<string, number> = {}; // per-connection screen audio volume (#75), keyed by sessionId (#363)
   public screenShareTelemetryEnabled: boolean = false;
+  public screenShareReceiver: ScreenShareReceiver = 'native';
+  public screenSharePreviewPauseWhenUnfocused: boolean = true;
+  public screenShareAutoPictureInPicture: boolean = true;
   public screenShareTelemetryPosition: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' = 'top-right';
   public screenShareTelemetryMode: 'simple' | 'complete' = 'simple';
   public customSounds: Partial<Record<string, string>> = {}; // key → file path
@@ -126,6 +138,7 @@ export class SettingsStore {
   public chatSoundChannelOverrides: Record<string, ChatSoundMode> = {};
   public onboardingCompleted: boolean = false;
   public autoEntryServerKeys: string[] = [];
+  public autoConnectServers: boolean = true;
 
   // Sobreposição de Tela Flutuante (Overlay) (#169)
   public overlayMode: OverlayMode = 'cameras-only';
@@ -136,6 +149,11 @@ export class SettingsStore {
   public overlayAutoOpenOnLeaveStage: boolean = false;
   public overlayMinimalistMode: boolean = false;
   public overlayHideSelf: boolean = false;
+  public overlayHideStagePreviews = false;
+  public overlayHideInactiveParticipants = false;
+  public overlayPreserveAspectRatio: boolean = true;
+  public overlayCardSize: OverlayConfig['cardSize'] | null = null;
+  public overlayMinimalistCardSize: OverlayConfig['minimalistCardSize'] | null = null;
   public overlaySavedBounds: OverlayBounds | null = null;
 
   constructor() {
@@ -143,10 +161,18 @@ export class SettingsStore {
   }
 
   public load(notify = true): void {
+    this.screenEncodingMode = 'hardware';
+    this.screenEncodingStrategy = 'automatic';
+    this.preferredScreenCodec = 'h264';
+    this.screenShareReceiver = 'native';
+    this.soundboardLimiterEnabled = false;
+    this.soundboardLoudnessLimit = 6;
     this.botDownloadConfirmationExceptions = [];
     this.botUserPreferences = {};
     this.botLocalePreferences = {};
     this.autoEntryServerKeys = [];
+    this.overlayHideStagePreviews = false;
+    this.overlayHideInactiveParticipants = false;
     if (typeof localStorage === 'undefined') return;
     try {
       const raw = localStorage.getItem('monky_settings');
@@ -156,6 +182,17 @@ export class SettingsStore {
           throw new TypeError('Saved settings must be an object');
         }
         Object.assign(this, parsed);
+        this.screenEncodingMode = parsed.screenEncodingMode === 'software' ? 'software' : 'hardware';
+        this.preferredScreenCodec = parsed.preferredScreenCodec === 'av1' ? 'av1' : 'h264';
+        this.screenEncodingStrategy = parsed.screenEncodingStrategy === 'manual' ? 'manual'
+          : parsed.screenEncodingStrategy === undefined
+            && (parsed.screenEncodingMode === 'software' || parsed.preferredScreenCodec === 'h264'
+              || parsed.preferredScreenCodec === 'av1') ? 'manual' : 'automatic';
+        if (parsed.screenShareReceiver !== undefined && parsed.screenShareReceiver !== 'native'
+          && parsed.screenShareReceiver !== 'chromium') {
+          console.warn('[Settings] Invalid screen receiver preference; restoring the platform default.');
+        }
+        this.screenShareReceiver = parsed.screenShareReceiver === 'chromium' ? 'chromium' : 'native';
         this.autoEntryServerKeys = restoreAutoEntryServerKeys(parsed.autoEntryServerKeys);
         this.botLocalePreferences = restoreBotLocalePreferences(parsed.botLocalePreferences);
         if (!this.userVolumes || typeof this.userVolumes !== 'object') {
@@ -191,12 +228,32 @@ export class SettingsStore {
         if (typeof this.soundboardMuted !== 'boolean') {
           this.soundboardMuted = false;
         }
+        if (parsed.soundboardLimiterEnabled !== undefined && typeof parsed.soundboardLimiterEnabled !== 'boolean') {
+          console.warn('[Settings] Invalid soundboard limiter state; the limiter remains disabled.');
+        }
+        this.soundboardLimiterEnabled = parsed.soundboardLimiterEnabled === true;
+        if (parsed.soundboardLoudnessLimit !== undefined &&
+            (typeof parsed.soundboardLoudnessLimit !== 'number' || !Number.isInteger(parsed.soundboardLoudnessLimit)
+              || parsed.soundboardLoudnessLimit < 1 || parsed.soundboardLoudnessLimit > 10)) {
+          console.warn('[Settings] Invalid soundboard loudness limit; using level 6.');
+          this.soundboardLoudnessLimit = 6;
+        }
         if (!this.screenAudioVolumes || typeof this.screenAudioVolumes !== 'object') {
           this.screenAudioVolumes = {};
         }
         if (typeof this.screenShareTelemetryEnabled !== 'boolean') {
           this.screenShareTelemetryEnabled = false;
         }
+        if (parsed.screenSharePreviewPauseWhenUnfocused !== undefined
+          && typeof parsed.screenSharePreviewPauseWhenUnfocused !== 'boolean') {
+          console.warn('[Settings] Invalid screen preview focus preference; enabling background pause.');
+        }
+        this.screenSharePreviewPauseWhenUnfocused = parsed.screenSharePreviewPauseWhenUnfocused !== false;
+        if (parsed.screenShareAutoPictureInPicture !== undefined
+          && typeof parsed.screenShareAutoPictureInPicture !== 'boolean') {
+          console.warn('[SettingsStore] Invalid automatic Picture-in-Picture preference; using the default.');
+        }
+        this.screenShareAutoPictureInPicture = parsed.screenShareAutoPictureInPicture !== false;
         if (!['top-left', 'top-right', 'bottom-left', 'bottom-right'].includes(this.screenShareTelemetryPosition)) {
           this.screenShareTelemetryPosition = 'top-right';
         }
@@ -209,6 +266,7 @@ export class SettingsStore {
         if (!this.customProfile || typeof this.customProfile !== 'object' || !this.customProfile.audioBitrateKbps) {
           this.customProfile = { ...DEFAULT_CUSTOM_PROFILE };
         }
+        this.limitCustomProfile();
         if (!this.customSounds || typeof this.customSounds !== 'object') {
           this.customSounds = {};
         }
@@ -267,6 +325,9 @@ export class SettingsStore {
         if (typeof this.onboardingCompleted !== 'boolean') {
           this.onboardingCompleted = false;
         }
+        if (typeof this.autoConnectServers !== 'boolean') {
+          this.autoConnectServers = true;
+        }
 
         if (!['cameras-only', 'cameras-and-screens'].includes(this.overlayMode)) {
           this.overlayMode = 'cameras-only';
@@ -293,6 +354,17 @@ export class SettingsStore {
         }
         if (typeof this.overlayHideSelf !== 'boolean') {
           this.overlayHideSelf = false;
+        }
+        if (typeof this.overlayHideStagePreviews !== 'boolean') this.overlayHideStagePreviews = false;
+        if (typeof this.overlayHideInactiveParticipants !== 'boolean') this.overlayHideInactiveParticipants = false;
+        if (typeof this.overlayPreserveAspectRatio !== 'boolean') this.overlayPreserveAspectRatio = true;
+        for (const key of ['overlayCardSize', 'overlayMinimalistCardSize'] as const) {
+          const size = this[key];
+          if (size != null && (Array.isArray(size) || ![size.width, size.height]
+            .every(value => Number.isFinite(value) && value >= 1 && value <= 16384))) {
+            console.warn('[Settings] Ignoring invalid overlay card dimensions:', key);
+            this[key] = null;
+          }
         }
         if (
           this.overlaySavedBounds &&
@@ -324,6 +396,11 @@ export class SettingsStore {
       autoOpenOnLeaveStage: this.overlayAutoOpenOnLeaveStage,
       minimalistMode: this.overlayMinimalistMode,
       hideSelf: this.overlayHideSelf,
+      hideStagePreviews: this.overlayHideStagePreviews,
+      hideInactiveParticipants: this.overlayHideInactiveParticipants,
+      preserveAspectRatio: this.overlayPreserveAspectRatio,
+      cardSize: this.overlayCardSize ?? undefined,
+      minimalistCardSize: this.overlayMinimalistCardSize ?? undefined,
       bounds: this.overlaySavedBounds || undefined,
     };
   }
@@ -344,8 +421,37 @@ export class SettingsStore {
     this.saveAutoEntryServerKeys(next);
   }
 
+  public setInputMode(mode: 'voice_activity' | 'push_to_talk'): void {
+    if (this.inputMode === mode) return;
+    const previous = this.inputMode;
+    this.inputMode = mode;
+    try {
+      this.save();
+    } catch (error) {
+      this.inputMode = previous;
+      throw error;
+    }
+  }
+
   public clearServerAutoEntry(): void {
     this.saveAutoEntryServerKeys([]);
+  }
+
+  /**
+   * Logout: drops what belongs to the identity leaving this computer (servers,
+   * bots, visibility, first-run guide) and keeps device preferences such as
+   * audio, video, language and shortcuts.
+   */
+  public clearAccountData(): void {
+    this.autoEntryServerKeys = [];
+    this.chatSoundServerOverrides = {};
+    this.chatSoundChannelOverrides = {};
+    this.botUserPreferences = {};
+    this.botLocalePreferences = {};
+    this.botDownloadConfirmationExceptions = [];
+    this.appearOffline = false;
+    this.onboardingCompleted = false;
+    this.save();
   }
 
   public retainAutoEntryServers(servers: readonly AutoEntryServerAddress[]): void {
@@ -385,6 +491,13 @@ export class SettingsStore {
     if (typeof config.hideSelf === 'boolean') {
       this.overlayHideSelf = config.hideSelf;
     }
+    if (typeof config.hideStagePreviews === 'boolean') this.overlayHideStagePreviews = config.hideStagePreviews;
+    if (typeof config.hideInactiveParticipants === 'boolean') this.overlayHideInactiveParticipants = config.hideInactiveParticipants;
+    if (typeof config.preserveAspectRatio === 'boolean') {
+      this.overlayPreserveAspectRatio = config.preserveAspectRatio;
+    }
+    if ('cardSize' in config) this.overlayCardSize = config.cardSize ? { ...config.cardSize } : null;
+    if ('minimalistCardSize' in config) this.overlayMinimalistCardSize = config.minimalistCardSize ? { ...config.minimalistCardSize } : null;
     // Presence of the key (not truthiness) is what matters: resetting the size
     // sends `{ bounds: undefined }` on purpose, and that has to actually clear
     // the saved bounds so the "reset size" control knows it is back to default
@@ -559,11 +672,37 @@ export class SettingsStore {
     }
   }
 
+  public getScreenShareReceiver(): ScreenShareReceiver {
+    return this.screenShareReceiver;
+  }
+
+  public setScreenShareReceiver(receiver: ScreenShareReceiver): void {
+    if (receiver !== 'native' && receiver !== 'chromium') {
+      throw new TypeError('The selected screen receiver is unavailable on this platform.');
+    }
+    const previous = this.screenShareReceiver;
+    this.screenShareReceiver = receiver;
+    try { this.save(); }
+    catch (error) { this.screenShareReceiver = previous; throw error; }
+  }
+
+  private limitCustomProfile(): void {
+    const normalized = normalizeCustomQualityProfile(this.customProfile);
+    if (JSON.stringify(normalized) !== JSON.stringify(this.customProfile)) {
+      console.warn('[SettingsStore] Custom quality values adjusted to supported limits.');
+      this.customProfile = normalized;
+    }
+  }
+
   public save(): void {
     try {
+      this.limitCustomProfile();
       localStorage.setItem('monky_settings', JSON.stringify({
         qualityPreset: this.qualityPreset,
         preferredVideoCodec: this.preferredVideoCodec,
+        screenEncodingMode: this.screenEncodingMode,
+        screenEncodingStrategy: this.screenEncodingStrategy,
+        preferredScreenCodec: this.preferredScreenCodec,
         vadSensitivity: this.vadSensitivity,
         selectedMicrophoneId: this.selectedMicrophoneId,
         selectedSpeakerId: this.selectedSpeakerId,
@@ -588,9 +727,14 @@ export class SettingsStore {
         botLocalePreferences: this.botLocalePreferences,
         soundboardVolume: this.soundboardVolume,
         soundboardMuted: this.soundboardMuted,
+        soundboardLimiterEnabled: this.soundboardLimiterEnabled,
+        soundboardLoudnessLimit: this.soundboardLoudnessLimit,
         stickersFolderPath: this.stickersFolderPath,
         screenAudioVolumes: this.screenAudioVolumes,
         screenShareTelemetryEnabled: this.screenShareTelemetryEnabled,
+        screenShareReceiver: this.getScreenShareReceiver(),
+        screenSharePreviewPauseWhenUnfocused: this.screenSharePreviewPauseWhenUnfocused,
+        screenShareAutoPictureInPicture: this.screenShareAutoPictureInPicture,
         screenShareTelemetryPosition: this.screenShareTelemetryPosition,
         screenShareTelemetryMode: this.screenShareTelemetryMode,
         customProfile: this.customProfile,
@@ -609,6 +753,7 @@ export class SettingsStore {
         chatSoundChannelOverrides: this.chatSoundChannelOverrides,
         onboardingCompleted: this.onboardingCompleted,
         autoEntryServerKeys: this.autoEntryServerKeys,
+        autoConnectServers: this.autoConnectServers,
         overlayMode: this.overlayMode,
         overlayLayout: this.overlayLayout,
         overlayPosition: this.overlayPosition,
@@ -617,6 +762,11 @@ export class SettingsStore {
         overlayAutoOpenOnLeaveStage: this.overlayAutoOpenOnLeaveStage,
         overlayMinimalistMode: this.overlayMinimalistMode,
         overlayHideSelf: this.overlayHideSelf,
+        overlayHideStagePreviews: this.overlayHideStagePreviews,
+        overlayHideInactiveParticipants: this.overlayHideInactiveParticipants,
+        overlayPreserveAspectRatio: this.overlayPreserveAspectRatio,
+        overlayCardSize: this.overlayCardSize,
+        overlayMinimalistCardSize: this.overlayMinimalistCardSize,
         overlaySavedBounds: this.overlaySavedBounds,
       }));
       appEvents.emit('settings.updated');

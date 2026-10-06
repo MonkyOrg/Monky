@@ -1,6 +1,8 @@
+import type { ChannelType } from '@monky/shared';
 import { serverStore } from '../stores/serverStore';
 import { t } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { setSurfaceVisible } from '../utils/surfaceVisibility';
 
 /**
  * Form fields shared by the create and edit channel modals (#384).
@@ -16,8 +18,8 @@ export interface ChannelPrivacySelection {
   allowedRoleIds: string[];
 }
 
-export function renderChannelBotCommandsField(enabled: boolean, type: 'TEXT' | 'VOICE'): string {
-  return `<div class="form-group" id="channel-bot-commands-group" ${type === 'VOICE' ? 'hidden' : ''}>
+export function renderChannelBotCommandsField(enabled: boolean): string {
+  return `<div class="form-group" id="channel-bot-commands-group">
     <div class="channel-privacy-row">
       <div class="channel-privacy-info">
         <span class="channel-privacy-title">${t('channelModal.botCommandsLabel')}</span>
@@ -35,17 +37,11 @@ export function readChannelBotCommandsField(root: HTMLElement): boolean {
   return root.querySelector<HTMLInputElement>('#input-channel-bot-commands')?.checked ?? true;
 }
 
-export function attachChannelBotCommandsField(root: HTMLElement): () => void {
-  const group = root.querySelector<HTMLElement>('#channel-bot-commands-group');
-  const inputs = root.querySelectorAll<HTMLInputElement>('input[name="channel-type"]');
-  const sync = () => {
-    if (group) group.hidden = root.querySelector<HTMLInputElement>('input[name="channel-type"]:checked')?.value === 'VOICE';
-  };
-  inputs.forEach((input) => input.addEventListener('change', sync));
-  return () => inputs.forEach((input) => input.removeEventListener('change', sync));
+export function attachChannelBotCommandsField(_root: HTMLElement): () => void {
+  return () => undefined;
 }
 
-export function renderChannelPrivacyFields(selection: ChannelPrivacySelection): string {
+export function renderChannelPrivacyFields(selection: ChannelPrivacySelection, category = false): string {
   const roles = serverStore.getVisibleRoles();
   const selected = new Set(selection.allowedRoleIds);
 
@@ -73,11 +69,11 @@ export function renderChannelPrivacyFields(selection: ChannelPrivacySelection): 
         <div class="channel-privacy-info">
           <span class="channel-privacy-title">
             <span class="material-symbols-outlined md-16">lock</span>
-            ${t('channelModal.privateLabel')}
+            ${t(category ? 'categories.private' : 'channelModal.privateLabel')}
           </span>
-          <span class="channel-privacy-desc">${t('channelModal.privateHint')}</span>
+          <span class="channel-privacy-desc">${t(category ? 'categories.privateHint' : 'channelModal.privateHint')}</span>
         </div>
-        <label class="toggle-switch" aria-label="${t('channelModal.privateLabel')}">
+        <label class="toggle-switch" aria-label="${t(category ? 'categories.private' : 'channelModal.privateLabel')}">
           <input type="checkbox" id="input-channel-private" ${selection.isPrivate ? 'checked' : ''}>
           <span class="toggle-slider"></span>
         </label>
@@ -99,7 +95,7 @@ export function attachChannelPrivacyFields(root: HTMLElement): () => void {
   if (!toggle || !rolesGroup) return () => {};
 
   const sync = () => {
-    rolesGroup.hidden = !toggle.checked;
+    setSurfaceVisible(rolesGroup, toggle.checked);
   };
   toggle.addEventListener('change', sync);
   sync();
@@ -127,9 +123,9 @@ export function readChannelPrivacyFields(root: HTMLElement): ChannelPrivacySelec
  * control, which frees room for a title and a line explaining what each type is
  * actually for — a bare radio next to a single word did not.
  */
-export function renderChannelTypeFields(defaultType: 'TEXT' | 'VOICE'): string {
+export function renderChannelTypeFields(defaultType: ChannelType): string {
   const option = (
-    value: 'TEXT' | 'VOICE',
+    value: ChannelType,
     icon: string,
     iconColor: string,
     title: string,
@@ -150,8 +146,58 @@ export function renderChannelTypeFields(defaultType: 'TEXT' | 'VOICE'): string {
       <label>${t('channelModal.typeLabel')}</label>
       <div class="channel-type-options">
         ${option('TEXT', 'tag', 'var(--text-muted)', t('channelModal.typeText'), t('channelModal.typeTextDesc'))}
+        ${option('FORUM', 'forum', 'var(--accent-primary)', t('forum.title'), t('forum.description'))}
         ${option('VOICE', 'volume_up', 'var(--success)', t('channelModal.typeVoice'), t('channelModal.typeVoiceDesc'))}
       </div>
     </div>
   `;
+}
+
+export function renderChannelCategorySelect(categoryId: string | null): string {
+  return `<div class="form-group">
+    <label for="input-channel-category">${t('categories.category')}</label>
+    <select id="input-channel-category">
+      <option value="">${t('categories.uncategorized')}</option>
+      ${(serverStore.serverDetails?.categories ?? []).map((category) => `<option value="${escapeHtml(category.id)}" ${category.id === categoryId ? 'selected' : ''}>${escapeHtml(category.name)}</option>`).join('')}
+    </select>
+  </div>`;
+}
+
+export function renderChannelCategoryFields(categoryId: string | null, inherit: boolean): string {
+  return `${renderChannelCategorySelect(categoryId)}
+  <div class="form-group" id="channel-inherit-group" ${categoryId ? '' : 'hidden'}>
+    <div class="channel-privacy-row">
+      <div class="channel-privacy-info">
+        <span class="channel-privacy-title">${t('categories.inherit')}</span>
+        <span class="channel-privacy-desc">${t('categories.inheritHint')}</span>
+      </div>
+      <label class="toggle-switch" aria-label="${t('categories.inherit')}">
+        <input type="checkbox" id="input-channel-inherit" ${inherit ? 'checked' : ''}>
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+  </div>`;
+}
+
+export function readChannelCategoryFields(root: HTMLElement): { categoryId: string | null; inheritCategoryPermissions: boolean } {
+  const categoryId = root.querySelector<HTMLSelectElement>('#input-channel-category')?.value || null;
+  return { categoryId, inheritCategoryPermissions: !!categoryId && !!root.querySelector<HTMLInputElement>('#input-channel-inherit')?.checked };
+}
+
+export function attachChannelCategoryFields(root: HTMLElement): () => void {
+  const select = root.querySelector<HTMLSelectElement>('#input-channel-category');
+  const inherit = root.querySelector<HTMLInputElement>('#input-channel-inherit');
+  const group = root.querySelector<HTMLElement>('#channel-inherit-group');
+  const overrides = root.querySelector<HTMLElement>('#channel-permission-overrides');
+  const sync = () => {
+    if (group) setSurfaceVisible(group, !!select?.value);
+    if (overrides) setSurfaceVisible(overrides, !select?.value || !inherit?.checked);
+  };
+  select?.addEventListener('change', sync);
+  inherit?.addEventListener('change', sync);
+  sync();
+  return () => {
+    select?.removeEventListener('change', sync);
+    inherit?.removeEventListener('change', sync);
+  };
 }

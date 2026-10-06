@@ -39,6 +39,7 @@ using monky::light::IdentityKey;
 using monky::light::IdentitySeed;
 using monky::light::IdentityStore;
 using monky::light::ProfileIdentity;
+using monky::light::ProfileSettings;
 
 static_assert(!std::is_copy_constructible_v<ProfileIdentity>);
 static_assert(!std::is_move_constructible_v<ProfileIdentity>);
@@ -146,6 +147,7 @@ class DisposableProfile final {
     // Only exact test-owned names, including empty directories used for negative cases.
     for (const auto* name : {".identity.lock", "identity.dpapi", "identity.dpapi.pending",
                              "monky-light.json", "monky-light.json.pending",
+                             "monky-light-settings.json", "monky-light-settings.json.pending",
                              "unrelated.txt", "unrelated-directory"}) {
       removeOwned(path / name);
     }
@@ -388,6 +390,53 @@ void unrelatedAndInvalidPaths(const fs::path& root) {
           "Refusing unrelated subdirectory created a lock");
 }
 
+void settingsBesideIdentity(const fs::path& root) {
+  DisposableProfile profile(root);
+  const auto settingsPath = profile.path / "monky-light-settings.json";
+  std::string publicKey;
+  {
+    ProfileIdentity identity(profile.path);
+    publicKey = identity.publicKeyHex();
+    const auto defaults = identity.loadSettings();
+    require(!defaults.inputDeviceId && !defaults.outputDeviceId, "Missing settings did not yield defaults");
+    identity.saveSettings({std::string("input-\xc3\xa1"), std::nullopt});
+    identity.saveSettings({std::string("input-\xc3\xa1"), std::string("output")});
+    require(!fs::exists(profile.path / "monky-light-settings.json.pending"), "Settings write left its marker");
+    requireFailure([&] { identity.saveSettings({std::string(), std::nullopt}); },
+                   "An empty device ID was saved");
+    requireFailure([&] { identity.saveSettings({std::string(1025, 'a'), std::nullopt}); },
+                   "An unbounded device ID was saved");
+    requireFailure([&] { identity.saveSettings({std::string("\xff"), std::nullopt}); },
+                   "An invalid UTF-8 device ID was saved");
+  }
+  const auto saved = readFile(settingsPath);
+  // An interrupted settings write is not identity state and must not block the profile.
+  writeFile(profile.path / "monky-light-settings.json.pending", "interrupted");
+  {
+    ProfileIdentity identity(profile.path);
+    require(identity.publicKeyHex() == publicKey, "Settings changed the profile identity");
+    const auto loaded = identity.loadSettings();
+    require(loaded.inputDeviceId == std::optional<std::string>("input-\xc3\xa1") &&
+            loaded.outputDeviceId == std::optional<std::string>("output"), "Settings did not round-trip");
+    identity.saveSettings({std::nullopt, std::string("output")});
+    require(!fs::exists(profile.path / "monky-light-settings.json.pending"),
+            "Settings write did not replace an interrupted marker");
+  }
+  for (const auto* invalid : {"", "{", "[]", "{\"format\":\"monky-light-settings\",\"version\":2}",
+                              "{\"format\":\"other\",\"version\":1}",
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"inputDeviceId\":7}",
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"inputDeviceId\":{}}"}) {
+    writeFile(settingsPath, invalid);
+    ProfileIdentity identity(profile.path);
+    require(identity.publicKeyHex() == publicKey, "Invalid settings affected identity validation");
+    requireFailure([&] { static_cast<void>(identity.loadSettings()); }, "Invalid settings were accepted");
+    identity.saveSettings({});
+    const auto replaced = identity.loadSettings();
+    require(!replaced.inputDeviceId && !replaced.outputDeviceId, "Saving did not replace invalid settings");
+  }
+  require(saved.find("monky-light-settings") != std::string::npos, "Settings were written without their format");
+}
+
 void nonOrdinaryAndUnreadable(const fs::path& root) {
   DisposableProfile profile(root);
   {
@@ -469,6 +518,7 @@ int main(int argc, char** argv) {
     inconsistentProfiles(root);
     pendingMarkers(root);
     unrelatedAndInvalidPaths(root);
+    settingsBesideIdentity(root);
     nonOrdinaryAndUnreadable(root);
 #ifdef __APPLE__
     movedMacosProfile(root);

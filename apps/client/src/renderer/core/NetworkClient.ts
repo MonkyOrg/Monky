@@ -7,6 +7,9 @@ import {
   MessageType,
   ProtocolMessage,
   PROTOCOL_VERSION,
+  ProtocolErrorCode,
+  createProtocolOffer,
+  legacyProtocolFallback,
   RECONNECT_DELAYS_MS,
   ServerErrorPayload,
   serverShutdownSchema,
@@ -28,6 +31,14 @@ export class RequestTimeoutError extends Error {
   }
 }
 
+/** A request the server answered with a protocol error; keeps the code callers branch on. */
+export class ProtocolRequestError extends Error {
+  constructor(message: string, public readonly code: ProtocolErrorCode) {
+    super(message);
+    this.name = 'ProtocolRequestError';
+  }
+}
+
 export interface PendingRequest {
   resolve: (value: any) => void;
   reject: (reason: any) => void;
@@ -40,6 +51,7 @@ interface ClientIdentity {
 }
 
 interface PendingAuthRequest {
+  retriedProtocol?: boolean;
   requestId: string;
   resolve: (value: AuthSuccessPayload) => void;
   reject: (reason: Error) => void;
@@ -90,6 +102,8 @@ export class NetworkClient {
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private pendingRequests: Map<string, PendingRequest> = new Map();
   private retiredRequests = new Set<string>();
+  private localVoiceLeaves = new Map<string, string>();
+  private localVoiceLeaveReplies = new WeakSet<object>();
   private pendingAuth: PendingAuthRequest | null = null;
   private pendingConnect: { reject: (reason: Error) => void } | null = null;
   private currentServerUrl: string = '';
@@ -172,6 +186,10 @@ export class NetworkClient {
   public onEvent(listener: (event: string, data: unknown, requestId?: string) => void): () => void {
     this.eventListeners.add(listener);
     return () => this.eventListeners.delete(listener);
+  }
+
+  public isLocalVoiceLeaveAcknowledgement(payload: unknown): boolean {
+    return payload !== null && typeof payload === 'object' && this.localVoiceLeaveReplies.has(payload);
   }
 
   public cancelRequest(requestId: string): boolean {
@@ -325,6 +343,7 @@ export class NetworkClient {
           MessageType.AUTH_CONNECT,
           {
             protocolVersion: PROTOCOL_VERSION,
+            protocolOffer: createProtocolOffer('client'),
             publicKey: identity.publicKey,
             nickname,
             password: password || '',
@@ -399,6 +418,8 @@ export class NetworkClient {
       pending.reject(new Error(t('network.connectionClosed')));
     }
     this.pendingRequests.clear();
+    this.localVoiceLeaves.clear();
+    this.localVoiceLeaveReplies = new WeakSet<object>();
   }
 
   /** Drops every handler of a socket and closes it, so it can no longer affect state. */
@@ -427,13 +448,23 @@ export class NetworkClient {
       return;
     }
 
+    const id = requestId || uuidv4();
     const message: ProtocolMessage = {
       type,
-      requestId: requestId || uuidv4(),
+      requestId: id,
       payload,
     };
 
     this.ws.send(JSON.stringify(message));
+    const leave: unknown = payload;
+    if (type === MessageType.VOICE_LEAVE && leave !== null && typeof leave === 'object'
+      && 'channelId' in leave && typeof leave.channelId === 'string') {
+      this.localVoiceLeaves.set(id, leave.channelId);
+      if (this.localVoiceLeaves.size > 256) {
+        const first = this.localVoiceLeaves.keys().next().value;
+        if (first !== undefined) this.localVoiceLeaves.delete(first);
+      }
+    }
   }
 
   public sendRequest<T = any>(type: MessageType, payload: any, customRequestId?: string, timeoutMs: number = 8000): Promise<T> {
@@ -467,6 +498,12 @@ export class NetworkClient {
     const { type, requestId, payload } = message;
     const localEvent = LOCAL_EXECUTION_EVENTS.has(type);
     if (requestId && this.retiredRequests.has(requestId) && !localEvent) return;
+    const leave: unknown = payload;
+    if (type === MessageType.VOICE_USER_LEFT && requestId && leave !== null && typeof leave === 'object'
+      && 'channelId' in leave && typeof leave.channelId === 'string'
+      && this.localVoiceLeaves.get(requestId) === leave.channelId) {
+      this.localVoiceLeaveReplies.add(leave);
+    }
 
     if (type === MessageType.PONG) {
       this.lastPongAt = Date.now();
@@ -511,6 +548,17 @@ export class NetworkClient {
 
       if (type === MessageType.SERVER_ERROR) {
         const errorPayload = payload as ServerErrorPayload;
+        const fallback = errorPayload.code === ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED
+          ? legacyProtocolFallback(errorPayload.serverProtocolVersion, 'client') : null;
+        if (fallback !== null && !this.pendingAuth.retriedProtocol && this.lastConnectPayload) {
+          this.pendingAuth.retriedProtocol = true;
+          this.send(MessageType.AUTH_CONNECT, {
+            ...this.lastConnectPayload, protocolVersion: fallback,
+            protocolOffer: createProtocolOffer('client'), deviceId: getDeviceId(),
+            appearOffline: settingsStore.appearOffline || undefined,
+          }, requestId);
+          return;
+        }
         this.pendingAuth.reject(
           new Error(
             translateProtocolError(errorPayload.code, errorPayload.message, errorPayload.serverProtocolVersion)
@@ -527,7 +575,7 @@ export class NetworkClient {
 
       if (type === MessageType.SERVER_ERROR) {
         const errorPayload = payload as ServerErrorPayload;
-        pending.reject(new Error(translateProtocolError(errorPayload.code, errorPayload.message)));
+        pending.reject(new ProtocolRequestError(translateProtocolError(errorPayload.code, errorPayload.message), errorPayload.code));
         return;
       }
 

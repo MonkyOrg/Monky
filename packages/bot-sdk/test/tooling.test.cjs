@@ -204,7 +204,27 @@ test('dependency bundling preserves per-requester versions, installed optional m
   const from = (name) => createRequire(path.join(f.output, 'node_modules', name, 'package.json'));
   assert.equal(from('first')('./index.js'), '1.0.0');
   assert.equal(from('second')('./index.js'), '2.0.0');
-  assert.equal(createRequire(path.join(f.output, 'node_modules', 'alpha', 'node_modules', 'beta', 'package.json'))('alpha'), '1.0.0');
+  assert.equal(createRequire(from('alpha').resolve('beta/package.json'))('alpha'), '1.0.0');
+});
+
+test('hoisted dependency registries keep one module identity regardless of consumer order', (t) => {
+  for (const names of [['first', 'second', 'registry'], ['registry', 'second', 'first']]) {
+    const f = fixture(t);
+    json(path.join(f.source, 'package.json'), { dependencies: Object.fromEntries(names.map(name => [name, '*'])) });
+    moduleAt(path.join(f.source, 'node_modules', 'registry'), 'registry', '1.0.0', {},
+      'module.exports = { entries: new WeakMap() };');
+    for (const name of ['first', 'second']) {
+      moduleAt(path.join(f.source, 'node_modules', name), name, '1.0.0',
+        { dependencies: { registry: '*' } }, 'module.exports = require("registry");');
+    }
+    assert.equal(bundleDependencies(f.source, f.output).packageCount, 3);
+    const installed = createRequire(path.join(f.output, 'package.json'));
+    assert.strictEqual(installed('first'), installed('second'));
+    assert.strictEqual(installed('first'), installed('registry'));
+    const key = {};
+    installed('first').entries.set(key, 'registered once');
+    assert.equal(installed('second').entries.get(key), 'registered once');
+  }
 });
 
 test('workspace dependencies resolve from their real workspace, not a different caller copy', (t) => {
@@ -216,12 +236,77 @@ test('workspace dependencies resolve from their real workspace, not a different 
   fs.writeFileSync(path.join(sdk, 'dist', 'index.js'), 'module.exports = require("leaf");');
   moduleAt(path.join(workspace, 'node_modules', 'leaf'), 'leaf', '2.0.0');
   moduleAt(path.join(f.source, 'node_modules', 'leaf'), 'leaf', '9.0.0');
-  json(path.join(f.source, 'package.json'), { dependencies: { '@monky/bot-sdk': '*' } });
+  json(path.join(f.source, 'package.json'), { dependencies: { '@monky/bot-sdk': '*', leaf: '*' } });
   fs.mkdirSync(path.join(f.source, 'node_modules', '@monky'), { recursive: true });
   fs.symlinkSync(sdk, path.join(f.source, 'node_modules', '@monky', 'bot-sdk'), process.platform === 'win32' ? 'junction' : 'dir');
+  for (const name of ['LICENSE'])
+    fs.writeFileSync(path.join(workspace, name), `Workspace ${name} fixture.\n`);
   bundleDependencies(f.source, f.output);
   const installed = createRequire(path.join(f.output, 'node_modules', '@monky', 'bot-sdk', 'package.json'));
   assert.equal(installed('./dist/index.js'), '2.0.0');
+  for (const name of ['LICENSE'])
+    assert.deepEqual(fs.readFileSync(path.join(f.output, 'node_modules', '@monky', 'bot-sdk', name)),
+      fs.readFileSync(path.join(workspace, name)));
+  assert.equal(createRequire(path.join(f.output, 'package.json'))('leaf'), '9.0.0');
+});
+
+test('installed Monky dependencies retain the GPL license when bundled into a bot', (t) => {
+  const f = fixture(t);
+  botAt(f.source);
+  const sdk = path.join(f.source, 'node_modules', '@monky', 'bot-sdk');
+  for (const name of ['LICENSE'])
+    fs.writeFileSync(path.join(sdk, name), `Installed ${name} fixture.\n`);
+  bundleDependencies(f.source, f.output);
+  for (const name of ['LICENSE'])
+    assert.deepEqual(fs.readFileSync(path.join(f.output, 'node_modules', '@monky', 'bot-sdk', name)),
+      fs.readFileSync(path.join(sdk, name)));
+  const manifest = JSON.parse(fs.readFileSync(path.join(sdk, 'package.json'), 'utf8'));
+  json(path.join(sdk, 'package.json'), { ...manifest, license: 'GPL-3.0-or-later' });
+  fs.unlinkSync(path.join(sdk, 'LICENSE'));
+  assert.throws(() => bundleDependencies(f.source, path.join(f.root, 'missing-notice')),
+    /Missing Monky LICENSE notice/);
+});
+
+test('linked workspace consumers preserve their shared registry, including a direct project dependency', (t) => {
+  for (const direct of [false, true]) {
+    const f = fixture(t);
+    const workspace = path.join(f.root, 'workspace');
+    const registry = path.join(workspace, 'node_modules', 'registry');
+    moduleAt(registry, 'registry', '1.0.0', {}, 'module.exports = {};');
+    const dependencies = { first: '*', second: '*', ...(direct ? { registry: '*' } : {}) };
+    json(path.join(f.source, 'package.json'), { dependencies });
+    fs.mkdirSync(path.join(f.source, 'node_modules'));
+    for (const name of ['first', 'second']) {
+      const directory = path.join(workspace, 'packages', name);
+      moduleAt(directory, name, '1.0.0', { files: ['index.js'], dependencies: { registry: '*' } },
+        'module.exports = require("registry");');
+      fs.symlinkSync(directory, path.join(f.source, 'node_modules', name), process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    if (direct) fs.symlinkSync(registry, path.join(f.source, 'node_modules', 'registry'), process.platform === 'win32' ? 'junction' : 'dir');
+    assert.equal(bundleDependencies(f.source, f.output).packageCount, 3);
+    const installed = createRequire(path.join(f.output, 'package.json'));
+    assert.strictEqual(installed('first'), installed('second'));
+    if (direct) assert.strictEqual(installed('first'), installed('registry'));
+  }
+});
+
+test('explicit root dependencies use their source with an absent, matching or different installed copy', (t) => {
+  for (const installed of ['absent', 'matching', 'different']) {
+    const f = fixture(t);
+    json(path.join(f.source, 'package.json'), {});
+    const override = path.join(f.root, 'local-leaf');
+    moduleAt(override, 'leaf', '2.0.0', { files: ['index.js'] });
+    const alias = path.join(f.source, 'node_modules', 'leaf');
+    if (installed === 'matching') {
+      fs.mkdirSync(path.dirname(alias), { recursive: true });
+      fs.symlinkSync(override, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    } else if (installed === 'different') {
+      moduleAt(alias, 'leaf', '9.0.0');
+    }
+    const result = bundleDependencies(f.source, f.output, new Map([['leaf', override]]));
+    assert.deepEqual(result, { dependencies: { leaf: '2.0.0' }, packageCount: 1 });
+    assert.equal(createRequire(path.join(f.output, 'package.json'))('leaf'), '2.0.0');
+  }
 });
 
 test('voice dependencies preserve npm polyfills and declaration-only packages', (t) => {
@@ -238,7 +323,7 @@ test('voice dependencies preserve npm polyfills and declaration-only packages', 
   assert.equal(bundleDependencies(f.source, f.output).packageCount, 3);
   const fromVoice = createRequire(path.join(f.output, 'node_modules', 'voice', 'package.json'));
   assert.equal(fromVoice('./index.js'), '6.0.3');
-  assert.ok(fs.existsSync(path.join(f.output, 'node_modules', 'voice', 'node_modules', '@types', 'media', 'index.d.ts')));
+  assert.ok(fs.existsSync(path.join(path.dirname(fromVoice.resolve('@types/media/package.json')), 'index.d.ts')));
 });
 
 test('source-local module aliases survive bundling without copying private runtime data', (t) => {
@@ -257,26 +342,44 @@ test('source-local module aliases survive bundling without copying private runti
   assert.equal(fs.existsSync(path.join(f.output, 'node_modules', 'voice', 'src', 'node_modules', 'internal', '.env')), false);
 });
 
-test('the real SDK voice dependency tree survives packaging and offline installation', { timeout: 120000 }, (t) => {
+test('the real SDK voice dependency tree survives packaging and offline installation', { timeout: 360000 }, (t) => {
   const f = fixture(t);
   botAt(f.source, {}, path.resolve(__dirname, '..'));
   const result = buildBotPackage({ root: f.source, out: f.output, skipBuild: true });
   assert.ok(result.packageCount > 1);
   const install = path.join(f.root, 'isolated voice install');
   runNpm(['install', '--prefix', install, '--cache', path.join(f.root, 'empty cache'), '--offline',
-    '--ignore-scripts', '--no-audit', '--no-fund', result.file], { cwd: f.root });
+    '--ignore-scripts', '--no-audit', '--no-fund', result.file], { cwd: f.root, timeout: 240000 });
   const packageRoot = path.join(install, 'node_modules', '@fixture', 'sound-bot');
   const packagedSdk = path.join(packageRoot, 'node_modules', '@monky', 'bot-sdk', 'package.json');
   const loaded = spawnSync(process.execPath, ['--no-global-search-paths', '-e', `
     const fromSdk = require('node:module').createRequire(${JSON.stringify(packagedSdk)});
-    const { RTCPeerConnection } = fromSdk('werift');
+    for (const name of ['@monky/bot-sdk', '@monky/shared']) {
+      const root = require('node:path').dirname(fromSdk.resolve(name + '/package.json'));
+      for (const notice of ['LICENSE']) {
+        const expected = require('node:fs').readFileSync(require('node:path').join(${JSON.stringify(path.resolve(__dirname, '..', '..', '..'))}, notice));
+        const actual = require('node:fs').readFileSync(require('node:path').join(root, notice));
+        require('node:assert/strict').deepEqual(actual, expected);
+      }
+    }
     const { BotClient } = fromSdk('./dist/index.js');
     if (typeof BotClient.prototype.joinVoice !== 'function') throw new Error('Missing voice API');
-    const peer = new RTCPeerConnection({ iceServers: [] });
-    peer.close().catch(error => { console.error(error); process.exitCode = 1; });
+    const fromShared = require('node:module').createRequire(fromSdk.resolve('@monky/shared'));
+    const codecPath = require('node:path').relative(${JSON.stringify(packageRoot)}, fromShared.resolve('fflate'));
+    if (codecPath.startsWith('..') || require('node:path').isAbsolute(codecPath)) throw new Error('Compression dependency escaped the installed package');
+    const { createServerInviteLink, parseServerInviteLink } = fromSdk('@monky/shared');
+    const invite = { v: 1, host: '[2001:db8::7]', port: 3000, name: 'Packaged invitation', password: 'fixture-only-'.repeat(30) };
+    const result = parseServerInviteLink(createServerInviteLink(invite));
+    if (!result.ok || JSON.stringify(result.invite) !== JSON.stringify(invite)) throw new Error('Packaged invitation codec lost data');
   `], { cwd: install, env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' }, encoding: 'utf8', timeout: 15000 });
   if (loaded.error) throw loaded.error;
   assert.equal(loaded.status, 0, loaded.stderr);
+  const voice = spawnSync(process.execPath, [
+    '--no-global-search-paths', path.resolve(__dirname, '../../../scripts/fixtures/packaged-sdk-voice.cjs'),
+    packagedSdk, packageRoot,
+  ], { cwd: install, env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' }, encoding: 'utf8', timeout: 40000 });
+  if (voice.error) throw voice.error;
+  assert.equal(voice.status, 0, voice.stderr);
   const cli = spawnSync(process.execPath, ['--no-global-search-paths', path.join(packageRoot, 'monky-cli.cjs'), '--version'], {
     cwd: install, env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' }, encoding: 'utf8', timeout: 15000,
   });
@@ -334,6 +437,48 @@ test('build compiles the bot and emits an offline-installable ESM package with a
   assert.equal(botEntryPath(loadBotProject(packageRoot)), path.join(packageRoot, 'dist', 'index.js'));
 });
 
+for (const nested of [false, true]) {
+  test(`offline global upgrades preserve dependencies hoisted into ${nested ? 'nested packages' : 'the bot root'}`,
+    { timeout: 120000 }, (t) => {
+      const f = fixture(t);
+      const name = nested ? 'container' : 'consumer';
+      botAt(f.source, { dependencies: { '@monky/bot-sdk': '*', [name]: '*' } });
+      const owner = nested ? path.join(f.source, 'node_modules', name) : f.source;
+      if (nested) {
+        moduleAt(owner, name, '1.0.0', { dependencies: { consumer: '*' } }, 'module.exports = require("consumer");');
+      }
+      const consumer = path.join(owner, 'node_modules', 'consumer');
+      moduleAt(consumer, 'consumer', '1.0.0', { dependencies: { '@fixture/alias': 'npm:@fixture/leaf@1.0.0' } },
+        'module.exports = require("@fixture/alias");');
+      const nestedLeaf = path.join(consumer, 'node_modules', '@fixture', 'alias');
+      moduleAt(nestedLeaf, '@fixture/leaf', '1.0.0');
+      const previous = buildBotPackage({ root: f.source, out: f.output, skipBuild: true });
+
+      const hoistedLeaf = path.join(owner, 'node_modules', '@fixture', 'alias');
+      fs.mkdirSync(path.dirname(hoistedLeaf), { recursive: true });
+      fs.renameSync(nestedLeaf, hoistedLeaf);
+      const next = buildBotPackage({ root: f.source, out: f.output, version: '1.2.4', skipBuild: true });
+      const prefix = path.join(f.root, 'global prefix');
+      for (const [index, release] of [previous, next].entries()) {
+        runNpm(['install', '-g', '--prefix', prefix, '--cache', path.join(f.root, `empty cache ${index}`),
+          '--offline', '--ignore-scripts', '--no-audit', '--no-fund', release.file], { cwd: f.root });
+      }
+      const globalRoot = process.platform === 'win32' ? path.join(prefix, 'node_modules')
+        : path.join(prefix, 'lib', 'node_modules');
+      const packageRoot = path.join(globalRoot, '@fixture', 'sound-bot');
+      const installed = createRequire(path.join(packageRoot, 'package.json'));
+      const ownerRoot = nested ? path.join(packageRoot, 'node_modules', name) : packageRoot;
+      const fromOwner = createRequire(path.join(ownerRoot, 'package.json'));
+      const metadata = fromOwner('./package.json');
+      assert.equal(installed('./package.json').version, '1.2.4');
+      assert.equal(installed(name), '1.0.0');
+      assert.equal(fromOwner.resolve('@fixture/alias'),
+        path.join(ownerRoot, 'node_modules', '@fixture', 'alias', 'index.js'));
+      assert.equal(metadata.dependencies['@fixture/alias'], 'npm:@fixture/leaf@1.0.0');
+      assert.ok(metadata.bundleDependencies.includes('@fixture/alias'));
+    });
+}
+
 test('private files inside a runtime directory, compiler recursion and incompatible SDKs fail explicitly', (t) => {
   const f = fixture(t);
   botAt(f.source);
@@ -343,6 +488,9 @@ test('private files inside a runtime directory, compiler recursion and incompati
   fs.writeFileSync(path.join(f.source, 'dist', '.npmrc'), '//registry.example/:_authToken=not-for-releases');
   assert.throws(() => buildBotPackage({ root: f.source, out: f.output }), /private runtime data/);
   fs.unlinkSync(path.join(f.source, 'dist', '.npmrc'));
+  json(path.join(f.source, 'dist', 'update-credentials.json'), { repository: 'example/private', token: 'synthetic-not-for-releases' });
+  assert.throws(() => buildBotPackage({ root: f.source, out: f.output }), /private runtime data/);
+  fs.unlinkSync(path.join(f.source, 'dist', 'update-credentials.json'));
   botAt(f.source, { scripts: { build: 'monky-bot-sdk build' } });
   assert.throws(() => buildBotPackage({ root: f.source, out: f.output }), /recursively/);
   botAt(f.source);

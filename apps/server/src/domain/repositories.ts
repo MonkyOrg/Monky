@@ -1,4 +1,4 @@
-import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord, VoiceRestrictions } from './entities';
+import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, NativePollRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord, VoiceRestrictions } from './entities';
 import type { BotSelector } from '@monky/shared';
 import type { BotSettingsRecord } from './entities';
 
@@ -60,9 +60,24 @@ export interface IChannelRepository {
   update(id: string, updates: Partial<Omit<ChannelRecord, 'id' | 'serverId'>>): Promise<void>;
   delete(id: string): Promise<void>;
   updatePosition(id: string, position: number): Promise<void>;
+  updatePositions?(positions: Array<{ channelId: string; position: number }>): Promise<void>;
+}
+
+export interface ICategoryRepository {
+  listByServerId(serverId: string): Promise<import('@monky/shared').ChannelCategory[]>;
+  findById(id: string): Promise<import('@monky/shared').ChannelCategory | null>;
+  create(category: import('@monky/shared').ChannelCategory): Promise<void>;
+  update(id: string, updates: Partial<Pick<import('@monky/shared').ChannelCategory, 'name' | 'isPrivate' | 'allowedRoleIds' | 'permissionOverwrites'>>): Promise<void>;
+  /** Detaches children and snapshots inherited ACLs in the same transaction. */
+  deletePreservingAccess(id: string): Promise<void>;
+  reorder(orderedIds: string[]): Promise<void>;
 }
 
 export interface IMessageRepository {
+  /** Atomically commits a human message, its attachments and mentions; retries do not repeat side effects. */
+  createChatMessage(message: MessageRecord, attachmentIds: string[], mentions: MentionRecord[]): Promise<{
+    message: MessageRecord; created: boolean;
+  } | null>;
   createBotMessage(message: MessageRecord): Promise<MessageRecord | null>;
   setReaction(messageId: string, userId: string, emoji: string, add: boolean): Promise<'changed' | 'unchanged' | 'limit' | 'invalid'>;
   listReactions(messageIds: string[]): Promise<import('./entities').MessageReactionRecord[]>;
@@ -70,11 +85,32 @@ export interface IMessageRepository {
   findById(messageId: string): Promise<MessageRecord | null>;
   listByChannel(channelId: string, limit: number, beforeTimestamp?: number): Promise<MessageRecord[]>;
   /** Rewrites the content of a message and stamps it as edited (#504). */
-  updateContent(messageId: string, content: string, editedAt: number): Promise<void>;
+  updateContent(messageId: string, content: string, editedAt: number, blocks?: import('@monky/shared').MessageBlock[]): Promise<void>;
   /** Blanks a message's content and stamps it as deleted, keeping the row (#504). */
-  markDeleted(messageId: string, deletedAt: number): Promise<void>;
+  markDeleted(messageId: string, deletedAt: number, actorId?: string, undoUntil?: number): Promise<void>;
+  restoreDeleted(messageId: string, actorId: string, deletedAt: number, revision: number, now: number): Promise<boolean>;
+  listExpiredDeletionMessageIds(now: number): Promise<string[]>;
+  purgeExpiredDeletions(now: number): Promise<void>;
   deleteByChannel(channelId: string): Promise<void>;
   countAll(): Promise<number>;
+}
+
+export interface INativePollRepository {
+  messageExists(messageId: string): boolean;
+  findById(id: string): NativePollRecord | undefined;
+  findByMessageId(messageId: string): NativePollRecord | undefined;
+  findByMessageIds(messageIds: string[]): NativePollRecord[];
+  listByChannel(channelId: string): NativePollRecord[];
+  listActiveLiveActions(now: number): NativePollRecord[];
+  createWithMessage(poll: NativePollRecord, message: MessageRecord): { poll: NativePollRecord; created: boolean };
+  vote(id: string, userId: string, optionIds: string[], now: number): NativePollRecord | undefined;
+  closeExpired(now: number): NativePollRecord[];
+  closeById(id: string, now: number): NativePollRecord | undefined;
+  closeByMessageId(messageId: string, now: number): NativePollRecord | undefined;
+  deleteByMessageIds(messageIds: string[]): void;
+  voteCounts(id: string): Map<string, number>;
+  voterCount(id: string): number;
+  votesForUser(id: string, userId: string): string[];
 }
 
 export interface IMentionRepository {

@@ -1,4 +1,5 @@
 include(FetchContent)
+include("${CMAKE_CURRENT_LIST_DIR}/VerifiedDownload.cmake")
 
 if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.0")
   message(FATAL_ERROR "The pinned SDP dependency requires CMake 3.x; use the qualified 3.31 series.")
@@ -119,39 +120,16 @@ set_property(TARGET mediasoupclient PROPERTY SOURCES "${MONKY_MEDIA_SOURCES}")
 
 # The SDK ships FieldTrials headers but omits this public API object from webrtc.lib.
 # Compile the unchanged implementation from the exact same upstream revision.
-foreach(field url sha256 decodedSha256)
+foreach(field url sha256)
   string(JSON MONKY_FIELD_TRIALS_${field} GET "${MONKY_DEPENDENCY_LOCK}" webrtc fieldTrials "${field}")
 endforeach()
 set(MONKY_WEBRTC_EXTRA_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/_deps/webrtc-api")
 file(MAKE_DIRECTORY "${MONKY_WEBRTC_EXTRA_DIRECTORY}")
-set(MONKY_FIELD_TRIALS_ENCODED "${MONKY_WEBRTC_EXTRA_DIRECTORY}/field_trials.base64")
+set(MONKY_FIELD_TRIALS_CACHED
+  "${CMAKE_CURRENT_SOURCE_DIR}/build/downloads/${MONKY_SDK_TARGET}/field_trials-${MONKY_FIELD_TRIALS_sha256}.cc")
 set(MONKY_FIELD_TRIALS_SOURCE "${MONKY_WEBRTC_EXTRA_DIRECTORY}/field_trials.cc")
-file(DOWNLOAD "${MONKY_FIELD_TRIALS_url}" "${MONKY_FIELD_TRIALS_ENCODED}"
-  EXPECTED_HASH "SHA256=${MONKY_FIELD_TRIALS_sha256}"
-  TLS_VERIFY TRUE TIMEOUT 120 INACTIVITY_TIMEOUT 30
-  STATUS MONKY_FIELD_TRIALS_DOWNLOAD)
-list(GET MONKY_FIELD_TRIALS_DOWNLOAD 0 MONKY_FIELD_TRIALS_DOWNLOAD_CODE)
-if(NOT MONKY_FIELD_TRIALS_DOWNLOAD_CODE EQUAL 0)
-  message(FATAL_ERROR "Could not restore the pinned FieldTrials source: ${MONKY_FIELD_TRIALS_DOWNLOAD}")
-endif()
-set(MONKY_FIELD_TRIALS_READY FALSE)
-if(EXISTS "${MONKY_FIELD_TRIALS_SOURCE}")
-  file(SHA256 "${MONKY_FIELD_TRIALS_SOURCE}" MONKY_FIELD_TRIALS_ACTUAL_HASH)
-  if(MONKY_FIELD_TRIALS_ACTUAL_HASH STREQUAL MONKY_FIELD_TRIALS_decodedSha256)
-    set(MONKY_FIELD_TRIALS_READY TRUE)
-  endif()
-endif()
-if(NOT MONKY_FIELD_TRIALS_READY)
-  execute_process(
-    COMMAND "${MONKY_NODE_EXECUTABLE}" -e
-      [=[const fs = require('node:fs'); fs.writeFileSync(process.argv[2], Buffer.from(fs.readFileSync(process.argv[1], 'utf8'), 'base64'));]=]
-      "${MONKY_FIELD_TRIALS_ENCODED}" "${MONKY_FIELD_TRIALS_SOURCE}"
-    COMMAND_ERROR_IS_FATAL ANY)
-  file(SHA256 "${MONKY_FIELD_TRIALS_SOURCE}" MONKY_FIELD_TRIALS_ACTUAL_HASH)
-  if(NOT MONKY_FIELD_TRIALS_ACTUAL_HASH STREQUAL MONKY_FIELD_TRIALS_decodedSha256)
-    message(FATAL_ERROR "Decoded FieldTrials source does not match the pinned upstream content.")
-  endif()
-endif()
+monky_download_verified("${MONKY_FIELD_TRIALS_url}" "${MONKY_FIELD_TRIALS_CACHED}" "${MONKY_FIELD_TRIALS_sha256}")
+file(COPY_FILE "${MONKY_FIELD_TRIALS_CACHED}" "${MONKY_FIELD_TRIALS_SOURCE}" ONLY_IF_DIFFERENT)
 target_sources(mediasoupclient PRIVATE "${MONKY_FIELD_TRIALS_SOURCE}")
 
 target_include_directories(mediasoupclient SYSTEM INTERFACE

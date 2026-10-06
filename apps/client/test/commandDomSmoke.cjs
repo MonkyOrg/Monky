@@ -6,6 +6,7 @@ const { authoredOggPreview } = require(path.join(__dirname, 'fixtures', 'authore
 
 const clientRoot = path.resolve(__dirname, '..');
 const output = path.join(clientRoot, 'dist-test');
+const sharedModule = '/@fs/' + path.resolve(clientRoot, '..', '..', 'packages', 'shared', 'src', 'index.ts').replace(/\\/g, '/');
 
 if (!process.versions.electron) {
   fs.mkdirSync(output, { recursive: true });
@@ -43,6 +44,7 @@ if (!process.versions.electron) {
     vite = await createServer({
       configFile: path.join(clientRoot, 'vite.config.ts'),
       logLevel: 'error',
+      cacheDir: path.join(app.getPath('userData'), 'vite-cache'),
       server: { host: '127.0.0.1', port: 0, strictPort: true, open: false },
       plugins: [{
         name: 'command-dom-fixture',
@@ -85,6 +87,37 @@ if (!process.versions.electron) {
       features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
     });
     console.log(`Command waiting indicators: ${waitingChecks} checks plus reduced-motion coverage passed`);
+    const captureBotVoiceIndicators = async () => {
+      const markup = await window.webContents.executeJavaScript('window.botVoicePreviewMarkup.join("")');
+      const preview = new BrowserWindow({
+        show: false, width: 280, height: 720, useContentSize: true,
+        webPreferences: { contextIsolation: true, nodeIntegration: false, offscreen: true, backgroundThrottling: false },
+      });
+      try {
+        await preview.loadURL(window.webContents.getURL());
+        await preview.webContents.executeJavaScript(`(async () => {
+          document.body.innerHTML = '<div style="width:250px;padding:12px;">' + ${JSON.stringify(markup)} + '</div>';
+          await document.fonts.ready;
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        })()`, true);
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => { preview.webContents.removeListener('paint', painted); reject(new Error('Bot indicators did not paint')); }, 5000);
+          const painted = () => { clearTimeout(timer); resolve(); };
+          preview.webContents.once('paint', painted);
+          preview.webContents.invalidate();
+        });
+        fs.writeFileSync(path.join(output, 'bot-voice-indicators.png'), (await preview.webContents.capturePage()).toPNG());
+      } finally {
+        preview.destroy();
+      }
+    };
+    if (process.argv.includes('--sidebar-only')) {
+      const checks = await window.webContents.executeJavaScript(`(${runSidebarPttSmoke.toString()})()`, true);
+      await captureBotVoiceIndicators();
+      console.log(`Sidebar voice indicators: ${checks} checks passed`);
+      await finish(0);
+      return;
+    }
     if (process.argv.includes('--bot-settings-only')) {
       const checks = await window.webContents.executeJavaScript(`(${runBotSettingsDomSmoke.toString()})()`, true);
       await window.webContents.executeJavaScript('document.body.innerHTML = window.botSettingsPreviewMarkup', true);
@@ -96,6 +129,15 @@ if (!process.versions.electron) {
       })()`, true);
       fs.writeFileSync(path.join(output, 'bot-settings.png'), (await window.webContents.capturePage()).toPNG());
       console.log(`Bot settings DOM smoke: ${checks} checks passed`);
+      await finish(0);
+      return;
+    }
+    if (process.argv.includes('--surfaces-only')) {
+      await window.webContents.executeJavaScript(`(${runDomSmoke.toString()})(${JSON.stringify(sharedModule)})`, true);
+      const result = await window.webContents.executeJavaScript('window.commandDomCaptureComposer()', true);
+      await runMessageToolbarPointerSmoke(window);
+      await window.webContents.executeJavaScript('window.commandDomCleanup()', true);
+      console.log(`Chat surfaces: ${result.checks} checks plus trusted message toolbar input passed`);
       await finish(0);
       return;
     }
@@ -125,7 +167,7 @@ if (!process.versions.electron) {
       await finish(0);
       return;
     }
-    await window.webContents.executeJavaScript(`(${runDomSmoke.toString()})()`, true);
+    await window.webContents.executeJavaScript(`(${runDomSmoke.toString()})(${JSON.stringify(sharedModule)})`, true);
     for (const withArguments of [true, false]) {
       await window.webContents.executeJavaScript(`window.commandSpaceFixture.prepare(${withArguments})`, true);
       await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
@@ -150,6 +192,7 @@ if (!process.versions.electron) {
     const paginationChecks = await window.webContents.executeJavaScript('window.autocompletePaginationSmoke()', true);
     await window.webContents.executeJavaScript('window.autocompleteDomCleanup()', true);
     const sidebarChecks = await window.webContents.executeJavaScript(`(${runSidebarPttSmoke.toString()})()`, true);
+    await captureBotVoiceIndicators();
     const restrictionChecks = await window.webContents.executeJavaScript(`(${runServerRestrictionSmoke.toString()})()`, true);
     const settingsChecks = await window.webContents.executeJavaScript(`(${runSettingsNavigationSmoke.toString()})()`, true);
     const botSettingsChecks = await window.webContents.executeJavaScript(`(${runBotSettingsDomSmoke.toString()})()`, true);
@@ -1033,9 +1076,9 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
   for (let offset = 0; offset < wave.length; offset += 16384) binary.push(String.fromCharCode(...wave.subarray(offset, offset + 16384)));
   const ready = { status: 'ok', audioBase64: btoa(binary.join('')), mimeType: 'audio/wav' };
   const nativeListeners = [];
-  const cleanup = () => {
+  const cleanup = async () => {
     nativeListeners.forEach(unbind => unbind());
-    view.destroy(); off(); audioPreviewService.release(); voiceStore.reset(); sessionManager.removeAll();
+    view.destroy(); off(); audioPreviewService.release(); voiceStore.reset(); await sessionManager.removeAll();
     // Later fixtures install standalone stores instead of SessionManager bundles.
     routing.setSessionEventRouter((_sessionKey, _event, emit) => emit());
     window.Audio = NativeAudio; window.api = previousApi; language.setLanguage('pt-BR');
@@ -1266,7 +1309,7 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     }
     return checks;
   } finally {
-    cleanup();
+    await cleanup();
   }
 }
 
@@ -1553,8 +1596,9 @@ async function runAutocompleteDomSmoke() {
   await waitFor(() => queries.length === 6);
   key(input(), 'Escape');
   response(queries[5], choices);
-  await new Promise(resolve => setTimeout(resolve, 30));
-  check(find('#bot-parameter-options').hidden, 'A late response must not reopen an escaped menu');
+  await waitFor(() => find('#bot-parameter-options').hidden,
+    'A late response must not reopen an escaped menu');
+  checks++;
   type(input(), 'channel');
   await waitFor(() => queries.length === 7);
   view.setChannel('two');
@@ -1748,6 +1792,7 @@ async function runAutocompleteDomSmoke() {
   });
   window.autocompleteNativeCancelled = async () => {
     await waitFor(() => store.getInvocation(receivedDownload.invocationId)?.soundDownload?.result?.status === 'cancelled');
+    await waitFor(() => !document.querySelector('.dialog-card'));
     check(!downloadInput && !document.querySelector('.dialog-card') && pickerCalls === 0,
       'Cancelling or ending a pending confirmation closes it without a transfer or folder picker');
     check(settingsStore.botDownloadConfirmationExceptions.length === 0, 'A cancelled confirmation cannot remember approval');
@@ -1869,8 +1914,10 @@ async function runAutocompleteDomSmoke() {
     await play(0);
     const invalidated = lazyRequests.at(-1);
     client.handleIncomingMessage({ type: 'COMMAND_AUTOCOMPLETE_CANCEL', payload: { requestId: queries.at(-1).requestId } });
-    check(find('#bot-parameter-options').hidden && lazyCancels.some(cancel => cancel.requestId === invalidated.requestId),
-      'Server expiry, disconnect, or access invalidation closes the choice and aborts its provider');
+    await waitFor(() => find('#bot-parameter-options').hidden &&
+      lazyCancels.some(cancel => cancel.requestId === invalidated.requestId),
+    'Server expiry, disconnect, or access invalidation closes the choice and aborts its provider');
+    checks++;
     await prepare('lazy close');
     await play(0);
     const closing = lazyRequests.at(-1);
@@ -2160,9 +2207,9 @@ async function runLocalDownloadGestureSmoke(window) {
     if (synthetic.downloadInput || !synthetic.confirmation) throw new Error('Synthetic acceptance must not authorize a transfer');
     if (remember) await click('.dialog-card .toggle-switch');
     await click('.dialog-card [data-action="confirm"]');
-    const accepted = await waitFor(state => !!state.downloadInput);
+    const accepted = await waitFor(state => !!state.downloadInput && !state.confirmation);
     if (accepted.invokes !== invokes || accepted.confirmation || accepted.pickerCalls !== 0) {
-      throw new Error('Acceptance must start exactly the correlated native download');
+      throw new Error(`Acceptance must start exactly the correlated native download: ${JSON.stringify(accepted)}`);
     }
     if (accepted.downloadInput.fileName !== `${baseName}.mp3` || accepted.fileName !== `${baseName}.mp3`) {
       throw new Error('The chosen filename must reach the native writer and download card with its extension preserved');
@@ -2198,7 +2245,11 @@ async function runMessageToolbarPointerSmoke(window) {
   window.focus();
   window.webContents.focus();
   const evaluate = code => window.webContents.executeJavaScript(code, true);
-  const wait = () => new Promise(resolve => setTimeout(resolve, 50));
+  const wait = async () => {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await evaluate(`Promise.allSettled([...document.querySelectorAll('[data-ui-closing]')]
+      .flatMap(element => element.getAnimations().map(animation => animation.finished)))`);
+  };
   const row = '.chat-message-row[data-message-id="toolbar-pointer"]';
   const action = name => `${row} [data-message-action="${name}"]`;
   const check = async (expression, message) => {
@@ -2253,7 +2304,7 @@ async function runMessageToolbarPointerSmoke(window) {
     await move(`${row} .chat-message-text`);
     await check(visible, 'Hovering the message again restores actions');
     await click(action('reply'));
-    await check(`!(${visible}) && document.activeElement.id === 'chat-message-input'`,
+    await check(`!(${visible}) && document.querySelector('#chat-message-input').contains(document.activeElement)`,
       'Reply immediately hides actions and focuses the composer');
     await leave();
     await move(`${row} .chat-message-text`);
@@ -2294,7 +2345,7 @@ async function runMessageToolbarPointerSmoke(window) {
     await click(action('more'));
     await evaluate(`Array.from(document.querySelectorAll('.floating-context-menu button'))
       .find(button => button.textContent.includes('content_copy')).id = 'toolbar-menu-copy'`);
-    await click('#toolbar-menu-copy');
+    await click('#toolbar-menu-copy .context-menu-trailing');
     await click('.floating-context-submenu button:first-child');
     await check(`!(${visible}) && !document.querySelector('.floating-context-menu')`,
       'Selecting a submenu action also dismisses the toolbar');
@@ -2397,7 +2448,7 @@ async function runServerRestrictionSmoke() {
     a.updateVoiceRestrictions(user.id, {
       sessionId: 'another-device', serverMuted: false, serverDeafened: true,
     });
-    check(blocks() === 2 && Object.keys(a.voiceRestrictions).sort().join(',') === 'serverDeafened,serverMuted',
+    check(blocks() === 2 && Object.keys(a.voiceRestrictions).sort().join(',') === 'permissionMuted,serverDeafened,serverMuted',
       'An update for another device of the same identity applies outside voice without retaining transient session data');
 
     voice.setChannel('room-b', 'unrestricted-b');
@@ -2472,7 +2523,7 @@ async function runSettingsNavigationSmoke() {
     check(!!document.querySelector('.monky-select-popup') && select.title === 'Device choice',
       'Themed select opens inside settings while tooltip handling preserves its title API');
     select.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-    check(!document.querySelector('.monky-select-popup') && !!document.querySelector('.modal-backdrop--settings'),
+    check(!document.querySelector('.monky-select-popup:not([data-ui-closing])') && !!document.querySelector('.modal-backdrop--settings'),
       'Escape closes the dropdown without also closing its settings modal');
     const priorCleanup = cleanups;
     modal.switchTab('account');
@@ -2493,7 +2544,7 @@ async function runSettingsNavigationSmoke() {
     resolveRefresh();
     await opening;
     check(starts === priorStarts && cameraActivations === pendingCameraActivations
-      && versions === priorVersions + 1 && !document.querySelector('.modal-backdrop--settings'),
+      && versions === priorVersions + 1 && !document.querySelector('.modal-backdrop--settings:not([data-ui-closing])'),
       'Closing during async settings setup cannot start a late media preview');
     return checks;
   } finally {
@@ -2523,7 +2574,7 @@ async function runSidebarPttSmoke() {
   const root = document.getElementById('app');
   root.innerHTML = '<div class="user-quick-actions">' + ptt.renderMicrophoneButton()
     + '<button id="bar-btn-deafen" class="btn btn-icon">' + audioIcons.renderAudioStateIcon('headphones') + '</button></div>'
-    + '<img id="main-user-avatar"><div id="voice-channels-list" style="width:250px"></div><div id="members-list-items"></div>';
+    + '<img id="main-user-avatar"><div id="channel-categories-list" style="width:250px"></div><div id="members-list-items"></div>';
   const view = new MainView(root);
   const stage = new VoiceStageView(document.getElementById('ptt-stage-fixture'));
   const fixtureSession = sessionManager.create('ptt-controls.example', 3001, 'Local');
@@ -2577,10 +2628,11 @@ async function runSidebarPttSmoke() {
       manager.updateVoiceState(botState);
       manager.updateVoiceState({ ...botState, sessionId: quietBot.sessionId, userId: quietBot.id, isSpeaking: false });
       manager.updateVoiceState({ ...remoteState, isMuted: true, isSpeaking: true });
+      view.renderChannels();
       stage.setChannel(channelId);
       await frame();
       const speaking = (id, expected, reason) => {
-        const row = root.querySelector(`#voice-mini-user-${CSS.escape(id)}`);
+        const row = root.querySelector(`.voice-participant-mini[data-session-id="${CSS.escape(id)}"]`);
         const card = document.querySelector(`#ptt-stage-fixture [data-session-id="${CSS.escape(id)}"][data-kind="voice"]`);
         check(!!row && row.classList.contains('speaking') === expected, `Sidebar: ${reason}`);
         check(!!card && card.classList.contains('speaking') === expected, `Stage: ${reason}`);
@@ -2593,6 +2645,50 @@ async function runSidebarPttSmoke() {
       const originalApi = window.api;
       try {
         speaking(bot.sessionId, true, 'The actual transmitting bot is green in the listening room');
+        window.botVoicePreviewMarkup = [];
+        for (const locale of ['pt-BR', 'en']) {
+          language.setLanguage(locale);
+          for (const permissions of [
+            { publish: true, receive: true, publishRequested: true, receiveRequested: true },
+            { publish: false, receive: true, publishRequested: false, receiveRequested: true },
+            { publish: true, receive: false, publishRequested: true, receiveRequested: false },
+            { publish: false, receive: true, publishRequested: true, receiveRequested: true },
+            { publish: true, receive: false, publishRequested: true, receiveRequested: true },
+          ]) {
+            manager.updateVoiceState({ ...botState, receivesVoice: true, botVoicePermissions: permissions });
+            await frame();
+            const row = root.querySelector(`#voice-mini-user-${CSS.escape(bot.sessionId)}`);
+            const card = document.querySelector(`#ptt-stage-fixture [data-session-id="${CSS.escape(bot.sessionId)}"][data-kind="voice"]`);
+            for (const element of [row, card]) {
+              check(!!element.querySelector('.bot-voice-listening') === permissions.receive, 'Listening reflects the actual receive permission');
+              check(element.querySelectorAll('.audio-state-icon--blocked').length ===
+                Number(permissions.publishRequested && !permissions.publish) + Number(permissions.receiveRequested && !permissions.receive),
+                'Only requested but denied bot directions use the administrative block badge');
+              if (permissions.receive) check(element.textContent.includes(language.t('botVoice.listening')), 'Listening has visible localized text');
+            }
+            check(row.scrollWidth <= row.clientWidth + 1, 'Bot indicators fit the narrow voice sidebar');
+            check(row.querySelector('.voice-mini-name').getBoundingClientRect().width >= 24, 'Listening must not hide the entire bot name');
+            window.botVoicePreviewMarkup.push(`<div style="margin-bottom:12px"><small>${locale}</small>${row.outerHTML}</div>`);
+          }
+          for (const restriction of ['isDeafened', 'serverMuted', 'serverDeafened']) {
+            manager.updateVoiceState({ ...botState, receivesVoice: true,
+              botVoicePermissions: { publish: true, receive: true, publishRequested: true, receiveRequested: true },
+              [restriction]: true });
+            await frame();
+            const row = root.querySelector(`#voice-mini-user-${CSS.escape(bot.sessionId)}`);
+            const card = document.querySelector(`#ptt-stage-fixture [data-session-id="${CSS.escape(bot.sessionId)}"][data-kind="voice"]`);
+            for (const element of [row, card]) {
+              check(!!element.querySelector('.bot-voice-listening') === (restriction === 'serverMuted'),
+                'Administrative mute preserves listening; personal and administrative deafen stop it');
+              check(element.querySelectorAll('.audio-state-icon--blocked').length ===
+                (restriction === 'serverMuted' ? 1 : restriction === 'serverDeafened' ? 2 : 0),
+                'Administrative restrictions stay visible even when both bot capabilities are granted');
+            }
+          }
+        }
+        language.setLanguage('pt-BR');
+        manager.updateVoiceState(botState);
+        await frame();
         speaking(remoteUser.sessionId, false, 'A bot cannot light a muted human with published speaking metadata');
         speaking(quietBot.sessionId, false, 'A bot cannot light another silent bot');
         appEvents.emit('participants.speaking_changed', { sessionId: bot.sessionId, speaking: true });
@@ -2924,6 +3020,7 @@ async function runSidebarPttSmoke() {
     check(icon() === 'mic' && button.dataset.state === 'idle', 'Unmuted VAD keeps the normal microphone icon');
     settings.inputMode = 'push_to_talk';
     appEvents.emit('settings.updated');
+    voice.setChannel('ptt-sidebar-fixture', fixtureSession.key);
     stage.setChannel('ptt-sidebar-fixture');
     check(!!document.querySelector('.stage-call-controls') && !document.querySelector('#ptt-stage-fixture [data-ptt-indicator]'), 'The actual stage must retain its controls without a separate PTT indicator');
     const pingBadge = document.getElementById('stage-ping-badge');
@@ -3080,6 +3177,9 @@ async function runSidebarPttSmoke() {
       'Actual footer device panel must open upward');
     window.mainAudioControlsPreviewMarkup = root.innerHTML + outputPanel.outerHTML;
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    for (let attempt = 0; attempt < 80 && document.querySelector('.audio-device-popover'); attempt++) {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    }
     check(!document.querySelector('.audio-device-popover') && document.activeElement === outputTrigger,
       'Escape closes actual footer panel and restores arrow focus');
     for (const element of [
@@ -3174,7 +3274,8 @@ async function runSidebarPttSmoke() {
     const ownProfile = root.querySelector('#user-profile-btn');
     view.destroy();
     ownProfile.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
-    check(!document.querySelector('.user-context-menu'), 'Destroy must release the own-profile context menu listener');
+    check(!document.querySelector('.user-context-menu:not([data-ui-closing])'),
+      'Destroy must release the own-profile context menu listener');
     return checks;
   } finally {
     routing.setForegroundContext(true);
@@ -3193,16 +3294,20 @@ async function runSidebarPttSmoke() {
   }
 }
 
-async function runDomSmoke() {
-  const [{ ChatView }, chats, servers, networks, events, inputs, catalog, language, proxies, botEvents] = await Promise.all([
+async function runDomSmoke(sharedModule) {
+  const [{ ChatView }, chats, servers, networks, events, inputs, catalog, language, proxies, botEvents, { Permission }] = await Promise.all([
     import('/views/ChatView.ts'), import('/stores/chatStore.ts'), import('/stores/serverStore.ts'),
     import('/core/NetworkClient.ts'), import('/core/EventBus.ts'), import('/utils/botInputs.ts'),
     import('/utils/commandCatalog.ts'), import('/i18n/index.ts'), import('/core/activeProxy.ts'), import('/core/botChatEvents.ts'),
+    import(sharedModule),
   ]);
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  const activeAll = selector => [...document.querySelectorAll(selector)].filter(element => !element.closest('[data-ui-closing]'));
+  const active = selector => activeAll(selector)[0] ?? null;
   const find = (selector) => {
-    const element = document.querySelector(selector);
+    const element = [...document.querySelectorAll(selector)].find(element =>
+      !element.closest('.modal-backdrop[data-ui-closing], .floating-context-menu[data-ui-closing], .user-context-menu[data-ui-closing], .emoji-picker[data-ui-closing], .chat-copy-toast[data-ui-closing]'));
     if (!element) throw new Error(`Missing ${selector}`);
     return element;
   };
@@ -3315,17 +3420,17 @@ async function runDomSmoke() {
   const rightClick = element => element.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 150, clientY: 100 }));
   try {
     rightClick(row.querySelector('.chat-author-name'));
-    check(!!document.querySelector('.user-context-menu #ctx-volume-slider'), 'Right-clicking another chat author must open their user menu');
+    check(!!active('.user-context-menu #ctx-volume-slider'), 'Right-clicking another chat author must open their user menu');
     userContextMenu.close();
     server.currentUser = otherCaller;
     rightClick(row.querySelector('.chat-author-name'));
-    check(!!document.querySelector('.user-context-menu [data-action="self-mute"]')
-      && !document.querySelector('.user-context-menu #ctx-volume-slider'), 'Right-clicking own chat name opens manual controls without self volume');
+    check(!!active('.user-context-menu [data-action="self-mute"]')
+      && !active('.user-context-menu #ctx-volume-slider'), 'Right-clicking own chat name opens manual controls without self volume');
     rightClick(row.querySelector('.chat-message-text'));
-    check(!!document.querySelector('.floating-context-menu') && !document.querySelector('.user-context-menu'), 'Message body retains message actions rather than opening the user menu');
+    check(!!active('.floating-context-menu') && !active('.user-context-menu'), 'Message body retains message actions rather than opening the user menu');
     rightClick(row.querySelector('.chat-author-avatar'));
-    check(!!document.querySelector('.user-context-menu [data-action="self-deafen"]')
-      && !document.querySelector('.floating-context-menu'), 'Own chat avatar opens the user menu and closes message actions');
+    check(!!active('.user-context-menu [data-action="self-deafen"]')
+      && !active('.floating-context-menu'), 'Own chat avatar opens the user menu and closes message actions');
   } finally {
     contextMenu.close();
     userContextMenu.close();
@@ -3338,19 +3443,21 @@ async function runDomSmoke() {
   check(row.getBoundingClientRect().height === beforeHeight, 'Message toolbar must not shift chat layout');
   check(getComputedStyle(find('[data-message-action="emoji"]')).opacity === '1', 'Enabled emoji action must not look disabled');
   const messagePermissions = server.myPermissions;
-  server.myPermissions = 0;
+  server.myPermissions = Permission.VIEW_CHANNEL | Permission.READ_MESSAGES;
   events.appEvents.emit('server.roles_updated');
+  check(row.isConnected && store.getMessages('one').some(message => message.id === original.id),
+    'Revoking send permission must preserve readable messages and their toolbar');
   check(find('[data-message-action="emoji"]').disabled, 'Emoji action must remain disabled without message permission');
   check(getComputedStyle(find('[data-message-action="emoji"]')).opacity === '0.4', 'Disabled emoji action must retain the toolbar disabled styling');
   server.myPermissions = messagePermissions;
   events.appEvents.emit('server.roles_updated');
   check(!find('[data-message-action="emoji"]').disabled && getComputedStyle(find('[data-message-action="emoji"]')).opacity === '1', 'Restoring permission must restore full emoji opacity');
   find('[data-message-action="more"]').click();
-  check(document.querySelectorAll('.floating-context-menu [role="menuitem"]').length === 4, 'Other authors offer emoji, reply, copy and moderator delete but not edit');
+  check(activeAll('.floating-context-menu [role="menuitem"]').length === 4, 'Other authors offer emoji, reply, copy and moderator delete but not edit');
   key(document.activeElement, 'ArrowDown');
   check(document.activeElement.textContent.includes('Responder'), 'Arrow keys must navigate message menu');
   key(document.activeElement, 'Escape');
-  check(!document.querySelector('.floating-context-menu'), 'Escape must close message menu');
+  check(!active('.floating-context-menu'), 'Escape must close message menu');
   check(document.activeElement.dataset.messageAction === 'more', 'Escape must return focus to toolbar');
   const originalWriteText = navigator.clipboard.writeText;
   const originalWrite = navigator.clipboard.write;
@@ -3383,40 +3490,40 @@ async function runDomSmoke() {
     language.setLanguage('en');
     navigator.clipboard.writeText = async (value) => { copiedMessage = value; };
     find('[data-message-action="more"]').click();
-    const menuCopy = [...document.querySelectorAll('.floating-context-menu [role="menuitem"]')]
+    const menuCopy = activeAll('.floating-context-menu [role="menuitem"]')
       .find((button) => button.textContent.includes('Copy message'));
     check(!!menuCopy, 'Message menu must expose its localized copy action');
-    menuCopy.click();
-    check(!!document.querySelector('.floating-context-submenu'), 'Copy exposes both formatting modes');
+    menuCopy.querySelector('.context-menu-trailing').click();
+    check(activeAll('.floating-context-submenu button').length === 3, 'The Copy arrow exposes all three formatting modes');
     find('.floating-context-submenu button').click();
     await Promise.resolve();
-    check(!document.querySelector('.floating-context-menu'), 'Copy from menu must close the menu');
+    check(!active('.floating-context-menu'), 'Copy from menu must close the menu');
     check(find('.chat-copy-toast-label').textContent === 'Copied!', 'Menu copy must show the same toast in English');
-    check(document.querySelectorAll('.chat-copy-toast').length === 1, 'Repeated copies must replace the toast instead of stacking');
+    check(activeAll('.chat-copy-toast').length === 1, 'Repeated copies must replace the toast instead of stacking');
     await new Promise((resolve) => setTimeout(resolve, 850));
     check(!!document.querySelector('.chat-copy-toast'), 'Copying again must renew the toast duration');
     await new Promise((resolve) => setTimeout(resolve, 850));
-    check(!document.querySelector('.chat-copy-toast'), 'Copy toast must disappear automatically');
+    check(!active('.chat-copy-toast'), 'Copy toast must disappear automatically');
     check(find('[data-message-action="copy"]').getAttribute('aria-label') === copyLabel, 'Copy action label must remain unchanged after toast dismissal');
     language.setLanguage('pt-BR');
     navigator.clipboard.writeText = async () => { throw new Error('Clipboard denied by fixture'); };
     find('[data-message-action="copy"]').click();
     await Promise.resolve();
-    check(!document.querySelector('.chat-copy-toast'), 'Clipboard failure must never show a success toast');
+    check(!active('.chat-copy-toast'), 'Clipboard failure must never show a success toast');
     check(find('.dialog-message').textContent === 'Não foi possível copiar a mensagem.', 'Clipboard failure must retain localized error feedback');
     find('.dialog-card [data-action="confirm"]').click();
     navigator.clipboard.writeText = async () => {};
     find('[data-message-action="copy"]').click();
     await Promise.resolve();
     view.setChannel('two');
-    check(!document.querySelector('.chat-copy-toast'), 'Changing channels must clean up the active copy toast');
+    check(!active('.chat-copy-toast'), 'Changing channels must clean up the active copy toast');
     view.setChannel('one');
     navigator.clipboard.writeText = () => new Promise((resolve) => { finishCopy = resolve; });
     find('[data-message-action="copy"]').click();
     view.destroy();
     finishCopy();
     await Promise.resolve();
-    check(!document.querySelector('.chat-copy-toast'), 'Clipboard completion after view destruction must not resurrect a toast');
+    check(!active('.chat-copy-toast'), 'Clipboard completion after view destruction must not resurrect a toast');
     view.render();
   } finally {
     navigator.clipboard.writeText = originalWriteText;
@@ -3428,7 +3535,8 @@ async function runDomSmoke() {
   type(find('#chat-message-input'), 'Answer');
   key(find('#chat-message-input'), 'Enter');
   check(sent.at(-1).payload.replyToMessageId === original.id && sent.at(-1).payload.content === 'Answer', 'Composer must send only the selected reply ID with text');
-  check(find('#chat-reply-composer').hidden, 'Sending must clear reply draft');
+  check(find('#chat-reply-composer').hidden || find('#chat-reply-composer').hasAttribute('data-ui-closing'),
+    'Sending must clear reply draft immediately while its surface exits');
   store.addMessage({ ...original, id: 'chat-response', content: 'Answer', createdAt: 2, reply: store.messageReply(original) });
   check(find('[data-reply-target]').textContent.includes('Original <safe>'), 'Reply preview must escape untrusted text');
   find('[data-reply-target]').click();
@@ -3446,7 +3554,7 @@ async function runDomSmoke() {
   find('#chat-return-latest').click();
   check(sent.at(-1).type === 'CHAT_LOAD_HISTORY' && !sent.at(-1).payload.aroundMessageId, 'Return to latest must request normal history');
   find('#btn-emoji').click();
-  await frame();
+  await waitFor(() => !!active('[data-goto-group="recent"]'));
   check(!document.querySelector('[data-picker-tab="recent"]'), 'Recent must not be a top-level picker tab');
   check(document.querySelectorAll('[data-picker-tab]').length === 2, 'Composer picker must keep only emoji and sticker tabs');
   check(find('.emoji-picker-nav').firstElementChild.dataset.gotoGroup === 'recent', 'Clock must be the first bottom category');
@@ -3484,8 +3592,9 @@ async function runDomSmoke() {
   key(document.activeElement, 'Escape');
   check(recentEmojis.get()[0] === selectedEmoji, 'Actual composer selection must persist recency');
   find('.chat-reaction-add').click();
-  await frame();
-  check(!!document.querySelector('[data-goto-group="recent"]') && !document.querySelector('.emoji-picker-tabs'), 'Reaction picker must have Recent in its category bar, without redundant tabs');
+  await waitFor(() => !!active('[data-goto-group="recent"]') && !active('.emoji-picker-tabs'),
+    'Reaction picker must have Recent in its category bar, without redundant tabs');
+  checks++;
   checkPickerSearch();
   find('[data-goto-group="recent"]').click();
   check(find('[data-emoji-group="recent"] [data-emoji]').dataset.emoji === selectedEmoji, 'Reaction picker must share composer recency');
@@ -3494,7 +3603,7 @@ async function runDomSmoke() {
   check(recentEmojis.get().filter((emoji) => emoji === selectedEmoji).length === 1, 'Repeated selections must stay distinct');
   language.setLanguage('en');
   find('.chat-reaction-add').click();
-  await frame();
+  await waitFor(() => active('[data-goto-group="recent"]')?.getAttribute('aria-label') === 'Recent');
   check(find('[data-goto-group="recent"]').getAttribute('aria-label') === 'Recent', 'Recent clock must be localized in English');
   check(find('[data-emoji-group="recent"] .emoji-picker-section-title').textContent === 'Recent', 'Recent category heading must be localized in English');
   key(document.activeElement, 'Escape');
@@ -3502,7 +3611,7 @@ async function runDomSmoke() {
   contextMenu.open(10, 10, [{ label: 'Test', onClick() {} }]);
   contextMenu.close();
   await new Promise((resolve) => setTimeout(resolve, 20));
-  check(!document.querySelector('.floating-context-menu'), 'Immediate menu teardown must stay closed');
+  check(!active('.floating-context-menu'), 'Immediate menu teardown must stay closed');
   const [{ VoiceVideoTab }, { settingsStore: voiceSettings }, { voiceStore: voiceState }, pttIndicators] = await Promise.all([
     import('/views/settings/tabs/VoiceVideoTab.ts'), import('/stores/settingsStore.ts'),
     import('/stores/voiceStore.ts'), import('/views/PttIndicator.ts'),
@@ -3537,7 +3646,8 @@ async function runDomSmoke() {
     check(indicators.every((indicator) => indicator.hidden), 'VAD mode must not show a PTT badge');
     pttCard.click();
     check(voiceSettings.inputMode === 'push_to_talk' && pttCard.getAttribute('aria-pressed') === 'true' && vadCard.getAttribute('aria-pressed') === 'false', 'Selecting the PTT card must persist one exclusive mode');
-    check(voicePanel.querySelector('#container-vad-settings').style.display === 'none' && voicePanel.querySelector('#container-ptt-settings').style.display === 'block', 'Input cards must switch their settings panels');
+    check(voicePanel.querySelector('#container-vad-settings').hasAttribute('data-ui-closing')
+      && !voicePanel.querySelector('#container-ptt-settings').hidden, 'Input cards must switch their settings panels');
     check(indicators.every((indicator) => !indicator.hidden && indicator.dataset.state === 'inactive'), 'PTT enabled outside a call must remain visible without claiming an open microphone');
     voiceState.currentVoiceChannelId = 'ptt-fixture';
     events.appEvents.emit('voice.channel_changed', 'ptt-fixture');
@@ -3618,7 +3728,7 @@ async function runDomSmoke() {
   type(find('#chat-message-input'), '/');
   check(find('#command-dropup').textContent.includes('not allowed in this text channel'), 'Channel denial must be localized in English');
   server.updateChannel(allowedChannel);
-  server.myPermissions = 1 << 8;
+  server.myPermissions = Permission.VIEW_CHANNEL | Permission.READ_MESSAGES | Permission.SEND_MESSAGES;
   events.appEvents.emit('server.roles_updated');
   check(find('#command-dropup').textContent.includes('do not have permission'), 'Role revocation must immediately refresh an open slash menu');
   check(!find('#chat-message-input').readOnly, 'Bot permission denial must not block ordinary chat');
@@ -3649,7 +3759,7 @@ async function runDomSmoke() {
     configure.focus();
     check(document.activeElement === configure && configure.tagName === 'BUTTON', 'Configuration action is keyboard focusable');
     configure.click();
-    check(configuredBot === pendingBot.botId && document.activeElement === find('#chat-message-input'),
+    check(configuredBot === pendingBot.botId && find('#chat-message-input').contains(document.activeElement),
       'Configuration opens the correct bot and preserves composer return focus');
     store.setCommandBots([{ ...pendingBot, canManage: false }]);
     type(find('#chat-message-input'), '/');
@@ -3667,9 +3777,8 @@ async function runDomSmoke() {
   }
   language.setLanguage('pt-BR');
   type(find('#chat-message-input'), '');
-  const [{ CreateChannelModal }, { EditChannelModal }, { ServerRolesTab }] = await Promise.all([
+  const [{ CreateChannelModal }, { EditChannelModal }] = await Promise.all([
     import('/views/CreateChannelModal.ts'), import('/views/EditChannelModal.ts'),
-    import('/views/serverSettings/tabs/ServerRolesTab.ts'),
   ]);
   const createChannel = new CreateChannelModal();
   const editChannel = new EditChannelModal();
@@ -3682,7 +3791,8 @@ async function runDomSmoke() {
     check(!!find('#input-channel-bot-commands').closest('.toggle-switch'), 'Channel bot setting must use the established toggle switch');
     find('#input-channel-bot-commands').checked = false;
     find('input[name="channel-type"][value="VOICE"]').click();
-    check(find('#channel-bot-commands-group').hidden, 'Voice channels must hide the text-only bot setting');
+    check(!find('#channel-bot-commands-group').hidden && !find('#channel-bot-commands-group').hasAttribute('data-ui-closing'),
+      'Voice channels with persistent chat must expose the bot setting');
     find('input[name="channel-type"][value="TEXT"]').click();
     check(!find('#channel-bot-commands-group').hidden && !find('#input-channel-bot-commands').checked, 'Switching channel type must preserve the chosen bot setting');
     type(find('#input-channel-name'), 'channel-test');
@@ -3697,15 +3807,13 @@ async function runDomSmoke() {
     await frame();
     check(channelRequests.at(-1)?.type === 'CHANNEL_UPDATE' && channelRequests.at(-1)?.payload.botCommandsEnabled === false, 'Editing a disabled channel must preserve its bot setting');
     createChannel.open('VOICE');
-    check(find('#channel-bot-commands-group').hidden, 'Voice creation must initially hide bot controls');
+    check(!find('#channel-bot-commands-group').hidden && find('#input-channel-bot-commands').checked,
+      'Voice creation must expose the enabled bot default for its persistent chat');
     type(find('#input-channel-name'), 'voice-test');
     find('#form-create-channel').requestSubmit();
     await frame();
-    check(channelRequests.at(-1)?.payload.botCommandsEnabled === undefined, 'Voice creation must leave bot defaults untouched');
-    const rolesMarkup = document.createElement('div');
-    rolesMarkup.innerHTML = new ServerRolesTab().renderHtml();
-    check(!!rolesMarkup.querySelector('.role-permission-switch[data-permission="8192"]'), 'Role editor must expose MANAGE_BOTS as a switch');
-    check(!!rolesMarkup.querySelector('.role-permission-switch[data-permission="16384"]'), 'Role editor must expose USE_BOT_COMMANDS as a switch');
+    check(channelRequests.at(-1)?.payload.botCommandsEnabled === true,
+      'Voice creation must send its explicit bot command setting');
   } finally {
     createChannel.close();
     editChannel.close();
@@ -3837,10 +3945,10 @@ async function runDomSmoke() {
     'Completed required parameters must enable command execution visually');
   countInput.setSelectionRange(0, 0);
   key(countInput, 'ArrowRight');
-  check(find('#bot-parameter-options').hidden, 'ArrowRight inside text must not open optional parameters early');
+  check(find('#bot-parameter-options').hidden || find('#bot-parameter-options').hasAttribute('data-ui-closing'), 'ArrowRight inside text must not open optional parameters early');
   countInput.setSelectionRange(countInput.value.length, countInput.value.length);
   countInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', isComposing: true, bubbles: true, cancelable: true }));
-  check(find('#bot-parameter-options').hidden, 'IME ArrowRight must not open optional parameters');
+  check(find('#bot-parameter-options').hidden || find('#bot-parameter-options').hasAttribute('data-ui-closing'), 'IME ArrowRight must not open optional parameters');
   key(countInput, 'ArrowRight');
   check(!find('#bot-parameter-options').hidden, 'ArrowRight at the end of the last parameter must open optional parameters');
   key(find('[data-bot-action="optional-parameters"]'), 'Enter');
@@ -3880,7 +3988,7 @@ async function runDomSmoke() {
   key(find('[data-bot-choice="mode"]'), 'ArrowDown');
   key(find('[data-bot-choice="mode"]'), 'Enter');
   check(store.getCommandDraft('one').values.mode === 'shuffle', 'Choice must keep declared value, not label');
-  check(find('#bot-parameter-options').hidden, 'Choosing an option must close its list');
+  check(find('#bot-parameter-options').hidden || find('#bot-parameter-options').hasAttribute('data-ui-closing'), 'Choosing an option must close its list');
   const typing = find('#chat-command-composer [data-field-name="song"] [data-bot-input]');
   typing.focus();
   typing.setSelectionRange(4, 12, 'backward');
@@ -3967,7 +4075,7 @@ async function runDomSmoke() {
   find('.bot-inline-form').requestSubmit();
   check(sent.length === beforeDeniedForm, 'A forged DOM submit must not bypass the channel switch');
   server.updateChannel(allowedChannel);
-  server.myPermissions = 1 << 8;
+  server.myPermissions = Permission.VIEW_CHANNEL | Permission.READ_MESSAGES | Permission.SEND_MESSAGES;
   events.appEvents.emit('server.roles_updated');
   check(find('.bot-inline-form button[type="submit"]').disabled, 'Role revocation must disable an existing form');
   server.myPermissions = 2147483647;

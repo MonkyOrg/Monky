@@ -1,6 +1,9 @@
 import type { TutorialDefinition } from './TutorialDefinition';
 import { t } from '../i18n';
+import { enterModal, exitModal } from '../utils/modalSurface';
+import { replaceModalStep } from '../utils/modalSteps';
 import { enableBackdropClose } from '../utils/modal';
+import { renderOnboardingShot } from '../views/onboardingShots';
 
 /**
  * Generic in-app tutorial viewer.
@@ -13,6 +16,7 @@ import { enableBackdropClose } from '../utils/modal';
 export class TutorialViewer {
   private modalEl: HTMLElement | null = null;
   private currentStep = 0;
+  private renderedStep = 0;
   private definition: TutorialDefinition | null = null;
   private onCloseCallback: (() => void) | null = null;
 
@@ -27,7 +31,7 @@ export class TutorialViewer {
 
   public close(): void {
     if (this.modalEl) {
-      this.modalEl.remove();
+      exitModal(this.modalEl);
       this.modalEl = null;
     }
     if (this.onCloseCallback) {
@@ -41,6 +45,7 @@ export class TutorialViewer {
 
   private render(): void {
     if (!this.definition) return;
+    const opening = !this.modalEl;
 
     const def = this.definition;
     const step = def.steps[this.currentStep];
@@ -48,6 +53,9 @@ export class TutorialViewer {
     const isFirst = this.currentStep === 0;
     const isLast = this.currentStep === total - 1;
     const progressPct = ((this.currentStep + 1) / total) * 100;
+    const shots = (step.images ?? [])
+      .map((image) => renderOnboardingShot(image.shot, t(image.alt), 'tutorial-shot'))
+      .join('');
 
     if (!this.modalEl) {
       this.modalEl = document.createElement('div');
@@ -56,7 +64,8 @@ export class TutorialViewer {
       enableBackdropClose(this.modalEl, () => this.close());
     }
 
-    this.modalEl.innerHTML = `
+    const next = document.createElement('div');
+    next.innerHTML = `
       <div class="modal-card onboarding-tutorial-card" style="max-width: 560px;">
         <!-- Header -->
         <div class="modal-header" style="display: flex; align-items: center; justify-content: space-between;">
@@ -78,16 +87,17 @@ export class TutorialViewer {
         </div>
 
         <!-- Step content -->
-        <div style="padding: 8px 0;">
+        <div class="tutorial-step-body">
           <h3 style="font-size: 16px; font-weight: 700; color: var(--text-primary); margin: 0 0 12px 0;">
             ${t(step.title)}
           </h3>
 
-          <!-- Placeholder image -->
-          <div class="tutorial-image-placeholder">
-            <span class="material-symbols-outlined" style="font-size: 32px; color: var(--text-muted);">image</span>
-            <span style="font-size: 11px; color: var(--text-muted);">${t('tutorial.imagePlaceholder')}</span>
-          </div>
+          ${shots || `
+            <div class="tutorial-image-placeholder">
+              <span class="material-symbols-outlined" style="font-size: 32px; color: var(--text-muted);">image</span>
+              <span style="font-size: 11px; color: var(--text-muted);">${t('tutorial.imagePlaceholder')}</span>
+            </div>
+          `}
 
           <div class="tutorial-content" style="font-size: 13px; color: var(--text-secondary); line-height: 1.65;">
             ${t(step.content)}
@@ -120,27 +130,31 @@ export class TutorialViewer {
       </div>
     `;
 
-    this.attachEvents();
+    const content = replaceModalStep(this.modalEl, next.firstElementChild as HTMLElement, this.currentStep - this.renderedStep);
+    this.renderedStep = this.currentStep;
+    this.attachEvents(content);
+    if (opening) enterModal(this.modalEl);
+    else content.querySelector<HTMLElement>('button')?.focus({ preventScroll: true });
   }
 
-  private attachEvents(): void {
-    this.modalEl?.querySelector('#tutorial-close')?.addEventListener('click', () => this.close());
-    this.modalEl?.querySelector('#tutorial-prev')?.addEventListener('click', () => {
+  private attachEvents(content: HTMLElement): void {
+    content.querySelector('#tutorial-close')?.addEventListener('click', () => this.close());
+    content.querySelector('#tutorial-prev')?.addEventListener('click', () => {
       if (this.currentStep > 0) {
         this.currentStep--;
         this.render();
       }
     });
-    this.modalEl?.querySelector('#tutorial-next')?.addEventListener('click', () => {
+    content.querySelector('#tutorial-next')?.addEventListener('click', () => {
       if (this.definition && this.currentStep < this.definition.steps.length - 1) {
         this.currentStep++;
         this.render();
       }
     });
-    this.modalEl?.querySelector('#tutorial-finish')?.addEventListener('click', () => this.close());
+    content.querySelector('#tutorial-finish')?.addEventListener('click', () => this.close());
 
     // Make links inside tutorial content open in the system browser
-    this.modalEl?.querySelectorAll('.tutorial-content a').forEach((el) => {
+    content.querySelectorAll('.tutorial-content a').forEach((el) => {
       el.addEventListener('click', (e) => {
         e.preventDefault();
         const href = (el as HTMLAnchorElement).href;
@@ -149,7 +163,7 @@ export class TutorialViewer {
     });
 
     // Inject copy buttons and syntax highlighting into terminal command blocks
-    this.modalEl?.querySelectorAll('.tutorial-cmd').forEach((block) => {
+    content.querySelectorAll('.tutorial-cmd').forEach((block) => {
       const cmd = block.textContent?.trim() || '';
 
       // Apply syntax highlighting

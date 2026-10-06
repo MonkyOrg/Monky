@@ -1,5 +1,7 @@
 #pragma once
 
+#include "audio_devices.hpp"
+
 #include <api/audio/audio_device.h>
 #include <api/environment/environment.h>
 #include <api/scoped_refptr.h>
@@ -48,6 +50,7 @@ struct JoinConfig {
   std::vector<Participant> admitted_participants;
   std::vector<IceServer> ice_servers;
   AudioPolicy policy;
+  AudioDevicePreference devices;
   std::optional<int> network_ignore_mask;
   std::chrono::milliseconds operation_timeout{15000};
 };
@@ -72,7 +75,9 @@ enum class EventKind {
   failed,
   left,
   stats,
-  warning
+  warning,
+  // `stats` carries the effective input/output device selection.
+  devices
 };
 struct Event {
   EventKind kind;
@@ -116,6 +121,9 @@ public:
   void producer_closed(std::string producer_id);
   void consumer_closed(std::string consumer_id);
   void update_policy(AudioPolicy policy);
+  // Persists for later generations of this call. Missing devices fall back to
+  // the system default and are retried when the preference is applied again.
+  void select_devices(AudioDevicePreference devices);
   void poll_stats();
 
 private:

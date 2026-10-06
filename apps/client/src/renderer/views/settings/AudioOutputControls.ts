@@ -35,7 +35,7 @@ export class AudioOutputControls {
             <div class="form-group" style="margin-top:10px;">
               <label for="select-audio-output-${category}">${t(labels[category])}</label>
               <div data-device-loading>${renderLoadingSkeleton('lines', 1)}</div>
-              <div data-device-control hidden><select id="select-audio-output-${category}" data-output-category="${category}" aria-describedby="audio-output-${category}-status">
+              <div class="voice-video-device-control" data-device-control hidden><select id="select-audio-output-${category}" data-output-category="${category}" aria-describedby="audio-output-${category}-status">
                 <option value="inherit">${t('audioOutputs.inherit')}</option>
               </select></div>
               <div id="audio-output-${category}-status" class="audio-device-status" role="status"></div>

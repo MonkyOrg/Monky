@@ -134,7 +134,11 @@ export class AttachmentService {
     const classification = this.storage.classifyFile(input.tempPath, input.originalName);
 
     // Make room FIFO before storing the new file.
-    await this.evictToFit(input.sizeBytes, maxTotalBytes);
+    if (!(await this.evictToFit(input.sizeBytes, maxTotalBytes))) {
+      this.storage.discardTemp(input.tempPath);
+      return { success: false, errorCode: ProtocolErrorCode.STORAGE_FULL,
+        errorMessage: 'Armazenamento reservado para mensagens que ainda podem ser restauradas. Tente novamente após o prazo.' };
+    }
 
     let filename: string;
     try {
@@ -171,9 +175,9 @@ export class AttachmentService {
    * the incoming file fits under the low-watermark, reducing per-upload churn. The
    * hard limit is always satisfied; the watermark is best-effort.
    */
-  private async evictToFit(incomingBytes: number, maxTotalBytes: number): Promise<void> {
+  private async evictToFit(incomingBytes: number, maxTotalBytes: number): Promise<boolean> {
     let used = await this.attachmentRepo.sumActiveBytes();
-    if (used + incomingBytes <= maxTotalBytes) return;
+    if (used + incomingBytes <= maxTotalBytes) return true;
 
     const target = Math.max(0, Math.floor(maxTotalBytes * LIMITS.ATTACHMENT_EVICTION_LOW_WATERMARK) - incomingBytes);
 
@@ -188,6 +192,7 @@ export class AttachmentService {
         if (used <= target) break;
       }
     }
+    return used + incomingBytes <= maxTotalBytes;
   }
 
   // --- Linking + reads -----------------------------------------------------

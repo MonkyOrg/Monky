@@ -4,7 +4,8 @@ To keep the server up 24/7, run the server alone on a Linux machine — no
 graphical interface and no repository clone. Everything is done by the **Monky
 CLI**, shipped ready to use in every release.
 
-Requires **Node.js 22 or newer** (required by mediasoup; CI also uses 22).
+Use **Node.js 22 or 24**. SFU mode depends on the native mediasoup worker;
+check the [CLI installation prerequisites](/en/cli#installation).
 
 ## Step by step
 
@@ -25,8 +26,19 @@ monky status
 and offers to start the server at the end. On a VPS, prefer a path outside your
 home directory, such as `/srv/monky`.
 
-The server runs as a PM2 daemon and comes back on its own after a reboot. The
-full command reference lives in [Monky CLI](/en/cli).
+The server runs as a PM2-managed process. **Returning after a reboot requires
+configuring the startup service**, not merely an `online` status:
+
+```bash
+pm2 save
+pm2 startup
+```
+
+Run the privileged command printed by `pm2 startup` for the correct user.
+If that user already has a startup service, inspect it instead of creating
+another. `pm2 save` saves the managed process list, including that user's
+other apps. Check the service, process and listening port after rebooting.
+The full reference is in [Monky CLI](/en/cli).
 
 ## Ports used
 
@@ -34,7 +46,7 @@ full command reference lives in [Monky CLI](/en/cli).
 |---|---|---|---|
 | `3000` (or the chosen one) | TCP | Login, chat, channels and signalling | Yes, in the VPS firewall |
 | `41234` | UDP | Local network discovery | No, on a VPS |
-| High dynamic | UDP | P2P voice, video and screen | Usually works through STUN |
+| High dynamic ports on participants | UDP | P2P voice, video and screen | These are client connections, not an extra range to open on a VPS without a relay |
 | `40000-49151` | UDP and TCP | WebRTC media in SFU mode (mediasoup) | Only with SFU mode enabled |
 | `3478` | TCP and UDP | TURN relay, if you enable it | Only with the relay on |
 | `49152-65535` | UDP | Media forwarded by the relay | Only with the relay on |
@@ -61,6 +73,11 @@ sudo iptables -I INPUT -p tcp --dport 40000:49151 -j ACCEPT
 sudo netfilter-persistent save
 ```
 
+The persistence command assumes `netfilter-persistent` is installed and
+configured, commonly on Debian/Ubuntu. On other distributions, use the
+existing firewall's mechanism. Do not mix firewall managers without reviewing
+their rules.
+
 ::: tip If you use `ufw` instead of `iptables`
 ```bash
 sudo ufw allow 40000:49151/udp
@@ -82,10 +99,13 @@ To check it is in effect, join a voice channel and watch the media arrive:
 sudo tcpdump -n -i any udp portrange 40000-49151 -c 20
 ```
 
-`In` packets from outside the machine mean the range is open. Only `Out`
-traffic, or nothing at all, means something upstream is blocking it — look for a
-`REJECT` rule in the `INPUT` chain above the ones you just inserted
-(`sudo iptables -L INPUT -n -v --line-numbers` shows the order).
+Test with participants on different networks and confirm playback in both
+directions. Captured packets prove arrival at the interface, not acceptance
+by the firewall or service. Missing UDP can also mean an incorrect announced
+IP, no transmission or use of TCP; do not diagnose from this capture alone.
+
+Check rule order with `sudo iptables -L INPUT -n -v --line-numbers` and the
+addresses/ports advertised in the server logs.
 
 ## Maintenance
 
@@ -93,7 +113,7 @@ traffic, or nothing at all, means something upstream is blocking it — look for
 monky logs --level WARN           # what needs attention
 monky config set port 3010        # changes the port and offers to restart
 monky update --check              # is there a new version?
-monky config set autoUpdate true  # updates itself daily at 4am
+monky config set autoUpdate true  # configures the automatic update schedule
 ```
 
 ### Upgrading the Node version

@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Canais e categorias ganham menu lateral e permissões por cargo ou pessoa, com busca e estados negar, herdar e permitir. Regras específicas substituem Todos; negar prevalece nos conflitos. Canais herdam regras da categoria. Todos substitui o antigo cargo Membro padrão.",
+  "en": "Channels and categories gain sidebar settings and searchable role/member permissions: deny, inherit or allow. Specific rules override Everyone; deny wins in conflicts. Channels inherit category rules. Everyone replaces the default Member role."
+}

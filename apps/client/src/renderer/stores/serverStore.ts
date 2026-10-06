@@ -1,7 +1,9 @@
-import { AttachmentStorageInfo, ChannelSummary, DEFAULT_PERMISSIONS, Permission, Role, ServerDetails, SlashCommand, TurnAvailability, UserRoleSummary, UserSummary, VoiceMode, VoiceRestrictions, hasPermission } from '@monky/shared';
+import { AttachmentStorageInfo, ChannelSummary, DEFAULT_PERMISSIONS, Permission, Role, ServerDetails, SlashCommand, TurnAvailability, UserRoleSummary, UserSummary, VoiceMode, VoiceRestrictions, canAccessChannel, hasPermission } from '@monky/shared';
 import { appEvents, EventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { clientLog } from '../core/ClientLogService';
+import type { ChannelCategory } from '@monky/shared';
+import { getChannelPermissions, hasChannelPermission, resolveLegacyMemberPermissions, resolveMemberPermissions, resolveRoleDenyMemberPermissions, resolveChannelPermissions, roleModelFor, type ChannelAccessRules, type RoleModel } from '@monky/shared';
 
 export class ServerStore {
   /**
@@ -12,12 +14,13 @@ export class ServerStore {
   public bus: EventBus = appEvents;
   public serverDetails: ServerDetails | null = null;
   public currentUser: UserSummary | null = null;
-  public voiceRestrictions: VoiceRestrictions = { serverMuted: false, serverDeafened: false };
+  public voiceRestrictions: VoiceRestrictions = { serverMuted: false, serverDeafened: false, permissionMuted: false };
   public activeTextChannelId: string | null = null;
   public roles: Role[] = [];
   public userRoles: UserRoleSummary[] = [];
   public ownerId: string | null = null;
   public myPermissions: number = 0;
+  public communityEventsEnabled: boolean | null = null;
   // Everyone who has ever connected (keyed by userId), so offline users remain
   // mentionable in chat (#14). Kept separate from the live members list.
   public knownMembers: Map<string, UserSummary> = new Map();
@@ -79,17 +82,25 @@ export class ServerStore {
   }
 
   /**
-   * Returns users that can be mentioned in chat: everyone who has ever
-   * connected, online first, then alphabetically. Excludes the current user.
+   * Includes offline members, but only readers of the selected channel.
+   * Orders online members first, then alphabetically, excluding self.
    */
-  public getMentionableUsers(): UserSummary[] {
-    const list = Array.from(this.knownMembers.values()).filter((u) => u.id !== this.currentUser?.id);
+  public getMentionableUsers(channelId: string): UserSummary[] {
+    const list = Array.from(this.knownMembers.values()).filter((user) =>
+      user.id !== this.currentUser?.id && this.canUserReadChannel(user.id, channelId));
     return list.sort((a, b) => {
       const aOnline = a.status !== 'DISCONNECTED' ? 0 : 1;
       const bOnline = b.status !== 'DISCONNECTED' ? 0 : 1;
       if (aOnline !== bOnline) return aOnline - bOnline;
       return a.nickname.localeCompare(b.nickname);
     });
+  }
+
+  public canUserReadChannel(userId: string, channelId: string): boolean {
+    const channel = this.getChannel(channelId);
+    if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE')) return false;
+    const permissions = this.getUserChannelPermissions(userId, channelId);
+    return hasPermission(permissions, Permission.VIEW_CHANNEL) && hasPermission(permissions, Permission.READ_MESSAGES);
   }
 
   /** Updates commands from a COMMANDS_LIST_RESPONSE message (#569). */
@@ -106,9 +117,10 @@ export class ServerStore {
   /** All devices of this identity share the same server policy, even outside voice. */
   public updateVoiceRestrictions(userId: string, restrictions: VoiceRestrictions): void {
     if (!this.currentUser || userId !== this.currentUser.id) return;
-    const { serverMuted, serverDeafened } = restrictions;
-    if (this.voiceRestrictions.serverMuted === serverMuted && this.voiceRestrictions.serverDeafened === serverDeafened) return;
-    this.voiceRestrictions = { serverMuted, serverDeafened };
+    const { serverMuted, serverDeafened, permissionMuted = this.voiceRestrictions.permissionMuted ?? false } = restrictions;
+    if (this.voiceRestrictions.serverMuted === serverMuted && this.voiceRestrictions.serverDeafened === serverDeafened &&
+        this.voiceRestrictions.permissionMuted === permissionMuted) return;
+    this.voiceRestrictions = { serverMuted, serverDeafened, permissionMuted };
     this.bus.emit('server.voice_restrictions_updated');
   }
 
@@ -123,6 +135,41 @@ export class ServerStore {
       this.sortChannels();
       this.bus.emit('server.updated');
     }
+  }
+
+  public setCategories(categories: ChannelCategory[]): void {
+    if (!this.serverDetails) return;
+    this.serverDetails.categories = [...categories].sort((a, b) => a.position - b.position || a.createdAt - b.createdAt);
+    this.bus.emit('server.updated');
+  }
+
+  private categoryCollapseKey(): string | null {
+    return this.serverDetails && this.currentUser
+      ? `monky.categories.collapsed.${this.serverDetails.id}.${this.currentUser.id}` : null;
+  }
+
+  public isCategoryCollapsed(categoryId: string): boolean {
+    const key = this.categoryCollapseKey();
+    if (!key) return false;
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem(key) ?? '[]');
+      return Array.isArray(stored) && stored.includes(categoryId);
+    } catch { return false; }
+  }
+
+  public toggleCategoryCollapsed(categoryId: string): void {
+    const key = this.categoryCollapseKey();
+    if (!key) return;
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem(key) ?? '[]');
+      const ids = new Set<string>(Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : []);
+      if (ids.has(categoryId)) ids.delete(categoryId);
+      else ids.add(categoryId);
+      localStorage.setItem(key, JSON.stringify([...ids]));
+    } catch {
+      clientLog.warn('SERVER_HOST', 'Could not persist category collapse state');
+    }
+    this.bus.emit('server.updated');
   }
 
   public removeChannel(channelId: string): void {
@@ -243,9 +290,15 @@ export class ServerStore {
     allowEveryoneMention?: boolean,
     allowMessageEdit?: boolean,
     voiceMode?: VoiceMode,
-    showRoleBadgesToEveryone?: boolean
+    showRoleBadgesToEveryone?: boolean,
+    maxMessageLength?: number,
+    messageDeleteUndoSeconds?: number,
+    recentSoundCacheEnabled?: boolean,
+    recentSoundCacheLimit?: number,
+    dmRelayEnabled?: boolean,
   ): void {
     if (this.serverDetails) {
+      if (maxMessageLength !== undefined) this.serverDetails.maxMessageLength = maxMessageLength;
       this.serverDetails.name = name;
       this.serverDetails.hasPassword = hasPassword;
       if (allowSoundboard !== undefined) {
@@ -269,6 +322,10 @@ export class ServerStore {
       if (allowMessageEdit !== undefined) {
         this.serverDetails.allowMessageEdit = allowMessageEdit;
       }
+      if (messageDeleteUndoSeconds !== undefined) this.serverDetails.messageDeleteUndoSeconds = messageDeleteUndoSeconds;
+      if (recentSoundCacheEnabled !== undefined) this.serverDetails.recentSoundCacheEnabled = recentSoundCacheEnabled;
+      if (recentSoundCacheLimit !== undefined) this.serverDetails.recentSoundCacheLimit = recentSoundCacheLimit;
+      if (dmRelayEnabled !== undefined) this.serverDetails.dmRelayEnabled = dmRelayEnabled;
       if (voiceMode !== undefined) {
         this.serverDetails.voiceMode = voiceMode;
       }
@@ -296,10 +353,11 @@ export class ServerStore {
     this.bus.emit('server.meta_updated', this.serverDetails);
   }
 
-  public updateRoles(roles: Role[], userRoles: UserRoleSummary[]): void {
+  public updateRoles(roles: Role[], userRoles: UserRoleSummary[], everyonePermissions?: number): void {
     this.roles = roles;
     this.userRoles = userRoles;
     if (this.serverDetails) {
+      if (everyonePermissions !== undefined) this.serverDetails.everyonePermissions = everyonePermissions;
       this.serverDetails.roles = roles;
       this.serverDetails.userRoles = userRoles;
     }
@@ -335,16 +393,45 @@ export class ServerStore {
 
   /**
    * Permissions of any member, resolved the same way the server does it: the
-   * owner gets everything, someone with no role falls back to the defaults, and
-   * roles otherwise combine bit by bit (PermissionService.getUserPermissions).
+   * owner/admin gets everything; otherwise Everyone plus whatever any of their
+   * roles grants (36.1 and older servers resolve roles their own way).
    */
   public getUserPermissions(userId: string): number {
     if (this.ownerId && userId === this.ownerId) return 0xFFFFFFFF;
     const roleIds = new Set(this.getUserRoleIds(userId));
     const roles = this.roles.filter((role) => roleIds.has(role.id));
-    return roles.length === 0
-      ? DEFAULT_PERMISSIONS
-      : roles.reduce((bits, role) => bits | role.permissions, 0);
+    switch (this.roleModel) {
+      case 'grants': return resolveMemberPermissions(this.everyonePermissions, roles);
+      case 'deny': return resolveRoleDenyMemberPermissions(this.everyonePermissions, roles);
+      default: return resolveLegacyMemberPermissions(this.everyonePermissions, roles);
+    }
+  }
+
+  /** How this server reads roles, from the negotiated protocol features. */
+  public get roleModel(): RoleModel {
+    const protocol = this.serverDetails?.protocol;
+    if (protocol) return roleModelFor(protocol.features);
+    return this.roles.length > 0 && this.roles.every((role) => typeof role.deny === 'number') ? 'deny' : 'legacy';
+  }
+
+  public get everyonePermissions(): number {
+    return this.serverDetails?.everyonePermissions ?? DEFAULT_PERMISSIONS;
+  }
+
+  public getUserChannelPermissions(userId: string, channelId: string): number {
+    const channel = this.channelAccessRules(channelId);
+    return channel ? getChannelPermissions(channel, this.getUserPermissions(userId), this.getUserRoleIds(userId), false, userId) : 0;
+  }
+
+  private channelAccessRules(channelId: string): ChannelAccessRules | undefined {
+    let channel = this.getChannel(channelId);
+    if (channel?.forumId) {
+      channel = this.getChannel(channel.forumId);
+      if (channel?.type !== 'FORUM') return undefined;
+    }
+    if (!channel) return undefined;
+    const category = this.serverDetails?.categories?.find(item => item.id === channel.categoryId) ?? null;
+    return resolveChannelPermissions(channel, category);
   }
 
   public getChannel(channelId: string): ChannelSummary | undefined {
@@ -432,6 +519,7 @@ export class ServerStore {
   public recalculateMyPermissions(): number {
     if (!this.currentUser) {
       this.myPermissions = 0;
+      this.communityEventsEnabled = null;
       return this.myPermissions;
     }
     this.myPermissions = this.getUserPermissions(this.currentUser.id);
@@ -441,15 +529,32 @@ export class ServerStore {
     return this.myPermissions;
   }
 
-  public hasPermission(permission: Permission): boolean {
+  public hasPermission(permission: Permission, channelId?: string | null): boolean {
+    if (permission === Permission.MANAGE_CHANNELS || permission === Permission.MOVE_MEMBERS) {
+      return hasPermission(this.myPermissions, permission);
+    }
+    if (channelId) {
+      const channel = this.channelAccessRules(channelId);
+      return !!channel && !!this.currentUser &&
+        hasChannelPermission(channel, this.myPermissions, this.getUserRoleIds(this.currentUser.id), permission, false, this.currentUser.id);
+    }
     return hasPermission(this.myPermissions, permission);
+  }
+
+  public hasCategoryPermission(permission: Permission, categoryId: string): boolean {
+    if (permission === Permission.MANAGE_CHANNELS || permission === Permission.MOVE_MEMBERS) {
+      return hasPermission(this.myPermissions, permission);
+    }
+    const category = this.serverDetails?.categories?.find(item => item.id === categoryId);
+    return !!category && !!this.currentUser &&
+      hasChannelPermission(category, this.myPermissions, this.getUserRoleIds(this.currentUser.id), permission, false, this.currentUser.id);
   }
 
   public clear(): void {
     clientLog.info('SERVER_HOST', 'Server store cleared');
     this.serverDetails = null;
     this.currentUser = null;
-    this.voiceRestrictions = { serverMuted: false, serverDeafened: false };
+    this.voiceRestrictions = { serverMuted: false, serverDeafened: false, permissionMuted: false };
     this.activeTextChannelId = null;
     this.roles = [];
     this.userRoles = [];

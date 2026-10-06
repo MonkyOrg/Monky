@@ -77,6 +77,15 @@ export class FavoritesStore {
     return this.toggle('sounds', soundFavoriteKey(filePath));
   }
 
+  public moveSound(previous: string, next: string | null): void {
+    const key = soundFavoriteKey(previous);
+    if (!this.sounds.has(key)) return;
+    const sounds = new Set(this.sounds);
+    sounds.delete(key);
+    if (next) sounds.add(soundFavoriteKey(next));
+    this.commit('sounds', sounds);
+  }
+
   public toggleServer(server: ServerAddress): boolean {
     return this.toggle('servers', savedServerFavoriteKey(server));
   }

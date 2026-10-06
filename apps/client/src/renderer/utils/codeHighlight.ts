@@ -13,6 +13,7 @@ import kotlin from 'highlight.js/lib/languages/kotlin';
 import lua from 'highlight.js/lib/languages/lua';
 import markdown from 'highlight.js/lib/languages/markdown';
 import php from 'highlight.js/lib/languages/php';
+import powershell from 'highlight.js/lib/languages/powershell';
 import python from 'highlight.js/lib/languages/python';
 import ruby from 'highlight.js/lib/languages/ruby';
 import rust from 'highlight.js/lib/languages/rust';
@@ -51,6 +52,7 @@ const LANGUAGES: LanguageEntry[] = [
   { id: 'lua', label: 'Lua', grammar: lua },
   { id: 'markdown', label: 'Markdown', grammar: markdown },
   { id: 'php', label: 'PHP', grammar: php },
+  { id: 'powershell', label: 'PowerShell', grammar: powershell },
   { id: 'python', label: 'Python', grammar: python },
   { id: 'ruby', label: 'Ruby', grammar: ruby },
   { id: 'rust', label: 'Rust', grammar: rust },
@@ -76,9 +78,9 @@ for (const entry of LANGUAGES) {
 }
 
 /** Options for the language dropdown, plain text first as the neutral default. */
-export const CODE_LANGUAGE_OPTIONS: Array<{ id: string; label: string }> = [
+export const CODE_LANGUAGE_OPTIONS: Array<{ id: string; label: string; searchTerms?: string }> = [
   { id: 'plaintext', label: 'Plain text' },
-  ...LANGUAGES.map(({ id, label }) => ({ id, label })),
+  ...LANGUAGES.map(({ id, label }) => ({ id, label, searchTerms: hljs.getLanguage(id)?.aliases?.join(' ') })),
 ];
 
 /**
@@ -97,6 +99,10 @@ export function codeLanguageLabel(tag: string): string {
   const id = resolveCodeLanguage(tag);
   if (!id) return tag;
   return LANGUAGES.find((entry) => entry.id === id)?.label ?? id;
+}
+
+export function codeLineNumbers(code: string): string {
+  return code.split('\n').map((_line, index) => String(index + 1)).join('\n');
 }
 
 /**

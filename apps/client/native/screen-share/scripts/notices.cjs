@@ -1,0 +1,141 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { root, write, fingerprint, regularFiles, execute, digest } = require('./buildTools.cjs');
+const { cache } = require('./fetchObs.cjs');
+const { copyMonkyLicenses } = require('../../../../../scripts/legal.cjs');
+
+function generateNotices() {
+  const sources = JSON.parse(fs.readFileSync(path.join(cache, 'obs-sources.json'), 'utf8'));
+  assert.equal(sources.schemaVersion, 1);
+  const directory = path.join(root, 'licenses');
+  const webrtc = path.join(cache, 'rtc', 'webrtc', 'src');
+  const copy = (from, to) => write(path.join(directory, to), fs.readFileSync(from));
+  assert.ok(fs.statSync(path.join(directory, 'webrtc', 'LICENSE.md')).size > 10_000,
+    'Generate the compiled WebRTC target licenses before packaging.');
+  for (const name of ['AUTHORS', 'PATENTS'])
+    copy(path.join(webrtc, name), path.join('webrtc', name));
+  for (const name of ['libmediasoupclient', 'libsdptransform'])
+    copy(path.join(root, 'src', 'rtc', 'inputs', name, 'LICENSE'), path.join(name, 'LICENSE'));
+  for (const name of ['COPYING', 'AUTHORS'])
+    copy(path.join(cache, 'obs-studio', name), path.join('obs-studio', name));
+  for (const relative of [
+    'deps/w32-pthreads/COPYING', 'deps/w32-pthreads/COPYING.LIB',
+    'deps/blake2/LICENSE.blake2', 'deps/json11/LICENSE.txt',
+    'libobs/graphics/libnsgif/LICENSE.libnsgif',
+  ]) copy(path.join(cache, 'obs-studio', ...relative.split('/')), path.join('obs-studio', ...relative.split('/')));
+  for (const source of sources.sources) {
+    const upstream = path.join(cache, 'obs-deps', 'licenses', source.name);
+    assert.ok(fs.statSync(upstream).isDirectory(), `Missing dependency notices: ${source.name}`);
+    for (const relative of regularFiles(upstream))
+      copy(path.join(upstream, relative), path.join('obs-deps', source.name, relative));
+  }
+  for (const name of ['COPYING.GPLv3', 'COPYING.LGPLv2.1', 'COPYING.LGPLv3', 'LICENSE.md'])
+    copy(path.join(cache, 'obs-sources', 'FFmpeg', name), path.join('obs-deps', 'FFmpeg', name));
+  copy(path.join(root, 'src', 'rtc', 'inputs', 'libsdptransform', 'include', 'json.hpp'),
+    path.join('nlohmann-json', 'json.hpp'));
+  copyMonkyLicenses(root);
+  const record = {
+    schemaVersion: 1,
+    license: 'GPL-3.0-or-later',
+    webrtcRevision: require('./native-rtc/pins.json').repositories.webrtc.commit,
+    obsRevision: sources.obsRevision,
+    recipesRevision: sources.recipesRevision,
+    correspondingSources: sources.sources,
+    files: regularFiles(directory).filter(relative => relative !== 'catalog.json')
+      .map(relative => ({ path: path.join('licenses', relative), ...fingerprint(path.join(directory, relative)) })),
+  };
+  write(path.join(directory, 'catalog.json'), JSON.stringify(record, null, 2) + '\n');
+  write(path.join(root, 'THIRD_PARTY_NOTICES'), [
+    'Monky native screen sharing - third-party notices',
+    '',
+    'Monky is free software under GNU GPL version 3 or, at your option, any later version.',
+    'See LICENSE.',
+    'Third-party copyrights and licenses are not replaced by the Monky license.',
+    '',
+    'OBS Studio 32.1.1 (GPL-2.0-or-later), its Windows capture module and runtime are included.',
+    'The capture module has Monky changes for source-bound WGC window/monitor capture and explicit Game Capture.',
+    'Pinned graphics hooks, injection/offset helpers and AMF/NVENC probes are distributed in the private runtime.',
+    'Game hooks require explicit game selection and local-preview or viewer demand.',
+    'Compatibility updater workers and automatic compatibility downloads are disabled.',
+    'The distributed FFmpeg 7.1.1 build is GPL version 3 or later; its static dependencies',
+    'and original build recipes are included in the corresponding-source material.',
+    'WebRTC M140, patched libmediasoupclient and libsdptransform retain their upstream notices.',
+    'H.264 software encoding uses x264; AV1 software encoding uses libaom and native AV1 decoding uses dav1d.',
+    'The WebRTC notices are generated from the dependencies of the actual compiled GN targets.',
+    'Monky changes to the pinned SDK are maintained in src/rtc/inputs/sdk; the upstream source is unchanged.',
+    'The maintained H264 Level 6 SDP enum/parser/level table retains the original WebRTC BSD notices.',
+    'The ISC h264-profile-level-id dependency carries the corresponding Level 6 patch in patches/.',
+    '',
+    'Complete third-party legal texts, authors and patent notices are in licenses/.',
+    'licenses/catalog.json records the exact source revisions and hashes of these legal files.',
+    'Microsoft Visual C++ runtime DLLs are app-local release redistributables, not Monky GPL code.',
+    'They retain Microsoft copyright and Visual Studio redistributable-code terms.',
+    'https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution',
+    'H.264 patent rights are separate from these software copyright licenses.',
+    '',
+    'Corresponding Source: the Monky source for the same release tag, together with the',
+    'Monky-native-sources archive attached to that release. It contains the pinned SDK',
+    'sources, OBS dependency sources and original build recipes/patches.',
+    'https://github.com/MonkyOrg/Monky/releases',
+    'See README.md for build, source archive and platform instructions.',
+    '',
+  ].join('\n'));
+  console.log(JSON.stringify({ nativeNoticesReady: true, licenseFiles: record.files.length }));
+  return record;
+}
+
+function generateMacNotices() {
+  assert.equal(process.platform, 'darwin');
+  const { workspace } = require('./prepareMacRtc.cjs');
+  const sdk = path.join(workspace, 'webrtc', 'src');
+  const key = digest(fs.realpathSync(root)).slice(0, 8);
+  const outputs = ['arm64', 'x64'].filter(arch =>
+    fs.existsSync(path.join(root, 'bin', `darwin-${arch}`, 'rtc-build.json')))
+    .map(arch => path.join(sdk, 'out', `monky-${key}-${arch}`));
+  assert.ok(outputs.length > 0, 'Build the native macOS RTC target before generating its notices.');
+  const directory = path.join(root, 'licenses');
+  execute(path.join(workspace, 'python-3.11', 'bin', 'python3'), ['-I',
+    path.join(__dirname, 'native-rtc', 'licenses.py'), `--sdk=${sdk}`,
+    ...outputs.map(output => `--output=${output}`), `--root-target=//out/monky-${key}-inputs/rtc`,
+    `--licenses=${path.join(directory, 'webrtc')}`]);
+  const copy = (from, to) => write(path.join(directory, to), fs.readFileSync(from));
+  for (const name of ['AUTHORS', 'PATENTS']) copy(path.join(sdk, name), path.join('webrtc', name));
+  for (const name of ['libmediasoupclient', 'libsdptransform'])
+    copy(path.join(root, 'src', 'rtc', 'inputs', name, 'LICENSE'), path.join(name, 'LICENSE'));
+  copy(path.join(root, 'src', 'rtc', 'inputs', 'libsdptransform', 'include', 'json.hpp'),
+    path.join('nlohmann-json', 'json.hpp'));
+  copyMonkyLicenses(root);
+  const record = { schemaVersion: 1, platform: 'darwin', license: 'GPL-3.0-or-later',
+    webrtcRevision: require('./native-rtc/pins.json').repositories.webrtc.commit,
+    files: regularFiles(directory).filter(relative => relative !== 'catalog.json')
+      .map(relative => ({ path: path.join('licenses', relative), ...fingerprint(path.join(directory, relative)) })),
+  };
+  write(path.join(directory, 'catalog.json'), JSON.stringify(record, null, 2) + '\n');
+  write(path.join(root, 'THIRD_PARTY_NOTICES'), [
+    'Monky native macOS screen sharing - third-party notices', '',
+    'Monky is GNU GPL version 3 or, at your option, any later version. See LICENSE.',
+    'WebRTC M140, patched libmediasoupclient and libsdptransform retain their upstream notices.',
+    'Native AV1 software encoding uses libaom; reception uses the dav1d decoder compiled by WebRTC.',
+    'licenses/webrtc/LICENSE.md and libraries.json describe the actual compiled GN targets.',
+    'Apple ScreenCaptureKit, VideoToolbox, Core Image, Metal and IOSurface are operating-system frameworks;',
+    'no Apple framework, OBS runtime or Microsoft CRT is redistributed in the macOS application.',
+    'H.264 patent rights are separate from software copyright licenses.', '',
+    'Corresponding Source: Monky source at the release tag, including src/rtc/inputs and SDK patches.',
+    'Pinned upstream WebRTC and dependency revisions are acquired with scripts/prepareMacRtc.cjs.',
+    'The release also supplies the native corresponding-source archive and its checksum.',
+    'https://github.com/MonkyOrg/Monky/releases',
+    'See README.md / README.en.md for build and platform requirements.', '',
+  ].join('\n'));
+  console.log(JSON.stringify({ nativeMacNoticesReady: true, licenseFiles: record.files.length }));
+  return record;
+}
+
+module.exports = { generateNotices, generateMacNotices };
+if (require.main === module) {
+  assert.ok(process.argv.length === 2 || process.argv.length === 3 && process.argv[2] === '--mac');
+  if (process.argv[2] === '--mac') generateMacNotices();
+  else generateNotices();
+}

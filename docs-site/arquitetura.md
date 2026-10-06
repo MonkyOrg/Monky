@@ -47,10 +47,16 @@ O repositório é um monorepo com workspaces npm:
 |---|---|
 | `apps/client` | O app Electron — a interface, e também o anfitrião quando você hospeda pelo próprio app |
 | `apps/server` | O servidor: WebSocket, SQLite e o [Monky CLI](/cli) |
+| `apps/light` | Núcleo nativo headless em desenvolvimento; não é o cliente desktop publicado descrito nos guias de uso |
 | `packages/shared` | O contrato entre os dois: tipos do protocolo, validadores, limites e perfis de qualidade |
+| `packages/bot-sdk` | SDK, contratos de bot, conexão de voz, execução local e empacotamento do CLI de bots |
 
 `packages/shared` é o que impede cliente e servidor de divergirem: os dois
 importam os **mesmos** tipos e os **mesmos** validadores.
+
+A implementação e as limitações atuais do Light estão no
+[README próprio](https://github.com/MonkyOrg/Monky/tree/main/apps/light).
+As seções de interface abaixo descrevem o cliente Electron.
 
 ## O cliente
 
@@ -76,8 +82,14 @@ Talvez a decisão mais incomum do projeto: **o renderer é TypeScript e DOM puro
 Não há React, Vue ou Svelte. As telas montam o próprio HTML com template strings
 e se re-renderizam.
 
-O estado fica em *stores* singleton que emitem eventos num barramento
-(`appEvents`), e as telas se inscrevem no que lhes interessa:
+`SessionManager` mantém conexão, chat, membros e miniapps separados por
+sessão de servidor. As stores da sessão ativa emitem no barramento de interface
+(`appEvents`); as de fundo atualizam seus dados por um barramento silencioso.
+Preferências e a chamada ativa têm escopo global. Trocar a sessão visualizada
+não equivale a encerrar as conexões.
+
+As telas se inscrevem nos eventos relevantes; o diagrama mostra esse fluxo
+lógico, não uma única store compartilhando dados de todos os servidores:
 
 <div class="diagrama">
 
@@ -94,7 +106,8 @@ Cada responsabilidade grande do cliente vive em uma classe própria, em
 | Serviço | Responsabilidade |
 |---|---|
 | `NetworkClient` | WebSocket, autenticação, heartbeat e reconexão |
-| `WebRtcManager` | As conexões P2P: mesh, tracks, renegociação |
+| `WebRtcManager` | Orquestração de mídia comum, publicações locais e conexões P2P; delega o transporte SFU |
+| `webrtc/SfuClientEngine` | Transporte SFU: capacidades negociadas, producers, consumers e reconexão |
 | `AudioProcessor` | Microfone, supressão de ruído, detecção de fala |
 | `VideoService` | Captura compartilhada de câmera, efeitos locais e captura de tela |
 | `ScreenAudioService` | Ponte do módulo nativo de áudio de tela para o WebRTC |
@@ -103,6 +116,77 @@ Cada responsabilidade grande do cliente vive em uma classe própria, em
 | `KeybindService` | Atalhos globais |
 | `AttachmentUploader` | Upload de anexos do chat |
 | `UpdateService` | Verificação e aviso de atualização |
+
+### Compartilhamento de tela: comportamento comum, transporte separado
+
+Compartilhar uma tela é a mesma funcionalidade nos dois modos. O transporte
+não deve ter uma segunda implementação da captura, das preferências de
+qualidade ou das regras de codec.
+
+| Responsabilidade | Onde fica |
+|---|---|
+| Captura, prévia e encerramento da fonte | `VideoService`; áudio capturado por `ScreenAudioService` |
+| Parada/substituição nos controles, áudio associado e atualização da sessão correta | `screenShareControls.ts`, usado pelo seletor, views e saída/troca de chamada |
+| Intenção de publicar cada tela, cancelamento e limpeza em caso de falha | Registro `localScreenShares` e métodos de compartilhamento do `WebRtcManager` |
+| Intenção de assistir, independente da view e da preferência de mute | `VoiceStore`, ligada à sessão da chamada e aplicada pelo `WebRtcManager` aos dois transportes |
+| Limites de bitrate/FPS e preferência de adaptação | `webrtc/mediaEncodingPolicy.ts`, usado por P2P e SFU |
+| Escolha da família de codec e recusa de alternativas quando a escolha é explícita | `webrtc/codecPreferences.ts`, com capacidades fornecidas por cada transporte |
+| Alterações serializadas de parâmetros RTP | `webrtc/rtpSenderParameters.ts`: qualidade e codec não sobrescrevem a transação um do outro |
+| Recepção e associação da mídia remota à interface | `webrtc/RemoteMediaRouter`, comum aos dois modos |
+| Captura/encoder/transporte nativos e ownership no Main | `nativeScreenSharing.ts` e `native/screen-share` |
+| Assinaturas e apresentação de tela nativa ou recepção Chromium compatível | `webrtc/NativeScreenController.ts` e `webrtc/BrowserScreenSubscription.ts` |
+
+No caminho Chromium, o que **precisa** diferir é o mecanismo de publicação. Em P2P há um sender por
+destinatário, negociação SDP/ICE e uma m-line de envio dedicada a cada tela;
+o encoder é selecionado também em `encodings[].codec`. Em SFU há um producer
+no transporte de envio, e o codec é escolhido entre as capacidades negociadas
+com o servidor. Preferir codecs no SDP não substitui fixar o encoder P2P, e
+as capacidades locais usadas pelo P2P não substituem as capacidades do SFU.
+
+Nesse caminho, a captura e a publicação têm ciclos de vida distintos: reconstruir um
+transporte na mesma chamada preserva a captura ativa, mas sair da chamada ou
+encerrar o compartilhamento encerra a fonte. Uma troca de modo que exige
+saída/reentrada autorizada segue a limpeza completa da chamada. O SFU usa
+`stopTracks: false`, e áudio e vídeo
+de tela compartilham a proteção contra producers tardios após cancelamento
+ou substituição. Trocar o codec refaz a publicação, não a captura.
+
+O seletor consulta `WebRtcManager.assertScreenShareSupported()` antes de pedir
+captura; `VideoService` não depende de codecs nem do modo de voz. Fechar o
+seletor cancela uma aquisição pendente sem encerrar telas já publicadas.
+O início do áudio também é cancelável antes da captura nativa ou durante a
+publicação: encerrar a tela não pode produzir um anúncio tardio de áudio ativo.
+O helper de controles captura a sessão da chamada, em vez de enviar atualizações
+ao servidor que estiver visível quando uma operação assíncrona terminar.
+
+Os valores do perfil são **tetos por envio**, não garantias de FPS nem um
+orçamento agregado de upload. P2P pode transmitir a mesma tela para vários
+destinatários; SFU normalmente a envia uma vez ao servidor. `GAMING` prioriza
+framerate; os demais perfis priorizam resolução. Esses tetos não prometem
+1080p120 sustentados.
+
+O caminho nativo usa **libobs/WGC → AMF H.264 → WebRTC nativo** no Windows x64
+qualificado, sem decodificar e recodificar o vídeo no transmissor. A escala
+com stretch acontece antes do encoder. No receptor Windows, Media Foundation
+decodifica e SharedTexture entrega os frames ao palco e à sobreposição.
+Receptores Chromium negociam o perfil H.264 real antes de aceitar a assinatura.
+
+No macOS 14+ (arm64/x64), ScreenCaptureKit captura janelas/monitores,
+Core Image/Metal redimensiona; VideoToolbox codifica H.264 e libaom codifica AV1
+por software. O encoder AV1 lê NV12 em C++ fora do Renderer, preserva o timestamp
+Mach e aplica bitrate/keyframes na mesma fila serial da captura. O RTC isolado em
+processo transporta o vídeo em P2P/SFU; VideoToolbox decodifica H.264 e o decoder
+AV1 por software cobre recepção desse codec. Direitos Mach transferem IOSurfaces
+ao Main, com liberação condicionada à devolução real das referências do Chromium.
+O áudio original usa timestamps Mach, não QPC. Contadores por decoder e relógios
+nativos medem FPS sem confundir o perfil solicitado com a taxa observada.
+
+Cada perfil demandado tem seu próprio pipeline; espectadores do mesmo perfil
+compartilham captura/encoder, mas não a autorização de assistir. Há no máximo
+quatro perfis por fonte e 16 espectadores por perfil. Sem demanda, o pipeline
+é fechado e só o descritor da fonte permanece. A nova assinatura cria owners
+novos, sem reutilizar engines retiradas. IPC centralizado, validação no Main
+e comprovantes privados de fechamento preservam a posse dos recursos.
 
 ### O que fica salvo na sua máquina
 
@@ -132,12 +216,37 @@ ficam no mesmo registro transacional. A falha de persistência não troca a
 preferência em memória; dados corrompidos não são interpretados como
 consentimento para transmitir a câmera sem efeito.
 
-A segmentação usa MediaPipe/Selfie Segmenter com modelo e WASM empacotados,
-sem CDN ou envio de frames a uma API. Segmentação, composição e chroma key
-rodam em um worker com `OffscreenCanvas`, com um frame em trânsito por vez.
-O segmentador é criado sob demanda uma vez por worker e reutilizado entre
-desfoque, cor, imagem e chroma; no chroma ele fica ocioso. Desativar os efeitos
-ou encerrar a captura libera o worker e o modelo. Resolução e cadência seguem
+A separação automática usa Robust Video Matting (RVM/MobileNetv3) com TensorFlow.js,
+modelo e pesos empacotados, sem CDN ou envio de frames a uma API. Inferência,
+composição e chroma key rodam em um worker com `OffscreenCanvas`, com um frame
+em trânsito por vez. `MediaStreamTrackProcessor` lê diretamente a captura;
+o fallback por elemento de vídeo emite aviso quando a API não está disponível.
+Chroma, composição e desfoque separável usam shaders WebGL2, sem leitura ou
+loop JavaScript dos pixels do vídeo inteiro. O desfoque exclui a pessoa antes
+da filtragem e normaliza o resultado pelo peso de fundo disponível, sem ampliar
+a imagem. Isso evita espalhar as cores da pessoa para o contorno ou desenhar
+uma segunda silhueta deslocada. O RVM recebe RGB na resolução completa e mantém
+quatro estados recorrentes. A razão interna é `min(1, 480 / max(largura, altura))`;
+cor do primeiro plano e alpha saem na resolução completa, sem download para a CPU.
+A composição compartilha o contexto WebGL2 do TensorFlow e restaura seu estado.
+O alpha não recebe o limiar ou a suavidade do segmentador antigo; os valores
+legados continuam armazenados, mas a interface informa que não são aplicados.
+Sem WebGL2, os efeitos de IA falham explicitamente. O chroma físico mantém
+o compositor Canvas2D com aviso no log; não há troca silenciosa do modelo de IA.
+Perda do contexto GPU durante o processamento interrompe a câmera, sem
+publicar frames crus ou trocar silenciosamente de backend.
+O modelo é criado sob demanda e reutilizado entre desfoque, cor e imagem.
+Reconfiguração ou mudança de tamanho reinicia a memória temporal; no chroma
+o modelo fica ocioso, sem inferência, preservando os shaders compilados.
+A configuração e o primeiro frame têm até 60 segundos cada para inicialização
+e compilação fria dos shaders, que pode ultrapassar 30 segundos no Metal.
+O primeiro frame de uma nova resolução também recebe esse prazo de compilação.
+Os frames seguintes mantêm watchdog de 8 segundos. Durante a preparação
+nenhum frame é publicado, e cancelar a captura não espera esses prazos.
+Os testes CI usam D3D11 WARP no Windows e Metal no macOS ARM, mantendo
+inferência real e sem alterar a seleção gráfica do aplicativo.
+Desativar efeitos ou encerrar a captura libera leitor, tensores,
+texturas, contexto e worker. Resolução e cadência seguem
 o perfil selecionado. O limitador opcional, desligado por padrão, restringe
 ambas a 1280 × 720 e 30 FPS, sem ampliar uma captura menor ou duplicar frames
 para compensar limitações de captura ou processamento.
@@ -211,34 +320,42 @@ ordem em que foram feitas.
 A validação dos payloads usa **zod**, com os schemas em `packages/shared` —
 os mesmos que o cliente usa para validar antes de enviar.
 
-::: warning A versão do protocolo é exata, não compatível
-`PROTOCOL_VERSION`, definida em `packages/shared/src/constants.ts`, precisa ser
-**idêntica** nos dois lados. Não há
-negociação nem modo de compatibilidade: se o cliente manda uma versão diferente
-da do servidor, a autenticação é recusada.
+::: warning Compatibilidade negociada, nunca um downgrade irrestrito
+O protocolo **26** negocia pisos independentes: **26 para clientes** e **24 para
+bots**, além de recursos em `AUTH_CONNECT`/`AUTH_SUCCESS`. O contrato nativo de
+tela 4K/80 Mbps exige atualizar cliente e servidor; clientes 24/25 não são
+rebaixados silenciosamente. Bots 24 continuam usando seu contrato anterior de
+áudio e comandos. Blocos de mensagem e configuração de limite só são habilitados
+com as capacidades correspondentes. O SDK pode repetir a autenticação uma vez
+no contrato conhecido de um servidor antigo, respeitando o piso de bots. Versões
+abaixo do piso são recusadas; versões futuras precisam anunciar explicitamente
+um intervalo compatível.
 
-É por isso que subir o protocolo é sempre uma *breaking change* e obriga uma
-release **major** — existe até uma verificação no CI que barra o PR se isso não
-for respeitado.
+Mudanças aditivas não exigem elevar o piso. Uma correção crítica ou alteração
+incompatível deve elevar `MIN_CLIENT_PROTOCOL` e/ou `MIN_BOT_PROTOCOL` em
+`protocolCompatibility.ts`, atualizar o manifesto de release e testar as
+rejeições antes da publicação. A política de versionamento major do CI para
+alterações de `PROTOCOL_VERSION` permanece vigente.
 :::
 
-### Autenticação: o servidor nunca vê uma senha sua
+### Autenticação por identidade {#autenticacao-o-servidor-nunca-ve-uma-senha-sua}
 
 O login é por desafio-resposta com criptografia de chave pública. Você não tem
 conta nem cadastro: sua identidade **é** o seu par de chaves.
 
 <div class="diagrama">
 
-![Autenticação: o servidor nunca vê uma senha sua](./diagramas/pt/07-autenticacao-o-servidor-nunca-ve-uma-sen.claro.svg){.tema-claro}
-![Autenticação: o servidor nunca vê uma senha sua](./diagramas/pt/07-autenticacao-o-servidor-nunca-ve-uma-sen.escuro.svg){.tema-escuro}
+![Autenticação por desafio e assinatura: a chave privada permanece no cliente; a senha opcional de entrada é enviada ao servidor.](./diagramas/pt/07-autenticacao-o-servidor-nunca-ve-uma-sen.claro.svg){.tema-claro}
+![Autenticação por desafio e assinatura: a chave privada permanece no cliente; a senha opcional de entrada é enviada ao servidor.](./diagramas/pt/07-autenticacao-o-servidor-nunca-ve-uma-sen.escuro.svg){.tema-escuro}
 
 </div>
 
 O `clientId` é derivado da própria chave pública, então ele não pode ser
 falsificado: quem não tem a chave privada não consegue assinar o desafio.
 
-A senha do servidor, quando existe, protege a *entrada* — é conferida antes de o
-desafio ser emitido.
+A senha do servidor, quando existe, protege a *entrada* e é conferida pelo
+servidor antes do desafio. Ela é diferente da senha local do backup da sua
+identidade. A chave privada e a senha desse backup não são enviadas no login.
 
 ### Sessões: a mesma pessoa em vários aparelhos
 
@@ -289,7 +406,7 @@ independentemente dos cargos que tenha.
 | Proteção | Como |
 |---|---|
 | Flood de mensagens | Janela deslizante: 10 mensagens a cada 5 s |
-| Tamanho da mensagem | 2000 caracteres |
+| Tamanho da mensagem | 16.000 caracteres por padrão; configurável por servidor, `0` sem limite de caracteres; pacote WebSocket até 8 MiB |
 | Avatar | 5 MB, e o arquivo precisa ter assinatura de PNG, JPEG ou WebP |
 | Anexos | Limite por arquivo e orçamento total do servidor, ambos configuráveis |
 | Soundboard | Áudio recusado acima de ~4 MB |
@@ -321,11 +438,33 @@ Excelente para grupos pequenos de amigos e servidores em VPSs econômicos (como 
 
 ### Topologia 2: SFU (Selective Forwarding Unit)
 
-No modo SFU, cada cliente abre apenas **2 WebRTC Transports** com o servidor:
+Na chamada SFU do motor de navegador, o cliente abre um par de **WebRTC Transports** com o servidor:
 - **`sendTransport`:** Envia as trilhas locais (microfone, webcam, tela e áudio do sistema).
 - **`recvTransport`:** Recebe as trilhas de todos os outros participantes roteadas pelo worker `mediasoup`.
 
-Quem transmite envia seu fluxo em 1080p60 **uma única vez**, economizando drasticamente o upload e a CPU do usuário.
+O servidor identifica esse par pelo propósito `call`, também usado quando
+`purpose` é omitido. Motores de tela com conexões próprias podem usar um par
+`screen`, restrito a vídeo e áudio de tela. Producers e consumers registram seu
+`transportId`: reconstruir um propósito não descarta os recursos do outro.
+Criações em andamento também têm esse escopo: respostas tardias do worker
+são fechadas após cancelamento, saída ou troca de canal, sem registrar
+transportes abandonados nem afetar uma conexão substituta.
+A saúde da conexão de voz considera o par `call`; a saúde de `screen` é
+consultada separadamente. Isso prepara o isolamento do motor nativo sem mudar
+o par atualmente usado pelo renderer.
+
+O encerramento explícito `SFU_CLOSE_WEBRTC_TRANSPORT` seleciona um ID de
+transporte `screen`, não o par inteiro, e responde com
+`SFU_WEBRTC_TRANSPORT_CLOSED`. `SFU_PRODUCER_SET_PAUSED` também se restringe
+à mídia de tela da própria sessão. Pausa/retomada de producers e consumers
+aguarda a resposta do worker e confere se o recurso ainda existe. Pedidos
+com `requestId` recebem confirmação ou erro correlacionado, inclusive no
+encerramento de producers/consumers; os controles antigos sem `requestId`
+continuam sem uma confirmação extra.
+
+Quem transmite envia cada fluxo **uma única vez ao servidor**, em vez de uma
+cópia por destinatário. Essa redução de envios não garante, sozinha, resolução,
+FPS ou um custo específico de CPU/GPU.
 
 ::: tip Resiliência & Reconexão Automática
 Se o processo SFU sofrer qualquer falha ou indisponibilidade, o cliente avisa em tela e passa a **refazer a sessão SFU automaticamente**, com espera progressiva entre as tentativas, até o servidor voltar.
@@ -418,13 +557,40 @@ Assim não é preciso renegociar a conexão a cada clique no botão de mudo.
 A câmera segue as dimensões e o FPS do perfil de qualidade escolhido.
 
 O compartilhamento de tela é uma track **separada** da câmera — você pode
-transmitir as duas ao mesmo tempo. Ao começar a compartilhar, a conexão é
-renegociada e o Monky manda junto um `screen-video-meta` para que o outro lado
-saiba que aquela track é uma tela, e não um rosto.
+transmitir as duas ao mesmo tempo. A fonte é anunciada na chamada sem exigir
+o recebimento de sua mídia. Em P2P, a negociação e o `screen-video-meta`
+associam a track à tela correta, separada da câmera.
 
 Dá para compartilhar **até 2 telas simultâneas**. Cada uma é identificada pelo id
 do seu próprio `MediaStream`, e é esse id que amarra a track, o sender e o
 quadradinho na tela.
+
+**Descoberta não é assinatura.** A intenção de assistir pertence à chamada,
+não ao ciclo de vida de uma view. `Assistir transmissão` autoriza a entrega
+daquela fonte ao destinatário; `Parar de assistir` a revoga. A escolha acompanha
+a mesma fonte em reconstruções de view e transporte, mas não é herdada por uma
+nova transmissão apenas por ter o mesmo dono.
+
+Em P2P, `RTC_SIGNAL` de tipo `screen-watch` leva a intenção ao emissor. No caminho Chromium, os
+senders de tela ficam sem track/encoding ativo até existir uma assinatura;
+parar afeta somente aquele peer. Épocas do publisher e do viewer e uma revisão
+crescente protegem contra comandos e negociações antigos. O servidor autentica
+o remetente e verifica canal e fonte publicada.
+
+Em SFU, o catálogo continua disponível sem criar consumers de tela automaticamente.
+Os consumers de tela/áudio começam pausados **no servidor** e só são liberados
+depois que o setup ainda válido termina. Parar fecha o consumer remoto e local;
+pausar somente a track no cliente não seria suficiente para cortar banda.
+Respostas tardias não podem reativar uma assinatura cancelada.
+
+O áudio da tela é compartilhado por publisher/destinatário: ele continua
+enquanto esse destinatário assistir pelo menos uma tela daquele publisher.
+Microfone, câmera, outros espectadores e preferências de mute são independentes.
+No caminho nativo, a última assinatura de um perfil encerra sua captura,
+encoder e envio, inclusive publisher→SFU. O caminho Chromium mantém sua
+captura/prévia e pode manter o upload ao SFU. RTCP e sinalização continuam permitidos; não se promete
+zero bytes na chamada. Os contratos exigem cliente e servidor com o mesmo
+`PROTOCOL_VERSION`.
 
 O Monky também marca a track com uma dica de conteúdo: `motion` prioriza
 fluidez (bom para jogos e vídeo), `detail` prioriza nitidez (bom para código e
@@ -438,7 +604,7 @@ Monky tem um módulo nativo em C++:
 | Plataforma | Como |
 |---|---|
 | **Windows** | WASAPI *process loopback* — captura o som do sistema ou de um app específico, excluindo o próprio Monky para não gerar eco |
-| **macOS** | ScreenCaptureKit (macOS 13+), com filtro de janela para não vazar áudio de apps que você não está compartilhando |
+| **macOS** | ScreenCaptureKit (macOS 13+ para áudio; caminho de vídeo nativo requer 14+), com áudio do sistema ou do aplicativo inteiro selecionado, mediante confirmação |
 | **Outras** | Não suportado — o app segue funcionando, só sem áudio de tela |
 
 Se o módulo não carregar, nada quebra: o compartilhamento continua funcionando
@@ -446,8 +612,9 @@ sem som e o app avisa.
 
 ### Qualidade e banda
 
-Os perfis controlam resolução, FPS e teto de bitrate, aplicados via
-`RTCRtpSender.setParameters()`:
+Os perfis controlam resolução, FPS e teto de bitrate. No caminho Chromium,
+os parâmetros de envio usam `RTCRtpSender.setParameters()`; no nativo,
+configuram o pipeline real de captura/encoder/transporte:
 
 | Perfil | Áudio | Câmera | Tela |
 |---|---|---|---|
@@ -460,17 +627,25 @@ O **Gaming Mode** é o mais revelador: ele *reduz* a câmera para gastar tudo na
 tela em 60fps. E, só nele, a preferência de degradação vira
 `maintain-framerate` — sob banda apertada o Monky sacrifica resolução para
 segurar os 60fps, porque num jogo a fluidez importa mais que a nitidez. Nos
-outros perfis é o contrário.
+outros perfis é o contrário no caminho Chromium. O nativo solicita o perfil
+real escolhido e não esconde degradação como se a configuração garantisse FPS.
+
+O perfil Personalizado permite solicitar até 1080p120 no caminho nativo.
+O espectador pode pedir Fonte, 1080p60, 720p60 ou 480p30 (852×480); perfis
+diferentes alocam pipelines separados, e não um redimensionamento só no player.
 
 Lembre que esses números são **por par**. Compartilhar tela em Alta Qualidade
 para 4 pessoas pede ~14 Mbps de upload.
 
 ### Telemetria
 
-Durante uma transmissão o Monky lê as estatísticas do WebRTC
-(`RTCPeerConnection.getStats()`) a cada 1,5 s e mostra FPS, resolução e bitrate
-reais — do lado de quem envia, ainda codec e keyframes; de quem recebe, perda de
-pacotes e jitter.
+Durante uma transmissão, a telemetria distingue configuração, envio,
+decodificação e apresentação. Estatísticas RTP usam deltas do timestamp do
+próprio relatório; contadores Media Foundation usam o relógio de observação
+do worker, não o horário em que o JavaScript leu um snapshot em cache.
+Métricas indisponíveis permanecem indisponíveis, não viram zero. O transporte
+H.264 externo não finge medir o tempo de codificação AMF como se fosse um
+encoder interno do WebRTC.
 
 ## Reconexão
 
@@ -502,6 +677,7 @@ anunciada normalmente — a reconexão vira uma entrada nova.
 apps/
   client/
     native/screen-audio/     módulo C++ de áudio de tela (Windows/macOS)
+    native/screen-share/     captura libobs, RTC nativo, contratos, build e licenças
     src/main/                processo main: janela, bandeja, updater, IPC
     src/preload/             a ponte window.api
     src/renderer/
@@ -531,6 +707,10 @@ Coisas que são consequência direta da arquitetura, não bugs:
   `PROTOCOL_VERSION`; atualizar um lado só quebra a conexão.
 - **Áudio de tela só em Windows e macOS**, por depender de API nativa de cada
   sistema.
+- **Homologação depende do hardware.** O caminho macOS foi exercitado em M1 com
+  áudio/vídeo P2P/SFU e cerca de 57 FPS em 4K60. O probe aceita Main 6.0/4K120,
+  mas isso não homologa 120 FPS sustentados nem GPU Intel. Loopback e compilação
+  x64 via Rosetta não substituem QA em rede externa ou hardware Intel.
 
 ## Para saber mais
 

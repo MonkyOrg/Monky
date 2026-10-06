@@ -85,6 +85,19 @@ select optgroup {
   pointer-events: none;
 }
 
+.monky-select-popup .monky-select-search {
+  position: sticky;
+  top: -5px;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  min-width: 200px;
+  margin-bottom: 5px;
+  font-size: 13px;
+  background: var(--bg-input);
+}
+.monky-select-empty { padding: 12px; color: var(--text-muted); }
+
 .monky-select-option {
   position: relative;
   min-height: 34px;
@@ -94,6 +107,7 @@ select optgroup {
   overflow-wrap: anywhere;
   white-space: normal;
 }
+.monky-select-option.has-icon { display: flex; align-items: center; gap: 8px; }
 
 .monky-select-option.is-active:not([aria-disabled="true"]) {
   background: var(--bg-card-hover);

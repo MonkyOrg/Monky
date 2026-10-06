@@ -1,7 +1,8 @@
 const assert = require('node:assert/strict');
+const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const { test } = require('node:test');
-const { MessageType } = require('@monky/shared');
+const { MessageType, rtcSignalSchema } = require('@monky/shared');
 const { NativeClient } = require('./native_client.cjs');
 const { createServerFixture } = require('./server_fixture.cjs');
 
@@ -222,10 +223,10 @@ test('a malformed P2P offer retires only its peer, not the healthy call', { time
   await alice.untilState(value => value.participants === 3, 'Malformed-offer sender was not admitted');
   const since = alice.events.length;
   alice.expectedPeerFailures.add(sender.auth.currentUser.sessionId);
-  sender.peer.send(MessageType.RTC_SIGNAL, {
+  sender.peer.send(MessageType.RTC_SIGNAL, rtcSignalSchema.parse({
     fromSessionId: sender.auth.currentUser.sessionId, targetSessionId: auth.sessionId,
-    signalType: 'offer', sdp: { type: 'offer', sdp: 'not a valid SDP description' },
-  });
+    signalType: 'offer', subscriptionId: randomUUID(), sdp: { type: 'offer', sdp: 'not a valid SDP description' },
+  }));
   const failed = await alice.wait('media-error', since);
   assert.equal(failed.sessionId, sender.auth.currentUser.sessionId);
   const before = await alice.state();

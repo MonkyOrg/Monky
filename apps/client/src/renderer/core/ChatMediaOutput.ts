@@ -6,7 +6,7 @@ import { setAudioOutputSink } from './AudioOutputSink';
 let pendingDeviceId: string | null = null;
 
 function showOutputError(media: HTMLMediaElement, error: unknown | null): void {
-  const player = media.closest<HTMLElement>('.chat-video-player');
+  const player = media.closest<HTMLElement>('.chat-video-player, .chat-audio-player');
   if (!player) return;
   let status = player.querySelector<HTMLElement>('.chat-media-output-error');
   if (error && !status) {

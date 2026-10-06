@@ -1,10 +1,14 @@
 import {
   LIMITS,
   botFormSchema,
+  botMessagePreviewLocalizations,
   type BotForm,
   type BotFormValues,
   type ChatMessage,
+  type NativePoll,
+  type ChatSendPayload,
   type MessageReply,
+  type ResolvedMessageBlock,
   type ChatReactionEventPayload,
   type CommandFinishedPayload,
   type CommandFinishReason,
@@ -25,6 +29,14 @@ import {
   type CommandUsage, type CommandUsageScope, type CommandUsageStorage,
 } from '../utils/commandCatalog';
 import type { AutocompleteInputs } from '../utils/commandAutocomplete';
+import { t } from '../i18n';
+
+export interface OutgoingMessage {
+  message: ChatMessage;
+  payload: ChatSendPayload;
+  status: 'sending' | 'failed';
+  error?: string;
+}
 
 export interface CommandDraft {
   command: SlashCommand;
@@ -49,6 +61,8 @@ export interface MessageEditDraft {
 }
 
 interface ComposerRecovery {
+  outgoing: Map<string, OutgoingMessage>;
+  blocks: Map<string, ResolvedMessageBlock[]>;
   drafts: Map<string, string>;
   replies: Map<string, MessageReply>;
   edits: Map<string, MessageEditDraft>;
@@ -98,6 +112,7 @@ export class ChatStore {
   // Public history windows and private responses have separate bounded caches:
   // private responses cannot be fetched again when leaving an old history window.
   private messages: Map<string, ChatMessage[]> = new Map();
+  private outgoing = new Map<string, OutgoingMessage>();
   private ephemeralMessages: Map<string, ChatMessage[]> = new Map();
   private historicalChannels = new Set<string>();
   // Text channels with an unread @-mention for the current user (#14).
@@ -109,6 +124,7 @@ export class ChatStore {
   // center area switches between chat and the voice stage.
   private drafts: Map<string, string> = new Map();
   private replyDrafts = new Map<string, MessageReply>();
+  private blockDrafts = new Map<string, ResolvedMessageBlock[]>();
   private messageEdits = new Map<string, MessageEditDraft>();
   private composerScope: string | null = null;
   private commands: SlashCommand[] = [];
@@ -148,14 +164,20 @@ export class ChatStore {
   }
 
   public setHistory(channelId: string, msgs: ChatMessage[], aroundMessageId?: string): void {
+    for (const message of msgs) this.acknowledgeOutgoing(message);
     // History can arrive after a live response, and never contains private
     // messages. Preserve those rows without duplicating public bot results.
     const current = aroundMessageId ? [] : this.messages.get(channelId) ?? [];
     if (aroundMessageId) this.historicalChannels.add(channelId);
     else this.historicalChannels.delete(channelId);
     const edit = this.messageEdits.get(channelId);
-    const publicHistory = msgs.filter((message) => !message.isEphemeral).map((message) =>
-      edit?.message.id === message.id && edit.message.deletedAt && !message.deletedAt ? edit.message : message);
+    const known = new Map((this.messages.get(channelId) ?? []).map(message => [message.id, message]));
+    const publicHistory = msgs.filter((message) => !message.isEphemeral).map(message => {
+      const previous = known.get(message.id) ?? (edit?.message.id === message.id ? edit.message : undefined);
+      if (previous?.revision !== undefined && previous.revision > (message.revision ?? -1)) return previous;
+      if (previous?.deletedAt && !message.deletedAt && (message.revision ?? 0) <= (previous.revision ?? 0)) return previous;
+      return message;
+    });
     const publicIds = new Set(publicHistory.map((message) => message.id));
     const privateMessages = new Map((this.ephemeralMessages.get(channelId) ?? [])
       .filter((message) => !publicIds.has(message.id))
@@ -187,13 +209,14 @@ export class ChatStore {
       .slice(-ChatStore.MAX_MESSAGES_PER_CHANNEL);
     this.messages.set(channelId, trimmed);
     const editingId = this.messageEdits.get(channelId)?.message.id;
-    const editedMessage = editingId ? msgs.find((message) => message.id === editingId) : undefined;
+    const editedMessage = editingId ? publicHistory.find((message) => message.id === editingId) : undefined;
     if (editedMessage) this.refreshMessageEdit(editedMessage);
     for (const message of trimmed) this.recordBotResponse(message);
     this.bus.emit('chat.history_loaded', { channelId, messages: this.getMessages(channelId), aroundMessageId });
   }
 
   public addMessage(message: ChatMessage): void {
+    const acknowledged = this.acknowledgeOutgoing(message);
     this.recordBotResponse(message);
     if (this.messages.get(message.channelId)?.some((entry) => entry.id === message.id) ||
         this.ephemeralMessages.get(message.channelId)?.some((entry) => entry.id === message.id)) return;
@@ -209,8 +232,45 @@ export class ChatStore {
       list.splice(0, list.length - ChatStore.MAX_MESSAGES_PER_CHANNEL);
     }
     if (!message.isEphemeral || !this.historicalChannels.has(message.channelId)) {
-      this.bus.emit('chat.message_added', message);
+      this.bus.emit(acknowledged ? 'chat.message_updated' : 'chat.message_added', message);
     }
+  }
+
+  public enqueueMessage(payload: ChatSendPayload, message: ChatMessage): OutgoingMessage {
+    if (this.outgoing.size >= ChatStore.MAX_MESSAGES_PER_CHANNEL) throw new Error(t('chat.deliveryQueueFull'));
+    if (payload.clientMessageId !== message.id || payload.channelId !== message.channelId || this.outgoing.has(message.id)) {
+      throw new Error(t('chat.deliveryFailed'));
+    }
+    const outgoing: OutgoingMessage = { payload: structuredClone(payload), message: structuredClone(message), status: 'sending' };
+    this.outgoing.set(message.id, outgoing);
+    this.bus.emit('chat.message_added', outgoing.message);
+    return outgoing;
+  }
+
+  public getOutgoing(messageId: string): OutgoingMessage | undefined {
+    return this.outgoing.get(messageId);
+  }
+
+  public retryOutgoing(messageId: string): OutgoingMessage | undefined {
+    const outgoing = this.outgoing.get(messageId);
+    if (!outgoing || outgoing.status !== 'failed') return undefined;
+    outgoing.status = 'sending';
+    outgoing.error = undefined;
+    this.bus.emit('chat.message_updated', outgoing.message);
+    return outgoing;
+  }
+
+  public failOutgoing(outgoing: OutgoingMessage, error: string): void {
+    if (this.outgoing.get(outgoing.message.id) !== outgoing) return;
+    outgoing.status = 'failed';
+    outgoing.error = error;
+    this.bus.emit('chat.message_updated', outgoing.message);
+  }
+
+  private acknowledgeOutgoing(message: ChatMessage): boolean {
+    const outgoing = this.outgoing.get(message.id);
+    if (!outgoing || outgoing.message.channelId !== message.channelId || outgoing.message.userId !== message.userId) return false;
+    return this.outgoing.delete(message.id);
   }
 
   private recordBotResponse(message: ChatMessage): void {
@@ -233,23 +293,35 @@ export class ChatStore {
       ? privateMessages : this.messages.get(message.channelId) ?? [];
     const index = list.findIndex((entry) => entry.id === message.id);
     const edit = this.messageEdits.get(message.channelId);
-    // A late edit ACK cannot resurrect a deleted original or discard its
-    // recoverable composer text. Deletion is irreversible in the protocol.
-    if (!message.deletedAt && (list[index]?.deletedAt || (edit?.message.id === message.id && edit.message.deletedAt))) return;
+    const previousState = list[index] ?? (edit?.message.id === message.id ? edit.message : undefined);
+    if (previousState?.revision !== undefined && (message.revision ?? -1) < previousState.revision) return;
+    // Only a newer server revision can restore a deletion; a delayed edit ACK cannot.
+    if (!message.deletedAt && previousState?.deletedAt
+      && (message.revision === undefined || message.revision <= (previousState.revision ?? 0))) return;
     this.refreshMessageEdit(message);
     const reply = this.messageReply(message);
+    let updatesBlockDraft = false;
+    for (const block of this.getBlockDraft(message.channelId)) {
+      if (block.type === 'reply' && block.messageId === message.id) { block.reply = reply; updatesBlockDraft = true; }
+    }
+
     const updatesDraft = this.replyDrafts.get(message.channelId)?.messageId === message.id;
     if (updatesDraft) {
       this.replyDrafts.set(message.channelId, reply);
     }
     for (const entry of list) {
+      let blocksChanged = false;
+      for (const block of entry.blocks ?? []) {
+        if (block.type === 'reply' && block.messageId === message.id) { block.reply = reply; blocksChanged = true; }
+      }
+      if (blocksChanged) this.bus.emit('chat.message_updated', entry);
       if (entry.reply?.messageId === message.id) {
         entry.reply = reply;
         this.bus.emit('chat.message_updated', entry);
       }
     }
     if (index === -1) {
-      if (updatesDraft) this.bus.emit('chat.message_updated', message);
+      if (updatesDraft || updatesBlockDraft) this.bus.emit('chat.message_updated', message);
       return;
     }
     const previous = list[index];
@@ -262,18 +334,35 @@ export class ChatStore {
     this.bus.emit('chat.message_updated', list[index]);
   }
 
+  public updatePoll(poll: NativePoll): void {
+    const collections = [...this.messages.values(), ...this.ephemeralMessages.values()];
+    for (const outgoing of this.outgoing.values()) collections.push([outgoing.message]);
+    for (const list of collections) {
+      const message = list.find(entry => entry.poll?.id === poll.id);
+      if (!message?.poll || poll.revision < message.poll.revision) continue;
+      message.poll = {
+        ...poll,
+        myVoteOptionIds: poll.myVoteOptionIds ?? message.poll.myVoteOptionIds,
+      };
+      this.bus.emit('chat.message_updated', message);
+    }
+  }
+
   public getMessages(channelId: string): ChatMessage[] {
     const publicMessages = this.messages.get(channelId) ?? [];
-    if (this.historicalChannels.has(channelId)) return publicMessages;
-    return [...publicMessages, ...(this.ephemeralMessages.get(channelId) ?? [])]
+    return [...publicMessages, ...(this.historicalChannels.has(channelId) ? [] : this.ephemeralMessages.get(channelId) ?? []),
+      ...[...this.outgoing.values()].filter(entry => entry.message.channelId === channelId).map(entry => entry.message)]
       .sort((a, b) => a.createdAt - b.createdAt);
   }
 
   public messageReply(message: ChatMessage): MessageReply {
     return {
       messageId: message.id,
+      ...(message.deletedAt ? {} : { createdAt: message.createdAt }),
       userNickname: message.deletedAt ? '' : message.userNickname,
       content: message.deletedAt ? '' : message.content.slice(0, 200),
+      ...(message.isBot && !message.deletedAt
+        ? { isBot: true, localizations: botMessagePreviewLocalizations(message.localizations) } : {}),
       deleted: !!message.deletedAt,
       hasAttachments: !message.deletedAt && !!message.attachments?.length,
     };
@@ -288,6 +377,15 @@ export class ChatStore {
 
   public getReplyDraft(channelId: string): MessageReply | undefined {
     return this.replyDrafts.get(channelId);
+  }
+
+  public getBlockDraft(channelId: string): ResolvedMessageBlock[] {
+    return this.blockDrafts.get(channelId) ?? [];
+  }
+
+  public setBlockDraft(channelId: string, blocks: ResolvedMessageBlock[]): void {
+    if (blocks.length) this.blockDrafts.set(channelId, blocks);
+    else this.blockDrafts.delete(channelId);
   }
 
   public updateReaction(event: ChatReactionEventPayload, add: boolean): void {
@@ -391,8 +489,10 @@ export class ChatStore {
       this.retainDisconnectedComposer();
       this.drafts.clear();
       this.replyDrafts.clear();
+      this.blockDrafts.clear();
       this.messageEdits.clear();
       this.commandDrafts.clear();
+      this.outgoing.clear();
     }
     this.composerScope = key;
     const recovered = disconnectedComposers.get(key);
@@ -400,8 +500,10 @@ export class ChatStore {
     disconnectedComposers.delete(key);
     this.drafts = recovered.drafts;
     this.replyDrafts = recovered.replies;
+    this.blockDrafts = recovered.blocks;
     this.messageEdits = recovered.edits;
     this.commandDrafts = recovered.commands;
+    this.outgoing = recovered.outgoing;
   }
 
   public beginMessageEdit(message: ChatMessage): MessageEditDraft | undefined {
@@ -447,11 +549,15 @@ export class ChatStore {
   }
 
   private retainDisconnectedComposer(): void {
-    if (!this.composerScope || this.messageEdits.size === 0) return;
+    if (!this.composerScope || (this.messageEdits.size === 0 && this.blockDrafts.size === 0 && this.outgoing.size === 0)) return;
     disconnectedComposers.delete(this.composerScope);
     disconnectedComposers.set(this.composerScope, {
+      outgoing: new Map([...this.outgoing].map(([id, outgoing]) => [
+        id, { ...structuredClone(outgoing), status: 'failed', error: outgoing.status === 'sending' ? undefined : outgoing.error },
+      ])),
       drafts: new Map(this.drafts),
       replies: new Map(this.replyDrafts),
+      blocks: new Map([...this.blockDrafts].map(([channel, blocks]) => [channel, blocks.map(block => ({ ...block }))])),
       edits: new Map([...this.messageEdits].map(([channelId, edit]) => [
         channelId, { ...edit, pending: false, error: edit.pending ? 'failed' : edit.error },
       ])),
@@ -797,6 +903,26 @@ export class ChatStore {
     }
   }
 
+  public revokeChannel(channelId: string): void {
+    this.finishChannelInvocations(channelId);
+    for (const [id, invocation] of this.invocations) {
+      if (invocation.channelId === channelId) this.invocations.delete(id);
+    }
+    for (const [id, outgoing] of this.outgoing) {
+      if (outgoing.payload.channelId === channelId) this.outgoing.delete(id);
+    }
+    this.messages.delete(channelId);
+    this.ephemeralMessages.delete(channelId);
+    this.historicalChannels.delete(channelId);
+    this.replyDrafts.delete(channelId);
+    this.blockDrafts.delete(channelId);
+    this.messageEdits.delete(channelId);
+    this.drafts.delete(channelId);
+    if (this.mentionChannels.delete(channelId)) this.bus.emit('chat.mentions_updated');
+    if (this.unreadChannels.delete(channelId)) this.bus.emit('chat.unread_updated');
+    this.bus.emit('chat.history_loaded', { channelId });
+  }
+
   public finishAllInvocations(reason: CommandFinishReason): void {
     for (const invocation of this.invocations.values()) this.finishInvocation({ ...invocation, reason });
     for (const [channelId, draft] of this.commandDrafts) {
@@ -828,10 +954,12 @@ export class ChatStore {
 
   public clear(): void {
     this.retainDisconnectedComposer();
+    this.outgoing.clear();
     this.finishAllInvocations('caller_disconnected');
     this.ephemeralMessages.clear();
     this.historicalChannels.clear();
     this.replyDrafts.clear();
+    this.blockDrafts.clear();
     this.messages.clear();
     this.mentionChannels.clear();
     this.unreadChannels.clear();

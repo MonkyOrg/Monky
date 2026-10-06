@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Corrigidos o encerramento com áudio, a validação de cor H.264 e a consulta inicial do NVENC. Avisos repetidos não empilham diálogos; fonte fechada gera aviso discreto. Os logs agora registram as etapas e os detalhes nativos do compartilhamento.",
+  "en": "Fixed shutdown with audio, H.264 color validation and initial NVENC queries. Repeated notices no longer stack dialogs; closed sources show a brief notice. Logs now record screen-sharing stages and native diagnostic details."
+}

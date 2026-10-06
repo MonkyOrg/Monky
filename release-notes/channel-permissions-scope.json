@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "As permissões de canal não mostram mais Gerenciar eventos e Emitir ações ao vivo, que valem para o servidor inteiro e continuam nos cargos.",
+  "en": "Channel permissions no longer show Manage events and Emit live actions, which apply to the whole server and remain on roles."
+}

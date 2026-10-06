@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Corrigidos recursos de compartilhamento que podiam ficar retidos ao encerrar o aplicativo. Tentar novamente agora repete a limpeza pendente em vez de reutilizar uma falha antiga; o fechamento continua protegido quando algum recurso ainda não foi liberado.",
+  "en": "Fixed screen-sharing resources that could remain retained when quitting. Retry now performs pending cleanup instead of reusing an old failure. Closing remains protected while any resource has not actually been released."
+}

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Beta integrada: mantém câmera RVM, chat e overlay junto das correções de transmissão, 4K/60 validado e encerramento seguro. Cliente e servidor precisam ser atualizados juntos para o protocolo 26; a compatibilidade de bots a partir do protocolo 24 é preservada.",
+  "en": "Integrated beta: keeps RVM camera, chat and overlay alongside screen-sharing fixes, validated 4K/60 and safe shutdown. Update client and server together for protocol 26; compatibility with bots using protocol 24 or newer is preserved."
+}

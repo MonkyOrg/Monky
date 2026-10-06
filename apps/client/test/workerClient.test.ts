@@ -178,7 +178,7 @@ function generatedSource(mode: 'complete' | 'recover' | 'blocked'): string {
 }
 
 async function fixture(t: TestContext, script?: string, preload?: string, realTools = false) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'monky-private-worker-'));
+  const root = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'monky-private-worker-'));
   const cache = path.join(root, 'cache');
   await fs.mkdir(cache);
   // Explicit test executable, never a production fallback to Electron/process.execPath.

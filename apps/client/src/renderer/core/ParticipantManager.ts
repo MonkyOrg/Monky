@@ -188,17 +188,17 @@ export class ParticipantManager {
     }
   }
 
-  public setRemoteScreenStream(sessionId: string, shareId: string, stream: MediaStream): void {
+  public setRemoteScreenStream(sessionId: string, shareId: string, stream: MediaStream, options: { notify?: boolean } = {}): void {
     const participant = this.participants.get(sessionId);
     if (participant) {
       participant.remoteScreenStreams.set(shareId, stream);
-      this.scheduleUpdate();
+      if (options.notify !== false) this.scheduleUpdate();
     }
   }
 
-  public removeRemoteScreenStream(sessionId: string, shareId: string): void {
+  public removeRemoteScreenStream(sessionId: string, shareId: string, options: { notify?: boolean } = {}): void {
     const participant = this.participants.get(sessionId);
-    if (participant && participant.remoteScreenStreams.delete(shareId)) {
+    if (participant && participant.remoteScreenStreams.delete(shareId) && options.notify !== false) {
       this.scheduleUpdate();
     }
   }
@@ -206,13 +206,13 @@ export class ParticipantManager {
   public setSpeaking(
     sessionId: string,
     speaking: boolean,
-    audioState?: Pick<VoiceParticipantState, 'isMuted' | 'isDeafened' | 'serverMuted' | 'serverDeafened'>
+    audioState?: Pick<VoiceParticipantState, 'isMuted' | 'isDeafened' | 'serverMuted' | 'serverDeafened' | 'permissionMuted'>
   ): void {
     const participant = this.participants.get(sessionId);
     if (!participant) return;
     const state = audioState ?? participant.voiceState;
     const audible = speaking && !!participant.voiceState && !!state && !state.isMuted && !state.isDeafened
-      && !state.serverMuted && !state.serverDeafened;
+      && !state.serverMuted && !state.serverDeafened && !state.permissionMuted;
     if (participant.isSpeaking !== audible) {
       participant.isSpeaking = audible;
       this.bus.emit('participants.speaking_changed', { sessionId, speaking: audible });

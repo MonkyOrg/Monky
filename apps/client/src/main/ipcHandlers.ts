@@ -9,19 +9,35 @@ import { LanDiscovery } from './lanDiscovery';
 import { globalInputHook } from './globalInputHookProcess';
 import {
   AUDIO_PREVIEW_IPC, LIMITS, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS,
+  DESKTOP_SOURCES_IPC, desktopSourcesOptionsSchema, desktopSourcePreviewsRequestSchema,
   type AudioPreviewResult, type SoundDownloadResult, type SoundboardDownloadPermit, type SoundboardDownloadAvailability,
 } from '@monky/shared';
 import { SoundboardDownloads } from './soundboardDownload';
+import { SoundboardFiles } from './soundboardFiles';
+import { setupSoundboardFilesIpc } from './soundboardFilesIpc';
+import { setupEditorCommands } from './editorCommands';
+import { createSoundboardEncoder } from './soundboardEncoder';
+import type { LocalTools } from './localExecution/LocalTools';
 import { AudioPreviews } from './audioPreviews';
 import { createLocalExecutionService } from './localExecution/createService';
 import { setupLocalExecutionIpc, type LocalExecutionIpc } from './localExecution/ipc';
-import { exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
+import { setupNativeScreenSharingIpc } from './nativeScreenSharing';
+import { NativeDesktopSources, nativeWindowIdFromSourceId, nativeMonitorDesktopSources } from './nativeWindows';
+import { browserOcclusionEngine } from './browserOcclusion';
+import { ScreenPictureInPictureWindows } from './screenPictureInPictureWindow';
+import { NativeThumbnailCapturer, loadThumbnailRuntime, createMacScreenProvider, type MacScreenProvider } from '@monky/screen-share';
+import { DesktopSourcePreviews } from './desktopSourcePreviews';
+import type { NativeWindowInfo, NativeMonitorInfo, NativeWindowState } from '@monky/screen-audio';
+import { deleteIdentity, exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
+import { exportDirectMessages, importDirectMessages, resetDirectMessages, setupDmIpc, wipeDirectMessages } from './dm/dmIpc';
 import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';
 import { HostServerOptions, ServerManager } from './serverManager';
 import { mt, setMainLanguage } from './i18n';
+import { setupEventCalendarIpc } from './serverEventCalendarIpc';
+import { setupRecentSoundSaveIpc } from './recentSoundSaveIpc';
 import { fetchLinkPreview } from './linkPreview';
 import { TrayManager, VoiceStatus } from './trayManager';
-import type { DesktopSource, OverlayBounds, OverlayConfig, OverlaySignalPayload, OverlaySyncState } from '@monky/shared';
+import type { DesktopSource, IpcInvokeChannels, OverlayBounds, OverlayConfig, OverlaySignalPayload, OverlaySyncState } from '@monky/shared';
 import { OverlayManager } from './overlayManager';
 import { SteamPresence } from './steamPresence';
 import {
@@ -114,28 +130,14 @@ async function downloadToFile(url: string, destPath: string): Promise<void> {
   });
 }
 
+/** Extensões que a soundboard aceita, na listagem e na leitura de um som. */
+const SOUNDBOARD_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.webm']);
+
 interface NativeWindowOwner {
   windowId: number;
   pid: number;
   bundlePath: string;
   appName: string;
-}
-
-interface NativeWindowInfo {
-  hwnd: number;
-  title: string;
-  processId: number;
-  processPath: string;
-  isIconic: boolean;
-  isVisible: boolean;
-  isCloaked: boolean;
-  isToolWindow: boolean;
-  isLayered: boolean;
-  isTransparent: boolean;
-  isNoActivate: boolean;
-  isAppWindow: boolean;
-  width: number;
-  height: number;
 }
 
 // Screen audio native module (compiled only on CI — graceful fallback)
@@ -147,6 +149,9 @@ let screenAudio: {
   getStatus: () => number;
   listWindowOwners?: () => NativeWindowOwner[];
   listWindows?: () => NativeWindowInfo[];
+  getWindowState?: (hwnd: number) => NativeWindowState | null;
+  listMonitors?: () => NativeMonitorInfo[];
+  getMonitorState?: (deviceId: string) => NativeMonitorInfo | null;
   restoreWindow?: (hwnd: number) => boolean;
 } | null = null;
 try {
@@ -159,14 +164,6 @@ try {
 // Icones de app nao mudam enquanto o app roda, e ler o bundle do disco a cada
 // abertura do seletor de tela seria desperdicio.
 const appIconCache = new Map<string, string | null>();
-
-/** Extrai o id nativo de `window:<id nativo>:<id do webContents>`. */
-function nativeWindowIdFromSourceId(sourceId: string): number | null {
-  const parts = sourceId.split(':');
-  if (parts[0] !== 'window') return null;
-  const nativeId = Number(parts[1]);
-  return Number.isFinite(nativeId) ? nativeId : null;
-}
 
 /**
  * No macOS o Electron devolve `appIcon` vazio para janelas, mesmo com
@@ -211,35 +208,20 @@ async function resolveMacAppIcons(sourceIds: string[]): Promise<Map<string, stri
   return iconsBySourceId;
 }
 
-/** Enumera as janelas nativas do Windows; vazio nas outras plataformas ou sem o modulo. */
 function listNativeWindows(): NativeWindowInfo[] {
-  if (process.platform !== 'win32' || !screenAudio?.listWindows) return [];
+  if (process.platform !== 'win32') return [];
+  if (!screenAudio?.listWindows) throw new Error('Native window enumeration is unavailable.');
   try {
     return screenAudio.listWindows();
   } catch (e) {
     console.warn('[ScreenShare:Main] Falha ao enumerar janelas nativas:', (e as Error).message);
-    return [];
+    throw e;
   }
 }
 
 /**
- * O capturador WGC do Electron 34 parou de filtrar janelas de overlay/ferramenta,
- * entao elas vazam para o seletor como se fossem janelas reais (Medal Overlay,
- * helpers do Raycast, Radmin VPN na bandeja...). O discriminador abaixo foi
- * validado contra janelas reais: nenhuma janela legitima dispara qualquer uma das
- * combinacoes, enquanto todo overlay dispara pelo menos uma (#560).
- */
-function isGhostWindow(w: NativeWindowInfo): boolean {
-  if (w.isCloaked) return true;
-  if (w.isToolWindow) return true;
-  if (w.isLayered && w.isTransparent) return true;
-  if (w.isLayered && w.isNoActivate) return true;
-  return false;
-}
-
-/**
- * Icones das janelas minimizadas que reexibimos: o `getSources` nao as devolve,
- * entao lemos o icone direto do executavel do processo dono. Reaproveita o
+ * Le o icone do executavel do processo dono usando a API nativa do sistema.
+ * Reaproveita o
  * `appIconCache` (chaveado por caminho absoluto, sem colisao com os bundles mac).
  */
 async function resolveWindowsAppIcons(processPaths: string[]): Promise<Map<string, string>> {
@@ -270,6 +252,8 @@ export interface SetupIpcOptions {
   setMinimizeToTray?: (enabled: boolean) => void;
   clientLogger?: import('./clientLogger').ClientLogger;
   overlayManager?: OverlayManager;
+  /** Graceful quit (leaves servers, stops the hosted server) used by logout. */
+  quitApplication?: () => void;
 }
 
 /**
@@ -352,20 +336,75 @@ export function setupIpcHandlers(
   serverManager: ServerManager,
   trayManager?: TrayManager,
   options?: SetupIpcOptions
-): LocalExecutionIpc {
+): LocalExecutionIpc & { prepareShutdown(): Promise<void> } {
   const lanDiscovery = new LanDiscovery(mainWindow);
   globalInputHook.init(mainWindow);
   const overlayManager = options?.overlayManager || new OverlayManager(mainWindow);
   const soundDownloads = new SoundboardDownloads(path.join(app.getPath('userData'), 'soundboard-folder.json'));
   const audioPreviews = new AudioPreviews();
+  let soundboardTools: LocalTools | undefined;
   const localExecution = setupLocalExecutionIpc(mainWindow, (notifications) =>
-    createLocalExecutionService(mainWindow, app.getPath('userData'), notifications));
+    createLocalExecutionService(mainWindow, app.getPath('userData'), notifications, tools => { soundboardTools = tools; }));
   // Presença de jogo (#675): só roda quando a pessoa liga nas configurações.
   const steamPresence = new SteamPresence((activity) => {
     if (!mainWindow.isDestroyed()) mainWindow.webContents.send('game-presence:changed', activity);
   });
+  const nativeSources = new NativeDesktopSources({
+    windows: listNativeWindows,
+    isWindowExcluded: hwnd => overlayManager.isScreenShareSource(`window:${hwnd}:0`),
+    windowState(hwnd) {
+      if (!screenAudio?.getWindowState) throw new Error('Native window identity inspection is unavailable.');
+      return screenAudio.getWindowState(hwnd);
+    },
+    monitors() {
+      if (!screenAudio?.listMonitors) throw new Error('Native monitor enumeration is unavailable.');
+      return screenAudio.listMonitors();
+    },
+    monitorState(deviceId) {
+      if (!screenAudio?.getMonitorState) throw new Error('Native monitor identity inspection is unavailable.');
+      return screenAudio.getMonitorState(deviceId);
+    },
+  });
+  const assertCaptureSourceAllowed = (sourceId: string): void => {
+    if (overlayManager.isScreenShareSource(sourceId)) {
+      throw new Error(mt('screenShare.overlayWindowUnavailable'));
+    }
+  };
+  let macSources: MacScreenProvider | undefined;
+  const getMacSources = (): MacScreenProvider => macSources ??= createMacScreenProvider();
+  const nativeScreenSharing = setupNativeScreenSharingIpc(
+    mainWindow, (sourceId, kind) => {
+      assertCaptureSourceAllowed(sourceId);
+      if (process.platform === 'darwin') {
+        if (kind === 'game') throw new Error('macOS does not support Windows game hooks.');
+        return getMacSources().resolveTarget(sourceId, kind);
+      }
+      return nativeSources.resolve(sourceId, kind);
+    }, options?.clientLogger,
+  );
   const ownsSoundDownload = (event: Electron.IpcMainInvokeEvent): boolean =>
     event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame;
+  const soundboardEncoder = createSoundboardEncoder(async () => {
+    try { return await soundboardTools?.readyExecutable('ffmpeg') ?? null; }
+    catch (error: unknown) {
+      console.error('[soundboard] Could not verify the local FFmpeg installation.', error);
+      return null;
+    }
+  });
+  const disposeSoundboardFiles = setupSoundboardFilesIpc(mainWindow, new SoundboardFiles(soundDownloads, soundboardEncoder));
+  const disposeEditorCommands = setupEditorCommands(mainWindow);
+  const disposeEventCalendar = setupEventCalendarIpc(mainWindow, sanitizeDownloadFileName);
+  const disposeRecentSoundSave = setupRecentSoundSaveIpc(mainWindow, sanitizeDownloadFileName);
+  const disposeDirectMessages = setupDmIpc(mainWindow, sanitizeDownloadFileName);
+  ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, async (event): Promise<string | null> => {
+    if (!ownsSoundDownload(event)) throw new Error(mt('error.defaultSoundboardFolder'));
+    try {
+      return await soundDownloads.getDefaultFolder();
+    } catch (error: unknown) {
+      console.warn('[Soundboard] Could not initialize the default sound folder:', error);
+      throw new Error(mt('error.defaultSoundboardFolder'));
+    }
+  });
   ipcMain.handle(SOUND_DOWNLOAD_IPC.availability, async (event, folder: unknown): Promise<SoundboardDownloadAvailability> =>
     ownsSoundDownload(event) ? soundDownloads.availability(folder) : 'unavailable');
   ipcMain.handle(SOUND_DOWNLOAD_IPC.confirmFolder, async (event, folder: unknown): Promise<boolean> => {
@@ -447,6 +486,11 @@ export function setupIpcHandlers(
     overlayManager.resetBounds();
   });
 
+  ipcMain.handle('overlay:layout-cards', (event, layout: IpcInvokeChannels['overlay:layout-cards']['args'][0]) => {
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('Overlay layout requires its main frame.');
+    return overlayManager.layoutCards(event.sender.id, layout);
+  });
+
   ipcMain.handle('overlay:send-signal', (_event, payload: OverlaySignalPayload) => {
     overlayManager.sendSignal(payload);
   });
@@ -478,10 +522,47 @@ export function setupIpcHandlers(
   ipcMain.handle('identity:get', async () => getIdentity(true));
   ipcMain.handle('identity:get-client-id', async () => getClientId());
   ipcMain.handle('identity:sign-challenge', async (_event, nonceHex: string) => signChallenge(nonceHex));
-  ipcMain.handle('identity:export', async (_event, password: string, extras?: string) =>
-    exportIdentity(password, typeof extras === 'string' ? extras : undefined)
+  ipcMain.handle('identity:export', async (_event, password: string, extras?: string, dmMode?: unknown) =>
+    exportIdentity(
+      password,
+      typeof extras === 'string' ? extras : undefined,
+      exportDirectMessages(dmMode === 'friends' || dmMode === 'history' ? dmMode : 'none'),
+    )
   );
-  ipcMain.handle('identity:import', async (_event, exportedIdentity: string, password: string) => importIdentity(exportedIdentity, password));
+  ipcMain.handle('identity:import', async (_event, exportedIdentity: string, password: string) => {
+    const { dm, ...imported } = importIdentity(exportedIdentity, password);
+    resetDirectMessages();
+    importDirectMessages(dm);
+    return imported;
+  });
+
+  // Logout: the identity only exists on this computer, so leaving it means
+  // deleting it together with friends and DMs. The renderer already cleared
+  // the identity-bound localStorage; relaunching gives a clean process that
+  // lands on the create/import screen.
+  let loggingOut = false;
+  ipcMain.handle('identity:logout', async (event) => {
+    if (mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
+      return { success: false, error: 'Forbidden' };
+    }
+    if (loggingOut) return { success: true };
+    loggingOut = true;
+    try {
+      deleteIdentity();
+      await wipeDirectMessages();
+      await mainWindow.webContents.session.flushStorageData();
+    } catch (error) {
+      loggingOut = false;
+      console.error('[Identity] Logout failed:', error);
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    setImmediate(() => {
+      app.relaunch();
+      if (options?.quitApplication) options.quitApplication();
+      else app.quit();
+    });
+    return { success: true };
+  });
 
   // Backup of saved servers and app settings (#472). The renderer owns the
   // content (it all lives in localStorage); the main process only picks the
@@ -597,76 +678,155 @@ export function setupIpcHandlers(
     return await ensureScreenRecordingPermission(mainWindow);
   });
 
-  ipcMain.handle('screen-share:get-sources', async () => {
-    const sources = await desktopCapturer.getSources({
-      types: ['screen', 'window'],
-      thumbnailSize: { width: 320, height: 180 },
-      fetchWindowIcons: true,
-    });
-
-    const nativeWindows = listNativeWindows();
-    const nativeByHwnd = new Map<number, NativeWindowInfo>();
-    for (const w of nativeWindows) nativeByHwnd.set(w.hwnd, w);
-
-    const macIcons = await resolveMacAppIcons(sources.map((s) => s.id));
-
-    // 1) Remove os overlays/tool windows que o capturador WGC passou a vazar. Sem
-    //    dados nativos (outra plataforma ou janela que fechou no meio) mantemos a
-    //    fonte para nao esconder algo legitimo por engano.
-    const realSources = sources.filter((s) => {
-      if (!s.id.startsWith('window:')) return true;
-      const hwnd = nativeWindowIdFromSourceId(s.id);
-      const info = hwnd === null ? undefined : nativeByHwnd.get(hwnd);
-      return info ? !isGhostWindow(info) : true;
-    });
-
-    const result: DesktopSource[] = realSources.map((s) => {
+  let nativeThumbnails: NativeThumbnailCapturer | undefined;
+  let desktopSourcesFrozen = false;
+  async function enumerateDesktopSources(metadataOnly: boolean, type?: DesktopSource['type'],
+    sourceIds?: readonly string[], signal?: AbortSignal): Promise<DesktopSource[]> {
+    if (desktopSourcesFrozen || signal?.aborted)
+      throw new DOMException('Desktop source enumeration was cancelled.', 'AbortError');
+    if (process.platform === 'darwin') {
+      const provider = getMacSources();
+      let sources = (await provider.listSources({ signal })).filter(source =>
+        (!type || source.type === type) && !overlayManager.isScreenShareSource(source.id));
+      if (metadataOnly) return sources;
+      if (sourceIds) sources = sources.filter(source => sourceIds.includes(source.id));
+      for (let offset = 0; offset < sources.length; offset += 4) {
+        await Promise.all(sources.slice(offset, offset + 4).map(async source => {
+          try {
+            const bytes = await provider.thumbnail(source.id, { signal });
+            source.thumbnailDataUrl = `data:image/png;base64,${bytes.toString('base64')}`;
+            source.thumbnailState = 'ready';
+          } catch (error) {
+            if (signal?.aborted || error instanceof Error && error.name === 'AbortError') throw error;
+            console.warn('[ScreenShare:Main] Native macOS preview unavailable:', error);
+            source.thumbnailState = 'unavailable';
+          }
+        }));
+      }
+      return sources;
+    }
+    if (process.platform === 'win32') {
+      let windows: ReturnType<NativeDesktopSources['listWindows']>;
+      let result: DesktopSource[];
+      try {
+        windows = type === 'screen' ? [] : nativeSources.listWindows();
+        result = windows.map(({ id, window }) => {
+          const occlusionEngine = browserOcclusionEngine(window.processPath);
+          return {
+            id, name: window.title, type: 'window', isOwnWindow: window.processId === process.pid,
+            ...(occlusionEngine ? { occlusionEngine } : {}),
+            thumbnailDataUrl: '', appIconDataUrl: null, thumbnailState: window.isIconic ? 'unavailable' : 'pending',
+          } satisfies DesktopSource;
+        });
+        if (type !== 'window') result.push(...nativeMonitorDesktopSources(nativeSources.listMonitors()));
+      } catch (error) {
+        console.warn('[ScreenShare:Main] Native desktop source enumeration failed:', error);
+        try {
+          options?.clientLogger?.write({
+            timestamp: new Date().toISOString(), level: 'ERROR', category: 'SCREEN_SHARE',
+            message: 'Native desktop source enumeration failed',
+            data: { phase: 'native-source-identities', metadataOnly, type: type ?? 'all' },
+          });
+        } catch (loggingError) {
+          console.error('[ScreenShare:Main] Could not persist source enumeration failure:', loggingError);
+        }
+        throw error;
+      }
+      if (metadataOnly) return result;
+      if (sourceIds) {
+        const requested = new Set(sourceIds);
+        result = result.filter(source => requested.has(source.id));
+      }
+      const paths = new Map(windows.map(({ id, window }) => [id, window.processPath]));
+      const iconPaths = result.flatMap(source => {
+        const filename = paths.get(source.id);
+        return filename ? [filename] : [];
+      });
+      const icons = await new Promise<Map<string, string>>((resolve, reject) => {
+        const abort = () => {
+          signal?.removeEventListener('abort', abort);
+          reject(new DOMException('Desktop preview icons were cancelled.', 'AbortError'));
+        };
+        signal?.addEventListener('abort', abort, { once: true });
+        if (signal?.aborted) { abort(); return; }
+        void resolveWindowsAppIcons(iconPaths).then(resolve, reject).finally(() => signal?.removeEventListener('abort', abort));
+      });
+      const previews = await Promise.allSettled(result.map(async source => {
+        source.appIconDataUrl = icons.get(paths.get(source.id) ?? '') ?? null;
+        if (source.thumbnailState === 'unavailable') return;
+        try {
+          if (signal?.aborted) throw new DOMException('Desktop preview was cancelled.', 'AbortError');
+          nativeThumbnails ??= new NativeThumbnailCapturer(loadThumbnailRuntime());
+          const kind = source.type === 'screen' ? 'monitor' : 'window';
+          const target = nativeSources.resolve(source.id, kind);
+          const image = await nativeThumbnails.capture(target, { signal });
+          nativeSources.resolve(source.id, kind);
+          source.thumbnailDataUrl = `data:image/png;base64,${image.toString('base64')}`;
+          source.thumbnailState = 'ready';
+        } catch (error) {
+          if (error instanceof Error && error.name === 'AbortError') throw error;
+          const code = error instanceof Error && 'code' in error && typeof error.code === 'string'
+            && /^ERR_DESKTOP_PREVIEW_[A-Z_]{1,32}$/u.test(error.code) ? error.code : 'ERR_DESKTOP_PREVIEW_UNAVAILABLE';
+          const hresult = error instanceof Error && 'hresult' in error && typeof error.hresult === 'number'
+            && Number.isInteger(error.hresult) && error.hresult >= 0 && error.hresult <= 0xffffffff ? error.hresult : undefined;
+          console.warn('[ScreenShare:Main] Native desktop preview unavailable:', code);
+          options?.clientLogger?.write({
+            timestamp: new Date().toISOString(), level: 'WARN', category: 'SCREEN_SHARE',
+            message: 'Native desktop preview unavailable', data: { type: source.type, code, hresult },
+          });
+          source.thumbnailState = 'unavailable';
+        }
+      }));
+      const errors = previews.filter(result => result.status === 'rejected').map(result => result.reason);
+      if (errors.length) throw new AggregateError(errors, 'Native desktop preview requests failed.');
+      return result;
+    }
+    const sources = (await desktopCapturer.getSources({
+      types: type ? [type] : ['screen', 'window'],
+      thumbnailSize: metadataOnly ? { width: 0, height: 0 } : { width: 320, height: 180 },
+      fetchWindowIcons: !metadataOnly,
+    })).filter(source => !overlayManager.isScreenShareSource(source.id));
+    const macIcons = metadataOnly ? new Map<string, string>() : await resolveMacAppIcons(sources.map((s) => s.id));
+    return sources.map((s) => {
       const electronIcon = s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : null;
       return {
         id: s.id,
         name: s.name,
         type: s.id.startsWith('screen:') ? 'screen' : 'window',
-        thumbnailDataUrl: s.thumbnail.toDataURL(),
+        thumbnailDataUrl: metadataOnly || s.thumbnail.isEmpty() ? '' : s.thumbnail.toDataURL(),
         appIconDataUrl: electronIcon ?? macIcons.get(s.id) ?? null,
+        thumbnailState: metadataOnly ? 'pending' : s.thumbnail.isEmpty() ? 'unavailable' : 'ready',
       };
     });
+  }
 
-    // 2) Reexibe janelas minimizadas que o WGC omite — tipicamente um jogo em tela
-    //    cheia que minimizou quando o usuario deu alt-tab para abrir este seletor
-    //    (#560). Sem preview ao vivo (a janela esta minimizada), a UI mostra um
-    //    tile de fallback; a captura passa a exibir o jogo assim que ele volta ao
-    //    primeiro plano.
-    const presentHwnds = new Set<number>();
-    for (const s of sources) {
-      const hwnd = nativeWindowIdFromSourceId(s.id);
-      if (hwnd !== null) presentHwnds.add(hwnd);
-    }
-    const minimizedExtras = nativeWindows.filter(
-      (w) =>
-        w.isIconic &&
-        !presentHwnds.has(w.hwnd) &&
-        !isGhostWindow(w) &&
-        w.width >= 240 &&
-        w.height >= 160,
-    );
-    const extraIcons = await resolveWindowsAppIcons(minimizedExtras.map((w) => w.processPath));
-    for (const w of minimizedExtras) {
-      result.push({
-        id: `window:${w.hwnd}:0`,
-        name: w.title,
-        type: 'window',
-        thumbnailDataUrl: '',
-        appIconDataUrl: extraIcons.get(w.processPath) ?? null,
-      });
-    }
-
-    return result;
+  const sourcePreviews = new DesktopSourcePreviews((type, ids, signal) => enumerateDesktopSources(false, type, ids, signal));
+  const stopDesktopPreviews = async (): Promise<void> => {
+    desktopSourcesFrozen = true;
+    await Promise.all([sourcePreviews.dispose(), nativeThumbnails?.close(), macSources?.close()]);
+  };
+  ipcMain.handle(DESKTOP_SOURCES_IPC.list, async (_event, input: unknown) => {
+    const options = desktopSourcesOptionsSchema.parse(input === undefined ? {} : input);
+    if (options.refresh) sourcePreviews.clear();
+    const sources = await enumerateDesktopSources(options.metadataOnly === true);
+    return options.metadataOnly ? sources.map(source => {
+      const cached = sourcePreviews.cached(source.id);
+      if (!cached) return source;
+      return source.thumbnailState === 'unavailable' ? { ...source, appIconDataUrl: cached.appIconDataUrl }
+        : { ...source, ...cached, thumbnailState: cached.thumbnailDataUrl ? 'ready' as const : 'unavailable' as const };
+    }) : sources;
   });
+  ipcMain.handle(DESKTOP_SOURCES_IPC.previews, async (_event, input: unknown) => {
+    const request = desktopSourcePreviewsRequestSchema.parse(input);
+    return sourcePreviews.get({ ...request, sourceIds: request.sourceIds.filter(id => !overlayManager.isScreenShareSource(id)) });
+  });
+  ipcMain.handle(DESKTOP_SOURCES_IPC.cancelPreviews, async () => sourcePreviews.cancel());
 
   // Restaura uma janela minimizada antes da captura (#560). O capturador WGC nao
   // consegue iniciar numa janela minimizada, entao o jogo em tela cheia que
   // minimizou no alt-tab precisa voltar ao primeiro plano antes do getUserMedia.
   ipcMain.handle('screen-share:prepare-window', (_event, sourceId: string) => {
+    assertCaptureSourceAllowed(sourceId);
     if (process.platform !== 'win32' || !screenAudio?.restoreWindow) return false;
     if (typeof sourceId !== 'string') return false;
     const hwnd = nativeWindowIdFromSourceId(sourceId);
@@ -704,6 +864,28 @@ export function setupIpcHandlers(
       mimeType: mime,
       base64: `data:${mime};base64,${base64}`,
     };
+  });
+
+  ipcMain.handle('dialog:select-images', async (_event, maxFiles: number) => {
+    const limit = Math.min(5, Math.max(1, Number.isInteger(maxFiles) ? maxFiles : 1));
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: mt('dialog.selectImages'),
+      filters: [
+        { name: 'Imagens (PNG, JPG, WebP)', extensions: ['png', 'jpg', 'jpeg', 'webp'] },
+      ],
+      properties: ['openFile', 'multiSelections'],
+    });
+    if (result.canceled || result.filePaths.length === 0) return [];
+    return Promise.all(result.filePaths.slice(0, limit).map(async filePath => {
+      const buffer = await fs.promises.readFile(filePath);
+      const ext = path.extname(filePath).toLowerCase().replace('.', '');
+      const mime = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`;
+      return {
+        fileName: path.basename(filePath),
+        mimeType: mime,
+        base64: `data:${mime};base64,${buffer.toString('base64')}`,
+      };
+    }));
   });
 
   // Custom sound file selection (#7)
@@ -754,7 +936,7 @@ export function setupIpcHandlers(
         return [];
       }
       const entries = await fs.promises.readdir(folderPath, { withFileTypes: true });
-      const validExts = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.webm']);
+      const validExts = SOUNDBOARD_EXTENSIONS;
       
       const soundPromises = entries
         .filter((entry) => entry.isFile() && validExts.has(path.extname(entry.name).toLowerCase()))
@@ -784,6 +966,11 @@ export function setupIpcHandlers(
   // Soundboard Read Sound
   ipcMain.handle('soundboard:read-sound', async (_, filePath: string) => {
     if (!filePath || typeof filePath !== 'string') {
+      return null;
+    }
+    // O caminho vem do renderer, então a extensão é conferida antes da leitura:
+    // sem isso o canal devolvia o conteúdo de qualquer arquivo até 3 MB (#372).
+    if (!SOUNDBOARD_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
       return null;
     }
     try {
@@ -1045,6 +1232,48 @@ export function setupIpcHandlers(
   });
 
   // Window Controls
+  // Automatic Picture-in-Picture follows the window leaving the screen
+  // (minimized or hidden to the tray), never a plain focus change.
+  const isWindowAway = () => mainWindow.isMinimized() || !mainWindow.isVisible();
+  let screenPipWindowInactive = isWindowAway();
+  const notifyWindowActivity = () => {
+    if (mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+    const inactive = isWindowAway();
+    // Minimize, hide, restore and show can describe the same native transition.
+    if (inactive === screenPipWindowInactive) return;
+    screenPipWindowInactive = inactive;
+    mainWindow.webContents.send(inactive ? 'window:inactive' : 'window:active');
+  };
+  mainWindow.on('minimize', notifyWindowActivity);
+  mainWindow.on('hide', notifyWindowActivity);
+  mainWindow.on('restore', notifyWindowActivity);
+  mainWindow.on('show', notifyWindowActivity);
+  mainWindow.on('focus', notifyWindowActivity);
+  const screenPipWindows = new ScreenPictureInPictureWindows(mainWindow);
+  // Authorizes one popup from the main frame; the renderer opens it right
+  // after with window.open, which needs no user activation in Electron.
+  ipcMain.handle('screen-pip:open', (event, requestId: unknown, requireInactive: unknown, aspectRatio: unknown) => {
+    if (mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
+      || event.senderFrame !== mainWindow.webContents.mainFrame
+      || typeof requestId !== 'string' || !/^[0-9a-f-]{36}$/i.test(requestId)
+      || typeof requireInactive !== 'boolean'
+      || typeof aspectRatio !== 'number' || !Number.isFinite(aspectRatio) || aspectRatio <= 0) {
+      throw new Error('Invalid screen Picture-in-Picture request.');
+    }
+    if (requireInactive && !isWindowAway()) return false;
+    screenPipWindows.authorize(requestId, aspectRatio);
+    return true;
+  });
+  // "Voltar ao Monky" must bring back a minimized or tray-hidden window.
+  ipcMain.handle('screen-pip:return', (event) => {
+    if (mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
+      || event.senderFrame !== mainWindow.webContents.mainFrame) {
+      throw new Error('Invalid screen Picture-in-Picture request.');
+    }
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.show();
+    mainWindow.focus();
+  });
   ipcMain.handle('window:minimize', () => {
     mainWindow.minimize();
   });
@@ -1166,6 +1395,28 @@ export function setupIpcHandlers(
       }
 
       await downloadToFile(parsedUrl.toString(), saveResult.filePath);
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
+    }
+  });
+
+  ipcMain.handle('app:save-csv-file', async (_, content: string, fileName: string) => {
+    try {
+      if (typeof content !== 'string' || Buffer.byteLength(content, 'utf8') > 128 * 1024 * 1024) {
+        return { success: false, error: 'Invalid CSV content' };
+      }
+      const safeName = sanitizeDownloadFileName(fileName || 'responses.csv');
+      const suggestedName = safeName.toLowerCase().endsWith('.csv') ? safeName : `${safeName}.csv`;
+      const saveResult = await dialog.showSaveDialog(mainWindow, {
+        defaultPath: path.join(app.getPath('downloads'), suggestedName),
+        filters: [{ name: 'CSV', extensions: ['csv'] }],
+      });
+      if (saveResult.canceled || !saveResult.filePath) return { success: false };
+      await fs.promises.writeFile(saveResult.filePath, content, 'utf8');
       return { success: true };
     } catch (error) {
       return {
@@ -1331,9 +1582,17 @@ export function setupIpcHandlers(
   }
 
   mainWindow.on('closed', () => {
+    void stopDesktopPreviews().catch(error => console.error('[ScreenShare:Main] Preview shutdown failed:', error));
+    for (const channel of Object.values(DESKTOP_SOURCES_IPC)) ipcMain.removeHandler(channel);
     stopSoundDownloads();
     for (const channel of Object.values(SOUND_DOWNLOAD_IPC)) ipcMain.removeHandler(channel);
+    disposeSoundboardFiles();
+    disposeEditorCommands();
+    disposeEventCalendar();
+    disposeRecentSoundSave();
+    disposeDirectMessages();
     for (const channel of Object.values(AUDIO_PREVIEW_IPC)) ipcMain.removeHandler(channel);
+    ipcMain.removeHandler('app:save-csv-file');
     clearAudioBufferAccumulator();
     // Recovery keeps Main alive after the renderer is retired (#454).
     try { screenAudio?.stop(); } catch (error: unknown) {
@@ -1342,5 +1601,22 @@ export function setupIpcHandlers(
     void lanDiscovery.stop();
     globalInputHook.destroy();
   });
-  return localExecution;
+  return {
+    service: localExecution.service,
+    freezeAdmissions: () => {
+      desktopSourcesFrozen = true;
+      sourcePreviews.clear();
+      localExecution.freezeAdmissions();
+      nativeScreenSharing.freezeAdmissions();
+    },
+    prepareShutdown: async () => {
+      localExecution.freezeAdmissions();
+      await Promise.all([stopDesktopPreviews(), nativeScreenSharing.prepareShutdown()]);
+    },
+    async dispose() {
+      const results = await Promise.allSettled([stopDesktopPreviews(), nativeScreenSharing.dispose(), localExecution.dispose()]);
+      const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
+      if (errors.length) throw new AggregateError(errors, 'Application resource shutdown failed.');
+    },
+  };
 }

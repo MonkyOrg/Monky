@@ -303,6 +303,8 @@ console.assert(applyBumps('v1.8.0-beta', ['patch', 'patch']) === '1.8.2', 'aplic
 console.assert(bumpTypeForEntry('* feat: x') === 'minor', 'item de lista com feat é minor');
 console.assert(bumpTypeForEntry('- fix(ui): x') === 'patch', 'item de lista com fix é patch');
 console.assert(bumpTypeForEntry('* feat!: x') === 'major', 'item de lista com ! é major');
+console.assert(bumpTypeForEntry('* feat!(chat): x') === 'major', 'marcador antes do escopo permanece major');
+console.assert(bumpTypeForEntry('- fix(chat)!: x') === 'major', 'marcador convencional depois do escopo permanece major');
 console.assert(
   bumpTypeForEntry('* refactor: x\n\nBREAKING CHANGE: muda tudo') === 'major',
   'BREAKING CHANGE no corpo do item é major'
@@ -332,6 +334,30 @@ console.assert(
   determineBumpType([squashComBreaking]) === 'major',
   'determineBumpType continua reportando o tipo mais alto'
 );
+
+// O PR #714 usou ! antes do escopo; descartar esse item perdia também seu footer.
+for (const header of ['feat!(chat)', 'feat(chat)!']) {
+  for (const footer of ['', '\n\nBREAKING CHANGE: protocolo 27.\n\n']) {
+    const protocolSquash = [
+      `${header}: editor Markdown (#714)`,
+      '',
+      `* ${header}: editor e protocolo 27${footer}`,
+      '* fix(ci): comandos nativos',
+      '* test(ci): aguardar captura',
+      '* fix(build): espelho fixado',
+      '* fix(ci): barra de formatacao',
+    ].join('\n');
+    console.assert(splitCommitEntries(protocolSquash).length === 5, `${header}: nenhum item perdido no squash`);
+    console.assert(
+      collectBumps([protocolSquash]).join(',') === 'major,patch,patch,patch,patch',
+      `${header}: exatamente um major seguido de quatro patches, com ou sem footer`
+    );
+    console.assert(
+      calculateNextVersion({ prevTag: 'v29.2.2-beta', commits: [protocolSquash], channel: 'beta' }).nextVersion === '30.0.4-beta',
+      `${header}: squash do protocolo deve produzir 30.0.4-beta, nao 29.2.6-beta`
+    );
+  }
+}
 
 // Prosa no corpo não pode virar commit. Só listas com um tipo conhecido contam.
 const comProsa = [

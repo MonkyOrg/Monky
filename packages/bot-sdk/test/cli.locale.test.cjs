@@ -7,6 +7,8 @@ const { test } = require('node:test');
 const { runBotCli } = require('../dist/cli');
 const { createCliContext } = require('../dist/cli/config');
 const { readSavedCliLocale, shouldPromptCliLocale } = require('../dist/cli/locale');
+const prompts = require('../dist/cli/prompts');
+const { runSdkTools } = require('../dist/tools');
 
 function fixture(t, env = {}) {
   const root = fs.mkdtempSync(path.join(__dirname, '.monky-sdk-locale-'));
@@ -52,6 +54,15 @@ function tty(t, input, output) {
 function answers(t, values) {
   const pending = [...values];
   const questions = [];
+  t.mock.method(prompts, 'askCliChoice', async (_locale, question, choices, initial) => {
+    assert.ok(pending.length, `Unexpected menu: ${question}`);
+    questions.push(question);
+    const value = pending.shift();
+    if (value === null) throw new prompts.CliPromptCancelled();
+    const selected = choices.find(choice => choice.value === (value || initial)) ?? (!value ? choices[0] : undefined);
+    assert.ok(selected, `Invalid scripted choice ${value}`);
+    return selected.value;
+  });
   t.mock.method(readline, 'createInterface', (options) => {
     assert.equal(options.historySize, 0);
     const rl = new EventEmitter();
@@ -71,17 +82,16 @@ function answers(t, values) {
 test('the first real interactive access saves the language and subsequent access does not prompt', async (t) => {
   const f = fixture(t);
   tty(t, true, true);
-  const questions = answers(t, ['invalid', '2']);
+  const questions = answers(t, ['en', 'exit', 'exit']);
   await runBotCli(f.bot, []);
   assert.equal(questions.length, 2);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.profile, 'preferences.json'), 'utf8')), { locale: 'en' });
   assert.equal(fs.existsSync(path.join(f.profile, 'config.json')), false);
-  assert.match(f.output.join('\n'), /USAGE/);
-  assert.match(f.output.join('\n'), /Configure the bot/);
+  assert.deepEqual(questions, ['Idioma / Language', 'Locale Bot']);
   f.output.length = 0;
   await runBotCli(f.bot, []);
-  assert.equal(questions.length, 2);
-  assert.match(f.output.join('\n'), /USAGE/);
+  assert.equal(questions.length, 3);
+  assert.equal(questions[2], 'Locale Bot');
   assert.equal(readSavedCliLocale(f.profile), 'en');
 });
 
@@ -103,6 +113,17 @@ test('version/help and non-TTY scripts never ask or create a language preference
   assert.equal(fs.existsSync(path.join(f.profile, '.keys')), false);
 });
 
+test('the SDK launcher forwards bot CLI help instead of swallowing it as SDK help', async t => {
+  const f = fixture(t);
+  tty(t, false, false);
+  t.mock.method(process, 'cwd', () => f.bot);
+  await runSdkTools(['cli', '--help', '--locale', 'en']);
+  assert.match(f.output.join('\n'), /locale-bot.*runtime CLI/);
+  assert.match(f.output.join('\n'), /NON-INTERACTIVE SETUP/);
+  assert.doesNotMatch(f.output.join('\n'), /create scaffolds/);
+  assert.equal(fs.existsSync(f.home), false);
+});
+
 test('explicit language changes persist aliases; --locale stays invocation-local', async (t) => {
   const f = fixture(t);
   tty(t, false, false);
@@ -120,11 +141,59 @@ test('explicit language changes persist aliases; --locale stays invocation-local
   assert.equal(readSavedCliLocale(f.profile), 'pt-BR');
 });
 
+test('configuration language works without setup and never reads or rewrites bot credentials', async t => {
+  const f = fixture(t);
+  tty(t, false, false);
+  fs.mkdirSync(f.profile, { recursive: true });
+  const config = path.join(f.profile, 'config.json');
+  fs.writeFileSync(config, '{leave-existing-config-alone');
+  await runBotCli(f.bot, ['config', 'language', 'en-US']);
+  assert.equal(readSavedCliLocale(f.profile), 'en');
+  assert.match(f.output.join('\n'), /Language: en-US/);
+  await runBotCli(f.bot, ['config', 'language', 'pt-br']);
+  assert.equal(readSavedCliLocale(f.profile), 'pt-BR');
+  await assert.rejects(runBotCli(f.bot, ['config', 'language', 'invalid']), /config language/);
+  assert.equal(readSavedCliLocale(f.profile), 'pt-BR');
+  assert.equal(fs.readFileSync(config, 'utf8'), '{leave-existing-config-alone');
+  assert.deepEqual(fs.readdirSync(f.profile).sort(), ['config.json', 'preferences.json']);
+});
+
+test('configuration language changes the live menus and persists after reopening', async t => {
+  const f = fixture(t);
+  tty(t, false, false);
+  await runBotCli(f.bot, ['config', 'language', 'en-US']);
+  tty(t, true, true);
+  const questions = answers(t, ['config', 'language', 'pt-BR', 'back', 'exit']);
+  await runBotCli(f.bot, []);
+  assert.deepEqual(questions, ['Locale Bot', 'Configuration', 'Idioma / Language', 'Configuração', 'Locale Bot']);
+  assert.equal(readSavedCliLocale(f.profile), 'pt-BR');
+  assert.equal(createCliContext(f.bot).locale, 'pt-BR');
+  assert.equal(fs.existsSync(path.join(f.profile, 'config.json')), false);
+});
+
+test('cancelled or failed language changes preserve the saved choice and active context', async t => {
+  const f = fixture(t);
+  tty(t, false, false);
+  await runBotCli(f.bot, ['config', 'language', 'en-US']);
+  tty(t, true, true);
+  answers(t, [null]);
+  await runBotCli(f.bot, ['config', 'language']);
+  assert.equal(readSavedCliLocale(f.profile), 'en');
+  const context = createCliContext(f.bot);
+  t.mock.method(fs, 'renameSync', () => { throw new Error('Simulated denied write'); });
+  const { languageCommand } = require('../dist/cli/locale');
+  await assert.rejects(languageCommand(context, ['pt-BR']), /Could not save the language/);
+  assert.equal(context.locale, 'en');
+  assert.equal(readSavedCliLocale(f.profile), 'en');
+  assert.deepEqual(fs.readdirSync(f.profile), ['preferences.json']);
+});
+
 test('cancelled first-run language selection leaves no partial state', async (t) => {
   const f = fixture(t);
   tty(t, true, true);
   answers(t, [null]);
-  await assert.rejects(runBotCli(f.bot, []), /cancelada/);
+  await runBotCli(f.bot, []);
+  assert.match(f.output.join('\n'), /cancelada/);
   assert.equal(fs.existsSync(f.home), false);
 });
 
@@ -140,7 +209,8 @@ test('a language query under CI does not open a picker even when both streams ar
 test('automation flags, CI, redirected output and explicit environment language bypass first-run selection', (t) => {
   const f = fixture(t);
   tty(t, true, true);
-  for (const args of [['setup', '--non-interactive'], ['update', '--yes'], ['update', '--check'], ['--version']]) {
+  for (const args of [['setup', '--non-interactive'], ['update', '--yes'], ['update', '--check'], ['--version'],
+    ['config', 'update-token', '--from-env', 'GH_TOKEN'], ['config', 'update-token', '--status']]) {
     assert.equal(shouldPromptCliLocale(f.profile, args), false);
   }
   assert.equal(shouldPromptCliLocale(f.profile, ['start'], undefined, { CI: 'true' }), false);
@@ -155,6 +225,16 @@ test('automation flags, CI, redirected output and explicit environment language 
   }).locale, 'pt-BR');
   Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: false });
   assert.equal(shouldPromptCliLocale(f.profile, ['start']), false);
+});
+
+test('explicit menus are refused in CI and command help stays noninteractive', async t => {
+  const f = fixture(t, { CI: 'true' });
+  tty(t, true, true);
+  t.mock.method(prompts, 'askCliChoice', () => assert.fail('CI must not open a menu'));
+  await assert.rejects(runBotCli(f.bot, ['menu']), /fora de CI/);
+  await runBotCli(f.bot, ['setup', '--help', '--locale', 'en']);
+  assert.match(f.output.join('\n'), /NON-INTERACTIVE SETUP/);
+  assert.equal(fs.existsSync(f.home), false);
 });
 
 test('malformed saved preferences cannot break --version or alter the runtime configuration', async (t) => {
@@ -217,9 +297,35 @@ test('version and explicit process choices bypass unreadable saved preferences',
   assert.match(f.output.join('\n'), /USAGE/);
   delete process.env.MONKY_BOT_LOCALE;
   process.env.MONKY_LANG = 'en_GB.UTF-8';
+  const chooser = t.mock.method(prompts, 'askCliChoice', async (locale, _question, choices) => {
+    assert.equal(locale, 'en');
+    assert.ok(choices.some(choice => choice.value === 'exit'));
+    return 'exit';
+  });
   await runBotCli(f.bot, []);
-  assert.match(f.output.join('\n'), /Configure the bot/);
+  assert.equal(chooser.mock.callCount(), 1);
   assert.equal(fs.existsSync(f.home), false);
+});
+
+test('the arrow menu nests update source and hidden GitHub credentials inside configuration', async t => {
+  const f = fixture(t);
+  tty(t, true, true);
+  const token = 'github_pat_synthetic_menu_fixture_123456789';
+  const questions = answers(t, [
+    'config', 'updates', 'source', 'github', 'https://github.com/example/private-fixture',
+    'locale-bot-{version}.tgz', 'paste', token, 'back', 'back', 'exit',
+  ]);
+  await runBotCli(f.bot, ['--locale', 'en']);
+  assert.ok(questions.includes('Configuration'));
+  assert.ok(questions.includes('Configuration > Updates'));
+  assert.ok(questions.some(question => question.includes('hidden input')));
+  assert.equal(questions.some(question => question.includes('Variable name')), false);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.profile, 'update-source.json'))).releases.url,
+    'https://github.com/example/private-fixture/releases');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.profile, 'update-credentials.json'))).token, token);
+  assert.equal(fs.existsSync(path.join(f.profile, 'config.json')), false, 'Update configuration does not reset or invent a bot connection');
+  assert.match(f.output.join('\n'), /https:\/\/github.com\/settings\/personal-access-tokens\/new/);
+  assert.equal(f.output.join('\n').includes(token), false);
 });
 
 test('malformed preferences are reported without blocking read-only help or noninteractive setup', async (t) => {

@@ -2,6 +2,11 @@ import {
   ProtocolErrorCode,
   VoiceParticipantState,
   WebRtcSignalPayload,
+  type NativeScreenSignalPayload,
+  type NativeScreenSource,
+  type UserRoleSummary,
+  screenWatchSignalSchema,
+  type ScreenWatchSignalPayload,
 } from '@monky/shared';
 import { IChannelRepository, IVoiceRestrictionRepository } from '../../domain/repositories';
 import type { VoiceRestrictions } from '../../domain/entities';
@@ -15,6 +20,92 @@ export class SignalingService {
   // person, so the same user can be in voice from two devices at once (#309).
   private voiceStates: Map<string, VoiceParticipantState> = new Map();
   private voiceMembershipListener?: () => void;
+  private screenPeerEpochs = new Map<string, Map<string, string>>();
+  private legacyScreenViewers = new Map<string, ScreenWatchSignalPayload>();
+  private screenRoleIds = new Map<string, Set<string>>();
+  private screenRoleVersion: number | null = null;
+  private currentRoleVersion: () => number | null = () => null;
+  private screenSubscriptionRevoked?: (request: Extract<NativeScreenSignalPayload, { action: 'watch' }>) => void;
+
+  public configureScreenAccess(
+    version: () => number | null,
+    revoked: ((request: Extract<NativeScreenSignalPayload, { action: 'watch' }>) => void) | undefined,
+  ): void {
+    this.currentRoleVersion = version;
+    this.screenSubscriptionRevoked = revoked;
+  }
+
+  public setScreenRoles(roles: readonly { id: string }[], userRoles: readonly UserRoleSummary[], version: number): void {
+    const existing = new Set(roles.map(role => role.id));
+    this.screenRoleIds = new Map(userRoles.map(user => [
+      user.userId, new Set(user.roleIds.filter(id => existing.has(id))),
+    ]));
+    this.screenRoleVersion = version;
+  }
+
+  public invalidateScreenRoles(revocation: { roleId?: string; userId?: string }, version: number): void {
+    // Remove authority at the write boundary without interrupting unrelated audiences.
+    for (const [userId, roles] of this.screenRoleIds) {
+      if (revocation.userId && revocation.userId !== userId) continue;
+      if (revocation.roleId) roles.delete(revocation.roleId);
+      else roles.clear();
+    }
+    this.screenRoleVersion = version;
+  }
+
+  public canSeeScreenSource(publisher: VoiceParticipantState, source: NativeScreenSource, viewerUserId?: string): boolean {
+    if (!source.audience) return true;
+    if (!viewerUserId) return false;
+    if (publisher.userId === viewerUserId || source.audience.userIds.includes(viewerUserId)) return true;
+    const version = this.currentRoleVersion();
+    return version !== null && version === this.screenRoleVersion
+      && source.audience.roleIds.some(id => this.screenRoleIds.get(viewerUserId)?.has(id));
+  }
+
+  public projectVoiceState(state: VoiceParticipantState, viewerUserId?: string): VoiceParticipantState {
+    const sources = state.nativeScreenShares ?? [];
+    const visible = sources.filter(source => this.canSeeScreenSource(state, source, viewerUserId));
+    const hidden = new Set(sources.filter(source => !visible.includes(source)).map(source => source.shareId));
+    const screenShareIds = (state.screenShareIds ?? []).filter(id => !hidden.has(id));
+    return {
+      ...state, screenShareIds,
+      nativeScreenShares: visible.map(source => {
+        if (viewerUserId === state.userId) return source;
+        const { audience: _audience, ...descriptor } = source;
+        return descriptor;
+      }),
+      isScreenSharing: hidden.size > 0 ? screenShareIds.length > 0 : state.isScreenSharing,
+      isSharingScreenAudio: visible.some(source => source.audio)
+        || (!sources.some(source => source.audio)
+          && screenShareIds.some(id => !sources.some(source => source.shareId === id)) && state.isSharingScreenAudio),
+    };
+  }
+
+  public canWatchScreen(publisherSessionId: string, viewerSessionId: string, shareId: string, instanceId?: string): boolean {
+    const publisher = this.voiceStates.get(publisherSessionId);
+    const viewer = this.voiceStates.get(viewerSessionId);
+    if (!publisher || !viewer || publisher.channelId !== viewer.channelId || !publisher.screenShareIds?.includes(shareId)) return false;
+    const source = publisher.nativeScreenShares?.find(source => source.shareId === shareId);
+    return source ? (!instanceId || source.instanceId === instanceId)
+      && this.canSeeScreenSource(publisher, source, viewer.userId) : !instanceId;
+  }
+
+  public reconcileScreenSubscriptions(): void {
+    for (const [key, watch] of this.legacyScreenViewers) {
+      if (!this.canWatchScreen(watch.targetSessionId, watch.fromSessionId, watch.streamId)
+        || this.voiceStates.get(watch.targetSessionId)?.nativeScreenShares?.some(source => source.shareId === watch.streamId))
+        this.legacyScreenViewers.delete(key);
+    }
+    for (const [key, { request }] of this.nativeScreenSubscriptions) {
+      if (this.canWatchScreen(request.publisherSessionId, request.fromSessionId, request.shareId, request.sourceInstanceId)) continue;
+      this.nativeScreenSubscriptions.delete(key);
+      this.screenSubscriptionRevoked?.(request);
+    }
+  }
+  private nativeScreenSubscriptions = new Map<string, {
+    request: Readonly<Extract<NativeScreenSignalPayload, { action: 'watch' }>>;
+    generation: number | null;
+  }>();
 
   constructor(
     private channelRepo: IChannelRepository,
@@ -30,7 +121,8 @@ export class SignalingService {
     userId: string,
     channelId: string,
     initialMuted?: boolean,
-    initialDeafened?: boolean
+    initialDeafened?: boolean,
+    permissionMuted = false,
   ): Promise<{
     success: boolean;
     errorCode?: ProtocolErrorCode;
@@ -82,13 +174,16 @@ export class SignalingService {
       isMuted: resolvedMuted,
       isDeafened: resolvedDeafened,
       ...restrictions,
+      permissionMuted,
       isSpeaking: false,
       isCameraOn: previousState?.isCameraOn ?? false,
       isScreenSharing: isChannelChange ? false : (previousState?.isScreenSharing ?? false),
       isSharingScreenAudio: isChannelChange ? false : (previousState?.isSharingScreenAudio ?? false),
       screenShareIds: isChannelChange ? [] : (previousState?.screenShareIds ?? []),
+      nativeScreenShares: isChannelChange ? [] : (previousState?.nativeScreenShares ?? []),
     };
 
+    this.dropNativeScreenSubscriptionsFor(sessionId);
     this.voiceStates.set(sessionId, newState);
     this.voiceMembershipListener?.();
     Logger.info('WEBRTC', `Session ${sessionId} joined voice channel ${channelId}`);
@@ -105,6 +200,7 @@ export class SignalingService {
     const current = this.voiceStates.get(sessionId);
     if (current) {
       this.voiceStates.delete(sessionId);
+      this.dropNativeScreenSubscriptionsFor(sessionId);
       this.voiceMembershipListener?.();
       Logger.info('WEBRTC', `Session ${sessionId} left voice channel ${current.channelId}`);
       return current;
@@ -127,8 +223,9 @@ export class SignalingService {
       channelId: current.channelId,
       serverMuted: current.serverMuted,
       serverDeafened: current.serverDeafened,
+      permissionMuted: current.permissionMuted,
     };
-    if (updated.serverMuted || updated.serverDeafened) updated.isSpeaking = false;
+    if (updated.serverMuted || updated.serverDeafened || updated.permissionMuted) updated.isSpeaking = false;
 
     // #253: a participant may broadcast more than one screen at a time, so
     // `screenShareIds` is the real state and `isScreenSharing` is derived from
@@ -141,8 +238,24 @@ export class SignalingService {
     } else if (updates.isScreenSharing === false) {
       updated.screenShareIds = [];
     }
-
+    updated.nativeScreenShares = (updated.nativeScreenShares ?? [])
+      .filter(source => updated.screenShareIds?.includes(source.shareId))
+      .map(source => {
+        const previous = current.nativeScreenShares?.find(value => value.shareId === source.shareId);
+        return previous?.audience ? { ...source, audience: previous.audience } : source;
+      });
+    const withdrawn = new Set((current.nativeScreenShares ?? [])
+      .filter(source => !updated.nativeScreenShares?.some(value => value.shareId === source.shareId))
+      .map(source => source.shareId));
+    updated.screenShareIds = (updated.screenShareIds ?? []).filter(id => !withdrawn.has(id));
+    if (withdrawn.size > 0) {
+      updated.isScreenSharing = updated.screenShareIds.length > 0;
+      if (!updated.isScreenSharing || current.nativeScreenShares?.some(source => source.audio && withdrawn.has(source.shareId))) {
+        updated.isSharingScreenAudio = updated.nativeScreenShares.some(source => source.audio);
+      }
+    }
     this.voiceStates.set(sessionId, updated);
+    this.reconcileScreenSubscriptions();
     return updated;
   }
 
@@ -154,6 +267,14 @@ export class SignalingService {
     return this.setServerRestriction(userId, 'serverDeafened', deafened);
   }
 
+  public setPermissionMuted(sessionId: string, muted: boolean): VoiceParticipantState | null {
+    const current = this.voiceStates.get(sessionId);
+    if (!current || current.permissionMuted === muted) return current ?? null;
+    const updated = { ...current, permissionMuted: muted, isSpeaking: muted ? false : current.isSpeaking };
+    this.voiceStates.set(sessionId, updated);
+    return updated;
+  }
+
   private setServerRestriction(
     userId: string,
     restriction: keyof VoiceRestrictions,
@@ -163,7 +284,12 @@ export class SignalingService {
     // Persist before touching the roster: a failed write must not look like successful moderation.
     this.voiceRestrictions.save(userId, restrictions);
     return this.getSessionsOfUser(userId).map((state) => {
-      const updated = { ...state, ...restrictions, isSpeaking: false };
+      const updated = {
+        ...state,
+        serverMuted: restrictions.serverMuted,
+        serverDeafened: restrictions.serverDeafened,
+        isSpeaking: false,
+      };
       this.voiceStates.set(state.sessionId, updated);
       return updated;
     });
@@ -215,11 +341,14 @@ export class SignalingService {
   public clearAllVoiceStates(): VoiceParticipantState[] {
     const list = Array.from(this.voiceStates.values());
     this.voiceStates.clear();
+    this.nativeScreenSubscriptions.clear();
+    this.screenPeerEpochs.clear();
+    this.legacyScreenViewers.clear();
     if (list.length) this.voiceMembershipListener?.();
     return list;
   }
 
-  public validateSignalRouting(signal: WebRtcSignalPayload): boolean {
+  public validateSignalRouting(signal: Pick<WebRtcSignalPayload, 'fromSessionId' | 'targetSessionId'>): boolean {
     const fromState = this.voiceStates.get(signal.fromSessionId);
     const targetState = this.voiceStates.get(signal.targetSessionId);
 
@@ -229,5 +358,131 @@ export class SignalingService {
 
     // Peers must be in the same voice channel to exchange WebRTC signals
     return fromState.channelId === targetState.channelId;
+  }
+
+  private dropNativeScreenSubscriptionsFor(sessionId: string): void {
+    this.screenPeerEpochs.delete(sessionId);
+    for (const peers of this.screenPeerEpochs.values()) peers.delete(sessionId);
+    for (const [key, watch] of this.legacyScreenViewers) {
+      if (watch.fromSessionId === sessionId || watch.targetSessionId === sessionId) this.legacyScreenViewers.delete(key);
+    }
+    for (const [key, subscription] of this.nativeScreenSubscriptions) {
+      if (subscription.request.fromSessionId === sessionId || subscription.request.publisherSessionId === sessionId) {
+        this.nativeScreenSubscriptions.delete(key);
+        this.screenSubscriptionRevoked?.(subscription.request);
+      }
+    }
+  }
+
+  public getNativeScreenViewers(publisherSessionId: string, shareId: string, sourceInstanceId: string): string[] {
+    return [...this.nativeScreenSubscriptions.values()].flatMap(({ request, generation }) =>
+      generation !== null && request.publisherSessionId === publisherSessionId && request.shareId === shareId
+        && request.sourceInstanceId === sourceInstanceId
+        && this.canWatchScreen(publisherSessionId, request.fromSessionId, shareId, sourceInstanceId)
+        ? [request.fromSessionId] : []);
+  }
+
+  /** Called only after authenticated signaling has been authorized and forwarded. */
+  public trackScreenSignal(signal: WebRtcSignalPayload): void {
+    const { fromSessionId: from, targetSessionId: target } = signal;
+    if (signal.signalType === 'offer' || signal.signalType === 'answer') {
+      if (!signal.subscriptionId) return;
+      let peers = this.screenPeerEpochs.get(from);
+      if (!peers) this.screenPeerEpochs.set(from, peers = new Map());
+      if (peers.get(target) === signal.subscriptionId) return;
+      peers.set(target, signal.subscriptionId);
+      for (const [key, watch] of this.legacyScreenViewers) {
+        if ((watch.fromSessionId === from && watch.targetSessionId === target)
+          || (watch.fromSessionId === target && watch.targetSessionId === from)) this.legacyScreenViewers.delete(key);
+      }
+    } else if (signal.signalType === 'screen-watch') {
+      const parsed = screenWatchSignalSchema.safeParse(signal);
+      if (!parsed.success) return;
+      const watch = parsed.data;
+      if (this.screenPeerEpochs.get(target)?.get(from) !== watch.subscriptionId
+        || this.screenPeerEpochs.get(from)?.get(target) !== watch.watcherSubscriptionId) return;
+      const key = JSON.stringify([target, from, watch.streamId]);
+      if ((this.legacyScreenViewers.get(key)?.subscriptionRevision ?? 0) >= watch.subscriptionRevision) return;
+      this.legacyScreenViewers.set(key, watch);
+    } else if (signal.signalType === 'user-left') {
+      this.screenPeerEpochs.get(from)?.delete(target);
+      this.screenPeerEpochs.get(target)?.delete(from);
+      for (const [key, watch] of this.legacyScreenViewers) {
+        if ((watch.fromSessionId === from && watch.targetSessionId === target)
+          || (watch.fromSessionId === target && watch.targetSessionId === from)) this.legacyScreenViewers.delete(key);
+      }
+    }
+  }
+
+  public getLegacyScreenViewers(publisherSessionId: string, shareId: string): string[] {
+    return [...this.legacyScreenViewers.values()].filter(watch => watch.watching
+      && watch.targetSessionId === publisherSessionId && watch.streamId === shareId
+      && this.canWatchScreen(publisherSessionId, watch.fromSessionId, shareId)).map(watch => watch.fromSessionId);
+  }
+
+  public authorizeNativeScreenSignal(signal: NativeScreenSignalPayload):
+    { success: true; forward?: false } | { success: false; code: ProtocolErrorCode; message: string } {
+    const reject = (message: string) => ({ success: false as const, code: ProtocolErrorCode.PERMISSION_DENIED, message });
+    const viewerId = signal.fromSessionId === signal.publisherSessionId ? signal.targetSessionId : signal.fromSessionId;
+    const key = JSON.stringify([signal.publisherSessionId, viewerId, signal.shareId]);
+    const current = this.nativeScreenSubscriptions.get(key);
+    if (signal.action === 'stop' && this.voiceStates.get(viewerId)?.channelId === signal.channelId
+      && (!current || current.request.subscriptionId !== signal.subscriptionId
+        || current.request.sourceInstanceId !== signal.sourceInstanceId)) {
+      // Expired leases are already stopped; never forward an old Stop to a replacement source.
+      return { success: true, forward: false };
+    }
+    const publisher = this.voiceStates.get(signal.publisherSessionId);
+    if (!this.validateSignalRouting(signal) || publisher?.channelId !== signal.channelId) {
+      return reject('A transmissão pertence a outra chamada.');
+    }
+    const source = publisher.nativeScreenShares?.find(value =>
+      value.shareId === signal.shareId && value.instanceId === signal.sourceInstanceId);
+    if (!source || !publisher.screenShareIds?.includes(source.shareId)) {
+      return reject('A fonte desta transmissão não está mais disponível.');
+    }
+    if (!this.canWatchScreen(signal.publisherSessionId, viewerId, signal.shareId, signal.sourceInstanceId)) {
+      return reject('A transmissão não está disponível.');
+    }
+    if (signal.action === 'watch') {
+      if (current?.request.subscriptionId === signal.subscriptionId) {
+        return current.request.sourceInstanceId === signal.sourceInstanceId
+          && current.request.quality === signal.quality && current.request.backend === signal.backend
+          ? { success: true } : reject('Uma assinatura existente não pode mudar de identidade.');
+      }
+      if (!current && [...this.nativeScreenSubscriptions.values()]
+        .filter(value => value.request.fromSessionId === viewerId).length >= 64) {
+        return reject('O limite de transmissões assistidas foi atingido.');
+      }
+      this.nativeScreenSubscriptions.set(key, { request: Object.freeze({ ...signal }), generation: null });
+      return { success: true };
+    }
+    if (!current || current.request.subscriptionId !== signal.subscriptionId
+      || current.request.sourceInstanceId !== signal.sourceInstanceId) {
+      return reject('A assinatura desta transmissão expirou.');
+    }
+    if (signal.action === 'stop' || signal.action === 'closed') {
+      this.nativeScreenSubscriptions.delete(key);
+      return { success: true };
+    }
+    if (signal.action === 'accepted') {
+      if (signal.quality !== current.request.quality || signal.backend !== current.request.backend
+        || (current.generation !== null && current.generation !== signal.generation)) {
+        return reject('A resposta não corresponde ao perfil solicitado.');
+      }
+      current.generation = signal.generation;
+      return { success: true };
+    }
+    if (signal.action === 'capture-mode') {
+      return signal.generation === current.generation
+        ? { success: true } : reject('O modo de captura não pertence à assinatura confirmada.');
+    }
+    if (signal.control.generation !== current.generation) {
+      return reject('O controle nativo não pertence à assinatura confirmada.');
+    }
+    if ('kind' in signal.control && signal.control.kind === 'audio' && !source.audio) {
+      return reject('Esta transmissão não publicou áudio.');
+    }
+    return { success: true };
   }
 }

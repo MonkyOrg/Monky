@@ -1,7 +1,127 @@
 import { z } from 'zod';
-import { LIMITS, PROTOCOL_VERSION } from './constants.js';
+import { ED25519_SPKI_PUBLIC_KEY_DER_HEX_LENGTH, ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX, LIMITS, PROTOCOL_VERSION } from './constants.js';
+import { CHANNEL_PERMISSIONS, EVERYONE_ROLE_ID, LEGACY_CHANNEL_PERMISSIONS, channelPermissionTargetKey } from './permissions.js';
+import { protocolOfferSchema } from './protocolCompatibility.js';
+import { screenShareIdSchema, nativeScreenRenditionSchema } from './screenSharing.js';
+export { screenShareIdSchema } from './screenSharing.js';
 
 export const messageReferenceSchema = z.string().min(1).max(128);
+export const rtcTransportPurposeSchema = z.enum(['call', 'screen']);
+export const sfuCreateWebRtcTransportSchema = z.object({
+  channelId: messageReferenceSchema,
+  direction: z.enum(['send', 'recv']),
+  purpose: rtcTransportPurposeSchema.default('call'),
+  screenSessionId: z.string().uuid().optional(),
+}).strict().refine(value => value.screenSessionId === undefined || value.purpose === 'screen');
+export const screenWatchSignalSchema = z.object({
+  fromSessionId: messageReferenceSchema,
+  targetSessionId: messageReferenceSchema,
+  signalType: z.literal('screen-watch'),
+  streamId: screenShareIdSchema,
+  subscriptionId: screenShareIdSchema,
+  watcherSubscriptionId: screenShareIdSchema,
+  subscriptionRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  watching: z.boolean(),
+}).strict();
+export const screenMetadataSignalSchema = z.object({
+  fromSessionId: messageReferenceSchema,
+  targetSessionId: messageReferenceSchema,
+  signalType: z.enum(['screen-video-meta', 'screen-audio-meta']),
+  streamId: screenShareIdSchema,
+  subscriptionId: screenShareIdSchema,
+}).strict();
+export const rtcSignalSchema = z.union([
+  screenWatchSignalSchema,
+  screenMetadataSignalSchema,
+  z.object({
+    fromSessionId: messageReferenceSchema,
+    targetSessionId: messageReferenceSchema,
+    signalType: z.enum(['offer', 'answer', 'candidate', 'user-left']),
+    subscriptionId: screenShareIdSchema.optional(),
+    sdp: z.object({
+      type: z.enum(['offer', 'answer', 'pranswer', 'rollback']),
+      sdp: z.string().max(1024 * 1024).optional(),
+    }).optional(),
+    candidate: z.object({
+      candidate: z.string().max(8192).optional(),
+      sdpMid: z.string().max(128).nullable().optional(),
+      sdpMLineIndex: z.number().int().min(0).max(65535).nullable().optional(),
+      usernameFragment: z.string().max(256).nullable().optional(),
+    }).optional(),
+  }).strict().refine(value => (value.signalType !== 'offer' && value.signalType !== 'answer') || !!value.subscriptionId),
+]);
+export const sfuConsumerClosedSchema = z.object({
+  channelId: messageReferenceSchema,
+  consumerId: messageReferenceSchema,
+}).strict();
+export const sfuProducerClosedSchema = z.object({
+  channelId: messageReferenceSchema,
+  producerId: messageReferenceSchema,
+}).strict();
+export const sfuProducerSetPausedSchema = sfuProducerClosedSchema.extend({
+  paused: z.boolean(),
+  purpose: z.literal('screen'),
+});
+export const sfuCloseWebRtcTransportSchema = z.object({
+  channelId: messageReferenceSchema,
+  transportId: messageReferenceSchema,
+  purpose: z.literal('screen'),
+}).strict();
+export const sfuConsumerSetPausedSchema = sfuConsumerClosedSchema.extend({
+  paused: z.boolean(),
+});
+export const sfuMediaAppDataSchema = z.discriminatedUnion('mediaType', [
+  z.object({ mediaType: z.literal('mic') }).strict(),
+  z.object({ mediaType: z.literal('camera') }).strict(),
+  z.object({
+    mediaType: z.literal('screen_video'), shareId: screenShareIdSchema,
+    nativeScreen: nativeScreenRenditionSchema.optional(),
+  }).strict(),
+  // Screen audio is a single publisher resource, not one consumer per screen.
+  z.object({
+    mediaType: z.literal('screen_audio'), shareId: screenShareIdSchema,
+    nativeScreen: nativeScreenRenditionSchema.optional(),
+  }).strict(),
+]);
+export const sfuConsumeSchema = z.object({
+  channelId: messageReferenceSchema,
+  transportId: messageReferenceSchema,
+  producerId: messageReferenceSchema,
+  rtpCapabilities: z.object({
+    codecs: z.array(z.object({
+      kind: z.enum(['audio', 'video']),
+      mimeType: z.string().min(1).max(128),
+      preferredPayloadType: z.number().int().min(0).max(127),
+      clockRate: z.number().int().positive(),
+      channels: z.number().int().min(1).max(64).optional(),
+      parameters: z.record(z.union([z.string().max(1024), z.number().finite()]))
+        .refine(value => Object.keys(value).length <= 64).optional(),
+      rtcpFeedback: z.array(z.object({
+        type: z.string().max(64), parameter: z.string().max(128).optional(),
+      })).max(32).optional(),
+    })).max(128).optional(),
+    headerExtensions: z.array(z.object({
+      kind: z.enum(['audio', 'video']),
+      uri: z.enum([
+        'urn:ietf:params:rtp-hdrext:sdes:mid',
+        'urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id',
+        'urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id',
+        'http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time',
+        'http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01',
+        'urn:ietf:params:rtp-hdrext:ssrc-audio-level',
+        'https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension',
+        'urn:3gpp:video-orientation',
+        'http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time',
+        'urn:ietf:params:rtp-hdrext:toffset',
+        'http://www.webrtc.org/experiments/rtp-hdrext/playout-delay',
+        'urn:mediasoup:params:rtp-hdrext:packet-id',
+      ]),
+      preferredId: z.number().int().min(1).max(255),
+      preferredEncrypt: z.boolean().optional(),
+      direction: z.enum(['sendrecv', 'sendonly', 'recvonly', 'inactive']).optional(),
+    })).max(64).optional(),
+  }),
+}).strict();
 export const adminVoiceRestrictionsGetSchema = z.object({
   targetUserId: messageReferenceSchema,
 });
@@ -15,6 +135,7 @@ export const voiceRestrictionsUpdatedSchema = z.object({
   userId: messageReferenceSchema,
   serverMuted: z.boolean(),
   serverDeafened: z.boolean(),
+  permissionMuted: z.boolean().optional(),
 });
 
 export const voiceModeTransitionSchema = z.object({
@@ -42,18 +163,17 @@ export const nicknameSchema = z
   .regex(/^[a-zA-Z0-9_\-\.\s]+$/, 'Nickname contém caracteres inválidos')
   .transform((val) => val.trim());
 
-export const messageContentSchema = z
-  .string()
-  .min(1, 'Mensagem não pode ser vazia')
-  .max(LIMITS.MAX_MESSAGE_LENGTH, `Mensagem não pode exceder ${LIMITS.MAX_MESSAGE_LENGTH} caracteres`)
-  .transform((val) => val.trim());
+export function createMessageContentSchema(limit: number = LIMITS.MAX_MESSAGE_LENGTH, allowEmpty = false) {
+  return z.string().transform(value => value.trim())
+    .refine(value => allowEmpty || value.length > 0, 'Mensagem não pode ser vazia')
+    .refine(value => limit === 0 || value.length <= limit, `Mensagem não pode exceder ${limit} caracteres`)
+    .refine(value => value.length <= LIMITS.WS_MAX_PAYLOAD_BYTES, 'Mensagem excede o limite de transporte');
+}
+export const messageContentSchema = createMessageContentSchema();
 
 // Optional caption for an attachment message (#11). Unlike messageContentSchema
 // it allows an empty string, because an attachments-only message carries no text.
-export const attachmentCaptionSchema = z
-  .string()
-  .max(LIMITS.MAX_MESSAGE_LENGTH, `Mensagem não pode exceder ${LIMITS.MAX_MESSAGE_LENGTH} caracteres`)
-  .transform((val) => val.trim());
+export const attachmentCaptionSchema = createMessageContentSchema(LIMITS.MAX_MESSAGE_LENGTH, true);
 
 export const channelNameSchema = z
   .string()
@@ -68,9 +188,8 @@ export const portSchema = z
   .max(LIMITS.MAX_PORT, `Porta deve ser menor ou igual a ${LIMITS.MAX_PORT}`);
 
 export const authConnectSchema = z.object({
-  protocolVersion: z.number().refine((v) => v === PROTOCOL_VERSION, {
-    message: `Versão de protocolo incompatível. Esperado: ${PROTOCOL_VERSION}`,
-  }),
+  protocolVersion: z.number().int().positive(),
+  protocolOffer: protocolOfferSchema.optional(),
   publicKey: z
     .string()
     .min(64, 'Chave pública inválida')
@@ -95,15 +214,78 @@ export const authChallengeResponseSchema = z.object({
   signature: z.string().regex(/^[a-fA-F0-9]+$/, 'Assinatura inválida'),
 });
 
+export const ed25519SpkiPublicKeyHexSchema = z.string()
+  .length(ED25519_SPKI_PUBLIC_KEY_DER_HEX_LENGTH, 'Chave pública inválida')
+  .regex(/^[a-fA-F0-9]+$/, 'Chave pública deve estar em hexadecimal')
+  .transform(value => value.toLowerCase())
+  .refine(value => value.startsWith(ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX), 'Chave pública Ed25519 inválida');
+
+export const dmRelayKindSchema = z.enum(['friend', 'envelope', 'file', 'signal']);
+const dmRelayBaseItemSchema = z.object({
+  to: ed25519SpkiPublicKeyHexSchema,
+});
+export const dmRelayItemSchema = z.discriminatedUnion('kind', [
+  dmRelayBaseItemSchema.extend({
+    kind: z.literal('friend'),
+    data: z.string().max(LIMITS.DM_RELAY_DATA_MAX_LENGTH, 'Payload de DM muito grande'),
+  }).strict(),
+  dmRelayBaseItemSchema.extend({
+    kind: z.literal('envelope'),
+    data: z.string().max(LIMITS.DM_RELAY_DATA_MAX_LENGTH, 'Payload de DM muito grande'),
+  }).strict(),
+  dmRelayBaseItemSchema.extend({
+    kind: z.literal('file'),
+    data: z.string().max(LIMITS.DM_RELAY_FILE_DATA_MAX_LENGTH, 'Arquivo de DM muito grande'),
+  }).strict(),
+  dmRelayBaseItemSchema.extend({
+    kind: z.literal('signal'),
+    data: z.string().max(LIMITS.DM_RELAY_DATA_MAX_LENGTH, 'Payload de DM muito grande'),
+  }).strict(),
+]);
+export const dmRelaySendSchema = z.object({
+  relayId: z.string().min(1, 'Relay inválido').max(128, 'Relay inválido'),
+  items: z.array(dmRelayItemSchema).min(1, 'Envie ao menos um item')
+    .max(LIMITS.DM_RELAY_MAX_ITEMS, 'Itens demais no relay'),
+}).strict().superRefine((value, ctx) => {
+  const total = value.items.reduce((sum, item) => sum + item.data.length, 0);
+  if (total > LIMITS.DM_RELAY_TOTAL_DATA_MAX_LENGTH) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Payload de DM muito grande',
+      path: ['items'],
+    });
+  }
+});
+
 export const channelAllowedRoleIdsSchema = z
   .array(z.string().min(1, 'Cargo inválido'))
   .max(100, 'Cargos demais para um canal')
   .transform((ids) => Array.from(new Set(ids)));
 
+const channelPermissionBitsSchema = z.number().int().min(0).max(CHANNEL_PERMISSIONS | LEGACY_CHANNEL_PERMISSIONS)
+  .refine(bits => (bits & ~(CHANNEL_PERMISSIONS | LEGACY_CHANNEL_PERMISSIONS)) === 0, 'Permissão não aplicável ao canal')
+  .transform(bits => (bits & CHANNEL_PERMISSIONS) >>> 0);
+const channelPermissionBits = {
+  allow: channelPermissionBitsSchema,
+  deny: channelPermissionBitsSchema,
+};
+export const channelPermissionOverwritesSchema = z.array(z.union([
+  z.object({
+    roleId: z.string().min(1).max(128).refine(id => id !== EVERYONE_ROLE_ID).nullable(),
+    ...channelPermissionBits,
+  }).strict(),
+  z.object({ userId: z.string().min(1).max(128), ...channelPermissionBits }).strict(),
+]).refine(value => (value.allow & value.deny) === 0, 'Permissão conflitante'))
+  .max(101)
+  .refine(entries => new Set(entries.map(channelPermissionTargetKey)).size === entries.length, 'Alvo duplicado');
+
 export const channelCreateSchema = z.object({
+  permissionOverwrites: channelPermissionOverwritesSchema.optional(),
+  categoryId: z.string().min(1).nullable().optional().default(null),
+  inheritCategoryPermissions: z.boolean().optional().default(true),
   botCommandsEnabled: z.boolean().optional().default(true),
   name: channelNameSchema,
-  type: z.enum(['VOICE', 'TEXT']),
+  type: z.enum(['VOICE', 'TEXT', 'FORUM']),
   maxParticipants: z.number().int().min(1).max(50).optional().default(LIMITS.MAX_PARTICIPANTS_PER_CHANNEL_DEFAULT),
   isPrivate: z.boolean().optional().default(false),
   allowedRoleIds: channelAllowedRoleIdsSchema.optional().default([]),
@@ -112,6 +294,9 @@ export const channelCreateSchema = z.object({
 // Editing a channel (#384). Only the fields present are changed, so `name` and
 // `isPrivate` are optional here even though they are required on creation.
 export const channelUpdateSchema = z.object({
+  permissionOverwrites: channelPermissionOverwritesSchema.optional(),
+  categoryId: z.string().min(1).nullable().optional(),
+  inheritCategoryPermissions: z.boolean().optional(),
   botCommandsEnabled: z.boolean().optional(),
   channelId: z.string().min(1, 'Canal inválido'),
   name: channelNameSchema.optional(),
@@ -120,15 +305,28 @@ export const channelUpdateSchema = z.object({
   allowedRoleIds: channelAllowedRoleIdsSchema.optional(),
 });
 
-// Reordenar os canais de um tipo (#471). A lista chega inteira, na ordem
-// desejada; o limite acompanha o de canais por servidor e o `min(1)` recusa uma
-// reordenação vazia, que só poderia vir de um payload malformado.
+// A category takes precedence over legacy type-scoped ordering.
 export const channelReorderSchema = z.object({
-  type: z.enum(['VOICE', 'TEXT']),
+  type: z.enum(['VOICE', 'TEXT', 'FORUM']).optional(),
+  categoryId: z.string().min(1).nullable().optional(),
   orderedIds: z
     .array(z.string().min(1, 'Canal inválido'))
     .min(1, 'Nenhum canal informado')
     .max(200, 'Canais demais'),
+}).refine((value) => value.type !== undefined || value.categoryId !== undefined, 'Informe uma categoria ou tipo');
+
+export const categoryCreateSchema = z.object({
+  permissionOverwrites: channelPermissionOverwritesSchema.optional(),
+  name: channelNameSchema,
+  isPrivate: z.boolean().optional().default(false),
+  allowedRoleIds: channelAllowedRoleIdsSchema.optional().default([]),
+});
+export const categoryUpdateSchema = categoryCreateSchema.partial().extend({
+  categoryId: z.string().min(1),
+});
+export const categoryDeleteSchema = z.object({ categoryId: z.string().min(1) });
+export const categoryReorderSchema = z.object({
+  orderedIds: z.array(z.string().min(1)).min(1).max(200),
 });
 
 export const roleNameSchema = z
@@ -149,22 +347,29 @@ export const permissionBitsSchema = z
   .min(0, 'Permissões inválidas')
   .max(0xFFFFFFFF, 'Permissões inválidas');
 
+const roleRuleConflict = (role: { permissions?: number; deny?: number }) =>
+  role.permissions === undefined || role.deny === undefined || (role.permissions & role.deny) === 0;
+const roleRuleConflictMessage = 'Uma permissão não pode ser permitida e negada ao mesmo tempo';
+
+/** `permissions` are granted bits, or a full mask from a client before 36.1; `deny` comes only from 36.1 clients. */
 export const roleCreateSchema = z.object({
   name: roleNameSchema,
   color: roleColorSchema.default(null),
   permissions: permissionBitsSchema,
+  deny: permissionBitsSchema.optional(),
   position: z.number().int().min(0).optional(),
   isDefault: z.boolean().optional().default(false),
-});
+}).refine(roleRuleConflict, roleRuleConflictMessage);
 
 export const roleUpdateSchema = z.object({
   roleId: z.string().min(1, 'Cargo inválido'),
   name: roleNameSchema.optional(),
   color: roleColorSchema,
   permissions: permissionBitsSchema.optional(),
+  deny: permissionBitsSchema.optional(),
   position: z.number().int().min(0).optional(),
   isDefault: z.boolean().optional(),
-});
+}).refine(roleRuleConflict, roleRuleConflictMessage);
 
 export const roleAssignmentSchema = z.object({
   userId: z.string().min(1, 'Usuário inválido'),

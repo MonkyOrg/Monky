@@ -5,6 +5,7 @@ import { changelogModal } from '../../ChangelogModal';
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
 import { bindVersionCopyButton, renderVersionCopyButton, setVersionCopyButton } from '../../VersionCopyButton';
+import licenseText from '../../../../../../../LICENSE?raw';
 
 const IDEAS_URL = 'https://github.com/MonkyOrg/Monky/discussions/categories/ideas';
 const NEW_IDEA_URL = 'https://github.com/MonkyOrg/Monky/discussions/new?category=ideas';
@@ -12,6 +13,7 @@ const DONATE_URL = 'https://buymeacoffee.com/monkyorg';
 
 export class AboutTab {
   private unbindVersionCopy: (() => void) | null = null;
+  private unbindSourceLink: (() => void) | null = null;
 
   public renderHtml(): string {
     return `
@@ -103,6 +105,18 @@ export class AboutTab {
         </div>
       </div>
 
+      <div data-settings-section="license" data-settings-label="${escapeHtml(t('settings.licenseSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px;">
+        <label>${t('settings.licenseSection')}</label>
+        <p style="font-size: 12px; color: var(--text-secondary);">Copyright (c) 2026 Monky Contributors</p>
+        <p style="font-size: 12px; color: var(--text-secondary);">${t('settings.licenseDescription')}</p>
+        <details>
+          <summary style="cursor: pointer;">GNU GPL-3.0-or-later</summary>
+          <pre tabindex="0" aria-label="${escapeHtml(t('settings.licenseSection'))}" style="max-height: 220px; overflow: auto; white-space: pre-wrap; font-size: 11px;">${escapeHtml(licenseText)}</pre>
+        </details>
+        <button id="btn-source-code" class="btn btn-secondary" style="font-size: 12px; margin-top: 8px;">${t('settings.sourceCode')}</button>
+        <p id="license-link-error" class="audio-device-status" role="alert" hidden></p>
+      </div>
+
       <!-- Community -->
       <div data-settings-section="community" data-settings-label="${escapeHtml(t('settings.communitySection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px;">
@@ -169,6 +183,30 @@ export class AboutTab {
     const btnSuggest = container.querySelector<HTMLButtonElement>('#btn-suggest-idea');
     const btnVote = container.querySelector<HTMLButtonElement>('#btn-vote-ideas');
     const btnReport = container.querySelector<HTMLButtonElement>('#btn-report-bug');
+    const sourceButton = container.querySelector<HTMLButtonElement>('#btn-source-code');
+    if (sourceButton) {
+      let active = true;
+      const openSource = async () => {
+        const failure = container.querySelector<HTMLElement>('#license-link-error');
+        if (failure) failure.hidden = true;
+        try {
+          if (!window.api?.openExternal) throw new Error('External navigation bridge unavailable');
+          const result = await window.api.openExternal('https://github.com/MonkyOrg/Monky');
+          if (!result.success) throw new Error('Source code link was not opened');
+        } catch (error: unknown) {
+          console.warn('[AboutTab] Could not open source code', error);
+          if (active && failure && container.isConnected) {
+            failure.textContent = t('settings.sourceCodeOpenFailed');
+            failure.hidden = false;
+          }
+        }
+      };
+      sourceButton.addEventListener('click', openSource);
+      this.unbindSourceLink = () => {
+        active = false;
+        sourceButton.removeEventListener('click', openSource);
+      };
+    }
 
     btnCheckUpdates?.addEventListener('click', async () => {
       if (updateStatus) updateStatus.textContent = t('settings.checking');
@@ -264,6 +302,8 @@ export class AboutTab {
   }
 
   public cleanup(): void {
+    this.unbindSourceLink?.();
+    this.unbindSourceLink = null;
     this.unbindVersionCopy?.();
     this.unbindVersionCopy = null;
   }

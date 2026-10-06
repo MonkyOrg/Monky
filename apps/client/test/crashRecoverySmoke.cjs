@@ -72,7 +72,7 @@ if (process.versions.electron) {
     };
     // Never launch the user's browser or replace the user's clipboard in tests.
     shell.openExternal = async (url) => { opened.push(url); };
-    clipboard.writeText = (text) => { copied.push(text); };
+    clipboard.writeText = async (text) => { copied.push(text); };
     dialog.showMessageBox = (options) => new Promise(resolve => nativeDialogs.push({ options, resolve }));
     dialog.showErrorBox = (...args) => { throw new Error(`Unexpected native failure: ${JSON.stringify(args)}`); };
 

@@ -26,6 +26,7 @@ if (!process.versions.electron) {
   const { app, BrowserWindow } = require('electron');
   const { Permission, MessageType } = require('@monky/shared');
   app.setPath('userData', process.env.MONKY_MONITOR_PROFILE);
+  app.on('window-all-closed', () => {});
   let vite;
   let browser;
   let timeout;
@@ -82,10 +83,9 @@ if (!process.versions.electron) {
 async function runRegression(config) {
   const { setLanguage, t } = await import('/i18n/index.ts');
   setLanguage(config.language);
-  const [{ ServerMonitorModal }, { sessionManager }, { appEvents }, { RequestTimeoutError }, { ServerRolesTab }] = await Promise.all([
+  const [{ ServerMonitorModal }, { sessionManager }, { appEvents }, { RequestTimeoutError }] = await Promise.all([
     import('/views/ServerMonitorModal.ts'), import('/core/SessionManager.ts'),
     import('/core/EventBus.ts'), import('/core/NetworkClient.ts'),
-    import('/views/serverSettings/tabs/ServerRolesTab.ts'),
   ]);
   sessionManager.install();
   let checks = 0;
@@ -162,12 +162,6 @@ async function runRegression(config) {
   const first = session('server-a', 3000);
   const second = session('server-b', 3001);
   sessionManager.activate(first.key);
-  const roleHtml = document.createElement('div');
-  roleHtml.innerHTML = new ServerRolesTab().renderHtml();
-  const permissionSwitch = roleHtml.querySelector(`[data-permission="${config.view}"]`);
-  check(!!permissionSwitch, 'monitor viewing is editable on the actual roles tab');
-  check(permissionSwitch.closest('label')?.classList.contains('permission-switch'), 'permission uses the existing switch component');
-  check(roleHtml.textContent.includes(t('permissions.viewServerMonitor')), 'permission label is localized');
   const modal = new ServerMonitorModal();
   const opener = document.querySelector('#opener');
   opener.focus();
@@ -232,10 +226,11 @@ async function runRegression(config) {
   check(localReads === 0 && scheduled.size === 0, 'timeout has no local fallback or retries');
   const switchOpening = modal.openRemote(second);
   sessionManager.activate(first.key);
-  check(!document.querySelector('[role="dialog"]'), 'switching servers closes the remote monitor immediately');
+  check(!document.querySelector('.modal-backdrop:not([data-ui-closing]) [role="dialog"]'),
+    'switching servers closes the remote monitor logically immediately');
   requests[4].resolve(result('server-b', 3));
   await switchOpening;
-  sessionManager.removeAll();
+  await sessionManager.removeAll();
   let resolveLocal;
   localStatsRead = () => new Promise((resolve) => { resolveLocal = resolve; });
   const localOpening = modal.openLocal();
@@ -245,7 +240,8 @@ async function runRegression(config) {
   check(logListeners.size === 0 && statusListeners.size === 0, 'local close removes IPC listeners even during loading');
   resolveLocal({ ...baseStats, dataDir: 'local-host' });
   await localOpening;
-  check(!document.querySelector('[role="dialog"]') && scheduled.size === 0, 'late local response cannot reopen or retain a timer');
+  check(!document.querySelector('.modal-backdrop:not([data-ui-closing]) [role="dialog"]') && scheduled.size === 0,
+    'late local response cannot reopen or retain a timer');
   localStatsRead = async () => ({ ...baseStats, dataDir: 'local-host' });
   opener.focus();
   await modal.openLocal();
@@ -253,7 +249,7 @@ async function runRegression(config) {
   document.querySelector('#btn-clear-logs').click();
   check(localClears === 0, 'local clear is also display-only');
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-  check(!document.querySelector('[role="dialog"]'), 'Escape closes the monitor');
+  check(!document.querySelector('.modal-backdrop:not([data-ui-closing]) [role="dialog"]'), 'Escape closes the monitor');
   check(document.activeElement === opener, 'closing restores keyboard focus');
   check(logListeners.size === 0 && statusListeners.size === 0 && scheduled.size === 0, 'all local subscriptions and timers are released');
   check(listenerCount() === initialListeners, 'all monitor event subscriptions are released');

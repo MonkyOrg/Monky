@@ -5,10 +5,40 @@ import {
   isReleaseVersion,
   parseBotCompatibility,
   parseReleaseCompatibility,
+  releaseRequiresProtocolUpdate,
 } from '../src/releaseCompatibility.js';
 
 const version = '18.0.0-beta';
-const manifest = { schemaVersion: 1, version, protocolVersion: 16, botSdkVersion: version };
+const manifest = { schemaVersion: 1, version, protocolVersion: 16, botSdkVersion: version } as const;
+
+test('release warnings follow the affected protocol floor, not every additive bump', () => {
+  const additive = parseReleaseCompatibility({ ...manifest, protocolVersion: 36, minimumClientProtocol: 35, minimumBotProtocol: 24 }, version);
+  assert.ok(additive);
+  assert.equal(releaseRequiresProtocolUpdate(additive, 'client'), false);
+  assert.equal(releaseRequiresProtocolUpdate(additive, 'bot'), false);
+  const future = { ...additive, protocolVersion: 37, minimumBotProtocol: 37, minimumClientProtocol: 37 };
+  assert.equal(releaseRequiresProtocolUpdate(future, 'bot'), true);
+  assert.equal(releaseRequiresProtocolUpdate({ ...future, minimumBotProtocol: 24 }, 'bot'), false);
+  assert.equal(releaseRequiresProtocolUpdate(future, 'client'), true);
+  assert.equal(releaseRequiresProtocolUpdate({ ...future, minimumClientProtocol: 31 }, 'client'), false);
+  for (const floor of [0, -1, 38, 1.2, '24', null]) {
+    assert.equal(parseReleaseCompatibility({ ...additive, minimumBotProtocol: floor }, version), null);
+  }
+});
+
+test('channel permission protocol 35 rejects old client contracts without requiring bot updates', () => {
+  for (const protocolVersion of [24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]) {
+    const old = parseReleaseCompatibility({ ...manifest, protocolVersion, minimumClientProtocol: 24, minimumBotProtocol: 24 }, version);
+    assert.ok(old);
+    assert.equal(releaseRequiresProtocolUpdate(old, 'client'), true);
+    assert.equal(releaseRequiresProtocolUpdate(old, 'bot'), false);
+    assert.equal(releaseRequiresProtocolUpdate({ ...manifest, protocolVersion }, 'client'), true);
+  }
+  const current = parseReleaseCompatibility({ ...manifest, protocolVersion: 36, minimumClientProtocol: 35, minimumBotProtocol: 24 }, version);
+  assert.ok(current);
+  assert.equal(releaseRequiresProtocolUpdate(current, 'client'), false);
+  assert.equal(releaseRequiresProtocolUpdate(current, 'bot'), false);
+});
 
 test('release compatibility validates exact release, SDK and protocol rather than assuming a SemVer change', () => {
   assert.deepEqual(parseReleaseCompatibility(manifest, version), manifest);

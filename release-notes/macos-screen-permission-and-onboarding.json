@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "No macOS, ao atualizar, o compartilhamento de tela volta a pedir a permissão de gravação quando ela é invalidada, em vez de falhar ao listar telas e janelas. E a tela de boas-vindas aparece só na primeira vez, mesmo que você a feche sem escolher uma opção.",
+  "en": "On macOS, after updating, screen sharing re-requests the recording permission when it is invalidated instead of failing to list screens and windows. And the welcome screen appears only once, even if you dismiss it without picking an option."
+}

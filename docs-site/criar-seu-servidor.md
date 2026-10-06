@@ -1,15 +1,26 @@
 # Criar Seu Servidor
 
-Na aba **Meus Servidores › Criar Servidor**, preencha nickname do anfitrião, nome do servidor, porta local, senha opcional, os canais iniciais de texto e voz e, se quiser, um limite de membros.
+Na Home, clique no botão **+** no trilho de servidores e escolha
+**Criar meu servidor**. Preencha nome do servidor, porta local, senha opcional,
+os canais iniciais de texto e voz e, se quiser, um limite de membros. O Monky
+usa o nickname global salvo em **Meu Perfil**.
+
+<AppScreenshot src="/screenshots/criar-servidor-pt.png" :width="1000" :height="1640" alt="Formulário de criação de servidor com nome, porta, canais iniciais, limite de membros e modo de voz." caption="O aplicativo hospeda na sua máquina. A disponibilidade pela internet depende também da rede e do firewall." />
 
 Clique em **Criar e Iniciar Servidor**. O servidor sobe na sua máquina, escuta em todas as interfaces de rede na porta escolhida e abre para visualização. Entrar em um canal de voz é uma ação separada.
 
-Servidores criados ficam salvos (até 10). Depois, use **Iniciar**, **Parar** ou **X** na aba *Meus Servidores*.
+Servidores criados ficam salvos (até 10) e aparecem no trilho como qualquer
+outro servidor. Clique com o botão direito no ícone para **Iniciar**, **Parar**,
+abrir o **Monitor** ou **Excluir** os dados locais.
 
-Iniciar um servidor offline pela Home ou pela barra lateral preserva a chamada
+Iniciar um servidor offline pelo trilho de servidores preserva a chamada
 atual, inclusive câmera, compartilhamentos e mute. Se outro servidor já estiver
 hospedado nesta instância, ele não será substituído: pare-o explicitamente
 quando for seguro antes de iniciar um diferente.
+
+Voltar à Home pela casinha não desconecta servidores nem encerra a chamada.
+Para iniciar outro servidor salvo sem sair da chamada, use sua entrada no
+trilho lateral.
 
 ## Convidar amigos
 
@@ -24,7 +35,7 @@ Dentro do servidor, clique no **nome do servidor** › **Convidar Amigos**. O ap
 ## Modos de Voz e Mídia (P2P Mesh vs SFU)
 
 Ao criar ou administrar o servidor, você escolhe o modo de voz e vídeo:
-- **P2P Mesh (Padrão):** O áudio e vídeo trafegam diretamente entre os participantes. O servidor apenas faz a sinalização, sem consumir CPU de transcodificação ou banda de mídia.
+- **P2P Mesh (Padrão):** O áudio e vídeo tentam um caminho direto entre participantes. Sem relay, o servidor não encaminha essa mídia; se TURN for necessário, o relay usa banda para repassá-la.
 - **SFU Centralizado (mediasoup):** O fluxo de cada membro é enviado uma única vez ao servidor, que repassa aos demais participantes. Economiza CPU e upload de quem transmite telas em 1080p60. O app e o CLI incluem um **Estimador de Capacidade** para calcular o hardware e banda necessários.
 
 ## Liberar acesso pela internet
@@ -35,7 +46,11 @@ Ao criar ou administrar o servidor, você escolhe o modo de voz e vídeo:
 
 ## Administrar
 
-Em **Configurações do Servidor** é possível renomear o servidor, alterar/remover senha, alternar o modo de voz (P2P / SFU), definir ou remover o limite de membros e permitir ou bloquear o soundboard. Os cabeçalhos de canais têm **+** para criar e lixeira para apagar.
+Em **Configurações do Servidor** é possível renomear o servidor, alterar/remover
+senha, alternar P2P/SFU e ajustar limites e Soundboard. Use **+** para criar
+canais e **Mais opções** no canal para editar ou excluir.
+O [guia de administração](/administrar-servidor) detalha cargos, canais privados
+e moderação.
 
 As edições aplicam imediatamente, e campos de texto aplicam ao terminar a
 edição. **Pronto** fecha a janela; não há uma etapa final de salvar. Enquanto
@@ -53,9 +68,9 @@ cargo. **Gerenciar servidor**, sozinho, não concede esse acesso. O servidor
 confere a autorização em cada solicitação; não é necessário hospedar nada
 na máquina do cliente.
 
-Para o servidor hospedado no próprio dispositivo, o ícone de **monitoramento**
-ao lado de *Parar*, na aba *Meus Servidores*, continua abrindo o monitor
-explicitamente local, separado do servidor remoto em foco.
+Para o servidor hospedado no próprio dispositivo, a ação **Monitor** no menu de
+contexto do trilho continua abrindo o monitor explicitamente local, separado do
+servidor remoto em foco.
 
 O painel traz:
 

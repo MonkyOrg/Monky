@@ -1,34 +1,17 @@
 const assert = require('node:assert/strict');
-const { execFile } = require('node:child_process');
-const { promisify } = require('node:util');
 const { test } = require('node:test');
 const { MessageType } = require('@monky/shared');
 const { NativeClient } = require('./native_client.cjs');
 const { createServerFixture } = require('./server_fixture.cjs');
+const { measureTree } = require('./process_sampler.cjs');
 
-const execute = promisify(execFile);
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
-const mib = bytes => Math.round(bytes / (1024 * 1024) * 100) / 100;
+const seconds = Number(process.env.MONKY_LIGHT_MEASURE_SECONDS ?? 10);
+const cycles = Number(process.env.MONKY_LIGHT_MEASURE_CYCLES ?? 0);
+assert.ok(Number.isFinite(seconds) && seconds >= 10, 'MONKY_LIGHT_MEASURE_SECONDS must be at least 10');
+assert.ok(Number.isSafeInteger(cycles) && cycles >= 0, 'MONKY_LIGHT_MEASURE_CYCLES must be a nonnegative integer');
 
-async function sample(pid) {
-  assert.ok(Number.isSafeInteger(pid) && pid > 0);
-  const { stdout } = await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
-    $ErrorActionPreference = 'Stop'
-    $p = Get-Process -Id ${pid}
-    [pscustomobject]@{
-      seconds = [System.Diagnostics.Stopwatch]::GetTimestamp() / [System.Diagnostics.Stopwatch]::Frequency
-      cpuSeconds = $p.TotalProcessorTime.TotalSeconds
-      workingSetBytes = $p.WorkingSet64
-      privateBytes = $p.PrivateMemorySize64
-      threads = $p.Threads.Count
-    } | ConvertTo-Json -Compress
-  `], { windowsHide: true, timeout: 10_000, maxBuffer: 4096 });
-  const result = JSON.parse(stdout);
-  for (const value of Object.values(result)) assert.ok(Number.isFinite(value) && value >= 0);
-  return result;
-}
-
-test('measure the owned native Windows process, not its server or test driver', { timeout: 120_000 }, async t => {
+test('measure the owned native Windows process, not its server or test driver', { timeout: 120_000 + (seconds * 6 + cycles * 30) * 1000 }, async t => {
   assert.equal(process.platform, 'win32', 'This measurement uses Windows process accounting');
   const fixture = await createServerFixture(t);
   const admin = await fixture.connectHuman('Fixture admin');
@@ -39,16 +22,9 @@ test('measure the owned native Windows process, not its server or test driver', 
   const channelId = auth.channels.find(channel => channel.type === 'VOICE').id;
   async function measure(phase) {
     await sleep(1000);
-    const start = await sample(alice.child.pid);
-    await sleep(10_000);
-    const end = await sample(alice.child.pid);
-    const seconds = end.seconds - start.seconds;
-    assert.ok(seconds >= 10 && end.cpuSeconds >= start.cpuSeconds);
-    t.diagnostic(`RESOURCE ${JSON.stringify({
-      phase, intervalSeconds: Math.round(seconds * 100) / 100,
-      oneCoreCpuPercent: Math.round((end.cpuSeconds - start.cpuSeconds) / seconds * 10000) / 100,
-      workingSetMiB: mib(end.workingSetBytes), privateMiB: mib(end.privateBytes), threads: end.threads,
-    })}`);
+    const result = await measureTree(alice.child.pid, { seconds, intervalSeconds: Math.min(5, seconds), sleep });
+    assert.ok(result.intervalSeconds >= seconds);
+    t.diagnostic(`RESOURCE ${JSON.stringify({ phase, ...result })}`);
   }
   await measure('connected-idle');
   await alice.join(channelId);
@@ -71,6 +47,18 @@ test('measure the owned native Windows process, not its server or test driver', 
   await alice.untilState(value => value.phase === 'ready' && value.retiringMedia === 0 &&
     value.audioDevice.runningDevices === 0, 'The media engine did not retire');
   await measure('left-voice');
+  // Repeated calls expose memory or threads that survive media teardown.
+  if (cycles > 0) {
+    for (const client of [alice, bob]) await client.command('deafen', { enabled: false });
+  }
+  for (let cycle = 0; cycle < cycles; cycle++) {
+    await alice.join(channelId);
+    await alice.decodedFrom(bobAuth.sessionId);
+    await alice.command('leave');
+    await alice.untilState(value => value.phase === 'ready' && value.retiringMedia === 0 &&
+      value.audioDevice.runningDevices === 0, `Call cycle ${cycle + 1} did not retire`);
+  }
+  if (cycles > 0) await measure(`left-voice-after-${cycles}-cycles`);
   await alice.close();
   await bob.close();
 });

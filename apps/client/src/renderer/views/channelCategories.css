@@ -1,0 +1,37 @@
+.category-collapse-btn {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  gap: 4px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.category-collapse-btn > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.category-collapse-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.category-channels:not([hidden]) {
+  min-height: 8px;
+}
+.channel-category + .channel-category { margin-top: 16px; }
+.category-modal { width: min(480px, calc(100vw - 32px)); }
+.category-modal .modal-footer > .btn { flex: 1; }
+.category-modal #input-category-name { padding-right: 36px; }
+.create-channel-modal { width: min(480px, calc(100vw - 32px)); }
+.create-channel-modal .modal-footer > .btn { flex: 1; }
+.channel-category-subtitle { margin: 8px 0 0; font-size: 13px; color: var(--text-secondary); }
+.category-modal .form-group > label, .create-channel-modal .form-group > label { text-transform: none; letter-spacing: normal; font-size: 13px; }

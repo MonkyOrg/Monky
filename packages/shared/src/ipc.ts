@@ -3,11 +3,16 @@
  * Define as mensagens e eventos trafegados entre o Main Process e o Renderer Process.
  */
 
+import { z } from 'zod';
 import type { ClientLogConfig, ClientLogEntry, LogEntry } from './logging.js';
 import type { DevelopmentQaConfig, DevelopmentQaReport } from './developmentQa.js';
 import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
 import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } from './botInteractions.js';
 import type { ReleaseCompatibilityResult } from './releaseCompatibility.js';
+import type { ServerInviteResult } from './serverInvites.js';
+import type { EventCalendarExport, EventCalendarSaveResult } from './serverEventCalendar.js';
+import type { NativeScreenCommand, NativeScreenCommandResult, NativeScreenEvent, NativeScreenReply, BrowserOcclusionEngine } from './nativeScreenIpc.js';
+import type { NativeScreenCaptureMode } from './screenSharing.js';
 import type {
   LocalExecutionMutationResult,
   LocalExecutionSnapshot,
@@ -34,10 +39,43 @@ export interface RendererBootstrapFailure {
   stack?: string;
 }
 
+export const EDITOR_COMMANDS = ['cut', 'copy', 'paste', 'pasteAndMatchStyle', 'selectAll'] as const;
+export type EditorCommand = typeof EDITOR_COMMANDS[number];
+export const EDITOR_COMMAND_IPC = 'editor:command' satisfies keyof IpcInvokeChannels;
+
+export interface AppShutdownRequest {
+  requestId: number;
+  phase: 'native' | 'farewell';
+}
+export const APP_SHUTDOWN_EVENT = 'app:before-quit' satisfies keyof IpcEvents;
+export const APP_SHUTDOWN_IPC = {
+  acknowledge: 'app:leave-complete',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+
 export const DEVELOPMENT_QA_IPC = {
   config: 'development-qa:config',
   report: 'development-qa:report',
 } as const satisfies Record<string, keyof IpcInvokeChannels>;
+
+export const SERVER_INVITE_IPC = {
+  take: 'server-invite:take',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+export const SERVER_INVITE_AVAILABLE = 'server-invite:available' satisfies keyof IpcEvents;
+
+export const BOT_SCREEN_DOCUMENT_IPC = {
+  create: 'bot-screen-document:create',
+  remove: 'bot-screen-document:remove',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+
+export const BOT_SCREEN_PERMISSION_POLICY_VERSION = 1;
+export const botScreenDocumentConsentSchema = z.object({
+  policyVersion: z.literal(BOT_SCREEN_PERMISSION_POLICY_VERSION),
+  serverKey: z.string().min(1).max(1024),
+  botId: z.string().min(1).max(128),
+  screenId: z.string().min(1).max(128),
+  instanceId: z.string().min(1).max(128),
+}).strict();
+export type BotScreenDocumentConsent = z.infer<typeof botScreenDocumentConsentSchema>;
 
 export type CrashRecoveryActionResult =
   | { ok: true; copied?: boolean }
@@ -56,14 +94,49 @@ export interface DesktopSource {
   id: string;
   name: string;
   type: 'screen' | 'window';
+  isOwnWindow?: boolean;
+  /** Browser engine that stops painting this window once other windows fully cover it, freezing its capture. */
+  occlusionEngine?: BrowserOcclusionEngine;
+  displayNumber?: number;
   thumbnailDataUrl: string;
   appIconDataUrl: string | null;
+  thumbnailState?: 'pending' | 'ready' | 'unavailable';
 }
+
+export const desktopSourcesOptionsSchema = z.object({
+  metadataOnly: z.boolean().optional(),
+  refresh: z.boolean().optional(),
+}).strict();
+export type DesktopSourcesOptions = z.infer<typeof desktopSourcesOptionsSchema>;
+export const desktopSourcePreviewsRequestSchema = z.object({
+  type: z.enum(['screen', 'window']),
+  sourceIds: z.array(z.string().min(1).max(512)).max(256)
+    .refine(ids => new Set(ids).size === ids.length, 'Source identities must be unique'),
+}).strict();
+export type DesktopSourcePreviewsRequest = z.infer<typeof desktopSourcePreviewsRequestSchema>;
+export type DesktopSourcePreview = Pick<DesktopSource, 'id' | 'thumbnailDataUrl' | 'appIconDataUrl'>;
+export const DESKTOP_SOURCES_IPC = {
+  list: 'screen-share:get-sources',
+  previews: 'screen-share:get-previews',
+  cancelPreviews: 'screen-share:cancel-previews',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
 
 export interface ImageSelectionResult {
   fileName: string;
   mimeType: string;
   base64: string;
+}
+
+export interface RecentSoundSaveInput {
+  fileName: string;
+  mimeType: string;
+  base64: string;
+}
+
+export interface RecentSoundSaveResult {
+  success: boolean;
+  canceled?: boolean;
+  error?: string;
 }
 
 export interface SoundboardSoundEntry {
@@ -88,6 +161,32 @@ export interface SoundboardDownloadKey {
   invocationId: string;
   downloadId: string;
 }
+
+export type SoundboardFileFailure = 'invalid_request' | 'no_folder' | 'missing' | 'exists' | 'locked' | 'too_large' | 'unsupported' | 'io_failed'
+  | 'source_changed' | 'encoder_unavailable' | 'encode_failed' | 'cleanup_failed';
+export type SoundboardFileResult<T> = { status: 'ok'; value: T } | { status: 'failed'; reason: SoundboardFileFailure };
+export interface SoundboardFileInput {
+  folder: string;
+  fileName: string;
+}
+export interface SoundboardRenameInput extends SoundboardFileInput { newFileName: string }
+export interface SoundboardEditTimes { start: number; end: number; fadeIn: number; fadeOut: number }
+export interface SoundboardEditInput extends SoundboardRenameInput, SoundboardEditTimes {
+  sampleRate: number;
+  channels: Float32Array[];
+}
+export interface SoundboardSavedFile { fileName: string; filePath: string; duration?: number }
+export interface SoundboardEditorSource { bytes: Uint8Array; revision: string; overwriteAvailable: boolean }
+export interface SoundboardOverwriteInput extends Omit<SoundboardEditInput, 'newFileName'> { revision: string }
+
+export const SOUNDBOARD_FILES_IPC = {
+  read: 'soundboard:edit-read',
+  rename: 'soundboard:rename-file',
+  delete: 'soundboard:delete-file',
+  edit: 'soundboard:save-edited-copy',
+  open: 'soundboard:open-editor',
+  overwrite: 'soundboard:overwrite-audio',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
 
 export interface SoundboardDownloadAuthorization {
   connectionId: string;
@@ -115,6 +214,7 @@ export interface SoundboardDownloadProgress extends SoundboardDownloadKey {
 export type SoundboardDownloadCancellation = Omit<SoundboardDownloadKey, 'downloadId'> & { downloadId?: string };
 
 export const SOUND_DOWNLOAD_IPC = {
+  defaultFolder: 'soundboard:default-folder',
   availability: 'soundboard:download-availability',
   confirmFolder: 'soundboard:confirm-download-folder',
   authorize: 'soundboard:authorize-download',
@@ -352,6 +452,7 @@ export interface HostServerOptions {
   password?: string;
   initialVoiceChannel?: string;
   initialTextChannel?: string;
+  categoryLocale?: 'pt-BR' | 'en';
   /** Id of the entry in "Meus Servidores" that owns this instance (#333). */
   serverId?: string;
   /**
@@ -429,6 +530,23 @@ export type OverlayMode = 'cameras-only' | 'cameras-and-screens';
 export type OverlayLayout = 'grid' | 'vertical' | 'horizontal';
 export type OverlayPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'custom';
 
+export interface OverlayCardSize {
+  width: number;
+  height: number;
+}
+
+export interface OverlayCardLayout {
+  cardSize: OverlayCardSize;
+  minimalistMode?: boolean;
+  preserveAspectRatio?: boolean;
+  width: number;
+  height: number;
+  resizeAspect?: {
+    ratio: number;
+    extraSize: OverlayCardSize;
+  };
+}
+
 export interface OverlayConfig {
   mode: OverlayMode;
   layout: OverlayLayout;
@@ -438,6 +556,11 @@ export interface OverlayConfig {
   autoOpenOnLeaveStage?: boolean;
   minimalistMode?: boolean;
   hideSelf?: boolean;
+  hideStagePreviews?: boolean;
+  hideInactiveParticipants?: boolean;
+  preserveAspectRatio?: boolean;
+  cardSize?: OverlayCardSize;
+  minimalistCardSize?: OverlayCardSize;
   bounds?: OverlayBounds;
 }
 
@@ -456,6 +579,7 @@ export interface OverlayParticipantState {
   isLocal: boolean;
   videoSlotIndex?: number;
   screenSlotIndexes?: Record<string, number>;
+  screenCaptureModes?: Record<string, NativeScreenCaptureMode>;
 }
 
 export interface OverlaySyncState {
@@ -471,10 +595,182 @@ export interface OverlaySignalPayload {
   signal: string; // JSON com Offer/Answer/Candidate
 }
 
+export interface NativeScreenAudioOutputConfig {
+  epoch: number;
+  sinkId: string;
+  sampleRate: 48000;
+  channels: 2;
+}
+
+export interface NativeScreenAudioClockProbeRequest {
+  epoch: number;
+  probeId: number;
+}
+
+export interface NativeScreenAudioClockProbe extends NativeScreenAudioClockProbeRequest {
+  rtcBeforeUs: number;
+  rtcAfterUs: number;
+}
+
+export interface NativeScreenAudioCalibrationRequest extends NativeScreenAudioClockProbeRequest {
+  rendererBeforeUs: number;
+  rendererAfterUs: number;
+}
+
+export interface NativeScreenAudioCalibration {
+  epoch: number;
+  calibrationId: number;
+  offsetUs: number;
+  uncertaintyUs: number;
+}
+
+export type NativeScreenAudioFeedback =
+  | { epoch: number; available: false }
+  | {
+    epoch: number;
+    available: true;
+    clockEpoch: number;
+    calibrationId: number;
+    atPerformanceTimeUs: number;
+    estimatedPlayoutFrame: number;
+    confirmedPcmEnd: number;
+    feedbackAgeUs: number;
+    outputClockAgeUs: number;
+  };
+
+export interface NativeScreenAudioCredits {
+  epoch: number;
+  grantSequence: number;
+  frames: 480 | 960;
+}
+
+export interface NativeScreenAudioPcmPacket {
+  epoch: number;
+  sequence: number;
+  firstPlayoutFrame: number;
+  frames: 480;
+  sampleRate: 48000;
+  channels: 2;
+  samples: Float32Array;
+}
+
+export interface NativeScreenAudioError {
+  code: string;
+  message: string;
+}
+
+export interface NativeScreenAudioRpc {
+  setSinkId: {
+    request: { epoch: number; sinkId: string };
+    result: { epoch: number; sinkId: string };
+  };
+  configure: {
+    request: NativeScreenAudioOutputConfig;
+    result: Omit<NativeScreenAudioOutputConfig, 'sinkId'>;
+  };
+  probe: {
+    request: NativeScreenAudioClockProbeRequest;
+    result: NativeScreenAudioClockProbe;
+  };
+  calibrate: {
+    request: NativeScreenAudioCalibrationRequest;
+    result: NativeScreenAudioCalibration;
+  };
+  stop: {
+    request: { epoch: number };
+    result: { epoch: number; stopped: true };
+  };
+}
+
+export interface NativeScreenAudioPortEvents {
+  ready: NativeScreenAudioOutputConfig;
+  disposed: NativeScreenAudioRpc['stop']['result'];
+  pcm: NativeScreenAudioPcmPacket;
+  credits: NativeScreenAudioCredits;
+  feedback: NativeScreenAudioFeedback;
+  error: NativeScreenAudioError;
+}
+
+export interface NativeScreenAudioPortScope {
+  portId: string;
+  epoch: number;
+}
+
+export interface NativeScreenAudioPortInfo {
+  version: 1;
+  sessionId: string;
+  portId: string;
+  output: NativeScreenAudioOutputConfig;
+}
+
+export type NativeScreenAudioRequest = {
+  [Method in keyof NativeScreenAudioRpc]: {
+    type: 'request';
+    id: number;
+    method: Method;
+    data: NativeScreenAudioRpc[Method]['request'];
+  };
+}[keyof NativeScreenAudioRpc] & NativeScreenAudioPortScope;
+
+export type NativeScreenAudioResponse = {
+  [Method in keyof NativeScreenAudioRpc]: {
+    type: 'response';
+    id: number;
+    method: Method;
+  } & (
+    | { ok: true; data: NativeScreenAudioRpc[Method]['result'] }
+    | { ok: false; error: NativeScreenAudioError }
+  );
+}[keyof NativeScreenAudioRpc] & NativeScreenAudioPortScope;
+
+export type NativeScreenAudioPortEvent = {
+  [Event in keyof NativeScreenAudioPortEvents]: {
+    type: 'event';
+    event: Event;
+    data: NativeScreenAudioPortEvents[Event];
+  };
+}[keyof NativeScreenAudioPortEvents] & NativeScreenAudioPortScope;
+
+export type NativeScreenAudioPortMessage =
+  | NativeScreenAudioRequest
+  | NativeScreenAudioResponse
+  | NativeScreenAudioPortEvent;
+
+// These channels transfer one private MessagePort, not a renderer-facing invoke API.
+export interface IpcPortEvents {
+  'native-screen:audio-output-port': NativeScreenAudioPortInfo;
+  'native-screen:preview-port': import('./nativeScreenIpc.js').NativeScreenPreviewInfo;
+  'native-screen:texture-port': import('./nativeScreenIpc.js').NativeScreenTextureChannelInfo;
+}
+
+export const NATIVE_SCREEN_TEXTURE_IPC = {
+  port: 'native-screen:texture-port',
+} as const satisfies Record<string, keyof IpcPortEvents>;
+
+export const NATIVE_SCREEN_PREVIEW_IPC = {
+  port: 'native-screen:preview-port',
+} as const satisfies Record<string, keyof IpcPortEvents>;
+
+export const NATIVE_SCREEN_AUDIO_IPC = {
+  outputPort: 'native-screen:audio-output-port',
+} as const satisfies Record<string, keyof IpcPortEvents>;
+
+export const NATIVE_SCREEN_IPC = {
+  invoke: 'native-screen:invoke',
+  reply: 'native-screen:reply',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+export const NATIVE_SCREEN_EVENT = 'native-screen:event' satisfies keyof IpcEvents;
+
 /**
  * Mapeamento de Canais Bidirecionais (Invoke / Handle)
  */
 export interface IpcInvokeChannels {
+  'bot-screen-document:create': { args: [html: string, consent: BotScreenDocumentConsent]; returnType: string };
+  'bot-screen-document:remove': { args: [url: string]; returnType: void };
+  'editor:command': { args: [command: EditorCommand]; returnType: { success: boolean } };
+  'native-screen:invoke': { args: [command: NativeScreenCommand]; returnType: NativeScreenCommandResult };
+  'native-screen:reply': { args: [reply: NativeScreenReply]; returnType: void };
+  'server-invite:take': { args: []; returnType: ServerInviteResult | null };
   'development-qa:config': { args: []; returnType: DevelopmentQaConfig | null };
   'development-qa:report': { args: [report: DevelopmentQaReport]; returnType: boolean };
   // Local fatal-failure recovery, not a client/server protocol change (#454).
@@ -486,6 +782,7 @@ export interface IpcInvokeChannels {
   'crash-recovery:close': { args: []; returnType: boolean };
   // Janela
   'window:minimize': { args: []; returnType: void };
+  'screen-pip:open': { args: [requestId: string, requireInactive: boolean]; returnType: boolean };
   'window:maximize': { args: []; returnType: void };
   'window:toggle-maximize': { args: []; returnType: void };
   'window:set-in-server': { args: [inServer: boolean]; returnType: void };
@@ -500,6 +797,7 @@ export interface IpcInvokeChannels {
   'overlay:set-config': { args: [config: Partial<OverlayConfig>]; returnType: void };
   'overlay:save-bounds': { args: [bounds: OverlayBounds]; returnType: void };
   'overlay:reset-bounds': { args: []; returnType: void };
+  'overlay:layout-cards': { args: [layout: OverlayCardLayout]; returnType: OverlayBounds };
   'overlay:send-signal': { args: [payload: OverlaySignalPayload]; returnType: void };
   'overlay:send-sync-state': { args: [state: OverlaySyncState]; returnType: void };
 
@@ -515,8 +813,10 @@ export interface IpcInvokeChannels {
   'app:set-auto-start': { args: [enabled: boolean]; returnType: void };
   'app:set-minimize-to-tray': { args: [enabled: boolean]; returnType: void };
   'app:download-file': { args: [url: string, fileName: string]; returnType: { success: boolean; error?: string } };
+  'app:save-recent-sound': { args: [input: RecentSoundSaveInput]; returnType: RecentSoundSaveResult };
+  'community:save-event-calendar': { args: [input: EventCalendarExport]; returnType: EventCalendarSaveResult };
   // Ack do renderer ao 'app:before-quit': confirma que ja saiu das chamadas (#458)
-  'app:leave-complete': { args: []; returnType: void };
+  'app:leave-complete': { args: [request: AppShutdownRequest]; returnType: void };
 
   // Identidade
   'identity:has': { args: []; returnType: boolean };
@@ -525,6 +825,8 @@ export interface IpcInvokeChannels {
   'identity:sign-challenge': { args: [nonceHex: string]; returnType: string };
   'identity:export': { args: [password: string, extras?: string]; returnType: string };
   'identity:import': { args: [exportedIdentity: string, password: string]; returnType: AppIdentityImportResult };
+  // Sair: apaga a identidade, amigos e DMs deste computador e reinicia o app
+  'identity:logout': { args: []; returnType: { success: boolean; error?: string } };
 
   // Backup de servidores salvos e configuracoes (#472)
   'backup:save-file': { args: [contents: string, suggestedName: string]; returnType: BackupSaveResult };
@@ -547,18 +849,28 @@ export interface IpcInvokeChannels {
 
   // Captura de Tela
   'screen-share:ensure-permission': { args: []; returnType: boolean };
-  'screen-share:get-sources': { args: []; returnType: DesktopSource[] };
+  'screen-share:get-sources': { args: [options?: DesktopSourcesOptions]; returnType: DesktopSource[] };
+  'screen-share:get-previews': { args: [request: DesktopSourcePreviewsRequest]; returnType: DesktopSourcePreview[] };
+  'screen-share:cancel-previews': { args: []; returnType: void };
   'screen-share:prepare-window': { args: [string]; returnType: boolean };
 
   // Diálogos Nativos
   'dialog:select-image': { args: []; returnType: ImageSelectionResult | null };
+  'dialog:select-images': { args: [maxFiles: number]; returnType: ImageSelectionResult[] };
   'dialog:select-sound-file': { args: []; returnType: string | null };
   'dialog:select-soundboard-folder': { args: []; returnType: string | null };
   'dialog:select-stickers-folder': { args: []; returnType: string | null };
 
   // Soundboard
+  'soundboard:default-folder': { args: []; returnType: string | null };
   'soundboard:list-sounds': { args: [folderPath: string]; returnType: SoundboardSoundEntry[] };
   'soundboard:read-sound': { args: [filePath: string]; returnType: SoundboardSoundData | null };
+  'soundboard:edit-read': { args: [input: SoundboardFileInput]; returnType: SoundboardFileResult<Uint8Array> };
+  'soundboard:rename-file': { args: [input: SoundboardRenameInput]; returnType: SoundboardFileResult<SoundboardSavedFile> };
+  'soundboard:delete-file': { args: [input: SoundboardFileInput]; returnType: SoundboardFileResult<null> };
+  'soundboard:save-edited-copy': { args: [input: SoundboardEditInput]; returnType: SoundboardFileResult<SoundboardSavedFile> };
+  'soundboard:open-editor': { args: [input: SoundboardFileInput]; returnType: SoundboardFileResult<SoundboardEditorSource> };
+  'soundboard:overwrite-audio': { args: [input: SoundboardOverwriteInput]; returnType: SoundboardFileResult<SoundboardSavedFile> };
   'soundboard:download-availability': { args: [configuredFolder: string]; returnType: SoundboardDownloadAvailability };
   'soundboard:confirm-download-folder': { args: [configuredFolder: string]; returnType: boolean };
   'soundboard:authorize-download': { args: [input: SoundboardDownloadAuthorization]; returnType: SoundboardDownloadPermit };
@@ -636,9 +948,13 @@ export interface IpcInvokeChannels {
  * Mapeamento de Eventos Unidirecionais (Main -> Renderer via webContents.send)
  */
 export interface IpcEvents {
+  'window:inactive': [];
+  'window:active': [];
+  'native-screen:event': [event: NativeScreenEvent];
+  'server-invite:available': [];
   // Pedido de despedida antes do processo morrer: o renderer sai das chamadas e
   // avisa os servidores enquanto ainda esta vivo (#458)
-  'app:before-quit': [];
+  'app:before-quit': [request: AppShutdownRequest];
   'lan:found': [server: DiscoveredLanServer];
   'lan:lost': [server: DiscoveredLanServer];
   'soundboard:shortcut-triggered': [soundName: string];
@@ -666,6 +982,8 @@ export interface IpcEvents {
   // Eventos de Sobreposição (Overlay) (#169)
   'overlay:state-changed': [isOpen: boolean];
   'overlay:config-updated': [config: OverlayConfig];
+  'overlay:hover-changed': [hovered: boolean, point?: { x: number; y: number }];
+  'overlay:resize-state-changed': [resizing: boolean];
   'overlay:signal-received': [signal: string];
   'overlay:sync-state-received': [state: OverlaySyncState];
   'overlay:close-requested': [];

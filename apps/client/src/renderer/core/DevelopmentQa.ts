@@ -1,5 +1,6 @@
 import {
-  LOCAL_CAPABILITY_TOOLS, MessageType, Permission, type BotInstalledPayload, type BotInstallPreview,
+  LOCAL_CAPABILITY_TOOLS, MessageType, Permission, recentSoundsListSchema,
+  type BotInstalledPayload, type BotInstallPreview,
   type BotPermissionsSnapshot, type DevelopmentQaConfig, type DevelopmentQaReport,
 } from '@monky/shared';
 import { connectionStore } from '../stores/connectionStore';
@@ -8,6 +9,7 @@ import { voiceStore } from '../stores/voiceStore';
 import { sessionManager } from './SessionManager';
 import { joinCallOnSession, openServerSession } from './serverConnection';
 import { serverSettingsModal } from '../views/ServerSettingsModal';
+import { addServerModal } from '../views/addServer/AddServerModal';
 import { webRtcManager } from './WebRtcManager';
 import { localExecutionFor } from './LocalExecutionController';
 import { getCommandPresentation } from '@monky/shared';
@@ -20,6 +22,35 @@ async function until(check: () => boolean, description: string, signal: AbortSig
     if (performance.now() > deadline) throw new Error(`Prepared QA timed out: ${description}`);
     await new Promise<void>((resolve) => window.setTimeout(resolve, 40));
   }
+
+}
+
+function qaToneBase64(frequency: number): string {
+  const sampleRate = 8000;
+  const sampleCount = 800;
+  const bytes = new Uint8Array(44 + sampleCount * 2);
+  const view = new DataView(bytes.buffer);
+  const text = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index++) bytes[offset + index] = value.charCodeAt(index);
+  };
+  text(0, 'RIFF');
+  view.setUint32(4, bytes.length - 8, true);
+  text(8, 'WAVEfmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  text(36, 'data');
+  view.setUint32(40, sampleCount * 2, true);
+  for (let index = 0; index < sampleCount; index++) {
+    view.setInt16(44 + index * 2, Math.round(Math.sin(2 * Math.PI * frequency * index / sampleRate) * 5000), true);
+  }
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
 
 export async function prepareDevelopmentQaProfile(config: DevelopmentQaConfig): Promise<void> {
@@ -43,11 +74,13 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
   };
   try {
     if (config.scenario === 'home' || config.scenario === 'login') {
-      if (!document.querySelector('.connection-layout')) throw new Error('The real Home view was not rendered.');
+      if (!document.querySelector('#home-view')) throw new Error('The real Home view was not rendered.');
       if (config.scenario === 'login') {
+        addServerModal.open('join');
+        await until(() => !!document.querySelector('#add-server-join-form'), 'add-server join form', owner.signal);
         for (const [id, value] of Object.entries({
-          'join-host': config.server.host, 'join-port': String(config.server.port),
-          'join-nickname': config.nickname, 'join-password': config.server.password,
+          'add-server-host': config.server.host, 'add-server-port': String(config.server.port),
+          'add-server-password': config.server.password,
         })) {
           const input = document.getElementById(id);
           if (!(input instanceof HTMLInputElement)) throw new Error(`Missing real login field: ${id}`);
@@ -72,9 +105,83 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
     if (!channel) throw new Error('The real text-channel control is missing.');
     channel.click();
     await until(() => !!document.querySelector('#chat-message-input'), 'chat view', owner.signal);
-    const seed = '**QA preparado / Prepared QA**\nPerfil, servidor e dados isolados / Isolated profile, server and data.';
-    session.client.send(MessageType.CHAT_SEND, { channelId: text.id, content: seed });
-    await until(() => session.chatStore.getMessages(text.id).some((message) => message.content === seed), 'authenticated seeded message acknowledgement', owner.signal);
+    if (config.scenario === 'empty-forum') {
+      const forum = auth.server.channels.find(channel => channel.type === 'FORUM');
+      if (!forum) throw new Error('The empty QA forum was not created.');
+      await until(() => session.serverStore.knownMembers.size === 20 && session.serverStore.roles.length === 10,
+        '20 QA members and 10 roles', owner.signal);
+      const forumButton = document.querySelector<HTMLButtonElement>(
+        `[data-channel-id="${CSS.escape(forum.id)}"][data-channel-type="FORUM"]`,
+      );
+      if (!forumButton) throw new Error('The empty QA forum control is missing.');
+      forumButton.click();
+      await until(() => !!document.querySelector('.forum-empty-state strong')
+        && document.querySelector('[data-forum-posts]')?.getAttribute('aria-busy') === 'false',
+      'loaded empty QA forum', owner.signal);
+      if (document.querySelector('.forum-post-row') || session.chatStore.getMessages(text.id).length !== 0) {
+        throw new Error('The empty QA scenario unexpectedly contains threads or chat messages.');
+      }
+    } else {
+      const seed = '**QA preparado / Prepared QA**\nPerfil, servidor e dados isolados / Isolated profile, server and data.';
+      session.client.send(MessageType.CHAT_SEND, { channelId: text.id, content: seed });
+      await until(() => session.chatStore.getMessages(text.id).some((message) => message.content === seed), 'authenticated seeded message acknowledgement', owner.signal);
+    }
+
+    if (config.scenario === 'connected' && !config.smoke) {
+      session.client.send(MessageType.SOUNDBOARD_PLAY, {
+        channelId: voice.id, soundName: 'QA Bell', mimeType: 'audio/wav', audioBase64: qaToneBase64(660),
+      });
+      session.client.send(MessageType.SOUNDBOARD_PLAY, {
+        channelId: voice.id, soundName: 'QA Chime', mimeType: 'audio/wav', audioBase64: qaToneBase64(880),
+      });
+      const recent = recentSoundsListSchema.parse(await session.client.sendRequest<unknown>(
+        MessageType.RECENT_SOUNDS_LIST, {},
+      ));
+      if (!recent.enabled || recent.limit !== 5 || recent.items.length !== 2) {
+        throw new Error('The connected QA recent-audio fixture was not prepared through the authenticated protocol.');
+      }
+      const serverMenu = document.querySelector<HTMLButtonElement>('#server-dropdown-toggle');
+      if (!serverMenu) throw new Error('The real server menu is unavailable.');
+      serverMenu.click();
+      const recentButton = document.querySelector<HTMLButtonElement>('#btn-recent-sounds');
+      if (!recentButton || recentButton.hidden || recentButton.style.display === 'none') {
+        throw new Error('The recent-audio menu action is unavailable.');
+      }
+      recentButton.click();
+      await until(() => document.querySelectorAll('.recent-sound-item').length === 2,
+        'recent audio list with the played QA clips', owner.signal);
+      if (!document.querySelector('.recent-sounds-overview') ||
+          document.querySelectorAll('[data-preview-recent]').length !== 2 ||
+          document.querySelector('.recent-sounds-section-heading')?.textContent?.includes('2') !== true) {
+        throw new Error('The recent-audio list is missing its guidance, capacity or local preview controls.');
+      }
+      session.client.send(MessageType.RECENT_SOUND_RECORD, {
+        soundName: 'QA Local Preview', mimeType: 'audio/wav', audioBase64: qaToneBase64(440),
+      });
+      await until(() => document.querySelectorAll('.recent-sound-item').length === 3 &&
+        document.querySelector('.recent-sound-item')?.textContent?.includes('QA Local Preview') === true,
+      'live recent-audio update after a local Soundboard use', owner.signal);
+      const localPreviewId = document.querySelector<HTMLElement>('.recent-sound-item')?.dataset.recentSound;
+      session.client.send(MessageType.RECENT_SOUND_RECORD, {
+        soundName: 'QA Local Preview Again', mimeType: 'audio/wav', audioBase64: qaToneBase64(440),
+      });
+      await until(() => document.querySelectorAll('.recent-sound-item').length === 3 &&
+        document.querySelector<HTMLElement>('.recent-sound-item')?.dataset.recentSound === localPreviewId &&
+        document.querySelector('.recent-sound-item')?.textContent?.includes('QA Local Preview Again') === true,
+      'deduplicated recent audio moved to the top without another row', owner.signal);
+      document.querySelector<HTMLButtonElement>('.recent-sounds-modal [data-community-close]')?.click();
+      await until(() => !document.querySelector('.recent-sounds-modal'),
+        'close recent audio list', owner.signal);
+      const forum = auth.server.channels.find(channel => channel.type === 'FORUM');
+      if (!forum) throw new Error('The connected QA forum fixture was not created.');
+      const forumButton = () => document.querySelector<HTMLButtonElement>(
+        `[data-channel-id="${CSS.escape(forum.id)}"][data-channel-type="FORUM"]`,
+      );
+      await until(() => !!forumButton(), 'example forum control', owner.signal);
+      forumButton()?.click();
+      await until(() => document.querySelectorAll('.forum-view [data-forum-id]').length === 25,
+        'open example forum with its first lazy page', owner.signal);
+    }
 
     if (config.scenario === 'bot-install') {
       serverSettingsModal.open('bots');
@@ -106,14 +213,49 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
       }
       report.botPermissions = permissions;
     }
-    if (config.scenario === 'voice' || config.scenario === 'music') {
+    if (config.scenario === 'voice' || config.scenario === 'voice-receive' || config.scenario === 'music') {
       await joinCallOnSession(session.key, voice.id);
       report.voiceChannelId = voice.id;
       await publish('voice-joined');
       await until(() => webRtcManager.getVoiceStatus().connectedP2pPeers.length > 0, 'real SDK bot P2P peer', owner.signal);
       report.peers = webRtcManager.getVoiceStatus().connectedP2pPeers.length;
       report.muted = voiceStore.isMuted;
-      if (!report.muted) throw new Error('Prepared QA must start with its synthetic microphone muted.');
+      if (!report.muted) throw new Error('Prepared QA must start with its microphone muted.');
+      if (config.scenario === 'voice-receive') {
+        const botRow = () => {
+          const user = session.serverStore.serverDetails?.members.find((member) => member.id === report.botId);
+          return user ? document.getElementById(`voice-mini-user-${user.sessionId}`) : null;
+        };
+        await until(() => {
+          const row = botRow();
+          return !!row?.querySelector('.bot-voice-listening') && !row.querySelector('.audio-state-icon--blocked');
+        }, 'visible listening notice without a denial for unrequested publication', owner.signal);
+        if (config.smoke) {
+          for (const listening of [false, true]) {
+            await session.client.sendRequest(MessageType.COMMAND_INVOKE, {
+              botId: report.botId, channelId: text.id, commandName: 'qa-listen',
+            }, undefined, 30_000);
+            await until(() => {
+              const row = botRow();
+              return !!row && !row.querySelector('.audio-state-icon--blocked') &&
+                !!row.querySelector('.bot-voice-listening') === listening;
+            }, 'listening toggle through the real SDK command and voice roster', owner.signal);
+          }
+          for (const [type, key, blocked] of [
+            [MessageType.ADMIN_MUTE_USER, 'muted', 1],
+            [MessageType.ADMIN_DEAFEN_USER, 'deafened', 2],
+          ] as const) {
+            for (const enabled of [true, false]) {
+              await session.client.sendRequest(type, { targetUserId: report.botId, [key]: enabled }, undefined, 30_000);
+              await until(() => {
+                const row = botRow();
+                return !!row && row.querySelectorAll('.audio-state-icon--blocked').length === (enabled ? blocked : 0) &&
+                  !!row.querySelector('.bot-voice-listening') === !(key === 'deafened' && enabled);
+              }, 'administrative restrictions independent of bot capability requests', owner.signal);
+            }
+          }
+        }
+      }
     }
     if (config.scenario === 'tool-consent' || config.scenario === 'music') {
       const command = session.chatStore.getCommands().find((candidate) => candidate.botId === report.botId &&
@@ -152,7 +294,7 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
       if (!document.querySelector('.server-settings-modal-card')) throw new Error('The real server-settings UI did not open.');
     }
     if (session.client.getStatus() !== 'CONNECTED') throw new Error('The QA session disconnected during preparation.');
-    if (config.scenario === 'voice' || config.scenario === 'music') {
+    if (config.scenario === 'voice' || config.scenario === 'voice-receive' || config.scenario === 'music') {
       const current = webRtcManager.getVoiceStatus();
       if (current.channelId !== voice.id || current.connectedP2pPeers.length === 0) {
         throw new Error('The real voice peer disconnected during preparation.');

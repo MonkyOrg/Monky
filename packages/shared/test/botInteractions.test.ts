@@ -34,7 +34,46 @@ import {
   getCommandPresentation,
   normalizeBotLocale,
   resolveBotLocale,
+  nativeLiveFormCreateSchema,
+  nativeLiveFormDefinitionSchema,
+  validateNativeLiveFormValues,
+  eventSaveSchema,
+  liveActionCreateSchema,
+  nativePollCreateSchema,
+  resourceAudienceProjectionSchema,
+  resourceAudienceSchema,
 } from '../src/index.js';
+
+const privateAudience = { visibility: 'private', userIds: ['member'], roleIds: ['role'] } as const;
+assert.equal(resourceAudienceSchema.safeParse(privateAudience).success, true);
+assert.equal(resourceAudienceSchema.safeParse({ visibility: 'private', userIds: [], roleIds: [] }).success, false);
+assert.equal(resourceAudienceSchema.safeParse({ visibility: 'private', userIds: ['member', 'member'], roleIds: [] }).success, false);
+assert.equal(resourceAudienceProjectionSchema.safeParse({ visibility: 'private' }).success, true);
+assert.deepEqual(eventSaveSchema.parse({
+  title: 'Public event', description: '', location: { kind: 'external', label: 'Outside' },
+  startsAt: 10, endsAt: 20, repeat: 'none', timeZone: 'UTC',
+}).audience, { visibility: 'public' });
+assert.equal(eventSaveSchema.safeParse({
+  title: 'Private event', description: '', location: { kind: 'external', label: 'Outside' },
+  startsAt: 10, endsAt: 20, repeat: 'none', timeZone: 'UTC', audience: privateAudience,
+}).success, true);
+assert.equal(nativePollCreateSchema.safeParse({
+  channelId: 'channel', question: 'Private?', options: [
+    { label: 'Yes', emoji: null }, { label: 'No', emoji: null },
+  ], durationMinutes: 10, audience: privateAudience,
+}).success, true);
+assert.equal(nativePollCreateSchema.safeParse({
+  channelId: 'channel', question: 'Invalid?', options: [
+    { label: 'Yes', emoji: null }, { label: 'No', emoji: null },
+  ], durationMinutes: 10, audience: { visibility: 'private', userIds: [], roleIds: [] },
+}).success, false);
+assert.equal(liveActionCreateSchema.safeParse({
+  channelId: 'channel', invocationId: 'invocation', title: 'Private action', description: '',
+  content: { kind: 'form', form: {
+    title: 'Form', fields: [{ name: 'answer', label: 'Answer', type: 'text', required: true }],
+  } },
+  expiresAt: 100, audience: privateAudience,
+}).success, true);
 
 const fields = botFormSchema.parse({
   title: 'Poll',
@@ -46,6 +85,72 @@ const fields = botFormSchema.parse({
     { name: 'count', label: 'Count', type: 'integer', min: 2, max: 100 },
   ],
 });
+
+const nativeForm = {
+  title: 'Check-in',
+  submitLabel: 'Send',
+  fields: [
+    { name: 'short', label: 'Short text', type: 'text', maxLength: 120 },
+    { name: 'long', label: 'Long text', type: 'text', maxLength: 2_000, multiline: true },
+    { name: 'count', label: 'Number', type: 'integer', min: 0, max: 100 },
+    { name: 'enabled', label: 'Yes or no', type: 'boolean' },
+    { name: 'choice', label: 'One choice', type: 'select', choices: [
+      { label: 'First', value: 'first' },
+      { label: 'Second', value: 'second' },
+    ] },
+    { name: 'multiple', label: 'Many choices', type: 'multi-select', choices: [
+      { label: 'First', value: 'first' },
+      { label: 'Second', value: 'second' },
+      { label: 'Third', value: 'third' },
+    ] },
+    { name: 'rating', label: 'Rating', type: 'rating', required: true },
+  ],
+} as const;
+assert.equal(nativeLiveFormDefinitionSchema.safeParse(nativeForm).success, true);
+const parsedNativeForm = nativeLiveFormDefinitionSchema.parse(nativeForm);
+assert.equal(parsedNativeForm.anonymous, false);
+assert.equal(nativeLiveFormDefinitionSchema.parse({ ...nativeForm, anonymous: true }).anonymous, true);
+assert.deepEqual(validateNativeLiveFormValues(parsedNativeForm, {
+  short: 'Answer', count: 2, enabled: true, choice: 'first', multiple: ['first', 'third'], rating: 4,
+}), {
+  success: true,
+  values: { short: 'Answer', count: 2, enabled: true, choice: 'first', multiple: ['first', 'third'], rating: 4 },
+});
+assert.deepEqual(validateNativeLiveFormValues(parsedNativeForm, { rating: 0 }), {
+  success: false, field: 'rating', reason: 'choice',
+});
+assert.deepEqual(validateNativeLiveFormValues(parsedNativeForm, { rating: 6 }), {
+  success: false, field: 'rating', reason: 'choice',
+});
+assert.deepEqual(validateNativeLiveFormValues(parsedNativeForm, { multiple: ['first', 'first'] }), {
+  success: false, field: 'multiple', reason: 'choice',
+});
+assert.deepEqual(validateNativeLiveFormValues(parsedNativeForm, { multiple: ['unknown'] }), {
+  success: false, field: 'multiple', reason: 'choice',
+});
+for (const type of ['string-list', 'image-list']) {
+  assert.equal(nativeLiveFormDefinitionSchema.safeParse({
+    title: 'Unsupported',
+    fields: [{ name: 'unsupported', label: 'Unsupported', type }],
+  }).success, false, `Native live forms must reject ${type}.`);
+}
+for (const durationMinutes of [1, 43_200]) {
+  assert.equal(nativeLiveFormCreateSchema.safeParse({
+    channelId: 'channel', form: nativeForm, durationMinutes,
+  }).success, true);
+}
+for (const durationMinutes of [0, 43_201, 1.5]) {
+  assert.equal(nativeLiveFormCreateSchema.safeParse({
+    channelId: 'channel', form: nativeForm, durationMinutes,
+  }).success, false);
+}
+assert.equal(nativeLiveFormCreateSchema.safeParse({
+  channelId: 'channel', form: nativeForm, durationMinutes: 10, audience: privateAudience,
+}).success, true);
+assert.equal(nativeLiveFormCreateSchema.safeParse({
+  channelId: 'channel', form: nativeForm, durationMinutes: 10,
+  audience: { visibility: 'private', userIds: [], roleIds: [] },
+}).success, false);
 
 const preview = { url: 'https://cdn.example.test/audio.mp3', fileName: 'audio.mp3', durationMs: 1500 };
 
@@ -289,6 +394,31 @@ for (const badValues of [
   { question: 'Question', options: ['First', 'Second'], extra: 'unexpected' },
   { question: '', options: ['First', 'Second'] },
 ]) assert.equal(validateBotFormValues(fields, badValues).success, false);
+const imageForm = botFormSchema.parse({
+  title: 'Images',
+  fields: [{
+    name: 'images', label: 'Images', type: 'image-list', maxItems: 5,
+    presentation: { format: 'portrait', fit: 'contain', size: 'compact' },
+  }],
+});
+assert.deepEqual(imageForm.fields[0], {
+  name: 'images', label: 'Images', type: 'image-list', maxItems: 5,
+  presentation: { format: 'portrait', fit: 'contain', size: 'compact' },
+});
+const imageRefs = [
+  'f2b47144-577a-4ea0-8d09-93e0d39a6b6e',
+  '4d2dc33a-3500-4af3-991f-7789f7247806',
+];
+assert.deepEqual(validateBotFormValues(imageForm, { images: imageRefs }), {
+  success: true,
+  values: { images: imageRefs },
+});
+assert.equal(validateBotFormValues(imageForm, { images: ['not-an-asset-reference'] }).success, false);
+assert.equal(validateBotFormValues(imageForm, { images: [...imageRefs, ...imageRefs, imageRefs[0]] }).success, false);
+assert.equal(botFormSchema.safeParse({
+  title: 'Unsafe images',
+  fields: [{ name: 'images', label: 'Images', type: 'image-list', presentation: { width: '200vw' } }],
+}).success, false);
 assert.equal(botFormSchema.safeParse({
   title: 'Bad form', fields: [{ name: 'text', label: 'Text', type: 'text', minLength: 10, maxLength: 5 }],
 }).success, false);

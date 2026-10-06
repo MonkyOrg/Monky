@@ -296,7 +296,7 @@ export async function checkForUpdate(
     console.log(color(t('update.upToDate'), ANSI.green));
   }
   const compatibility = await fetchReleaseCompatibility(latest.version);
-  if (compatibility.status === 'available' && compatibility.manifest.protocolVersion !== PROTOCOL_VERSION) {
+  if (compatibility.status === 'available' && releaseRequiresProtocolUpdate(compatibility.manifest, 'bot')) {
     console.log(color(t('update.compatibilityChanged', {
       protocol: compatibility.manifest.protocolVersion, sdk: compatibility.manifest.botSdkVersion,
     }), ANSI.yellow));
@@ -628,3 +628,4 @@ export async function disableAutoUpdate(dataDir: string): Promise<void> {
   runSync('pm2', ['save'], { stdio: 'ignore' });
   console.log(color(t('update.autoUpdateDisabled'), ANSI.green));
 }
+import { releaseRequiresProtocolUpdate } from '@monky/shared';

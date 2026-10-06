@@ -11,6 +11,7 @@ const require = createRequire(import.meta.url);
 const { WebSocket } = require('ws');
 const { MonkyServer } = require('../apps/server/dist/server.js');
 const { BotClient, BOT_CAPABILITIES, LIMITS, MessageType, PROTOCOL_VERSION } = require('../packages/bot-sdk/dist/index.js');
+const { rtcSignalSchema } = require('@monky/shared');
 
 function identity() {
   const pair = generateKeyPairSync('ed25519');
@@ -34,6 +35,7 @@ class Peer {
   voiceQueue = Promise.resolve();
   voiceEnabled = false;
   voiceChannelId = null;
+  voiceSubscriptionId = randomUUID();
   voiceError = null;
 
   constructor(url) {
@@ -105,7 +107,10 @@ class Peer {
     }
     if (message.type === MessageType.VOICE_USER_JOINED) {
       const joining = message.payload.sessionId === this.sessionId;
-      if (joining) this.voiceChannelId = message.payload.channelId;
+      if (joining) {
+        this.voiceChannelId = message.payload.channelId;
+        this.voiceSubscriptionId = randomUUID();
+      }
       if (message.payload.channelId !== this.voiceChannelId) return;
       const sessions = [...(message.payload.participants ?? []).map((member) => member.voiceState.sessionId), message.payload.sessionId];
       for (const sessionId of sessions) {
@@ -173,6 +178,9 @@ class Peer {
   }
 
   send(type, payload, requestId) {
+    if (type === MessageType.RTC_SIGNAL) {
+      payload = rtcSignalSchema.parse({ ...payload, subscriptionId: this.voiceSubscriptionId });
+    }
     this.ws.send(JSON.stringify({ type, payload, requestId }));
   }
 
@@ -941,6 +949,18 @@ process.on('message', (message) => {
     };
     let runtime = startSoundBot();
     try {
+      const declaration = await owner.wait((message) => message.type === MessageType.BOT_SETTINGS_LIST_RESPONSE &&
+        message.payload.bots?.some((summary) => summary.botId === account.bot.id &&
+          Array.isArray(summary.permissions?.requested)), 'sound bot capability declaration', 15000);
+      const permissions = declaration.payload.bots.find((summary) => summary.botId === account.bot.id).permissions;
+      assert.deepEqual(permissions.requested, ['commands', 'sound_download']);
+      assert.deepEqual(permissions.granted, [], 'The manual link must wait for administrator approval.');
+      const beforeApproval = await owner.request(MessageType.COMMANDS_LIST, {});
+      assert.equal(beforeApproval.commands.some((command) => command.botId === account.bot.id), false);
+      const approval = await owner.request(MessageType.BOT_PERMISSIONS_UPDATE, {
+        botId: account.bot.id, expectedRevision: permissions.revision, granted: permissions.requested,
+      });
+      assert.deepEqual(approval.permissions.granted, ['commands', 'sound_download']);
       await waitForSoundBot(runtime);
       await new Promise((resolve) => setTimeout(resolve, LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS));
       const found = await owner.request(MessageType.COMMAND_AUTOCOMPLETE, {

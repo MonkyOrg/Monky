@@ -79,8 +79,9 @@ export class AvatarStorageService {
   /**
    * Saves validated buffer safely without path traversal
    */
-  public async saveAvatar(buffer: Buffer, extension: string): Promise<string> {
-    const filename = `${uuidv4()}.${extension}`;
+  public async saveAvatar(buffer: Buffer, extension: string, prefix = ''): Promise<string> {
+    if (prefix && !/^[a-z0-9-]+$/.test(prefix)) throw new Error('Invalid image prefix.');
+    const filename = `${prefix}${uuidv4()}.${extension}`;
     const filePath = path.join(this.avatarsDir, filename);
 
     // Ensure within directory
@@ -140,6 +141,23 @@ export class AvatarStorageService {
       } catch (err) {
         Logger.warn('SECURITY', `Could not delete old avatar: ${filename}`);
       }
+    }
+  }
+
+  public renameAvatar(filename: string, prefix: string): string {
+    if (!/^[a-z0-9-]+$/.test(prefix)) throw new Error('Invalid image prefix.');
+    const source = this.getAvatarFile(filename);
+    if (!source) throw new Error('Image asset not found.');
+    const extension = path.extname(filename);
+    const next = `${prefix}${uuidv4()}${extension}`;
+    fs.renameSync(source.filePath, path.join(this.avatarsDir, next));
+    return next;
+  }
+
+  public deleteAvatarsWithPrefix(prefix: string): void {
+    if (!/^[a-z0-9-]+$/.test(prefix)) throw new Error('Invalid image prefix.');
+    for (const filename of fs.readdirSync(this.avatarsDir)) {
+      if (filename.startsWith(prefix)) this.deleteAvatar(filename);
     }
   }
 }

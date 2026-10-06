@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Corrigida a saída involuntária ao entrar novamente em uma chamada rapidamente. Confirmações atrasadas da saída anterior não interrompem a nova conexão nem removem seu áudio.",
+  "en": "Fixed unexpectedly leaving a call after quickly rejoining. Delayed acknowledgements of the previous departure no longer interrupt the new connection or remove its audio."
+}

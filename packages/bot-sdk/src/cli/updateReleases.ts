@@ -7,12 +7,14 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { list } from 'tar';
 import type { UpdateProgressHandler } from './updateProgress';
+import { CliError } from './locale';
 import {
   httpsUpdateUrl, isBotVersion, isRecord, releaseAssetName,
   type BotPackageDefinition, type GitHubReleaseSource, type HttpsUpdateSource,
 } from '../tooling/config';
 
 const GITHUB_API = 'https://api.github.com';
+export const GITHUB_TOKEN_CREATION_URL = 'https://github.com/settings/personal-access-tokens/new';
 const JSON_ACCEPT = 'application/vnd.github+json';
 const ASSET_ACCEPT = 'application/octet-stream';
 const JSON_TIMEOUT_MS = 15_000;
@@ -126,13 +128,18 @@ export function compareVersions(left: string, right: string): number {
   return 0;
 }
 
+export function validateUpdateToken(value: unknown): string {
+  if (typeof value !== 'string' || !value || value.length > 8192 || !/^[\x21-\x7e]+$/.test(value)) {
+    throw new CliError('O token GitHub/de atualização deve ser um único token, sem espaços nem quebras de linha.',
+      'The GitHub/update token must be a single header-safe token, without spaces or line breaks.');
+  }
+  return value;
+}
+
 function environmentToken(tokenEnv: string, env: NodeJS.ProcessEnv): string | null {
   const direct = env[tokenEnv];
   if (typeof direct !== 'string' || !direct.trim()) return null;
-  if (direct.length > 8192 || !/^[\x21-\x7e]+$/.test(direct)) {
-    throw new Error(`The update credential in ${tokenEnv} must be a single header-safe token.`);
-  }
-  return direct;
+  return validateUpdateToken(direct);
 }
 
 function releaseToken(tokenEnv: string, env: NodeJS.ProcessEnv = process.env): string | null {
@@ -400,10 +407,14 @@ export async function fetchLatestRelease(
     const url = `${GITHUB_API}/repos/${source.repository}/releases?per_page=100&page=${page}`;
     const response = await githubJson(url, token);
     if (response.statusCode === 404) {
-      throw new Error(`GitHub releases for ${source.repository} are not accessible. If the repository is private, set ${source.tokenEnv}${source.tokenEnv === 'GH_TOKEN' ? ' or GITHUB_TOKEN' : ''}.`);
+      throw new CliError(
+        `As releases de ${source.repository} não estão acessíveis. Se o repositório for privado, defina ${source.tokenEnv}${source.tokenEnv === 'GH_TOKEN' ? ' ou GITHUB_TOKEN' : ''} ou use ${definition.cliName} config update-token. Crie um fine-grained token com Contents: Read-only para o repositório em ${GITHUB_TOKEN_CREATION_URL}.`,
+        `GitHub releases for ${source.repository} are not accessible. If the repository is private, set ${source.tokenEnv}${source.tokenEnv === 'GH_TOKEN' ? ' or GITHUB_TOKEN' : ''}, or use ${definition.cliName} config update-token. Create a fine-grained token with repository Contents: Read-only at ${GITHUB_TOKEN_CREATION_URL}.`);
     }
     if (response.statusCode === 401 || response.statusCode === 403) {
-      throw new Error(`GitHub denied access to ${source.repository} (HTTP ${response.statusCode}). Check ${source.tokenEnv}${source.tokenEnv === 'GH_TOKEN' ? ' or GITHUB_TOKEN' : ''}.`);
+      throw new CliError(
+        `O GitHub recusou o acesso a ${source.repository} (HTTP ${response.statusCode}). Confira ${source.tokenEnv} ou use ${definition.cliName} config update-token. Um fine-grained token exige Contents: Read-only no repositório e eventual aprovação da organização: ${GITHUB_TOKEN_CREATION_URL}.`,
+        `GitHub denied access to ${source.repository} (HTTP ${response.statusCode}). Check ${source.tokenEnv}${source.tokenEnv === 'GH_TOKEN' ? ' or GITHUB_TOKEN' : ''}, or use ${definition.cliName} config update-token. A fine-grained token needs repository Contents: Read-only and any required organization approval: ${GITHUB_TOKEN_CREATION_URL}.`);
     }
     if (response.statusCode !== 200) {
       throw new Error(`GitHub releases lookup failed with HTTP ${response.statusCode}.`);

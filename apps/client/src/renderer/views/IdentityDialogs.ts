@@ -1,8 +1,11 @@
 import jsQR from 'jsqr';
 import QRCode from 'qrcode';
+import type { DmExportMode } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { applyBackup, BACKUP_FILE_EXTENSION, BackupScope, collectBackup, parseBackup, scopesInBackup } from '../utils/backup';
+import { withButtonLoading } from '../utils/buttonLoading';
 
 export interface IdentityInfo {
   publicKey: string;
@@ -53,6 +56,23 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
             <span class="toggle-slider"></span>
           </label>
         </div>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+          <label style="font-size: 13px; cursor: pointer;" for="identity-export-include-friends">${t('backup.scopeFriends')}</label>
+          <label class="toggle-switch" aria-label="${t('backup.scopeFriends')}">
+            <input type="checkbox" id="identity-export-include-friends" checked>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div id="identity-export-history-row" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-left: 16px;">
+          <div style="display: grid; gap: 2px;">
+            <label style="font-size: 13px; cursor: pointer;" for="identity-export-include-history">${t('backup.scopeDmHistory')}</label>
+            <span style="font-size: 11px; color: var(--text-muted);">${t('backup.scopeDmHistoryHint')}</span>
+          </div>
+          <label class="toggle-switch" aria-label="${t('backup.scopeDmHistory')}">
+            <input type="checkbox" id="identity-export-include-history">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
       </div>
       <div style="display: flex; gap: 8px; margin-bottom: 14px;">
         <button type="button" id="btn-run-export-identity" class="btn btn-primary" style="flex: 1;">${t('identity.exportAction')}</button>
@@ -76,11 +96,12 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
 
   const cleanup = () => {
     document.removeEventListener('keydown', onKeyDown, true);
-    backdrop.remove();
+    exitModal(backdrop);
   };
 
   const close = () => cleanup();
   const onKeyDown = (event: KeyboardEvent) => {
+    if (!handlesModalKey(backdrop, event)) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       close();
@@ -94,6 +115,16 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
   const fileButton = backdrop.querySelector('#btn-file-export-identity') as HTMLButtonElement;
   const includeServers = backdrop.querySelector('#identity-export-include-servers') as HTMLInputElement;
   const includeSettings = backdrop.querySelector('#identity-export-include-settings') as HTMLInputElement;
+  const includeFriends = backdrop.querySelector('#identity-export-include-friends') as HTMLInputElement;
+  const includeHistory = backdrop.querySelector('#identity-export-include-history') as HTMLInputElement;
+  const historyRow = backdrop.querySelector('#identity-export-history-row') as HTMLElement;
+  // History travels with the friends list; without friends it has no owner.
+  const syncHistoryRow = () => {
+    includeHistory.disabled = !includeFriends.checked;
+    historyRow.style.opacity = includeFriends.checked ? '1' : '0.5';
+  };
+  includeFriends.addEventListener('change', syncHistoryRow);
+  syncHistoryRow();
   const resultWrapper = backdrop.querySelector('#identity-export-result') as HTMLElement;
   const qrImage = backdrop.querySelector('#identity-export-qr') as HTMLImageElement;
   const qrWrap = backdrop.querySelector('#identity-export-qr-wrap') as HTMLElement;
@@ -121,7 +152,8 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
       if (includeSettings.checked) scopes.push('settings');
       const extras = scopes.length > 0 ? JSON.stringify(collectBackup(scopes)) : undefined;
 
-      const exported = await window.api.exportIdentity(passwordInput.value, extras);
+      const dmMode: DmExportMode = !includeFriends.checked ? 'none' : includeHistory.checked ? 'history' : 'friends';
+      const exported = await window.api.exportIdentity(passwordInput.value, extras, dmMode);
       codeTextarea.value = exported;
       resultWrapper.style.display = 'block';
       copyButton.style.display = 'inline-flex';
@@ -161,7 +193,9 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
   });
 
   fileButton.addEventListener('click', async () => {
-    const result = await window.api.saveBackupFile(codeTextarea.value, `monky-identidade.${BACKUP_FILE_EXTENSION}`);
+    const result = await withButtonLoading(fileButton, () =>
+      window.api.saveBackupFile(codeTextarea.value, `monky-identidade.${BACKUP_FILE_EXTENSION}`));
+    if (!result) return;
     if (!result.success && result.error) showError(result.error);
   });
 
@@ -173,6 +207,7 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
   });
   document.addEventListener('keydown', onKeyDown, true);
   document.body.appendChild(backdrop);
+  enterModal(backdrop);
   passwordInput.focus();
 }
 
@@ -255,7 +290,7 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
     const cleanup = () => {
       stopScan();
       document.removeEventListener('keydown', onKeyDown, true);
-      backdrop.remove();
+      exitModal(backdrop);
     };
 
     const settle = (identity: IdentityInfo | null) => {
@@ -300,6 +335,7 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (!handlesModalKey(backdrop, event)) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         settle(null);
@@ -343,7 +379,8 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
 
     fileButton.addEventListener('click', async () => {
       clearError();
-      const result = await window.api.openBackupFile();
+      const result = await withButtonLoading(fileButton, () => window.api.openBackupFile());
+      if (!result) return;
       if (!result.success) {
         if (result.error) showError(result.error);
         return;
@@ -360,6 +397,7 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
     });
     document.addEventListener('keydown', onKeyDown, true);
     document.body.appendChild(backdrop);
+    enterModal(backdrop);
     codeInput.focus();
   });
 }

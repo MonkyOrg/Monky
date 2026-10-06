@@ -33,7 +33,7 @@ export function bindPttIndicators(container: HTMLElement): () => void {
     const title = describePttState(state);
     container.querySelectorAll<HTMLButtonElement>('[data-microphone-control]').forEach((button) => {
       const muted = voiceStore.isMuted || voiceStore.isDeafened;
-      const blocked = moderation.serverMuted || moderation.serverDeafened;
+      const blocked = moderation.serverMuted || moderation.serverDeafened || moderation.permissionMuted;
       const showPtt = enabled && !muted;
       const gateState = state === 'muted' ? 'closed' : state;
       const buttonState = muted ? 'muted' : enabled ? gateState : 'idle';
@@ -50,6 +50,7 @@ export function bindPttIndicators(container: HTMLElement): () => void {
       button.setAttribute('aria-pressed', String(voiceStore.isMuted));
       button.setAttribute('aria-label', description);
       button.title = description;
+      button.disabled = moderation.permissionMuted;
       updateAudioStateIcon(button, icon, blocked);
       const modeLabel = button.querySelector<HTMLElement>('[data-ptt-mode]');
       if (modeLabel) {

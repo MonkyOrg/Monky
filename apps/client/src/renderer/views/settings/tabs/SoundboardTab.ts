@@ -2,6 +2,7 @@ import { settingsStore } from '../../../stores/settingsStore';
 import { soundboardService, SoundItem } from '../../../core/SoundboardService';
 import { getLanguage, t, tCount } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
+import { enterModal, exitModal } from '../../../utils/modalSurface';
 import { matchesSearch } from '../../../utils/search';
 import { sortFavoritesFirst } from '../../../utils/favoriteOrder';
 import { FavoriteListMotion, type FavoriteMotionKind } from '../../../utils/favoriteMotion';
@@ -11,8 +12,10 @@ import { favoritesStore, soundFavoriteKey } from '../../../stores/favoritesStore
 import { clientLog } from '../../../core/ClientLogService';
 import { renderFavoriteToggle, renderFavoritesFilter } from '../../FavoritesControls';
 import { showAlert } from '../../Dialog';
+import { setButtonLoading } from '../../../utils/buttonLoading';
 import type { SoundboardDownloadAvailability } from '@monky/shared';
 import { renderLoadingError, renderLoadingSkeleton } from '../../../utils/loadingSkeleton';
+import { bindSoundboardLimiterControls, renderSoundboardLimiterControls } from '../../SoundboardLimiterControls';
 
 export class SoundboardTab {
   private searchQuery: string = '';
@@ -95,6 +98,10 @@ export class SoundboardTab {
             <span class="toggle-slider"></span>
           </label>
         </div>
+      </div>
+
+      <div data-settings-section="soundboard-limiter" data-settings-label="${escapeHtml(t('settings.soundboardLimiter'))}" class="form-group" style="margin-top: 16px;">
+        ${renderSoundboardLimiterControls('soundboard')}
       </div>
 
       <!-- Soundboard Shortcuts Table -->
@@ -237,6 +244,7 @@ export class SoundboardTab {
     const sliderVol = container.querySelector<HTMLInputElement>('#slider-soundboard-vol');
     const volVal = container.querySelector<HTMLElement>('#soundboard-vol-val');
     const checkboxMute = container.querySelector<HTMLInputElement>('#checkbox-soundboard-mute');
+    const unbindLimiter = bindSoundboardLimiterControls(container);
     let observedFolder = settingsStore.soundboardFolderPath;
     this.unbindSettings = appEvents.on('settings.updated', () => {
       if (observedFolder === settingsStore.soundboardFolderPath) return;
@@ -247,6 +255,7 @@ export class SoundboardTab {
     const handlePickFolder = async () => {
       if (this.pickingFolder) return;
       this.setPickingFolder(true);
+      setButtonLoading(btnSelectFolder, true);
       try {
         const folder = await soundboardService.selectFolder();
         if (!folder || !container.isConnected) return;
@@ -264,6 +273,7 @@ export class SoundboardTab {
           await showAlert({ title: t('common.error'), message: t('soundboard.chooseFolderFailed'), variant: 'danger' });
         }
       } finally {
+        setButtonLoading(btnSelectFolder, false);
         this.setPickingFolder(false);
         if (this.folderContainer) await this.refreshFolderDownloadState(this.folderContainer);
       }
@@ -271,6 +281,7 @@ export class SoundboardTab {
     const handleConfirmFolder = async () => {
       if (this.pickingFolder) return;
       this.setPickingFolder(true);
+      setButtonLoading(btnConfirmFolder, true);
       try {
         await soundboardService.confirmConfiguredFolder();
       } catch (error: unknown) {
@@ -281,6 +292,7 @@ export class SoundboardTab {
           await showAlert({ title: t('common.error'), message: t('soundboard.confirmFolderFailed'), variant: 'danger' });
         }
       } finally {
+        setButtonLoading(btnConfirmFolder, false);
         this.setPickingFolder(false);
         if (this.folderContainer) await this.refreshFolderDownloadState(this.folderContainer);
       }
@@ -293,6 +305,7 @@ export class SoundboardTab {
       btnSelectFolder?.removeEventListener('click', handlePickFolder);
       inputPath?.removeEventListener('click', handlePickFolder);
       btnConfirmFolder?.removeEventListener('click', handleConfirmFolder);
+      unbindLimiter();
     };
     this.setPickingFolder(this.pickingFolder);
     void this.refreshFolderDownloadState(container);
@@ -480,6 +493,7 @@ export class SoundboardTab {
     `;
 
     document.body.appendChild(backdrop);
+    enterModal(backdrop);
 
     const disposeCapture = captureShortcut(backdrop, backdrop.querySelector('#sb-keybind-capture-box'), (combo) => {
       settingsStore.soundboardShortcuts[soundName] = combo;
@@ -493,7 +507,7 @@ export class SoundboardTab {
 
     const cleanup = () => {
       disposeCapture();
-      backdrop.remove();
+      exitModal(backdrop);
     };
 
     backdrop.querySelector('#btn-cancel-keybind')?.addEventListener('click', cleanup);

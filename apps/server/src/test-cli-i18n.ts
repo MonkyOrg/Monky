@@ -14,6 +14,7 @@ import { CONFIG_KEYS, PERMISSION_OPTIONS } from './cli/constants';
 import { GlobalArgs, withContext } from './cli/context';
 import { askConfigKey, setConfig, showConfig } from './cli/commands/config';
 import { createCommand } from './cli/commands/create';
+import { cliLanguageCommand } from './cli/commands/cliSettings';
 import { listMembers, showMemberInfo } from './cli/commands/members';
 import { listRoles } from './cli/commands/roles';
 import { printServerTable, restartServerCommand, startServerCommand, statusServerCommand } from './cli/commands/serverLifecycle';
@@ -652,7 +653,7 @@ test('members, roles and config display translated labels while retaining canoni
   context.mock.method(CoturnManager, 'describeAvailability', () => ({ supported: true }));
   await withContext(path.join(root, 'server-data'), async (ctx) => {
     await ctx.userRepo.create({
-      id: 'fixture-user', clientId: 'fixture-client', publicKey: 'synthetic-public-key',
+      id: 'fixture-user', clientId: '0123456789abcdef0123456789abcdef', publicKey: 'synthetic-public-key',
       nickname: 'Fixture Nickname', avatarPath: null, createdAt: 1, lastSeenAt: 2,
     });
     const admin = await ctx.roleRepo.findByName('Admin');
@@ -662,7 +663,7 @@ test('members, roles and config display translated labels while retaining canoni
       setCliLanguage(language);
       output.length = 0;
       await listMembers(ctx);
-      await showMemberInfo(ctx, 'fixture-client');
+      await showMemberInfo(ctx, '0123456789abcdef0123456789abcdef');
       await listRoles(ctx);
       await showConfig(ctx);
       const text = output.join('\n');
@@ -751,6 +752,26 @@ test('successful start and restart print persistent bot warnings from the effect
   }
 });
 
+test('start, restart and post-update restart retry while the server preview is still starting', async (context) => {
+  for (const command of ['start', 'restart', 'after-update'] as const) {
+    await context.test(command, async (subtest) => {
+      const f = lifecycleFixture(subtest);
+      const readPreview = onlineUsers.readLocalServerPreview;
+      let attempts = 0;
+      const probe = subtest.mock.method(onlineUsers, 'readLocalServerPreview', async (port: number) => {
+        if (++attempts === 1) return null;
+        return readPreview(port);
+      });
+      if (command === 'start') await startServerCommand(commandArgs(['start'], f.dataDir), ['--port', '4100']);
+      else await restartServerCommand(commandArgs(['restart'], f.dataDir), command === 'after-update' ? ['--after-update'] : []);
+      const expectedPort = command === 'start' ? 4100 : 3200;
+      assert.deepEqual(probe.mock.calls.map((call) => call.arguments[0]), [expectedPort, expectedPort]);
+      assert.ok(!f.output.includes(t('botCompatibility.unavailable')));
+      assert.ok(f.output.includes(t('botCompatibility.incompatible', { count: 1, protocol: PROTOCOL_VERSION })));
+    });
+  }
+});
+
 test('failed start or restart never claims that a running server was checked for bot compatibility', async (context) => {
   const f = lifecycleFixture(context);
   f.state.exitCode = 1;
@@ -826,9 +847,11 @@ test('detailed status checks bot compatibility only for a process that is runnin
   assert.deepEqual(f.commands, []);
 });
 
-test('startup reports unavailable preview diagnostics explicitly instead of claiming bots are compatible', async (context) => {
+test('startup reports missing compatibility diagnostics explicitly instead of claiming bots are compatible', async (context) => {
   const f = lifecycleFixture(context);
-  context.mock.method(onlineUsers, 'readLocalServerPreview', async () => null);
+  context.mock.method(onlineUsers, 'readLocalServerPreview', async () => ({
+    userCount: 0, voiceUserCount: 0, botCompatibility: null,
+  }));
   await startServerCommand(commandArgs(['start'], f.dataDir), []);
   assert.ok(f.output.includes(t('botCompatibility.unavailable')));
   assert.ok(f.output.includes(t('lifecycle.started')));
@@ -855,4 +878,73 @@ test('the built CLI exits promptly with localized help, validation and stderr in
     if (entry.status !== 0) assert.match(result.stderr, /monky --help/);
   }
   assert.equal(fs.existsSync(profile), false);
+});
+
+test('global settings switch language immediately without resolving a server and restore the process override', async context => {
+  const { profile } = fixture(context);
+  setTty(context, true);
+  captureConsole(context);
+  writeConfig('{"language":"pt-BR","sentinel":true}');
+  context.mock.method(target, 'resolveTargetServer', async () => assert.fail('Language settings do not need a server'));
+  const questions: string[] = [];
+  context.mock.method(prompts, 'askChoice', async (question: string, options: string[]) => {
+    questions.push(question);
+    return questions.length === 3 ? options[2] : options[0];
+  });
+  await main(['config']);
+  assert.deepEqual(questions, [ptBR['cliSettings.title'], ptBR['language.selectPrompt'], en['cliSettings.title']]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(profile, 'cli-config.json'), 'utf8')), { language: 'en', sentinel: true });
+  assert.equal(process.env.MONKY_LANG, undefined);
+});
+
+test('cancelled or failed language settings preserve the previous preference and live language', async context => {
+  fixture(context);
+  setTty(context, true);
+  writeConfig('{"language":"en","sentinel":true}');
+  const before = fs.readFileSync(getCliConfigPath(), 'utf8');
+  context.mock.method(prompts, 'askChoice', async () => { throw new Error(t('prompt.cancelled')); });
+  await assert.rejects(cliLanguageCommand([]), { message: en['prompt.cancelled'] });
+  assert.equal(getCliLanguage(), 'en');
+  assert.equal(fs.readFileSync(getCliConfigPath(), 'utf8'), before);
+  context.mock.method(fs, 'renameSync', () => { throw new Error('fixture rename denied'); });
+  await assert.rejects(cliLanguageCommand(['pt-BR']), /fixture rename denied/);
+  assert.equal(getCliLanguage(), 'en');
+  assert.equal(fs.readFileSync(getCliConfigPath(), 'utf8'), before);
+});
+
+test('arrow choice restores raw/flow state and releases its timer/listeners on selection, cancellation, EOF and errors', async context => {
+  fixture(context);
+  context.mock.method(process.stdout, 'write', () => true);
+  const originalInput = Object.getOwnPropertyDescriptor(process, 'stdin')!;
+  context.after(() => Object.defineProperty(process, 'stdin', originalInput));
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const outcome of ['select', 'escape', 'ctrl-c', 'ctrl-d', 'end', 'close', 'error'] as const) {
+    const wasRaw = outcome === 'select', wasFlowing = outcome === 'close';
+    const rawChanges: boolean[] = [];
+    const input = Object.assign(new PassThrough(), {
+      isTTY: true, isRaw: wasRaw,
+      setRawMode(raw: boolean) { this.isRaw = raw; rawChanges.push(raw); return this; },
+    });
+    if (wasFlowing) input.resume(); else input.pause();
+    Object.defineProperty(process, 'stdin', { configurable: true, value: input });
+    const pending = prompts.askChoiceArrows('Choice', Array.from({ length: 12 }, (_, index) => `Option ${index + 1}`));
+    input.emit('data', '1');
+    if (outcome === 'select') {
+      input.emit('data', '2');
+      assert.equal(await pending, 'Option 12');
+    } else {
+      const rejected = assert.rejects(pending, outcome === 'error' ? /fixture input error/ : /cancel/i);
+      if (outcome === 'escape') input.emit('data', '\u001b');
+      else if (outcome === 'ctrl-c') input.emit('data', '\u0003');
+      else if (outcome === 'ctrl-d') input.emit('data', '\u0004');
+      else if (outcome === 'error') input.emit('error', new Error('fixture input error'));
+      else input.emit(outcome);
+      await rejected;
+    }
+    context.mock.timers.tick(1000);
+    assert.deepEqual(rawChanges, [true, wasRaw]);
+    assert.equal(input.readableFlowing, wasFlowing);
+    for (const event of ['data', 'end', 'close', 'error']) assert.equal(input.listenerCount(event), 0, `${outcome}: ${event}`);
+    input.destroy();
+  }
 });

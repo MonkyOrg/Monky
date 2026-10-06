@@ -3,6 +3,7 @@ import type { CommandDraft } from '../stores/chatStore';
 import { getLanguage, t } from '../i18n';
 import { getAvatarUrl } from '../utils/avatar';
 import { escapeHtml } from '../utils/html';
+import { renderLoadingIndicator } from '../utils/loadingIndicator';
 import {
   commandValuesFromInputs,
   botInputError,
@@ -158,6 +159,7 @@ export function renderCompactCommand(
         <span class="material-symbols-outlined md-18">send</span>
       </button>
     </div>
+    ${preparing ? `<p class="bot-status bot-command-preparation" role="status">${renderLoadingIndicator(t('localExecution.preparing'))}</p>` : ''}
     ${draft.command.downloadsSound ? `<p class="bot-local-download-cue"><span class="material-symbols-outlined md-16" aria-hidden="true">download</span>${t('botChat.localDownload')}</p>` : ''}
     <p class="bot-command-voice-error" role="status" ${voiceError ? '' : 'hidden'}>${escapeHtml(voiceError ?? '')}</p>
     <p class="bot-error" role="alert" ${draft.error || !available ? '' : 'hidden'}>${escapeHtml(draft.error ?? (!available ? t('botChat.commandUnavailable') : ''))}</p>

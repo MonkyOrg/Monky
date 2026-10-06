@@ -16,6 +16,7 @@ import { DatabaseConnection } from './infrastructure/database/DatabaseConnection
 import { SqliteVoiceRestrictionRepository } from './infrastructure/database/SqliteVoiceRestrictionRepository';
 import { SfuManager, SfuProducerClosedError } from './infrastructure/sfu/SfuManager';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
+import './test-screen-subscriptions';
 
 function memoryRestrictions(): IVoiceRestrictionRepository {
   const saved = new Map<string, VoiceRestrictions>();
@@ -89,6 +90,7 @@ test('authentication supplies the current identity restriction before voice, aft
   server['sessionSockets'] = new Map();
   server['reconnectTimers'] = new Map();
   server['closing'] = false;
+  server['dmRelay'] = { register: () => {}, unregister: () => {} } as unknown as WebSocketServer['dmRelay'];
   server['broadcastRolesState'] = async () => {};
   server['handleCommandsList'] = () => {};
   const messages: Parameters<WebSocketServer['send']>[1][] = [];
@@ -170,6 +172,7 @@ function moderationFixture() {
   const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
   server['signalingService'] = service;
   server['closing'] = false;
+  server['sfuManager'] = new SfuManager();
   const grants = { bits: Permission.MUTE_MEMBERS | Permission.DEAFEN_MEMBERS };
   const permissions = Object.create(PermissionService.prototype) as PermissionService;
   permissions.getUserPermissions = async (id) => id === 'moderator' ? grants.bits : 0;
@@ -392,6 +395,7 @@ test('voice join snapshot is captured after async broadcast and includes peers w
   const sfu = new SfuManager();
   server['signalingService'] = service;
   server['sfuManager'] = sfu;
+  server['channelService'] = { canUserAccessChannel: async () => true } as unknown as WebSocketServer['channelService'];
   server['serverRepo'] = {
     getServer: async () => ({ id: 'server', name: 'Voice', passwordHash: '', createdAt: 1, maxUsers: 10, voiceMode: 'sfu' }),
     createServer: async () => {}, updateServer: async () => {},
@@ -458,8 +462,8 @@ test('SFU health is derived from both server ICE/DTLS transports, not signaling 
   } as MediasoupTypes.WebRtcTransport);
   const send = transport('send');
   const recv = transport('recv');
-  sfu['transports'].set('send', { transport: send, sessionId: 'peer', channelId: 'room', direction: 'send' });
-  sfu['transports'].set('recv', { transport: recv, sessionId: 'peer', channelId: 'room', direction: 'recv' });
+  sfu['transports'].set('send', { transport: send, sessionId: 'peer', channelId: 'room', direction: 'send', purpose: 'call' });
+  sfu['transports'].set('recv', { transport: recv, sessionId: 'peer', channelId: 'room', direction: 'recv', purpose: 'call' });
   const state = (target: MediasoupTypes.WebRtcTransport, ice: string, dtls: string, closed = false) => {
     Object.defineProperties(target, {
       iceState: { configurable: true, value: ice }, dtlsState: { configurable: true, value: dtls },
@@ -488,10 +492,14 @@ test('real missing-producer consume path replies before the delayed close broadc
   const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
   const sfu = new SfuManager();
   server['sfuManager'] = sfu;
+  server['signalingService'] = signaling();
+  await server['signalingService'].joinVoiceChannel('self', 'self', 'room');
+  await server['signalingService'].joinVoiceChannel('peer', 'peer', 'room');
   const transport = { id: 'recv', closed: false, close() {} } as MediasoupTypes.WebRtcTransport;
-  sfu['transports'].set('recv', { transport, sessionId: 'self', channelId: 'room', direction: 'recv' });
+  sfu['transports'].set('recv', { transport, sessionId: 'self', channelId: 'room', direction: 'recv', purpose: 'call' });
   sfu['producers'].set('producer', {
     producer: { id: 'producer', close() {} } as MediasoupTypes.Producer,
+    transportId: 'send-peer',
     sessionId: 'peer', channelId: 'room', kind: 'video', appData: { mediaType: 'camera' },
   });
   const session: Parameters<WebSocketServer['handleSfuConsume']>[0] = {
@@ -502,13 +510,18 @@ test('real missing-producer consume path replies before the delayed close broadc
   const sent: Parameters<WebSocketServer['send']>[1][] = [];
   const broadcasts: Parameters<WebSocketServer['send']>[1][] = [];
   server['send'] = (_ws, message) => { sent.push(message); };
+  assert.ok(server['projectScreenMessage'](session, {
+    type: MessageType.SFU_NEW_PRODUCER,
+    payload: { channelId: 'room', producerId: 'producer', producerSessionId: 'peer',
+      kind: 'video', appData: { mediaType: 'camera' } },
+  }), 'the consumer request must follow a producer advertised to this client');
   let releaseBroadcast = () => {};
   const pendingPermission = new Promise<void>((resolve) => { releaseBroadcast = resolve; });
   server['broadcastToChannel'] = async (_channelId, message) => {
     await pendingPermission;
     broadcasts.push(message);
   };
-  server['handleSfuProducerClosed'](session, { channelId: 'room', producerId: 'producer' });
+  server['handleSfuProducerClosed']({ ...session, sessionId: 'peer' }, { channelId: 'room', producerId: 'producer' });
   await server['handleSfuConsume'](session, {
     channelId: 'room', transportId: 'recv', producerId: 'producer', rtpCapabilities: {},
   }, 'consume-request');
@@ -524,6 +537,53 @@ test('real missing-producer consume path replies before the delayed close broadc
   sfu.close();
 });
 
+test('permission-muted SFU participants can publish video but not microphone or screen audio', async () => {
+  const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
+  const sfu = new SfuManager();
+  const service = signaling();
+  server['sfuManager'] = sfu;
+  server['signalingService'] = service;
+  server['closing'] = false;
+  const ws = Object.create(WebSocket.prototype) as WebSocket;
+  Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
+  const session: Parameters<WebSocketServer['handleSfuProduce']>[0] = {
+    ws, sessionId: 'self', isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+    user: { id: 'self', sessionId: 'self', clientId: 'self', nickname: 'Self', status: 'ONLINE', joinedAt: 1 },
+  };
+  server['sessions'] = new Map([[ws, session]]);
+  server['sessionSockets'] = new Map([['self', ws]]);
+  server['isCurrentSession'] = () => true;
+  const messages: Parameters<WebSocketServer['send']>[1][] = [];
+  server['send'] = (_ws, message) => { messages.push(message); };
+  server['broadcast'] = (message) => { messages.push(message); };
+  sfu.produce = async (_sessionId, _channelId, _transportId, _kind, _rtp, appData) =>
+    ({ id: `${appData?.mediaType ?? 'unknown'}-producer` });
+  sfu.setMicrophonesMuted = async () => {};
+  await service.joinVoiceChannel('self', 'self', 'room', false, false, true);
+  service.updateVoiceState('self', { screenShareIds: ['share'] });
+
+  await server['handleSfuProduce'](session, {
+    channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: {}, appData: { mediaType: 'mic' },
+  }, 'mic');
+  await server['handleSfuProduce'](session, {
+    channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: {}, appData: { mediaType: 'screen_audio', shareId: 'share' },
+  }, 'screen-audio');
+  await server['handleSfuProduce'](session, {
+    channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: {}, appData: { mediaType: 'camera' },
+  }, 'camera');
+  await server['handleSfuProduce'](session, {
+    channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: {}, appData: { mediaType: 'screen_video', shareId: 'share' },
+  }, 'screen-video');
+
+  assert.equal(messages.find(message => message.requestId === 'mic')?.type, MessageType.SERVER_ERROR);
+  assert.equal((messages.find(message => message.requestId === 'mic')?.payload as ServerErrorPayload).code, ProtocolErrorCode.PERMISSION_DENIED);
+  assert.equal(messages.find(message => message.requestId === 'screen-audio')?.type, MessageType.SERVER_ERROR);
+  assert.equal((messages.find(message => message.requestId === 'screen-audio')?.payload as ServerErrorPayload).code, ProtocolErrorCode.PERMISSION_DENIED);
+  assert.equal(messages.find(message => message.requestId === 'camera')?.type, MessageType.SFU_PRODUCED);
+  assert.equal(messages.find(message => message.requestId === 'screen-video')?.type, MessageType.SFU_PRODUCED);
+  sfu.close();
+});
+
 test('producer disappearance during worker consume is obsolete work, but transport errors stay genuine', async (t) => {
   for (const disappearance of [false, true]) {
     const sfu = new SfuManager();
@@ -534,9 +594,10 @@ test('producer disappearance during worker consume is obsolete work, but transpo
         throw error;
       },
     };
-    sfu['transports'].set('recv', { transport: transport as MediasoupTypes.WebRtcTransport, sessionId: 'self', channelId: 'room', direction: 'recv' });
+    sfu['transports'].set('recv', { transport: transport as MediasoupTypes.WebRtcTransport, sessionId: 'self', channelId: 'room', direction: 'recv', purpose: 'call' });
     sfu['producers'].set('producer', {
       producer: { id: 'producer', closed: false, close() {} } as MediasoupTypes.Producer,
+      transportId: 'send-peer',
       sessionId: 'peer', channelId: 'room', kind: 'video', appData: { mediaType: 'screen_video' },
     });
 
@@ -565,18 +626,20 @@ test('SFU pause and resume tolerate retired consumers but propagate failures of 
         id: 'consumer', closed: false, close() {}, pause: changeState, resume: changeState,
       };
       sfu['consumers'].set('consumer', {
-        consumer: consumer as MediasoupTypes.Consumer, sessionId: 'self', channelId: 'room', producerId: 'producer',
+        consumer: consumer as MediasoupTypes.Consumer, transportId: 'recv',
+        sessionId: 'self', channelId: 'room', producerId: 'producer',
       });
       sfu['producers'].set('producer', {
         producer: { id: 'producer', closed: false, close() {} } as MediasoupTypes.Producer,
+        transportId: 'send-peer',
         sessionId: 'peer', channelId: 'room', kind: 'audio', appData: { mediaType: 'mic' },
       });
       if (disappearance === 'before') sfu.closeProducer('producer');
       try {
         if (disappearance === 'none') {
-          await assert.rejects(sfu.setConsumerPaused('consumer', paused), actual => actual === error);
+          await assert.rejects(sfu.setConsumerPaused('self', 'room', 'consumer', paused), actual => actual === error);
         } else {
-          await sfu.setConsumerPaused('consumer', paused);
+          await sfu.setConsumerPaused('self', 'room', 'consumer', paused);
         }
         assert.equal(calls, disappearance === 'before' ? 0 : 1);
       } finally {
@@ -620,16 +683,18 @@ test('SFU allocations completing after a human reconnect are reaped without touc
         if (allocation === 'transport' || allocation === 'initialization') {
           sfu['transports'].set(entry.id, {
             transport: entry as MediasoupTypes.WebRtcTransport,
-            sessionId: 'self', channelId: 'room', direction: 'send',
+            sessionId: 'self', channelId: 'room', direction: 'send', purpose: 'call',
           });
         } else if (allocation === 'producer') {
           sfu['producers'].set(entry.id, {
             producer: entry as MediasoupTypes.Producer,
+            transportId: 'old-transport',
             sessionId: 'self', channelId: 'room', kind: 'audio', appData: { mediaType: 'mic' },
           });
         } else {
           sfu['consumers'].set(entry.id, {
             consumer: entry as MediasoupTypes.Consumer,
+            transportId: 'old-transport',
             sessionId: 'self', channelId: 'room', producerId: 'peer-producer',
           });
         }
@@ -657,7 +722,15 @@ test('SFU allocations completing after a human reconnect are reaped without touc
           channelId: 'room', transportId: 'old-transport', kind: 'audio', rtpParameters: {}, appData: { mediaType: 'mic' },
         }, 'old-request');
       } else {
+        await service.joinVoiceChannel('peer', 'peer', 'room');
+        sfu['producers'].set('peer-producer', {
+          producer: resource('peer-producer') as MediasoupTypes.Producer,
+          transportId: 'peer-transport', sessionId: 'peer', channelId: 'room',
+          kind: 'audio', appData: { mediaType: 'mic' },
+        });
+        let consumeStarted = false;
         sfu.consume = async () => {
+          consumeStarted = true;
           await gate;
           register(abandoned);
           return {
@@ -668,6 +741,7 @@ test('SFU allocations completing after a human reconnect are reaped without touc
         pending = server['handleSfuConsume'](session, {
           channelId: 'room', transportId: 'old-transport', producerId: 'peer-producer', rtpCapabilities: {},
         }, 'old-request');
+        assert.equal(consumeStarted, true, 'the authorized producer must reach allocation before the reconnect race');
       }
       const replacementSession = { ...session, ws: makeSocket() };
       session.replaced = true;

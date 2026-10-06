@@ -31,7 +31,11 @@ const baseConfig = () => ({
 test('QA scenarios validate explicit production, fixture and unprepared paths', () => {
   assert.deepEqual(scenarios, [...shared.DEVELOPMENT_QA_SCENARIOS]);
   assert.equal(parseQaArguments([]).scenario, 'connected');
+  assert.equal(parseQaArguments(['empty-forum']).scenario, 'empty-forum');
+  assert.equal(parseQaArguments([]).realMedia, false);
+  assert.equal(parseQaArguments(['connected', '--real-media']).realMedia, true);
   assert.equal(parseQaArguments(['voice']).bot, 'sdk-fixture');
+  assert.equal(parseQaArguments(['voice-receive']).bot, 'sdk-fixture');
   assert.equal(parseQaArguments(['tool-consent', '--bot=fixture']).bot, 'sdk-fixture');
   const production = parseQaArguments(['music', '--bot-root', path.join(repoRoot, 'explicit-bot'), '--smoke']);
   assert.equal(production.bot, 'production');
@@ -41,19 +45,41 @@ test('QA scenarios validate explicit production, fixture and unprepared paths', 
     ['home', '--bot=fixture'], ['login', '--bot=fixture'], ['bot-install'], ['tool-consent'],
     ['--bot-root'], ['--bot-root=relative'], ['--bot=fixture', '--bot=fixture'],
     ['--bot=fixture', `--bot-root=${repoRoot}`],
+    ['voice-receive', `--bot-root=${repoRoot}`],
+    ['--smoke', '--real-media'], ['--real-media', '--smoke'],
   ]) assert.throws(() => parseQaArguments(args), Error, args.join(' '));
   const valid = baseConfig();
   assert.equal(shared.developmentQaConfigSchema.safeParse(valid).success, true);
+  assert.equal(shared.developmentQaConfigSchema.safeParse({ ...valid, smoke: false, realMedia: true }).success, true);
   for (const config of [
     { ...valid, server: { ...valid.server, host: '0.0.0.0' } },
     { ...valid, server: { ...valid.server, password: 'short' } },
     { ...valid, scenario: 'music', bot: { kind: 'sdk-fixture', manifestUrl: 'http://127.0.0.1:54322/manifest' } },
     { ...valid, scenario: 'voice' },
+    { ...valid, scenario: 'voice-receive' },
+    { ...valid, scenario: 'voice-receive', bot: { kind: 'production', manifestUrl: 'http://127.0.0.1:54322/manifest' } },
     { ...valid, bot: { kind: 'production', manifestUrl: 'https://external.invalid/manifest' } },
     { ...valid, bot: { kind: 'sdk-fixture', manifestUrl: 'http://secret@127.0.0.1:54322/manifest' } },
     { ...valid, bot: { kind: 'sdk-fixture', manifestUrl: 'http://127.0.0.1:54322/manifest?token=secret' } },
     { ...valid, token: 'must-not-be-accepted' },
+    { ...valid, realMedia: true },
   ]) assert.equal(shared.developmentQaConfigSchema.safeParse(config).success, false);
+});
+
+test('physical media is opt-in, keeps normal permissions and is forbidden in smoke', async () => {
+  const { configureDevelopmentQaMedia } = loadMain({});
+  const switches = [];
+  const commandLine = { appendSwitch: name => switches.push(name) };
+  const configure = config => { switches.length = 0; configureDevelopmentQaMedia(commandLine, config); return [...switches]; };
+  assert.deepEqual(configure(null), []);
+  assert.deepEqual(configure({ ...baseConfig(), smoke: false }),
+    ['use-fake-device-for-media-stream', 'use-fake-ui-for-media-stream']);
+  assert.deepEqual(configure(baseConfig()),
+    ['use-fake-device-for-media-stream', 'use-fake-ui-for-media-stream', 'mute-audio']);
+  assert.deepEqual(configure({ ...baseConfig(), smoke: false, realMedia: true }), []);
+  assert.throws(() => configure({ ...baseConfig(), realMedia: true }), /unattended/);
+  assert.deepEqual(switches, []);
+  await assert.rejects(runQa({ scenario: 'connected', smoke: true, realMedia: true }), /interactive/);
 });
 
 test('QA environment does not inherit installed profiles, credentials or Node flags', () => {
@@ -252,7 +278,7 @@ test('real prepared Electron scenarios authenticate, seed, install or deliberate
   const paths = new Set();
   for (const args of [
     ['home'], ['login'], ['connected'], ['server-settings'], ['connected', '--bot=fixture'],
-    ['bot-install', '--bot=fixture'], ['tool-consent', '--bot=fixture'], ['voice'],
+    ['bot-install', '--bot=fixture'], ['tool-consent', '--bot=fixture'], ['voice'], ['voice-receive'],
   ]) {
     if (t.signal.aborted) break;
     await t.test(args.join(' '), async () => {
@@ -272,7 +298,7 @@ test('real prepared Electron scenarios authenticate, seed, install or deliberate
           paths.add(state.root);
           const unauthenticated = ['home', 'login'].includes(state.scenario);
           assert.equal(state.ready.connected, !unauthenticated);
-          assert.equal(state.stats.members, unauthenticated ? 0 : 1);
+          assert.equal(state.stats.members, unauthenticated ? 0 : state.scenario === 'connected' ? 101 : 1);
           assert.equal(state.stats.messages, unauthenticated ? 0 : 1);
           if (state.ready.userId) { assert.equal(ids.has(state.ready.userId), false); ids.add(state.ready.userId); }
           if (state.scenario === 'bot-install') {
@@ -280,15 +306,16 @@ test('real prepared Electron scenarios authenticate, seed, install or deliberate
             assert.equal(state.ready.botPermissions, undefined);
           } else if (state.botKind) {
             assert.equal(state.botKind, 'sdk-fixture');
-            assert.equal(state.ready.commandCount, 2);
-            const expected = state.scenario === 'voice' ? ['commands', 'publish_voice', 'local_execution'] : ['commands', 'local_execution'];
+            assert.equal(state.ready.commandCount, state.scenario === 'voice-receive' ? 3 : 2);
+            const expected = state.scenario === 'voice' ? ['commands', 'publish_voice', 'local_execution'] :
+              state.scenario === 'voice-receive' ? ['commands', 'receive_voice', 'local_execution'] : ['commands', 'local_execution'];
             assert.deepEqual(state.ready.botPermissions.requested, expected);
             assert.deepEqual(state.ready.botPermissions.granted, expected);
             assert.equal(state.ready.botPermissions.reviewRequired, false);
             assert.equal(state.ready.botPermissions.reviewedBy, state.ready.userId);
             assert.ok(state.ready.botPermissions.revision > 0);
           }
-          if (state.scenario === 'voice') { assert.ok(state.ready.peers > 0); assert.equal(state.ready.muted, true); }
+          if (['voice', 'voice-receive'].includes(state.scenario)) { assert.ok(state.ready.peers > 0); assert.equal(state.ready.muted, true); }
           if (state.scenario === 'tool-consent') {
             assert.equal(state.ready.localConsentCount, 0);
             assert.equal(state.ready.localToolStatus, 'absent');
@@ -309,6 +336,22 @@ test('failure after actual readiness cleans every real child and its private run
   }), /deliberate post-ready failure/);
   assert.ok(observed.pids.every(pid => !alive(pid)));
   await assert.rejects(fs.access(observed.root), /ENOENT/);
+});
+
+test('empty forum QA has no threads or messages and exactly 20 members and 10 roles', { timeout: 60_000 }, async () => {
+  const result = await runQa(parseQaArguments(['empty-forum', '--smoke']), {
+    onReady(state) {
+      assert.equal(state.windowVisible, false);
+      assert.equal(state.ready.connected, true);
+      assert.equal(state.stats.members, 20);
+      assert.equal(state.stats.messages, 0);
+      assert.equal(state.stats.channels, 3);
+      assert.equal(state.ready.commandCount, undefined);
+      assert.ok(state.prepared.includes('10 roles'));
+    },
+  });
+  assert.ok(result.pids.every(pid => !alive(pid)));
+  await assert.rejects(fs.access(result.root), /ENOENT/);
 });
 
 test('an attached hidden QA startup handles interruption without orphaning the real app or server', { timeout: 60_000 }, async () => {

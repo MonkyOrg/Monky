@@ -3,6 +3,19 @@ import fs from 'fs';
 import path from 'path';
 import { developmentQaConfigSchema, developmentQaReportSchema, DEVELOPMENT_QA_IPC, type DevelopmentQaConfig } from '@monky/shared';
 
+export function configureDevelopmentQaMedia(
+  commandLine: Pick<Electron.CommandLine, 'appendSwitch'>,
+  config: DevelopmentQaConfig | null,
+): void {
+  if (!config) return;
+  if (config.realMedia && config.smoke) throw new Error('Real capture devices cannot be used in unattended QA.');
+  if (!config.realMedia) {
+    commandLine.appendSwitch('use-fake-device-for-media-stream');
+    commandLine.appendSwitch('use-fake-ui-for-media-stream');
+  }
+  if (config.smoke) commandLine.appendSwitch('mute-audio');
+}
+
 export function loadDevelopmentQa(options: {
   packaged: boolean;
   appPath: string;

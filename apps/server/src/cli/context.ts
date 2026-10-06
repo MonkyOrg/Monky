@@ -16,7 +16,7 @@ import {
   DEFAULT_SERVER_NAME,
   SERVER_DB_NAME,
 } from './constants';
-import { t } from './i18n/index';
+import { t, getCliLanguage } from './i18n/index';
 
 export interface CliContext {
   dataDir: string;
@@ -115,6 +115,7 @@ export async function withContext<T>(
         maxUsers: LIMITS.MAX_USERS_DEFAULT,
         initialTextChannel: 'geral',
         initialVoiceChannel: 'Geral',
+        categoryLocale: getCliLanguage(),
       },
       serverRepo,
       channelRepo,

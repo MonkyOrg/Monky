@@ -1,7 +1,10 @@
 import { t } from '../i18n';
+import { animateEnter, removeWithMotion } from '../utils/surfaceMotion';
 import { initializeCustomVideoPlayers } from '../utils/videoPlayer';
 import { showAlert } from './Dialog';
 import { playChatMedia } from '../core/ChatMediaOutput';
+import { ImageClipboard } from '../utils/imageClipboard';
+import { withButtonLoading } from '../utils/buttonLoading';
 
 /**
  * Handler de download que o lightbox espera. Fica aqui porque todo mundo que
@@ -52,9 +55,12 @@ export class LightboxModal {
     let startPanX = 0;
     let startPanY = 0;
     let currentImage: HTMLImageElement | null = null;
+    let fittedWidth = 0;
+    let fittedHeight = 0;
     let currentLightboxVideo: HTMLVideoElement | null = null;
     let currentInlineVideo: HTMLVideoElement | null = null;
     let resumeInlineVideoOnClose = false;
+    const imageClipboard = new ImageClipboard();
 
     const overlay = document.createElement('div');
     overlay.className = 'attachment-lightbox';
@@ -69,6 +75,9 @@ export class LightboxModal {
           <div class="lightbox-meta-details"></div>
         </div>
         <div class="lightbox-actions">
+          <button type="button" class="lightbox-btn lightbox-copy" title="${t('chat.copyImage')}" aria-label="${t('chat.copyImage')}">
+            <span class="material-symbols-outlined">content_copy</span>
+          </button>
           <button type="button" class="lightbox-btn lightbox-download" title="${t('common.download')}">
             <span class="material-symbols-outlined">download</span>
           </button>
@@ -97,8 +106,9 @@ export class LightboxModal {
     const prevButton = overlay.querySelector('.lightbox-nav--prev') as HTMLButtonElement | null;
     const nextButton = overlay.querySelector('.lightbox-nav--next') as HTMLButtonElement | null;
     const downloadButton = overlay.querySelector('.lightbox-download') as HTMLButtonElement | null;
+    const copyButton = overlay.querySelector<HTMLButtonElement>('.lightbox-copy');
     const closeButton = overlay.querySelector('.lightbox-close') as HTMLButtonElement | null;
-    if (!stage || !frame || !counter || !caption || !metaDetails || !zoomIndicator || !prevButton || !nextButton || !downloadButton || !closeButton) {
+    if (!stage || !frame || !counter || !caption || !metaDetails || !zoomIndicator || !prevButton || !nextButton || !downloadButton || !copyButton || !closeButton) {
       return () => {};
     }
 
@@ -109,9 +119,7 @@ export class LightboxModal {
         zoomIndicator.hidden = true;
         return;
       }
-      const fittedWidth = currentImage.clientWidth || currentImage.naturalWidth || 1;
-      const fittedHeight = currentImage.clientHeight || currentImage.naturalHeight || 1;
-      const actualScale = Math.max(currentImage.naturalWidth / fittedWidth, currentImage.naturalHeight / fittedHeight, 1);
+      const actualScale = getActualScale();
       const percent = Math.round((zoom / actualScale) * 100);
       zoomIndicator.hidden = false;
       zoomIndicator.innerText = `${percent}%`;
@@ -124,8 +132,8 @@ export class LightboxModal {
         panY = 0;
         return;
       }
-      const maxX = Math.max(0, (currentImage.clientWidth * zoom - stage.clientWidth) / 2);
-      const maxY = Math.max(0, (currentImage.clientHeight * zoom - stage.clientHeight) / 2);
+      const maxX = Math.max(0, (fittedWidth * zoom - overlay.clientWidth) / 2);
+      const maxY = Math.max(0, (fittedHeight * zoom - overlay.clientHeight) / 2);
       panX = clamp(panX, -maxX, maxX);
       panY = clamp(panY, -maxY, maxY);
     };
@@ -137,12 +145,25 @@ export class LightboxModal {
         return;
       }
       clampPan();
-      currentImage.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
-      currentImage.style.cursor = zoom > 1 ? (dragging ? 'grabbing' : 'grab') : 'zoom-in';
-      stage.classList.toggle('is-pannable', zoom > 1);
+      frame.style.width = `${fittedWidth * zoom}px`;
+      frame.style.height = `${fittedHeight * zoom}px`;
+      frame.style.transform = `translate(${panX}px, ${panY}px)`;
+      const pannable = fittedWidth * zoom > overlay.clientWidth || fittedHeight * zoom > overlay.clientHeight;
+      currentImage.style.cursor = pannable ? (dragging ? 'grabbing' : 'grab') : 'zoom-in';
+      stage.classList.toggle('is-pannable', pannable);
       stage.classList.toggle('is-dragging', dragging);
       updateZoomIndicator();
     };
+
+    const fitImage = () => {
+      if (!currentImage?.naturalWidth || !currentImage.naturalHeight || !stage.clientWidth || !stage.clientHeight) return;
+      const fit = Math.min(1, stage.clientWidth / currentImage.naturalWidth, stage.clientHeight / currentImage.naturalHeight);
+      fittedWidth = currentImage.naturalWidth * fit;
+      fittedHeight = currentImage.naturalHeight * fit;
+      updateImageTransform();
+    };
+    const resizeObserver = new ResizeObserver(fitImage);
+    resizeObserver.observe(stage);
 
     const resetZoom = () => {
       zoom = 1;
@@ -173,9 +194,7 @@ export class LightboxModal {
 
     const getActualScale = () => {
       if (!currentImage) return 1;
-      const fittedWidth = currentImage.clientWidth || currentImage.naturalWidth || 1;
-      const fittedHeight = currentImage.clientHeight || currentImage.naturalHeight || 1;
-      return Math.max(currentImage.naturalWidth / fittedWidth, currentImage.naturalHeight / fittedHeight, 1);
+      return Math.max(currentImage.naturalWidth / (fittedWidth || 1), currentImage.naturalHeight / (fittedHeight || 1), 1);
     };
 
     const setZoom = (nextZoom: number) => {
@@ -204,12 +223,16 @@ export class LightboxModal {
     };
 
     const renderCurrent = () => {
+      imageClipboard.cancel();
       syncCurrentVideoBackToInline();
       releaseDrag();
       resetZoom();
       frame.innerHTML = '';
       currentImage = null;
+      fittedWidth = fittedHeight = 0;
+      for (const property of ['width', 'height', 'transform']) frame.style.removeProperty(property);
       const item = items[currentIndex];
+      frame.classList.toggle('lightbox-media-frame--image', item.kind === 'image');
 
       counter.innerText = `${currentIndex + 1} / ${items.length}`;
       caption.innerText = item.fileName;
@@ -219,6 +242,7 @@ export class LightboxModal {
       prevButton.disabled = currentIndex === 0;
       nextButton.disabled = currentIndex === items.length - 1;
       zoomIndicator.hidden = item.kind !== 'image';
+      copyButton.hidden = item.kind !== 'image';
 
       if (item.kind === 'image') {
         const img = document.createElement('img');
@@ -227,13 +251,13 @@ export class LightboxModal {
         img.alt = item.fileName;
         img.draggable = false;
         img.addEventListener('load', () => {
-          resetZoom();
-          updateImageTransform();
+          if (currentImage === img && overlay.isConnected) fitImage();
         });
         img.addEventListener(
           'wheel',
           (e) => {
             e.preventDefault();
+            if (e.deltaY === 0 || !fittedWidth) return;
             setZoom(zoom + (e.deltaY < 0 ? 0.2 : -0.2));
           },
           { passive: false },
@@ -244,7 +268,7 @@ export class LightboxModal {
           setZoom(zoom > 1.01 ? 1 : getActualScale());
         });
         img.addEventListener('pointerdown', (e) => {
-          if (zoom <= 1) return;
+          if (!stage.classList.contains('is-pannable')) return;
           e.preventDefault();
           e.stopPropagation();
           pointerId = e.pointerId;
@@ -266,7 +290,7 @@ export class LightboxModal {
         img.addEventListener('pointercancel', releaseDrag);
         currentImage = img;
         frame.appendChild(img);
-        updateImageTransform();
+        fitImage();
       } else {
         const player = document.createElement('div');
         player.className = 'chat-video-player chat-video-player--lightbox';
@@ -315,9 +339,14 @@ export class LightboxModal {
 
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      const isFormField = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA';
+      const isFormField = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
 
-      if (e.key === 'Escape') {
+      if (!isFormField && currentImage && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey
+        && e.key.toLowerCase() === 'c' && !window.getSelection()?.toString()) {
+        e.preventDefault();
+        e.stopPropagation();
+        void imageClipboard.copy(items[currentIndex].url);
+      } else if (e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
         close();
@@ -333,17 +362,26 @@ export class LightboxModal {
     };
 
     const close = () => {
+      imageClipboard.cancel();
       syncCurrentVideoBackToInline({ resume: true });
       releaseDrag();
       if (document.fullscreenElement && overlay.contains(document.fullscreenElement)) {
         void document.exitFullscreen().catch(() => undefined);
       }
       document.removeEventListener('keydown', onKey, true);
-      overlay.remove();
+      resizeObserver.disconnect();
+      currentImage = null;
+      removeWithMotion(overlay, 'modal');
       if (this.closeCurrent === close) this.closeCurrent = null;
     };
 
     this.closeCurrent = close;
+    copyButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const current = items[currentIndex];
+      if (current.kind === 'image') void imageClipboard.copy(current.url);
+    });
     closeButton.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -353,7 +391,7 @@ export class LightboxModal {
       e.preventDefault();
       e.stopPropagation();
       const current = items[currentIndex];
-      void onDownload(current.url, current.fileName);
+      void withButtonLoading(downloadButton, () => onDownload(current.url, current.fileName));
     });
     prevButton.addEventListener('click', (e) => {
       e.preventDefault();
@@ -371,6 +409,7 @@ export class LightboxModal {
     document.addEventListener('keydown', onKey, true);
     document.body.appendChild(overlay);
     renderCurrent();
+    animateEnter(overlay, 'modal');
 
     return close;
   }

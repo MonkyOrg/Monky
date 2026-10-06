@@ -16,6 +16,7 @@
 #include <api/stats/rtc_stats_report.h>
 #include <api/video_codecs/video_decoder_factory.h>
 #include <api/video_codecs/video_encoder_factory.h>
+#include <rtc_base/crypto_random.h>
 #include <rtc_base/ssl_adapter.h>
 #include <rtc_base/thread.h>
 #if defined(WEBRTC_WIN)
@@ -33,6 +34,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <utility>
 
 namespace monky::light::media {
@@ -72,6 +74,11 @@ void Check(const webrtc::RTCError &error, const char *operation) {
   if (!error.ok())
     throw std::runtime_error(std::string(operation) + ": " +
                              std::string(error.message()));
+}
+
+// Null means the operating system default device is in use.
+Json DeviceId(const AudioDeviceSelection &selection) {
+  return selection.id.empty() ? Json(nullptr) : Json(selection.id);
 }
 
 std::string Text(const Json &object, const char *key) {
@@ -348,6 +355,7 @@ struct VoiceEngine::Impl : std::enable_shared_from_this<VoiceEngine::Impl> {
   std::map<std::string, Json> known_producers;
   std::set<std::string> closed_producers;
   std::map<std::string, std::string> sfu_transport_states;
+  Json applied_devices;
   bool initialized = false;
   bool sfu_recovery_pending = false;
   unsigned sfu_recovery_attempts = 0;
@@ -506,6 +514,7 @@ struct VoiceEngine::Impl : std::enable_shared_from_this<VoiceEngine::Impl> {
   void InitializeAudio();
   void ApplyProcessing();
   void ApplyPolicy();
+  void ApplyDevices();
   void GateAudio(const std::shared_ptr<CallToken> &call);
   void EnsureMicrophone();
   void StopMicrophone(bool notify_server);
@@ -536,6 +545,7 @@ struct VoiceEngine::Impl::Peer : webrtc::PeerConnectionObserver,
   std::weak_ptr<Impl> owner;
   std::shared_ptr<CallToken> token;
   Participant participant;
+  const std::string subscription_id = webrtc::CreateRandomUuid();
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
   webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> mic_transceiver;
   std::vector<SdpSection> remote_sections;
@@ -761,6 +771,35 @@ void VoiceEngine::Impl::InitializeAudio() {
   }
   token->CheckActive();
   ApplyProcessing();
+  ApplyDevices();
+}
+
+void VoiceEngine::Impl::ApplyDevices() {
+  token->CheckActive();
+  auto [result, input, output] = worker->BlockingCall([this] {
+    const auto result = adm->SelectDevices(config.devices);
+    return std::tuple(result, adm->input_selection(), adm->output_selection());
+  });
+  if (result != 0)
+    throw std::runtime_error("Native audio device selection failed");
+  const auto describe = [](const AudioDeviceSelection &selection) {
+    return Json{{"requestedId", selection.requested
+                                    ? Json(*selection.requested)
+                                    : Json(nullptr)},
+                {"id", DeviceId(selection)},
+                {"name", selection.name.empty() ? Json(nullptr)
+                                                : Json(selection.name)},
+                {"fallback", selection.fallback}};
+  };
+  Json devices{{"input", describe(input)}, {"output", describe(output)}};
+  if (devices == applied_devices)
+    return;
+  applied_devices = devices;
+  Emit(EventKind::devices,
+       input.fallback || output.fallback
+           ? "A requested audio device is unavailable; using the system default"
+           : "Audio devices selected",
+       {}, std::move(devices));
 }
 
 void VoiceEngine::Impl::ApplyProcessing() {
@@ -965,6 +1004,7 @@ std::string VoiceEngine::Impl::Cleanup() {
     audio_token.reset();
   }
   environment.reset();
+  applied_devices = nullptr;
   initialized = false;
   sfu_recovery_pending = false;
   sfu_recovery_attempts = 0;
@@ -1149,6 +1189,7 @@ void VoiceEngine::Impl::Offer(Peer &peer, bool restart) {
   Notify(msg::RTC_SIGNAL, {{"targetSessionId", peer.participant.session_id},
                            {"fromSessionId", config.self_session_id},
                            {"signalType", "offer"},
+                           {"subscriptionId", peer.subscription_id},
                            {"sdp", {{"type", "offer"}, {"sdp", sdp}}}});
   ApplyProcessing();
 }
@@ -1315,6 +1356,7 @@ void VoiceEngine::Impl::Signal(const Json &payload) {
            {{"targetSessionId", session},
             {"fromSessionId", config.self_session_id},
             {"signalType", "answer"},
+            {"subscriptionId", peer->subscription_id},
             {"sdp", {{"type", "answer"}, {"sdp", answer_sdp}}}});
   }
   ApplyProcessing();
@@ -1638,6 +1680,8 @@ void VoiceEngine::Impl::Stats() {
     return;
   Json audio = worker->BlockingCall([this] {
     Json result{{"recording", adm->Recording()}, {"playing", adm->Playing()},
+                {"inputDeviceId", DeviceId(adm->input_selection())},
+                {"outputDeviceId", DeviceId(adm->output_selection())},
                 {"videoEncoderCreations", video_codec_activity->encoders.load()},
                 {"videoDecoderCreations", video_codec_activity->decoders.load()}};
     if (auto stats = adm->GetStats()) {
@@ -1862,6 +1906,16 @@ void VoiceEngine::update_policy(AudioPolicy policy) {
       engine.ApplyPolicy();
     });
   }
+}
+
+void VoiceEngine::select_devices(AudioDevicePreference devices) {
+  auto self = owner_->impl;
+  if (auto call = self->Ingress())
+    self->ForCall(call, [devices = std::move(devices)](Impl &engine) {
+      engine.config.devices = devices;
+      if (engine.adm)
+        engine.ApplyDevices();
+    });
 }
 
 void VoiceEngine::poll_stats() {

@@ -59,6 +59,7 @@ export const en: CliTranslationMap = {
   'create.serverNotFound': 'Server not found.',
   'create.alreadyHasOwner': 'This server already has an owner configured.',
   'create.bootstrapFailed': 'Failed to update the bootstrap user.',
+  'create.identityCollision': 'This identity clientId collides with another member, but the public key is different. Login was refused for safety.',
   'create.adminRoleNotFound': 'Admin role not found.',
   'create.ownerConfigured': 'Server owner configured successfully.',
   'create.askDataDir': 'Where to store server data',
@@ -198,7 +199,7 @@ export const en: CliTranslationMap = {
   'roles.deleted': 'Role {name} removed successfully.',
   'roles.selectToRemove': 'Select the role to remove:',
   'roles.selectToAssign': 'Select the role to assign:',
-  'roles.permissionsLabel': 'Role permissions:',
+  'roles.permissionsLabel': 'Permissions the role grants (added to Everyone):',
 
   // ── Server Lifecycle ───────────────────────────────────────────────────
   'lifecycle.migratingPm2': 'Migrating old PM2 process ("monky-server") to the new format...',
@@ -347,6 +348,10 @@ export const en: CliTranslationMap = {
   'label.password': 'Server password',
   'label.hasPassword': 'Password protected',
   'label.maxUsers': 'Member limit',
+  'label.maxMessageLength': 'Characters per message (0 = unlimited)',
+  'label.messageDeleteUndoSeconds': 'Deletion undo window (seconds)',
+  'config.invalidDeleteUndo': 'Enter a whole number between 1 and 86400 seconds.',
+  'config.invalidMessageLimit': 'Enter a non-negative integer; 0 removes the character limit.',
   'label.ownerUserId': 'Owner ID',
   'label.ownerNickname': 'Owner nickname',
   'label.allowSoundboard': 'Allow soundboard',
@@ -388,6 +393,7 @@ export const en: CliTranslationMap = {
   'validation.roleColor': 'Invalid color. Use the #RRGGBB format.',
   'validation.voiceMode': 'Invalid voice mode: {value}. Use p2p or sfu.',
   'permission.MANAGE_CHANNELS': 'Manage Channels',
+  'permission.VIEW_CHANNEL': 'View Channels',
   'permission.MANAGE_SERVER': 'Manage Server',
   'permission.MANAGE_ROLES': 'Manage Roles',
   'permission.KICK_MEMBERS': 'Kick Members',
@@ -404,6 +410,8 @@ export const en: CliTranslationMap = {
   'permission.USE_BOT_COMMANDS': 'Use Bot Commands',
   'permission.CONFIGURE_BOTS': 'Configure Bots',
   'permission.VIEW_SERVER_MONITOR': 'View Server Monitor',
+  'permission.MANAGE_EVENTS': 'Manage Events',
+  'permission.EMIT_LIVE_ACTIONS': 'Emit Live Actions',
 
   // ── Voice mode comparison ──────────────────────────────────────────────
   'voice.data': 'Data',
@@ -425,6 +433,12 @@ export const en: CliTranslationMap = {
 
   // ── Language setup ─────────────────────────────────────────────────────
   'language.selectPrompt': 'Select your language / Selecione seu idioma:',
+  'language.current': 'CLI language: {language}.',
+  'language.configUsage': 'Use monky config language [pt-BR|en-US].',
+  'cliSettings.title': 'Settings',
+  'cliSettings.language': 'Idioma / Language',
+  'cliSettings.server': 'Show server configuration',
+  'cliSettings.back': 'Back',
   'language.invalidSelection': 'Choose 1 (English), 2 (Português), or a code: en, en-US, pt-BR.',
   'language.saved': 'CLI language saved: {language}.',
   'language.missingValue': 'Provide a language after --lang (en, en-US or pt-BR).',

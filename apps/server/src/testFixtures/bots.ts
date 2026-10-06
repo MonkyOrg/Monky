@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { WebSocket } from 'ws';
-import { BOT_CAPABILITIES, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, type BotCapability, type UserSummary } from '@monky/shared';
+import { BOT_CAPABILITIES, MessageType, Permission, PROTOCOL_VERSION, ProtocolErrorCode, type BotCapability, type ProtocolOffer, type UserSummary } from '@monky/shared';
 import { AttachmentService } from '../application/services/AttachmentService';
 import { AuthService } from '../application/services/AuthService';
 import { BotService } from '../application/services/BotService';
@@ -15,6 +15,14 @@ import { BotPermissionService } from '../application/services/BotPermissionServi
 import { SqliteBotPermissionRepository } from '../infrastructure/database/SqliteBotPermissionRepository';
 import { ChannelService } from '../application/services/ChannelService';
 import { ChatService } from '../application/services/ChatService';
+import { CommunityService } from '../application/services/CommunityService';
+import { ForumService } from '../application/services/ForumService';
+import { MessageSearchService } from '../application/services/MessageSearchService';
+import { NativePollService } from '../application/services/NativePollService';
+import { SqliteCommunityRepository } from '../infrastructure/database/SqliteCommunityRepository';
+import { SqliteForumRepository } from '../infrastructure/database/SqliteForumRepository';
+import { SqliteMessageSearchRepository } from '../infrastructure/database/SqliteMessageSearchRepository';
+import { SqliteNativePollRepository } from '../infrastructure/database/SqliteNativePollRepository';
 import { CommandRegistry } from '../application/services/CommandRegistry';
 import { PermissionService } from '../application/services/PermissionService';
 import { RoleService } from '../application/services/RoleService';
@@ -179,7 +187,17 @@ export async function createFixture(options: {
   );
   const permissions = new PermissionService(serverRepo, roleRepo);
   const roleService = new RoleService(roleRepo, userRepo, permissions);
-  const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissions, botPermissions);
+  const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissions, botPermissions, userRepo, channelRepo.categories);
+  const pollService = new NativePollService(new SqliteNativePollRepository(db), {
+    consume: (refs, userId, channelId) => communityService.consumeImageAssets(refs, userId, channelId)
+      .map(url => url.split('/').pop()!),
+    delete: paths => communityService.deleteImagePaths(paths),
+  }, {
+    canView: async (userId, poll) =>
+      await channelService.canUserAccessChannel(userId, poll.channelId, Permission.READ_MESSAGES) &&
+      await permissions.canAccessAudience(userId, poll.creatorUserId, poll.audience),
+    canRevealAudience: (userId, poll) => permissions.canRevealAudience(userId, poll.creatorUserId),
+  });
   const registry = new CommandRegistry();
   let online: () => Map<string, { user: UserSummary }> = () => new Map();
   const userService = new UserService(userRepo, avatars, () => online());
@@ -190,15 +208,36 @@ export async function createFixture(options: {
   }, botPermissions);
   await ensureServerSeedData({ serverName: 'Bot tests', maxUsers: 10 }, serverRepo, channelRepo, roleRepo);
   const httpServer = http.createServer();
+  let communityService!: CommunityService;
   const chatService = new ChatService(
     messageRepo, channelRepo, userRepo, mentionRepo, avatars, rateLimiter, attachmentService, serverRepo,
-    (userId, channelId) => channelService.canUserAccessChannel(userId, channelId)
+    (userId, channelId, permission) => channelService.canUserAccessChannel(userId, channelId, permission),
+    (userId, channelId) => channelService.canUserAccessChannel(userId, channelId, Permission.READ_MESSAGES),
+    pollService,
   );
   const signalingService = new SignalingService(channelRepo, new SqliteVoiceRestrictionRepository(db));
   const coturnManager = new CoturnManager(dataDir);
-  const wsServer = new WebSocketServer(
+  const authService = new AuthService(serverRepo, userRepo, channelRepo, mentionRepo, avatars, () => online(), attachmentService, permissions, roleService, channelRepo.categories);
+  const selectorService = new BotSelectorService(new SqliteBotSelectorRepository(db));
+  communityService = new CommunityService(
+    new SqliteCommunityRepository(db), channelService, permissions, avatars, selectorService,
+    id => botPermissions.allows(id, 'live_actions', 'commands'),
+    pollService,
+  );
+  const forumService = new ForumService(
+    new SqliteForumRepository(db),
+    channelService,
+    permissions,
+    chatService,
+    channelId => communityService.prepareChannelDeletion(channelId),
+  );
+  const searchService = new MessageSearchService(
+    new SqliteMessageSearchRepository(db), messageRepo, channelService, permissions, chatService,
+    () => wsServer.getChannelAccessVersion(),
+  );
+  const wsServer: WebSocketServer = new WebSocketServer(
     httpServer,
-    new AuthService(serverRepo, userRepo, channelRepo, mentionRepo, avatars, () => online(), attachmentService, permissions, roleService),
+    authService,
     userService,
     channelService,
     chatService,
@@ -208,11 +247,13 @@ export async function createFixture(options: {
     permissions,
     roleService,
     coturnManager,
+    rateLimiter,
     new SfuManager(),
     botService,
     registry,
-    new BotSelectorService(new SqliteBotSelectorRepository(database.getDb())),
-    new BotSettingsService(new SqliteBotSettingsRepository(database.getDb()), botPermissions)
+    selectorService,
+    new BotSettingsService(new SqliteBotSettingsRepository(database.getDb()), botPermissions),
+    undefined, null, communityService, searchService, forumService, pollService,
   );
   online = () => wsServer.getOnlineUsersMap();
   httpServer.listen(0, '127.0.0.1');
@@ -229,10 +270,17 @@ export async function createFixture(options: {
     await once(peer.ws, 'open');
     return peer;
   };
-  const human = async (nickname: string, keys = identity(), deviceId = randomUUID(), appearOffline = false) => {
+  const human = async (
+    nickname: string,
+    keys = identity(),
+    deviceId = randomUUID(),
+    appearOffline = false,
+    protocolVersion = PROTOCOL_VERSION,
+    protocolOffer?: ProtocolOffer,
+  ) => {
     const peer = await connect();
     const challenge = await peer.request(MessageType.AUTH_CONNECT, {
-      protocolVersion: PROTOCOL_VERSION, nickname, publicKey: keys.publicKey, deviceId, appearOffline,
+      protocolVersion, protocolOffer, nickname, publicKey: keys.publicKey, deviceId, appearOffline,
     });
     assert.equal(challenge.type, MessageType.AUTH_CHALLENGE);
     const signature = sign(null, Buffer.from(text(challenge.payload.nonce), 'hex'), keys.privateKey).toString('hex');
@@ -269,6 +317,7 @@ export async function createFixture(options: {
     url,
     connect, human, bot, dispose, peers, wsServer, botService, botRepo, roleRepo, avatars,
     channelService, userService, registry, dataDir, messageRepo, channelRepo, userRepo, serverRepo, chatService, attachmentRepo,
-    database, permissions, botPermissions, signalingService, coturnManager,
+    database, permissions, botPermissions, signalingService, coturnManager, authService, roleService, rateLimiter,
+    communityService, forumService, searchService,
   };
 }

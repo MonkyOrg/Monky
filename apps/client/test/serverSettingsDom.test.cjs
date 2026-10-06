@@ -25,6 +25,7 @@ if (!process.versions.electron) {
 } else {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_SERVER_SETTINGS_PROFILE);
+  app.on('window-all-closed', () => {});
   let vite;
   let browser;
   let timeout;
@@ -36,6 +37,8 @@ if (!process.versions.electron) {
   };
   app.whenReady().then(async () => {
     const { createServer } = await import('vite');
+    const fonts = ['material-symbols/outlined.css', '@fontsource/inter/400.css', '@fontsource/inter/600.css']
+      .map(id => `<link rel="stylesheet" href="/@fs/${require.resolve(id).replaceAll('\\', '/')}">`).join('');
     vite = await createServer({
       configFile: path.join(clientRoot, 'vite.config.ts'), logLevel: 'error',
       cacheDir: path.join(app.getPath('userData'), 'vite-cache'),
@@ -44,9 +47,14 @@ if (!process.versions.electron) {
         name: 'server-settings-regression-fixture',
         configureServer(server) {
           server.middlewares.use((request, response, next) => {
+            if (request.url === '/avatars/cover.png') {
+              response.setHeader('Content-Type', 'image/svg+xml');
+              response.end('<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="400"><rect width="1000" height="400" fill="#363586"/><circle cx="700" cy="180" r="170" fill="#6965d9"/></svg>');
+              return;
+            }
             if (request.url !== '/__server_settings_regression__') return next();
             response.setHeader('Content-Type', 'text/html');
-            response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css"></head><body></body></html>');
+            response.end(`<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css">${fonts}</head><body></body></html>`);
           });
         },
       }],
@@ -68,21 +76,80 @@ if (!process.versions.electron) {
     for (const language of ['pt-BR', 'en']) {
       await browser.loadURL(`http://127.0.0.1:${address.port}/__server_settings_regression__`);
       await browser.webContents.executeJavaScript('localStorage.clear(); sessionStorage.clear();', true);
-      const checks = await browser.webContents.executeJavaScript(
-        `(${runRegression.toString()})(${JSON.stringify(language)})`, true);
-      console.log(`Server settings DOM (${language}): ${checks} checks passed`);
+      const sharedModule = '/@fs/' + path.resolve(clientRoot, '..', '..', 'packages', 'shared', 'src', 'index.ts').replace(/\\/g, '/');
+      await browser.webContents.executeJavaScript(
+        `window.settingsRegression = (${runRegression.toString()})(${JSON.stringify(language)}, ${JSON.stringify(sharedModule)}); void 0`, true);
+      for (;;) {
+        const step = await browser.webContents.executeJavaScript('window.settingsRegression.next().catch(error => ({ failure: error.stack || String(error) }))', true);
+        if (step.failure) throw new Error(step.failure);
+        if (step.done) { console.log(`Server settings DOM (${language}): ${step.value} checks passed`); break; }
+        const roleClicks = {
+          'role-menu-open': '[data-role-menu="editors"]',
+          'role-editor-open': '.floating-context-menu:not([data-ui-closing]) [role="menuitem"]:first-child',
+          'role-member-picker-open': '#btn-role-add-members',
+          'role-create-open': '#btn-role-create-new',
+        };
+        if (roleClicks[step.value]) {
+          const point = await browser.webContents.executeJavaScript(`(() => {
+            const element = document.querySelector(${JSON.stringify(roleClicks[step.value])});
+            const box = element.getBoundingClientRect();
+            const point = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
+            const hit = document.elementFromPoint(point.x, point.y);
+            if (hit !== element && !element.contains(hit)) throw new Error('Role control is not clickable: ' + JSON.stringify({ point, hit: hit?.outerHTML, width: innerWidth }));
+            return point;
+          })()`);
+          browser.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+          browser.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
+          browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
+        } else if (step.value === 'role-member-picker-escape') {
+          browser.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+          browser.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+        } else if (step.value === 'role-member-picker-scroll') {
+          const point = await browser.webContents.executeJavaScript(`(() => {
+            const box = document.querySelector('[data-role-member-picker] .role-dialog-body').getBoundingClientRect();
+            return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
+          })()`);
+          browser.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+          browser.webContents.sendInputEvent({ type: 'mouseWheel', ...point, deltaX: 0, deltaY: -420 });
+        } else if (step.value === 'role-dialog-narrow') {
+          browser.setSize(360, 680);
+        } else if (step.value === 'role-dialog-normal') {
+          browser.setSize(1100, 850);
+        }
+        if (step.value === 'role-dialog-normal' || step.value === 'role-dialog-narrow') {
+          const width = step.value === 'role-dialog-normal' ? 1100 : 360;
+          await browser.webContents.executeJavaScript(`new Promise((resolve, reject) => {
+            let frames = 0;
+            const wait = () => {
+              if (innerWidth === ${width}) return requestAnimationFrame(() => requestAnimationFrame(resolve));
+              if (++frames > 120) return reject(new Error('Role dialog viewport did not resize'));
+              requestAnimationFrame(wait);
+            };
+            wait();
+          })`);
+        }
+        await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+        if (process.env.MONKY_COMMUNITY_SCREENSHOTS && !['role-dialog-normal', 'role-dialog-narrow'].includes(step.value)) {
+          await browser.webContents.executeJavaScript('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
+          fs.writeFileSync(path.join(process.env.MONKY_COMMUNITY_SCREENSHOTS, `727-${language}-${step.value}.png`),
+            (await browser.webContents.capturePage()).toPNG());
+        }
+      }
     }
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
 }
 
-async function runRegression(language) {
+async function* runRegression(language, sharedModule) {
   const { setLanguage, t } = await import('/i18n/index.ts');
   setLanguage(language);
   const [{ ServerSettingsModal }, stores, network, { appEvents }] = await Promise.all([
     import('/views/ServerSettingsModal.ts'), import('/stores/serverStore.ts'),
     import('/core/NetworkClient.ts'), import('/core/EventBus.ts'),
   ]);
+  const { Permission } = await import(sharedModule);
+  const { CommunityFeed } = await import('/core/CommunityFeed.ts');
+  const { sessionManager } = await import('/core/SessionManager.ts');
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
   const copiedVersions = [];
@@ -91,7 +158,11 @@ async function runRegression(language) {
   });
   const listenerCount = () => [...appEvents.listeners.values()].reduce((total, listeners) => total + listeners.size, 0);
   const initialListeners = listenerCount();
-  const flush = async () => { for (let index = 0; index < 20; index++) await Promise.resolve(); };
+  const flush = async () => {
+    for (let index = 0; index < 20; index++) await Promise.resolve();
+    await Promise.allSettled(document.getAnimations().filter(animation =>
+      animation.effect?.getComputedTiming().iterations !== Infinity).map(animation => animation.finished));
+  };
   const settle = async (predicate, message) => {
     for (let attempt = 0; attempt < 100; attempt++) {
       if (predicate()) return;
@@ -101,7 +172,7 @@ async function runRegression(language) {
   };
   const member = (id) => ({ id, clientId: `${id}-key`, sessionId: `${id}-session`, nickname: id, status: 'ONLINE', joinedAt: 1 });
   const store = new stores.ServerStore();
-  const role = { id: 'editors', serverId: 'server-a', name: 'Editors', color: '#5865f2', position: 1, permissions: 16, isDefault: false, createdAt: 1 };
+  const role = { id: 'editors', serverId: 'server-a', name: 'Editors', color: '#5865f2', position: 1, permissions: 16, deny: 0, isDefault: false, createdAt: 1 };
   const botInfo = (overrides = {}) => ({
     id: 'bot-a',
     name: 'Helper',
@@ -136,8 +207,11 @@ async function runRegression(language) {
     id: 'server-a', name: 'Server A', serverVersion: '44.7.9-beta', createdAt: 1, maxUsers: 0, hasPassword: false,
     iconUrl: 'data:image/png;base64,AA==', voiceMode: 'p2p', turnEnabled: false,
     turnAvailability: { supported: false, reason: 'not-installed', autoInstallable: true },
-    allowSoundboard: true, allowEveryoneMention: true, allowMessageEdit: true, showRoleBadgesToEveryone: true,
-    channels: [], members: [member('admin'), member('bob')], knownMembers: [member('admin'), member('bob')],
+    allowSoundboard: true, recentSoundCacheEnabled: true, recentSoundCacheLimit: 20, dmRelayEnabled: true,
+    allowEveryoneMention: true, allowMessageEdit: true, showRoleBadgesToEveryone: true,
+    messageDeleteUndoSeconds: 60, protocol: { version: 36, minimumVersion: 35, features: ['message-delete-undo', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants'] },
+    channels: [], members: [member('admin'), member('bob')],
+    knownMembers: [member('admin'), member('bob'), { ...member('carol'), status: 'DISCONNECTED' }, { ...member('helper'), isBot: true }],
     voiceStates: {}, roles: [role], userRoles: [], ownerId: 'admin', myPermissions: 0xFFFFFFFF,
     attachmentStorage: { usedBytes: 0, maxFileBytes: 25 * 1024 * 1024, maxTotalBytes: 100 * 1024 * 1024 },
   }, member('admin'));
@@ -145,9 +219,12 @@ async function runRegression(language) {
   client.sessionKey = 'server-a';
   client.getStatus = () => 'CONNECTED';
   client.getCurrentServerUrl = () => 'wss://server-a.example/';
+  client.getHttpBaseUrl = () => window.location.origin;
   const requests = [];
+  const communitySnapshot = { settings: { eventsEnabled: true, bannerUrl: null }, events: [], liveActions: [] };
   let bots = [botInfo()];
   client.sendRequest = (type, payload) => {
+    if (type === 'COMMUNITY_GET') return Promise.resolve(structuredClone(communitySnapshot));
     if (type === 'BOT_LIST') return Promise.resolve({ bots: structuredClone(bots) });
     if (type === 'BOT_SETTINGS_GET') return Promise.resolve(botSettingsSnapshot(payload.botId));
     return new Promise((resolve, reject) => { requests.push({ type, payload: structuredClone(payload), resolve, reject, done: false }); });
@@ -164,9 +241,10 @@ async function runRegression(language) {
     let result = {};
     if (type === 'SERVER_UPDATE_SETTINGS') {
       const s = store.serverDetails;
-      for (const key of ['name', 'maxUsers', 'allowSoundboard', 'allowEveryoneMention', 'allowMessageEdit', 'showRoleBadgesToEveryone', 'turnEnabled', 'voiceMode']) {
+      for (const key of ['name', 'maxUsers', 'allowSoundboard', 'recentSoundCacheEnabled', 'recentSoundCacheLimit', 'dmRelayEnabled', 'allowEveryoneMention', 'allowMessageEdit', 'showRoleBadgesToEveryone', 'turnEnabled', 'voiceMode', 'messageDeleteUndoSeconds']) {
         if (payload[key] !== undefined) s[key] = payload[key];
       }
+      if (payload.allowSoundboard === false) s.recentSoundCacheEnabled = false;
       if (payload.voiceMode === 'sfu') s.turnEnabled = false;
       if (payload.turnEnabled) s.turnAvailability = { supported: true };
       if ('password' in payload) s.hasPassword = Boolean(payload.password);
@@ -175,9 +253,16 @@ async function runRegression(language) {
       if (payload.maxAttachmentStorageBytes !== undefined) s.attachmentStorage.maxTotalBytes = payload.maxAttachmentStorageBytes;
       result = { ...s };
       appEvents.emit('server.updated');
+    } else if (type === 'COMMUNITY_UPDATE_SETTINGS') {
+      if (payload.eventsEnabled !== undefined) communitySnapshot.settings.eventsEnabled = payload.eventsEnabled;
+      if ('bannerBase64' in payload) communitySnapshot.settings.bannerUrl = payload.bannerBase64;
+      void community.load();
+    } else if (type === 'MEMBER_KICK') {
+      store.removeMemberCompletely(payload.targetUserId);
     } else if (type === 'ROLE_UPDATE') {
       const { roleId, ...patch } = payload;
-      store.updateRoles(store.roles.map((entry) => entry.id === roleId ? { ...entry, ...patch } : entry), store.userRoles);
+      store.updateRoles(store.roles.map((entry) => entry.id === roleId ? { ...entry, ...patch } : entry), store.userRoles,
+        roleId === '@everyone' ? patch.permissions : undefined);
     } else if (type === 'ROLE_ASSIGN' || type === 'ROLE_UNASSIGN') {
       const roleIds = store.getUserRoleIds(payload.userId).filter((id) => id !== payload.roleId);
       if (type === 'ROLE_ASSIGN') roleIds.push(payload.roleId);
@@ -209,8 +294,12 @@ async function runRegression(language) {
   };
   stores.setActiveServerStore(store);
   network.setActiveNetworkClient(client);
+  const community = new CommunityFeed(client, store);
+  await community.load();
+  const originalGetActive = sessionManager.getActive;
+  sessionManager.getActive = () => ({ community });
   const modal = new ServerSettingsModal();
-  const field = (id) => document.querySelector(id);
+  const field = (id) => [...document.querySelectorAll(id)].find(element => !element.closest('[data-ui-closing]'));
   const change = (id, value) => {
     const input = field(id);
     if (!input) throw new Error(`Missing ${id}`);
@@ -220,10 +309,118 @@ async function runRegression(language) {
     input.dispatchEvent(new Event('change', { bubbles: true }));
   };
   const tab = (name) => field(`[data-tab="${name}"]`).click();
+  const openRoleEditor = (roleId) => {
+    field(`[data-role-menu="${roleId}"]`).click();
+    field('.floating-context-menu [role="menuitem"]').click();
+  };
   const locked = () => field('#btn-done')?.disabled === true;
-  const mainBackdrop = () => document.querySelector('.server-settings-modal-card')?.closest('.modal-backdrop');
+  const mainBackdrop = () => field('.server-settings-modal-card')?.closest('.modal-backdrop');
   modal.open();
   await flush();
+  check(!field('[data-tab="community"]') && !field('#tab-panel-community'), 'Events and banner have no standalone settings category');
+  const general = field('#tab-panel-general');
+  const profile = field('[data-settings-section="server-profile"]');
+  check(profile.contains(field('#community-server-banner')) && profile.contains(field('#server-icon-wrapper')),
+    'Banner belongs to the same General profile card as the server name and photo');
+  check(general.contains(field('#community-events-enabled'))
+    && field('#community-events-enabled').closest('[data-settings-section="server-events"]').textContent.includes(t('community.enabled')),
+  'The master Events and Live Actions switch is in General with localized copy');
+  const bannerLabel = getComputedStyle(field('[data-settings-section="server-banner"] > label'));
+  const nameLabel = getComputedStyle(field('#input-server-name').closest('.form-group').querySelector('label'));
+  check(['fontSize', 'fontFamily', 'fontWeight', 'textTransform', 'letterSpacing'].every(key => bannerLabel[key] === nameLabel[key]),
+    'Banner title uses the same typography as the server name field');
+  for (const selector of ['#community-events-enabled', '#toggle-message-limit', '#checkbox-limit-members']) {
+    const toggle = field(selector).closest('.toggle-switch');
+    const row = toggle.parentElement;
+    const box = row.getBoundingClientRect();
+    const style = getComputedStyle(row);
+    const inset = parseFloat(style.paddingRight) + parseFloat(style.borderRightWidth);
+    check(Math.abs(toggle.getBoundingClientRect().right - (box.right - inset)) < 2, `${selector} is aligned at the right edge`);
+  }
+  yield 'settings-general';
+  change('#community-events-enabled', false);
+  await flush();
+  check(locked() && pendingRequest('COMMUNITY_UPDATE_SETTINGS').payload.eventsEnabled === false, 'General event switch applies immediately with the normal dismissal guard');
+  acknowledge('COMMUNITY_UPDATE_SETTINGS');
+  await flush();
+  check(!locked() && !field('#community-events-enabled').checked, 'Event acknowledgement refreshes the persisted switch');
+  change('#community-events-enabled', true);
+  await flush();
+  reject('COMMUNITY_UPDATE_SETTINGS', 'Events update failed');
+  await flush();
+  check(!field('#community-events-enabled').checked && field('#server-settings-banner').textContent.includes('Events update failed'),
+    'Rejected event changes restore persisted state and display the failure');
+  store.myPermissions = Permission.MANAGE_EVENTS;
+  appEvents.emit('server.updated');
+  check(field('#community-events-enabled').matches(':disabled') && field('#input-server-name').matches(':disabled') &&
+    field('#community-choose-banner').matches(':disabled'), 'Event managers cannot change the server-wide master switch');
+  store.myPermissions = Permission.MANAGE_SERVER;
+  appEvents.emit('server.updated');
+  check(!field('#community-events-enabled').matches(':disabled') && !field('#input-server-name').matches(':disabled') &&
+    !field('#community-choose-banner').matches(':disabled'), 'Server managers can change the master switch and server profile');
+  store.myPermissions = 0xFFFFFFFF;
+  appEvents.emit('server.updated');
+  change('#community-events-enabled', true);
+  await flush();
+  acknowledge('COMMUNITY_UPDATE_SETTINGS');
+  await flush();
+  communitySnapshot.settings.bannerUrl = '/avatars/cover.png';
+  await community.load();
+  await settle(() => field('#community-server-banner').complete && field('#community-server-banner').naturalWidth > 0,
+    'The server banner preview did not finish loading');
+  check(!field('#community-server-banner').hidden && !field('[data-community-setting="remove"]').disabled,
+    'Banner preview updates without rebuilding the profile form');
+  check(field('#community-server-banner').getBoundingClientRect().right <= profile.getBoundingClientRect().right,
+    'The banner preview fits within the name and photo card');
+  yield 'settings-banner';
+  field('[data-community-setting="remove"]').click();
+  await flush();
+  check(locked() && pendingRequest('COMMUNITY_UPDATE_SETTINGS').payload.bannerBase64 === null, 'Removing the profile banner preserves immediate persistence');
+  acknowledge('COMMUNITY_UPDATE_SETTINGS');
+  await flush();
+  check(field('#community-server-banner').hidden && field('[data-community-setting="remove"]').disabled,
+    'Removing the banner clears its preview and disables a second removal');
+  tab('members');
+  const memberIds = () => [...document.querySelectorAll('#tab-panel-members .member-actions-trigger')].map(button => button.dataset.userId);
+  const memberRow = id => field(`#tab-panel-members .member-actions-trigger[data-user-id="${id}"]`)?.closest('tr');
+  check(memberIds().join() === 'admin,bob,carol', 'Members settings list every human member once, including persisted offline members, in alphabetical order');
+  check(memberRow('carol').querySelector('.member-badge-offline')?.textContent === t('roles.offlineBadge'),
+    'Offline members use the existing localized badge');
+  check(!memberRow('bob').querySelector('.member-badge-offline'), 'Online members are not labelled offline');
+  check(memberRow('admin').querySelector('[data-member-action="kick"]').disabled, 'The owner remains protected');
+  field('.member-actions-trigger[data-user-id="carol"]').click();
+  field('[data-member-action="toggle-role"][data-user-id="carol"][data-role-id="editors"]').click();
+  await flush();
+  check(pendingRequest('ROLE_ASSIGN').payload.userId === 'carol', 'Offline members can be assigned roles from their action menu');
+  acknowledge('ROLE_ASSIGN');
+  await flush();
+  check(memberRow('carol').querySelector('.member-role-tag')?.textContent === 'Editors', 'Offline role changes refresh without reopening settings');
+  field('[data-member-action="toggle-role"][data-user-id="carol"][data-role-id="editors"]').click();
+  await flush();
+  acknowledge('ROLE_UNASSIGN');
+  await flush();
+  check(!memberRow('carol').querySelector('.member-role-tag'), 'Offline role removal refreshes the member row');
+  store.addMember({ ...member('carol'), nickname: 'Carol connected' });
+  await flush();
+  check(memberIds().length === 3 && memberRow('carol').textContent.includes('Carol connected')
+    && !memberRow('carol').querySelector('.member-badge-offline'), 'Reconnecting updates the member without duplicating the persisted entry');
+  store.removeMember('carol');
+  await flush();
+  check(memberIds().length === 3 && memberRow('carol').querySelector('.member-badge-offline'),
+    'Disconnecting keeps the member listed and changes its presence even if the cached summary was online');
+  store.addMember({ ...member('carol'), invisible: true });
+  await flush();
+  check(memberRow('carol').querySelector('.member-badge-offline'), 'Invisible presence remains masked as offline in settings');
+  store.removeMember('carol');
+  await flush();
+  field('[data-member-action="kick"][data-user-id="carol"]').click();
+  await flush();
+  check(pendingRequest('MEMBER_KICK').payload.targetUserId === 'carol', 'Offline membership can still be removed');
+  acknowledge('MEMBER_KICK');
+  await flush();
+  check(memberIds().join() === 'admin,bob', 'An expelled offline member disappears immediately');
+  store.removeMemberCompletely('helper');
+  tab('general');
   check(field('#server-settings-version').textContent === '44.7.9-beta',
     'Server settings display the remote runtime version rather than the desktop version');
   field('#server-settings-version').click();
@@ -234,10 +431,11 @@ async function runRegression(language) {
   check(field('[data-settings-section="server-profile"]').contains(field('#input-server-name')) &&
     field('#server-voice-mode-cards').children.length === 2, 'Profile and selectable-card markup retain their expected layout boundaries');
   const original = mainBackdrop();
+  const requestsBeforeTyping = requests.length;
   field('#input-server-name').focus();
   field('#input-server-name').value = 'First rename';
   field('#input-server-name').dispatchEvent(new Event('input', { bubbles: true }));
-  check(requests.length === 0, 'Typing does not persist until editing finishes');
+  check(requests.length === requestsBeforeTyping, 'Typing does not persist until editing finishes');
   check(modal.close() === false && locked(), 'Public close commits the focused edit before checking the lock');
   await flush();
   check(Object.keys(pendingRequest('SERVER_UPDATE_SETTINGS').payload).join() === 'name', 'Rename sends only its own field');
@@ -258,6 +456,11 @@ async function runRegression(language) {
   change('#input-server-name', 'Rapid one');
   change('#input-server-name', 'Rapid two');
   tab('voice_video');
+  check(field('#checkbox-recent-sounds').checked && field('#input-recent-sounds-limit').value === '20',
+    'Recent audio cache settings are shown for compatible servers');
+  check(field('#checkbox-dm-relay-enabled').checked &&
+    field('[data-settings-section="dm-relay"]').textContent.includes(t('serverSettings.dmRelayEnabled')),
+  'DM relay setting is shown as a localized switch for compatible servers');
   change('#checkbox-allow-soundboard', false);
   await flush();
   check(pendingRequest('SERVER_UPDATE_SETTINGS').payload.name === 'Rapid one', 'First rapid edit is not replaced by a later DOM value');
@@ -271,6 +474,16 @@ async function runRegression(language) {
   acknowledge('SERVER_UPDATE_SETTINGS');
   await flush();
   check(!locked() && store.serverDetails.allowSoundboard === false, 'All queued changes finish before dismissal unlocks');
+  check(store.serverDetails.recentSoundCacheEnabled === false, 'Disabling soundboard also disables its recent audio cache');
+  check(field('#checkbox-recent-sounds').disabled && field('#input-recent-sounds-limit').disabled,
+    'Disabling soundboard also disables recent audio cache controls');
+  change('#checkbox-dm-relay-enabled', false);
+  await flush();
+  check(pendingRequest('SERVER_UPDATE_SETTINGS').payload.dmRelayEnabled === false, 'DM relay switch persists through server settings');
+  acknowledge('SERVER_UPDATE_SETTINGS');
+  await flush();
+  check(store.serverDetails.dmRelayEnabled === false && !field('#checkbox-dm-relay-enabled').checked,
+    'Acknowledged DM relay setting refreshes the switch');
   change('#checkbox-turn-enabled', true);
   await flush();
   appEvents.emit('message.TURN_INSTALL_PROGRESS', { stage: 'configuring', percent: 100 });
@@ -294,6 +507,25 @@ async function runRegression(language) {
   acknowledge('SERVER_UPDATE_SETTINGS');
   await flush();
   check(!field('#server-settings-banner').classList.contains('show'), 'Correcting a rejected field clears its error');
+  tab('notifications');
+  check(field('#input-delete-undo').value === '60' && !field('#input-delete-undo').disabled, 'Undo starts at the persisted server default');
+  change('#input-delete-undo', '90');
+  await flush();
+  check(pendingRequest('SERVER_UPDATE_SETTINGS').payload.messageDeleteUndoSeconds === 90 && locked(), 'Changing the undo window applies immediately with an acknowledgement guard');
+  acknowledge('SERVER_UPDATE_SETTINGS');
+  await flush();
+  const beforeInvalidUndo = requests.length;
+  change('#input-delete-undo', '0');
+  await flush();
+  check(requests.length === beforeInvalidUndo && field('#input-delete-undo').value === '90', 'Invalid undo windows restore the acknowledged value without sending');
+  change('#input-delete-undo', '120');
+  await flush();
+  acknowledge('SERVER_UPDATE_SETTINGS');
+  await flush();
+  store.serverDetails.messageDeleteUndoSeconds = 30;
+  appEvents.emit('server.updated');
+  await flush();
+  check(field('#input-delete-undo').value === '30', 'An external administrator update synchronizes the visible undo window');
   tab('general');
   change('#checkbox-limit-members', true);
   await flush();
@@ -342,7 +574,54 @@ async function runRegression(language) {
   await flush();
   check(!locked() && field('[data-mode="sfu"]').getAttribute('aria-pressed') === 'true', 'Declining a prerequisite never changes persisted mode');
   tab('roles');
-  field('[data-role-open="editors"]').click();
+  check(!field('#role-editor-name'), 'Role settings do not render an inline editor below the list');
+  const everyoneRow = field('[data-role-menu="@everyone"]').closest('tr');
+  check(everyoneRow === everyoneRow.parentElement.firstElementChild && !everyoneRow.classList.contains('role-table-row'),
+    'Everyone is fixed first and cannot be reordered with real roles');
+  check(!store.roles.some(role => role.id === '@everyone'), 'Everyone never enters assignable roles');
+  openRoleEditor('@everyone');
+  await flush();
+  check(!field('#role-editor-name') && !field('[data-role-editor-tab="members"]') &&
+    !field('[data-role-editor-tab="general"]') && !field('#role-editor-tab-general') &&
+    !field('#role-editor-tab-members') && !field('#btn-role-delete'),
+    'Everyone has permission switches but no name, members, color or deletion controls');
+  const { display: everyoneDisplay, flexDirection: everyoneDirection, gap: everyoneGap } =
+    getComputedStyle(field('#role-editor-tab-permissions'));
+  check(field('[data-role-editor] .role-editor-tab-btn.active')?.textContent === t('roles.permissionsTab') &&
+    field('[data-role-editor]').querySelectorAll('.role-editor-tab-btn').length === 1 &&
+    everyoneDisplay === 'flex' && everyoneDirection === 'column' && everyoneGap === '10px',
+  'Everyone uses the normal role editor layout with only its active Permissions tab');
+  yield 'role-everyone-editor';
+  change('.role-permission-switch[data-permission="256"]', false);
+  await flush();
+  check(pendingRequest('ROLE_UPDATE').payload.roleId === '@everyone', 'Everyone edits its server setting, not a real role');
+  acknowledge('ROLE_UPDATE');
+  await flush();
+  check((store.everyonePermissions & 256) === 0, 'Everyone permission changes persist in the store');
+  field('[data-role-editor] [data-role-dialog-close]').click();
+  await flush();
+  yield 'role-menu-open';
+  await flush();
+  const roleMenu = field('.floating-context-menu');
+  check(!field('[data-role-open]') && field('[data-role-menu="editors"]').getAttribute('aria-expanded') === 'true' &&
+    roleMenu.querySelectorAll('[role="menuitem"]').length === 2 &&
+    roleMenu.textContent.includes(t('roles.editRole')) && roleMenu.textContent.includes(t('roles.deleteRole')),
+    'The role row uses a three-dot menu with Edit role and Delete role');
+  check(getComputedStyle(field('[data-role-menu="editors"]')).cursor === 'pointer',
+    'The three-dot button has a clickable cursor');
+  yield 'role-row-menu';
+  yield 'role-editor-open';
+  await flush();
+  const roleEditor = field('[data-role-editor]');
+  check(roleEditor && roleEditor !== mainBackdrop() && mainBackdrop().inert,
+    'A real Edit click opens a dedicated modal and suspends settings');
+  check(!field('.server-settings-modal-card').checkVisibility(), 'The suspended settings card is visually hidden behind the editor');
+  check(document.activeElement === field('#role-editor-name'), 'The editor focuses the role name without scrolling the settings list');
+  check(field('[data-role-editor-tab="general"]').textContent === t('roles.generalTab') &&
+    field('#role-editor-tab-general .role-delete-section #btn-role-delete') &&
+    !field('[data-role-editor] .modal-footer #btn-role-delete'),
+    'General replaces Display and contains deletion in its own section, outside the footer');
+  yield 'role-editor-modal';
   change('#role-editor-name', 'New role name');
   await flush();
   check(locked() && pendingRequest('ROLE_UPDATE').payload.name === 'New role name', 'Existing role names apply without a role Save button');
@@ -350,28 +629,117 @@ async function runRegression(language) {
   await flush();
   check(store.getRole('editors').name === 'New role name' && field('#btn-role-save').hidden, 'Role editor remains open at the acknowledged state');
   field('[data-role-editor-tab="members"]').click();
-  change('.role-editor-member-switch[data-user-id="bob"]', true);
+  check(!field('.role-editor-member-switch') && !field('[data-bulk-assign]') &&
+    field('[data-role-editor] [data-role-members-empty]').textContent === t('roles.noAssignedMembers'),
+  'Membership lists only assigned people, without switches or filtered bulk actions');
+  yield 'role-member-picker-open';
   await flush();
+  const memberPicker = field('[data-role-member-picker]');
+  check(memberPicker && roleEditor.inert && document.activeElement === field('#role-add-members-search'),
+    'Add members opens a separate searchable dialog and suspends the editor');
+  check(memberPicker.querySelectorAll('[data-role-member-action="add"]').length === 2 &&
+    memberPicker.querySelector('[data-user-id="bob"]') && !memberPicker.querySelector('[data-user-id="helper"]'),
+    'Only remaining human members are candidates');
+  change('#role-add-members-search', 'not-a-member');
+  check(!memberPicker.querySelector('[data-role-members-empty]').hidden &&
+    memberPicker.querySelector('[data-role-members-empty]').textContent === t('roles.noMatchingMembers'),
+    'An unmatched candidate search has an explicit empty state');
+  change('#role-add-members-search', 'BOB');
+  check([...memberPicker.querySelectorAll('.role-member-row')].filter(row => row.style.display !== 'none').length === 1 &&
+    memberPicker.querySelector('[data-role-members-count]').textContent === t('roles.membersShown', { shown: 1, total: 2 }),
+  'Candidate search filters names case-insensitively with an accurate count');
+  const addBob = () => field('[data-role-member-action="add"][data-user-id="bob"]').click();
+  const beforeAddToast = field('.chat-copy-toast');
+  const pickerFooterTop = memberPicker.querySelector('.modal-footer').getBoundingClientRect().top;
+  addBob();
+  addBob();
+  await flush();
+  const applyingStatus = memberPicker.querySelector('.role-dialog-status');
+  check(field('.chat-copy-toast') === beforeAddToast && getComputedStyle(applyingStatus).clipPath === 'inset(50%)' &&
+    !memberPicker.querySelector('.modal-footer').textContent.includes(t('serverSettings.applying', { count: 1 })) &&
+    Math.abs(memberPicker.querySelector('.modal-footer').getBoundingClientRect().top - pickerFooterTop) < 1,
+    'Pending membership changes keep the footer stable with no visible loading text or premature success toast');
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  memberPicker.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  check(field('[data-role-member-picker]') === memberPicker && locked() &&
+    requests.filter(request => !request.done && request.type === 'ROLE_ASSIGN').length === 1,
+    'Assignments block duplicate clicks, Escape and backdrop dismissal until acknowledged');
   reject('ROLE_ASSIGN', 'Assignment denied');
   await flush();
-  check(!field('.role-editor-member-switch[data-user-id="bob"]').checked && !locked(), 'Role assignment failure is reconciled and does not trap the operator');
-  check(field('#server-settings-banner').textContent.includes('Assignment denied'), 'Role assignment failures are not swallowed');
-  change('.role-editor-member-switch[data-user-id="bob"]', true);
+  check(field('.chat-copy-toast') === beforeAddToast, 'Rejected assignments do not produce a success toast');
+  check(!field('[data-role-member-action="add"][data-user-id="bob"]').disabled && !locked(), 'Role assignment failure keeps the candidate available for retry');
+  check(memberPicker.querySelector('.role-dialog-errors.show').textContent.includes('Assignment denied'), 'Assignment failures appear in the active dialog');
+  addBob();
   await flush();
   acknowledge('ROLE_ASSIGN');
   await flush();
-  check(field('.role-editor-member-switch[data-user-id="bob"]').checked, 'Role assignment retries preserve the editor');
+  check(field('.chat-copy-toast-label')?.textContent === t('roles.memberAdded', { name: 'bob', role: 'New role name' }) &&
+    field('.chat-copy-toast .material-symbols-outlined')?.textContent === 'check_circle',
+    'Acknowledged assignment shows a localized success toast naming the member and role');
+  check(!memberPicker.querySelector('[data-user-id="bob"]') &&
+    roleEditor.querySelector('[data-role-member-action="remove"][data-user-id="bob"]'),
+  'Acknowledged additions leave the candidate list and appear in current membership');
+  check(field('#role-add-members-search').value === 'BOB', 'Acknowledgements preserve the candidate search');
+  yield 'role-member-picker-escape';
+  await flush();
+  check(!field('[data-role-member-picker]') && !roleEditor.inert && mainBackdrop().inert &&
+    document.activeElement === field('#btn-role-add-members'),
+    'Real Escape closes only the picker and restores focus to Add members');
   field('[data-role-editor-tab="permissions"]').click();
-  const managementCopy = field('.role-permission-switch[data-permission="8192"]').closest('div').textContent;
+  const normalPanelStyle = getComputedStyle(field('#role-editor-tab-permissions'));
+  check(normalPanelStyle.display === everyoneDisplay && normalPanelStyle.gap === everyoneGap,
+    'Normal roles and Everyone use the same permission panel layout and spacing');
+  const roleSwitch = (permission) => field(`[data-role-editor] .role-permission-switch[data-permission="${permission}"]`);
+  const switchRole = (permission, enabled) => change(`[data-role-editor] .role-permission-switch[data-permission="${permission}"]`, enabled);
+  check(!field('[data-role-editor] [data-role-permission-bit]') && !field('[data-role-editor] .permission-three-state'),
+    'Normal roles use on/off switches like Everyone, not Deny/Inherit/Allow');
+  for (const permission of [Permission.MANAGE_BOTS, Permission.USE_BOT_COMMANDS, Permission.VIEW_SERVER_MONITOR]) {
+    check(roleSwitch(permission)?.type === 'checkbox' && roleSwitch(permission).closest('.permission-switch'),
+      `The opened role editor exposes permission ${permission} as an on/off switch`);
+  }
+  check(roleSwitch(Permission.SPEAK).checked && !roleSwitch(Permission.MANAGE_BOTS).checked,
+    'Role switches reflect the permissions the role grants');
+  check(roleSwitch(Permission.VIEW_SERVER_MONITOR).closest('.permission-switch').getAttribute('aria-label') === t('permissions.viewServerMonitor'),
+    'The monitor permission in the actual role dialog has a localized accessible label');
+  check(field('[data-role-editor] #role-editor-tab-permissions').textContent.includes(t('roles.permissionSwitchesHint')),
+    'Normal roles explain that a switch only grants on top of Everyone');
+  const managementCopy = roleSwitch(8192).closest('.permission-switch').parentElement.textContent;
   check(managementCopy.includes(t('permissions.manageBotsDesc')) && managementCopy.includes('token') &&
     !/editar o perfil|editing their profiles/i.test(managementCopy),
   'MANAGE_BOTS permission copy no longer claims admins can edit bot profiles');
-  change('.role-permission-switch[data-permission="32"]', true);
+  switchRole(32, true);
   await flush();
-  check(pendingRequest('ROLE_UPDATE').payload.permissions === 48, 'Permission switches apply only the requested bit against current permissions');
+  check(Object.keys(pendingRequest('ROLE_UPDATE').payload).sort().join() === 'permissions,roleId' &&
+    pendingRequest('ROLE_UPDATE').payload.permissions === 48,
+    'Turning a switch on grants only that bit, with no denial involved');
   acknowledge('ROLE_UPDATE');
   await flush();
-  field('[data-role-editor-tab="display"]').click();
+  switchRole(16, false);
+  await flush();
+  check(pendingRequest('ROLE_UPDATE').payload.permissions === 32 && !('deny' in pendingRequest('ROLE_UPDATE').payload) &&
+    !roleSwitch(16).checked, 'Turning a switch off only stops granting the bit');
+  acknowledge('ROLE_UPDATE');
+  await flush();
+  check(store.getRole('editors').permissions === 32 && roleSwitch(32).checked,
+    'Acknowledged role grants persist in the store and the editor');
+  const grantFeatures = store.serverDetails.protocol.features;
+  store.serverDetails.protocol.features = grantFeatures.filter(feature => feature !== 'role-grants');
+  store.updateRoles(store.roles.map(entry => entry.id === 'editors' ? { ...entry, deny: 16 } : entry), store.userRoles);
+  await flush();
+  switchRole(16, true);
+  await flush();
+  check(pendingRequest('ROLE_UPDATE').payload.permissions === 48 && pendingRequest('ROLE_UPDATE').payload.deny === 0,
+    'On a 36.1 server a switch turned on also lifts the stored denial of that bit');
+  acknowledge('ROLE_UPDATE');
+  await flush();
+  switchRole(16, false);
+  await flush();
+  check(pendingRequest('ROLE_UPDATE').payload.permissions === 32 && pendingRequest('ROLE_UPDATE').payload.deny === 0,
+    'On a 36.1 server a switch turned off never becomes a denial');
+  acknowledge('ROLE_UPDATE');
+  await flush();
+  store.serverDetails.protocol.features = grantFeatures;
+  field('[data-role-editor-tab="general"]').click();
   field('#role-editor-color').click();
   field('[data-color-preset="#57f287"]').click();
   field('#role-editor-name').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }));
@@ -394,7 +762,7 @@ async function runRegression(language) {
   field('#role-editor-color').click();
   const colorOwner = field('#role-editor-color').closest('.modal-backdrop');
   window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-  check(colorOwner.isConnected && !document.querySelector('.color-picker-popover'),
+  check(colorOwner.isConnected && !field('.color-picker-popover'),
     'Escape closes the role color picker before the server settings capture-phase handler');
   field('#role-editor-color').click();
   field('[data-color-preset="#ed4245"]').click();
@@ -403,7 +771,7 @@ async function runRegression(language) {
   reject('ROLE_UPDATE', 'Color update denied');
   await flush();
   check(field('#role-editor-color').value === '#3158af' && store.getRole('editors').color === '#3158af'
-    && field('#server-settings-banner').textContent.includes('Color update denied') && !locked(),
+    && roleEditor.querySelector('.role-dialog-errors').textContent.includes('Color update denied') && !locked(),
     'A rejected color change restores the acknowledged role color and reports the failure');
   change('#role-editor-is-default', true);
   await flush();
@@ -411,30 +779,101 @@ async function runRegression(language) {
   await flush();
   check(store.getRole('editors').isDefault, 'Role auto-assignment is immediately persisted');
   field('[data-role-editor-tab="members"]').click();
-  change('.role-editor-member-switch[data-user-id="bob"]', false);
+  const beforeRemoveToast = field('.chat-copy-toast');
+  field('[data-role-member-action="remove"][data-user-id="bob"]').click();
+  await flush();
+  reject('ROLE_UNASSIGN', 'Removal denied');
+  await flush();
+  check(field('.chat-copy-toast') === beforeRemoveToast, 'Rejected removals do not produce a success toast');
+  check(field('[data-role-member-action="remove"][data-user-id="bob"]') &&
+    roleEditor.querySelector('.role-dialog-errors.show').textContent.includes('Removal denied'),
+    'Failed removal keeps acknowledged membership and shows its error locally');
+  field('[data-role-member-action="remove"][data-user-id="bob"]').click();
   await flush();
   acknowledge('ROLE_UNASSIGN');
   await flush();
-  field('[data-bulk-assign="true"]').click();
+  check(field('.chat-copy-toast-label')?.textContent === t('roles.memberRemoved', { name: 'bob', role: 'New role name' }),
+    'Acknowledged removal shows its own localized success toast');
+  check(!field('[data-role-member-action="remove"][data-user-id="bob"]'), 'Removal drops only the acknowledged member from the role list');
+  field('#btn-role-add-members').click();
   await flush();
-  document.querySelector('.dialog-card [data-action="confirm"]').click();
+  check(field('[data-role-member-action="add"][data-user-id="bob"]'), 'A removed member can be added again in the candidate dialog');
+  const currentKnownMembers = new Map(store.knownMembers);
+  for (let index = 0; index < 20; index++) {
+    store.knownMembers.set(`offline-${index}`, { ...member(`offline-${index}`), nickname: `QA Jo\u00e3o ${index}`, status: 'DISCONNECTED' });
+  }
+  appEvents.emit('server.updated');
   await flush();
-  reject('ROLE_ASSIGN', 'Owner cannot be assigned');
+  check(field('[data-role-member-action="add"][data-user-id="offline-0"]').closest('tr').querySelector('.member-badge-offline'),
+    'The add dialog includes registered offline members');
+  yield 'role-members-candidates';
+  const candidateBody = field('[data-role-member-picker] .role-dialog-body');
+  check(candidateBody.scrollHeight > candidateBody.clientHeight, 'Long candidate lists scroll inside the modal');
+  yield 'role-member-picker-scroll';
+  await settle(() => candidateBody.scrollTop > 0, 'Candidate wheel did not scroll the dialog');
+  check(field('[data-role-member-picker]') && candidateBody.scrollTop > 0, 'A real wheel scrolls candidates without dismissing the modal');
+  change('#role-add-members-search', 'joao 0');
+  check([...field('[data-role-member-picker]').querySelectorAll('.role-member-row')].filter(row => row.style.display !== 'none').length === 1,
+    'Candidate search ignores accents in offline member names');
+  field('[data-role-member-action="add"][data-user-id="offline-0"]').click();
   await flush();
-  check(locked(), 'A partially rejected batch keeps the guard while remaining members are applying');
   acknowledge('ROLE_ASSIGN');
   await flush();
-  check(!field('.role-editor-member-switch[data-user-id="admin"]').checked &&
-    field('.role-editor-member-switch[data-user-id="bob"]').checked, 'Bulk failures preserve each member’s actual acknowledged state');
-  check(field('#server-settings-banner').classList.contains('show') && !locked(), 'Partial failures remain explicit and release the guard');
-  field('#btn-role-create-new').click();
+  check(field('[data-role-member-action="remove"][data-user-id="offline-0"]') &&
+    !field('[data-role-member-action="add"][data-user-id="offline-0"]') && field('#role-add-members-search').value === 'joao 0',
+    'Offline assignment updates both lists without resetting the search');
+  change('#role-add-members-search', '');
+  yield 'role-dialog-narrow';
+  await flush();
+  check(field('[data-role-member-picker] .role-dialog-card').getBoundingClientRect().right <= innerWidth &&
+    candidateBody.scrollWidth <= candidateBody.clientWidth + 1,
+    'The candidate dialog fits a narrow window without horizontal overflow');
+  yield 'role-dialog-normal';
+  await flush();
+  store.knownMembers = currentKnownMembers;
+  store.updateRoles(store.roles, store.userRoles.filter(entry => !entry.userId.startsWith('offline-')));
+  await flush();
+  const currentAssignments = structuredClone(store.userRoles);
+  store.updateRoles(store.roles, [...store.userRoles.filter(entry => entry.userId !== 'bob'), { userId: 'bob', roleIds: ['editors'] }]);
+  await flush();
+  check(!field('[data-role-member-action="add"][data-user-id="bob"]') &&
+    field('[data-role-member-action="remove"][data-user-id="bob"]'),
+    'External membership changes update both dialogs without reopening them');
+  store.updateRoles(store.roles, ['admin', 'bob'].map(userId => ({ userId, roleIds: ['editors'] })));
+  await flush();
+  check(!field('[data-role-member-picker] [data-role-member-action]') &&
+    field('[data-role-member-picker] [data-role-members-empty]').textContent === t('roles.noAvailableMembers'),
+    'The add dialog explains when everyone already has the role');
+  store.updateRoles(store.roles, currentAssignments);
+  await flush();
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  await flush();
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  await flush();
+  check(!field('[data-role-editor]') && !mainBackdrop().inert && document.activeElement === field('[data-role-menu="editors"]'),
+    'Closing the role editor restores settings and its three-dot button');
+  yield 'role-create-open';
+  await flush();
+  check(field('[data-role-editor]') && field('.role-delete-section').hidden &&
+    !field('[data-role-editor] .modal-footer [data-role-dialog-close]') &&
+    field('[data-role-editor] .modal-header [data-role-dialog-close]') &&
+    field('#role-editor-title').textContent === t('roles.editorNewTitle'), 'Create role opens a fresh dedicated modal without a delete action');
+  yield 'role-create-clean-footer';
+  field('#btn-role-save').click();
+  await flush();
+  check(field('[data-role-editor] .role-dialog-errors.show').textContent.includes(t('serverSettings.roleNameInvalid')) &&
+    !requests.some(request => !request.done && request.type === 'ROLE_CREATE'),
+    'Invalid creation stays in the modal with actionable validation');
   change('#role-editor-name', 'Created role');
   field('#btn-role-save').click();
   await flush();
   check(locked(), 'Explicit role creation remains tracked');
+  check(pendingRequest('ROLE_CREATE').payload.permissions === 0 && !('deny' in pendingRequest('ROLE_CREATE').payload),
+    'New roles start granting nothing beyond Everyone');
   acknowledge('ROLE_CREATE');
   await flush();
-  check(store.getRole('created-role') && field('[data-role-open="created-role"]'), 'Role creation refreshes the list without reopening the modal');
+  check(store.getRole('created-role') && field('[data-role-menu="created-role"]') && !field('[data-role-editor]') && !mainBackdrop().inert,
+    'Successful creation closes its dialog and refreshes the existing settings list');
   const dragged = field('.role-table-row[data-role-id="created-role"]');
   const destination = field('.role-table-row[data-role-id="editors"]');
   dragged.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: new DataTransfer() }));
@@ -448,8 +887,33 @@ async function runRegression(language) {
   acknowledge('ROLE_UPDATE');
   await flush();
   check(!locked() && field('.role-table-row').dataset.roleId === 'created-role', 'Acknowledged role ordering is preserved');
-  field('[data-role-open="created-role"]').click();
+  openRoleEditor('created-role');
   field('#btn-role-delete').click();
+  await flush();
+  check(field('.dialog-card').textContent.includes('Created role') && locked() &&
+    !requests.some(request => !request.done && request.type === 'ROLE_DELETE'),
+    'General deletion asks for confirmation before sending a destructive request');
+  field('.dialog-card [data-action="cancel"]').click();
+  await flush();
+  check(store.getRole('created-role') && field('[data-role-editor]') && !locked(),
+    'Cancelling deletion preserves the role and its editor');
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  await flush();
+  field('[data-role-menu="created-role"]').click();
+  field('.floating-context-menu .danger').click();
+  await flush();
+  check(field('.dialog-card').textContent.includes('Created role') && !field('[data-role-editor]'),
+    'Delete role in the three-dot menu uses the same confirmation without opening the editor');
+  field('.dialog-card [data-action="confirm"]').click();
+  await flush();
+  reject('ROLE_DELETE', 'Role deletion denied');
+  await flush();
+  check(store.getRole('created-role') && field('#server-settings-banner').textContent.includes('Role deletion denied') && !locked(),
+    'Rejected role deletion remains explicit and keeps the role');
+  openRoleEditor('created-role');
+  field('#btn-role-delete').click();
+  await flush();
+  field('.dialog-card [data-action="confirm"]').click();
   await flush();
   acknowledge('ROLE_DELETE');
   await flush();
@@ -701,8 +1165,19 @@ async function runRegression(language) {
   appEvents.emit('server.updated');
   check(field('#checkbox-show-role-badges').matches(':disabled') && !field('#btn-role-create-new').matches(':disabled'),
     'Role management does not grant server-wide settings permission');
+  tab('roles');
+  field('[data-role-menu="editors"]').click();
+  check(field('.floating-context-menu .danger').disabled, 'The menu preserves protection of auto-assigned roles for non-owners');
+  field('.floating-context-menu [role="menuitem"]').click();
+  check(field('#btn-role-delete').disabled, 'General uses the same role-deletion protection as the menu');
+  field('[data-role-editor-tab="members"]').click();
+  field('#btn-role-add-members').click();
+  await flush();
+  check(field('[data-role-member-picker]'), 'A role manager can open both role dialogs without managing server settings');
   store.myPermissions = 0;
   appEvents.emit('server.updated');
+  check(!field('[data-role-editor]') && !field('[data-role-member-picker]') && !mainBackdrop().inert,
+    'Permission revocation immediately retires both dialogs and restores settings');
   check(field('#input-server-name').matches(':disabled') && field('[data-tab="bots"]').hidden, 'Permission changes immediately disable management controls');
   store.ownerId = 'admin';
   store.myPermissions = 0xFFFFFFFF;
@@ -710,6 +1185,11 @@ async function runRegression(language) {
   check(!field('#input-server-name').matches(':disabled'), 'Restored permission enables corrections without reopening');
   change('#input-server-name', 'Old session update');
   change('#input-attach-file-mb', '15');
+  await flush();
+  tab('roles');
+  openRoleEditor('editors');
+  field('[data-role-editor-tab="members"]').click();
+  field('#btn-role-add-members').click();
   await flush();
   const otherStore = new stores.ServerStore();
   otherStore.setServerDetails({ ...store.serverDetails, id: 'server-b', name: 'Server B' }, member('admin'));
@@ -720,6 +1200,7 @@ async function runRegression(language) {
   stores.setActiveServerStore(otherStore);
   network.setActiveNetworkClient(otherClient);
   appEvents.emit('session.changed', { key: 'server-b' });
+  check(!field('[data-role-editor]') && !field('[data-role-member-picker]'), 'Session changes immediately remove role dialogs with no stale controls');
   check(locked() && modal.close() === false, 'Session switching cannot dismiss an operation still awaiting its original server');
   acknowledge('SERVER_UPDATE_SETTINGS');
   await flush();
@@ -749,6 +1230,8 @@ async function runRegression(language) {
     field('#server-settings-version-unavailable').textContent === t('serverSettings.serverVersionUnavailable'),
   'Missing server metadata is explicit and never replaced with the local app version');
   modal.close();
+  community.dispose();
+  sessionManager.getActive = originalGetActive;
   client.dispose();
   otherClient.dispose();
   return checks;

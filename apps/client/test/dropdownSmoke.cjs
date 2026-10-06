@@ -78,10 +78,10 @@ if (!process.versions.electron) {
     window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
     window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
     await wait();
-    assert(await evaluate(`document.querySelectorAll('.monky-select-popup:popover-open').length === 1`), 'Trusted pointer opens exactly one custom listbox');
+    assert(await evaluate(`document.querySelectorAll('.monky-select-popup:popover-open:not([data-ui-closing])').length === 1`), 'Trusted pointer opens exactly one custom listbox');
     assert(await evaluate(`!CSS.supports('selector(:open)') || !document.querySelector('#select-video-codec').matches(':open')`), 'Native OS select picker is not open');
     const optionPoint = await evaluate(`(() => {
-      const rect = document.querySelectorAll('.monky-select-option')[1].getBoundingClientRect();
+      const rect = document.querySelectorAll('.monky-select-popup:not([data-ui-closing]) .monky-select-option')[1].getBoundingClientRect();
       return {x: Math.round(rect.left + 30), y: Math.round(rect.top + rect.height / 2)};
     })()`);
     window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...optionPoint });
@@ -93,35 +93,61 @@ if (!process.versions.electron) {
     })()`), 'Trusted pointer commits exactly once and keeps focus on original select');
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
-    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'End' });
-    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'End' });
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Home' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Home' });
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
     await wait();
-    assert(await evaluate(`document.querySelector('#select-video-codec').value === 'h264' && !document.querySelector('.monky-select-popup')`), 'Trusted keyboard selects without native picker');
+    assert(await evaluate(`document.querySelector('#select-video-codec').value === 'h264' && !document.querySelector('.monky-select-popup:not([data-ui-closing])')`), 'Trusted keyboard selects without native picker');
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
     await wait();
-    assert(await evaluate(`!!document.querySelector('.monky-select-popup:popover-open') && (!CSS.supports('selector(:open)') || !document.querySelector('#select-video-codec').matches(':open'))`), 'Space opens only the custom listbox');
+    assert(await evaluate(`!!document.querySelector('.monky-select-popup:popover-open:not([data-ui-closing])') && (!CSS.supports('selector(:open)') || !document.querySelector('#select-video-codec').matches(':open'))`), 'Space opens only the custom listbox');
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
     await wait();
-    assert(await evaluate(`!document.querySelector('.monky-select-popup') && document.activeElement.id === 'select-video-codec'`), 'Trusted Escape closes and retains focus');
+    assert(await evaluate(`!document.querySelector('.monky-select-popup:not([data-ui-closing])') && document.activeElement.id === 'select-video-codec'`), 'Trusted Escape closes and retains focus');
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
     await wait();
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
     await wait();
-    assert(await evaluate(`!document.querySelector('.monky-select-popup') && document.activeElement.id !== 'select-video-codec'`), 'Trusted Tab dismisses and advances focus');
+    assert(await evaluate(`!document.querySelector('.monky-select-popup:not([data-ui-closing])') && document.activeElement.id !== 'select-video-codec'`), 'Trusted Tab dismisses and advances focus');
 
+    await evaluate(`(() => {
+      const select = document.querySelector('#select-video-codec');
+      select.dataset.searchPlaceholder = 'Find codec';
+      const label = document.createElement('label');
+      label.id = 'trusted-codec-label';
+      label.htmlFor = select.id;
+      label.textContent = 'Select a codec';
+      label.style.display = 'block';
+      select.before(label);
+    })()`);
+    for (const area of ['label', 'body', 'arrow']) {
+      const clickPoint = await evaluate(`(() => {
+        const field = document.querySelector('${area === 'label' ? '#trusted-codec-label' : '#select-video-codec'}');
+        field.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const rect = field.getBoundingClientRect();
+        return { x: Math.round(${area === 'arrow' ? 'rect.right - 18' : 'rect.left + 40'}), y: Math.round(rect.top + rect.height / 2) };
+      })()`);
+      window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...clickPoint });
+      window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...clickPoint });
+      await wait();
+      assert(await evaluate(`document.querySelectorAll('.monky-select-popup:popover-open:not([data-ui-closing])').length === 1
+        && document.activeElement.classList.contains('monky-select-search')`), `Trusted ${area} opens searchable select and focuses search`);
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+      await wait();
+    }
     await evaluate(`document.querySelector('#select-video-codec').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true, cancelable:true}))`);
     await evaluate('document.fonts.ready.then(() => true)');
     await wait();
     const screenshot = path.join(clientRoot, 'dist-test', 'dropdown-smoke.png');
     fs.writeFileSync(screenshot, (await window.webContents.capturePage()).toPNG());
     await evaluate(`import('/core/SelectEnhancer.ts').then(({selectEnhancer}) => selectEnhancer.dispose())`);
-    console.log(`Dropdown smoke: ${checks + 7} checks passed (Electron ${process.versions.electron}, Chromium ${process.versions.chrome})`);
+    console.log(`Dropdown smoke: ${checks + 10} checks passed (Electron ${process.versions.electron}, Chromium ${process.versions.chrome})`);
     console.log(`Screenshot: ${screenshot}`);
     await finish(0);
   }).catch(async error => { console.error(error); await finish(1); });
@@ -138,8 +164,8 @@ async function runDropdownSmoke() {
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
   const wait = () => new Promise(resolve => setTimeout(resolve, 30));
-  const popup = () => document.querySelector('.monky-select-popup');
-  const rows = () => Array.from(document.querySelectorAll('.monky-select-option'));
+  const popup = () => document.querySelector('.monky-select-popup:not([data-ui-closing])');
+  const rows = () => Array.from(document.querySelectorAll('.monky-select-popup:not([data-ui-closing]) .monky-select-option'));
   const key = (select, key, modifiers = {}) => select.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...modifiers }));
   const open = select => {
     select.scrollIntoView({ block: 'nearest' });
@@ -151,8 +177,18 @@ async function runDropdownSmoke() {
   const originals = {
     save: settings.save, preset: settings.qualityPreset, codec: settings.preferredVideoCodec,
     profile: { ...settings.customProfile }, microphone: settings.selectedMicrophoneId,
-    setPreset: rtc.setQualityPreset, reapply: rtc.reapplyCodecPreferences,
+    setPreset: rtc.setQualityPreset, reapply: rtc.reapplyCodecPreferences, api: window.api,
   };
+  window.api = { ...originals.api, nativeScreenCommand: async command => {
+    if (command.action === 'cancel-encoding-probe') return { kind: 'ok' };
+    check(command.action === 'probe-encoding' && !('desktopSourceId' in command),
+      'Quality dropdown validation may only probe encoders without capturing a source');
+    return { kind: 'encoding', availability: {
+      selection: { mode: command.encodingStrategy === 'automatic' ? 'hardware' : command.encodingMode,
+        codec: command.encodingStrategy === 'automatic' ? 'av1' : command.codec, encoder: 'fixture' },
+      hardware: { available: true, reason: null }, fallback: false,
+    } };
+  } };
   let saves = 0;
   let applies = 0;
   settings.save = () => { saves++; };
@@ -183,6 +219,7 @@ async function runDropdownSmoke() {
     key(preset, 'End');
     check(preset.value === 'NORMAL', 'Navigation previews without changing native value');
     key(preset, 'Enter');
+    for (let attempt = 0; attempt < 100 && settings.qualityPreset !== 'CUSTOM'; attempt++) await wait();
     check(preset.value === 'CUSTOM' && settings.qualityPreset === 'CUSTOM', 'Existing quality handler updates native value and settings');
     check(inputs === 1 && changes === 1 && saves === 1 && applies === 1, 'Input/change and application handler fire exactly once after duplicate init');
     check(fixture.querySelector('#q-select-audioBitrate'), 'Existing CUSTOM handler renders dependent controls');
@@ -227,6 +264,10 @@ async function runDropdownSmoke() {
       for (const group of conditionalGroups) group.hidden = true;
     }
     const mic = container.querySelector('#select-mic');
+    check(Math.abs(mic.parentElement.getBoundingClientRect().width - mic.getBoundingClientRect().width) < 1
+      && [...container.querySelectorAll('.voice-video-device-control > select')]
+        .every(select => getComputedStyle(select).width === getComputedStyle(select.parentElement).width),
+    'Voice and video device dropdowns fill the available settings width');
     settings.selectedMicrophoneId = 'usb';
     devices.populateAudioDeviceSelect(mic, 'input', [{ kind: 'audioinput', deviceId: 'usb', label: 'USB microphone' }]);
     open(mic);
@@ -323,6 +364,7 @@ async function runDropdownSmoke() {
     check(bounds.top >= 0 && bounds.left >= 0 && bounds.bottom <= innerHeight && bounds.right <= innerWidth, 'Long list stays within bottom/right viewport edges');
     check(bounds.bottom <= edge.getBoundingClientRect().top && popup().scrollHeight > popup().clientHeight, 'Bottom-edge list opens upward with internal scrolling');
     key(edge, 'End');
+    await wait();
     check(popup().scrollTop > 0 && active(edge).textContent.startsWith('Device 099'), 'Keyboard scroll keeps final option visible');
     key(edge, 'Escape');
     edge.style.cssText = 'position:fixed;left:4px;top:4px;width:210px';
@@ -371,6 +413,7 @@ async function runDropdownSmoke() {
     check(!hiddenKey.defaultPrevented && !popup() && hiddenModel.hidden, 'Hidden native device models are never enhanced or exposed');
     service.dispose();
   } finally {
+    quality.cleanup();
     service.dispose();
     settings.save = originals.save;
     settings.qualityPreset = originals.preset;
@@ -379,11 +422,18 @@ async function runDropdownSmoke() {
     settings.selectedMicrophoneId = originals.microphone;
     rtc.setQualityPreset = originals.setPreset;
     rtc.reapplyCodecPreferences = originals.reapply;
+    window.api = originals.api;
   }
   // Keep a real settings fixture for trusted-input checks and the screenshot.
-  fixture.innerHTML = quality.renderHtml();
+  const strategy = settings.screenEncodingStrategy;
+  try {
+    settings.screenEncodingStrategy = 'manual';
+    fixture.innerHTML = quality.renderHtml();
+  } finally { settings.screenEncodingStrategy = strategy; }
   const codec = fixture.querySelector('#select-video-codec');
-  codec.value = 'auto';
+  check(!codec.disabled && [...codec.options].map(option => option.value).join(',') === 'h264,av1',
+    'Trusted codec input uses the editable Manual H.264/AV1 control, not read-only Automatic mode');
+  codec.value = 'h264';
   fixture.insertAdjacentHTML('beforeend', '<button type="button" class="btn btn-secondary">Next control</button>');
   service.init();
   return checks;

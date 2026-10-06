@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; media-src blob:">
+  <title>Monky native screen test</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+    canvas, video { display: block; width: 100%; height: 100%; object-fit: fill; }
+    [hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <canvas id="source" width="800" height="600" hidden></canvas>
+  <video id="screen-smoke-video" autoplay muted playsinline hidden></video>
+  <script src="nativeCaptureSmoke.renderer.js"></script>
+</body>
+</html>

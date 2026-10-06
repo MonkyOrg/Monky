@@ -9,7 +9,7 @@ import type { LocalExecutionNotifications } from './ipc';
 import { createLocalRuntimeTask, probeLocalTool } from './workerClient';
 
 export function createLocalExecutionService(
-  window: BrowserWindow, userData: string, notifications: LocalExecutionNotifications,
+  window: BrowserWindow, userData: string, notifications: LocalExecutionNotifications, onTools?: (tools: LocalTools) => void,
 ): LocalExecutionService {
   const root = path.join(userData, 'local-execution');
   const logError = (message: string, error: unknown): void => {
@@ -21,6 +21,7 @@ export function createLocalExecutionService(
     onChanged: () => { notifications.changed(); dialogs?.toolsChanged(); },
     probe: (tool, paths, signal) => probeLocalTool(tool, paths, signal, tools, logError),
   });
+  onTools?.(tools);
   dialogs = new LocalExecutionDialogs(window, tools);
   const permissions = new LocalPermissions(path.join(root, 'permissions.json'), notifications.changed);
   return new LocalExecutionService({

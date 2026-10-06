@@ -1,15 +1,23 @@
-import { QUALITY_PRESETS, QualityPresetType, QualityProfile } from '@monky/shared';
+import { QUALITY_PRESETS, QualityPresetType, QualityProfile, NATIVE_SCREEN_VIDEO_LIMITS, type NativeScreenVideoProfile } from '@monky/shared';
 import { settingsStore } from '../../../stores/settingsStore';
 import { webRtcManager } from '../../../core/WebRtcManager';
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
+import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
+import {
+  CUSTOM_QUALITY_FIELDS, customQualityBounds, normalizeCustomQualityProfile, type QualityNumberKey,
+} from '../../../utils/qualityProfileLimits';
+import { showAlert } from '../../Dialog';
+import { showInfoToast } from '../../CopyToast';
+import { ScreenEncodingControls } from '../../ScreenEncodingControls';
+import { nativeScreenProfile } from '../../../core/webrtc/NativeScreenController';
 import {
   ASPECT_RATIO_GROUPS,
   AUDIO_BITRATE_OPTIONS,
   AspectRatioGroup,
   CUSTOM_OPTION,
   FPS_OPTIONS,
-  VIDEO_BITRATE_OPTIONS,
+  SCREEN_BITRATE_OPTIONS,
   aspectRatioGroup,
   aspectRatioIdFor,
   closestResolution,
@@ -17,8 +25,118 @@ import {
 } from '../qualityOptions';
 
 export class QualityTab {
+  private eventController: AbortController | null = null;
+  private customProfileController: AbortController | null = null;
+  private clearQualityToast: (() => void) | null = null;
+  private container: HTMLElement | null = null;
+  private requestedQuality: { preset: QualityPresetType; profile: QualityProfile } | null = null;
+  private appliedEncoding = '';
+  private readonly encoding = new ScreenEncodingControls(() => nativeScreenProfile(this.qualityProfile()),
+    undefined, profile => this.applyCompatibleProfile(profile), () => this.rejectQualityRequest());
+
+  private qualityProfile(): QualityProfile {
+    return this.requestedQuality?.profile ?? (settingsStore.qualityPreset === 'CUSTOM'
+      ? settingsStore.customProfile : QUALITY_PRESETS[settingsStore.qualityPreset]);
+  }
+
+  private encodingKey(): string {
+    return JSON.stringify([settingsStore.screenEncodingStrategy,
+      settingsStore.screenEncodingMode, settingsStore.preferredScreenCodec]);
+  }
+
+  private requestQualityChanges(preset: QualityPresetType, profile: QualityProfile): void {
+    this.requestedQuality = { preset, profile };
+    void this.encoding.refresh(true);
+  }
+
+  private renderQualityDetails(): void {
+    const container = this.container;
+    if (!container) return;
+    const preset = this.requestedQuality?.preset ?? settingsStore.qualityPreset;
+    const select = container.querySelector<HTMLSelectElement>('#select-preset');
+    if (select) select.value = preset;
+    const details = container.querySelector<HTMLElement>('#preset-details');
+    this.customProfileController?.abort();
+    this.customProfileController = null;
+    if (details) {
+      const focused = document.activeElement;
+      const focusId = focused instanceof HTMLElement && details.contains(focused) ? focused.id : '';
+      details.innerHTML = this.getPresetDetailsHtml(preset);
+      if (preset === 'CUSTOM') this.attachCustomProfileListeners(container);
+      if (focusId) details.querySelector<HTMLElement>(`#${CSS.escape(focusId)}`)?.focus();
+    }
+  }
+
+  private rejectQualityRequest(): void {
+    if (!this.requestedQuality) return;
+    this.requestedQuality = null;
+    this.renderQualityDetails();
+  }
+
+  private commitQualityChanges(preset: QualityPresetType, customProfile?: QualityProfile, persist = true): void {
+    const previousPreset = settingsStore.qualityPreset, previousCustom = settingsStore.customProfile;
+    const profile = preset === 'CUSTOM' ? customProfile ?? previousCustom : QUALITY_PRESETS[preset];
+    webRtcManager.assertScreenSharingSettings(profile);
+    settingsStore.qualityPreset = preset;
+    if (customProfile) settingsStore.customProfile = customProfile;
+    try { webRtcManager.setQualityPreset(preset); }
+    catch (error) {
+      settingsStore.qualityPreset = previousPreset;
+      settingsStore.customProfile = previousCustom;
+      throw error;
+    }
+    if (persist) settingsStore.save();
+    void this.encoding.refresh();
+  }
+
+  private applyCompatibleProfile(profile: NativeScreenVideoProfile): void {
+    if (!this.container || this.eventController?.signal.aborted) throw new Error('Quality settings were closed.');
+    const previous = this.qualityProfile();
+    const adjusted = previous.screenFps !== profile.fps;
+    if (!this.requestedQuality && !adjusted && this.appliedEncoding === this.encodingKey()) return;
+    const preset = adjusted ? 'CUSTOM' : this.requestedQuality?.preset ?? settingsStore.qualityPreset;
+    const persist = !!this.requestedQuality || adjusted;
+    const encoding = this.encodingKey();
+    this.requestedQuality = null;
+    try {
+      this.commitQualityChanges(preset, preset === 'CUSTOM' ? { ...previous, screenFps: profile.fps } : undefined, persist);
+      this.appliedEncoding = encoding;
+    } catch (error) {
+      this.renderQualityDetails();
+      throw error;
+    }
+    if (adjusted) this.renderQualityDetails();
+  }
+
+  private settingsError(error: unknown): void {
+    console.warn('[QualityTab] Could not apply screen sharing settings:', error);
+    const safeMessages = [t('screenShare.nativeProfileChangeBlocked'), t('screenShare.nativeCodecChangeBlocked')];
+    const message = error instanceof Error && safeMessages.includes(error.message)
+      ? error.message : t('settings.screenEncodingAdjustmentBlocked');
+    void showAlert({ variant: 'danger', message });
+  }
+
   public renderHtml(): string {
     return `
+      ${ScreenEncodingControls.html()}
+      <div data-settings-section="screen-receiver" data-settings-label="${escapeHtml(t('settings.screenReceiverSection'))}" class="form-group">
+        <label>${t('settings.screenReceiverSection')}</label>
+        <div class="input-mode-cards" role="group" aria-label="${escapeHtml(t('settings.screenReceiverSection'))}" aria-describedby="screen-receiver-warning screen-receiver-apply">
+          <button type="button" class="voice-mode-card input-mode-card" id="screen-receiver-native"
+            aria-pressed="${settingsStore.getScreenShareReceiver() === 'native'}">
+            <span class="input-mode-card-title">${t('settings.screenReceiverNative')}</span>
+            <span class="input-mode-card-description">${t('settings.screenReceiverNativeDesc')}</span>
+          </button>
+          <button type="button" class="voice-mode-card input-mode-card" id="screen-receiver-chromium"
+            aria-pressed="${settingsStore.getScreenShareReceiver() === 'chromium'}">
+            <span class="input-mode-card-title">Chromium</span>
+            <span class="input-mode-card-description">${t('settings.screenReceiverChromiumDesc')}</span>
+          </button>
+        </div>
+        <p id="screen-receiver-warning" class="audio-device-status" role="note" style="color: var(--warning);">${t('settings.screenReceiverWarning')}</p>
+        <p id="screen-receiver-apply" class="audio-device-status">${t('settings.screenReceiverApply')}</p>
+      </div>
+
       <!-- Quality Preset -->
       <div class="form-group">
         <label data-settings-section="quality-preset" data-settings-label="${escapeHtml(t('settings.qualitySection'))}" style="display: flex; align-items: center; gap: 6px;">
@@ -46,29 +164,73 @@ export class QualityTab {
         </small>
       </div>
 
-      <!-- Preferred Video Codec -->
-      <div data-settings-section="video-codec" data-settings-label="${escapeHtml(t('settings.videoCodecSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
-        <label style="display: flex; align-items: center; gap: 6px;" for="select-video-codec">
-          <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">movie</span>
-          ${t('settings.videoCodecSection')}
-          <span class="material-symbols-outlined md-16" style="color: var(--text-muted); cursor: help;" title="${t('settings.videoCodecHelp')}">help</span>
-        </label>
-        <select id="select-video-codec">
-          <option value="auto" ${settingsStore.preferredVideoCodec === 'auto' ? 'selected' : ''}>${t('settings.codecAuto')}</option>
-          <option value="av1" ${settingsStore.preferredVideoCodec === 'av1' ? 'selected' : ''}>${t('settings.codecAv1')}</option>
-          <option value="vp9" ${settingsStore.preferredVideoCodec === 'vp9' ? 'selected' : ''}>${t('settings.codecVp9')}</option>
-          <option value="vp8" ${settingsStore.preferredVideoCodec === 'vp8' ? 'selected' : ''}>${t('settings.codecVp8')}</option>
-          <option value="h264" ${settingsStore.preferredVideoCodec === 'h264' ? 'selected' : ''}>${t('settings.codecH264')}</option>
-        </select>
-        <small style="display: block; margin-top: 6px; color: var(--text-muted); font-size: 11px;">
-          ${t('settings.videoCodecDesc')}
-        </small>
+      <div data-settings-section="screen-pip" data-settings-label="${escapeHtml(t('settings.screenAutoPipLabel'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+          <div>
+            <label for="checkbox-screen-auto-pip" style="cursor: pointer;">${t('settings.screenAutoPipLabel')}</label>
+            <small id="screen-auto-pip-description" style="display: block; color: var(--text-muted);">${t('settings.screenAutoPipDesc')}</small>
+          </div>
+          <label class="toggle-switch" aria-label="${escapeHtml(t('settings.screenAutoPipLabel'))}">
+            <input id="checkbox-screen-auto-pip" type="checkbox" aria-describedby="screen-auto-pip-description" ${settingsStore.screenShareAutoPictureInPicture ? 'checked' : ''}>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div data-settings-section="screen-preview" data-settings-label="${escapeHtml(t('settings.screenPreviewSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+          <div>
+            <label for="checkbox-screen-preview-focus" style="cursor: pointer;">${t('settings.screenPreviewPauseLabel')}</label>
+            <small id="screen-preview-focus-description" style="display: block; color: var(--text-muted);">${t('settings.screenPreviewPauseDesc')}</small>
+          </div>
+          <label class="toggle-switch" aria-label="${escapeHtml(t('settings.screenPreviewPauseLabel'))}">
+            <input id="checkbox-screen-preview-focus" type="checkbox" aria-describedby="screen-preview-focus-description" ${settingsStore.screenSharePreviewPauseWhenUnfocused ? 'checked' : ''}>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div data-settings-section="video-telemetry" data-settings-label="${escapeHtml(t('settings.telemetrySection'))}" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+        <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 13px; font-weight: 700; color: var(--text-primary);">
+          <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);" aria-hidden="true">monitoring</span>
+          ${t('settings.telemetrySection')}
+        </div>
+        <div class="form-group" style="padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); margin-bottom: 12px;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+            <div>
+              <label style="margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-screen-telemetry">${t('settings.telemetryLabel')}</label>
+              <div style="font-size: 11px; color: var(--text-muted);">${t('settings.telemetryDesc')}</div>
+            </div>
+            <label class="toggle-switch" aria-label="${escapeHtml(t('settings.telemetryLabel'))}">
+              <input id="checkbox-screen-telemetry" type="checkbox" ${settingsStore.screenShareTelemetryEnabled ? 'checked' : ''}>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom: 12px;">
+          <label for="select-screen-telemetry-position">${t('settings.telemetryPosition')}</label>
+          <select id="select-screen-telemetry-position">
+            <option value="top-right" ${settingsStore.screenShareTelemetryPosition === 'top-right' ? 'selected' : ''}>${t('settings.positionTopRight')}</option>
+            <option value="top-left" ${settingsStore.screenShareTelemetryPosition === 'top-left' ? 'selected' : ''}>${t('settings.positionTopLeft')}</option>
+            <option value="bottom-right" ${settingsStore.screenShareTelemetryPosition === 'bottom-right' ? 'selected' : ''}>${t('settings.positionBottomRight')}</option>
+            <option value="bottom-left" ${settingsStore.screenShareTelemetryPosition === 'bottom-left' ? 'selected' : ''}>${t('settings.positionBottomLeft')}</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom: 0;">
+          <label for="select-screen-telemetry-mode">${t('settings.telemetryMode')}</label>
+          <select id="select-screen-telemetry-mode">
+            <option value="simple" ${settingsStore.screenShareTelemetryMode === 'simple' ? 'selected' : ''}>${t('settings.telemetryModeSimple')}</option>
+            <option value="complete" ${settingsStore.screenShareTelemetryMode === 'complete' ? 'selected' : ''}>${t('settings.telemetryModeComplete')}</option>
+          </select>
+          <small style="display: block; margin-top: 6px; color: var(--text-muted);">${t('settings.telemetryHelp')}</small>
+        </div>
       </div>
     `;
   }
 
   public getPresetDetailsHtml(preset: QualityPresetType): string {
-    const p: QualityProfile = preset === 'CUSTOM' ? settingsStore.customProfile : QUALITY_PRESETS[preset];
+    const p: QualityProfile = this.requestedQuality?.preset === preset ? this.requestedQuality.profile
+      : preset === 'CUSTOM' ? settingsStore.customProfile : QUALITY_PRESETS[preset];
     const totalMbps = Math.round((p.audioBitrateKbps + p.cameraBitrateKbps + p.screenBitrateKbps) / 100) / 10;
 
     if (preset === 'CUSTOM') {
@@ -79,7 +241,7 @@ export class QualityTab {
               <span class="material-symbols-outlined" style="font-size: 16px; color: var(--accent-primary);">mic</span>
               <strong style="color: var(--text-secondary);">${t('settings.audio')}</strong>
             </div>
-            ${this.renderNumberChoice('audioBitrate', t('settings.bitrate'), AUDIO_BITRATE_OPTIONS, p.audioBitrateKbps, 'kbps')}
+            ${this.renderNumberChoice('audioBitrateKbps', t('settings.bitrate'), AUDIO_BITRATE_OPTIONS, p.audioBitrateKbps, 'kbps', 'audio')}
           </div>
           <div class="quality-custom-block" data-settings-section="custom-camera" data-settings-label="${escapeHtml(t('settings.cameraShort'))}">
             <div class="quality-custom-title">
@@ -134,11 +296,28 @@ export class QualityTab {
    * every row keeps the same three columns and nothing shifts sideways when a
    * field is switched to custom.
    */
-  private renderNumberChoice(id: string, label: string, options: number[], value: number, unit: string): string {
+  private renderNumberChoice(
+    key: QualityNumberKey, label: string, options: number[], value: number, unit: string,
+    bitrateHelp?: 'audio' | 'camera' | 'screen',
+  ): string {
+    const id = key.replace('Kbps', '');
+    const { min, max, step } = customQualityBounds(key, this.qualityProfile());
+    options = options.filter(option => option >= min && option <= max);
     const isKnown = options.includes(value);
+    const mediaLabel = bitrateHelp === 'audio' ? t('settings.audio')
+      : key.startsWith('camera') ? t('settings.cameraShort') : t('settings.screen');
+    const help = bitrateHelp ? `
+      <button type="button" class="quality-bitrate-help" data-bitrate-help="${bitrateHelp}"
+        aria-label="${escapeHtml(t('settings.bitrateHelpLabel', { media: mediaLabel }))}"
+        data-tooltip="${escapeHtml(t(bitrateHelp === 'audio' ? 'settings.audioBitrateHelp' : 'settings.videoBitrateHelp'))}">
+        <span class="material-symbols-outlined md-16" aria-hidden="true">help</span>
+      </button>` : '';
     return `
       <div class="quality-custom-row">
-        <label class="quality-custom-label" for="q-select-${id}">${label}</label>
+        <div class="quality-custom-label quality-label-with-help">
+          <label for="q-select-${id}">${label}</label>
+          ${help}
+        </div>
         <select id="q-select-${id}" class="quality-custom-control">
           ${options.map((option) => `<option value="${option}" ${option === value ? 'selected' : ''}>${option}${unit ? ` ${unit}` : ''}</option>`).join('')}
           <option value="${CUSTOM_OPTION}" ${isKnown ? '' : 'selected'}>${t('settings.optionCustom')}</option>
@@ -147,7 +326,8 @@ export class QualityTab {
       </div>
       <div class="quality-custom-row" id="q-custom-${id}" ${isKnown ? 'hidden' : ''}>
         <span class="quality-custom-label"></span>
-        <input id="custom-${id}" type="number" min="1" value="${value}" class="quality-custom-control">
+        <input id="custom-${id}" type="number" inputmode="numeric" min="${min}" max="${max}" step="${step}"
+          value="${value}" class="quality-custom-control" aria-label="${escapeHtml(`${mediaLabel} · ${label} (${unit})`)}">
         <span class="quality-custom-unit">${unit}</span>
       </div>
     `;
@@ -156,7 +336,7 @@ export class QualityTab {
   /** Resolution (with aspect-ratio picker), FPS and bitrate of one media kind (#476). */
   private renderMediaFields(kind: 'camera' | 'screen', width: number, height: number, fps: number, bitrate: number): string {
     const aspectId = aspectRatioIdFor(width, height);
-    const group = aspectRatioGroup(aspectId);
+    const group = this.mediaResolutionGroup(aspectId);
     const isKnownResolution = group.resolutions.some((r) => r.width === width && r.height === height);
 
     return `
@@ -177,15 +357,22 @@ export class QualityTab {
       <div class="quality-custom-row" id="q-res-${kind}-custom" ${isKnownResolution ? 'hidden' : ''}>
         <span class="quality-custom-label"></span>
         <div class="quality-custom-pair">
-          <input id="custom-${kind}Width" type="number" min="1" value="${width}" title="${t('settings.width')}" aria-label="${t('settings.width')}">
+          <input id="custom-${kind}Width" type="number" inputmode="numeric" min="${kind === 'screen' ? 4 : 1}" max="${NATIVE_SCREEN_VIDEO_LIMITS.width}" step="1" value="${width}" title="${t('settings.width')}" aria-label="${t('settings.width')}">
           <span class="quality-custom-times">×</span>
-          <input id="custom-${kind}Height" type="number" min="1" value="${height}" title="${t('settings.height')}" aria-label="${t('settings.height')}">
+          <input id="custom-${kind}Height" type="number" inputmode="numeric" min="${kind === 'screen' ? 2 : 1}" max="${NATIVE_SCREEN_VIDEO_LIMITS.height}" step="1" value="${height}" title="${t('settings.height')}" aria-label="${t('settings.height')}">
         </div>
         <span class="quality-custom-unit">px</span>
       </div>
       ${this.renderNumberChoice(`${kind}Fps`, 'FPS', FPS_OPTIONS, fps, 'fps')}
-      ${this.renderNumberChoice(`${kind}Bitrate`, t('settings.bitrate'), VIDEO_BITRATE_OPTIONS, bitrate, 'kbps')}
+      ${this.renderNumberChoice(`${kind}BitrateKbps`, t('settings.bitrate'), SCREEN_BITRATE_OPTIONS, bitrate, 'kbps', kind)}
+      ${kind === 'screen' ? `<p class="quality-custom-help">${escapeHtml(t('settings.screen4kLimits'))}</p>` : ''}
     `;
+  }
+
+  private mediaResolutionGroup(id: string): AspectRatioGroup {
+    const group = aspectRatioGroup(id);
+    return { ...group, resolutions: group.resolutions.filter(option =>
+      option.width <= NATIVE_SCREEN_VIDEO_LIMITS.width && option.height <= NATIVE_SCREEN_VIDEO_LIMITS.height) };
   }
 
   private renderResolutionOptions(group: AspectRatioGroup, width: number, height: number): string {
@@ -197,29 +384,83 @@ export class QualityTab {
   }
 
   public attachEvents(container: HTMLElement): void {
+    this.cleanup();
+    this.eventController = new AbortController();
+    this.container = container;
+    this.appliedEncoding = this.encodingKey();
+    this.encoding.attach(container);
+    const options = { signal: this.eventController.signal };
+    const nativeReceiver = container.querySelector<HTMLButtonElement>('#screen-receiver-native');
+    const chromiumReceiver = container.querySelector<HTMLButtonElement>('#screen-receiver-chromium');
+    for (const receiver of ['native', 'chromium'] as const) {
+      const button = receiver === 'native' ? nativeReceiver : chromiumReceiver;
+      button?.addEventListener('click', () => {
+        if (button.disabled) return;
+        try {
+          settingsStore.setScreenShareReceiver(receiver);
+          nativeReceiver?.setAttribute('aria-pressed', String(settingsStore.getScreenShareReceiver() === 'native'));
+          chromiumReceiver?.setAttribute('aria-pressed', String(settingsStore.getScreenShareReceiver() === 'chromium'));
+        } catch (error) { this.settingsError(error); }
+      }, options);
+    }
     const selectPreset = container.querySelector<HTMLSelectElement>('#select-preset');
-    const presetDetails = container.querySelector<HTMLElement>('#preset-details');
+    const checkboxPreviewFocus = container.querySelector<HTMLInputElement>('#checkbox-screen-preview-focus');
+    const checkboxAutoPip = container.querySelector<HTMLInputElement>('#checkbox-screen-auto-pip');
+    const checkboxScreenTelemetry = container.querySelector<HTMLInputElement>('#checkbox-screen-telemetry');
+    const selectScreenTelemetryPos = container.querySelector<HTMLSelectElement>('#select-screen-telemetry-position');
+    const selectScreenTelemetryMode = container.querySelector<HTMLSelectElement>('#select-screen-telemetry-mode');
+
+    checkboxAutoPip?.addEventListener('change', () => {
+      const previous = settingsStore.screenShareAutoPictureInPicture;
+      settingsStore.screenShareAutoPictureInPicture = checkboxAutoPip.checked;
+      try { settingsStore.save(); }
+      catch (error) {
+        settingsStore.screenShareAutoPictureInPicture = previous;
+        checkboxAutoPip.checked = previous;
+        console.warn('[QualityTab] Could not save automatic Picture-in-Picture:', error);
+        void showAlert({ variant: 'danger', message: t('settings.screenAutoPipSaveError') });
+      }
+    }, options);
+    checkboxPreviewFocus?.addEventListener('change', () => {
+      settingsStore.screenSharePreviewPauseWhenUnfocused = checkboxPreviewFocus.checked;
+      settingsStore.save();
+    }, options);
+    checkboxScreenTelemetry?.addEventListener('change', () => {
+      settingsStore.screenShareTelemetryEnabled = checkboxScreenTelemetry.checked;
+      settingsStore.save();
+    }, options);
+    selectScreenTelemetryPos?.addEventListener('change', () => {
+      const position = selectScreenTelemetryPos.value;
+      if (position === 'top-right' || position === 'top-left' || position === 'bottom-right' || position === 'bottom-left') {
+        settingsStore.screenShareTelemetryPosition = position;
+        settingsStore.save();
+      } else {
+        console.warn('[QualityTab] Invalid telemetry position:', position);
+      }
+    }, options);
+    selectScreenTelemetryMode?.addEventListener('change', () => {
+      const mode = selectScreenTelemetryMode.value;
+      if (mode === 'simple' || mode === 'complete') {
+        settingsStore.screenShareTelemetryMode = mode;
+        settingsStore.save();
+      } else {
+        console.warn('[QualityTab] Invalid telemetry mode:', mode);
+      }
+    }, options);
 
     selectPreset?.addEventListener('change', () => {
-      const val = selectPreset.value as QualityPresetType;
-      settingsStore.qualityPreset = val;
-      settingsStore.save();
-      webRtcManager.setQualityPreset(val);
-      if (presetDetails) {
-        presetDetails.innerHTML = this.getPresetDetailsHtml(val);
-        if (val === 'CUSTOM') {
-          this.attachCustomProfileListeners(container);
-        }
+      const choices: QualityPresetType[] = ['ECONOMIC', 'NORMAL', 'HIGH', 'GAMING', 'ULTRA', 'CUSTOM'];
+      const val = choices.find(choice => choice === selectPreset.value);
+      if (!val) {
+        console.warn('[QualityTab] Invalid quality preset:', selectPreset.value);
+        selectPreset.value = settingsStore.qualityPreset;
+        return;
       }
-    });
-
-    const selectCodec = container.querySelector<HTMLSelectElement>('#select-video-codec');
-    selectCodec?.addEventListener('change', () => {
-      const val = selectCodec.value as any;
-      settingsStore.preferredVideoCodec = val;
-      settingsStore.save();
-      void webRtcManager.reapplyCodecPreferences();
-    });
+      this.requestQualityChanges(val, val === 'CUSTOM' ? settingsStore.customProfile : QUALITY_PRESETS[val]);
+      this.clearQualityToast?.();
+      this.clearQualityToast = null;
+      this.renderQualityDetails();
+    }, options);
 
     if (settingsStore.qualityPreset === 'CUSTOM') {
       this.attachCustomProfileListeners(container);
@@ -227,82 +468,131 @@ export class QualityTab {
   }
 
   private attachCustomProfileListeners(container: HTMLElement): void {
+    this.customProfileController?.abort();
+    this.customProfileController = new AbortController();
+    const options = { signal: this.customProfileController.signal };
+    let editedProfile = { ...this.qualityProfile() };
+    const notify = (key: 'settings.qualityValueAdjusted' | 'settings.qualityValueInvalid' | null) => {
+      this.clearQualityToast?.();
+      this.clearQualityToast = key ? showInfoToast(t(key)) : null;
+    };
+    const syncInputs = () => {
+      const profile = this.qualityProfile();
+      for (const key of CUSTOM_QUALITY_FIELDS) {
+        const id = key.replace('Kbps', '');
+        const input = container.querySelector<HTMLInputElement>(`#custom-${id}`);
+        const { min, max, step } = customQualityBounds(key, profile);
+        if (input) {
+          input.min = String(min);
+          input.max = String(max);
+          input.step = String(step);
+          input.value = String(profile[key]);
+        }
+        if (key === 'cameraFps' || key === 'screenFps') {
+          const select = container.querySelector<HTMLSelectElement>(`#q-select-${id}`);
+          if (!select) continue;
+          const custom = select.value === CUSTOM_OPTION;
+          const value = profile[key];
+          select.innerHTML = FPS_OPTIONS.filter(fps => fps <= max).map(fps =>
+            `<option value="${fps}">${fps} fps</option>`).join('')
+            + `<option value="${CUSTOM_OPTION}">${escapeHtml(t('settings.optionCustom'))}</option>`;
+          select.value = custom || !FPS_OPTIONS.includes(value) ? CUSTOM_OPTION : String(value);
+          const row = container.querySelector<HTMLElement>(`#q-custom-${id}`);
+          if (row) setSurfaceVisible(row, select.value === CUSTOM_OPTION);
+        }
+      }
+    };
     const apply = () => {
-      settingsStore.save();
-      webRtcManager.setQualityPreset('CUSTOM');
+      const requested = editedProfile;
+      const normalized = normalizeCustomQualityProfile(requested);
+      const adjusted = CUSTOM_QUALITY_FIELDS.some(key => normalized[key] !== requested[key]);
+      editedProfile = normalized;
+      notify(adjusted ? 'settings.qualityValueAdjusted' : null);
+      this.requestQualityChanges('CUSTOM', normalized);
+      syncInputs();
     };
 
-    const setValue = <K extends keyof QualityProfile>(key: K, value: number) => {
-      if (typeof settingsStore.customProfile[key] !== 'number') return;
-      (settingsStore.customProfile[key] as number) = value;
+    const setValue = (key: QualityNumberKey, value: number) => {
+      editedProfile = { ...editedProfile, [key]: value };
     };
 
     // The free-form number box behind each "custom" entry.
-    const bindInput = <K extends keyof QualityProfile>(id: string, key: K) => {
+    const bindInput = (id: string, key: QualityNumberKey) => {
       const input = container.querySelector<HTMLInputElement>(`#custom-${id}`);
       input?.addEventListener('change', () => {
-        const val = parseInt(input.value, 10);
-        if (isNaN(val) || val <= 0) return;
+        const val = input.valueAsNumber;
+        if (!Number.isFinite(val)) {
+          syncInputs();
+          notify('settings.qualityValueInvalid');
+          return;
+        }
         setValue(key, val);
         apply();
-      });
+      }, options);
     };
 
     // The dropdown of common values. Picking "custom" only reveals the box —
     // the stored value stays untouched until the user actually types one (#476).
-    const bindSelect = <K extends keyof QualityProfile>(id: string, key: K) => {
+    const bindSelect = (id: string, key: QualityNumberKey) => {
       const select = container.querySelector<HTMLSelectElement>(`#q-select-${id}`);
       const customRow = container.querySelector<HTMLElement>(`#q-custom-${id}`);
       const input = container.querySelector<HTMLInputElement>(`#custom-${id}`);
       select?.addEventListener('change', () => {
         if (select.value === CUSTOM_OPTION) {
-          if (customRow) customRow.hidden = false;
+          if (customRow) setSurfaceVisible(customRow, true);
           input?.focus();
           return;
         }
-        if (customRow) customRow.hidden = true;
-        const val = parseInt(select.value, 10);
-        if (isNaN(val) || val <= 0) return;
+        if (customRow) setSurfaceVisible(customRow, false);
+        const val = Number(select.value);
+        if (!Number.isFinite(val) || val <= 0) {
+          syncInputs();
+          notify('settings.qualityValueInvalid');
+          return;
+        }
         setValue(key, val);
         apply();
-      });
+      }, options);
     };
 
     const bindResolution = (kind: 'camera' | 'screen') => {
-      const widthKey = (kind === 'camera' ? 'cameraWidth' : 'screenWidth') as keyof QualityProfile;
-      const heightKey = (kind === 'camera' ? 'cameraHeight' : 'screenHeight') as keyof QualityProfile;
+      const widthKey = kind === 'camera' ? 'cameraWidth' : 'screenWidth';
+      const heightKey = kind === 'camera' ? 'cameraHeight' : 'screenHeight';
       const aspectSelect = container.querySelector<HTMLSelectElement>(`#q-aspect-${kind}`);
       const resSelect = container.querySelector<HTMLSelectElement>(`#q-res-${kind}`);
       const customRow = container.querySelector<HTMLElement>(`#q-res-${kind}-custom`);
 
       resSelect?.addEventListener('change', () => {
         if (resSelect.value === CUSTOM_OPTION) {
-          if (customRow) customRow.hidden = false;
+          if (customRow) setSurfaceVisible(customRow, true);
           return;
         }
-        if (customRow) customRow.hidden = true;
+        if (customRow) setSurfaceVisible(customRow, false);
         const [width, height] = resSelect.value.split('x').map((part) => parseInt(part, 10));
-        if (isNaN(width) || isNaN(height)) return;
+        if (!Number.isFinite(width) || !Number.isFinite(height)) {
+          notify('settings.qualityValueInvalid');
+          return;
+        }
         setValue(widthKey, width);
         setValue(heightKey, height);
         apply();
-      });
+      }, options);
 
       aspectSelect?.addEventListener('change', () => {
-        const group = aspectRatioGroup(aspectSelect.value);
+        const group = this.mediaResolutionGroup(aspectSelect.value);
         // Switching the aspect ratio snaps to the entry closest in height, so
         // the user keeps roughly the same quality instead of being thrown to
         // the top of the new list.
-        const currentHeight = settingsStore.customProfile[heightKey] as number;
+        const currentHeight = this.qualityProfile()[heightKey];
         const target = closestResolution(group, currentHeight);
         if (resSelect) {
           resSelect.innerHTML = this.renderResolutionOptions(group, target.width, target.height);
         }
-        if (customRow) customRow.hidden = true;
+        if (customRow) setSurfaceVisible(customRow, false);
         setValue(widthKey, target.width);
         setValue(heightKey, target.height);
         apply();
-      });
+      }, options);
     };
 
     bindSelect('audioBitrate', 'audioBitrateKbps');
@@ -321,5 +611,17 @@ export class QualityTab {
     bindInput('screenHeight', 'screenHeight');
     bindResolution('camera');
     bindResolution('screen');
+  }
+
+  public cleanup(): void {
+    this.requestedQuality = null;
+    this.container = null;
+    this.encoding.cleanup();
+    this.clearQualityToast?.();
+    this.clearQualityToast = null;
+    this.eventController?.abort();
+    this.eventController = null;
+    this.customProfileController?.abort();
+    this.customProfileController = null;
   }
 }

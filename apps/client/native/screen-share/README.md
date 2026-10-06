@@ -1,0 +1,1064 @@
+# Compartilhamento nativo de tela
+
+[English](README.en.md)
+
+No Windows, o Monky usa libobs para capturar e redimensionar a fonte escolhida, **AMD AMF
+ou NVIDIA NVENC para codificar H.264/AV1 em hardware**, ou x264/libaom para
+codificação por software, e WebRTC nativo para
+transportar os frames **sem decodificar e recodificar o vídeo no transmissor**.
+No Windows, o receptor nativo usa Media Foundation para H.264 e dav1d para
+AV1, com apresentação SharedTexture. A decodificação AV1 é feita na CPU;
+a preferência Hardware/Software controla a codificação no transmissor. Voz e
+câmera continuam usando seus caminhos próprios.
+
+Há backends nativos para **Windows x64 e macOS 14+ (arm64/x64)**. No Windows, **Automático é o padrão
+recomendado** e prioriza Hardware: AV1, depois H.264 e, somente quando o probe
+confirma ausência de hardware compatível, H.264 por Software com aviso.
+Os campos de codificação e codec mostram a seleção efetiva como somente leitura.
+Em **Manual**, o usuário escolhe Hardware/Software e H.264/AV1 no mesmo grupo;
+a combinação é preservada e, se indisponível, bloqueada com motivo explícito,
+sem substituição silenciosa. Software + AV1 usa libaom.
+Ausência de suporte não é confundida com falha de
+driver, arquivos ou encerramento. Não há troca silenciosa para CPU durante a
+transmissão, transcodificação no servidor, nem fallback para captura Chromium.
+Intel/QSV não está implementado; no Windows, Software continua usando a captura libobs.
+Se Captura de jogo não conseguir iniciar, há uma tentativa em **Normal** para
+a mesma janela, após comprovar o encerramento da tentativa anterior.
+A recepção Chromium continua disponível para perfis H.264/AV1 que o
+dispositivo receptor consiga decodificar; isso não comprova capacidade de envio.
+Em **Configurações → Qualidade e compartilhamento → Recepção de tela**, Windows e macOS
+usa Nativo por padrão e Chromium somente por escolha explícita, nunca como
+fallback. Uma falha nativa indica essa opção sem mudar o receptor. Uma preferência
+Chromium já salva no macOS é preservada. A preferência
+salva vale para o próximo Assistir/Tentar novamente, sem interromper a recepção
+ativa, alterar câmera/voz ou a captura. O aviso de limitações Chromium permanece
+visível nas configurações.
+
+AV1 usa Main, 8 bits, 4:2:0, BT.709 limitado e L1T1. As larguras dos perfis
+AV1 são alinhadas a oito pixels antes do probe e anúncio (480p usa 848×480),
+evitando padding visível do AMF; H.264 mantém seus perfis existentes. Um receptor
+sem o codec/nível necessário recebe um erro explícito para escolher H.264;
+Automático não promete transcodificação por espectador. O cabeçalho do keyframe
+real é a fonte de verdade, pois o extradata AMF anterior ao primeiro frame pode
+estar desatualizado.
+
+## Isolamento do RTC nativo
+
+### Estado do desenvolvimento macOS
+
+O aplicativo transmite janelas e monitores por **ScreenCaptureKit → H.264
+VideoToolbox ou AV1 libaom → WebRTC nativo**, em P2P ou SFU. Core Image/Metal
+redimensiona antes da codificação; não há decodificação/recodificação no transmissor.
+VideoToolbox oferece H.264 por hardware ou software. **Manual → Software → AV1**
+usa o mesmo encoder C++ libaom do Windows, lendo NV12 nativo fora do Renderer;
+essa leitura usa CPU, não é codificação AV1 por hardware nem um caminho zero-copy.
+Automático prioriza H.264 por hardware e só usa H.264 por software após comprovar
+ausência de hardware compatível. Não troca AV1 por H.264 silenciosamente.
+O hook de Captura de jogo continua exclusivo do Windows. O receptor Mac usa
+VideoToolbox para H.264 e dav1d por software para AV1, com apresentação IOSurface/SharedTexture.
+
+A observação de uso de hardware do decoder é opcional. Se o VideoToolbox retornar
+`kVTPropertyNotSupportedErr` para essa propriedade, a decodificação nativa continua
+e `hardwareExecutionObserved` permanece `null`, sem inferir execução por software.
+Outros erros e respostas inválidas continuam sendo reportados.
+
+Enumeração, miniaturas e capturas compartilham um helper, com ownership separado
+por sessão. O probe de seleção comprova a liberação da sua própria sessão; não
+exige encerrar o helper enquanto o seletor ou outra captura ainda o utiliza.
+Essa prova usa o estado privado do owner original, não apenas seu snapshot.
+O RTC fica em `utilityProcess`; o Main recebe direitos Mach verificados
+por PID/euid e mantém a IOSurface até a liberação real do Chromium, inclusive
+após crash do filho. O protocolo de capacidades do provedor continua descrevendo
+apenas enumeração/miniaturas; o suporte RTC vem do manifesto da biblioteca compilada.
+
+Áudio original estéreo é adquirido pelo ScreenCaptureKit, marcado com relógio
+Mach e enviado por Opus. Selecionar uma janela inclui o áudio do **aplicativo
+inteiro**, mediante confirmação, não apenas daquela janela. Perda da janela,
+cancelamento e encerramento liberam a captura; parar de assistir não encerra outros
+espectadores. A permissão de gravação de tela do macOS é necessária.
+
+Os perfis chegam a **3840×2160/120 FPS**, sujeitos à fonte, hardware e rede. O
+probe codifica um quadro sintético e verifica o SPS H.264 real, incluindo Main 6.0,
+ou a sequência AV1 Main/8 bits/BT.709 limitada; isso não homologa throughput.
+AV1 por software pode consumir muita CPU: comece em 720p30 e ajuste pela taxa
+observada, sem esperar 4K120 do M1. No ensaio local M1, P2P/SFU com áudio e múltiplos
+espectadores passaram, e a fonte sintética rasterizada em 4K sustentou cerca de
+57 FPS em 4K60. **4K120 sustentado e GPU Intel não foram homologados nesse ensaio**.
+Compilar/executar o x64 via Rosetta não substitui validação em um Mac Intel.
+
+Com Xcode/SDK macOS, Python 3.11, Node e dependências instaladas:
+
+```sh
+node apps/client/native/screen-share/scripts/prepareMacRtc.cjs
+node apps/client/native/screen-share/scripts/buildMac.cjs
+node apps/client/native/screen-share/scripts/buildMacRtc.cjs
+node apps/client/native/screen-share/scripts/notices.cjs --mac
+npm exec --no -- node-gyp rebuild --directory=apps/client/native/screen-audio
+npm run build
+npm run test:native-screen --workspace=apps/client
+node apps/client/native/screen-share/test/macNativeHostSmoke.cjs
+```
+
+Use `--arch=x64` nos dois builds para produzir Intel em Apple Silicon com Rosetta.
+O build executa o autoteste do helper e consulta a biblioteca da arquitetura real;
+não fabrica capacidades a partir do arm64. O CI também compila em runners Intel
+e Apple Silicon. `macNativeHostSmoke.cjs` é device-free, não prova mídia.
+Para mídia real, `nativeCaptureSmoke.cjs`, `nativeAvSmoke.cjs` e
+`screen-audio/test/macPacketAudioSmoke.cjs` usam fontes sintéticas próprias e exigem
+um diretório absoluto em `--artifacts`. O teste de áudio também inicia e encerra
+a captura de sistema, descartando os pacotes sem gravar mídia, para verificar a
+exclusão de processos sem depender de acesso a processos protegidos.
+Não são testes de rede externa.
+Após `npm run build`, `macSourceAdmissionSmoke.cjs --artifacts=<diretório-absoluto-novo>`
+exercita Main/IPC/helper reais: admite e remove monitores e janelas repetidamente,
+reserva/libera áudio e mantém o seletor vivo. Só captura pixels da janela sintética
+própria, verificando miniatura e prévia H.264/AV1; a admissão do monitor não captura
+a área de trabalho. O último owner precisa encerrar o helper. A prévia local AV1
+permite decode por software quando não há hardware, inclusive no M1; isso não
+altera o codec transmitido nem a preferência de recepção remota.
+As prévias H.264 (hardware/software) e AV1 permanecem ativas por 15 segundos cada,
+com enumeração e miniaturas concorrentes, antes da remoção e nova admissão.
+`macCaptureStopSmoke.cjs --artifacts=<diretório-absoluto-novo>` exercita uma
+interrupção controlada no delegate nativo de uma captura própria, preservando
+uma segunda captura real; aceita `--arch=x64` para Rosetta. Não induz pressão no
+sistema. A notificação `didStopWithError` comprova a parada do stream, mas não
+dispensa drenar callbacks, remover outputs e fechar o encoder. O erro original
+continua visível; um segundo `stopCapture` não deve derrubar o helper compartilhado.
+Interrupções do sistema (`-3821`) também podem ocorrer por pouco espaço em disco:
+verifique o evento do sistema, sem atribuir toda falha à identidade da janela.
+O encoder H.264 por software conclui cada timestamp na fila de captura para evitar
+que seu buffering interno esgote os créditos de entrada antes do primeiro quadro.
+`macAv1ReceiveSmoke.cjs --artifacts=<diretório-absoluto-novo>` codifica uma fonte
+I420 BT.709 própria com WebCodecs, transmite AV1 pelo RTC nativo e verifica codec,
+quadros interdependentes, pixels IOSurface e teardown. Não exige captura da tela
+do usuário nem afirma codificação AV1 nativa no Mac. Use `--mode=sfu` para repetir
+pelo SFU real. Para testar **transmissão AV1 nativa**, use
+`nativeCaptureSmoke.cjs --encoder=monky_aom_av1 --profile=480p15 --quality=source --mode=p2p --artifacts=<diretório-absoluto-novo>`
+e `nativeAvSmoke.cjs --encoder=monky_aom_av1 --profile=720p30 --mode=p2p --artifacts=<diretório-absoluto-novo>`;
+repita com `--mode=sfu`. Esses caminhos capturam fontes próprias pelo ScreenCaptureKit
+e usam libaom nativo, não WebCodecs. `macAv1Encoder.test.cjs` verifica a ABI I420/NV12,
+keyframes solicitados, frames dependentes, mudança de bitrate e probes sem captura até 4K120.
+Ensaios de cadência exigem sessão macOS desbloqueada: a tela
+bloqueada impede foco e pode limitar o compositor/captura.
+
+O empacotamento verifica fontes, binários e licenças do grafo GN compilado. A
+assinatura atualiza hashes dos binários assinados e sela novamente somente o app;
+a notarização ocorre depois. Sem Developer ID, o build local é ad-hoc, não
+notarizado. A release inclui `monky-native-macos-sources-<versão>.tar.xz` e
+manifesto, além do código Monky da mesma tag. O arquivo preserva links relativos
+internos do SDK; ferramentas baixáveis e saídas compiladas ficam de fora.
+O artefato aprovado do CI inclui os dois runtimes, licenças e fontes; a release
+os reaproveita e vincula a proveniência ao commit integrado, sem recompilar
+o SDK quando a árvore de fontes e o ambiente conferem. O `.tar.xz` aprovado não
+é recomprimido: seu manifesto interno continua identificando o build do CI.
+O manifesto externo de esquema 2 registra essa identidade em `archiveManifest`
+e a vincula à versão/commit da release, com a mesma árvore Git e o mesmo SHA-256.
+
+### Backend Windows
+
+Antes de inicializar as janelas e o processo GPU, o cliente desabilita a promoção
+de vídeos para overlays DirectComposition com o workaround Chromium
+`disable_direct_composition_video_overlays`. Essa política de compatibilidade
+evita os bloqueios de apresentação reproduzidos ao iniciar uma transmissão
+enquanto uma recepção H.264 permanece ativa. Não desativa a aceleração por GPU,
+não troca codecs, resolução, FPS ou bitrate e não remove a janela de sobreposição
+do Monky. A composição de vídeo pode exigir mais trabalho da GPU sem essa
+otimização. A política vale para o cliente Windows; macOS e outros sistemas
+mantêm sua configuração de apresentação.
+
+Cada endpoint de publicação/recepção possui um **processo de mídia próprio**
+(`utilityProcess`, serviço **Monky native screen RTC**). Somente esse filho
+carrega `monky_screen_rtc.node` e o WebRTC/decoder nativo. Abort, access violation
+ou timeout encerram apenas o filho possuído, rejeitam suas operações pendentes
+e reportam `ERR_RTC_HOST_EXIT` à fonte/assinatura. Assistir/compartilhar novamente
+cria outro processo; não muda o codec nem usa Chromium como fallback.
+Os testes Node usam `child_process.fork`; o backend continua Windows x64.
+
+Após a confirmação de saída do host, o diagnóstico persistente conserva seu
+código de saída numérico e hexadecimal e sinais conhecidos do sistema, sem
+copiar mensagens, caminhos ou campos arbitrários. Contenção de uma falha
+induzida não identifica, por si só, a causa de um crash ocorrido em outra GPU.
+
+O Main carrega somente `monky_native_handles.node`, um módulo pequeno de
+`OpenProcess`/`DuplicateHandle`/`CloseHandle`, sem RTC, codec, COM ou D3D.
+Cada textura é duplicada para um **HANDLE NT pertencente ao Main** antes da
+importação; um número de handle do filho não é reutilizado no Main.
+O duplicado permanece possuído até `allReferencesReleased` do Chromium
+(ou prova de que nunca foi importado). A morte do filho comprova encerramento
+do processo, **não conclusão de fence/GPU**: não libera referências externas,
+não remove guards por timeout e não reaproveita o endpoint antigo.
+Um host JS ainda responsivo não mascara um worker nativo preso: operações
+de decoder observadas em andamento por oito segundos, no relógio diagnóstico
+nativo existente, também encerram somente esse filho, preservando os duplicados.
+O snapshot nativo distingue chamadas MFT de entrada/saída, cópia/fence de GPU
+e devolução de `IMFSample` por enums e contadores limitados, sem conteúdo de mídia.
+Esses escopos permanecem legíveis enquanto a chamada está bloqueada; o mutex
+de diagnóstico não cobre chamadas externas nem altera sua ordem ou seus fences.
+O pump devolve os `IMFSample` originais somente após os fences de cópia e antes
+de outra operação MFT de processamento/encerramento. Leituras pendentes cedem ao evento de fence,
+inclusive durante abort/shutdown: a capacidade privada de apresentação não é
+uma garantia sobre o pool interno do decoder. `sampleRetirementDeferrals` conta
+essas esperas, sem impor FPS, sleeps ou um novo limite arbitrário de superfícies.
+O envio de tela usa AUs comprimidos, não empréstimos de textura. Para o
+`submitFrame` NV12 legado, morte do filho sem recibo do reader/fence **não**
+autoriza reutilizar a textura do produtor: a API retém esse guard e rejeita
+o comprovante de fechamento, em vez de inventar aposentadoria de GPU.
+
+A entrega de texturas usa a API pública `sharedTexture.subtle` do Electron com
+um MessagePort privado, tipado e reutilizável por destino, em vez de criar um
+par de ports a cada quadro ou usar o timeout fixo de um segundo de
+`sendSharedTexture`. Cada quadro tem uma sequência própria e o canal admite
+no máximo 16 transferências pendentes. Isso evita filas de finalização dos
+wrappers nativos de milhares de ports, que podem atrasar o ciclo do Node e a
+entrega de áudio no Main. O renderer devolve seu token real de criação e,
+separadamente, um comprovante do callback nativo de liberação na GPU. Só então
+o Main libera seu wrapper importado e aguarda `allReferencesReleased` e o ACK de
+retirada do RTC. A aquisição conserva o prazo existente do endpoint; timeout,
+comprovante inválido ou port fechado reportam erro, mas não autorizam reutilizar
+a textura. Comprovantes reais atrasados ainda podem concluir a limpeza.
+`delivered` conta aquisições; transferências pendentes incluem a retirada na GPU.
+Não há alteração de internals ou timers globais do Electron, e o pool nativo
+de decodificação continua limitando a quantidade de texturas. Mudanças de
+destino drenam o canal anterior; desmontar o renderer solicita drenagem sem
+descartar quadros já enviados. O canal só fecha após os comprovantes de GPU
+de todos os quadros pendentes, sem reter wrappers encerrados indefinidamente.
+
+IPC tem limites de quantidade/bytes e confirmações correlacionadas. A entrada
+de vídeo aguarda o ACK real da cópia nativa mantendo um único AU na pipe
+limitada de captura; não inventa `copied:true`. PCM conserva seus créditos,
+identidade e recibo de processamento separados da cópia serializada.
+Probes/calibração executam no filho usando o relógio RTC original; timestamps
+QPC/renderer e limites de incerteza permanecem inalterados. Capabilities
+síncronas descrevem o build verificado, conferido novamente no filho antes
+de `ready`; snapshots síncronos são cache, diagnósticos solicitam observação nova.
+
+Chamadas comuns têm 128 créditos/32 MiB. A retirada usa uma reserva independente
+de 64 créditos/64 KiB para `releaseFrame`, `close`, `resource.close` e
+`audio.stopOutput`, dentro do teto existente de 192 chamadas do host. Saturar
+operações comuns não pode impedir a liberação de uma textura já possuída.
+Os créditos retornam somente com a conclusão real ou saída do processo.
+
+Observações do relógio de áudio mantêm no máximo uma chamada em voo e a
+observação pendente mais recente. Substituir uma observação resolve sua
+promessa como `false`, não como aplicação nativa. Stop e troca de época
+cancelam a pendência; calibrações substituídas não são reaplicadas.
+`coalescedFeedback` e `supersededCalibrationFeedback` registram esses casos.
+Créditos de PCM e seus comprovantes não são coalescidos.
+
+As cópias comprimidas do pipe de captura continuam limitadas a 16 itens/8 MiB,
+incluindo o item em escrita. A espera agora usa o prazo existente de 15 segundos
+do proprietário nativo, em vez de confundir entrega local com frescor de mídia.
+O RTC mantém sua rejeição de AUs com mais de 500 ms e a recuperação por IDR real:
+esperar uma cópia não autoriza apresentar um quadro atrasado. Timestamps,
+sequência, confirmações de feedback e provas de encerramento não são alterados;
+os prazos de retirada também não aumentaram. `maxBackpressureMs` registra a
+espera observada, não um teto de latência. O build nativo exige a regressão de
+pipe com leitura do pai atrasada por 1200 ms, sem GPU.
+
+`nativeRtcProcess.test.cjs` verifica abort real, timeout, rejeição de operações,
+créditos e recuperação. `nativeCaptureSmoke.cjs --rtc-fault=receive` (ou
+`publish`, com `--quality`) encerra o host durante apresentação real, verifica
+o Main e a retirada de leases, depois abre novos endpoints no mesmo aplicativo.
+`nativeAvSmoke.cjs --rtc-fault` acrescenta PCM/Opus real, retirada do áudio
+e novo Assistir após a falha, em P2P ou SFU.
+
+## Fontes e verificação de disponibilidade
+
+O seletor tem duas abas: **Telas** e **Janelas**. Após selecionar uma janela,
+os cards oferecem **Normal** (padrão, WGC internamente) e **Captura de jogo**
+para essa mesma fonte. Não há aba Jogos nem detecção automática de jogos.
+Trocar o método preserva o ID da janela; escolher outra janela volta a Normal.
+A seleção não executa probe/hook antes da confirmação explícita.
+Use **Atualizar** se abrir um aplicativo depois do seletor. A lista não fica
+consultando janelas/miniaturas continuamente enquanto você joga. Uma fonte que
+desapareceu perde a seleção; uma atualização que falha não autoriza compartilhar
+uma lista desatualizada.
+
+| Método nativo | Fonte libobs | Identidade preservada | Áudio opcional |
+|---|---|---|---|
+| Janela (`window`) | `window_capture`, Windows Graphics Capture (WGC) | HWND, PID e instante de criação do processo | Aplicativo/processo selecionado |
+| Monitor (`monitor`) | `monitor_capture`, WGC | Interface do dispositivo, nome GDI e limites físicos do monitor | Sistema, excluindo o Monky |
+| Captura de Jogo (`game`) | `game_capture`, explicitamente para a janela escolhida | A mesma identidade HWND/PID/criação, não apenas título ou executável | Aplicativo/processo selecionado |
+
+No Windows, tanto monitores quanto janelas vêm exclusivamente da enumeração
+Win32, sem `desktopCapturer` ou associação por ordinal/DPI do Electron. A lista
+inicial não captura pixels. Uma falha de enumeração é um erro de carregamento,
+não uma resposta de sucesso com a aba vazia.
+
+As miniaturas usam `monky-screen-thumbnail.exe`, um processo WGC independente
+por imagem, sem encoder, libobs ou hook de jogo. O alvo original é verificado
+antes e depois da captura. O resultado é um PNG em memória, limitado a 1 MiB,
+publicado após a limpeza nativa e aceito pelo Main somente após a saída normal
+do filho. Uma saída forçada descarta a imagem; não é prova de um fence.
+Há no máximo quatro processos ativos e 32 pedidos ativos/na fila. O helper tem
+limite de vida de 4,5 segundos; o Main também limita a espera e aguarda a saída
+antes de reutilizar a vaga. Nenhum handle de GPU é exportado pelo helper.
+
+Antes de iniciar uma prévia, o helper confere o suporte à API sem borda,
+solicita `GraphicsCaptureAccessKind.Borderless` e exige autorização do Windows.
+Só então define `IsBorderRequired(false)` e inicia a sessão. Definir a propriedade
+sem autorização não basta: o Windows pode ignorá-la. Sem suporte ou autorização,
+a prévia fica indisponível, mas a fonte permanece selecionável; não há tentativa
+com borda nem mudança nas configurações de privacidade do sistema. Bordas
+solicitadas por outros aplicativos não são alteradas.
+
+O seletor pede lotes de quatro fontes por tipo, atualiza as imagens gradualmente
+e mantém a lista selecionável. Atualizar, fechar ou iniciar o compartilhamento
+cancela as miniaturas; o fechamento do aplicativo aguarda os filhos originais.
+Fontes minimizadas/protegidas ou imagens indisponíveis conservam sua opção sem
+uma imagem substituta. Erros ficam registrados, e o cache continua limitado a
+dez segundos, 256 entradas e 8 MiB. Ícones vêm da API de arquivos do sistema.
+
+Desconectar o monitor ou alterar sua identidade, posição ou resolução encerra
+a fonte e exige nova seleção explícita; não se troca para a tela principal.
+Minimizar ou ocultar uma janela/jogo é tratado como pausa, não como perda da
+identidade. Restaurar permite retomar os frames. O título também não faz parte
+da identidade: navegadores, editores e players renomeiam a janela a cada página
+ou arquivo, e o compartilhamento continua. Trocar a classe da janela ou o
+executável encerra a fonte. Fechar ou substituir a
+janela/processo encerra o anúncio mesmo sem espectadores.
+
+Janelas WinUI (por exemplo, WhatsApp) não são bloqueadas apenas pela classe
+`WinUIDesktopWin32WindowClass`/`ApplicationFrameWindow`. A admissão exige que
+a lista de propriedades corresponda à janela selecionada e que o backend
+seja vinculado diretamente ao HWND, PID, criação do processo e thread retidos.
+Janelas com títulos iguais são admitidas sem busca por título nem troca de alvo.
+O backend confirma essa identidade antes de capturar/renderizar. Se a enumeração
+redirecionar para um filho de outro processo, a seleção é recusada em vez de
+compartilhar esse filho implicitamente.
+
+A disponibilidade distingue arquivos, encoder e fonte:
+
+1. `loadCaptureRuntime()` verifica arquivos e hashes, sem abrir a GPU.
+   `captureKinds` declara implementação, **não qualificação de hardware**.
+   O Main informa `requiresSelectionProbe: true`; o seletor mostra o preparo
+   pendente, sem testar uma fonte arbitrária em segundo plano.
+2. `probeCaptureCapabilities()` inicializa o encoder escolhido com o perfil
+   solicitado, sem selecionar fonte ou capturar pixels. Confirma o encerramento
+   antes de disponibilizar Hardware/Software; registro do plugin não prova suporte.
+3. Depois da confirmação do usuário, o Main resolve a identidade selecionada
+   e chama `CaptureBridge.prepare(target)`. Essa etapa abre gráficos OBS e
+   verifica identidade, configuração e capacidade AMF/NVENC, mas não captura
+   pixels da fonte nem inicia o encoder de produção. O Main encerra esse probe
+   e comprova o fechamento do filho original antes de liberar sua reserva.
+4. Com demanda de prévia local ou de espectador, `start` cria a fonte e o
+   encoder. `READY` exige vínculo com a fonte e pacotes do codec escolhido;
+   `hardwareSessionConfirmed` só então pode ser verdadeiro, em modo Hardware.
+   `hardwareQualified` permanece falso: uma sessão não qualifica todos os usos.
+
+Na criação do componente AMF, `AMF_CODEC_NOT_SUPPORTED`, `AMF_NOT_SUPPORTED`
+e `AMF_NOT_FOUND` comprovam indisponibilidade do codec. `AMF_FAIL` (status 1)
+continua sendo falha de inicialização, não prova de codec ausente. A ausência
+de AV1 por hardware não implica ausência de H.264, nem justifica crash;
+Software muda o encoder, mas a captura libobs e a apresentação nativa ainda
+dependem de APIs gráficas.
+No Automático, uma falha de inicialização de um candidato, com encerramento
+independentemente comprovado, é registrada e permite verificar os demais
+candidatos Hardware. Só um probe bem-sucedido autoriza usá-los. Se nenhum
+funcionar e houver falha de inicialização não esclarecida, ela é preservada:
+não autoriza fallback para Software. Cancelamento, timeout e encerramento
+não comprovado continuam interrompendo a sequência imediatamente.
+
+SPS/PPS são exigidos e validados no primeiro pacote, antes de enviar qualquer
+vídeo, não na inicialização: o plugin NVENC do OBS só disponibiliza esses
+cabeçalhos ao produzir o primeiro pacote. O fluxo começa com um IDR, e cada
+keyframe recebe os parâmetros atuais para permitir espectadores tardios.
+Cabeçalhos ausentes, inválidos ou fora dos limites continuam sendo erros.
+
+Ao encerrar a fonte inteira, a retirada dos espectadores fecha diretamente
+os pipelines compartilhados; não atualiza a demanda dos espectadores restantes
+em um endpoint que está sendo encerrado. Falhas reais de limpeza continuam
+sendo reportadas.
+A trilha da prévia nativa pertence ao preload, não ao `VideoService`: encerrar
+essa trilha antes do decoder fecha o writer enquanto ainda há frames chegando.
+O proprietário bloqueia novos frames, encerra o decoder e drena o writer antes
+de parar a trilha; timeout mantém os recursos retidos para nova tentativa.
+
+Parar uma fonte ou recepção pode retornar `retired-with-errors` quando os
+proprietários originais comprovam o encerramento, mas reportam um erro de limpeza.
+O renderer registra o aviso e libera somente o estado daquela instância, permitindo
+compartilhar ou assistir novamente na mesma chamada. O fechamento do app também
+prossegue após essa comprovação; um erro histórico não equivale a um recurso retido.
+Sem comprovação, a operação continua falhando e preserva os proprietários para retry.
+
+Uma amostragem QPC/RTC que excede 2 ms descarta o quadro e invalida seus
+dependentes, solicitando um IDR real pela recuperação existente (limite de
+1,5 s). Não aumenta a tolerância do relógio, não inventa timestamps e não
+transforma descontinuidades em sucesso. Avisos de conexão usam toast de
+8 segundos, para não deixar um diálogo bloqueando o jogo após a recuperação.
+
+Se o diagnóstico AMF indicar `primaries=0`, com `transfer=1`, `matrix=1` e faixa
+limitada, confira o driver: [AMF #354](https://github.com/GPUOpen-LibrariesAndSDKs/AMF/issues/354)
+documenta esse metadado reservado mesmo quando o OBS solicita BT.709.
+A AMD informou em 20/07/2026 que a correção estava no driver público; isso não
+comprova disponibilidade para todo modelo. O mesmo erro foi relatado em um 5600G
+após atualização, portanto atualizar não é uma solução garantida.
+Declarar `InColorPrimaries=1` também não resolveu no 5600G testado. O host agora
+corrige exclusivamente o metadado de primárias do SPS produzido pelo AMF quando
+o pipeline próprio foi verificado como NV12/BT.709/faixa limitada e o SPS declara
+exatamente `primaries=0`, `transfer=1`, `matrix=1`, `fullRange=false`. O parser
+limitado de RBSP/EBSP corrige extradata e SPS em banda antes da prévia e da rede,
+sem recodificar nem alterar VCL, dimensões, perfil ou timestamps. A correção é
+registrada uma vez por host. Outros metadados, fluxos de terceiros e a validação
+de cor do RTC não recebem essa exceção. A publicação física no 5600G ainda
+precisa ser confirmada.
+
+Um PLI do receptor solicita um novo quadro-chave, mas não invalida a sequência
+codificada que continua válida no transmissor. Os quadros dependentes seguem
+para os espectadores já ativos, e pedidos repetidos são agrupados até chegar
+um quadro-chave real. Bootstrap e perda efetiva de dependências continuam
+exigindo um quadro independente, com os mesmos limites de recuperação.
+
+Na recepção, uma observação de relógio que expira durante o transporte IPC é
+indisponível, não uma falha do áudio inteiro. O código estruturado
+`ERR_RTC_AUDIO_CLOCK_OBSERVATION` retira a medição e permite recalibrar no mesmo
+epoch, mantendo os limites de 200 ms e de incerteza. Contadores
+`rejectedClockObservations` e `lastClockRejection` preservam o diagnóstico.
+Valores impossíveis, PCM não confirmado e regressões reais continuam erros.
+Uma recalibração pendente ou expirada não muda a identidade da saída já
+calibrada: controles de volume/mute e recepções SFU/P2P conservam seus vínculos.
+A primeira calibração continua obrigatória, e parar ou substituir a saída
+invalida os vínculos antigos; medições vencidas não viram feedback válido.
+
+A troca da saída usa `AudioContext.setSinkId()` no contexto/worklet existente,
+via IPC privado validado por epoch. Ela conserva a apresentação, o transporte,
+o PCM e o epoch de saída; apenas a medição do relógio físico fica indisponível
+até existir uma nova âncora válida e não regressiva. Seleções são serializadas;
+uma rejeição é reportada ao seletor e restaura a seleção anterior sem encerrar
+o vídeo. Parar a saída aguarda seleções em andamento antes de fechar o contexto.
+Mute, deafen e volume não recriam a recepção. No palco, mudanças apenas nos
+indicadores dos participantes também preservam os elementos de vídeo e fullscreen.
+
+Minimizar ou ocultar a janela pausa também a entrada codificada nativa, não só
+o envio de pacotes em JavaScript. O monitor da fonte aplica essa pausa mesmo
+quando tela cheia exclusiva deixa de produzir quadros. Ao restaurar, a mesma
+sessão aguarda a confirmação nativa e um quadro-chave real antes de reenviar,
+sem contabilizar o tempo minimizado como falha de recuperação nem ampliar seus
+limites. Fechar ou substituir a janela continua exigindo seleção explícita.
+A regressão `nativeScreenAppSmoke.cjs --sfu --screen-codec=av1 --native-1080p60
+--window-lifecycle --windowed --sample-seconds=8 --artifacts=<diretório absoluto novo>`
+exercita minimizar/restaurar, prévia e áudio com uma janela sintética. `--windowed`
+mantém o espectador na área útil do monitor de QA; não é uma validação de jogo
+real em tela cheia exclusiva nem desativa a proteção de posicionamento.
+
+Alterações de qualidade fazem preflight com a fonte anterior ainda ativa.
+Somente após admissão encerram a instância antiga e publicam a substituta com
+o mesmo ID de compartilhamento. Stop bloqueia novas demandas imediatamente,
+mas drena transações SFU/PCM já admitidas antes de invalidar seus callbacks;
+timeout retém o proprietário para retry. Consultas de diagnóstico durante essa
+retirada retornam indisponibilidade, sem inventar FPS zero.
+
+O teto configurável da tela é 3840x2160/80 Mbps, sem mudar os presets existentes:
+**até 240 FPS abaixo de 4K e 120 FPS ao atingir 3840 px de largura ou 2160 px de altura**.
+O cliente aplica o mesmo limite nas listas, valores digitados e preferências
+salvas. Câmera mantém seus limites anteriores de 120 FPS, ou 60 FPS em 4K.
+O contrato compartilhado, o host de captura, a base de tempo e o RTC aceitam os
+novos perfis; cliente e servidor precisam usar versões compatíveis desse contrato.
+Cada perfil negocia o nível H.264 necessário: pelo menos 5.1 para 1080p120,
+5.2 para 1080p240/4K60 e 6 para 4K120. O overlay versionado do WebRTC e o patch de
+`h264-profile-level-id` acrescentam suporte real ao nível 6; os patches e
+licenças acompanham as fontes correspondentes. O teto de bitrate não é um piso: o controle de congestionamento
+continua ativo e diferentes perfis podem consumir upload adicional.
+
+No SFU, o SDP de H.264 e AV1 preserva a estimativa inicial de até 5 Mbps e o
+teto do perfil. O adaptador inclui AV1 ao serializar essas opções, evitando o
+início involuntário em 300 kbps e o acúmulo de pacotes no pacer. Nenhum bitrate
+mínimo é imposto; a estimativa continua podendo cair com congestionamento.
+O mínimo configurável do encoder (50 kbps) não pausa uma alocação positiva
+do RTC: os quadros reais continuam chegando ao pacer, que controla o envio
+pela rede. Somente alocação zero ou pausa explícita do RTC suspende a admissão.
+Sondagens periódicas em períodos de pouco envio ajudam a detectar a recuperação
+da rede; não elevam a estimativa inicial a um piso obrigatório.
+
+Isso não torna todo encoder compatível com 4K120. No AMF instalado na RX 9070 XT
+do ensaio, `MaxLevel=52` e `ProfileLevel=60` é rejeitado; 4K60/80 Mbps inicializa
+em nível 5.2. O preflight consulta essa capacidade no adaptador selecionado,
+sem capturar pixels, e recusa o perfil incompatível antes de retirar a fonte
+antiga. Não muda para 60 FPS nem falsifica o nível silenciosamente. NVENC também
+precisa admitir o nível solicitado. Inicialização não comprova cadência física.
+
+No NVENC AV1, o host fixa `tier=0` e o nível Main Tier que comporta a resolução,
+o FPS e o **teto completo de bitrate**, não somente os 5 Mbps iniciais.
+O nível permanece igual durante os ajustes de congestionamento; 4K/80 Mbps
+requer índice 17 (6.1). Feedback acima do teto é rejeitado. A validação do
+bitstream continua rejeitando High Tier, e o diagnóstico inclui encoder,
+bitrate solicitado e teto. Isso evita depender da escolha automática de nível
+do driver quando o bitrate sobe.
+
+O export separado `probeCaptureCapabilities()` inicializa o encoder na GPU
+sem capturar uma fonte, mas **não é o fluxo de descoberta global do Main**.
+Sua API não entrega ao chamador um comprovante de encerramento vinculado a
+PID/nonce nem um owner para repetir a limpeza após rejeição/cancelamento.
+Não a use para deduzir que é seguro remover o diretório ou liberar uma reserva;
+o fluxo selecionado mantém esse controle de ownership e encerramento.
+
+Os encoders são `h264_texture_amf` e `obs_nvenc_h264_tex`. O probe NVIDIA abre
+uma sessão NVENC no dispositivo D3D11 efetivamente escolhido; marca/vendor
+sozinho não comprova suporte. Os dois caminhos de textura fixados usam
+**DXGI adapter 0**. Uma GPU AMD/NVIDIA secundária, especialmente em notebooks
+híbridos com Intel no adapter 0, não é selecionada automaticamente nem tem
+compatibilidade cross-adapter garantida. Modelo, driver, recursos disponíveis
+e limite de sessões do encoder podem impedir o preparo ou a captura.
+
+## Vídeo, áudio e demanda de prévia
+
+O vídeo usa NV12, perfil H.264 Main, zero B-frames e GOP de um segundo, com
+limites de 3840x2160, 240 FPS (120 FPS em 4K) e 80000 kbps, sujeitos ao encoder. O switch **Preservar proporção** no
+seletor vale somente para o compartilhamento que está sendo criado. Desligado,
+estica a imagem para a resolução solicitada. Ligado (padrão), mantém a imagem
+inteira centralizada e acrescenta barras pretas quando as proporções diferem,
+sem cortar ou deformar a fonte. A escolha vale para a prévia e todos os perfis
+de espectadores, inclusive depois de trocar a qualidade; não altera a resolução
+ou o FPS configurados e não é uma preferência global. Perfis diferentes podem
+exigir encoders e upload adicionais. Esses valores são
+limites de configuração, não garantia de FPS, bitrate entregue ou desempenho.
+O feedback de bitrate confirma configurações, não a aplicação medida no
+hardware (`hardwareApplicationConfirmed: false`, `fpsApplied: null`).
+
+Todos os encoders usam controle de taxa CBR, inclusive o H.264 por AMF. O plugin
+AMF fixado aplica cada bitrate ao vivo com `Flush()` + `ReInit()`, o que reinicia o
+controle de taxa e emite um IDR. Com `VBR_LAT`, o VBV de ~1 quadro produzia um IDR
+pequeno e quadriculado, que levava vários quadros para recuperar a nitidez. Em
+redes instáveis, a imagem pulsava a cada ajuste de bitrate. Com CBR, o reinício gera
+um IDR completo, como já acontecia no AV1 por AMF. Em troca, o AMF completa com
+*filler* os quadros abaixo do bitrate alvo, como o x264 e o AV1 por AMF já faziam.
+
+Mesmo em CBR, todo ajuste reinicia os encoders de hardware do Windows: o AV1 por
+AMF ainda emite, após o `ReInit()`, um quadro-chave com cerca de metade do tamanho
+normal e leva de 10 a 20 quadros para recuperar a nitidez. O NVENC reinicia com
+`resetEncoder` e IDR forçado. Por isso, o transmissor mantém 10% de folga sobre a
+alocação do RTC e só aumenta o bitrate quando o novo alvo supera o atual em
+**25%**. Reduções continuam imediatas assim que a alocação fica abaixo do valor
+aplicado. Na banda registrada de uma conexão instável, as mudanças caíram de oito
+para cinco em 30 segundos. x264, libaom e VideoToolbox ajustam o bitrate sem
+reiniciar e seguem a mesma regra.
+
+A captura só começa após selecionar uma fonte e existir **demanda de prévia
+local ou de espectador**. A prévia funciona sem espectadores: nesse caso usa
+um pipeline local no perfil da fonte, sem publicar mídia na rede. Quando há
+espectadores, ela reutiliza um perfil assistido e decodifica seus mesmos
+frames H.264, sem segunda captura/encoder apenas para exibição. A fila da
+prévia é limitada e não bloqueia o envio remoto.
+Um novo compartilhamento abre sua prévia no modo foco; atualizações de
+qualidade ou recuperação não desfazem a escolha posterior de sair do foco.
+O indicador **Normal / Captura de jogo** só aparece depois de observar frames,
+e acompanha o pipeline efetivo da prévia ou do espectador, não apenas a opção
+solicitada. A sinalização desse estado exige cliente e servidor compatíveis com o protocolo 26.
+
+A opção **Pausar prévia quando o Monky estiver fora de foco**, ativa por padrão,
+controla somente a prévia local; perder foco não interrompe espectadores.
+Enquanto pausada, a prévia mostra fundo preto e o aviso de pausa, sem exibir
+a miniatura congelada. Ao voltar ao foco, a imagem ao vivo reaparece.
+Desativá-la permite manter a prévia em outro monitor. Ao sair o último
+espectador, a publicação remota é encerrada; se a prévia ainda tiver demanda,
+um pipeline local pode continuar/recomeçar. Sem espectadores e sem demanda de
+prévia, os recursos de captura/encoder são encerrados. Isso vale também para
+Captura de Jogo, que não precisa de um espectador remoto para a prévia.
+
+O áudio usa o caminho PCM nativo com timestamps: janela/jogo captura o
+aplicativo selecionado; monitor captura o sistema **excluindo o Monky**, não
+somente aplicativos visíveis naquele monitor. Não é captura de microfone.
+No macOS, essa exclusão enumera os descendentes do próprio processo, sem consultar
+dados protegidos de aplicativos alheios. A validação de identidade da janela
+selecionada continua obrigatória.
+Apenas uma fonte pode capturar áudio por vez. Ao substituir uma transmissão
+com som, o seletor mantém a opção de áudio habilitada: o Main prepara a nova
+fonte sem adquirir PCM, e o renderer aguarda o encerramento da fonte anterior
+antes de ativar a prévia e o novo seletor de áudio. Uma falha de preparação
+preserva a transmissão anterior; uma falha no encerramento impede a ativação
+da substituta. Adicionar outra transmissão com som continua bloqueado enquanto
+a primeira possui o áudio. Se a captura de áudio não
+estiver disponível, é preciso desativá-la explicitamente para enviar só vídeo;
+não há troca silenciosa de escopo. Suporte do módulo e testes sem dispositivos
+não substituem a validação do áudio físico no Windows de destino.
+
+O compartilhamento usa `overflowMode: 'discontinue'` na captura PCM. A fila
+continua limitada a 32 créditos, com espera de admissão de 500 ms. Se o prazo
+expirar, somente o pacote ainda sem crédito é descartado; o próximo pacote
+admitido inicia uma nova época nativa e registra a perda. Índices adquiridos,
+PCM, QPC e flags WASAPI permanecem originais. A ponte aguarda os comprovantes
+de processamento anteriores antes de ativar a nova época; nenhum crédito em
+trânsito é revogado. Falhas de dispositivo continuam explícitas e fatais.
+O timer de diagnóstico RTC é suspenso antes de iniciar o fechamento nativo,
+para não consultar estado já desmontado enquanto os recursos ainda encerram.
+
+Uma coleta pareada QPC/RTC que leva mais de 2 ms
+não invalida, por si só, PCM contínuo. Somente nesse caso o bloco segue sem
+timestamp absoluto, com `clockObservationsUnavailable` incrementado no
+diagnóstico da fonte. A próxima observação válida retoma os timestamps sem
+reiniciar a época. Não se amplia o limite do relógio, inventa timestamp ou
+descarta PCM; descontinuidade, retrocesso e outros erros continuam explícitos.
+
+Na reprodução, `currentFrame` é uma observação do relógio do grafo, não do
+alto-falante. O Chromium 152.0.7977.130 [avança o grafo antes de atualizar o
+worklet](https://raw.githubusercontent.com/chromium/chromium/152.0.7977.130/third_party/blink/renderer/modules/webaudio/realtime_audio_destination_handler.cc);
+essa [atualização pode ser pulada por um try-lock](https://raw.githubusercontent.com/chromium/chromium/152.0.7977.130/third_party/blink/renderer/modules/webaudio/base_audio_context.cc),
+repetindo o timestamp mesmo com callbacks novos. O receptor retira imediatamente
+a âncora de sincronização e incrementa apenas `clockEpoch`, sem trocar o epoch
+de saída, o dispositivo ou o owner. O PCM válido na fila continua tocando:
+um timestamp indisponível não comprova falta de áudio. Observações repetidas
+ou saltadas são contabilizadas, mas não descartam amostras nem fabricam
+underruns. `clockAvailable` retira explicitamente a relação com o relógio do
+alto-falante até voltar uma observação contínua do grafo; não se inventam
+timestamps. Retrocesso real ou sobreposição parcial continua sendo erro explícito.
+
+A saída prepara 60 ms de PCM dentro de um buffer limitado a 80 ms. Um callback de
+10 ms do dispositivo pode renderizar vários blocos do worklet antes de seus
+créditos saírem da thread de áudio. Os 50 ms restantes acomodam a variação
+medida de cerca de 40 ms no IPC; o alvo anterior de 20 ms deixava cerca de 10 ms.
+Isso acrescenta 40 ms de buffering e 15 KiB de memória para PCM estéreo float,
+sem introduzir um timer de reprodução ou relaxar os limites do relógio. No máximo 20 ms de
+créditos nativos podem ficar pendentes, inclusive durante a partida. Falta
+real de áudio continua sendo reportada; isso não garante continuidade diante
+de bloqueios arbitrários dos processos ou interrupções de rede.
+
+## Dependências OBS e Captura de Jogo
+
+`scripts\buildCapture.cjs` gera `bin\win32-x64\capture-build.json` no **schema 5**.
+Ele mantém OBS **32.1.1**, revisão
+`7272af1375b38bc3cf4e0f98a5d999e8b76e9309`, com arquivos verificados por SHA-256.
+Além de libobs/D3D11/WinRT, `obs-ffmpeg` e do módulo `win-capture` especializado,
+o pacote inclui `obs-nvenc.dll`, dados de locale, probes
+`obs-amf-test.exe`/`obs-nvenc-test.exe` e as dependências fixadas.
+Os probes também ficam ao lado de `monky-screen-capture.exe`.
+O header NVENC `include\ffnvcodec\nvEncodeAPI.h` do pacote de dependências é
+verificado por `src\capture\runtime-additions.json`.
+
+O build também recompila `libobs-winrt.dll` a partir da mesma revisão OBS.
+A especialização em `src\capture\wgcCadence.h` configura a cadência WGC na
+criação da sessão e na recuperação do dispositivo, somente quando o Windows
+expõe `GraphicsCaptureSession.MinUpdateInterval`. Sem essa propriedade, o
+Windows continua controlando a entrega de frames e essa limitação é registrada.
+As fontes vendorizadas permanecem intactas e verificadas por hash; a receita
+`scripts\captureSourceBindings.cjs`, a especialização e as fontes OBS integram
+as fontes correspondentes da release. O manifesto e o host verificam o hash
+da DLL recompilada, não o da DLL original do pacote OBS.
+
+Os helpers OBS `graphics-hook32.dll`/`graphics-hook64.dll`,
+`inject-helper32.exe`/`inject-helper64.exe` e
+`get-graphics-offsets32.exe`/`get-graphics-offsets64.exe` são distribuídos em
+`obs\data\obs-plugins\win-capture`, dentro do runtime privado. O preparo de
+uma seleção `game` inicializa os helpers de offsets; a captura/injeção só
+começa com demanda dessa seleção. Não há updater/download autônomo de
+compatibilidade, instalação global de hooks ou registro global de camada
+Vulkan. Isso é diferente dos hooks de **build do `gclient`**, que continuam
+desativados.
+
+Os dados imutáveis de `win-capture` são copiados, com verificação de cada
+SHA-256, para `native-screen-capture\hooks-<hash>\data\obs-plugins\win-capture`
+dentro do perfil selecionado. A chave deriva do conjunto completo de arquivos
+fixados. Cada arquivo é publicado atomicamente, sem sobrescrever uma cópia
+existente, que também precisa passar pelas verificações de caminho, tamanho e
+hash. Configurações e ownership continuam privados por execução.
+Uma DLL injetada pode permanecer mapeada no jogo após encerrar a transmissão:
+por isso esse cache não é apagado no Stop, na pausa da prévia ou na troca de
+qualidade. O encerramento ainda exige liberar a captura, o encoder, o transporte
+e o processo auxiliar; não mata o jogo nem força o descarregamento de sua DLL.
+Um runtime antigo deve ser recompilado para usar esse armazenamento e os dois
+modos de proporção.
+
+Mantém-se a configuração normal OBS `anti_cheat_hook=true`; ela não autoriza
+desativar anti-cheat, Trusted Mode ou alterar argumentos de lançamento.
+Captura de Jogo exige renderização compatível com o hook: não é um método
+universal para qualquer aplicativo enumerado. O [guia oficial do
+OBS](https://obsproject.com/kb/game-capture-troubleshooting) lista CS2 entre os
+jogos com problemas conhecidos e orienta modo janela/sem bordas com captura de
+janela. Não se pode deduzir qual proteção está ativa apenas pela falta de frames.
+Uma falha de inicialização da fonte Game ou ausência de frames antes do prazo
+inicia o fallback para **Normal**, com aviso discreto traduzido, sem desativar
+proteções. O host anterior precisa confirmar seu encerramento; HWND, PID e
+instante de criação são revalidados antes da única tentativa alternativa.
+O transporte, espectadores, áudio, proporção e perfil permanecem os mesmos.
+Perda da janela, cancelamento, erro do encoder ou falha após emitir vídeo não
+autorizam trocar de método. Se Normal também falhar, o erro é explícito.
+Para esses jogos, Normal pode exigir modo janela/sem bordas; não há garantia
+de compatibilidade. O guia pesquisável no seletor resume limitações publicadas
+pelo OBS, não uma lista completa de jogos homologados no Monky.
+
+## Build a partir de um checkout
+
+Requisitos: Windows x64, Node.js 22+ x64, npm, Git, CPython **3.11.8+ da série
+3.11, x64**, Visual Studio **2022 (17.x)** C++ com **v143/MSVC 14.30–14.44**,
+ATL/MFC e CRT redistribuível de release, Windows SDK
+**10.0.26100.0** com servicing **10.0.26100.3323 ou posterior** e Debugging Tools
+x64. Reserve vários GB para fontes, ferramentas e build.
+O Python deve ser um executável instalado, não o launcher da Microsoft Store.
+
+O seletor compartilhado em `scripts\windowsToolchain.cjs` considera somente
+VS2022 completo e não preview, mesmo com VS2026 instalado. Escolhe a instalação
+compatível mais recente dentro dessa faixa, informa versões/caminhos e rejeições,
+e verifica ferramentas, integração v143, SDK e servicing antes de criar o venv,
+baixar fontes ou compilar. **17.13.4 é a referência upstream dos pins, não um
+patch exato obrigatório**; não implica suporte a VS2026 ou MSVC 14.5x.
+O SDK 28000 sozinho não substitui o diretório 26100: `rc.exe` precisa continuar
+na família 26100; as DLLs compartilhadas de Debugging Tools podem ser mais novas.
+
+`--vs-install=<caminho absoluto>`, `--sdk-root=<caminho absoluto>` e
+`--vswhere=<executável absoluto>` estão disponíveis no seletor, preparo,
+bootstrap e builders. Uma seleção explícita inválida falha, sem escolher outra
+instalação. O ambiente de outro Developer Prompt não é herdado pelos builds:
+`vcvars`, GN, node-gyp e MSBuild recebem a instalação e as versões verificadas.
+Nenhuma dessas etapas instala ou atualiza Visual Studio, MSVC ou SDK.
+
+Na raiz do checkout já atualizado, em PowerShell comum, ajuste o caminho do Python
+e execute as etapas separadamente, interrompendo no primeiro erro. Antes do
+rebuild, feche somente o Monky Dev desse checkout, não a versão instalada:
+
+```powershell
+$Python = "C:\Python311\python.exe"
+$env:PYTHON = $Python
+$env:NODE_GYP_FORCE_PYTHON = $Python
+$Git = (Get-Command git -CommandType Application | Select-Object -First 1).Source
+node apps\client\native\screen-share\scripts\windowsToolchain.cjs --python="$Python"
+if ($LASTEXITCODE -ne 0) { throw 'Windows toolchain preflight failed.' }
+npm ci
+if ($LASTEXITCODE -ne 0) { throw 'npm ci failed.' }
+npm run prepare:native-screen -- --python="$Python" --git="$Git" --jobs=4
+if ($LASTEXITCODE -ne 0) { throw 'Native screen preparation failed.' }
+node apps\client\native\screen-share\scripts\buildScreenAudio.cjs --python="$Python"
+if ($LASTEXITCODE -ne 0) { throw 'screen-audio rebuild failed.' }
+npm run build
+if ($LASTEXITCODE -ne 0) { throw 'Monky build failed.' }
+npm start
+```
+
+`npm ci` usa o lockfile, mas o script de instalação de `screen-audio` adia
+seu build. `buildScreenAudio.cjs` usa o `node-gyp` já instalado no repositório
+para configurar os headers do Electron instalado **depois de `npm ci`**, não
+os do Node do terminal. Em seguida, recompila
+`apps\client\native\screen-audio\build\Release\screen_audio.node` com MSBuild,
+fixando instalação/MSVC/SDK e usando o job privado gerado pelo preparo RTC.
+Por isso esse comando vem **depois de `prepare:native-screen`**.
+Execute-o no primeiro preparo ou quando mudarem as fontes do addon ou o Electron;
+um addon anterior às funções de monitor/identidade e ACKs PCM precisa ser atualizado.
+Se o addon já corresponde a essas fontes e ao Electron instalado, uma alteração
+somente de scripts/TypeScript não exige outro rebuild de `screen-audio`.
+As fixtures de `screen-audio\test` não substituem o addon de produção.
+Não instale outro Electron ou `node-gyp` global nem reutilize um `.node` antigo
+para contornar falhas.
+
+O primeiro comando é um preflight somente leitura, sem build, download ou GPU,
+e funciona antes de `npm ci`. Ele não altera o ambiente global nem os hooks de
+instalação de outros pacotes que `npm ci` possa executar; use PowerShell comum,
+não um Developer Prompt de outra versão do VS.
+
+`prepare:native-screen` usa `.native-screen`, ignorado pelo Git. Após o preflight, cria um venv
+privado, obtém revisões fixadas, verifica os arquivos OBS por SHA-256, compila
+o RTC e a captura de `screen-share` e reúne as licenças; **não compila
+`screen-audio`**. Não usa diretórios de experimentos nem executa os hooks de
+build do `gclient`. Checkouts modificados ou incompletos interrompem a
+preparação; não são resetados ou substituídos silenciosamente.
+
+Downloads de arquivos compactados têm até três tentativas para falhas
+transitórias de rede/servidor, incluindo conexões abortadas no Windows
+(`ECONNABORTED`), com espera e descarte do arquivo parcial.
+Cada tentativa concluída precisa validar o SHA-256 e o tamanho, quando fixado.
+Falhas de integridade, certificado, redirecionamento inseguro ou HTTP
+permanente interrompem o preparo sem repetir nem substituir o cache.
+
+Esse roteiro não instala os pré-requisitos de sistema nem promete um preparo
+completo em um comando em qualquer máquina. `nativeScreenReady: true` confirma
+o build/runtime, não a captura, o driver ou o envio NVIDIA. O preparo em uma
+máquina limpa e cada combinação GPU/driver ainda precisam de validação própria.
+
+O build inclui o CRT redistribuível de release do Visual Studio no aplicativo.
+Não depende de Visual Studio ou de um CRT previamente instalado no computador
+de quem recebe o Monky.
+Use um diretório de instalação curto: o host admite caminhos de até 240
+caracteres, incluindo os nomes dos arquivos internos, e recusa aliases.
+
+```powershell
+npm run package
+```
+
+Esse comando usa o mesmo electron-builder da release, sem encerrar instâncias
+alheias. Produz `release\win-unpacked\Monky.exe` e
+`release\Monky-Windows.zip`. O empacotamento falha se binários, fontes
+compiladas, runtime, CRT ou avisos de terceiros estiverem inconsistentes.
+
+## Reaproveitamento no CI e na release Windows
+
+O CI executa a suíte DOM Windows em outro runner `windows-2022`, em paralelo
+ao preparo nativo e ao empacotamento. Os testes continuam sequenciais dentro
+desse runner para não disputar fixtures de desktop/áudio. Os dois checks
+`Build check` existentes aguardam o empacotamento nas duas plataformas e a
+suíte DOM Windows; falha, cancelamento ou uma etapa paralela pulada não aprova
+esses gates. A suíte DOM macOS continua no job de empacotamento.
+
+CI e release mantêm cache somente de `.native-screen\downloads`: arquivos
+compactados de runtime/dependências OBS, identificados pelo conteúdo, e os
+arquivos de fontes selecionados pelas receitas OBS fixadas. A chave inclui
+Windows x64, os manifestos e as receitas de download/verificação, sem fallback
+por prefixo. CI e release usam namespaces separados. Antes do uso, cada arquivo
+restaurado é conferido contra o SHA-256 confiável e o tamanho, quando fixado;
+corrupção falha explicitamente, sem baixar uma substituição silenciosa. Sem
+cache, os arquivos são baixados e verificados normalmente.
+
+Isso **não é cache de binários nativos**: alterações de ABI do Electron,
+compilador e fontes continuam compilando do zero. Não são restaurados árvore
+WebRTC, marcadores de propriedade do checkout, venv Python, ferramentas
+extraídas nem resultados de compilação nativa. Permanecem a seleção de Python
+3.11, VS2022 v143 e SDK 10.0.26100.0, os contratos nativos, as verificações de
+pacote, as licenças e os gates de geração/publicação das fontes correspondentes.
+
+A execução fria ganha somente a oportunidade de sobrepor DOM Windows ao
+trabalho nativo, ao custo da instalação e do build dos workspaces em outro
+runner. A execução quente pode também evitar esses downloads OBS, mas ainda
+extrai, valida, compila WebRTC e gera o arquivo de fontes da release. Não há
+promessa de duração nem eliminação do custo principal da compilação nativa;
+meça as execuções reais de CI/release antes de afirmar ganho de tempo.
+
+## Licença e fontes correspondentes
+
+Antes de atualizar licenças ou assinar, o empacotamento separa os hard links
+criados pelo electron-builder no CI. Arquivos do aplicativo ficam independentes
+do checkout, evitando colisões na cópia de licenças e alterações nos binários
+ou manifestos originais durante a assinatura.
+
+O Monky é **GPL-3.0-or-later**. Dependências mantêm seus próprios direitos e licenças; consulte
+`THIRD_PARTY_NOTICES` e `licenses`. Os avisos WebRTC são derivados do grafo GN
+realmente compilado. O FFmpeg distribuído usa GPL versão 3 ou posterior.
+Direitos de patentes H.264 são uma questão separada da licença de software.
+
+As fontes correspondentes são o código Monky da **mesma tag da release** e
+`monky-native-sources-<versao>.tar.xz`, com seu manifesto JSON, na
+[mesma página de release](https://github.com/MonkyOrg/Monky/releases).
+O arquivo inclui fontes do SDK, bibliotecas OBS/FFmpeg e receitas de dependências,
+inclusive as usadas por NVENC e pelos helpers de Game Capture. O host, os
+ajustes de vínculo da fonte e as receitas de build Monky vêm do checkout da
+mesma tag; o arquivo de fontes sozinho não é um runtime pronto. Ele inclui
+`SOURCE-MANIFEST.json` e cópias deste guia em `SOURCE-README.md` e
+`SOURCE-README.en.md`. Arquivos de fonte upstream são preservados com seu
+checksum original, inclusive os que contêm links simbólicos de Unix.
+
+Para gerar o arquivo, depois de preparar o runtime:
+
+```powershell
+$Version = (Get-Content apps\client\package.json | ConvertFrom-Json).version
+npm run pack:native-sources -- --version=$Version
+```
+
+O destino padrão é `release\monky-native-sources-<versao>.tar.xz` e
+`release\monky-native-sources-<versao>.json`. O script exige fontes e avisos
+consistentes com o build e recusa sobrescrever um par já existente.
+Não publique um manifesto com `publicationReady: false`: ele foi produzido
+de uma árvore com alterações locais. A release verifica o commit, tamanho e
+SHA-256 das fontes e só fica pública depois de confirmar todos os uploads.
+
+## Reconstruindo com o arquivo de fontes
+
+Obtenha o checkout Monky da mesma tag, confira os checksums da release e
+instale os mesmos pré-requisitos de Python 3.11/MSVC/SDK descritos acima.
+Em um checkout novo, sem `.native-screen`, substitua `<versao>` pelo nome do
+arquivo baixado e execute cada etapa, parando em qualquer erro:
+
+```powershell
+$Python = "C:\Python311\python.exe"
+$env:PYTHON = $Python
+$env:NODE_GYP_FORCE_PYTHON = $Python
+node apps\client\native\screen-share\scripts\windowsToolchain.cjs --python="$Python"
+if ($LASTEXITCODE -ne 0) { throw 'Windows toolchain preflight failed.' }
+New-Item -ItemType Directory .native-screen -ErrorAction Stop
+& $Python -c "import tarfile; tarfile.open('monky-native-sources-<versao>.tar.xz', 'r|xz').extractall('.native-screen', filter='data')"
+if ($LASTEXITCODE -ne 0) { throw 'Source extraction failed.' }
+npm ci
+if ($LASTEXITCODE -ne 0) { throw 'npm ci failed.' }
+node apps\client\native\screen-share\scripts\buildRtc.cjs --webrtc-root="$PWD\.native-screen\rtc\webrtc\src" --python="$Python" --jobs=4
+if ($LASTEXITCODE -ne 0) { throw 'RTC build failed.' }
+node apps\client\native\screen-share\scripts\fetchObs.cjs --runtime-only
+if ($LASTEXITCODE -ne 0) { throw 'Pinned OBS acquisition failed.' }
+node apps\client\native\screen-share\scripts\buildCapture.cjs --obs-root="$PWD\.native-screen\obs-runtime" --deps-root="$PWD\.native-screen\obs-dependencies" --python="$Python"
+if ($LASTEXITCODE -ne 0) { throw 'Capture build failed.' }
+node apps\client\native\screen-share\scripts\buildScreenAudio.cjs --python="$Python"
+if ($LASTEXITCODE -ne 0) { throw 'screen-audio rebuild failed.' }
+node apps\client\native\screen-share\scripts\notices.cjs
+if ($LASTEXITCODE -ne 0) { throw 'Native notices failed.' }
+npm run build
+if ($LASTEXITCODE -ne 0) { throw 'Monky build failed.' }
+```
+
+Use esses comandos diretos, não o bootstrap de aquisição, sobre o snapshot:
+o snapshot não carrega os locks ou a identidade do checkout da máquina de build.
+A extração via Python preserva os nomes Unicode das fontes no Windows.
+Ferramentas genéricas ainda exigem Node/Python/MSVC/SDK instalados; a etapa
+`--runtime-only` baixa os binários OBS e as dependências fixadas para o build
+padrão, incluindo NVENC e hooks; não é uma reconstrução offline completa.
+`buildRtc.cjs` deve preceder `buildCapture.cjs` e `buildScreenAudio.cjs`: ele gera também
+`build\tools\monky_msvc_job.exe`, dentro deste módulo. Para alterar OBS/FFmpeg,
+use suas fontes, receitas e ajustes Monky e atualize os pins do runtime para
+seus novos binários; não misture helpers/hooks de outra versão do OBS.
+
+O build verifica revisão, ABI, fontes e recursos, mas não promete binários
+bit a bit idênticos entre versões distintas do toolchain.
+
+## Validação
+
+Na primeira advertência e na primeira falha terminal de cada pipeline, `receive-health`
+registra uma projeção limitada do snapshot de controle: filas, recursos
+retidos e operações do decoder em andamento. Isso permite atualizar a observação
+se uma advertência antiga anteceder um travamento posterior. São no máximo
+duas observações por pipeline, quatro decoders e 61 registros por observação.
+As quatro chamadas nativas selecionadas por decoder priorizam operações
+em andamento sobre chamadas concluídas recentes e indicam truncamento.
+São observações em cache,
+com seus timestamps, não uma consulta síncrona ao worker de mídia nem
+prova de que ele está progredindo. Não são registrados SDP, credenciais,
+nomes de fontes ou mensagens nativas arbitrárias. Falha de leitura aparece
+separadamente e não substitui o erro original nem altera a limpeza.
+Falhas de parada da captura também preservam a causa original junto da
+ausência de comprovação de encerramento; a fonte não é considerada fechada
+sem essa comprovação.
+
+`npm run test:native-screen --workspace=@monky/client` cobre os contratos e
+lifecycle sem exigir captura de hardware. O build C++ também executa contratos
+sem abrir dispositivos. `test\nativeCaptureSmoke.cjs`, neste módulo, e
+`apps\client\test\nativeScreenAppSmoke.cjs` exercitam mídia real em janelas
+sintéticas próprias; exigem o hardware qualificado e um diretório novo de
+artefatos via `--artifacts=<caminho_absoluto>`.
+
+No Windows, defina `$env:MONKY_TEST_DISPLAY='2'` na mesma chamada que inicia
+os ensaios de captura, A/V ou aplicação para escolher `\\.\DISPLAY2`
+(não o índice da lista do Electron). As janelas recebem coordenadas antes
+da criação, começam ocultas e só aparecem após validar o posicionamento.
+Monitor ausente ou janela maior que sua área útil interrompem o ensaio;
+não há retorno à tela principal nem redução silenciosa da fonte.
+Para manter essa preferência também quando o launcher omitir a variável,
+use `{"display":2}` em `.native-screen\test-display.json` na raiz do repositório.
+Esse arquivo é local e ignorado pelo Git; a variável de ambiente tem precedência.
+O destino precisa ser não primário e estar à esquerda da tela principal.
+Sem essa configuração opcional, outros ambientes mantêm o posicionamento
+padrão anterior. Um destino configurado inválido nunca usa esse caminho padrão.
+
+`nativeCaptureSmoke.cjs` aceita `--encoder=h264_texture_amf`,
+`obs_nvenc_h264_tex`, `obs_x264`, `av1_texture_amf`, `obs_nvenc_av1_tex`
+ou `monky_aom_av1`; o padrão `auto` mantém o ensaio H.264 por hardware.
+Use `--quality=480p30`, `720p60` ou `1080p60` para um único perfil,
+`--mode=sfu` para encaminhamento mediasoup real, ou `--preview-only`
+para validar captura e prévia WebCodecs sem admissão de rede.
+Software também usa captura libobs/D3D11; não exige um encoder na GPU.
+Os ensaios verificam pixels, cadência e encerramento dos recursos.
+
+Para investigar interrupções, `nativeCaptureSmoke.cjs` aceita
+`--mode=sfu --quality=source --profile=480p15` e
+`--congestion=moderate` (500/250 kbps) ou `--congestion=severe` (150/50 kbps),
+restaurando depois o teto do perfil no transporte exclusivo do ensaio.
+Como alternativa, `--main-stall-ms=1700` atrasa o Main após um PLI real.
+O relatório preserva o primeiro erro e os contadores anteriores à limpeza.
+Esses modos injetam condições adversas e podem reprovar; não desativam os
+guards de produção nem confirmam, sozinhos, a causa de uma ocorrência externa.
+
+`nativeAvSmoke.cjs` aceita seleção explícita de encoder H.264/AV1 AMD ou NVIDIA,
+`--profile=720p30` (o padrão continua 1080p120),
+`--main-stall-ms=1200` e `--soak-ms=900000` para um ensaio de 15 minutos
+(limite de 20 minutos). O ensaio prolongado registra atraso do event loop e
+frames apresentados, atualizando `progress.json` a cada cinco amostras.
+Somente a janela sintética própria fornece áudio/vídeo; não há gravação de mídia.
+
+`--single-receiver-soak-ms=180000` mede, em vez disso, um único receptor contínuo:
+silêncio/underruns do worklet, PCM nativo, perdas da fonte e tempos de créditos
+e PCM no IPC. Grava progresso limitado e registros incrementais em
+`audio-samples.jsonl`, mantendo somente a primeira e a última amostra em memória
+e no relatório final, com o total em `sampleCount`. Isso evita acumular ou
+serializar repetidamente o histórico durante a reprodução.
+Acrescente `--require-audio-continuity` para reprovar
+qualquer silêncio, underrun ou descarte novo após a partida da fonte,
+contadores de saída parados ou descontinuidade no tom recebido. Esse modo
+exige pelo menos 30 segundos e não pode ser combinado com os demais cenários
+de soak, injeção de falhas, mute ou ciclo de vida.
+Com `--mode=sfu`, `--sfu-listen-ip=<IPv4 local>` vincula e anuncia somente
+esse adaptador local validado, em vez de escutar em todas as interfaces.
+
+`--silent-source` não inicia o tom e exige PCM real silencioso com contadores
+avançando; é adequado para continuidade/pressão sem alterar o mixer. Esse modo
+declara explicitamente que não mediu ganho nem estéreo audível. O ensaio normal
+confere primeiro o sinal original, para não atribuir ao controle de volume uma
+fonte já mutada. `--audio-addon=<caminho_absoluto.node>` permite testar um
+candidato compilado separadamente, somente nesse fixture, sem substituir uma
+DLL em uso. Após o atraso do Main, o ensaio exige retomada de vídeo e PCM nos
+três receptores e, para atrasos a partir de 1200 ms, uma perda PCM diagnosticada.
+O atraso começa logo após enviar uma transferência real de textura, antes de
+o Main processar seu comprovante, sem depender de uma coincidência de timing.
+`textureTransfer.test.cjs` verifica a ordem GPU-renderer/Main/RTC, comprovantes
+atrasados, tokens inválidos e limpeza do documento sem depender de hardware.
+Na etapa de perda da fonte, o processo dono deve confirmar a destruição da sua
+janela. Somente nesse cenário o fixture aceita tanto fonte perdida quanto
+ambiguidade observada durante a destruição; os guards de identidade de produção
+e a exigência de encerramento completo continuam inalterados.
+
+`--quality=source --profile=1080p240` e
+`--quality=source --profile=4k120` exercitam os novos perfis sem reduzir a
+qualidade no receptor. `--cadence-ffmpeg=<executável_absoluto>` acrescenta
+uma auditoria independente do contador visual da janela sintética: decodifica
+uma amostra limitada em memória e exige pelo menos 85% do FPS solicitado
+em frames distintos, além das verificações de apresentação nativa. Contar
+apenas pacotes, frames codificados ou apresentações repetidas não comprova
+a cadência real da captura. Essa auditoria não grava vídeo.
+
+Para qualificar 240 FPS, use também `--disable-frame-rate-limit
+--disable-gpu-vsync` **somente no processo do ensaio**: o compositor da janela
+sintética pode limitar os quadros novos mesmo quando o JavaScript pinta mais
+rápido. A fonte do ensaio produz atualizações com trabalho limitado e relógio
+independente de RAF. Essas flags não são aplicadas ao aplicativo distribuído.
+A entrega real continua dependendo da cadência da fonte e da carga do sistema.
+
+`test\nativeWindowIdentitySmoke.cjs --artifacts=<caminho_absoluto>` usa o
+`capture-contract-test.exe` gerado pelo build para criar janelas próprias
+WinUI/ApplicationFrameWindow. Verifica captura WGC real com filhos do mesmo
+processo e distingue as duas janelas com títulos duplicados, recusando
+remapeamento para filhos de outro processo e identidade de processo alterada.
+Também renomeia a janela durante a captura (título novo, com mais de 512
+caracteres e vazio) e exige que os frames continuem.
+Não captura janelas pessoais
+nem grava vídeo; `--contracts=<executável_absoluto>` permite outro diretório
+de build.
+
+Novos compartilhamentos preservam a proporção por padrão, incluindo a API
+`NativeScreenEndpoint`; `preserveAspectRatio: false` seleciona o esticamento
+explicitamente. O protocolo de baixo nível mantém seu padrão histórico
+`scaleMode: stretch`. O ensaio do aplicativo valida o padrão com bordas;
+`--stretch` exercita a opção desligada. `nativeCaptureSmoke.cjs` escolhe
+explicitamente o esticamento para suas verificações de pixels nas bordas.
+
+Os ensaios do aplicativo cobrem P2P/SFU, receptor Chromium, áudio, qualidade,
+prévia local, Assistir/Parar, fullscreen, overlay, troca de servidor e queda
+de conexão. `--window-lifecycle` acrescenta minimizar/restaurar;
+`--idle-source-close` verifica fechar uma fonte sem espectadores.
+`--publisher-stop` verifica dois ciclos de Parar no transmissor enquanto outro
+participante assiste, seguidos de reinício com áudio na mesma chamada.
+`--source-resize` altera o tamanho da janela sintética mantendo a fonte e o
+perfil de saída; não altera a resolução do monitor nem simula tela cheia exclusiva.
+O QA da prévia deve validar funcionamento sem espectadores, perda/retorno de
+foco, opção de pausa desativada e continuidade dos espectadores. Resolução
+e contagem de frames, sozinhas, não comprovam que os pixels decodificados
+foram exibidos na interface.
+
+### Limitação conhecida da recepção Chromium no Windows
+
+O ensaio integrado na RX 9070 XT qualificou 4K60 com recepção nativa, mas
+**não qualificou a cadência do receptor Chromium**. Mesmo em 1080p60, houve
+congelamentos periódicos e resultados abaixo de 50 FPS. Durante um intervalo
+sem ações do QA, o escopo `DXGISwapChainImageBacking::Present` bloqueou a thread
+GPU por 262–285 ms; o despacho de decode atrasou, a fila do adapter encheu e
+foram solicitados novos keyframes. O trace não distingue a chamada `Present1`
+da espera de inicialização da swap chain, nem atribui a causa ao driver ou DWM.
+
+A análise de 1.166 slices não encontrou quebra de continuidade de `frame_num`
+ou POC. Desativar somente video overlays manteve o decode D3D11 por hardware,
+mas não resolveu os bloqueios; esse workaround não foi aplicado ao aplicativo.
+Não foram ampliadas filas, relaxados guards de IDR ou reduzidos os critérios
+de aprovação. Essa falha permanece aberta e não deve ser apresentada como
+corrigida pela qualificação do caminho nativo. O ensaio local também não
+estabelece se houve regressão entre as betas.
+
+Esses scripts de janela não qualificam monitor, Game Capture, NVIDIA ou tela
+cheia exclusiva. A evidência local desta integração cobre AMF e WGC/Game em
+uma fonte D3D11 sintética própria, incluindo minimizar/restaurar. A captura
+física de monitor também passou em cenário com guarda de privacidade:
+212 frames decodificados, 211 distintos, EOF e encerramento dos recursos GPU
+verificados. Isso não é uma medição de desempenho. Desconexão/mudança de
+resolução, hardware NVIDIA, jogos protegidos e áudio físico permanecem
+dependentes de QA específico; NVIDIA requer validação externa. Loopback Windows
+não substitui QA em duas máquinas, macOS físico ou rede externa.
+Para verificar o módulo já empacotado, `nativeCaptureSmoke.cjs` também aceita
+`--module=<caminho_absoluto_do_modulo>`; ele carrega o runtime e os binários
+desse diretório, não os do checkout.

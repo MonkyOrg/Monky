@@ -18,31 +18,37 @@ Os botões abaixo apontam direto para os arquivos da última release — não é
 
 ## Depois de baixar
 
-Windows e macOS podem exibir um aviso ao abrir o Monky pela primeira vez, porque os executáveis ainda não têm assinatura digital paga. Não é sinal de arquivo corrompido.
+Windows e macOS podem exibir um aviso porque o aplicativo ainda não tem
+assinatura de distribuição reconhecida por esses sistemas. Um aviso não
+prova, por si só, nem corrupção nem segurança.
 
-- **Windows**: clique em _Mais informações › Executar assim mesmo_.
-- **macOS**: clique com o botão direito no app e escolha _Abrir_.
+Antes de autorizar a execução, confirme a origem oficial e
+[verifique a release](/verificar-releases). Com o arquivo conferido:
+
+- **Windows**: quando o SmartScreen oferecer a opção, use _Mais informações › Executar assim mesmo_.
+- **macOS**: tente abrir pelo menu de contexto do aplicativo e consulte **Privacidade e Segurança** nos Ajustes do Sistema. As opções variam com a versão do macOS.
 
 ### macOS: "O aplicativo está danificado e não pode ser aberto"
 
-No macOS (principalmente em Apple Silicon), o Gatekeeper pode bloquear o app com a mensagem **"está danificado e não pode ser aberto"**. O arquivo **não** está corrompido — é só a quarentena de segurança, porque o app ainda não é notarizado pela Apple.
+Essa mensagem pode decorrer da quarentena do Gatekeeper e da ausência de
+notarização. Não descarte um download incompleto ou alterado: confira o
+checksum do `.dmg` original antes de mudar proteções do sistema.
 
-Depois de mover o **Monky.app** para a pasta *Aplicativos*, abra o Terminal e rode:
+Depois de conferir a origem, mover o **Monky.app** para *Aplicativos* e
+decidir autorizar essa cópia, remova apenas a quarentena desse aplicativo:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Monky.app
 ```
 
-Depois é só abrir o app normalmente. Se ainda reclamar, force uma reassinatura local (ad-hoc):
-
-```bash
-sudo xattr -cr /Applications/Monky.app
-codesign --force --deep --sign - /Applications/Monky.app
-```
+Tente abrir novamente. Se continuar bloqueado, preserve a mensagem de erro
+e confira a compatibilidade do sistema. Não desative o Gatekeeper globalmente
+nem remova proteções de outras pastas para tentar resolver.
 
 ## Atualizações
 
-O app avisa quando sai uma versão nova. Você também pode conferir em **Configurações › Sobre e Atualizações › Verificar atualizações**.
+O app avisa quando sai uma versão nova. Você também pode conferir em
+**Configurações › Sobre e Updates › Verificar atualizações**.
 
 No Windows a atualização é aplicada sozinha: o Monky baixa, instala e reabre.
 
@@ -54,7 +60,8 @@ Para conferir se o arquivo baixado é mesmo o que publicamos, veja [Verificar Re
 
 As betas saem antes da versão estável e servem para testar o que está por vir. Elas passam pelo mesmo processo de build e assinatura, mas podem conter problemas que ainda não apareceram. Se você só quer usar o Monky, fique na estável.
 
-Dá para receber betas pelo próprio app, sem baixar nada à mão, em **Configurações › Sobre e Atualizações**.
+Dá para receber betas pelo próprio app, sem baixar nada à mão, em
+**Configurações › Sobre e Updates**.
 
 ## Sobre o CLI
 

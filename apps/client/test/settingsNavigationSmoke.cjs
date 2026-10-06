@@ -4,19 +4,28 @@ const { spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const clientRoot = path.resolve(__dirname, '..');
 const releaseNotesOnly = process.argv.includes('--release-notes');
+const qualitySettingsOnly = process.argv.includes('--quality-settings');
+const screenStageOnly = process.argv.includes('--screen-stage');
+const screenAudienceOnly = process.argv.includes('--screen-audience');
+const overlayWindowOnly = process.argv.includes('--overlay-window');
+const displayPlacementOnly = process.argv.includes('--verify-display-placement');
+const navigationOnly = process.argv.includes('--navigation-only');
+if ([releaseNotesOnly, qualitySettingsOnly, screenStageOnly, screenAudienceOnly, overlayWindowOnly, displayPlacementOnly, navigationOnly].filter(Boolean).length > 1)
+  throw new Error('Choose one targeted UI smoke.');
 
 if (!process.versions.electron) {
   const profile = path.join(clientRoot, 'dist-test', `settings-navigation-profile-${process.pid}`);
   fs.mkdirSync(profile, { recursive: true });
   const env = { ...process.env, MONKY_SETTINGS_NAV_PROFILE: profile };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(require('electron'), [__filename, ...(releaseNotesOnly ? ['--release-notes'] : [])], { cwd: clientRoot, env, stdio: 'inherit' });
+  const child = spawn(require('electron'), [__filename, ...process.argv.slice(2)], { cwd: clientRoot, env, stdio: 'inherit' });
   const cleanup = () => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   child.once('error', error => { console.error(error); cleanup(); process.exitCode = 1; });
   child.once('exit', code => { cleanup(); process.exitCode = code ?? 1; });
 } else {
-  const { app, BrowserWindow } = require('electron');
+  const { app, BrowserWindow, screen } = require('electron');
   app.setPath('userData', process.env.MONKY_SETTINGS_NAV_PROFILE);
+  if (qualitySettingsOnly || screenStageOnly || screenAudienceOnly || overlayWindowOnly || displayPlacementOnly) app.disableHardwareAcceleration();
   // Hosted Windows sessions can disable Chromium's scroll animator independently of matchMedia.
   app.commandLine.appendSwitch('enable-smooth-scrolling');
   app.on('window-all-closed', () => {});
@@ -25,11 +34,21 @@ if (!process.versions.electron) {
   let timeout;
   const finish = async code => {
     clearTimeout(timeout);
+    if (window?.webContents.debugger.isAttached()) window.webContents.debugger.detach();
     if (window && !window.isDestroyed()) window.destroy();
     if (vite) await vite.close();
     app.exit(code);
   };
   app.whenReady().then(async () => {
+    if (displayPlacementOnly) {
+      timeout = setTimeout(() => { console.error('Hidden display verification timed out'); void finish(1); }, 20000);
+      verifyHiddenDisplayPlacement({ app, BrowserWindow, screen });
+      await finish(0);
+      return;
+    }
+    const placement = navigationOnly
+      ? null
+      : require('./fixtures/testDisplay.cjs').installTestDisplay({ app, screen, BrowserWindow });
     const { createServer } = await import('vite');
     vite = await createServer({
       configFile: path.join(clientRoot, 'vite.config.ts'), logLevel: 'error',
@@ -54,16 +73,148 @@ if (!process.versions.electron) {
     });
     const address = httpServer.address();
     if (!address || typeof address === 'string') throw new Error('Missing Vite listener');
-    window = new BrowserWindow({
-      show: false, width: 1100, height: 850, useContentSize: true,
+    const options = {
+      title: 'Monky settings UI smoke', show: false, width: 1100, height: 850, useContentSize: true,
       webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true },
-    });
+    };
+    window = placement ? placement.createWindow(options) : new BrowserWindow(options);
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     timeout = setTimeout(() => { console.error('Settings navigation smoke timed out'); void finish(1); }, 90_000);
     await window.loadURL(`http://127.0.0.1:${address.port}/__settings_navigation__`);
-    window.focus();
-    window.webContents.focus();
+    window.webContents.debugger.attach('1.3');
+    await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+    });
+    if (!qualitySettingsOnly && !screenStageOnly && !screenAudienceOnly && !overlayWindowOnly) {
+      window.focus();
+      window.webContents.focus();
+    }
     const evaluate = code => window.webContents.executeJavaScript(code, true);
+    if (overlayWindowOnly) {
+      const { runOverlayWindowSmoke, runOverlayConfigPositionSmoke } = require('./overlayWindowSmoke.cjs');
+      const { runOverlayParticipantSmoke } = require('./overlayParticipantSmoke.cjs');
+      let checks = 0;
+      for (const [width, height] of [[600, 400], [340, 240]]) {
+        window.setContentSize(width, height);
+        checks += await evaluate(`(${runOverlayWindowSmoke.toString()})()`);
+        checks += await evaluate(`(${runOverlayConfigPositionSmoke.toString()})()`);
+        checks += await evaluate(`(${runOverlayParticipantSmoke.toString()})()`);
+        for (const state of ['Idle', 'Hover']) {
+          await evaluate(`(async () => {
+            document.body.classList.add('overlay-window-mode');
+            document.body.innerHTML = '<div id="app">' + window.overlayWindow${state}Preview + '</div>';
+            await new Promise(requestAnimationFrame);
+            await new Promise(requestAnimationFrame);
+          })()`);
+          fs.writeFileSync(path.join(clientRoot, 'dist-test', `overlay-window-${state.toLowerCase()}-${width}.png`),
+            (await window.webContents.capturePage()).toPNG());
+        }
+      }
+      console.log(`Overlay window: ${checks} checks passed, frame/resize/drag/controls, no media capture`);
+      await finish(0);
+      return;
+    }
+    if (screenAudienceOnly) {
+      const { runScreenAudienceSmoke } = require('./screenAudienceSmoke.cjs');
+      // Give the hidden fixture DOM focus without focusing a desktop window.
+      await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
+      let checks = 0;
+      for (const [width, height] of [[1100, 850], [640, 440]]) {
+        window.setContentSize(width, height);
+        checks += await evaluate(`(${runScreenAudienceSmoke.toString()})()`);
+        fs.writeFileSync(path.join(clientRoot, 'dist-test', `screen-audience-${width}.png`),
+          (await window.webContents.capturePage()).toPNG());
+        for (const [name, preview] of [['picker', 'modalOptionPickerPreview'], ['overlay', 'modalOptionOverlayPreview']]) {
+          await evaluate(`(async () => {
+            document.body.innerHTML = window.${preview};
+            await document.fonts.ready;
+            await new Promise(requestAnimationFrame);
+            await new Promise(requestAnimationFrame);
+          })()`);
+          fs.writeFileSync(path.join(clientRoot, 'dist-test', `modal-options-${name}-${width}.png`),
+            (await window.webContents.capturePage()).toPNG());
+          window.webContents.focus();
+          for (const id of name === 'picker' ? ['chk-preserve-aspect-ratio', 'chk-private-share']
+            : ['overlay-aspect-ratio', 'overlay-hide-stage-cb', 'overlay-hide-inactive-cb']) {
+            const checked = await evaluate(`(() => {
+              const input = document.getElementById(${JSON.stringify(id)});
+              input.scrollIntoView({ block: 'nearest' });
+              input.focus();
+              return input.checked;
+            })()`);
+            window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+            window.webContents.sendInputEvent({ type: 'char', keyCode: ' ' });
+            window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+            const state = await evaluate(`(async () => {
+              await new Promise(requestAnimationFrame);
+              await new Promise(requestAnimationFrame);
+              const input = document.getElementById(${JSON.stringify(id)});
+              const result = { active: document.activeElement === input, checked: input.checked,
+                documentFocused: document.hasFocus(), outline: getComputedStyle(input.nextElementSibling).outlineStyle };
+              input.checked = ${checked};
+              return result;
+            })()`);
+            if (!state.active || state.checked === checked || state.outline !== 'solid')
+              throw new Error(`${id}: native Space must toggle once with visible focus: ${JSON.stringify(state)}`);
+            checks++;
+          }
+        }
+      }
+      console.log(`Screen audience: ${checks} checks passed, 500 members/20 roles, software rendering only, no capture`);
+      await finish(0);
+      return;
+    }
+    if (screenStageOnly) {
+      const { runScreenStageSmoke } = require('./screenStageSmoke.cjs');
+      const { runScreenViewersSmoke } = require('./screenViewersSmoke.cjs');
+      const { appEventHandlerSource } = require('./fixtures/screenSharingUiModel.cjs');
+      const fallbackHandler = appEventHandlerSource('native_screen.capture_fallback');
+      await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
+      let checks = 0;
+      for (const [width, height] of [[1100, 850], [640, 440]]) {
+        window.setContentSize(width, height);
+        checks += await evaluate(`(${runScreenStageSmoke.toString()})(${JSON.stringify(fallbackHandler)})`);
+        checks += await evaluate(`(${runScreenViewersSmoke.toString()})()`);
+        await evaluate(`(async () => {
+          const { ScreenViewersView } = await import('/views/ScreenViewersView.ts');
+          document.body.innerHTML = '<div class="stage-viewers" data-publisher="retired-fixture" data-share="fixture"></div>';
+          window.keyboardViewers = new ScreenViewersView(document.querySelector('.stage-viewers'));
+        })()`);
+        for (const keyCode of ['Return', 'Space']) {
+          await evaluate(`document.querySelector('.stage-viewers-button').focus()`);
+          window.webContents.focus();
+          window.webContents.sendInputEvent({ type: 'keyDown', keyCode });
+          window.webContents.sendInputEvent({ type: 'char', keyCode: keyCode === 'Return' ? '\r' : ' ' });
+          window.webContents.sendInputEvent({ type: 'keyUp', keyCode });
+          if (!await evaluate(`new Promise(resolve => requestAnimationFrame(() =>
+            resolve(document.querySelector('.stage-viewers-popup').matches(':popover-open'))))`))
+            throw new Error(`${keyCode} must open the viewer list`);
+          window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+          window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+          if (!await evaluate(`new Promise(resolve => requestAnimationFrame(() =>
+            resolve((document.querySelector('.stage-viewers-popup').hasAttribute('data-ui-closing')
+              || !document.querySelector('.stage-viewers-popup').matches(':popover-open'))
+              && document.activeElement.matches('.stage-viewers-button'))))`))
+            throw new Error('Escape must close the viewer list and restore trigger focus');
+          checks += 2;
+        }
+        await evaluate(`window.keyboardViewers.destroy(); delete window.keyboardViewers; document.body.innerHTML = ''`);
+      }
+      console.log(`Screen stage: ${checks} checks passed, software rendering only, no media capture`);
+      await finish(0);
+      return;
+    }
+    if (qualitySettingsOnly) {
+      const { runQualitySettingsSmoke } = require('./qualitySettingsSmoke.cjs');
+      let checks = 0;
+      for (const [width, height] of [[1100, 850], [640, 440]]) {
+        window.setContentSize(width, height);
+        checks += await evaluate(`(${runQualitySettingsSmoke.toString()})()`);
+      }
+      console.log(`Quality settings: ${checks} checks passed, software rendering only, no media capture`);
+      await finish(0);
+      return;
+    }
     if (releaseNotesOnly) {
       const repository = path.resolve(clientRoot, '..', '..');
       const { buildReleaseNotes } = await import(pathToFileURL(path.join(repository, 'scripts', 'generate-changelog.js')).href);
@@ -86,6 +237,10 @@ if (!process.versions.electron) {
     }
     const checks = await evaluate(`(${runSettingsNavigationSmoke.toString()})()`);
     console.log(`Settings navigation and emoji scrolling: ${checks} checks passed`);
+    if (navigationOnly) {
+      await finish(0);
+      return;
+    }
     for (const kind of ['app', 'server']) {
       await evaluate(`(() => {
         const preview = window.settingsPreviews.${kind};
@@ -140,6 +295,72 @@ if (!process.versions.electron) {
   }).catch(async error => { console.error(error); await finish(1); });
 }
 
+function verifyHiddenDisplayPlacement({ app, BrowserWindow, screen }) {
+  const assert = require('node:assert/strict');
+  const displayHelper = require('./fixtures/testDisplay.cjs');
+  assert.equal(process.env.MONKY_TEST_DISPLAY ?? displayHelper.localDisplayPreference(), '2',
+    'Hidden verification requires display 2 in the environment or local test-display.json.');
+  const owned = new Set(), records = [];
+  let proof, placement;
+  const initial = (_event, window) => {
+    owned.add(window);
+    records.push({ pid: process.pid, windowId: window.id, title: window.getTitle(), bounds: window.getBounds(),
+      visible: window.isVisible(), focused: window.isFocused(), beforeConstruction: proof });
+  };
+  const guardedConstructor = new Proxy(BrowserWindow, {
+    construct(target, [options]) {
+      assert.equal(options.show, false, 'The real native constructor must never receive a visible-window request.');
+      assert.equal(options.center, false);
+      assert.equal(proof?.phase, 'before-construction');
+      assert.deepEqual({ x: options.x, y: options.y, width: options.width, height: options.height }, proof.bounds);
+      return Reflect.construct(target, [options], target);
+    },
+  });
+  // Observe the native constructor's bounds before the helper's event guards can move anything.
+  app.prependListener('browser-window-created', initial);
+  try {
+    placement = displayHelper.installTestDisplay({ app, screen, BrowserWindow: guardedConstructor }, {
+      log: line => {
+        console.log(line);
+        const record = JSON.parse(line.slice('[TestDisplay] '.length));
+        if (record.phase === 'before-construction') proof = record;
+      },
+    });
+    const verify = window => {
+      const record = records.find(item => item.windowId === window.id);
+      assert.ok(record);
+      assert.equal(record.beforeConstruction.deviceName, '\\\\.\\DISPLAY2');
+      assert.deepEqual(record.bounds, record.beforeConstruction.bounds,
+        'Initial native bounds must be correct before browser-window-created repositioning.');
+      assert.equal(record.visible, false);
+      assert.equal(record.focused, false);
+      assert.equal(window.isVisible(), false);
+      assert.equal(window.isFocused(), false);
+      assert.deepEqual(window.getContentSize(), [record.bounds.width, record.bounds.height]);
+      console.log(`[TestDisplayInitialBounds] ${JSON.stringify(record)}`);
+    };
+    const options = { show: false, frame: false, useContentSize: true,
+      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } };
+    const source = placement.createWindow({ ...options, title: 'Monky hidden 480p source placement', width: 640, height: 480 });
+    verify(source);
+    placement.interceptElectronImports();
+    const { BrowserWindow: ImportedWindow } = require('electron');
+    const receiver = new ImportedWindow({ ...options, title: 'Monky hidden 720p receiver placement', width: 1280, height: 720 });
+    verify(receiver);
+    source.destroy();
+    const reopened = new ImportedWindow({ ...options, title: 'Monky hidden 480p reopened placement', width: 640, height: 480 });
+    verify(reopened);
+    const count = records.length;
+    assert.throws(() => new ImportedWindow({ ...options, width: 3840, height: 2160 }), /does not fit/);
+    assert.equal(records.length, count, 'An oversized request must fail before native construction.');
+    console.log(`Hidden display verification: ${records.length} native constructors verified before show; no visible windows, focus, media or Vite.`);
+  } finally {
+    placement?.dispose();
+    app.removeListener('browser-window-created', initial);
+    for (const window of owned) if (!window.isDestroyed()) window.destroy();
+  }
+}
+
 async function runVersionCopyKeyboardSmoke(window) {
   window.focus();
   window.webContents.focus();
@@ -163,21 +384,31 @@ async function runVersionCopyKeyboardSmoke(window) {
         })`);
         throw new Error(`${surface}/${keyCode}: native keyboard activation must copy exactly the displayed version once: ${JSON.stringify({ before, copied, focus })}`);
       }
-      if (!await evaluate(`document.querySelector('.chat-copy-toast-label')?.textContent === 'Versão copiada!'`)) {
+      if (!await evaluate(`document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label')?.textContent === 'Versão copiada!'`)) {
         throw new Error(`${surface}/${keyCode}: keyboard copy must use the shared toast`);
       }
     }
     await evaluate(`document.querySelector(${JSON.stringify(selector)}).blur()`);
     window.webContents.sendInputEvent({ type: 'mouseMove', x: 3, y: 3 });
-    await wait(170);
-    const initial = await evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(selector)})).backgroundColor`);
+    // Compare settled colours: slow runners can render the 140ms transition several frames late.
+    const settledBackground = hover => evaluate(`(async () => {
+      const button = document.querySelector(${JSON.stringify(selector)});
+      const deadline = performance.now() + 3000;
+      while (performance.now() < deadline) {
+        if (button.matches(':hover') === ${hover} && button.getAnimations().length === 0) return getComputedStyle(button).backgroundColor;
+        await new Promise(resolve => setTimeout(resolve, 16));
+      }
+      return { hover: button.matches(':hover'), animations: button.getAnimations().length };
+    })()`);
+    const initial = await settledBackground(false);
+    if (typeof initial !== 'string') throw new Error(`${surface}: version text did not settle without hover: ${JSON.stringify(initial)}`);
     const point = await evaluate(`(() => {
       const rect = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
       return {x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)};
     })()`);
     window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
-    await wait(180);
-    const hovered = await evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(selector)})).backgroundColor`);
+    const hovered = await settledBackground(true);
+    if (typeof hovered !== 'string') throw new Error(`${surface}: version text did not settle under hover: ${JSON.stringify(hovered)}`);
     if (hovered === initial) throw new Error(`${surface}: version text must have a subtle hover affordance`);
     await evaluate(`document.querySelector(${JSON.stringify(selector)}).focus()`);
     // A non-activating key changes input modality without racing Tab's focus move.
@@ -197,7 +428,6 @@ async function runVersionCopyKeyboardSmoke(window) {
       throw new Error(`${surface}: version copy needs a visible keyboard focus indicator: ${JSON.stringify(focused)}`);
     }
   }
-  window.webContents.debugger.attach('1.3');
   try {
     await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
       features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
@@ -206,7 +436,9 @@ async function runVersionCopyKeyboardSmoke(window) {
       throw new Error('Version hover must respect reduced motion');
     }
   } finally {
-    window.webContents.debugger.detach();
+    await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+    });
   }
 }
 
@@ -273,6 +505,55 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     delete window.releaseNotesFixture;
   };
   try {
+    for (const locale of ['pt-BR', 'en']) {
+      language.setLanguage(locale);
+      mountAbout();
+      const section = root.querySelector('[data-settings-section="license"]');
+      check(section && section.dataset.settingsLabel === language.t('settings.licenseSection') &&
+        section.textContent.includes(language.t('settings.licenseDescription')),
+      'The license section and no-warranty/redistribution notice follow the selected app language');
+      const details = section.querySelector('details'), fullLicense = details.querySelector('pre');
+      check(fullLicense.textContent.includes('GNU GENERAL PUBLIC LICENSE') &&
+        fullLicense.textContent.includes('17. Interpretation of Sections 15 and 16.') &&
+        fullLicense.textContent.length > 30_000 && fullLicense.tabIndex === 0 &&
+        fullLicense.getAttribute('aria-label') === language.t('settings.licenseSection'),
+      'The complete GPL is available offline, escaped as text and keyboard-focusable');
+      details.querySelector('summary').click();
+      check(details.open && !requests.length, 'License disclosure opens without fetching release notes or network content');
+      details.querySelector('summary').click();
+      check(!details.open, 'The native accessible license disclosure closes again');
+      const sourceButton = section.querySelector('#btn-source-code');
+      check(sourceButton.textContent === language.t('settings.sourceCode'), 'Source link text is localized');
+      about.attachEvents(root);
+      about.attachEvents(root);
+      const before = opened.length;
+      sourceButton.click();
+      await wait();
+      check(opened.length === before + 1 && opened.at(-1) === 'https://github.com/MonkyOrg/Monky',
+        'Rebinding adds only one source-code navigation handler');
+      about.cleanup();
+      sourceButton.click();
+      await wait();
+      check(opened.length === before + 1, 'Closing About removes the source-code listener');
+    }
+    language.setLanguage('pt-BR');
+    mountAbout();
+    const sourceButton = root.querySelector('#btn-source-code');
+    const linkError = root.querySelector('#license-link-error');
+    window.api.openExternal = async () => ({ success: false });
+    sourceButton.click();
+    await wait();
+    check(!linkError.hidden && linkError.getAttribute('role') === 'alert' &&
+      linkError.textContent === language.t('settings.sourceCodeOpenFailed'),
+    'Source navigation failure is visible and localized, without a silent browser fallback');
+    const delayedSource = deferred();
+    window.api.openExternal = () => delayedSource.promise;
+    sourceButton.click();
+    about.cleanup();
+    delayedSource.reject(new Error('Late source navigation failure'));
+    await wait();
+    check(linkError.hidden, 'A late navigation failure cannot modify an About binding after cleanup');
+    window.api.openExternal = async url => { opened.push(url); return { success: true }; };
     let button = mountAbout();
     check(button.tagName === 'BUTTON' && button.type === 'button' && button.disabled && button.textContent === '…',
       'About/Updates version is a non-submitting button, disabled until loaded');
@@ -291,13 +572,13 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     clipboardWork = () => pendingCopy.promise;
     button.click();
     await wait();
-    check(copies.at(-1) === `v${version}` && !document.querySelector('.chat-copy-toast'),
+    check(copies.at(-1) === `v${version}` && !document.querySelector('.chat-copy-toast:not([data-ui-closing])'),
       'Clipboard gets the displayed text, without a premature success toast');
     pendingCopy.resolve();
     await wait();
-    check(document.querySelector('.chat-copy-toast')?.getAttribute('role') === 'status' &&
-      document.querySelector('.chat-copy-toast-label')?.textContent === language.t('versionCopy.copied') &&
-      document.querySelector('.chat-copy-toast .material-symbols-outlined')?.textContent === 'check_circle',
+    check(document.querySelector('.chat-copy-toast:not([data-ui-closing])')?.getAttribute('role') === 'status' &&
+      document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label')?.textContent === language.t('versionCopy.copied') &&
+      document.querySelector('.chat-copy-toast:not([data-ui-closing]) .material-symbols-outlined')?.textContent === 'check_circle',
     'Version copy reuses the exact message copy toast and live-region semantics');
     clipboardWork = async () => {};
     about.attachEvents(root);
@@ -305,10 +586,10 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     const beforeRebindCopy = copies.length;
     button.click();
     await wait();
-    check(copies.length === beforeRebindCopy + 1 && document.querySelectorAll('.chat-copy-toast').length === 1,
+    check(copies.length === beforeRebindCopy + 1 && document.querySelectorAll('.chat-copy-toast:not([data-ui-closing])').length === 1,
       'Rebinding does not duplicate clipboard calls or stack toasts');
     await wait(1650);
-    check(!document.querySelector('.chat-copy-toast'), 'Shared copy toast expires after 1600ms');
+    check(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'Shared copy toast expires after 1600ms');
 
     const superseded = deferred();
     clipboardWork = () => superseded.promise;
@@ -316,13 +597,13 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     clipboardWork = async () => { throw new Error('Clipboard denied'); };
     button.click();
     await wait();
-    check(!document.querySelector('.chat-copy-toast') &&
-      document.querySelector('.dialog-message')?.textContent === language.t('versionCopy.failed'),
+    check(!document.querySelector('.chat-copy-toast:not([data-ui-closing])') &&
+    document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-message')?.textContent === language.t('versionCopy.failed'),
     'Clipboard rejection reports a localized error, never success');
     superseded.resolve();
     await wait();
-    check(!document.querySelector('.chat-copy-toast'), 'An older clipboard completion cannot replace a newer failure with success');
-    document.querySelector('.dialog-card [data-action="confirm"]').click();
+    check(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'An older clipboard completion cannot replace a newer failure with success');
+    document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card [data-action="confirm"]').click();
 
     const closingCopy = deferred();
     clipboardWork = () => closingCopy.promise;
@@ -331,7 +612,7 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     root.remove();
     closingCopy.resolve();
     await wait();
-    check(!document.querySelector('.chat-copy-toast'), 'Closing settings discards late clipboard confirmation');
+    check(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'Closing settings discards late clipboard confirmation');
     clipboardWork = async () => {};
     button = mountAbout();
     window.api.getAppVersion = async () => { throw new Error('No version bridge'); };
@@ -370,7 +651,7 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     const releaseVersion = document.querySelector('#changelog-version');
     releaseVersion.click();
     await wait();
-    check(copies.at(-1) === `v${version}` && document.querySelector('.chat-copy-toast-label').textContent === 'Version copied!',
+    check(copies.at(-1) === `v${version}` && document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label').textContent === 'Version copied!',
       'Release-notes version copies with the same localized toast');
     document.querySelector('#changelog-github').click();
     await wait();

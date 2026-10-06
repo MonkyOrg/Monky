@@ -12,7 +12,7 @@ const COMMIT_TYPES = 'feat|feature|minor|fix|bugfix|perf|refactor|style|docs|cho
  * `* fix: subject`. This is what lets one squashed PR still be counted as the
  * several commits it actually carried (#465).
  */
-const SQUASH_ENTRY = new RegExp(`^\\s*[*-]\\s+(${COMMIT_TYPES})(\\([^)]*\\))?(!)?:`, 'i');
+const SQUASH_ENTRY = new RegExp(`^\\s*[*-]\\s+(${COMMIT_TYPES})(?:(?:\\([^)]*\\))?!?|!\\([^)]*\\)):`, 'i');
 
 /**
  * Splits one commit message into the commits it describes.
@@ -56,7 +56,7 @@ export function bumpTypeForEntry(entry) {
 
   if (
     /BREAKING[ -]CHANGE:/i.test(text) ||
-    /^[a-zA-Z0-9_-]+(\([^)]*\))?!:/.test(header) ||
+    /^[a-zA-Z0-9_-]+(?:(?:\([^)]*\))?!|!\([^)]*\)):/.test(header) ||
     /^major(\([^)]*\))?:/i.test(header)
   ) {
     return 'major';

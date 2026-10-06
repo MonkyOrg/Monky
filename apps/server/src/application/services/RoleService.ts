@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Permission, ProtocolErrorCode, Role, RoleAssignPayload, RoleCreatePayload, RoleUpdatePayload, UserRoleSummary, roleAssignmentSchema, roleCreateSchema, roleUpdateSchema, stripAdministrator } from '@monky/shared';
+import { EVERYONE_ROLE_ID, Permission, ProtocolErrorCode, Role, RoleAssignPayload, RoleCreatePayload, RoleUpdatePayload, UserRoleSummary, RoleModel, legacyRoleGrants, roleAssignmentSchema, roleCreateSchema, roleUpdateSchema, stripAdministrator } from '@monky/shared';
 import { RoleRecord } from '../../domain/entities';
 import { IRoleRepository, IUserRepository } from '../../domain/repositories';
 import { PermissionService } from './PermissionService';
@@ -12,6 +12,7 @@ interface RoleResult {
 }
 
 interface RoleStateResult {
+  everyonePermissions: number;
   roles: Role[];
   userRoles: UserRoleSummary[];
 }
@@ -37,6 +38,16 @@ export class RoleService {
     };
   }
 
+  /**
+   * The bits a role grants. Current and 36.1 clients send them directly (a
+   * 36.1 denial no longer exists and is ignored); older clients send a full
+   * mask that also carries what Everyone grants.
+   */
+  private async toGrants(permissions: number, model: RoleModel, previous?: number): Promise<number> {
+    if (model !== 'legacy') return permissions >>> 0;
+    return legacyRoleGrants(permissions, await this.permissionService.getEveryonePermissions(), previous);
+  }
+
   public async listRoles(): Promise<Role[]> {
     return (await this.roleRepo.listAll()).map((role) => this.toRole(role));
   }
@@ -54,6 +65,7 @@ export class RoleService {
 
   public async getRoleState(): Promise<RoleStateResult> {
     return {
+      everyonePermissions: await this.permissionService.getEveryonePermissions(),
       roles: await this.listRoles(),
       userRoles: await this.listUserRoles(),
     };
@@ -62,14 +74,15 @@ export class RoleService {
   public async ensureDefaultRolesAssigned(userId: string): Promise<void> {
     const defaultRoles = await this.roleRepo.getDefaultRoles();
     for (const role of defaultRoles) {
-      await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(userId, role.id));
+      if ((role.permissions & Permission.ADMINISTRATOR) !== 0 || await this.isBuiltInAdminRole(role.id)) continue;
+      await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(userId, role.id), false);
     }
   }
 
   public async assignAdminRole(userId: string): Promise<void> {
     const adminRole = await this.roleRepo.findByName('Admin');
     if (adminRole) {
-      await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(userId, adminRole.id));
+      await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(userId, adminRole.id), false);
     }
   }
 
@@ -87,7 +100,7 @@ export class RoleService {
     return name.trim().toLowerCase() === RESERVED_ADMIN_ROLE_NAME;
   }
 
-  public async createRole(actorUserId: string, payload: RoleCreatePayload): Promise<RoleResult> {
+  public async createRole(actorUserId: string, payload: RoleCreatePayload, model: RoleModel = 'grants'): Promise<RoleResult> {
     if (!(await this.permissionService.checkPermission(actorUserId, Permission.MANAGE_ROLES))) {
       return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Você não pode gerenciar cargos.' };
     }
@@ -105,16 +118,16 @@ export class RoleService {
       id: uuidv4(),
       name: parsed.data.name,
       color: parsed.data.color ?? null,
-      permissions: stripAdministrator(parsed.data.permissions),
+      permissions: stripAdministrator(await this.toGrants(parsed.data.permissions, model)),
       position: parsed.data.position ?? Date.now(),
       isDefault: parsed.data.isDefault ?? false,
       createdAt: Date.now(),
     };
-    await this.permissionService.withRoleMutation(() => this.roleRepo.create(roleRecord));
+    await this.permissionService.withRoleMutation(() => this.roleRepo.create(roleRecord), false);
     return { success: true, role: this.toRole(roleRecord) };
   }
 
-  public async updateRole(actorUserId: string, payload: RoleUpdatePayload): Promise<RoleResult> {
+  public async updateRole(actorUserId: string, payload: RoleUpdatePayload, model: RoleModel = 'grants'): Promise<RoleResult> {
     if (!(await this.permissionService.checkPermission(actorUserId, Permission.MANAGE_ROLES))) {
       return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Você não pode gerenciar cargos.' };
     }
@@ -124,12 +137,27 @@ export class RoleService {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: parsed.error.errors[0]?.message || 'Cargo inválido' };
     }
 
+    if (parsed.data.roleId === EVERYONE_ROLE_ID) {
+      if (parsed.data.permissions === undefined ||
+          Object.keys(payload).some(key => key !== 'roleId' && key !== 'permissions')) {
+        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Todos permite editar apenas as permissões.' };
+      }
+      await this.permissionService.updateEveryonePermissions(parsed.data.permissions);
+      return { success: true };
+    }
+
     const existing = await this.roleRepo.findById(parsed.data.roleId);
     if (!existing) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Cargo não encontrado.' };
     }
 
     const isBuiltInAdmin = await this.isBuiltInAdminRole(existing.id);
+    if (isBuiltInAdmin && !(await this.permissionService.isOwner(actorUserId))) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Apenas o dono do servidor pode editar o cargo Admin.' };
+    }
+    if (isBuiltInAdmin && parsed.data.isDefault === true) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'O cargo Admin não pode ser atribuído automaticamente.' };
+    }
     if (parsed.data.name !== undefined && parsed.data.name !== existing.name) {
       // Renaming either direction would move the ADMINISTRATOR exemption around.
       if (isBuiltInAdmin || this.usesReservedAdminName(parsed.data.name)) {
@@ -141,14 +169,13 @@ export class RoleService {
     if (parsed.data.name !== undefined) updates.name = parsed.data.name;
     if (parsed.data.color !== undefined) updates.color = parsed.data.color ?? null;
     if (parsed.data.permissions !== undefined) {
+      const grants = await this.toGrants(parsed.data.permissions, model, existing.permissions);
       // Admin rights come exclusively from the Admin role now (#277).
-      updates.permissions = isBuiltInAdmin
-        ? parsed.data.permissions
-        : stripAdministrator(parsed.data.permissions);
+      updates.permissions = isBuiltInAdmin ? grants : stripAdministrator(grants);
     }
     if (parsed.data.position !== undefined) updates.position = parsed.data.position;
     if (parsed.data.isDefault !== undefined) updates.isDefault = parsed.data.isDefault;
-    await this.permissionService.withRoleMutation(() => this.roleRepo.update(existing.id, updates));
+    await this.permissionService.withRoleMutation(() => this.roleRepo.update(existing.id, updates), false);
     const updated = await this.roleRepo.findById(existing.id);
     return { success: true, role: this.toRole(updated ?? { ...existing, ...updates }) };
   }
@@ -168,7 +195,7 @@ export class RoleService {
       return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Apenas o dono do servidor pode excluir este cargo.' };
     }
 
-    await this.permissionService.withRoleMutation(() => this.roleRepo.delete(roleId));
+    await this.permissionService.withRoleMutation(() => this.roleRepo.delete(roleId), { roleId });
     return { success: true };
   }
 
@@ -188,7 +215,14 @@ export class RoleService {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Usuário ou cargo não encontrado.' };
     }
 
-    await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(parsed.data.userId, parsed.data.roleId));
+    // MANAGE_ROLES não pode virar ADMINISTRATOR pela porta dos fundos: criar e
+    // editar cargo já barram isso (#277), mas atribuir o cargo Admin embutido
+    // dava o mesmo resultado em um passo. Só o dono promove alguém a admin.
+    if ((await this.isBuiltInAdminRole(role.id)) && !(await this.permissionService.isOwner(actorUserId))) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Apenas o dono do servidor pode promover alguém a administrador.' };
+    }
+
+    await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(parsed.data.userId, parsed.data.roleId), false);
     return { success: true };
   }
 
@@ -210,8 +244,14 @@ export class RoleService {
     if (role.isDefault) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'O cargo padrão não pode ser removido.' };
     }
+    // Simétrico ao assign: quem tem MANAGE_ROLES não derruba um administrador.
+    if ((await this.isBuiltInAdminRole(role.id)) && !(await this.permissionService.isOwner(actorUserId))) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Apenas o dono do servidor pode remover um administrador.' };
+    }
 
-    await this.permissionService.withRoleMutation(() => this.roleRepo.unassignRole(parsed.data.userId, parsed.data.roleId));
+    await this.permissionService.withRoleMutation(() => this.roleRepo.unassignRole(parsed.data.userId, parsed.data.roleId), {
+      userId: parsed.data.userId, roleId: parsed.data.roleId,
+    });
     return { success: true };
   }
 }

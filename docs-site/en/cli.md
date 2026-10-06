@@ -1,5 +1,8 @@
 # Monky CLI
 
+This is the **server CLI**, not the CLI generated for a bot. To package
+and operate your own bot, see [Bot distribution](/en/bots-distribuicao).
+
 Command line tool to create and administer Monky servers.
 
 ```
@@ -81,18 +84,23 @@ monky --data /srv/monky-friends restart
 
 ## CLI language
 
-The first command run in an interactive terminal asks for **English** or
+The first command run in an interactive terminal asks for **English (US)** or
 **Português (Brasil)** and saves the choice in `~/.monky/cli-config.json`.
 `monky`, `--help` and `--version` neither ask this question nor save a
 preference. Commands in scripts or with redirected input/output do not ask
 or change the saved language either.
 
-To change the preference later, use the explicit command:
+To change it later, open `monky config` and choose **Idioma / Language**, or run:
 
 ```bash
-monky --lang en-US
-monky --lang pt-BR
+monky config language en-US
+monky config language pt-BR
 ```
+
+This setting works without creating or selecting a server. The next menu already
+uses the new language; identity, database and server configuration are unchanged.
+`monky config language` without a code opens the picker in a terminal; in scripts,
+it only queries the preference. The `monky --lang pt-BR|en-US` shortcut remains available.
 
 `en-US` is normalized to `en`; English and Portuguese variants, including
 `pt_BR.UTF-8`, use the `en` and `pt-BR` catalogs. An unsupported code, a
@@ -152,7 +160,7 @@ such as `true`, `false`, `p2p` and `sfu` are not translated.
 
 ---
 
-# Command reference
+## Command reference
 
 ## `monky create`
 
@@ -168,7 +176,8 @@ After the initial language choice, when needed, the command asks:
 1. **Where to store the data** — suggests `./data`, but any path works. If the
    chosen folder already holds a server, it asks for another one.
 2. **Owner identity code** (`MONKY-ID:...`) — export it from the Monky app under
-   *Settings → Identity → Export*.
+   *Settings → My Profile → Identity*. Treat the backup and password as
+   credentials: use them only on a trusted administration machine.
 3. **Identity password** — the one you set when exporting.
 4. **Server name**
 5. **Server port** (default: `3000`)
@@ -360,9 +369,11 @@ a read-only query has no side effects, so asking would be busywork.
 
 Detailed status for a running server also reports bots with an incompatible
 or unchecked protocol. These warnings appear after `monky start` and
-`monky restart` and explain when to update or check the bots' SDK. If the
-server is still starting or `/preview` does not respond, the CLI reports that
-compatibility could not be retrieved; check again with
+`monky restart` and explain when to update or check the bots' SDK. After starting
+or restarting (including after `monky update`), the CLI retries for up to 10
+seconds while `/preview` is unavailable, ending the wait as soon as it receives
+data. If the deadline expires or the response lacks valid compatibility data,
+the CLI reports that compatibility could not be retrieved; check again with
 `monky status --data <folder>`.
 
 `monky list` and multi-server tables keep these warnings next to the relevant
@@ -522,10 +533,13 @@ role cannot be removed from a member.
 
 ## `monky config`
 
-Shows or changes the server configuration.
+In a terminal, opens CLI settings, including language and access to the server
+configuration. Without a TTY or in CI, it keeps the direct server query.
 
 ```bash
-monky config                       # show everything
+monky config                       # settings menu in a terminal
+monky config show                  # show server data directly
+monky config language en-US        # CLI language, even without a server
 monky config set                   # pick the key interactively
 monky config set <key> [value]     # change it directly
 ```
@@ -539,6 +553,7 @@ monky config set <key> [value]     # change it directly
 | `port` | TCP port | `3000` |
 | `icon` | Path to an image, copied into the data directory. Empty or `clear` removes it | no icon |
 | `maxUsers` | Maximum registered members. `0` removes the limit | `20` |
+| `maxMessageLength` | Characters per message. `0` removes the character limit; the 8 MiB packet limit still applies | `16000` |
 | `allowSoundboard` | Allows the soundboard (`true`/`false`) | `true` |
 | `allowEveryoneMention` | Allows `@everyone`/`@todos` in chat (`true`/`false`) | `true` |
 | `maxAttachmentFileBytes` | Maximum size per attachment, in bytes | no limit |
@@ -554,7 +569,7 @@ Changing `voiceMode` applies dynamically and notifies all connected clients.
 ### Examples
 
 ```bash
-monky config
+monky config show
 monky config set name "Friends Server"
 monky config set password           # typed hidden
 monky config set password clear     # removes the password

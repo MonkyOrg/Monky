@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O app agora recebe cada tela apenas enquanto ela estiver sendo assistida. Parar de assistir a todas as telas de uma pessoa interrompe o som compartilhado por ela, sem afetar a chamada. Atualize o app e o servidor juntos.",
+  "en": "Screen video is received only while you are watching it. Stopping the last screen from someone also stops their shared audio, without affecting the call. Update the app and server together."
+}

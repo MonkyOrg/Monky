@@ -114,7 +114,8 @@ if (!process.versions.electron) {
       }
     };
     await sampleHovers(['#bar-btn-mic', '#bar-btn-deafen', '#bar-btn-settings', '#media-btn-camera',
-      '#media-btn-screen', '#media-btn-soundboard', '#btn-attach', '#btn-emoji', '#btn-code']);
+      '#media-btn-screen', '#media-btn-soundboard', '#btn-attach', '#btn-emoji', '#btn-format',
+      '#btn-code', '.chat-format-toolbar [data-format="inline-code"]']);
     phase = 'native pointer';
     const point = await window.webContents.executeJavaScript('window.footerSmoke.pointerTarget()');
     window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
@@ -163,31 +164,58 @@ if (!process.versions.electron) {
     phase = 'stage cleanup';
     const stageChecks = await window.webContents.executeJavaScript('window.stageSmoke.cleanup()', true);
     const checks = await window.webContents.executeJavaScript('window.footerSmoke.checkCount()');
+    phase = 'writing motion samples';
+    const samples = await window.webContents.executeJavaScript(
+      `(${renderMotionSamples.toString()})(${JSON.stringify(hoverSamples)})`);
+    const prefix = 'data:image/png;base64,';
+    if (!samples.startsWith(prefix)) throw new Error('Motion contact sheet did not produce a PNG.');
+    fs.writeFileSync(path.join(clientRoot, 'dist-test', 'control-motion-samples.png'), Buffer.from(samples.slice(prefix.length), 'base64'));
     console.log(`Footer/composer/stage controls smoke: ${checks + stageChecks} checks passed (motion, layout, PTT, reduced motion, lifecycle)`);
-    window.setContentSize(1100, Math.ceil(hoverSamples.length / 3) * 170 + 40);
-    await window.webContents.executeJavaScript(`document.body.innerHTML = '<main id="motion-samples"></main>';
-      document.body.style.cssText = 'margin:0;padding:20px;background:#18191d;color:white;overflow:auto';
-      document.querySelector('#motion-samples').style.cssText = 'display:grid;grid-template-columns:repeat(3,1fr);gap:18px';
-      for (const row of ${JSON.stringify(hoverSamples)}) {
-        const tile = document.createElement('section');
-        tile.innerHTML = '<h3 style="font-size:14px;margin:0 0 8px">' + row.id + '</h3>'
-          + row.images.map((image, index) => '<div style="display:inline-block;margin-right:8px"><div style="font-size:11px">'
-            + [200,460][index] + 'ms</div><img style="max-width:145px;height:105px;object-fit:contain" src="' + image + '"></div>').join('');
-        document.querySelector('#motion-samples').append(tile);
-      }
-      new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
-    fs.writeFileSync(path.join(clientRoot, 'dist-test', 'control-motion-samples.png'), (await window.webContents.capturePage()).toPNG());
     await finish(0);
   }).catch(async (error) => { console.error(`Footer/composer smoke failed during ${phase}`, error); await finish(1); });
 }
 
+async function renderMotionSamples(samples) {
+  // Compose the captured pixels without resizing the offscreen compositor after teardown.
+  const canvas = document.createElement('canvas');
+  canvas.width = 1100;
+  canvas.height = Math.ceil(samples.length / 3) * 170 + 40;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Motion contact sheet canvas is unavailable.');
+  context.fillStyle = '#18191d';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.textBaseline = 'top';
+  await document.fonts.ready;
+  for (const [index, row] of samples.entries()) {
+    if (row.images.length !== 2) throw new Error('Each control needs both captured motion samples.');
+    const x = 20 + index % 3 * 360, y = 20 + Math.floor(index / 3) * 170;
+    context.fillStyle = 'white';
+    context.font = 'bold 14px Inter, sans-serif';
+    context.fillText(row.id, x, y);
+    for (const [frame, source] of row.images.entries()) {
+      const image = new Image();
+      image.src = source;
+      await image.decode();
+      const scale = Math.min(145 / image.naturalWidth, 105 / image.naturalHeight);
+      const width = image.naturalWidth * scale, height = image.naturalHeight * scale;
+      const left = x + frame * 160;
+      context.font = '11px Inter, sans-serif';
+      context.fillText(`${[200, 460][frame]}ms`, left, y + 24);
+      context.drawImage(image, left + (145 - width) / 2, y + 43 + (105 - height) / 2, width, height);
+    }
+  }
+  return canvas.toDataURL('image/png');
+}
+
 async function setupFooterSmoke() {
   const [{ MainView }, { voiceStore: voice }, { settingsStore: settings }, { serverStore: server },
-    { appEvents }, { networkClient }, { soundEffects }, { bindChatComposerMotion }, { sessionManager }] = await Promise.all([
+    { appEvents }, { networkClient }, { soundEffects }, { bindChatComposerMotion }, { sessionManager },
+    { renderFormattingToolbar }] = await Promise.all([
     import('/views/MainView.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
     import('/stores/serverStore.ts'), import('/core/EventBus.ts'),
     import('/core/NetworkClient.ts'), import('/core/SoundEffects.ts'), import('/views/FooterControlsMotion.ts'),
     import('/core/SessionManager.ts'),
+    import('/views/FormattingToolbar.ts'),
   ]);
   sessionManager.install();
   const session = sessionManager.create('footer.test', 7890, 'Footer');
@@ -217,10 +245,10 @@ async function setupFooterSmoke() {
   // of message-toolbar behavior and native file dialogs.
   const composer = document.createElement('section');
   composer.style.cssText = 'position:fixed;right:10px;top:10px;width:500px';
-  composer.innerHTML = `<div class="chat-input-container"><div class="chat-input-wrapper">
-    <button id="btn-attach" class="chat-attach-btn"><span class="material-symbols-outlined">add_circle</span></button>
+  composer.innerHTML = `<div class="chat-input-container">${renderFormattingToolbar()}<div class="chat-input-wrapper">
+    <button id="btn-attach" class="chat-attach-btn"><span class="material-symbols-outlined">attach_file</span></button>
     <button id="btn-emoji" class="chat-attach-btn"><span class="material-symbols-outlined">mood</span></button>
-    <button id="btn-code" class="chat-attach-btn"><span class="material-symbols-outlined">code</span></button>
+    <button id="btn-format" class="chat-attach-btn"><span class="material-symbols-outlined">format_size</span></button>
     <textarea class="chat-input-field"></textarea>
     <button id="btn-send-message" class="btn"><span class="material-symbols-outlined">send</span></button>
     </div></div>
@@ -228,6 +256,10 @@ async function setupFooterSmoke() {
       <button class="chat-attach-btn" data-message-action="emoji"><span class="material-symbols-outlined">add_reaction</span></button>
       <button data-message-action="reply"><span class="material-symbols-outlined">reply</span></button>
     </div>`;
+  const formatPanel = composer.querySelector('.chat-format-panel');
+  formatPanel.inert = false;
+  formatPanel.classList.add('is-open');
+  formatPanel.setAttribute('aria-hidden', 'false');
   document.body.append(composer);
   let offComposer = bindChatComposerMotion(composer);
   await document.fonts.ready;
@@ -269,7 +301,7 @@ async function setupFooterSmoke() {
   const footerButtons = () => [...root.querySelectorAll('.user-quick-actions button, .user-media-bar button')];
   const motionCount = () => footerButtons()
     .reduce((count, button) => count + animations(button).length, 0);
-  const composerButtons = () => [...composer.querySelectorAll('#btn-attach, #btn-emoji, #btn-code')];
+  const composerButtons = () => [...composer.querySelectorAll('#btn-attach, #btn-emoji, #btn-format, .chat-format-toolbar > button')];
   const composerMotionCount = () => composerButtons().reduce((count, button) => count + animations(button).length, 0);
   const controlAnimations = () => [...footerButtons(), ...composerButtons()].flatMap(animations);
   let pointerBounds;
@@ -361,12 +393,13 @@ async function setupFooterSmoke() {
       }
       const expected = {
         'media-btn-camera': 'camera', 'media-btn-screen': 'screen', 'media-btn-soundboard': 'music',
-        'btn-attach': 'attachment', 'btn-emoji': 'laugh', 'btn-code': 'code',
+        'btn-emoji': 'laugh',
         'stage-btn-camera': 'camera', 'stage-btn-screen': 'screen', 'stage-btn-soundboard': 'music',
         'stage-btn-overlay': 'overlay', 'stage-btn-stop-share': 'screen', 'btn-stage-quick-stop': 'stop',
         'stage-watch-btn': 'watch', 'stage-volume-btn': 'volume', 'stage-fullscreen-btn': 'fullscreen',
       }[button.id || button.classList[0]];
       if (expected) check(layer?.dataset.motion === expected, `${button.id}: its own function-specific artwork is present`);
+      if (button.dataset.format === 'inline-code') check(layer?.dataset.motion === 'code', 'Inline code retains its function-specific artwork');
       const sample = JSON.stringify([glyph(button), ...button.querySelectorAll('.control-motion-decoration svg *')]
         .map((element) => [getComputedStyle(element).transform, getComputedStyle(element).opacity]));
       if (previousSample) check(sample !== previousSample, `${button.id}: sampled frames show meaningful progression`);
@@ -511,11 +544,15 @@ async function setupFooterSmoke() {
         const inputBounds = rect(composer.querySelector('textarea'));
         enter(button);
         const hover = animations(button)[0];
-        check(hover?.effect.getTiming().duration === 760, `${button.id} has an expressive, finite hover`);
+        const replacesGlyph = ['mood', 'code'].includes(glyph(button).textContent.trim());
+        const duration = ['mood', 'code', 'attach_file', 'format_size'].includes(glyph(button).textContent.trim()) ? 760 : 480;
+        check(hover?.effect.getTiming().duration === duration, `${button.id || button.dataset.format} has a finite glyph-specific hover`);
         hover.pause();
         hover.currentTime = 80;
-        check(getComputedStyle(glyph(button)).opacity === '0' && !!button.querySelector('.control-motion-decoration'),
-          `${button.id} shows its animated icon parts`);
+        check(replacesGlyph
+          ? getComputedStyle(glyph(button)).opacity === '0' && !!button.querySelector('.control-motion-decoration')
+          : getComputedStyle(glyph(button)).opacity === '1' && getComputedStyle(glyph(button)).transform !== 'none',
+          `${button.id || button.dataset.format} animates its actual glyph or its dedicated icon parts`);
         check(rect(button) === bounds && rect(composer.querySelector('textarea')) === inputBounds,
           `${button.id} hover preserves hit box and composer layout`);
         let clicks = 0;
@@ -728,12 +765,13 @@ async function setupFooterSmoke() {
 async function setupStageSmoke() {
   const [{ VoiceStageView }, { voiceStore: voice }, { settingsStore: settings }, { serverStore: server },
     { participantManager: participants }, { appEvents }, { screenAudioService },
-    { overlayBridgeService }, { overlayConfigModal }, { soundboardModal }, { sessionManager }] = await Promise.all([
+    { overlayBridgeService }, { overlayConfigModal }, { soundboardModal }, { sessionManager }, { VideoDiagnosticsSampler }] = await Promise.all([
     import('/views/VoiceStageView.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
     import('/stores/serverStore.ts'), import('/core/ParticipantManager.ts'), import('/core/EventBus.ts'),
     import('/core/ScreenAudioService.ts'), import('/core/OverlayBridgeService.ts'),
     import('/views/OverlayConfigModal.ts'), import('/views/SoundboardModal.ts'),
     import('/core/SessionManager.ts'),
+    import('/core/webrtc/videoDiagnostics.ts'),
   ]);
   const session = sessionManager.create('stage.test', 7890, 'Local');
   session.client.send = () => {};
@@ -779,6 +817,13 @@ async function setupStageSmoke() {
     actions.picker++;
     appEvents.emit('modal.screenshare_picker_opened');
   });
+  const diagnosticParticipant = participants.get(remote.sessionId);
+  const originalCameraStream = diagnosticParticipant.remoteStream;
+  const diagnosticCanvas = document.createElement('canvas');
+  diagnosticCanvas.width = diagnosticCanvas.height = 16;
+  diagnosticCanvas.getContext('2d').fillRect(0, 0, 16, 16);
+  const diagnosticStream = diagnosticCanvas.captureStream(0);
+  diagnosticParticipant.remoteStream = diagnosticStream;
   const stage = new VoiceStageView(root);
   const codecStats = new Map([
     ['first-capability', { type: 'codec', mimeType: 'video/AV1' }],
@@ -787,12 +832,18 @@ async function setupStageSmoke() {
     ['repair', { type: 'codec', mimeType: 'video/rtx' }],
     ['invalid', { type: 'codec', mimeType: 42 }],
   ]);
-  check(stage.getCodecName(codecStats) === null, 'Absent RTP codecId must not turn the first capability into a reported codec');
-  check(stage.getCodecName(codecStats, 'missing') === null, 'Missing codec reports stay unknown instead of guessing AV1');
-  check(stage.getCodecName(codecStats, 'actual-video') === 'H264', 'Stage codec comes from the exact RTP reference');
-  check(stage.getCodecName(codecStats, 'first-capability') === 'AV1', 'Referenced AV1 remains visible when it is the actual RTP codec');
+  const sampler = new VideoDiagnosticsSampler();
+  const readCodec = codecId => {
+    const stats = new Map(codecStats);
+    stats.set('rtp-video', { id: 'rtp-video', type: 'outbound-rtp', kind: 'video', codecId, timestamp: 1000 });
+    return sampler.sampleOutbound({}, stats)[0]?.codec ?? null;
+  };
+  check(readCodec() === null, 'Absent RTP codecId must not turn the first capability into a reported codec');
+  check(readCodec('missing') === null, 'Missing codec reports stay unknown instead of guessing AV1');
+  check(readCodec('actual-video') === 'H264', 'Stage codec comes from the exact RTP reference');
+  check(readCodec('first-capability') === 'AV1', 'Referenced AV1 remains visible when it is the actual RTP codec');
   for (const id of ['audio', 'repair', 'invalid']) {
-    check(stage.getCodecName(codecStats, id) === null, `${id}: non-video, repair and malformed codecs are not reported as screen encoding`);
+    check(readCodec(id) === null, `${id}: non-video, repair and malformed codecs are not reported as screen encoding`);
   }
   // Exercise the actual button wiring without physical media, native windows or leaving a real call.
   stage.toggleCamera = async () => { actions.camera++; };
@@ -808,12 +859,96 @@ async function setupStageSmoke() {
   const finishAnimations = window.footerSmoke.finishAnimations;
   const enter = (control) => control.dispatchEvent(new PointerEvent('pointerenter', { pointerType: 'mouse' }));
   const leave = (control) => control.dispatchEvent(new PointerEvent('pointerleave', { pointerType: 'mouse' }));
-  const buttons = () => [...root.querySelectorAll('.voice-stage-container button')];
+  const buttons = () => [...root.querySelectorAll('.voice-stage-container button')]
+    .filter(control => !control.closest('[data-ui-closing]'));
   const motionCount = () => buttons().reduce((count, control) => count + animations(control).length, 0);
   const rect = (element) => JSON.stringify(element.getBoundingClientRect().toJSON());
   check(motionCount() === 0, 'Actual stage has no autoplay motion');
   check(button('.stage-watch-btn') && button('.stage-fullscreen-btn'), 'Actual participant media controls render');
   check(getComputedStyle(button('.screen-audio-badge')).display === 'none', 'Inactive audio badge is hidden');
+  const copyButton = button('.stage-diagnostics-btn');
+  check(copyButton && getComputedStyle(copyButton).display === 'none', 'Video diagnostics controls are hidden when telemetry is off');
+  const originalCollect = stage.collectTelemetrySnapshot;
+  const originalTiles = stage.getTelemetryTiles;
+  const originalClipboard = navigator.clipboard.writeText;
+  const originalTelemetryMode = settings.screenShareTelemetryMode;
+  let copied = '';
+  let copyCount = 0;
+  const diagnosticTile = stage.getTelemetryTiles()[0];
+  const fakeSnapshot = {
+    kind: 'receiver', media: 'camera', transport: 'p2p', sampledAt: new Date().toISOString(),
+    documentVisibility: 'visible',
+    requested: null, capture: null, streams: [], playback: null, readErrors: 0,
+  };
+  try {
+    stage.getTelemetryTiles = () => [diagnosticTile];
+    stage.collectTelemetrySnapshot = async () => structuredClone(fakeSnapshot);
+    navigator.clipboard.writeText = async text => { copied = text; copyCount++; };
+    settings.screenShareTelemetryEnabled = true;
+    settings.screenShareTelemetryMode = 'complete';
+    stage.applyTelemetryOverlayState();
+    check(getComputedStyle(copyButton).display !== 'none', 'Enabling telemetry exposes the actual copy button');
+    enter(copyButton);
+    check(animations(copyButton).length === 1, 'Visible diagnostics controls reuse stage hover feedback');
+    leave(copyButton);
+    for (let sample = 0; sample < 25; sample++) await stage.refreshTelemetry();
+    check(stage.telemetryHistory.get(diagnosticTile.key).length === 20, 'Video diagnostics history is bounded');
+    const focusedBeforeCopy = [...stage.focusedTileKeys];
+    copyButton.click();
+    await delay();
+    const report = JSON.parse(copied);
+    check(report.schemaVersion === 1 && report.history.length === 20 && report.kind === 'receiver',
+      'Actual stage button copies normalized diagnostics and recent history');
+    check(JSON.stringify(stage.focusedTileKeys) === JSON.stringify(focusedBeforeCopy), 'Copy does not change video focus');
+
+    let release;
+    stage.collectTelemetrySnapshot = () => new Promise(resolve => { release = resolve; });
+    const pending = stage.refreshTelemetry();
+    settings.screenShareTelemetryEnabled = false;
+    appEvents.emit('settings.updated');
+    check(stage.telemetryHistory.size === 0 && stage.telemetrySnapshots.size === 0
+      && stage.telemetryEndpoints.size === 0 && stage.telemetryInterval === null,
+    'Disabling diagnostics clears samples, targets and timers');
+    release(structuredClone(fakeSnapshot));
+    await pending;
+    check(stage.telemetrySnapshots.size === 0 && stage.telemetryHistory.size === 0,
+      'A delayed read cannot repopulate diagnostics after they are disabled');
+    check(getComputedStyle(copyButton).display === 'none', 'Disabled diagnostic buttons remain hidden despite their flex styling');
+    const retainedVideo = button('video.stage-video-element');
+    stage.renderParticipants();
+    check(button('.stage-diagnostics-btn') === copyButton && button('video.stage-video-element') === retainedVideo,
+      'Metadata-only participant updates retain the diagnostic button and video');
+    settings.screenShareTelemetryEnabled = true;
+    stage.applyTelemetryOverlayState();
+    stage.collectTelemetrySnapshot = async () => structuredClone(fakeSnapshot);
+    await stage.refreshTelemetry();
+    const retainedCopies = copyCount;
+    copyButton.click();
+    await delay();
+    check(copyCount === retainedCopies + 1, 'A retained diagnostic button keeps exactly one working copy listener');
+
+    stage.setFocusedTiles([diagnosticTile.key]);
+    check(!copyButton.isConnected && !retainedVideo.isConnected,
+      'A real focus-layout change must replace the previous diagnostic button and video');
+    document.body.append(copyButton);
+    const copiedBefore = copyCount;
+    copyButton.click();
+    await delay();
+    check(copyCount === copiedBefore && !document.querySelector('.dialog-card'),
+      'Layout replacement removes diagnostic click listeners even if the old button stays connected');
+    copyButton.remove();
+    stage.setFocusedTiles(focusedBeforeCopy);
+  } finally {
+    diagnosticParticipant.remoteStream = originalCameraStream;
+    diagnosticStream.getTracks().forEach(track => track.stop());
+    navigator.clipboard.writeText = originalClipboard;
+    stage.collectTelemetrySnapshot = originalCollect;
+    stage.getTelemetryTiles = originalTiles;
+    settings.screenShareTelemetryEnabled = false;
+    settings.screenShareTelemetryMode = originalTelemetryMode;
+    stage.stopTelemetryMonitor();
+    stage.applyTelemetryOverlayState();
+  }
 
   window.stageSmoke = {
     keyboardTarget() {
@@ -944,7 +1079,8 @@ async function setupStageSmoke() {
       await delay();
       check(animations(stop).length === 0 && !stop.querySelector('.control-motion-decoration'),
         'Hiding the stop button cancels its motion');
-      check(!button('#btn-stage-quick-stop'), 'Broadcast banner is removed when sharing stops');
+      check(!button('#stage-broadcast-banner-wrapper:not([data-ui-closing]) #btn-stage-quick-stop'),
+        'Broadcast banner is removed when sharing stops');
       check(getComputedStyle(badge).display === 'none', 'Screen-audio badge hides without replacing the main glyph');
 
       button('.stage-stopwatch-btn').click();
@@ -958,6 +1094,10 @@ async function setupStageSmoke() {
         enter(oldButton);
         const oldHover = animations(oldButton)[0];
         stage.renderParticipants();
+        check(button('.stage-focused-main') === oldCard && animations(oldButton)[0] === oldHover
+          && animations(oldButton).length === 1,
+        'Metadata-only updates preserve participant cards and their single active animation');
+        stage.setFocusedTiles([]);
         await delay();
         check(oldHover.playState === 'idle' && !oldButton.querySelector('.control-motion-decoration'),
           'Replacing participant cards cancels their animations');
@@ -967,14 +1107,17 @@ async function setupStageSmoke() {
         await delay();
         check(animations(oldButton).length === 0, 'Removed card listeners and observers stay detached on connected DOM');
         oldCard.remove();
+        stage.setFocusedTiles([oldCard.dataset.tileKey]);
+        await delay();
         enter(button('.stage-volume-btn'));
         check(animations(button('.stage-volume-btn')).length === 1, 'Replacement cards bind exactly once');
       }
-      for (const control of buttons().filter((control) => control.style.display !== 'none')) {
+      for (const control of buttons().filter((control) => !control.hidden && control.style.display !== 'none')) {
         enter(control);
         const animation = animations(control)[0];
         check(animation && animation.effect.getTiming().iterations === 1
-          && animation.effect.getTiming().duration > 480, 'Every visible stage control has a finite, semantic hover');
+          && animation.effect.getTiming().duration > 480,
+        `Every visible stage control has a finite, semantic hover: ${control.id || control.className}`);
       }
       await finishAnimations(buttons().flatMap(control => animations(control)));
       check(motionCount() === 0 && !root.querySelector('.control-motion-decoration'), 'All stage hovers finish and remove artwork');

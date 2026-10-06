@@ -1,10 +1,17 @@
-import { MessageType, type BotScreen } from '@monky/shared';
+import { MessageType, getScreenShareQualities, screenShareQualitySchema, type BotScreen, type NativeScreenSource } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
+import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
+import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
 import { appEvents } from '../core/EventBus';
+import { sessionManager } from '../core/SessionManager';
+import {
+  screenPictureInPicture, type ScreenPictureInPictureRelease, type ScreenPictureInPictureSource,
+} from '../core/ScreenPictureInPicture';
 import { networkClient } from '../core/NetworkClient';
 import { callClient, leaveCurrentCall } from '../core/serverConnection';
 import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
 import { screenAudioService } from '../core/ScreenAudioService';
+import { stopLocalScreenShares } from '../core/screenShareControls';
 import { getActiveServerStore, serverStore } from '../stores/serverStore';
 import { settingsStore } from '../stores/settingsStore';
 import { voiceStore, VoiceStore } from '../stores/voiceStore';
@@ -24,34 +31,19 @@ import { setButtonLoading, isButtonLoading } from '../utils/buttonLoading';
 import { soundboardModal } from './SoundboardModal';
 import { overlayConfigModal } from './OverlayConfigModal';
 import { overlayBridgeService } from '../core/OverlayBridgeService';
+import { VideoDiagnosticsSampler } from '../core/webrtc/videoDiagnostics';
+import { NativeDecoderDiagnosticsSampler } from '../core/webrtc/nativeDecoderDiagnostics';
+import { formatVideoTelemetry, serializeVideoTelemetry, VideoTelemetrySnapshot } from './VideoTelemetry';
+import { showCopyToast } from './CopyToast';
 import { t } from '../i18n';
 import { reportCameraError, setLocalCameraState } from '../core/CameraPublication';
 import { isCameraOperationCancelled } from '../utils/cameraEffects';
 import { getBotVoiceContext, type BotVoiceContext } from '../utils/botVoice';
 import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { BotScreenView } from './BotScreenView';
+import { ScreenViewersView } from './ScreenViewersView';
 import type { VoiceBotScreensUpdated } from '../stores/botScreenStore';
-import { showInfoToast } from './CopyToast';
-
-interface ScreenTelemetrySnapshot {
-  kind: 'sender' | 'receiver';
-  fps: number | null;
-  width: number | null;
-  height: number | null;
-  bitrateKbps: number | null;
-  codec: string | null;
-  framesEncoded: number | null;
-  keyFramesEncoded: number | null;
-  packetLossPct: number | null;
-  jitterMs: number | null;
-  framesDecoded: number | null;
-  framesDropped: number | null;
-}
-
-interface TelemetryByteSample {
-  bytes: number;
-  timestamp: number;
-}
+import { showInfoToast, showErrorToast } from './CopyToast';
 
 /**
  * A single renderable tile on the stage. A participant contributes one tile per
@@ -97,38 +89,54 @@ const MAX_FOCUSED_TILES = 2;
 /** Zoom bounds for the focused screen share (#271). */
 const FOCUS_ZOOM_MAX_SCALE = 4;
 const FOCUS_ZOOM_STEP = 0.25;
+const MAX_TELEMETRY_SAMPLES = 20;
 
 export class VoiceStageView {
+  public onToggleChat?: (channelId: string) => void;
+  public onJoinChannel?: (channelId: string) => Promise<void>;
   private container: HTMLElement;
   private currentChannelId: string | null = null;
+  private renderedSessionKey: string | null = null;
+  private chatOpen = false;
+  private renderedJoined = false;
+  private windowInactive = false;
   private unbindEvents: Array<() => void> = [];
   private focusedTileKeys: string[] = [];
+  /** Focused screen tiles whose share retired, kept so a source switch can refocus its successor. */
+  private retiredScreenFocus = new Map<string, number>();
   private focusEpoch = 0;
   private focusError: HTMLElement | null = null;
+  private readonly seenScreenStarts = new WeakSet<MediaStream>();
+  private readonly pendingScreenFocus = new Map<string, { tileKey: string; isCurrent: () => boolean }>();
   /** Zoom/pan state of the focused screen share, reset when focus changes (#271). */
   private focusZoom = { scale: 1, x: 0, y: 0 };
   private focusZoomTileKey: string | null = null;
   private suppressCardClickUntil = 0;
-  // #150: remote screen shares are gated behind an explicit "Assistir
-  // transmissão". Keyed by stage tile key (`${sessionId}:screen:${shareId}`) so
-  // each of a peer's shares is opted into separately (#253). These sets survive
-  // innerHTML re-renders (instance state).
-  private watchingShareKeys: Set<string> = new Set();
-  // Screen audio is capped at one stream per participant (#253), so the
-  // explicit mute stays keyed by user id — it matches the <audio> element.
-  private mutedScreenSessionIds: Set<string> = new Set();
   private pingInterval: any = null;
   private telemetryInterval: number | null = null;
+  private telemetryEpoch = 0;
   private telemetryRefreshInFlight = false;
-  private telemetrySnapshots: Map<string, ScreenTelemetrySnapshot> = new Map();
-  private telemetryByteSamples: Map<string, TelemetryByteSample> = new Map();
+  private telemetrySnapshots = new Map<string, VideoTelemetrySnapshot>();
+  private telemetryHistory = new Map<string, VideoTelemetrySnapshot[]>();
+  private telemetryHistorySources = new Map<string, string>();
+  private telemetrySampler = new VideoDiagnosticsSampler();
+  private nativeDecoderSampler = new NativeDecoderDiagnosticsSampler();
+  private nativeTelemetryTargets = new Map<string, object>();
+  private telemetryEndpoints = new Map<object, number>();
+  private nextTelemetryEndpoint = 1;
+  private telemetryCopyRequest = 0;
+  private clearTelemetryToast: (() => void) | null = null;
+  private unbindTelemetryButtons: Array<() => void> = [];
+  private videoLoadingListeners = new WeakMap<HTMLVideoElement, () => void>();
   // Caches the current live-banner content so updateControlsUI() only rebuilds
   // it when the broadcast state actually changes, preventing the pulse dot from
   // flickering on frequent voice.state_updated events (#70).
   private broadcastBannerSignature: string | null = null;
+  private participantStructure: string | null = null;
   private cameraToggleEpoch = 0;
   private cameraTogglePending = false;
   private botScreens = new Map<string, BotScreenView>();
+  private screenViewers: ScreenViewersView[] = [];
   private botVoiceContext: BotVoiceContext | null = null;
   private botScreenLayoutObserver: ResizeObserver | null = null;
   private clearMiniappToast: (() => void) | null = null;
@@ -137,34 +145,57 @@ export class VoiceStageView {
     this.container = container;
   }
 
+  private isJoinedHere(): boolean {
+    return isViewingCallServer() && voiceStore.currentVoiceChannelId === this.currentChannelId;
+  }
+
+  public setChatOpen(open: boolean): void {
+    this.chatOpen = open;
+    const button = this.container.querySelector<HTMLButtonElement>('#stage-btn-chat');
+    if (!button) return;
+    button.classList.toggle('active', open);
+    button.setAttribute('aria-pressed', String(open));
+    button.setAttribute('aria-label', t(open ? 'voiceChat.hide' : 'voiceChat.show'));
+    button.title = t(open ? 'voiceChat.hide' : 'voiceChat.show');
+  }
+
   public setChannel(channelId: string | null): void {
-    if (channelId === this.currentChannelId && this.container.querySelector('.voice-stage-container')) {
+    if (channelId === this.currentChannelId && this.renderedJoined === this.isJoinedHere()
+        && this.container.querySelector('.voice-stage-container')) {
       this.refreshBotScreens();
+      this.setChatOpen(this.chatOpen);
+      this.restorePictureInPicture();
       return;
     }
+    if (channelId !== this.currentChannelId) this.openAutomaticPictureInPicture();
     this.focusEpoch++;
+    this.pendingScreenFocus.clear();
     this.clearFocusError();
     this.closeBotScreens();
+    if (channelId !== this.currentChannelId) this.stopTelemetryMonitor();
     this.currentChannelId = channelId;
     this.focusedTileKeys = [];
+    this.retiredScreenFocus.clear();
     if (!channelId) {
       this.stopTelemetryMonitor();
     }
     this.render();
+    this.restorePictureInPicture();
   }
 
   public hasOpenBotScreen(): boolean { return [...this.botScreens.values()].some((view) => view.isWatching); }
 
   public isWatchingBotScreen(id: string): boolean { return this.botScreens.get(id)?.isWatching ?? false; }
 
-  public watchBotScreen(id: string, focus = false): void {
+  public watchBotScreen(id: string): void {
     this.refreshBotScreens();
     const view = this.botScreens.get(id);
     if (!view) return;
-    const open = () => {
+    const open = async () => {
       if (this.botScreens.get(id) !== view) return;
       try {
-        view.open();
+        await view.open();
+        if (this.botScreens.get(id) !== view) return;
         if (view.isWatching) this.botVoiceContext?.session.botScreenStore.setInvitationDismissed(id, false);
         this.positionBotScreens();
         appEvents.emit('stage.bot_screens_changed');
@@ -173,8 +204,7 @@ export class VoiceStageView {
         void showAlert({ title: t('common.error'), message: t('botScreen.openError'), variant: 'danger' });
       }
     };
-    if (focus) this.setFocusedTiles([`miniapp:${id}`], { afterRender: open });
-    else open();
+    this.setFocusedTiles([`miniapp:${id}`], { afterRender: open });
   }
 
   private closeBotScreen(id: string): void {
@@ -302,6 +332,7 @@ export class VoiceStageView {
    * (i.e. after `setChannel`), since it re-renders the participant tiles.
    */
   public watchScreenShare(sessionId: string): void {
+    if (!isViewingCallServer() || this.currentChannelId !== voiceStore.currentVoiceChannelId) return;
     const participant = participantManager
       .getInVoiceChannel(this.currentChannelId ?? '')
       .find((p) => sidOf(p) === sessionId);
@@ -313,18 +344,26 @@ export class VoiceStageView {
     if (shareIds.length === 0) return;
 
     this.setFocusedTiles([`${sessionId}:screen:${shareIds[0]}`], { beforeRender: () => {
-      for (const shareId of shareIds) this.watchingShareKeys.add(`${sessionId}:screen:${shareId}`);
-      this.mutedScreenSessionIds.delete(sessionId);
+      for (const shareId of shareIds) {
+        webRtcManager.setRemoteScreenWatching(sessionId, shareId, true);
+      }
     } });
   }
 
   public render(): void {
+    const sessionKey = sessionManager.getActiveKey();
+    const retainTelemetry = this.renderedSessionKey === sessionKey && !!this.currentChannelId && !!serverStore.serverDetails;
+    this.renderedSessionKey = sessionKey;
+    this.participantStructure = null;
+    this.releaseStageVideos(this.container);
     if (this.focusError) this.focusError.textContent = t('stage.fullscreenExitError');
     this.stopPingMonitor();
-    this.stopTelemetryMonitor(false);
+    if (retainTelemetry) this.pauseTelemetryMonitor();
+    else this.stopTelemetryMonitor();
     this.unbindListeners();
 
     if (!this.currentChannelId || !serverStore.serverDetails) {
+      this.pendingScreenFocus.clear();
       this.closeBotScreens();
       this.container.innerHTML = `
         <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); gap: 12px;">
@@ -338,6 +377,8 @@ export class VoiceStageView {
 
     const channel = serverStore.serverDetails.channels.find((c) => c.id === this.currentChannelId);
     const channelName = channel ? channel.name : 'Geral';
+    const joinedHere = this.isJoinedHere();
+    this.renderedJoined = joinedHere;
 
     // Fresh DOM below means the (empty) banner wrapper must be repopulated by
     // updateControlsUI(), so drop the cached signature (#70).
@@ -351,6 +392,12 @@ export class VoiceStageView {
           </div>
 
           <div style="display: flex; align-items: center; gap: 10px;">
+            <button id="stage-btn-chat" class="btn btn-icon stage-chat-toggle ${this.chatOpen ? 'active' : ''}"
+              aria-pressed="${this.chatOpen}" aria-label="${t(this.chatOpen ? 'voiceChat.hide' : 'voiceChat.show')}"
+              title="${t(this.chatOpen ? 'voiceChat.hide' : 'voiceChat.show')}">
+              <span class="material-symbols-outlined">chat_bubble</span>
+            </button>
+            ${joinedHere ? `
             <!-- Ping / Latency Badge -->
             <div id="stage-ping-badge" class="stage-ping-badge good" tabindex="0" data-tooltip-source="ping-tooltip-content">
               <span class="ping-dot"></span>
@@ -371,11 +418,13 @@ export class VoiceStageView {
                      </div>`
               }
             </div>
+            ` : ''}
           </div>
         </div>
 
         <!-- Live Broadcast Top Banner Container -->
         <div id="stage-broadcast-banner-wrapper" style="display: none;"></div>
+        <div id="stage-overlay-preview-notice" role="status" hidden>${t('overlay.stagePreviewsHidden')}</div>
 
         <!-- Participants Container (Grid or Focused) -->
         <div id="stage-content-area">
@@ -383,6 +432,7 @@ export class VoiceStageView {
           <div id="stage-bot-screens" class="stage-bot-screen-layer" hidden></div>
         </div>
 
+        ${joinedHere ? `
         <!-- Stage Bottom Controls Bar -->
         <div class="stage-call-controls">
           <button id="stage-btn-mic" class="btn btn-icon ${voiceStore.isMuted || voiceStore.isDeafened ? 'danger-active' : ''}" aria-pressed="${voiceStore.isMuted}" title="${voiceStore.isMuted ? t('stage.unmuteMic') : t('stage.muteMic')}">
@@ -413,6 +463,14 @@ export class VoiceStageView {
             <span>${t('stage.leaveVoice')}</span>
           </button>
         </div>
+        ` : `
+        <div class="stage-preview-controls">
+          <button id="stage-btn-join" type="button" class="btn btn-primary">
+            <span class="material-symbols-outlined md-18" aria-hidden="true">call</span>
+            <span>${t('voiceChat.join')}</span>
+          </button>
+        </div>
+        `}
       </div>
     `;
     if (!this.hasOpenBotScreen() ||
@@ -424,19 +482,29 @@ export class VoiceStageView {
     this.renderParticipants();
     this.updateControlsUI();
     this.attachEvents();
-    this.startPingMonitor();
+    if (joinedHere) this.startPingMonitor();
+    else this.stopPingMonitor();
     this.syncTelemetryMonitor();
   }
 
   public updateControlsUI(): void {
+    const previewsHidden = settingsStore.overlayHideStagePreviews && overlayBridgeService.getIsOpen();
+    const previews = this.container.querySelector<HTMLElement>('#stage-participants-area');
+    if (previews) {
+      previews.classList.toggle('overlay-previews-hidden', previewsHidden);
+      previews.inert = previewsHidden;
+    }
+    const previewNotice = this.container.querySelector<HTMLElement>('#stage-overlay-preview-notice');
+    if (previewNotice) previewNotice.hidden = !previewsHidden;
     const moderation = getVoiceControlModeration();
     const btnMic = document.getElementById('stage-btn-mic');
     if (btnMic) {
       const muted = voiceStore.isMuted || voiceStore.isDeafened;
       btnMic.className = `btn btn-icon ${muted ? 'danger-active' : ''}`;
-      const blocked = moderation.serverMuted || moderation.serverDeafened;
+      const blocked = moderation.serverMuted || moderation.serverDeafened || moderation.permissionMuted;
       btnMic.setAttribute('aria-pressed', String(voiceStore.isMuted));
       btnMic.title = [t(voiceStore.isMuted ? 'stage.unmuteMic' : 'stage.muteMic'), moderation.muteReason].filter(Boolean).join('. ');
+      (btnMic as HTMLButtonElement).disabled = moderation.permissionMuted;
       updateAudioStateIcon(btnMic, muted ? 'mic_off' : 'mic', blocked);
     }
 
@@ -459,7 +527,7 @@ export class VoiceStageView {
 
     const btnScreen = document.getElementById('stage-btn-screen');
     if (btnScreen) {
-      const hasScreenAudio = screenAudioService.getIsCapturing();
+      const hasScreenAudio = voiceStore.screenAudioShareId !== null || screenAudioService.getIsCapturing();
       btnScreen.className = `btn btn-icon ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}`;
       btnScreen.title = voiceStore.isScreenSharing
         ? (hasScreenAudio ? t('stage.stopScreenShareWithAudio') : t('stage.stopScreenShare'))
@@ -482,7 +550,7 @@ export class VoiceStageView {
     const btnLeave = document.getElementById('stage-btn-leave') as HTMLButtonElement | null;
 
     if (btnStopShare) {
-      const hasScreenAudio = screenAudioService.getIsCapturing();
+      const hasScreenAudio = voiceStore.screenAudioShareId !== null || screenAudioService.getIsCapturing();
       btnStopShare.style.display = voiceStore.isScreenSharing ? 'inline-flex' : 'none';
       btnStopShare.title = hasScreenAudio ? t('stage.stopScreenShareWithAudio') : t('stage.stopScreenShare');
     }
@@ -494,7 +562,7 @@ export class VoiceStageView {
     const bannerWrapper = document.getElementById('stage-broadcast-banner-wrapper');
     if (bannerWrapper) {
       const isBroadcasting = voiceStore.isCameraOn || voiceStore.isScreenSharing;
-      const hasScreenAudio = screenAudioService.getIsCapturing();
+      const hasScreenAudio = voiceStore.screenAudioShareId !== null || screenAudioService.getIsCapturing();
       // Only touch the DOM when the banner's content would actually change, so
       // the live-pulse animation isn't restarted on every state update (#70).
       const signature = isBroadcasting
@@ -503,7 +571,6 @@ export class VoiceStageView {
       if (signature !== this.broadcastBannerSignature) {
         this.broadcastBannerSignature = signature;
         if (isBroadcasting) {
-          bannerWrapper.style.display = 'block';
           bannerWrapper.innerHTML = `
             <div class="stage-broadcast-banner">
               <div style="display: flex; align-items: center; gap: 10px;">
@@ -522,9 +589,9 @@ export class VoiceStageView {
           `;
           const btnQuickStop = document.getElementById('btn-stage-quick-stop');
           btnQuickStop?.addEventListener('click', () => this.handleStopStreaming());
+          setSurfaceVisible(bannerWrapper, true, 'panel', 'block');
         } else {
-          bannerWrapper.style.display = 'none';
-          bannerWrapper.innerHTML = '';
+          setSurfaceVisible(bannerWrapper, false, 'panel', undefined, () => bannerWrapper.replaceChildren());
         }
       }
     }
@@ -548,7 +615,17 @@ export class VoiceStageView {
       } else {
         card.classList.remove('speaking');
       }
+
     });
+  }
+
+  private releaseStageVideos(root: HTMLElement): void {
+    for (const video of root.querySelectorAll<HTMLVideoElement>('video.stage-video-element')) {
+      this.videoLoadingListeners.get(video)?.();
+      if (screenPictureInPicture.retain(video)) continue;
+      video.pause();
+      video.srcObject = null;
+    }
   }
 
   /**
@@ -601,6 +678,8 @@ export class VoiceStageView {
    * without requiring Shift.
    */
   private toggleFocus(tileKey: string): void {
+    // A broadcast a manual PiP took off the stage only comes back through it.
+    if (tileKey === this.pictureInPictureTileKey()) return;
     const isFocused = this.focusedTileKeys.includes(tileKey);
     this.setFocusedTiles(isFocused
       ? this.focusedTileKeys.filter((key) => key !== tileKey)
@@ -608,14 +687,67 @@ export class VoiceStageView {
   }
 
   private clearFocusError(): void {
-    this.focusError?.remove();
+    if (this.focusError) removeWithMotion(this.focusError, 'notice');
     this.focusError = null;
+  }
+
+  private queueScreenStartFocus({ shareId, stream }: { shareId: string; stream: MediaStream }): void {
+    if (!SAFE_SHARE_ID.test(shareId) || this.seenScreenStarts.has(stream)) return;
+    this.seenScreenStarts.add(stream);
+    const channelId = this.currentChannelId;
+    const displayedServer = getActiveServerStore();
+    const sessionId = displayedServer.currentUser?.sessionId || displayedServer.currentUser?.id;
+    const voiceSessionKey = voiceStore.voiceSessionKey;
+    if (!channelId || !sessionId || channelId !== voiceStore.currentVoiceChannelId || !isViewingCallServer()) return;
+    this.pendingScreenFocus.set(shareId, {
+      tileKey: `${sessionId}:screen:${shareId}`,
+      isCurrent: () => this.currentChannelId === channelId && voiceStore.currentVoiceChannelId === channelId
+        && voiceStore.voiceSessionKey === voiceSessionKey && getActiveServerStore() === displayedServer
+        && (displayedServer.currentUser?.sessionId || displayedServer.currentUser?.id) === sessionId
+        && videoService.getScreenStream(shareId) === stream,
+    });
+    this.focusStartedScreens();
+  }
+
+  private focusStartedScreens(tiles?: StageTile[]): boolean {
+    for (const [shareId, intent] of this.pendingScreenFocus) {
+      if (!intent.isCurrent()) this.pendingScreenFocus.delete(shareId);
+    }
+    if (!this.pendingScreenFocus.size || !this.currentChannelId) return false;
+    const availableTiles = tiles ?? this.buildStageTiles(
+      participantManager.getInVoiceChannel(this.currentChannelId),
+      serverStore.currentUser?.sessionId || serverStore.currentUser?.id,
+    );
+    const ready = [...this.pendingScreenFocus].filter(([, intent]) =>
+      availableTiles.some(tile => tile.key === intent.tileKey));
+    if (!ready.length) return false;
+    const keys = [...new Set([...this.focusedTileKeys, ...ready.map(([, intent]) => intent.tileKey)])]
+      .filter(key => availableTiles.some(tile => tile.key === key)).slice(-MAX_FOCUSED_TILES);
+    const consume = () => {
+      for (const [shareId, intent] of ready) {
+        if (this.pendingScreenFocus.get(shareId) === intent) this.pendingScreenFocus.delete(shareId);
+      }
+    };
+    // Capture starts before the roster changes. Consume its intent only when the
+    // tile exists, and keep it cancellable while native fullscreen is exiting.
+    this.setFocusedTiles(keys, {
+      screenStart: true,
+      isCurrent: () => ready.every(([shareId, intent]) => this.pendingScreenFocus.get(shareId) === intent
+        && intent.isCurrent() && voiceStore.screenShareIds.includes(shareId)),
+      beforeRender: consume,
+      onFailure: consume,
+    });
+    return true;
   }
 
   private setFocusedTiles(
     tileKeys: string[],
-    hooks?: { beforeRender?: () => void; afterRender?: () => void },
+    hooks?: {
+      beforeRender?: () => void; afterRender?: () => void; onFailure?: () => void;
+      isCurrent?: () => boolean; screenStart?: boolean;
+    },
   ): void {
+    if (!hooks?.screenStart) this.pendingScreenFocus.clear();
     const root = this.container.querySelector('.voice-stage-container');
     if (!root) return;
     const epoch = ++this.focusEpoch;
@@ -626,7 +758,8 @@ export class VoiceStageView {
     const current = () => epoch === this.focusEpoch && this.currentChannelId === channelId
       && getActiveServerStore() === displayedServer && displayedServer.currentUser?.sessionId === sessionId
       && voiceStore.voiceSessionKey === voiceSessionKey
-      && root.isConnected && this.container.querySelector('.voice-stage-container') === root;
+      && root.isConnected && this.container.querySelector('.voice-stage-container') === root
+      && hooks?.isCurrent?.() !== false;
     const commit = () => {
       if (!current()) return;
       this.clearFocusError();
@@ -635,9 +768,10 @@ export class VoiceStageView {
       this.renderParticipants();
       hooks?.afterRender?.();
     };
-    const leavingFocus = this.focusedTileKeys.some((key) => !tileKeys.includes(key));
+    const changingLayout = tileKeys.length !== this.focusedTileKeys.length
+      || this.focusedTileKeys.some((key, index) => tileKeys[index] !== key);
     const fullscreen = document.fullscreenElement;
-    if (!leavingFocus || !fullscreen ||
+    if (!changingLayout || !fullscreen ||
         (!this.container.contains(fullscreen) && !fullscreen.contains(root))) {
       commit();
       return;
@@ -661,6 +795,8 @@ export class VoiceStageView {
       this.focusError.setAttribute('role', 'alert');
       this.focusError.textContent = t('stage.fullscreenExitError');
       (this.container.contains(fullscreen) ? fullscreen : root).append(this.focusError);
+      animateEnter(this.focusError, 'notice');
+      hooks?.onFailure?.();
     });
   }
 
@@ -693,11 +829,9 @@ export class VoiceStageView {
       : `${common} data-session-id="${escapeHtml(sidOf(tile.p))}"`;
   }
 
-  /** True when at least one of the participant's shares was opted into (#253). */
-  private isWatchingAnyShare(p: ParticipantViewModel): boolean {
-    return this.getShareIds(p, false).some((shareId) =>
-      this.watchingShareKeys.has(`${sidOf(p)}:screen:${shareId}`)
-    );
+  private isWatchingScreen(sessionId: string, shareId: string): boolean {
+    return isViewingCallServer() && this.currentChannelId === voiceStore.currentVoiceChannelId
+      && voiceStore.isWatchingScreen(sessionId, shareId);
   }
 
   private isTileSpeaking(tile: StageTile): boolean {
@@ -714,9 +848,12 @@ export class VoiceStageView {
 
     const participants = participantManager.getInVoiceChannel(this.currentChannelId);
     if (participants.length === 0) {
+      this.participantStructure = null;
+      this.unbindTelemetryControls();
+      this.releaseStageVideos(area);
       area.innerHTML = `
         <div style="flex: 1; display: flex; align-items: center; justify-content: center; color: var(--text-muted);">
-          Aguardando outros amigos entrarem na chamada...
+          ${t('voiceChat.empty')}
         </div>
       `;
       return;
@@ -724,42 +861,28 @@ export class VoiceStageView {
 
     const currentSessionId = serverStore.currentUser?.sessionId || serverStore.currentUser?.id;
 
-    // #150: reset watch-state for any share that is no longer being broadcast
-    // so a fresh broadcast is gated behind "Assistir transmissão" again; also
-    // drop the broadcaster's explicit screen-audio mute once they stop entirely.
-    const liveShareKeys = new Set<string>();
-    for (const p of participants) {
-      if (sidOf(p) === currentSessionId) continue;
-      for (const shareId of this.getShareIds(p, false)) {
-        liveShareKeys.add(`${sidOf(p)}:screen:${shareId}`);
-      }
-    }
-    for (const watchedKey of [...this.watchingShareKeys]) {
-      if (!liveShareKeys.has(watchedKey)) {
-        this.watchingShareKeys.delete(watchedKey);
-      }
-    }
-    for (const mutedSessionId of [...this.mutedScreenSessionIds]) {
-      const stillSharing = [...liveShareKeys].some((key) => key.startsWith(`${mutedSessionId}:screen:`));
-      if (!stillSharing) this.mutedScreenSessionIds.delete(mutedSessionId);
-    }
-
     // A participant sharing camera + screens contributes one tile per source
     // (#26, #253); focus, speaking and DOM keys are keyed per tile.
     const tiles = this.buildStageTiles(participants, currentSessionId);
+    if (this.focusStartedScreens(tiles)) return;
 
     // Drop focus entries whose tile disappeared (share ended, peer left).
-    this.focusedTileKeys = this.focusedTileKeys.filter((key) =>
-      tiles.some((tile) => tile.key === key)
-    );
+    const now = Date.now();
+    for (const [key, expiresAt] of this.retiredScreenFocus) if (expiresAt < now) this.retiredScreenFocus.delete(key);
+    this.focusedTileKeys = this.focusedTileKeys.filter((key) => {
+      if (tiles.some((tile) => tile.key === key)) return true;
+      if (key.includes(':screen:')) this.retiredScreenFocus.set(key, now + VoiceStore.SCREEN_WATCH_HANDOFF_MS);
+      return false;
+    });
 
+    let markup: string;
     if (this.focusedTileKeys.length > 0) {
       const focusedTiles = this.focusedTileKeys
         .map((key) => tiles.find((tile) => tile.key === key)!)
         .filter(Boolean);
       const otherTiles = tiles.filter((tile) => !this.focusedTileKeys.includes(tile.key));
 
-      area.innerHTML = `
+      markup = `
         <div class="stage-focused-layout">
           <div class="stage-focused-stack ${focusedTiles.length > 1 ? 'stage-focused-stack--split' : ''}">
             ${focusedTiles.map((focusedTile) => `
@@ -787,7 +910,7 @@ export class VoiceStageView {
         </div>
       `;
     } else {
-      area.innerHTML = `
+      markup = `
         <div class="stage-grid" id="stage-grid">
           ${tiles.map((tile) => {
             return `
@@ -800,16 +923,42 @@ export class VoiceStageView {
       `;
     }
 
-    // #150: gate remote screen audio behind the "Assistir transmissão" opt-in
-    // while preserving explicit per-user mutes. The <audio> elements are created
-    // by WebRtcManager on document.body and persist across these re-renders.
-    participants.forEach((p) => {
-      if (sidOf(p) === currentSessionId) return;
-      if (this.getShareIds(p, false).length === 0) return;
-      const audioEl = document.querySelector(`audio[data-screen-audio-session="${sidOf(p)}"]`) as HTMLAudioElement | null;
-      if (!audioEl) return;
-      webRtcManager.setScreenAudioMuted(sidOf(p), !this.isWatchingAnyShare(p) || this.mutedScreenSessionIds.has(sidOf(p)));
+    const template = document.createElement('template');
+    template.innerHTML = markup;
+    const badges = new Map<string, string>();
+    for (const badge of template.content.querySelectorAll<HTMLElement>('.stage-badges-overlay')) {
+      const key = badge.closest<HTMLElement>('[data-tile-key]')?.dataset.tileKey;
+      if (key) badges.set(key, badge.innerHTML);
+      badge.innerHTML = '';
+    }
+    for (const telemetry of template.content.querySelectorAll('.telemetry-overlay')) telemetry.textContent = '';
+    for (const card of template.content.querySelectorAll('[data-tile-key]')) {
+      card.className = [...card.classList].filter(name => name !== 'speaking').join(' ');
+    }
+    const structure = template.innerHTML;
+    const pipKey = this.pictureInPictureTileKey();
+    // Voice metadata must not detach a playing video or exit its fullscreen card.
+    const sameMedia = tiles.every(tile => {
+      if (tile.kind === 'voice' || tile.kind === 'miniapp' || tile.key === pipKey) return true;
+      const video = area.querySelector<HTMLVideoElement>(`[data-video-tile-key="${CSS.escape(tile.key)}"]`);
+      const stream = tile.kind === 'screen' && sidOf(tile.p) !== currentSessionId
+        && !this.isWatchingScreen(sidOf(tile.p), tile.shareId!) ? null : this.getTileStream(tile, currentSessionId);
+      return video?.srcObject === stream;
     });
+    if (this.participantStructure === structure && sameMedia) {
+      for (const badge of area.querySelectorAll<HTMLElement>('.stage-badges-overlay')) {
+        const key = badge.closest<HTMLElement>('[data-tile-key]')?.dataset.tileKey;
+        const content = key ? badges.get(key) : undefined;
+        if (content !== undefined && badge.innerHTML !== content) badge.innerHTML = content;
+      }
+      this.updateSpeakingClasses();
+      this.refreshParticipantMedia(tiles, currentSessionId);
+      return;
+    }
+    this.participantStructure = structure;
+    this.unbindTelemetryControls();
+    this.releaseStageVideos(area);
+    area.innerHTML = markup;
 
     // Attach click listeners to cards for focus toggle & right-click for volume adjustment
     const allCards = area.querySelectorAll('[data-session-id]');
@@ -819,7 +968,7 @@ export class VoiceStageView {
         // overlay (volume/fullscreen), nor right after a slider drag whose
         // pointer-up may land outside the controls (#75).
         if (Date.now() < this.suppressCardClickUntil) return;
-        if ((e.target as HTMLElement).closest('.stage-card-controls')) return;
+        if ((e.target as HTMLElement).closest('.stage-card-controls, .stage-viewers, .stage-pip-placeholder')) return;
         // While zoomed in, a click pans instead of dropping out of focus (#271).
         if (this.focusZoom.scale > 1 && card.classList.contains('stage-focused-main')) return;
         const tileKey = card.getAttribute('data-tile-key');
@@ -851,7 +1000,33 @@ export class VoiceStageView {
       });
     });
 
+    area.querySelectorAll<HTMLButtonElement>('.stage-pip-btn').forEach(button => {
+      button.addEventListener('click', event => {
+        event.stopPropagation();
+        const targetId = button.dataset.pipTarget;
+        if (targetId) void this.openPictureInPicture(targetId, button);
+      });
+    });
+
+    area.querySelectorAll<HTMLButtonElement>('.stage-pip-return-btn').forEach(button => {
+      button.addEventListener('click', event => {
+        event.stopPropagation();
+        screenPictureInPicture.returnToStage();
+      });
+    });
+
+    area.querySelectorAll<HTMLButtonElement>('.stage-diagnostics-btn').forEach(button => {
+      const onCopy = (event: MouseEvent): void => {
+        event.stopPropagation();
+        const tileKey = button.dataset.diagnosticsKey;
+        if (tileKey) void this.copyTelemetry(tileKey, button);
+      };
+      button.addEventListener('click', onCopy);
+      this.unbindTelemetryButtons.push(() => button.removeEventListener('click', onCopy));
+    });
+
     this.setupFocusedScreenZoom(area);
+    this.screenViewers = [...area.querySelectorAll<HTMLElement>('.stage-viewers')].map(root => new ScreenViewersView(root));
 
     // #150: "Assistir transmissão" — opt into a gated remote screen share.
     // Starts video + audio and auto-focuses the broadcaster.
@@ -862,15 +1037,14 @@ export class VoiceStageView {
         const sessionId = btn.getAttribute('data-watch-session');
         const shareId = btn.getAttribute('data-watch-share');
         if (!sessionId || !shareId) return;
+        if (!isViewingCallServer() || this.currentChannelId !== voiceStore.currentVoiceChannelId) return;
         this.setFocusedTiles([`${sessionId}:screen:${shareId}`], { beforeRender: () => {
-          this.watchingShareKeys.add(`${sessionId}:screen:${shareId}`);
-          this.mutedScreenSessionIds.delete(sessionId);
+          webRtcManager.setRemoteScreenWatching(sessionId, shareId, true);
         } });
       });
     });
 
-    // #150: "Parar de assistir" — re-gate the broadcast (blur + silence) and
-    // drop back to the grid.
+    // Stop changes the transport subscription, not just playback or styling.
     const stopWatchBtns = area.querySelectorAll('.stage-stopwatch-btn') as NodeListOf<HTMLButtonElement>;
     stopWatchBtns.forEach((btn) => {
       btn.addEventListener('click', (e: Event) => {
@@ -879,8 +1053,43 @@ export class VoiceStageView {
         const shareId = btn.getAttribute('data-stopwatch-share');
         if (!sessionId || !shareId) return;
         const tileKey = `${sessionId}:screen:${shareId}`;
+        if (!isViewingCallServer() || this.currentChannelId !== voiceStore.currentVoiceChannelId) return;
         this.setFocusedTiles(this.focusedTileKeys.filter((key) => key !== tileKey), {
-          beforeRender: () => { this.watchingShareKeys.delete(tileKey); },
+          beforeRender: () => { webRtcManager.setRemoteScreenWatching(sessionId, shareId, false); },
+        });
+      });
+    });
+
+    area.querySelectorAll<HTMLButtonElement>('.stage-quality-button').forEach(button => {
+      const menu = button.parentElement?.querySelector<HTMLElement>('.stage-quality-menu');
+      if (!menu) return;
+      button.addEventListener('click', event => {
+        event.stopPropagation();
+        const open = button.getAttribute('aria-expanded') !== 'true';
+        setSurfaceVisible(menu, open, 'popover');
+        button.setAttribute('aria-expanded', String(open));
+        if (open) menu.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus();
+      });
+      menu.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+          event.stopPropagation();
+          setSurfaceVisible(menu, false, 'popover');
+          button.setAttribute('aria-expanded', 'false');
+          button.focus();
+        }
+      });
+      menu.querySelectorAll<HTMLButtonElement>('[data-screen-quality]').forEach(choice => {
+        choice.addEventListener('click', event => {
+          event.stopPropagation();
+          const sessionId = menu.dataset.sessionId, shareId = menu.dataset.shareId;
+          const quality = screenShareQualitySchema.parse(choice.dataset.screenQuality);
+          if (!sessionId || !shareId || !this.isWatchingScreen(sessionId, shareId)) return;
+          voiceStore.setScreenQuality(sessionId, shareId, quality);
+          for (const option of menu.querySelectorAll('[data-screen-quality]'))
+            option.setAttribute('aria-pressed', String(option === choice));
+          setSurfaceVisible(menu, false, 'popover');
+          button.setAttribute('aria-expanded', 'false');
+          button.focus();
         });
       });
     });
@@ -907,7 +1116,7 @@ export class VoiceStageView {
       const initWrapper = btn.closest('.stage-volume-wrapper');
       const initSlider = initWrapper?.querySelector('.stage-screen-volume-slider') as HTMLInputElement | null;
       const initSessionId = initSlider?.getAttribute('data-session-id');
-      if (initSessionId && this.mutedScreenSessionIds.has(initSessionId)) {
+      if (initSessionId && voiceStore.isScreenAudioMuted(initSessionId)) {
         const initIcon = btn.querySelector('.material-symbols-outlined');
         if (initIcon) initIcon.textContent = 'volume_off';
         btn.title = t('stage.screenAudioMuted');
@@ -922,14 +1131,12 @@ export class VoiceStageView {
         const sessionId = slider.getAttribute('data-session-id');
         if (!sessionId) return;
         const icon = btn.querySelector('.material-symbols-outlined');
-        if (this.mutedScreenSessionIds.has(sessionId)) {
-          this.mutedScreenSessionIds.delete(sessionId);
+        if (voiceStore.isScreenAudioMuted(sessionId)) {
           webRtcManager.setScreenAudioMuted(sessionId, false);
           if (icon) icon.textContent = 'volume_up';
           btn.title = t('stage.screenAudioVolume');
           wrapper?.classList.remove('screen-audio-muted');
         } else {
-          this.mutedScreenSessionIds.add(sessionId);
           webRtcManager.setScreenAudioMuted(sessionId, true);
           if (icon) icon.textContent = 'volume_off';
           btn.title = t('stage.screenAudioMuted');
@@ -966,15 +1173,18 @@ export class VoiceStageView {
       slider.addEventListener('lostpointercapture', endDrag);
     });
 
+    this.refreshParticipantMedia(tiles, currentSessionId);
+  }
+
+  private refreshParticipantMedia(tiles: StageTile[], currentSessionId: string | undefined): void {
     // Attach media streams to the per-tile video elements cleanly. Camera rides
     // remoteStream / cameraStream; each screen share rides its own stream keyed
     // by share id so every tile shows independent video (#26, #253).
     tiles.forEach((tile) => {
       if (tile.kind === 'voice' || tile.kind === 'miniapp') return;
       const isLocal = sidOf(tile.p) === currentSessionId;
-      const stream = isLocal
-        ? (tile.kind === 'screen' ? videoService.getScreenStream(tile.shareId!) : videoService.getCameraState().stream)
-        : (tile.kind === 'screen' ? this.getRemoteScreenStream(tile) : tile.p.remoteStream);
+      if (!isLocal && tile.kind === 'screen' && !this.isWatchingScreen(sidOf(tile.p), tile.shareId!)) return;
+      const stream = this.getTileStream(tile, currentSessionId);
       if (!stream) return;
       const suffix = tile.kind === 'screen' ? `screen-${tile.shareId}` : tile.kind;
       const ids = [`video-${sidOf(tile.p)}-${suffix}`, `video-mini-${sidOf(tile.p)}-${suffix}`];
@@ -992,6 +1202,144 @@ export class VoiceStageView {
     this.applyTelemetryOverlayState();
     this.syncTelemetryMonitor();
     this.syncBotScreenLayout();
+    this.refreshNativeScreenState();
+    this.watchPendingLoadingOverlays();
+  }
+
+  /**
+   * Remote media (RemoteMediaRouter, WebRtcManager) attaches streams straight
+   * to the tile video when a track arrives after the tile rendered, e.g. the
+   * first watch of a screen. Every pending overlay must therefore already be
+   * listening, or it stays over the playing video.
+   */
+  private watchPendingLoadingOverlays(): void {
+    for (const overlay of this.container.querySelectorAll<HTMLElement>('.stage-loading-overlay:not([data-ui-closing])')) {
+      const video = document.getElementById(overlay.id.slice('loading-'.length));
+      if (!(video instanceof HTMLVideoElement) || this.videoLoadingListeners.has(video)) continue;
+      this.hideVideoLoadingWhenReady(video, video.id);
+    }
+  }
+
+  private getTileStream(tile: ParticipantStageTile, currentSessionId: string | undefined): MediaStream | null {
+    return (sidOf(tile.p) === currentSessionId
+      ? (tile.kind === 'screen' ? videoService.getScreenStream(tile.shareId!) : videoService.getCameraState().stream)
+      : (tile.kind === 'screen' ? this.getRemoteScreenStream(tile) : tile.p.remoteStream)) ?? null;
+  }
+
+  private renderScreenQuality(source: NativeScreenSource, sessionId: string): string {
+    const selected = voiceStore.getScreenQuality(sessionId, source.shareId);
+    return `<div class="stage-quality-wrapper">
+      <button type="button" class="stage-quality-button" aria-expanded="false" title="${t('stage.screenQuality')}" aria-label="${t('stage.screenQuality')}">
+        <span class="material-symbols-outlined md-18">tune</span>
+      </button>
+      <div class="stage-quality-menu" hidden role="group" aria-label="${t('stage.screenQuality')}"
+        data-session-id="${escapeHtml(sessionId)}" data-share-id="${escapeHtml(source.shareId)}">
+        ${getScreenShareQualities(source.video, source.codec).map(({ quality, profile }) => `
+          <button type="button" data-screen-quality="${quality}" aria-pressed="${selected === quality}">
+            ${quality === 'source' ? `<strong>${t('stage.screenQualitySource')}</strong>` : ''}
+            <span>${t('stage.screenQualityOption', {
+              width: profile.width, height: profile.height, fps: profile.fps, bitrate: profile.maxBitrateKbps,
+            })}</span>
+          </button>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  /** The black standby layer covers the local preview until it shows live frames of a visible window. */
+  private isLocalPreviewLive(shareId: string): boolean {
+    return webRtcManager.getLocalScreenPreviewState(shareId) === 'playing'
+      && webRtcManager.getLocalScreenSourceWarning(shareId) !== 'hidden';
+  }
+
+  private refreshNativeScreenState(): void {
+    for (const card of this.container.querySelectorAll<HTMLElement>('[data-kind="screen"][data-session-id]')) {
+      const sessionId = card.dataset.sessionId;
+      const shareId = card.dataset.tileKey?.split(':screen:')[1];
+      if (!sessionId || !shareId) continue;
+      const badge = card.querySelector<HTMLElement>('.stage-capture-mode-badge');
+      if (badge) {
+        const native = badge.dataset.nativeScreen === 'true'
+          || (serverStore.isMySession(sessionId) ? videoService.getNativeScreenCapture(shareId)
+            : webRtcManager.getNativeScreenSource(sessionId, shareId)) !== null;
+        if (native) badge.dataset.nativeScreen = 'true';
+        const mode = native ? webRtcManager.getScreenCaptureMode(sessionId, shareId) : 'normal';
+        badge.hidden = mode === null;
+        const text = mode === null ? '' : t(mode === 'game' ? 'stage.captureModeGame' : 'stage.captureModeNormal');
+        const label = mode === null ? '' : t('stage.captureModeLabel', { mode: text });
+        if (mode === null) badge.removeAttribute('data-capture-mode');
+        else if (badge.dataset.captureMode !== mode) badge.dataset.captureMode = mode;
+        if (badge.textContent !== text) badge.textContent = text;
+        if (badge.getAttribute('aria-label') !== label) badge.setAttribute('aria-label', label);
+        if (badge.title !== label) badge.title = label;
+      }
+      if (sessionId && shareId && serverStore.isMySession(sessionId) && videoService.getNativeScreenCapture(shareId)) {
+        const state = webRtcManager.getLocalScreenPreviewState(shareId);
+        const warning = webRtcManager.getLocalScreenSourceWarning(shareId);
+        card.dataset.previewState = state;
+        card.toggleAttribute('data-source-hidden', warning === 'hidden');
+        const placeholder = card.querySelector<HTMLElement>('.stage-native-thumbnail');
+        if (placeholder) {
+          placeholder.toggleAttribute('data-live', this.isLocalPreviewLive(shareId));
+          const label = placeholder.querySelector('span');
+          if (label) {
+            // The warning explains the frozen picture; the preview labels would claim viewers receive normally.
+            label.hidden = warning !== null;
+            label.textContent = t(state === 'unavailable' ? 'stage.nativePreviewUnavailable'
+              : state === 'paused' ? 'stage.nativePreviewPaused' : 'stage.nativeThumbnail');
+          }
+        }
+        const warningEl = card.querySelector<HTMLElement>('.stage-source-warning');
+        if (warningEl) {
+          warningEl.hidden = warning === null;
+          if (warning) warningEl.dataset.sourceWarning = warning;
+          else warningEl.removeAttribute('data-source-warning');
+          const title = warning ? t(`stage.sourceWarningTitle.${warning}`) : '';
+          const detail = warning ? t(`stage.sourceWarning.${warning}`) : '';
+          const titleEl = warningEl.querySelector('.stage-source-warning-title');
+          const detailEl = warningEl.querySelector('.stage-source-warning-detail');
+          if (titleEl && titleEl.textContent !== title) titleEl.textContent = title;
+          if (detailEl && detailEl.textContent !== detail) detailEl.textContent = detail;
+        }
+        continue;
+      }
+      if (!sessionId || !shareId || !this.isWatchingScreen(sessionId, shareId)) continue;
+      if (!webRtcManager.getNativeScreenSource(sessionId, shareId)) continue;
+      const video = card.querySelector<HTMLVideoElement>('video.stage-video-element');
+      const stream = participantManager.get(sessionId)?.remoteScreenStreams.get(shareId) ?? null;
+      if (video && video.srcObject !== stream) {
+        this.videoLoadingListeners.get(video)?.();
+        video.pause();
+        video.srcObject = stream;
+        if (stream) {
+          video.muted = true;
+          this.hideVideoLoadingWhenReady(video, video.id);
+          void video.play().catch((error: unknown) => console.warn('[VoiceStage] Could not show the screen:', error));
+        }
+      }
+      const state = webRtcManager.getNativeScreenWatchState(sessionId, shareId);
+      const existing = card.querySelector<HTMLElement>('.stage-native-error:not([data-ui-closing])');
+      if (state?.state !== 'unavailable') { if (existing) removeWithMotion(existing, 'notice'); continue; }
+      if (existing) continue;
+      card.querySelector('.stage-loading-overlay')?.remove();
+      const error = document.createElement('div');
+      error.className = 'stage-native-error';
+      error.setAttribute('role', 'alert');
+      const text = document.createElement('span');
+      text.textContent = t(`screenShare.nativeFailure.${state.reason ?? 'connection-failed'}`);
+      if (state.receiver === 'native') text.textContent += ` ${t('screenShare.nativeReceiverSettingsHint')}`;
+      else if (state.reason === 'unsupported') text.textContent += ` ${t('screenShare.chromiumReceiverSettingsHint')}`;
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'btn btn-secondary';
+      retry.textContent = t('stage.screenRetry');
+      retry.addEventListener('click', event => {
+        event.stopPropagation();
+        if (this.isWatchingScreen(sessionId, shareId)) webRtcManager.retryNativeScreen(sessionId, shareId);
+      });
+      error.append(text, retry);
+      card.append(error);
+      animateEnter(error, 'notice');
+    }
   }
 
   private refreshLocalCameraVideo(): void {
@@ -1016,19 +1364,26 @@ export class VoiceStageView {
 
   /** Removes the "loading video" overlay once the stream actually renders (#48). */
   private hideVideoLoadingWhenReady(videoEl: HTMLVideoElement, videoId: string): void {
+    this.videoLoadingListeners.get(videoEl)?.();
     const overlay = document.getElementById(`loading-${videoId}`);
     if (!overlay) return;
-    const hide = () => overlay.remove();
+    const cleanup = (): void => {
+      videoEl.removeEventListener('playing', hide);
+      videoEl.removeEventListener('loadeddata', hide);
+      this.videoLoadingListeners.delete(videoEl);
+    };
+    const hide = (): void => { cleanup(); removeWithMotion(overlay, 'panel'); };
     if (videoEl.readyState >= 2) {
       hide();
       return;
     }
+    this.videoLoadingListeners.set(videoEl, cleanup);
     videoEl.addEventListener('playing', hide, { once: true });
     videoEl.addEventListener('loadeddata', hide, { once: true });
   }
 
   /**
-   * Ctrl+scroll zooms the focused screen share towards the pointer, dragging
+   * Scrolling zooms the focused screen share towards the pointer, dragging
    * pans the zoomed image and a double-click resets it (#271). Re-attached on
    * every render because the stage markup is rebuilt from scratch.
    */
@@ -1070,7 +1425,7 @@ export class VoiceStageView {
     apply();
 
     main.addEventListener('wheel', (e: WheelEvent) => {
-      if (!e.ctrlKey) return;
+      if (e.target instanceof Element && e.target.closest('.stage-card-controls')) return;
       e.preventDefault();
 
       const previous = this.focusZoom.scale;
@@ -1162,6 +1517,134 @@ export class VoiceStageView {
     }
   }
 
+  private isPictureInPictureAvailable(): boolean {
+    return screenPictureInPicture.isAvailable();
+  }
+
+  private pictureInPictureSource(video: HTMLVideoElement): ScreenPictureInPictureSource | null {
+    const card = video.closest<HTMLElement>('[data-kind="screen"][data-session-id]');
+    const publisherSessionId = card?.dataset.sessionId;
+    const prefix = `${publisherSessionId}:screen:`;
+    const key = card?.dataset.tileKey;
+    const publisher = publisherSessionId ? participantManager.get(publisherSessionId) : undefined;
+    if (!publisherSessionId || !publisher || !key?.startsWith(prefix) || !this.renderedSessionKey
+      || !this.currentChannelId || !(video.srcObject instanceof MediaStream)) return null;
+    return {
+      sessionKey: this.renderedSessionKey, channelId: this.currentChannelId,
+      publisherSessionId, publisherName: participantManager.displayName(publisher),
+      shareId: key.slice(prefix.length), stream: video.srcObject,
+    };
+  }
+
+  /** The broadcast a manual PiP took off this stage shows only its placeholder here. */
+  private pictureInPictureTileKey(): string | null {
+    return screenPictureInPicture.getStageExclusiveTileKey(this.renderedSessionKey, this.currentChannelId);
+  }
+
+  /**
+   * A manual PiP takes its broadcast out of focus and gives that focus back when
+   * it ends without being brought back. A share already gone keeps it retired,
+   * so the publisher's next source takes it over (refocusScreenHandoff).
+   */
+  private syncPictureInPictureTile(release?: ScreenPictureInPictureRelease): void {
+    const key = this.pictureInPictureTileKey();
+    let keys = this.focusedTileKeys.filter(candidate => candidate !== key);
+    if (release && release.tileKey !== key && !keys.includes(release.tileKey) && this.isJoinedHere()
+        && release.sessionKey === this.renderedSessionKey && release.channelId === this.currentChannelId) {
+      keys = [...keys, release.tileKey].slice(-MAX_FOCUSED_TILES);
+    }
+    if (keys.length !== this.focusedTileKeys.length || keys.some((candidate, index) => candidate !== this.focusedTileKeys[index])) {
+      this.setFocusedTiles(keys);
+    } else {
+      this.renderParticipants();
+    }
+  }
+
+  public openAutomaticPictureInPicture(reason: 'navigation' | 'window-inactive' = 'navigation'): void {
+    screenPictureInPicture.markStageLeft(this.renderedSessionKey, this.currentChannelId);
+    if (!settingsStore.screenShareAutoPictureInPicture || !this.isPictureInPictureAvailable()) return;
+    for (const key of [...this.focusedTileKeys].reverse()) {
+      const card = this.container.querySelector<HTMLElement>(`[data-tile-key="${CSS.escape(key)}"]`);
+      const video = card?.querySelector<HTMLVideoElement>('video.stage-video-element');
+      if (!video || !card?.querySelector('.stage-pip-btn')) continue;
+      const source = this.pictureInPictureSource(video);
+      if (!source) continue;
+      void screenPictureInPicture.open(video, source, reason, this.focusedTileKeys).catch(error => {
+        console.warn('[VoiceStageView] Automatic Picture-in-Picture failed:', error);
+        showErrorToast(t('stage.pictureInPictureErrorMessage'));
+      });
+      return;
+    }
+  }
+
+  /** A publisher switching sources keeps the viewer's focused layout on the new share. */
+  private refocusScreenHandoff(handoff: { sessionId: string; fromShareId: string; shareId: string }): void {
+    if (!this.isJoinedHere()) return;
+    const previousKey = `${handoff.sessionId}:screen:${handoff.fromShareId}`;
+    const nextKey = `${handoff.sessionId}:screen:${handoff.shareId}`;
+    const retired = (this.retiredScreenFocus.get(previousKey) ?? 0) >= Date.now();
+    this.retiredScreenFocus.delete(previousKey);
+    if (this.focusedTileKeys.includes(nextKey)) return;
+    if (this.focusedTileKeys.includes(previousKey)) {
+      this.setFocusedTiles(this.focusedTileKeys.map(key => key === previousKey ? nextKey : key), { screenStart: true });
+    } else if (retired) {
+      this.setFocusedTiles([...this.focusedTileKeys, nextKey].slice(-2), { screenStart: true });
+    }
+  }
+
+  private restorePictureInPicture(): void {
+    if (!this.isJoinedHere()) return;
+    const entry = screenPictureInPicture.getStageReturn(this.renderedSessionKey, this.currentChannelId);
+    if (!entry) return;
+    const key = `${entry.source.publisherSessionId}:screen:${entry.source.shareId}`;
+    // Automatic PiP restores the layout left behind; a manual one rejoins the
+    // current layout, back in focus only if it was focused when it opened.
+    const keys = entry.automatic ? [...entry.focusedTileKeys] : this.focusedTileKeys.filter(candidate => candidate !== key);
+    if ((entry.automatic || entry.focusedTileKeys.includes(key)) && !keys.includes(key)) keys.push(key);
+    this.setFocusedTiles(keys.slice(-2), {
+      isCurrent: () => screenPictureInPicture.getStageReturn(this.renderedSessionKey, this.currentChannelId) === entry,
+      afterRender: () => {
+        const target = this.container.querySelector<HTMLVideoElement>(`[data-video-tile-key="${CSS.escape(key)}"]`);
+        if (!target) return;
+        this.videoLoadingListeners.get(target)?.();
+        if (screenPictureInPicture.restoreToStage(entry.video, target)) {
+          this.hideVideoLoadingWhenReady(entry.video, entry.video.id);
+        }
+      },
+    });
+  }
+
+  private async openPictureInPicture(videoId: string, button: HTMLButtonElement): Promise<void> {
+    const video = document.getElementById(videoId) as HTMLVideoElement | null;
+    if (!video || !this.isPictureInPictureAvailable()) {
+      button.hidden = true;
+      return;
+    }
+    if (screenPictureInPicture.isPresenting(video) || button.disabled) return;
+
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    try {
+      const source = this.pictureInPictureSource(video);
+      if (!source) throw new Error('The screen Picture-in-Picture source is unavailable.');
+      await screenPictureInPicture.open(video, source, undefined, this.focusedTileKeys);
+    } catch (error: unknown) {
+      console.warn('[VoiceStageView] Picture-in-Picture request failed:', error);
+      if (button.isConnected) {
+        void showAlert({
+          title: t('stage.pictureInPictureErrorTitle'),
+          message: t('stage.pictureInPictureErrorMessage'),
+          variant: 'danger',
+        });
+      }
+    } finally {
+      if (button.isConnected) {
+        button.disabled = false;
+        button.removeAttribute('aria-busy');
+      }
+    }
+  }
+
   private renderCardContent(tile: StageTile, isFocused: boolean = false, isMini: boolean = false): string {
     if (tile.kind === 'miniapp') return '';
     const p = tile.p;
@@ -1171,6 +1654,7 @@ export class VoiceStageView {
     const isScreenOn = isLocal ? voiceStore.isScreenSharing : (p.voiceState?.isScreenSharing ?? false);
     const isServerMuted = isLocalCall ? voiceStore.serverMuted : (p.voiceState?.serverMuted ?? false);
     const isServerDeafened = isLocalCall ? voiceStore.serverDeafened : (p.voiceState?.serverDeafened ?? false);
+    const isPermissionMuted = isLocalCall ? voiceStore.permissionMuted : (p.voiceState?.permissionMuted ?? false);
     const isSelfMuted = isLocalCall ? voiceStore.isMuted : (p.voiceState?.isMuted ?? false);
     const isSelfDeafened = isLocalCall ? voiceStore.isDeafened : (p.voiceState?.isDeafened ?? false);
     const isSfu = serverStore.serverDetails?.voiceMode === 'sfu';
@@ -1182,11 +1666,14 @@ export class VoiceStageView {
     const tileSuffix = isScreenTile ? `screen-${tile.shareId}` : tile.kind;
     const videoId = isMini ? `video-mini-${sidOf(p)}-${tileSuffix}` : `video-${sidOf(p)}-${tileSuffix}`;
     const isRemoteScreen = isScreenTile && !isLocal;
-    const isWatching = this.watchingShareKeys.has(tile.key);
-    // #150: a remote screen the local user has not opted into watching is
-    // rendered blurred + silent behind an "Assistir transmissão" CTA. Applies
-    // to screen tiles only — the camera tile always plays normally (#26).
+    const localNative = isScreenTile && isLocal && tile.shareId ? videoService.getNativeScreenCapture(tile.shareId) : null;
+    const remoteNative = isRemoteScreen && tile.shareId
+      ? p.voiceState?.nativeScreenShares?.find(source => source.shareId === tile.shareId) : undefined;
+    const isWatching = !!tile.shareId && this.isWatchingScreen(sidOf(p), tile.shareId);
+    // An unrequested source is only a placeholder; no remote payload is needed.
     const isLocked = isRemoteScreen && !isWatching;
+    const inPictureInPicture = isRemoteScreen && isWatching && tile.key === this.pictureInPictureTileKey();
+    const hasVideo = isVideoTile && !inPictureInPicture;
     // Distinguish the two tiles of a camera + screen sharer with a "· Tela"
     // suffix on the screen tile label (#26); when the same person shares two
     // screens at once, number them so the tiles stay tellable apart (#253).
@@ -1201,14 +1688,37 @@ export class VoiceStageView {
 
     return `
       ${isVideoTile ? `
-        <video id="${videoId}" class="stage-video-element ${isScreenTile ? 'screen-share' : ''}${isLocked ? ' screen-locked' : ''}" autoplay playsinline muted></video>
-        ${!isLocked ? `
+        ${inPictureInPicture ? `
+          <div class="stage-pip-placeholder${isMini ? ' stage-pip-placeholder--mini' : ''}" role="status">
+            ${isMini ? '' : `<span class="material-symbols-outlined stage-pip-placeholder-icon" aria-hidden="true">picture_in_picture_alt</span>
+              <span class="stage-pip-placeholder-text">${t('stage.pictureInPictureShowing')}</span>`}
+            <button type="button" class="stage-pip-return-btn" title="${t('stage.pictureInPictureBringBackLabel')}" aria-label="${t('stage.pictureInPictureBringBackLabel')}">
+              <span class="material-symbols-outlined md-18" aria-hidden="true">pip_exit</span>
+              ${isMini ? '' : `<span>${t('stage.pictureInPictureBringBack')}</span>`}
+            </button>
+          </div>
+        ` : `<video id="${videoId}" data-video-tile-key="${escapeHtml(tile.key)}" class="stage-video-element ${isScreenTile ? 'screen-share' : ''}${isLocked ? ' screen-locked' : ''}" autoplay playsinline muted></video>`}
+        ${hasVideo && isScreenTile ? `<span class="stage-capture-mode-badge" data-native-screen="${!!(localNative || remoteNative)}"
+          role="status" aria-live="polite" aria-atomic="true" hidden></span>` : ''}
+        ${localNative ? `<div class="stage-native-thumbnail"${this.isLocalPreviewLive(tile.shareId!) ? ' data-live' : ''}>
+          <span>${t('stage.nativeThumbnail')}</span>
+        </div>
+        <div class="stage-source-warning" role="status" aria-live="polite" aria-atomic="true" hidden>
+          <div class="stage-source-warning-box">
+            <span class="material-symbols-outlined" aria-hidden="true">warning</span>
+            <div class="stage-source-warning-text">
+              <strong class="stage-source-warning-title"></strong>
+              <span class="stage-source-warning-detail"></span>
+            </div>
+          </div>
+        </div>` : ''}
+        ${!isLocked && !localNative && hasVideo ? `
           <div class="stage-loading-overlay${isMini ? ' stage-loading-overlay--mini' : ''}" id="loading-${videoId}">
             <div class="reconnect-spinner"></div>
             ${isMini ? '' : `<span>${isScreenTile ? t('stage.loadingScreen') : t('stage.loadingCamera')}</span>`}
           </div>
         ` : ''}
-        ${(isVideoTile && !isLocked && !isMini) ? `
+        ${(hasVideo && !isLocked && !isMini) ? `
           <div
             class="telemetry-overlay position-${settingsStore.screenShareTelemetryPosition}${settingsStore.screenShareTelemetryEnabled ? '' : ' is-hidden'}"
             data-telemetry-key="${escapeHtml(tile.key)}"
@@ -1225,6 +1735,7 @@ export class VoiceStageView {
         ` : `
           <div class="stage-card-controls">
             ${isRemoteScreen ? `
+              ${remoteNative && !isMini ? this.renderScreenQuality(remoteNative, sidOf(p)) : ''}
               <div class="stage-volume-wrapper">
                 <div class="stage-volume-popup">
                   <input type="range" class="stage-screen-volume-slider" data-session-id="${sidOf(p)}" min="0" max="200" value="${settingsStore.getScreenAudioVolume(sidOf(p), p.user.clientId)}" />
@@ -1236,10 +1747,21 @@ export class VoiceStageView {
               <button class="stage-stopwatch-btn" data-stopwatch-session="${sidOf(p)}" data-stopwatch-share="${tile.shareId}" title="${t('stage.stopWatching')}" aria-label="${t('stage.stopWatching')}">
                 <span class="material-symbols-outlined md-18">visibility_off</span>
               </button>
+              ${this.isPictureInPictureAvailable() && hasVideo ? `
+                <button type="button" class="stage-pip-btn" data-pip-target="${videoId}" title="${t('stage.pictureInPicture')}" aria-label="${t('stage.pictureInPicture')}">
+                  <span class="material-symbols-outlined md-18">picture_in_picture_alt</span>
+                </button>
+              ` : ''}
             ` : ''}
-            <button class="stage-fullscreen-btn" data-fullscreen-target="${videoId}" title="${t('stage.fullscreen')}" aria-label="${t('stage.fullscreen')}">
+            ${!isMini && hasVideo ? `
+              <button type="button" class="stage-diagnostics-btn" data-diagnostics-key="${escapeHtml(tile.key)}" ${settingsStore.screenShareTelemetryEnabled ? '' : 'hidden'}
+                title="${escapeHtml(t('stage.telemetryCopy'))}" aria-label="${escapeHtml(t('stage.telemetryCopy'))}">
+                <span class="material-symbols-outlined md-18">content_copy</span>
+              </button>
+            ` : ''}
+            ${hasVideo ? `<button class="stage-fullscreen-btn" data-fullscreen-target="${videoId}" title="${t('stage.fullscreen')}" aria-label="${t('stage.fullscreen')}">
               <span class="material-symbols-outlined md-18">fullscreen</span>
-            </button>
+            </button>` : ''}
           </div>
         `}
       ` : `
@@ -1251,12 +1773,15 @@ export class VoiceStageView {
         </div>
       `}
 
+      ${isScreenTile && isViewingCallServer() && this.currentChannelId === voiceStore.currentVoiceChannelId
+        && serverStore.serverDetails?.protocol?.features.includes('screen-viewers') ? `
+        <div class="stage-viewers" data-publisher="${escapeHtml(sidOf(p))}" data-share="${escapeHtml(tile.shareId!)}"></div>` : ''}
       <div class="stage-badges-overlay">
         <span>${label}</span>
         ${isPeerFailed ? `<span class="material-symbols-outlined md-14 stage-peer-failed-icon" title="${isSfu ? t('main.sfuConnectionFailed') : peerFailureTooltip('stage.peerConnectionFailed')}">link_off</span>` : ''}
         ${isConnecting ? `<span class="material-symbols-outlined md-14 stage-peer-connecting-icon" title="${t(isSfu ? 'main.sfuConnecting' : 'stage.peerConnecting')}">sync</span>` : ''}
         ${isRelayed ? `<span class="material-symbols-outlined md-14" style="color: var(--warning, #f0b232);" title="${t('stage.peerRelayed')}">swap_horiz</span>` : ''}
-        ${renderAudioMuteIndicators({ isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened })}
+        ${renderAudioMuteIndicators({ ...p.voiceState, isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened, permissionMuted: isPermissionMuted })}
         ${isCamOn ? '<span class="material-symbols-outlined md-14" style="color: var(--accent-primary);">videocam</span>' : ''}
         ${isScreenOn ? '<span class="material-symbols-outlined md-14" style="color: var(--success);">screen_share</span>' : ''}
       </div>
@@ -1272,47 +1797,42 @@ export class VoiceStageView {
   /** Telemetry is keyed by tile, so each share reports its own numbers (#340). */
   private getTelemetryText(tileKey: string): string {
     const snapshot = this.telemetrySnapshots.get(tileKey);
-    if (!snapshot) {
-      return t('stage.telemetryCollecting');
+    return snapshot
+      ? formatVideoTelemetry(snapshot, settingsStore.screenShareTelemetryMode)
+      : t('stage.telemetryCollecting');
+  }
+
+  private async copyTelemetry(tileKey: string, button: HTMLButtonElement): Promise<void> {
+    const snapshot = this.telemetrySnapshots.get(tileKey);
+    if (!snapshot || !settingsStore.screenShareTelemetryEnabled) {
+      void showAlert({ message: t('stage.telemetryCollecting') });
+      return;
     }
-
-    const lines = [
-      `Codec: ${snapshot.codec || '--'}`,
-      `FPS: ${this.formatTelemetryNumber(snapshot.fps, 0)}`,
-      `Res: ${this.formatResolution(snapshot.width, snapshot.height)}`,
-      `Bitrate: ${this.formatTelemetryNumber(snapshot.bitrateKbps, 0, ' kbps')}`,
-    ];
-
-    if (settingsStore.screenShareTelemetryMode === 'complete') {
-      if (snapshot.kind === 'sender') {
-        lines.push(
-          `Frames enc: ${this.formatTelemetryNumber(snapshot.framesEncoded, 0)}`,
-          `Keyframes: ${this.formatTelemetryNumber(snapshot.keyFramesEncoded, 0)}`
-        );
-      } else {
-        lines.push(
-          `Loss: ${this.formatTelemetryNumber(snapshot.packetLossPct, 1, '%')}`,
-          `Jitter: ${this.formatTelemetryNumber(snapshot.jitterMs, 1, ' ms')}`,
-          `Frames dec: ${this.formatTelemetryNumber(snapshot.framesDecoded, 0)}`,
-          `Frames drop: ${this.formatTelemetryNumber(snapshot.framesDropped, 0)}`
-        );
+    const request = ++this.telemetryCopyRequest;
+    this.clearTelemetryToast?.();
+    this.clearTelemetryToast = null;
+    try {
+      await navigator.clipboard.writeText(serializeVideoTelemetry(snapshot, navigator.userAgent, this.telemetryHistory.get(tileKey)));
+    } catch (error) {
+      console.warn('[VoiceStageView] Could not copy video diagnostics', error);
+      if (request === this.telemetryCopyRequest && button.isConnected) {
+        void showAlert({ message: t('stage.telemetryCopyFailed'), variant: 'danger' });
       }
+      return;
     }
-
-    return lines.join('\n');
-  }
-
-  private formatTelemetryNumber(value: number | null, decimals: number, suffix = ''): string {
-    if (value === null || !Number.isFinite(value)) return `--${suffix}`;
-    return `${value.toFixed(decimals)}${suffix}`;
-  }
-
-  private formatResolution(width: number | null, height: number | null): string {
-    if (!width || !height) return '--';
-    return `${width}x${height}`;
+    if (request === this.telemetryCopyRequest && button.isConnected) {
+      this.clearTelemetryToast = showCopyToast(t('stage.telemetryCopied'));
+    }
   }
 
   private applyTelemetryOverlayState(): void {
+    this.container.querySelectorAll<HTMLButtonElement>('.stage-diagnostics-btn').forEach(button => {
+      button.hidden = !settingsStore.screenShareTelemetryEnabled;
+      const snapshot = this.telemetrySnapshots.get(button.dataset.diagnosticsKey ?? '');
+      button.title = snapshot
+        ? `${formatVideoTelemetry(snapshot, 'complete')}\n\n${t('stage.telemetryCopy')}`
+        : t('stage.telemetryCopy');
+    });
     const overlays = this.container.querySelectorAll('.telemetry-overlay');
     overlays.forEach((overlay) => {
       overlay.classList.remove(
@@ -1343,7 +1863,10 @@ export class VoiceStageView {
       const isCamOn = isLocal ? voiceStore.isCameraOn : (p.voiceState?.isCameraOn ?? false);
       if (isCamOn) tiles.push({ p, kind: 'camera', key: `${sidOf(p)}:camera` });
       for (const shareId of this.getShareIds(p, isLocal)) {
-        tiles.push({ p, kind: 'screen', key: `${sidOf(p)}:screen:${shareId}`, shareId });
+        const key = `${sidOf(p)}:screen:${shareId}`;
+        if (isLocal || this.isWatchingScreen(sidOf(p), shareId)) {
+          tiles.push({ p, kind: 'screen', key, shareId });
+        }
       }
     }
     return tiles;
@@ -1355,7 +1878,7 @@ export class VoiceStageView {
 
   private syncTelemetryMonitor(): void {
     if (!this.currentChannelId || !settingsStore.screenShareTelemetryEnabled || !this.hasTelemetryTiles()) {
-      this.stopTelemetryMonitor(false);
+      this.stopTelemetryMonitor();
       this.applyTelemetryOverlayState();
       return;
     }
@@ -1378,251 +1901,262 @@ export class VoiceStageView {
       return;
     }
 
+    const epoch = this.telemetryEpoch;
     this.telemetryRefreshInFlight = true;
     try {
       const videoTiles = this.getTelemetryTiles();
-
       if (videoTiles.length === 0) {
-        this.telemetrySnapshots.clear();
-        this.telemetryByteSamples.clear();
+        this.stopTelemetryMonitor();
         this.applyTelemetryOverlayState();
-        this.stopTelemetryMonitor(false);
         return;
       }
 
-      const nextSnapshots = new Map<string, ScreenTelemetrySnapshot>();
-      await Promise.all(videoTiles.map(async (tile) => {
-        const snapshot = await this.collectTelemetrySnapshot(tile);
-        if (snapshot) {
-          nextSnapshots.set(tile.key, snapshot);
-        }
-      }));
+      const targets = new Set<object>();
+      const samples = await Promise.all(videoTiles.map(async tile => ({
+        key: tile.key,
+        sourceKey: this.nativeTelemetrySource(tile)?.instanceId ?? this.getTelemetryTrack(tile)?.id,
+        snapshot: await this.collectTelemetrySnapshot(tile, epoch, targets),
+      })));
+      if (epoch !== this.telemetryEpoch) return;
 
+      const nextSnapshots = new Map<string, VideoTelemetrySnapshot>();
+      for (const sample of samples) {
+        if (sample.snapshot && sample.sourceKey) {
+          nextSnapshots.set(sample.key, sample.snapshot);
+          const history = this.telemetryHistorySources.get(sample.key) === sample.sourceKey
+            ? this.telemetryHistory.get(sample.key) ?? [] : [];
+          history.push(sample.snapshot);
+          if (history.length > MAX_TELEMETRY_SAMPLES) history.shift();
+          this.telemetryHistory.set(sample.key, history);
+          this.telemetryHistorySources.set(sample.key, sample.sourceKey);
+        }
+      }
+      for (const key of this.telemetryHistory.keys()) {
+        if (!nextSnapshots.has(key)) {
+          this.telemetryHistory.delete(key);
+          this.telemetryHistorySources.delete(key);
+        }
+      }
       this.telemetrySnapshots = nextSnapshots;
-      this.pruneTelemetryByteSamples(Array.from(videoTiles, (tile) => tile.key));
+      this.telemetrySampler.retainTargets(targets);
+      this.nativeDecoderSampler.retainTargets(targets);
+      for (const [key, target] of this.nativeTelemetryTargets) {
+        if (!targets.has(target)) this.nativeTelemetryTargets.delete(key);
+      }
+      for (const target of this.telemetryEndpoints.keys()) {
+        if (!targets.has(target)) this.telemetryEndpoints.delete(target);
+      }
       this.applyTelemetryOverlayState();
     } finally {
-      this.telemetryRefreshInFlight = false;
+      if (epoch === this.telemetryEpoch) this.telemetryRefreshInFlight = false;
     }
   }
 
-  private async collectTelemetrySnapshot(tile: ParticipantStageTile): Promise<ScreenTelemetrySnapshot | null> {
+  private getTelemetryTrack(tile: ParticipantStageTile): MediaStreamTrack | null {
+    if (tile.kind === 'voice') return null;
     const isLocal = serverStore.isMySession(tile.p.user.sessionId);
-    return isLocal
-      ? this.collectSenderTelemetry(tile.key, tile.shareId ?? null)
-      : this.collectReceiverTelemetry(tile);
-  }
-
-  /**
-   * Stats for one local video source only (#340). Reading `getStats()` off the
-   * senders that carry this source — instead of the whole peer connection —
-   * keeps a second share (or the camera) out of these numbers. A null
-   * `shareId` means the camera tile (#493).
-   */
-  private async collectSenderTelemetry(tileKey: string, shareId: string | null): Promise<ScreenTelemetrySnapshot | null> {
-    const senders = shareId === null
-      ? webRtcManager.getCameraSenders()
-      : webRtcManager.getScreenSendersForShare(shareId);
-    const localTrack = this.getLocalVideoTrack(shareId);
-    const fallback = this.getLocalVideoFallback(shareId);
-
-    if (senders.length === 0) {
-      return fallback;
-    }
-
-    let fps: number | null = fallback?.fps ?? null;
-    let width: number | null = fallback?.width ?? null;
-    let height: number | null = fallback?.height ?? null;
-    let codec: string | null = null;
-    let framesEncoded = 0;
-    let keyFramesEncoded = 0;
-    let totalBitrateKbps = 0;
-    let reportCount = 0;
-
-    await Promise.all(senders.map(async (sender, index) => {
-      try {
-        const stats = await sender.getStats();
-        stats.forEach((report: any) => {
-          const kind = report.kind || report.mediaType;
-          if (report.type !== 'outbound-rtp' || kind !== 'video' || typeof report.bytesSent !== 'number') {
-            return;
-          }
-
-          reportCount++;
-          fps = this.pickTelemetryNumber(fps, report.framesPerSecond);
-          width = this.pickTelemetryNumber(width, report.frameWidth);
-          height = this.pickTelemetryNumber(height, report.frameHeight);
-          if (!codec) {
-            codec = this.getCodecName(stats, report.codecId);
-          }
-          if (typeof report.framesEncoded === 'number') {
-            framesEncoded += report.framesEncoded;
-          }
-          if (typeof report.keyFramesEncoded === 'number') {
-            keyFramesEncoded += report.keyFramesEncoded;
-          }
-
-          const bitrate = this.computeBitrateKbps(`sender:${tileKey}:${index}:${report.id}`, report.bytesSent);
-          if (bitrate !== null) {
-            totalBitrateKbps += bitrate;
-          }
-        });
-      } catch (err) {
-        console.warn('[VoiceStageView] Error collecting sender telemetry:', err);
-      }
-    }));
-
-    if (reportCount === 0) {
-      if (localTrack) return fallback;
-      return null;
-    }
-
-    return {
-      kind: 'sender',
-      fps,
-      width,
-      height,
-      bitrateKbps: totalBitrateKbps > 0 ? totalBitrateKbps : 0,
-      codec,
-      framesEncoded,
-      keyFramesEncoded,
-      packetLossPct: null,
-      jitterMs: null,
-      framesDecoded: null,
-      framesDropped: null,
-    };
-  }
-
-  /**
-   * Stats for one remote video source only (#340, #493). The receiver is
-   * matched by the routed track, so a peer sharing two screens (or a screen
-   * plus a camera) reports separate numbers on each tile.
-   */
-  private async collectReceiverTelemetry(tile: ParticipantStageTile): Promise<ScreenTelemetrySnapshot | null> {
-    const sessionId = sidOf(tile.p);
-    const stream = tile.kind === 'camera' ? tile.p.remoteStream : this.getRemoteScreenStream(tile);
-    const track = stream?.getVideoTracks()[0];
-    if (!track) return null;
-
-    const receiver = webRtcManager.getReceiverForTrack(sessionId, track.id);
-    if (!receiver) return null;
-
-    try {
-      const stats = await receiver.getStats();
-      let snapshot: ScreenTelemetrySnapshot | null = null;
-
-      stats.forEach((report: any) => {
-        const kind = report.kind || report.mediaType;
-        if (snapshot || report.type !== 'inbound-rtp' || kind !== 'video' || typeof report.bytesReceived !== 'number') {
-          return;
-        }
-
-        const packetsReceived = typeof report.packetsReceived === 'number' ? report.packetsReceived : 0;
-        const packetsLost = typeof report.packetsLost === 'number' ? report.packetsLost : 0;
-        const totalPackets = packetsReceived + packetsLost;
-        const packetLossPct = totalPackets > 0 ? (packetsLost / totalPackets) * 100 : 0;
-        const jitterMs = typeof report.jitter === 'number' ? report.jitter * 1000 : null;
-
-        snapshot = {
-          kind: 'receiver',
-          fps: this.pickTelemetryNumber(null, report.framesPerSecond),
-          width: this.pickTelemetryNumber(null, report.frameWidth),
-          height: this.pickTelemetryNumber(null, report.frameHeight),
-          bitrateKbps: this.computeBitrateKbps(`receiver:${tile.key}:${report.id}`, report.bytesReceived) ?? 0,
-          codec: this.getCodecName(stats, report.codecId),
-          framesEncoded: null,
-          keyFramesEncoded: null,
-          packetLossPct,
-          jitterMs,
-          framesDecoded: typeof report.framesDecoded === 'number' ? report.framesDecoded : null,
-          framesDropped: typeof report.framesDropped === 'number' ? report.framesDropped : null,
-        };
-      });
-
-      return snapshot;
-    } catch (err) {
-      console.warn('[VoiceStageView] Error collecting receiver telemetry:', err);
-      return null;
-    }
-  }
-
-  /** Local video track backing one screen share, or the camera when null (#340, #493). */
-  private getLocalVideoTrack(shareId: string | null): MediaStreamTrack | null {
-    const stream = shareId === null
-      ? videoService.getCameraStream()
-      : videoService.getScreenStream(shareId);
+    const stream = isLocal
+      ? tile.kind === 'camera' ? videoService.getCameraStream()
+        : tile.shareId ? videoService.getScreenStream(tile.shareId) : null
+      : tile.kind === 'camera' ? tile.p.remoteStream : this.getRemoteScreenStream(tile);
     return stream?.getVideoTracks()[0] ?? null;
   }
 
-  private getLocalVideoFallback(shareId: string | null): ScreenTelemetrySnapshot | null {
-    const track = this.getLocalVideoTrack(shareId);
-    if (!track) return null;
-
-    const settings = track.getSettings();
-    return {
-      kind: 'sender',
-      fps: typeof settings.frameRate === 'number' ? settings.frameRate : null,
-      width: typeof settings.width === 'number' ? settings.width : null,
-      height: typeof settings.height === 'number' ? settings.height : null,
-      bitrateKbps: 0,
-      codec: null,
-      framesEncoded: null,
-      keyFramesEncoded: null,
-      packetLossPct: null,
-      jitterMs: null,
-      framesDecoded: null,
-      framesDropped: null,
-    };
-  }
-
-  private pickTelemetryNumber(currentValue: number | null, nextValue: unknown): number | null {
-    return typeof nextValue === 'number' && Number.isFinite(nextValue) ? nextValue : currentValue;
-  }
-
-  private getCodecName(stats: RTCStatsReport, codecId?: string): string | null {
-    const report: unknown = codecId ? stats.get(codecId) : undefined;
-    if (!report || typeof report !== 'object' || !('type' in report) || report.type !== 'codec'
-      || !('mimeType' in report) || typeof report.mimeType !== 'string') {
-      return null;
+  private telemetryEndpoint(target: object): number {
+    let endpoint = this.telemetryEndpoints.get(target);
+    if (endpoint === undefined) {
+      endpoint = this.nextTelemetryEndpoint++;
+      this.telemetryEndpoints.set(target, endpoint);
     }
-    const codec = /^video\/([^/]+)$/i.exec(report.mimeType)?.[1];
-    // Capability entries and repair codecs do not identify the encoded video.
-    return codec && !['rtx', 'red', 'ulpfec', 'flexfec-03'].includes(codec.toLowerCase()) ? codec : null;
+    return endpoint;
   }
 
-  private computeBitrateKbps(key: string, bytes: number): number | null {
-    const now = Date.now();
-    const previous = this.telemetryByteSamples.get(key);
-    this.telemetryByteSamples.set(key, { bytes, timestamp: now });
-    if (!previous) return null;
-
-    const deltaBytes = bytes - previous.bytes;
-    const deltaMs = now - previous.timestamp;
-    if (deltaBytes < 0 || deltaMs <= 0) return null;
-
-    return (deltaBytes * 8) / (deltaMs / 1000) / 1000;
+  private nativeTelemetryTarget(key: string, targets: Set<object>): object {
+    let target = this.nativeTelemetryTargets.get(key);
+    if (!target) { target = {}; this.nativeTelemetryTargets.set(key, target); }
+    targets.add(target);
+    return target;
   }
 
-  private pruneTelemetryByteSamples(activeTileKeys: string[]): void {
-    const activeFragments = activeTileKeys.map((tileKey) => `:${tileKey}:`);
-    for (const key of this.telemetryByteSamples.keys()) {
-      const isActive = activeFragments.some((fragment) => key.includes(fragment));
-      if (!isActive) {
-        this.telemetryByteSamples.delete(key);
+  private nativeTelemetrySource(tile: ParticipantStageTile): NativeScreenSource | null {
+    if (tile.kind !== 'screen' || !tile.shareId) return null;
+    return serverStore.isMySession(tile.p.user.sessionId)
+      ? videoService.getNativeScreenCapture(tile.shareId)?.source ?? null
+      : webRtcManager.getNativeScreenSource(sidOf(tile.p), tile.shareId);
+  }
+
+  private async collectTelemetrySnapshot(
+    tile: ParticipantStageTile,
+    epoch: number,
+    targets: Set<object>
+  ): Promise<VideoTelemetrySnapshot | null> {
+    const track = this.getTelemetryTrack(tile);
+    const nativeSource = this.nativeTelemetrySource(tile);
+    if ((!track || track.readyState !== 'live') && !nativeSource) return null;
+    const isLocal = serverStore.isMySession(tile.p.user.sessionId);
+    const profile = videoService.getProfile();
+    const settings = isLocal && !nativeSource ? track?.getSettings() : null;
+    const isCamera = tile.kind === 'camera';
+    const snapshot: VideoTelemetrySnapshot = {
+      kind: isLocal ? 'sender' : 'receiver',
+      media: isCamera ? 'camera' : 'screen',
+      transport: webRtcManager.isSfuMode() ? 'sfu' : 'p2p',
+      sampledAt: new Date().toISOString(),
+      documentVisibility: document.visibilityState,
+      requested: nativeSource ? { width: nativeSource.video.width, height: nativeSource.video.height,
+        fps: nativeSource.video.fps, bitrateKbps: nativeSource.video.maxBitrateKbps } : isLocal ? {
+        width: isCamera ? profile.cameraWidth : profile.screenWidth,
+        height: isCamera ? profile.cameraHeight : profile.screenHeight,
+        fps: isCamera ? profile.cameraFps : profile.screenFps,
+        bitrateKbps: isCamera ? profile.cameraBitrateKbps : profile.screenBitrateKbps,
+      } : null,
+      capture: settings && track ? {
+        width: settings.width ?? null,
+        height: settings.height ?? null,
+        configuredFps: settings.frameRate ?? null,
+        contentHint: track.contentHint,
+        readyState: track.readyState,
+      } : null,
+      streams: [],
+      playback: null,
+      readErrors: 0,
+    };
+
+    const videos = Array.from(this.container.querySelectorAll<HTMLVideoElement>('[data-video-tile-key]'))
+      .filter(video => video.dataset.videoTileKey === tile.key);
+    const video = videos.find(element => !element.closest('.stage-mini-card')) ?? videos[0];
+    if (track && video?.srcObject instanceof MediaStream
+      && video.srcObject.getVideoTracks().some(playingTrack => playingTrack.id === track.id)
+      && typeof video.getVideoPlaybackQuality === 'function') {
+      targets.add(video);
+      const quality = video.getVideoPlaybackQuality();
+      snapshot.playback = this.telemetrySampler.samplePlayback(video, {
+        timestampMs: performance.now(),
+        totalFrames: quality.totalVideoFrames,
+        droppedFrames: quality.droppedVideoFrames,
+        sourceKey: track.id,
+        width: video.videoWidth,
+        height: video.videoHeight,
+        paused: video.paused,
+      });
+    }
+
+    if (nativeSource && tile.shareId) {
+      try {
+        const diagnostics = await webRtcManager.getScreenVideoDiagnostics(sidOf(tile.p), tile.shareId);
+        if (epoch !== this.telemetryEpoch || this.nativeTelemetrySource(tile)?.instanceId !== nativeSource.instanceId) return null;
+        if (this.getTelemetryTrack(tile) !== track) snapshot.playback = null;
+        if (!diagnostics) return snapshot;
+        if (diagnostics.source.instanceId !== nativeSource.instanceId) return null;
+        snapshot.nativeScreen = { receiver: isLocal ? null : diagnostics.backend,
+          waitingForViewers: diagnostics.backend === 'native' && diagnostics.viewers === 0, decoders: [] };
+        if (diagnostics.backend === 'browser') {
+          const { target, reports, profile: selected } = diagnostics;
+          snapshot.requested = { width: selected.width, height: selected.height, fps: selected.fps, bitrateKbps: selected.maxBitrateKbps };
+          targets.add(target);
+          if (reports) snapshot.streams = this.telemetrySampler.sampleInbound(target, reports, nativeSource.instanceId)
+            .map(data => ({ endpoint: this.telemetryEndpoint(target), data }));
+        } else {
+          for (const observation of diagnostics.endpoints) {
+            snapshot.readErrors += observation.readErrors;
+            const selected = observation.profile;
+            if (!isLocal) {
+              snapshot.requested = { width: selected.width, height: selected.height, fps: selected.fps, bitrateKbps: selected.maxBitrateKbps };
+              const target = this.nativeTelemetryTarget(`decoder:${observation.pipelineId}`, targets);
+              snapshot.nativeScreen.decoders.push({ endpoint: this.telemetryEndpoint(target),
+                data: this.nativeDecoderSampler.sample(target, observation.decoders) });
+            }
+            for (const observationRtp of observation.rtp) {
+              const target = this.nativeTelemetryTarget(`rtp:${observation.pipelineId}:${observationRtp.id}`, targets);
+              const reports = new Map(observationRtp.reports.map(report => [report.id, report]));
+              const streams = isLocal
+                ? this.telemetrySampler.sampleOutbound(target, reports, {
+                  encodings: [{ maxBitrate: selected.maxBitrateKbps * 1000, maxFramerate: selected.fps }],
+                }, nativeSource.instanceId)
+                : this.telemetrySampler.sampleInbound(target, reports, nativeSource.instanceId);
+              snapshot.streams.push(...streams.map(data => ({ endpoint: this.telemetryEndpoint(target), data })));
+            }
+          }
+        }
+      } catch (error) {
+        if (epoch === this.telemetryEpoch) {
+          snapshot.readErrors++;
+          console.warn('[VoiceStageView] Could not read native screen diagnostics', error);
+        }
+      }
+      if (this.getTelemetryTrack(tile) !== track) snapshot.playback = null;
+      return epoch === this.telemetryEpoch && this.nativeTelemetrySource(tile)?.instanceId === nativeSource.instanceId
+        ? snapshot : null;
+    }
+
+    if (!track) return null;
+    if (isLocal) {
+      const getSenders = (): RTCRtpSender[] => isCamera
+        ? webRtcManager.getCameraSenders()
+        : tile.shareId ? webRtcManager.getScreenSendersForShare(tile.shareId) : [];
+      const streams = await Promise.all(getSenders().map(async sender => {
+        targets.add(sender);
+        const endpoint = this.telemetryEndpoint(sender);
+        const sendingTrack = sender.track;
+        try {
+          const stats = await sender.getStats();
+          if (epoch !== this.telemetryEpoch || sender.track !== sendingTrack
+            || this.getTelemetryTrack(tile) !== track || !getSenders().includes(sender)) return [];
+          return this.telemetrySampler.sampleOutbound(sender, stats, sender.getParameters(), track.id)
+            .map(data => ({ endpoint, data }));
+        } catch (error) {
+          if (epoch === this.telemetryEpoch) {
+            snapshot.readErrors++;
+            console.warn('[VoiceStageView] Could not read sender diagnostics', error);
+          }
+          return [];
+        }
+      }));
+      snapshot.streams = streams.flat();
+    } else {
+      const receiver = webRtcManager.getReceiverForTrack(sidOf(tile.p), track.id);
+      if (receiver) {
+        targets.add(receiver);
+        const endpoint = this.telemetryEndpoint(receiver);
+        try {
+          const stats = await receiver.getStats();
+          if (epoch !== this.telemetryEpoch || this.getTelemetryTrack(tile) !== track
+            || webRtcManager.getReceiverForTrack(sidOf(tile.p), track.id) !== receiver) return null;
+          snapshot.streams = this.telemetrySampler.sampleInbound(receiver, stats, track.id)
+            .map(data => ({ endpoint, data }));
+        } catch (error) {
+          if (epoch === this.telemetryEpoch) {
+            snapshot.readErrors++;
+            console.warn('[VoiceStageView] Could not read receiver diagnostics', error);
+          }
+        }
       }
     }
+    return epoch === this.telemetryEpoch && this.getTelemetryTrack(tile) === track ? snapshot : null;
   }
 
-  private stopTelemetryMonitor(clearSnapshots: boolean = true): void {
+  private pauseTelemetryMonitor(): void {
+    this.telemetryEpoch++;
+    this.telemetryRefreshInFlight = false;
     if (this.telemetryInterval !== null) {
       clearInterval(this.telemetryInterval);
       this.telemetryInterval = null;
     }
+    this.telemetryCopyRequest++;
+    this.clearTelemetryToast?.();
+    this.clearTelemetryToast = null;
+  }
 
-    if (clearSnapshots) {
-      this.telemetrySnapshots.clear();
-      this.telemetryByteSamples.clear();
-    }
+  private stopTelemetryMonitor(): void {
+    this.pauseTelemetryMonitor();
+    this.telemetrySnapshots.clear();
+    this.telemetryHistory.clear();
+    this.telemetryHistorySources.clear();
+    this.telemetrySampler.clear();
+    this.nativeDecoderSampler.clear();
+    this.nativeTelemetryTargets.clear();
+    this.telemetryEndpoints.clear();
+    this.nextTelemetryEndpoint = 1;
   }
 
   private startPingMonitor(): void {
@@ -1713,20 +2247,19 @@ export class VoiceStageView {
     this.stopTelemetryMonitor();
     soundEffects.play('leave_voice');
     leaveCurrentCall();
-    this.setChannel(null);
+    this.setChannel(channelId);
   }
 
   private async handleStopStreaming(): Promise<void> {
     if (voiceStore.isScreenSharing) {
-      videoService.stopScreenShare();
-      await webRtcManager.removeAllLocalScreenTracks();
-      voiceStore.setScreenSharing(false);
-      callClient().send(MessageType.VOICE_STATE_UPDATE, {
-        screenShareIds: [],
-        isScreenSharing: false,
-      });
-      if (screenAudioService.getIsCapturing()) {
-        await screenAudioService.stop();
+      try {
+        await stopLocalScreenShares(screenAudioService);
+      } catch (error) {
+        await showAlert({
+          title: t('screenShare.errorTitle'),
+          message: t('screenShare.errorMessage', { error: error instanceof Error ? error.message : String(error) }),
+          variant: 'danger',
+        });
       }
     } else if (voiceStore.isCameraOn) {
       this.cameraToggleEpoch++;
@@ -1787,6 +2320,10 @@ export class VoiceStageView {
   }
 
   private attachEvents(): void {
+    for (const shareId of voiceStore.screenShareIds) {
+      const stream = videoService.getScreenStream(shareId);
+      if (stream) this.seenScreenStarts.add(stream);
+    }
     this.unbindEvents.push(bindStageControlsMotion(this.container));
     const btnMic = document.getElementById('stage-btn-mic');
     const btnDeafen = document.getElementById('stage-btn-deafen');
@@ -1794,6 +2331,23 @@ export class VoiceStageView {
     const btnScreen = document.getElementById('stage-btn-screen');
     const btnStopShare = document.getElementById('stage-btn-stop-share');
     const btnLeave = document.getElementById('stage-btn-leave');
+    const btnChat = this.container.querySelector<HTMLButtonElement>('#stage-btn-chat');
+    const btnJoin = this.container.querySelector<HTMLButtonElement>('#stage-btn-join');
+
+    btnChat?.addEventListener('click', () => {
+      if (this.currentChannelId) this.onToggleChat?.(this.currentChannelId);
+    });
+
+    btnJoin?.addEventListener('click', async () => {
+      const channelId = this.currentChannelId;
+      if (!channelId || isButtonLoading(btnJoin)) return;
+      setButtonLoading(btnJoin, true);
+      try {
+        await this.onJoinChannel?.(channelId);
+      } finally {
+        if (btnJoin.isConnected) setButtonLoading(btnJoin, false);
+      }
+    });
 
     btnMic?.addEventListener('click', () => {
       toggleMicrophoneMute();
@@ -1860,6 +2414,7 @@ export class VoiceStageView {
       this.applyTelemetryOverlayState();
       this.syncTelemetryMonitor();
       this.refreshLocalCameraVideo();
+      this.focusStartedScreens();
     });
 
     const u3 = appEvents.on('participants.speaking_changed', (data: { sessionId: string; speaking: boolean }) => {
@@ -1876,6 +2431,7 @@ export class VoiceStageView {
     const u5 = appEvents.on('modal.screenshare_picker_opened', clearScreenLoading);
     const u6 = appEvents.on('modal.screenshare_picker_closed', clearScreenLoading);
     const u7 = appEvents.on('settings.updated', () => {
+      this.updateControlsUI();
       this.applyTelemetryOverlayState();
       this.syncTelemetryMonitor();
     });
@@ -1888,6 +2444,7 @@ export class VoiceStageView {
     const u13 = appEvents.on('overlay_settings.updated', () => this.updateControlsUI());
 
     const u11 = appEvents.on('voice.mode_switched', () => {
+      this.stopTelemetryMonitor();
       this.updateHeaderModeBadge();
       this.renderParticipants();
     });
@@ -1911,13 +2468,34 @@ export class VoiceStageView {
     });
     const u18 = appEvents.on('voice.channel_changed', () => {
       this.focusEpoch++;
+      this.pendingScreenFocus.clear();
       this.clearFocusError();
       this.renderParticipants();
     });
     const u19 = appEvents.on('session.voice_context_updated', () => this.renderParticipants());
     const u20 = appEvents.on('server.updated', () => this.renderParticipants());
     const u21 = appEvents.on('server.roles_updated', () => this.renderParticipants());
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21);
+    const u22 = appEvents.on('voice.screen_watch_changed', () => this.renderParticipants());
+    const u23 = appEvents.on('native_screen.updated', () => this.refreshNativeScreenState());
+    const u24 = appEvents.on('local.screen_started', (start: { shareId: string; stream: MediaStream }) => this.queueScreenStartFocus(start));
+    const u25 = appEvents.on('local.screen_stopped', (shareId: string) => this.pendingScreenFocus.delete(shareId));
+    const u26 = appEvents.on('screen_pip.stage_return', () => this.restorePictureInPicture());
+    const u28 = appEvents.on('screen_pip.updated',
+      (release?: ScreenPictureInPictureRelease) => this.syncPictureInPictureTile(release));
+    const u27 = appEvents.on('voice.screen_watch_handoff',
+      (handoff: { sessionId: string; fromShareId: string; shareId: string }) => this.refocusScreenHandoff(handoff));
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22, u23, u24, u25, u26, u27, u28);
+    const inactive = () => {
+      if (this.windowInactive) return;
+      this.windowInactive = true;
+      this.openAutomaticPictureInPicture('window-inactive');
+    };
+    const unbindInactive = window.api?.onWindowInactive?.(inactive);
+    const unbindActive = window.api?.onWindowActive?.(() => { this.windowInactive = false; });
+    this.unbindEvents.push(() => {
+      unbindInactive?.();
+      unbindActive?.();
+    });
     const area = this.container.querySelector('#stage-content-area');
     const position = () => {
       this.positionBotScreens();
@@ -1945,14 +2523,26 @@ export class VoiceStageView {
          </div>`;
   }
 
+  private unbindTelemetryControls(): void {
+    this.container.querySelectorAll<HTMLElement>('.stage-quality-menu').forEach(cancelSurfaceMotion);
+    this.screenViewers.forEach(view => view.destroy());
+    this.screenViewers = [];
+    this.unbindTelemetryButtons.forEach(unbind => unbind());
+    this.unbindTelemetryButtons = [];
+  }
+
   private unbindListeners(): void {
     this.botScreenLayoutObserver?.disconnect();
+    this.unbindTelemetryControls();
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
+    this.container.querySelectorAll<HTMLElement>('[data-ui-motion]').forEach(cancelVisibilityMotion);
   }
 
   public destroy(): void {
+    this.releaseStageVideos(this.container);
     this.focusEpoch++;
+    this.pendingScreenFocus.clear();
     this.clearFocusError();
     this.stopPingMonitor();
     this.stopTelemetryMonitor();

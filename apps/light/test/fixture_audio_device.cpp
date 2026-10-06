@@ -63,17 +63,31 @@ int32_t Unsupported(T* output) {
   return -1;
 }
 
-template <std::size_t NameSize, std::size_t GuidSize>
-int32_t DeviceName(uint16_t index, char* name, char* guid, const char (&label)[NameSize],
-                   const char (&identifier)[GuidSize]) {
-  static_assert(NameSize <= webrtc::kAdmMaxDeviceNameSize);
-  static_assert(GuidSize <= webrtc::kAdmMaxGuidSize);
+int32_t DeviceName(const std::vector<FixtureDeviceCatalog::Device>& devices, uint16_t index,
+                   char* name, char* guid) {
   if (name) name[0] = '\0';
   if (guid) guid[0] = '\0';
-  if (index != 0 || !name) return -1;
-  std::memcpy(name, label, NameSize);
-  if (guid) std::memcpy(guid, identifier, GuidSize);
+  if (index >= devices.size() || !name) return -1;
+  const auto& device = devices[index];
+  if (device.name.size() >= webrtc::kAdmMaxDeviceNameSize ||
+      device.id.size() >= webrtc::kAdmMaxGuidSize) {
+    return -1;
+  }
+  std::memcpy(name, device.name.c_str(), device.name.size() + 1);
+  if (guid) std::memcpy(guid, device.id.c_str(), device.id.size() + 1);
   return 0;
+}
+
+void ValidateDevices(const std::vector<FixtureDeviceCatalog::Device>& devices) {
+  if (devices.empty() || devices.size() > 16) {
+    throw std::invalid_argument("Fixture device lists need 1 to 16 entries");
+  }
+  for (const auto& device : devices) {
+    if (device.id.empty() || device.name.empty() ||
+        device.id.size() >= webrtc::kAdmMaxGuidSize || device.name.size() >= webrtc::kAdmMaxDeviceNameSize) {
+      throw std::invalid_argument("Fixture devices need a bounded nonempty id and name");
+    }
+  }
 }
 
 double Energy(const int16_t* samples, std::size_t count) {
@@ -86,6 +100,28 @@ double Energy(const int16_t* samples, std::size_t count) {
 }
 
 }  // namespace
+
+FixtureDeviceCatalog::FixtureDeviceCatalog()
+    : inputs_{{"monky-test-tone-source", "Monky synthetic 1 kHz tone (test only)"}},
+      outputs_{{"monky-test-pcm-sink", "Monky synthetic PCM sink (test only)"}} {}
+
+void FixtureDeviceCatalog::Set(std::vector<Device> inputs, std::vector<Device> outputs) {
+  ValidateDevices(inputs);
+  ValidateDevices(outputs);
+  std::lock_guard lock(mutex_);
+  inputs_ = std::move(inputs);
+  outputs_ = std::move(outputs);
+}
+
+std::vector<FixtureDeviceCatalog::Device> FixtureDeviceCatalog::Inputs() const {
+  std::lock_guard lock(mutex_);
+  return inputs_;
+}
+
+std::vector<FixtureDeviceCatalog::Device> FixtureDeviceCatalog::Outputs() const {
+  std::lock_guard lock(mutex_);
+  return outputs_;
+}
 
 struct FixtureAudioDevice::State {
   enum class Direction { none, recording, playout };
@@ -263,11 +299,17 @@ struct FixtureAudioDevice::State {
   Counters counters;
 };
 
-webrtc::scoped_refptr<FixtureAudioDevice> FixtureAudioDevice::Create() {
-  return webrtc::make_ref_counted<FixtureAudioDevice>();
+webrtc::scoped_refptr<FixtureAudioDevice> FixtureAudioDevice::Create(
+    std::shared_ptr<const FixtureDeviceCatalog> catalog) {
+  return webrtc::make_ref_counted<FixtureAudioDevice>(std::move(catalog));
 }
 
-FixtureAudioDevice::FixtureAudioDevice() : state_(std::make_unique<State>()) {}
+FixtureAudioDevice::FixtureAudioDevice(std::shared_ptr<const FixtureDeviceCatalog> catalog)
+    : state_(std::make_unique<State>()),
+      catalog_(catalog ? std::move(catalog) : std::make_shared<const FixtureDeviceCatalog>()) {
+  state_->counters.selected_input = catalog_->Inputs().front().id;
+  state_->counters.selected_output = catalog_->Outputs().front().id;
+}
 FixtureAudioDevice::~FixtureAudioDevice() { Terminate(); }
 
 FixtureAudioDevice::Counters FixtureAudioDevice::Snapshot() const {
@@ -324,23 +366,31 @@ bool FixtureAudioDevice::Initialized() const {
   return state_->initialized;
 }
 
-int16_t FixtureAudioDevice::PlayoutDevices() { return 1; }
-int16_t FixtureAudioDevice::RecordingDevices() { return 1; }
+int16_t FixtureAudioDevice::PlayoutDevices() {
+  return static_cast<int16_t>(catalog_->Outputs().size());
+}
+int16_t FixtureAudioDevice::RecordingDevices() {
+  return static_cast<int16_t>(catalog_->Inputs().size());
+}
 int32_t FixtureAudioDevice::PlayoutDeviceName(uint16_t index, char* name, char* guid) {
-  return DeviceName(index, name, guid, "Monky synthetic PCM sink (test only)",
-                    "monky-test-pcm-sink");
+  return DeviceName(catalog_->Outputs(), index, name, guid);
 }
 int32_t FixtureAudioDevice::RecordingDeviceName(uint16_t index, char* name, char* guid) {
-  return DeviceName(index, name, guid, "Monky synthetic 1 kHz tone (test only)",
-                    "monky-test-tone-source");
+  return DeviceName(catalog_->Inputs(), index, name, guid);
 }
 int32_t FixtureAudioDevice::SetPlayoutDevice(uint16_t index) {
+  const auto devices = catalog_->Outputs();
   std::lock_guard lock(state_->mutex);
-  return index == 0 && !state_->playing ? 0 : -1;
+  if (index >= devices.size() || state_->playing) return -1;
+  state_->counters.selected_output = devices[index].id;
+  return 0;
 }
 int32_t FixtureAudioDevice::SetRecordingDevice(uint16_t index) {
+  const auto devices = catalog_->Inputs();
   std::lock_guard lock(state_->mutex);
-  return index == 0 && !state_->recording ? 0 : -1;
+  if (index >= devices.size() || state_->recording) return -1;
+  state_->counters.selected_input = devices[index].id;
+  return 0;
 }
 int32_t FixtureAudioDevice::SetPlayoutDevice(WindowsDeviceType device) {
   // M140's ADM initialization helper selects this logical default on Windows.

@@ -1,4 +1,10 @@
 #include <napi.h>
+#if defined(_WIN32) || defined(__MACOS__)
+#include "packet_core.h"
+#include <memory>
+namespace screen_audio { Napi::Value CreatePacketCapture(const Napi::CallbackInfo& info); }
+static std::unique_ptr<screen_audio::CaptureLease> g_legacyLease;
+#endif
 
 // Platform-specific forward declarations
 #if defined(_WIN32)
@@ -10,8 +16,17 @@ void platform_stop();
 const char* platform_get_last_error();
 int platform_get_status();
 Napi::Value platform_list_windows(Napi::Env env);
+Napi::Value platform_get_window_state(const Napi::CallbackInfo& info);
+Napi::Value platform_get_window_occlusion(const Napi::CallbackInfo& info);
+Napi::Value platform_start_window_frame_probe(const Napi::CallbackInfo& info);
+Napi::Value platform_get_window_frame_probe(const Napi::CallbackInfo& info);
+Napi::Value platform_stop_window_frame_probe(const Napi::CallbackInfo& info);
+void platform_register_window_frame_probes(Napi::Env env);
+Napi::Value platform_list_monitors(const Napi::CallbackInfo& info);
+Napi::Value platform_get_monitor_state(const Napi::CallbackInfo& info);
 bool platform_restore_window(int64_t hwnd);
 Napi::Value GetKeyboardLayoutSnapshot(const Napi::CallbackInfo& info);
+Napi::Value SetWindowResizeAspect(const Napi::CallbackInfo& info);
 #elif defined(__MACOS__)
 bool platform_is_supported();
 bool platform_start(uint32_t targetPid, uint32_t loopbackMode, int64_t includeWindowId,
@@ -54,6 +69,14 @@ Napi::Value Start(const Napi::CallbackInfo& info) {
   Napi::Object opts = info[0].As<Napi::Object>();
   Napi::Function callback = info[1].As<Napi::Function>();
 
+#if defined(_WIN32) || defined(__MACOS__)
+  auto lease = std::make_unique<screen_audio::CaptureLease>(screen_audio::CaptureOwner::legacy);
+  if (!lease->held()) {
+    result.Set("success", false);
+    result.Set("error", "Already capturing");
+    return result;
+  }
+#endif
   uint32_t excludePid = 0;
   uint32_t sampleRate = 48000;
   uint32_t channels = 2;
@@ -103,6 +126,9 @@ Napi::Value Start(const Napi::CallbackInfo& info) {
   bool ok = platform_start(targetPid, loopbackMode, includeWindowId, sampleRate, channels, g_tsfn);
   if (ok) {
     g_running = true;
+#if defined(_WIN32) || defined(__MACOS__)
+    g_legacyLease = std::move(lease);
+#endif
     result.Set("success", Napi::Boolean::New(env, true));
   } else {
     g_tsfn.Release();
@@ -122,6 +148,9 @@ Napi::Value Stop(const Napi::CallbackInfo& info) {
     g_running = false;
     platform_stop();
     g_tsfn.Release();
+#if defined(_WIN32) || defined(__MACOS__)
+    g_legacyLease.reset();
+#endif
     result.Set("success", Napi::Boolean::New(env, true));
   } else {
     result.Set("success", Napi::Boolean::New(env, false));
@@ -184,7 +213,19 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("listWindows", Napi::Function::New(env, ListWindows));
   exports.Set("restoreWindow", Napi::Function::New(env, RestoreWindow));
 #if defined(_WIN32)
+  exports.Set("getWindowState", Napi::Function::New(env, platform_get_window_state));
+  exports.Set("getWindowOcclusion", Napi::Function::New(env, platform_get_window_occlusion));
+  exports.Set("startWindowFrameProbe", Napi::Function::New(env, platform_start_window_frame_probe));
+  exports.Set("getWindowFrameProbe", Napi::Function::New(env, platform_get_window_frame_probe));
+  exports.Set("stopWindowFrameProbe", Napi::Function::New(env, platform_stop_window_frame_probe));
+  platform_register_window_frame_probes(env);
+  exports.Set("listMonitors", Napi::Function::New(env, platform_list_monitors));
+  exports.Set("getMonitorState", Napi::Function::New(env, platform_get_monitor_state));
   exports.Set("getKeyboardLayout", Napi::Function::New(env, GetKeyboardLayoutSnapshot));
+  exports.Set("setWindowResizeAspect", Napi::Function::New(env, SetWindowResizeAspect));
+#endif
+#if defined(_WIN32) || defined(__MACOS__)
+  exports.Set("createPacketCapture", Napi::Function::New(env, screen_audio::CreatePacketCapture));
 #endif
   return exports;
 }

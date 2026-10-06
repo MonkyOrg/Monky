@@ -6,10 +6,12 @@ export const BOT_CAPABILITIES = [
   'read_messages',
   'send_messages',
   'publish_voice',
+  'receive_voice',
   'local_execution',
   'sound_download',
   'selectors',
   'miniapps',
+  'live_actions',
 ] as const;
 
 export const botCapabilitySchema = z.enum(BOT_CAPABILITIES);

@@ -1,4 +1,4 @@
-import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserActivity, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, VoiceRestrictions, WebRtcSignalPayload } from './models.js';
+import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, RtcTransportPurpose, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserActivity, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, VoiceRestrictions, WebRtcSignalPayload } from './models.js';
 import type {
   BotForm, BotFormValues, BotSettingsContext, BotSettingsDefinition, BotSettingsListResponse,
   BotSettingsPatch, BotSettingsSnapshot, BotServerSettingsSnapshot, CommandAutocompleteResult, CommandValues,
@@ -7,6 +7,7 @@ import type { SoundDownloadRequest, SoundDownloadResult } from './soundDownloads
 import type { CommandCallerContext, LocalCommandPreparation } from './localExecutionProtocol.js';
 import type { ServerShutdownReason } from './serverLifecycle.js';
 import type { BotCapability, BotPermissions } from './botPermissions.js';
+import type { NativeScreenSource } from './screenSharing.js';
 
 export enum ProtocolErrorCode {
   AUTH_INVALID_PASSWORD = 'AUTH_INVALID_PASSWORD',
@@ -16,6 +17,12 @@ export enum ProtocolErrorCode {
   CHANNEL_FULL = 'CHANNEL_FULL',
   MESSAGE_TOO_LONG = 'MESSAGE_TOO_LONG',
   RATE_LIMITED = 'RATE_LIMITED',
+  /**
+   * Tentativas de conexão limitadas por IP (#372). Separado de RATE_LIMITED
+   * porque o cliente traduz por código: reusar aquele mostraria "você está
+   * enviando mensagens rápido demais" para quem nem entrou no servidor.
+   */
+  AUTH_RATE_LIMITED = 'AUTH_RATE_LIMITED',
   AVATAR_TOO_LARGE = 'AVATAR_TOO_LARGE',
   AVATAR_INVALID_TYPE = 'AVATAR_INVALID_TYPE',
   ATTACHMENT_TOO_LARGE = 'ATTACHMENT_TOO_LARGE',
@@ -23,11 +30,17 @@ export enum ProtocolErrorCode {
   STORAGE_FULL = 'STORAGE_FULL',
   SERVER_FULL = 'SERVER_FULL',
   PROTOCOL_VERSION_UNSUPPORTED = 'PROTOCOL_VERSION_UNSUPPORTED',
+  FEATURE_REQUIRES_UPDATE = 'FEATURE_REQUIRES_UPDATE',
   INTERNAL_ERROR = 'INTERNAL_ERROR',
   UNAUTHORIZED = 'UNAUTHORIZED',
   PERMISSION_DENIED = 'PERMISSION_DENIED',
   BAD_REQUEST = 'BAD_REQUEST',
+  COMMUNITY_INVALID = 'COMMUNITY_INVALID',
+  COMMUNITY_CONFLICT = 'COMMUNITY_CONFLICT',
+  FORUM_INVALID = 'FORUM_INVALID',
+  MESSAGE_SEARCH_INVALID = 'MESSAGE_SEARCH_INVALID',
   BOT_OFFLINE = 'BOT_OFFLINE',
+  DM_RELAY_DISABLED = 'DM_RELAY_DISABLED',
   BOT_COMMAND_NOT_FOUND = 'BOT_COMMAND_NOT_FOUND',
   BOT_INVALID_OPTIONS = 'BOT_INVALID_OPTIONS',
   BOT_INTERACTION_EXPIRED = 'BOT_INTERACTION_EXPIRED',
@@ -60,6 +73,41 @@ export enum ProtocolErrorCode {
 }
 
 export enum MessageType {
+  COMMUNITY_GET = 'COMMUNITY_GET',
+  COMMUNITY_IMAGE_UPLOAD = 'COMMUNITY_IMAGE_UPLOAD',
+  COMMUNITY_UPDATE_SETTINGS = 'COMMUNITY_UPDATE_SETTINGS',
+  COMMUNITY_SNAPSHOT = 'COMMUNITY_SNAPSHOT',
+  COMMUNITY_ACK = 'COMMUNITY_ACK',
+  EVENT_SAVE = 'EVENT_SAVE',
+  EVENT_GET = 'EVENT_GET',
+  EVENT_GET_INTERESTED = 'EVENT_GET_INTERESTED',
+  EVENT_INTERESTED_LIST = 'EVENT_INTERESTED_LIST',
+  EVENT_SAVED = 'EVENT_SAVED',
+  EVENT_CONTROL = 'EVENT_CONTROL',
+  EVENT_INTEREST = 'EVENT_INTEREST',
+  EVENT_STARTED = 'EVENT_STARTED',
+  LIVE_ACTION_CREATE = 'LIVE_ACTION_CREATE',
+  LIVE_ACTION_UPDATE = 'LIVE_ACTION_UPDATE',
+  LIVE_ACTION_CLOSE = 'LIVE_ACTION_CLOSE',
+  LIVE_ACTION_LIST = 'LIVE_ACTION_LIST',
+  LIVE_ACTION_LIST_RESULT = 'LIVE_ACTION_LIST_RESULT',
+  LIVE_ACTION_SNAPSHOT = 'LIVE_ACTION_SNAPSHOT',
+  LIVE_ACTION_SUBMIT = 'LIVE_ACTION_SUBMIT',
+  LIVE_ACTION_SUBMITTED = 'LIVE_ACTION_SUBMITTED',
+  NATIVE_FORM_CREATE = 'NATIVE_FORM_CREATE',
+  NATIVE_FORM_SUBMIT = 'NATIVE_FORM_SUBMIT',
+  NATIVE_FORM_CLOSE = 'NATIVE_FORM_CLOSE',
+  NATIVE_FORM_RESULTS = 'NATIVE_FORM_RESULTS',
+  NATIVE_FORM_SNAPSHOT = 'NATIVE_FORM_SNAPSHOT',
+  NATIVE_FORM_RESULTS_RESULT = 'NATIVE_FORM_RESULTS_RESULT',
+  FORUM_LIST = 'FORUM_LIST',
+  FORUM_LIST_RESULT = 'FORUM_LIST_RESULT',
+  FORUM_CREATE_POST = 'FORUM_CREATE_POST',
+  FORUM_UPDATE_POST = 'FORUM_UPDATE_POST',
+  FORUM_DELETE_POST = 'FORUM_DELETE_POST',
+  FORUM_POST_SAVED = 'FORUM_POST_SAVED',
+  CHAT_SEARCH = 'CHAT_SEARCH',
+  CHAT_SEARCH_RESULTS = 'CHAT_SEARCH_RESULTS',
   SELECTOR_CREATE = 'SELECTOR_CREATE',
   SELECTOR_LIST = 'SELECTOR_LIST',
   SELECTOR_UPDATE = 'SELECTOR_UPDATE',
@@ -103,11 +151,17 @@ export enum MessageType {
   CHAT_EDIT = 'CHAT_EDIT',
   /** Client -> server: delete a message (own, or anyone's with MANAGE_SERVER) (#504). */
   CHAT_DELETE = 'CHAT_DELETE',
+  CHAT_RESTORE = 'CHAT_RESTORE',
   CHAT_REQUEST_UPLOAD_TOKEN = 'CHAT_REQUEST_UPLOAD_TOKEN',
   CHANNEL_CREATE = 'CHANNEL_CREATE',
   CHANNEL_UPDATE = 'CHANNEL_UPDATE',
   CHANNEL_DELETE = 'CHANNEL_DELETE',
   CHANNEL_REORDER = 'CHANNEL_REORDER',
+  CATEGORY_CREATE = 'CATEGORY_CREATE',
+  CATEGORY_UPDATE = 'CATEGORY_UPDATE',
+  CATEGORY_DELETE = 'CATEGORY_DELETE',
+  CATEGORY_REORDER = 'CATEGORY_REORDER',
+  CATEGORIES_UPDATED = 'CATEGORIES_UPDATED',
   USER_CHANGE_NICKNAME = 'USER_CHANGE_NICKNAME',
   USER_UPDATE_AVATAR = 'USER_UPDATE_AVATAR',
   SERVER_UPDATE_SETTINGS = 'SERVER_UPDATE_SETTINGS',
@@ -128,10 +182,18 @@ export enum MessageType {
   ADMIN_MOVE_USER = 'ADMIN_MOVE_USER',
   MEMBER_KICK = 'MEMBER_KICK',
   RTC_SIGNAL = 'RTC_SIGNAL',
+  NATIVE_SCREEN_SIGNAL = 'NATIVE_SCREEN_SIGNAL',
+  NATIVE_SCREEN_SIGNAL_ACK = 'NATIVE_SCREEN_SIGNAL_ACK',
+  SCREEN_VIEWERS_GET = 'SCREEN_VIEWERS_GET',
+  SCREEN_VIEWERS_RESULT = 'SCREEN_VIEWERS_RESULT',
   RTC_DIAGNOSTICS_REPORT = 'RTC_DIAGNOSTICS_REPORT',
   PING = 'PING',
   USER_LOGOUT = 'USER_LOGOUT',
   SOUNDBOARD_PLAY = 'SOUNDBOARD_PLAY',
+  RECENT_SOUND_RECORD = 'RECENT_SOUND_RECORD',
+  RECENT_SOUNDS_LIST = 'RECENT_SOUNDS_LIST',
+  RECENT_SOUND_DOWNLOAD = 'RECENT_SOUND_DOWNLOAD',
+  DM_RELAY_SEND = 'DM_RELAY_SEND',
   /**
    * Client -> server, when the person who triggered a sound stops it. The audio
    * is broadcast once and then played by each listener on their own, so a stop
@@ -151,11 +213,14 @@ export enum MessageType {
   SFU_WEBRTC_TRANSPORT_CREATED = 'SFU_WEBRTC_TRANSPORT_CREATED',
   SFU_CONNECT_WEBRTC_TRANSPORT = 'SFU_CONNECT_WEBRTC_TRANSPORT',
   SFU_WEBRTC_TRANSPORT_CONNECTED = 'SFU_WEBRTC_TRANSPORT_CONNECTED',
+  SFU_CLOSE_WEBRTC_TRANSPORT = 'SFU_CLOSE_WEBRTC_TRANSPORT',
+  SFU_WEBRTC_TRANSPORT_CLOSED = 'SFU_WEBRTC_TRANSPORT_CLOSED',
   SFU_PRODUCE = 'SFU_PRODUCE',
   SFU_PRODUCED = 'SFU_PRODUCED',
   SFU_CONSUME = 'SFU_CONSUME',
   SFU_CONSUMED = 'SFU_CONSUMED',
   SFU_PRODUCER_CLOSED = 'SFU_PRODUCER_CLOSED',
+  SFU_PRODUCER_SET_PAUSED = 'SFU_PRODUCER_SET_PAUSED',
   SFU_CONSUMER_CLOSED = 'SFU_CONSUMER_CLOSED',
   SFU_CONSUMER_SET_PAUSED = 'SFU_CONSUMER_SET_PAUSED',
   SFU_NEW_PRODUCER = 'SFU_NEW_PRODUCER',
@@ -250,11 +315,20 @@ export enum MessageType {
   /** Server -> clients: an existing message was edited or deleted (#504). */
   CHAT_MESSAGE_UPDATED = 'CHAT_MESSAGE_UPDATED',
   CHAT_UPLOAD_TOKEN = 'CHAT_UPLOAD_TOKEN',
+  POLL_CREATE = 'POLL_CREATE',
+  POLL_VOTE = 'POLL_VOTE',
+  POLL_CLOSE = 'POLL_CLOSE',
+  POLL_UPDATED = 'POLL_UPDATED',
   VOICE_USER_JOINED = 'VOICE_USER_JOINED',
   VOICE_USER_LEFT = 'VOICE_USER_LEFT',
   VOICE_STATE_CHANGED = 'VOICE_STATE_CHANGED',
   VOICE_RESTRICTIONS_UPDATED = 'VOICE_RESTRICTIONS_UPDATED',
   SOUNDBOARD_PLAYED = 'SOUNDBOARD_PLAYED',
+  RECENT_SOUND_ADDED = 'RECENT_SOUND_ADDED',
+  RECENT_SOUNDS_RESULT = 'RECENT_SOUNDS_RESULT',
+  RECENT_SOUND_DATA = 'RECENT_SOUND_DATA',
+  DM_RELAY_ACK = 'DM_RELAY_ACK',
+  DM_RELAY_DELIVER = 'DM_RELAY_DELIVER',
   /** Server -> clients in the channel: drop this user's ongoing sound (#499). */
   SOUNDBOARD_STOPPED = 'SOUNDBOARD_STOPPED',
   SERVER_ERROR = 'SERVER_ERROR',
@@ -270,6 +344,7 @@ export interface ProtocolMessage<T = any> {
 // Client Payloads
 export interface AuthConnectPayload {
   protocolVersion: number;
+  protocolOffer?: import('./protocolCompatibility.js').ProtocolOffer;
   publicKey: string;
   nickname: string;
   password?: string;
@@ -307,6 +382,11 @@ export interface AuthFailedPayload {
 }
 
 export interface ChatSendPayload {
+  /** Stable message ID, reused on explicit retries when chat-delivery is negotiated. */
+  clientMessageId?: string;
+  blocks?: import('./messageBlocks.js').MessageBlock[];
+  /** Bot-authored variants; rejected for human messages. */
+  localizations?: import('./botMessages.js').BotMessageLocalizations;
   replyToMessageId?: string;
   channelId: string;
   content: string;
@@ -341,9 +421,12 @@ export interface ChatMentionsReadPayload {
 }
 
 export interface ChannelCreatePayload {
+  permissionOverwrites?: import('./permissions.js').ChannelPermissionOverwrite[];
+  categoryId?: string | null;
+  inheritCategoryPermissions?: boolean;
   botCommandsEnabled?: boolean;
   name: string;
-  type: 'VOICE' | 'TEXT';
+  type: ChannelType;
   maxParticipants?: number;
   isPrivate?: boolean;
   allowedRoleIds?: string[];
@@ -355,6 +438,10 @@ export interface ChannelCreatePayload {
  * resending the name.
  */
 export interface ChannelUpdatePayload {
+  permissionOverwrites?: import('./permissions.js').ChannelPermissionOverwrite[];
+  categoryId?: string | null;
+  /** Explicit ACL fields imply an override unless this is explicitly true. */
+  inheritCategoryPermissions?: boolean;
   botCommandsEnabled?: boolean;
   channelId: string;
   name?: string;
@@ -368,17 +455,37 @@ export interface ChannelDeletePayload {
 }
 
 /**
- * Reorders the channels of one kind (#471).
+ * Reorders a mixed category, with type-scoped ordering retained for callers.
  *
  * The whole list is sent rather than a single "move this one here": the client
  * already knows the order it is showing, and sending it whole means the server
  * never has to guess what the other positions became.
  */
 export interface ChannelReorderPayload {
-  type: ChannelType;
-  /** Every channel of that type, in the order they should appear. */
+  type?: ChannelType;
+  categoryId?: string | null;
+  /** Every channel of the selected category or type, in display order. */
   orderedIds: string[];
 }
+
+export interface CategoryCreatePayload {
+  permissionOverwrites?: import('./permissions.js').ChannelPermissionOverwrite[];
+  name: string;
+  isPrivate?: boolean;
+  allowedRoleIds?: string[];
+}
+
+export interface CategoryUpdatePayload {
+  permissionOverwrites?: import('./permissions.js').ChannelPermissionOverwrite[];
+  categoryId: string;
+  name?: string;
+  isPrivate?: boolean;
+  allowedRoleIds?: string[];
+}
+
+export interface CategoryDeletePayload { categoryId: string }
+export interface CategoryReorderPayload { orderedIds: string[] }
+export interface CategoriesUpdatedPayload { categories: import('./models.js').ChannelCategory[] }
 
 /**
  * The new positions, broadcast after a reorder (#471). Only the channels the
@@ -399,13 +506,18 @@ export interface UserUpdateAvatarPayload {
 }
 
 export interface ServerUpdateSettingsPayload {
+  maxMessageLength?: number;
   name?: string;
   password?: string | null; // null or empty string removes the password
   allowSoundboard?: boolean;
+  recentSoundCacheEnabled?: boolean;
+  recentSoundCacheLimit?: number;
+  dmRelayEnabled?: boolean;
   /** Enables or disables the `@todos` / `@everyone` mention (#464). */
   allowEveryoneMention?: boolean;
   /** Enables or disables editing of already-sent messages (#504). */
   allowMessageEdit?: boolean;
+  messageDeleteUndoSeconds?: number;
   /** Shows role badges to every member, or only to who holds the role (#530). */
   showRoleBadgesToEveryone?: boolean;
   iconBase64?: string | null; // Data URL, pure base64, or null to remove
@@ -424,7 +536,10 @@ export interface ServerUpdateSettingsPayload {
 export interface RoleCreatePayload {
   name: string;
   color?: string | null;
+  /** Granted bits; a full mask when sent by a client before 36.1. */
   permissions: number;
+  /** Required by 36.1 servers; newer servers ignore it. */
+  deny?: number;
   position?: number;
   isDefault?: boolean;
 }
@@ -433,7 +548,10 @@ export interface RoleUpdatePayload {
   roleId: string;
   name?: string;
   color?: string | null;
+  /** Granted bits; a full mask when sent by a client before 36.1. */
   permissions?: number;
+  /** Required by 36.1 servers; newer servers ignore it. */
+  deny?: number;
   position?: number;
   isDefault?: boolean;
 }
@@ -463,8 +581,19 @@ export interface ChatDeletePayload {
   messageId: string;
 }
 
+export interface ChatRestorePayload extends ChatDeletePayload {
+  deletedAt: number;
+  revision: number;
+}
+
 export interface SoundboardPlayPayload {
   channelId: string;
+  soundName: string;
+  audioBase64: string;
+  mimeType?: string;
+}
+
+export interface RecentSoundRecordPayload {
   soundName: string;
   audioBase64: string;
   mimeType?: string;
@@ -474,12 +603,41 @@ export interface SoundboardStopPayload {
   channelId: string;
 }
 
+export type DmRelayKind = 'friend' | 'envelope' | 'file' | 'signal';
+
+export interface DmRelayItem {
+  /** Recipient full normalized Ed25519 SPKI public key hex. */
+  to: string;
+  kind: DmRelayKind;
+  /** Opaque end-to-end encrypted client data. */
+  data: string;
+}
+
+export interface DmRelaySendPayload {
+  relayId: string;
+  items: DmRelayItem[];
+}
+
+export interface DmRelayAckPayload {
+  relayId: string;
+  accepted: number;
+}
+
+export interface DmRelayDeliverPayload {
+  /** Sender full normalized authenticated Ed25519 SPKI public key hex. */
+  from: string;
+  kind: DmRelayKind;
+  data: string;
+}
+
 export interface VoiceJoinPayload {
   channelId: string;
   isMuted?: boolean;
   isDeafened?: boolean;
   /** Bot-only admission scoped to the originating command invocation. */
   invocationId?: string;
+  /** Bot-only opt-in, requiring the separate receive_voice capability. */
+  receiveAudio?: boolean;
 }
 
 export interface VoiceModeTransition {
@@ -506,6 +664,7 @@ export interface VoiceStateUpdatePayload {
   isSharingScreenAudio?: boolean;
   /** See VoiceParticipantState.screenShareIds (#253). */
   screenShareIds?: string[];
+  nativeScreenShares?: NativeScreenSource[];
 }
 
 export interface AdminMuteUserPayload {
@@ -598,6 +757,7 @@ export interface ServerErrorPayload {
   code: ProtocolErrorCode;
   message: string;
   requestId?: string;
+  relayId?: string;
   /**
    * Protocol version the server speaks, sent with
    * `PROTOCOL_VERSION_UNSUPPORTED` so the client can say *who* is outdated
@@ -608,13 +768,18 @@ export interface ServerErrorPayload {
 }
 
 export interface ServerSettingsUpdatedPayload {
+  maxMessageLength?: number;
   name: string;
   hasPassword: boolean;
   allowSoundboard?: boolean;
+  recentSoundCacheEnabled?: boolean;
+  recentSoundCacheLimit?: number;
+  dmRelayEnabled?: boolean;
   /** Current state of the `@todos` / `@everyone` mention (#464). */
   allowEveryoneMention?: boolean;
   /** Current state of the message-editing switch (#504). */
   allowMessageEdit?: boolean;
+  messageDeleteUndoSeconds?: number;
   /** Current state of the role badge visibility switch (#530). */
   showRoleBadgesToEveryone?: boolean;
   /** Current state of the voice/video topology mode ('p2p' | 'sfu') (#515). */
@@ -753,6 +918,7 @@ export interface VoiceRestrictionsUpdatedPayload extends VoiceRestrictions {
 }
 
 export interface RolesListPayload {
+  everyonePermissions?: number;
   roles: Role[];
   userRoles: UserRoleSummary[];
 }
@@ -762,8 +928,12 @@ export interface ServerNetworkInterface {
   address: string;
   family: 'IPv4' | 'IPv6';
   type: 'public' | 'lan' | 'vpn' | 'loopback';
+  /** Portuguese label kept for older clients; current clients translate from `type`/`name`. */
   description: string;
 }
+
+/** `name` of the entry for the internet IP the server discovered, as opposed to an adapter. */
+export const PUBLIC_IP_INTERFACE_NAME = 'Internet (IP Público)';
 
 export interface ServerInviteInfoPayload {
   port: number;
@@ -785,11 +955,17 @@ export interface SfuRouterRtpCapabilitiesPayload {
 export interface SfuCreateWebRtcTransportPayload {
   channelId: string;
   direction: 'send' | 'recv';
+  /** Omitted by the browser's existing call; native screen media uses its own pair. */
+  purpose?: RtcTransportPurpose;
+  /** One native engine/rendition; replacing it must not close other screen profiles. */
+  screenSessionId?: string;
 }
 
 export interface SfuWebRtcTransportCreatedPayload {
   channelId: string;
   direction: 'send' | 'recv';
+  purpose?: RtcTransportPurpose;
+  screenSessionId?: string;
   transportOptions: {
     id: string;
     iceParameters: any;
@@ -803,6 +979,12 @@ export interface SfuConnectWebRtcTransportPayload {
   channelId: string;
   transportId: string;
   dtlsParameters: any;
+}
+
+export interface SfuCloseWebRtcTransportPayload {
+  channelId: string;
+  transportId: string;
+  purpose: 'screen';
 }
 
 export interface SfuProducePayload {
@@ -840,6 +1022,11 @@ export interface SfuProducerClosedPayload {
   producerId: string;
 }
 
+export interface SfuProducerSetPausedPayload extends SfuProducerClosedPayload {
+  paused: boolean;
+  purpose: 'screen';
+}
+
 export interface SfuConsumerClosedPayload {
   channelId: string;
   consumerId: string;
@@ -848,6 +1035,7 @@ export interface SfuConsumerClosedPayload {
 export interface SfuConsumerSetPausedPayload {
   channelId: string;
   consumerId: string;
+  /** Screen consumers start paused and only resume after an explicit Watch. */
   paused: boolean;
 }
 
@@ -1007,13 +1195,16 @@ export interface CommandInvokedPayload {
 
 /** Bot -> server. The destination and author come from the stored invocation. */
 export interface CommandResponsePayload {
+  localizations?: import('./botMessages.js').BotMessageLocalizations;
+  components?: import('./botCarousels.js').BotMessageComponentInput[];
   invocationId: string;
   content: string;
   /** Private by default. Public output must be explicitly requested. */
   ephemeral?: boolean;
 }
 
-export interface BotCommandMessagePayload extends CommandResponsePayload, BotCommandContext {
+export interface BotCommandMessagePayload extends Omit<CommandResponsePayload, 'components'>, BotCommandContext {
+  components?: import('./botCarousels.js').BotMessageComponent[];
   messageId: string;
   channelId: string;
   botId: string;

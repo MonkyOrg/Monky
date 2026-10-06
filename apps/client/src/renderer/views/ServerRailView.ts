@@ -1,32 +1,42 @@
 import { escapeHtml } from '../utils/html';
 import { sessionManager, sessionKeyFor } from '../core/SessionManager';
 import {
-  assertServerBrowseAvailable, captureServerBrowseIntent, getServerSessionForAddress, openServerSession, showServerSession,
+  assertServerBrowseAvailable, captureServerBrowseIntent, getServerSessionForAddress, openServerSession, showHome, showServerSession,
 } from '../core/serverConnection';
 import { ensureHostedServerStarted, findOwnedServer } from '../core/hostedServerStart';
 import { voiceStore } from '../stores/voiceStore';
+import { settingsStore } from '../stores/settingsStore';
+import { favoritesStore } from '../stores/favoritesStore';
 import {
   connectionStore,
+  CreatedServer,
   SavedServer,
   RailFolderNode,
   RailNode,
 } from '../stores/connectionStore';
-import { audioProcessor } from '../core/AudioProcessor';
-import { webRtcManager } from '../core/WebRtcManager';
-import { showConfirm, showAlert } from './Dialog';
+import { showConfirm, showAlert, showTextForm } from './Dialog';
 import { checkServerOnline, fetchServerPreview } from '../utils/serverStatus';
 import {
-  captureHostedServerLeaveState,
-  promptShutdownAfterLeave,
+  confirmStopHostedServer,
 } from '../utils/hostedServer';
-import { soundEffects } from '../core/SoundEffects';
 import { toAbsoluteServerIconUrl } from '../utils/avatar';
 import { t } from '../i18n';
-import { contextMenu } from './ContextMenu';
+import { contextMenu, type ContextMenuEntry } from './ContextMenu';
+import { appEvents } from '../core/EventBus';
+import { addServerModal } from './addServer/AddServerModal';
+import { serverMonitorModal } from './ServerMonitorModal';
 
 type DraggedRailItem =
   | { type: 'server'; host: string; port: number }
   | { type: 'folder'; folderId: string };
+
+export function serverRailCallIcon(
+  events: readonly { status: string; location: { kind: string; channelId?: string } }[] | undefined,
+  channelId: string | null,
+): 'calendar_month' | 'volume_up' {
+  return channelId && events?.some(event => event.status === 'active' && event.location.kind === 'voice'
+    && event.location.channelId === channelId) ? 'calendar_month' : 'volume_up';
+}
 
 export class ServerRailView {
   /**
@@ -39,10 +49,22 @@ export class ServerRailView {
   private skipNextFolderToggle = false;
   private lastProbeTime = 0;
   private probeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private homeBadgeCount = 0;
   private static readonly PROBE_INTERVAL_MS = 15000;
+
+  constructor() {
+    appEvents.on('community.updated', () => this.render());
+  }
 
   private static keyOf(host: string, port: number): string {
     return `${host.trim().replace(/^wss?:\/\//, '')}:${port}`;
+  }
+
+  public setHomeBadge(count: number): void {
+    const next = Math.max(0, Math.min(99, Math.trunc(count)));
+    if (this.homeBadgeCount === next) return;
+    this.homeBadgeCount = next;
+    this.render();
   }
 
   public render(): void {
@@ -53,7 +75,7 @@ export class ServerRailView {
 
     // The active key (not the proxied client) is what identifies the server on
     // screen: during a background event the proxy points elsewhere (#400).
-    const currentUrl = sessionManager.getActiveKey();
+    const currentUrl = sessionManager.isHome() ? null : sessionManager.getActiveKey();
     const busy = this.connectingKey !== null;
     const savedByKey = new Map(
       (connectionStore.savedServers || []).map((server) => [ServerRailView.keyOf(server.host, server.port), server])
@@ -67,35 +89,20 @@ export class ServerRailView {
     }).join('');
 
     railEl.innerHTML = `
-      <button class="server-rail-home" id="server-rail-home" title="${t('main.homeTitle')}" ${busy ? 'disabled' : ''}>
+      <button class="server-rail-home" id="server-rail-home" title="${t('main.homeTitle')}" aria-current="${sessionManager.isHome() ? 'page' : 'false'}" ${busy ? 'disabled' : ''}>
         <span class="material-symbols-outlined md-22">home</span>
+        ${this.homeBadgeCount > 0 ? `<span class="server-rail-home-badge">${this.homeBadgeCount}</span>` : ''}
       </button>
       <div class="server-rail-divider"></div>
       <div class="server-rail-list">
         ${nodesHtml}
         ${this.renderRootDropZone(layout.length)}
+        ${this.renderAddServerButton(busy)}
       </div>
     `;
 
-    railEl.querySelector('#server-rail-home')?.addEventListener('click', async () => {
-      const confirmed = await showConfirm({
-        title: t('main.backHomeTitle'),
-        message: t('main.backHomeMessage'),
-        confirmLabel: t('main.backHomeTitle'),
-        variant: 'warning',
-      });
-      if (!confirmed) return;
-      // Captured before the socket closes: afterwards there is no way to tell
-      // whether this user was hosting the server they just left (#334).
-      const leaveState = await captureHostedServerLeaveState();
-      soundEffects.play('leave_voice');
-      audioProcessor.stopMicrophone();
-      webRtcManager.closeAllPeers();
-      // Going home means leaving everything, including servers kept alive in
-      // the background for an ongoing call (#400).
-      sessionManager.removeAll();
-      if (leaveState) await promptShutdownAfterLeave(leaveState);
-    });
+    railEl.querySelector('#server-rail-home')?.addEventListener('click', showHome);
+    railEl.querySelector('#server-rail-add')?.addEventListener('click', () => addServerModal.open());
 
     this.bindServerClicks();
     this.bindFolderToggles();
@@ -144,6 +151,10 @@ export class ServerRailView {
         dot.setAttribute('data-status', online ? 'online' : 'offline');
         const baseTitle = btn.getAttribute('title')?.split(' • ')[0] || '';
         btn.title = `${baseTitle} • ${online ? t('main.statusOnline') : t('main.statusOffline')}`;
+        if (online) {
+          const saved = (connectionStore.savedServers || []).find((s) => s.host === host && s.port === port);
+          if (saved) appEvents.emit('connection.saved_server_online', saved);
+        }
 
         // Pick up the icon of servers the user never connected to (#312). Only
         // persist on change, otherwise the resulting re-render loops forever.
@@ -248,6 +259,7 @@ export class ServerRailView {
     // is merely retrying does not count as online.
     const background = !isCurrent && live?.client.getStatus() === 'CONNECTED' ? live : undefined;
     const hasCall = voiceStore.voiceSessionKey === url;
+    const callIcon = serverRailCallIcon(live?.community.snapshot?.events, voiceStore.currentVoiceChannelId);
     // A mention outranks a plain unread, so the row shows the red dot instead
     // of the white one when both are pending (#479).
     const hasMention = !!background?.chatStore.hasAnyMention();
@@ -268,7 +280,7 @@ export class ServerRailView {
         ? t('main.serverHostingCall', { name: label })
         : label;
     const badge = hasCall
-      ? `<span class="server-rail-badge" data-kind="call" title="${escapeHtml(t('main.callHereTooltip'))}"><span class="material-symbols-outlined md-14">graphic_eq</span></span>`
+      ? `<span class="server-rail-badge" data-kind="call" title="${escapeHtml(t('main.callHereTooltip'))}"><span class="material-symbols-outlined md-14">${callIcon}</span></span>`
       : hasMention
         ? `<span class="server-rail-badge" data-kind="mention" title="${escapeHtml(t('main.mentionHereTooltip'))}"></span>`
         : hasUnread
@@ -311,6 +323,16 @@ export class ServerRailView {
         data-root-index="${index}"
         aria-hidden="true"
       ></div>
+    `;
+  }
+
+  private renderAddServerButton(busy: boolean): string {
+    const highlighted = sessionManager.isHome() && connectionStore.savedServers.length === 0;
+    return `
+      <button type="button" class="server-rail-add ${highlighted ? 'server-rail-add--highlight' : ''}"
+        id="server-rail-add" title="${t('addServer.title')}" aria-label="${t('addServer.title')}" ${busy ? 'disabled' : ''}>
+        <span class="material-symbols-outlined md-24" aria-hidden="true">add</span>
+      </button>
     `;
   }
 
@@ -386,7 +408,7 @@ export class ServerRailView {
       ]);
     });
 
-    railEl.querySelectorAll('.server-rail-avatar[data-folder-id]').forEach((btn) => {
+    railEl.querySelectorAll('.server-rail-avatar').forEach((btn) => {
       btn.addEventListener('contextmenu', (event) => {
         const mouseEvent = event as MouseEvent;
         event.preventDefault();
@@ -395,14 +417,9 @@ export class ServerRailView {
         const port = parseInt(btn.getAttribute('data-port') || '0', 10);
         if (!host || !port) return;
         const folderId = btn.getAttribute('data-folder-id');
-        if (!folderId) return;
-        contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, [
-          {
-            label: t('main.removeFromFolder'),
-            icon: 'drive_file_move',
-            onClick: () => connectionStore.moveServerToFolder(host, port, null),
-          },
-        ]);
+        const server = connectionStore.savedServers.find(item => item.host === host && item.port === port);
+        if (!server) return;
+        contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, this.getServerContextEntries(server, folderId), btn as HTMLElement);
       });
     });
 
@@ -435,6 +452,179 @@ export class ServerRailView {
         ]);
       });
     });
+  }
+
+  private getServerContextEntries(server: SavedServer, folderId: string | null): ContextMenuEntry[] {
+    const owned = findOwnedServer(server.host, server.port);
+    const favorite = favoritesStore.isServerFavorite(server);
+    const autoEntry = settingsStore.isServerAutoEntryEnabled(server);
+    const entries: ContextMenuEntry[] = [
+      {
+        label: t('connection.join'),
+        icon: 'login',
+        onClick: () => { void this.connectToSavedServer(server); },
+      },
+    ];
+
+    if (owned) {
+      entries.push(
+        {
+          label: t('connection.start'),
+          icon: 'play_arrow',
+          onClick: () => { void this.startOwnedServer(owned); },
+        },
+        {
+          label: t('connection.stop'),
+          icon: 'stop',
+          onClick: () => { void this.stopOwnedServer(); },
+        },
+        {
+          label: t('serverMonitor.title'),
+          icon: 'monitoring',
+          onClick: () => { void serverMonitorModal.openLocal(); },
+        },
+        {
+          label: t('connection.deleteSavedServer'),
+          icon: 'delete',
+          danger: true,
+          onClick: () => { void this.deleteOwnedServer(owned); },
+        },
+      );
+    }
+
+    entries.push(
+      {
+        label: t('connection.editSavedServer'),
+        icon: 'edit',
+        onClick: () => { void this.editSavedServer(server); },
+      },
+      {
+        label: t(favorite ? 'favorites.removeShort' : 'favorites.addShort'),
+        icon: favorite ? 'star' : 'star_border',
+        onClick: () => { void this.toggleFavorite(server); },
+      },
+      {
+        label: t(autoEntry ? 'autoEntry.disableShort' : 'autoEntry.enableShort'),
+        icon: autoEntry ? 'home_pin' : 'not_started',
+        onClick: () => { void this.toggleAutoEntry(server, !autoEntry); },
+      },
+    );
+
+    if (folderId) {
+      entries.push({
+        label: t('main.removeFromFolder'),
+        icon: 'drive_file_move',
+        onClick: () => connectionStore.moveServerToFolder(server.host, server.port, null),
+      });
+    }
+
+    entries.push({
+      label: t('connection.removeFromSaved'),
+      icon: 'close',
+      danger: !owned,
+      onClick: () => {
+        appEvents.emit('connection.manual_disconnect', { key: sessionKeyFor(server.host, server.port) });
+        connectionStore.removeSavedServer(server.host, server.port);
+      },
+    });
+    return entries;
+  }
+
+  private async startOwnedServer(server: CreatedServer): Promise<void> {
+    try {
+      await ensureHostedServerStarted(server);
+      this.render();
+    } catch (error: unknown) {
+      await showAlert({
+        title: t('main.serverStartFailedTitle'),
+        message: error instanceof Error && error.message ? error.message : t('main.serverStartFailedMessage'),
+        variant: 'danger',
+      });
+    }
+  }
+
+  private async stopOwnedServer(): Promise<void> {
+    if (!window.api?.hostServerStop) return;
+    if (!(await confirmStopHostedServer())) return;
+    const result = await window.api.hostServerStop();
+    if (!result.success) {
+      await showAlert({ title: t('common.error'), message: t('connection.stopServerError'), variant: 'danger' });
+    }
+    this.render();
+  }
+
+  private async deleteOwnedServer(server: CreatedServer): Promise<void> {
+    const confirmed = await showConfirm({
+      title: t('connection.deleteSavedServer'),
+      message: t('connection.deleteServerMessage', { name: server.name }),
+      confirmLabel: t('common.delete'),
+      cancelLabel: t('common.cancel'),
+      variant: 'danger',
+    });
+    if (!confirmed) return;
+    try {
+      const status = await window.api?.hostServerStatus?.();
+      if (status?.isRunning && (status.serverId === server.id || status.port === server.port)) {
+        await this.stopOwnedServer();
+      }
+      const deleted = await window.api?.hostServerDeleteData?.(server.id);
+      connectionStore.removeCreatedServer(server.id);
+      connectionStore.removeSavedServer('127.0.0.1', server.port);
+      if (deleted && !deleted.success) {
+        await showAlert({ title: t('common.error'), message: deleted.error || t('connection.deleteServerError'), variant: 'danger' });
+      }
+    } catch (error: unknown) {
+      await showAlert({
+        title: t('common.error'),
+        message: error instanceof Error && error.message ? error.message : t('connection.deleteServerError'),
+        variant: 'danger',
+      });
+    }
+  }
+
+  private async editSavedServer(server: SavedServer): Promise<void> {
+    const values = await showTextForm({
+      title: t('connection.editSavedServer'),
+      fields: [
+        { label: t('connection.serverNameLabel'), value: server.name || '' },
+        { label: t('connection.hostLabel'), value: server.host, validate: value => value.trim() ? undefined : t('connection.hostLabel') },
+        { label: t('connection.portLabel'), value: String(server.port), validate: value => {
+          const port = Number(value);
+          return Number.isInteger(port) && port >= 1024 && port <= 65535 ? undefined : t('connection.portLabel');
+        } },
+        { label: t('connection.passwordLabel'), value: server.password || '' },
+      ],
+      focusInput: 0,
+    });
+    if (!values) return;
+    const [name, host, portText, password] = values;
+    const port = Number(portText);
+    connectionStore.updateSavedServer(server.host, server.port, {
+      host: host.trim(),
+      port,
+      name: name.trim() || server.name,
+      password: password || undefined,
+      iconUrl: server.iconUrl,
+      lastConnected: server.lastConnected || Date.now(),
+    });
+  }
+
+  private async toggleFavorite(server: SavedServer): Promise<void> {
+    try {
+      favoritesStore.toggleServer(server);
+      this.render();
+    } catch (error: unknown) {
+      await showAlert({ title: t('common.error'), message: t('favorites.saveFailed'), variant: 'danger' });
+    }
+  }
+
+  private async toggleAutoEntry(server: SavedServer, enabled: boolean): Promise<void> {
+    try {
+      settingsStore.setServerAutoEntry(server, enabled);
+      this.render();
+    } catch (error: unknown) {
+      await showAlert({ title: t('autoEntry.section'), message: t('autoEntry.saveFailed'), variant: 'danger' });
+    }
   }
 
   private bindDragAndDrop(): void {

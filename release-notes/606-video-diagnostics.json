@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "A telemetria dos vídeos agora distingue configuração, envio e reprodução, com informações sobre encoder, limitações e buffer. Você também pode copiar um diagnóstico com histórico recente para ajudar a investigar quedas de qualidade.",
+  "en": "Video telemetry now separates configuration, transmission and playback, with encoder, limitation and buffer information. You can also copy diagnostics with recent history to help investigate quality drops."
+}

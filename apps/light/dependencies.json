@@ -10,9 +10,9 @@
     "revision": "36ea4535a500ac137dbf1f577ce40dc1aaa774ef",
     "boringsslRevision": "ddb2ca4b48fca9a1c468d83dc513b837331843ac",
     "fieldTrials": {
-      "url": "https://webrtc.googlesource.com/src/+/36ea4535a500ac137dbf1f577ce40dc1aaa774ef/api/field_trials.cc?format=TEXT",
-      "sha256": "3b99bc36b5f6a84be1c911fcbdf66cde6e0f682a98c0fb69d18465cde16af52b",
-      "decodedSha256": "b5f82993430c8a1365e5416036b8a2f5dfaa6bf2709e2e2764812927fe358b3c",
+      "url": "https://raw.githubusercontent.com/webrtc-mirror/webrtc/89a301023b5ab034b38a8946996fdbb6ddd69e57/api/field_trials.cc",
+      "upstreamUrl": "https://webrtc.googlesource.com/src/+show/36ea4535a500ac137dbf1f577ce40dc1aaa774ef/api/field_trials.cc?format=TEXT",
+      "sha256": "b5f82993430c8a1365e5416036b8a2f5dfaa6bf2709e2e2764812927fe358b3c",
       "gitBlob": "fc896e1258acdfa2a98fe9aa5c3c872a41b67750"
     },
     "targets": {

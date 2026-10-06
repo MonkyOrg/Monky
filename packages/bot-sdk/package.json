@@ -23,5 +23,5 @@
     "@types/ws": "^8.5.0",
     "typescript": "^5.3.0"
   },
-  "license": "MIT"
+  "license": "GPL-3.0-or-later"
 }

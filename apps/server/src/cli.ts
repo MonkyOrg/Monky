@@ -29,6 +29,7 @@ import {
   listRoles,
 } from './cli/commands/roles';
 import { setConfig, showConfig } from './cli/commands/config';
+import { cliLanguageCommand, cliSettingsMenu } from './cli/commands/cliSettings';
 import { updateCommand, getLocalVersion } from './cli/commands/update';
 import { destroyCommand } from './cli/commands/destroy';
 import {
@@ -75,7 +76,8 @@ ${color('MEMBROS E CARGOS', ANSI.bold)}
   roles delete             Apaga um cargo
 
 ${color('CONFIGURAÇÃO', ANSI.bold)}
-  config                   Exibe a configuração do servidor
+  config                   Abre Configurações (exibe o servidor em scripts)
+  config language [pt-BR|en-US]  Consulta ou altera o idioma do CLI
   config set <chave> [valor]  Altera uma configuração
 
 ${color('OPÇÕES GLOBAIS', ANSI.bold)}
@@ -130,7 +132,8 @@ ${color('MEMBERS & ROLES', ANSI.bold)}
   roles delete             Delete a role
 
 ${color('SETTINGS', ANSI.bold)}
-  config                   Show server configuration
+  config                   Open Settings (show server configuration in scripts)
+  config language [pt-BR|en-US]  Show or change the CLI language
   config set <key> [value] Change a setting
 
 ${color('GLOBAL OPTIONS', ANSI.bold)}
@@ -175,7 +178,7 @@ const SUBCOMMANDS = new Map<string, readonly string[]>([
   ['members', ['list', 'info']],
   ['admin', ['add', 'remove']],
   ['roles', ['list', 'create', 'assign', 'unassign', 'delete']],
-  ['config', ['show', 'set']],
+  ['config', ['show', 'set', 'language']],
 ]);
 
 function commandKind(args: string[]): 'help' | 'version' | 'command' {
@@ -314,6 +317,14 @@ export async function runCommand(globalArgs: GlobalArgs): Promise<void> {
   }
 
   if (section === 'config') {
+    if (action === 'language') {
+      await cliLanguageCommand(rest);
+      return;
+    }
+    if (!action && process.stdin.isTTY && process.stdout.isTTY && !process.env.CI) {
+      await cliSettingsMenu(globalArgs);
+      return;
+    }
     const configAction = action || 'show';
     await runDataCommand(globalArgs, async (dataDir) => {
       await withContext(dataDir, async (ctx) => {
@@ -379,7 +390,7 @@ export async function main(rawArgs: string[] = process.argv.slice(2)): Promise<v
   if (process.stdin.isTTY && process.stdout.isTTY && !process.env.CI) {
     if (language) {
       persistLanguage(language);
-    } else if (!hasLanguage) {
+    } else if (!hasLanguage && !(globalArgs.args[0] === 'config' && globalArgs.args[1] === 'language')) {
       await promptLanguageSelection();
     }
   }

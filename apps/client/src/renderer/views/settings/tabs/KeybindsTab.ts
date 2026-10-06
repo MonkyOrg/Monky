@@ -2,6 +2,7 @@ import { settingsStore } from '../../../stores/settingsStore';
 import { keybindService, KEYBIND_ACTIONS, KeybindActionDefinition } from '../../../core/KeybindService';
 import { t, type TranslationKey } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
+import { enterModal, exitModal } from '../../../utils/modalSurface';
 import { captureShortcut } from '../../../utils/keybind';
 
 export class KeybindsTab {
@@ -125,6 +126,7 @@ export class KeybindsTab {
     `;
 
     document.body.appendChild(backdrop);
+    enterModal(backdrop);
 
     const disposeCapture = captureShortcut(backdrop, backdrop.querySelector('#keybind-capture-box'), (combo) => {
       settingsStore.keybindShortcuts[actionId] = combo;
@@ -142,7 +144,7 @@ export class KeybindsTab {
 
     const cleanup = () => {
       disposeCapture();
-      backdrop.remove();
+      exitModal(backdrop);
     };
 
     backdrop.querySelector('#btn-cancel-action-keybind')?.addEventListener('click', cleanup);

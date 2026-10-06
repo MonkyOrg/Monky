@@ -8,12 +8,23 @@ export const botVoiceContextResultSchema = z.object({
 }).strict();
 export type BotVoiceContextRequest = z.infer<typeof botVoiceContextRequestSchema>;
 export type BotVoiceContextResult = z.infer<typeof botVoiceContextResultSchema>;
-export const botVoiceJoinOptionsSchema = z.object({ invocationId: id.optional() }).strict();
+export const botVoiceJoinOptionsSchema = z.object({
+  invocationId: id.optional(),
+  receiveAudio: z.boolean().optional(),
+}).strict();
 export type BotVoiceJoinOptions = z.infer<typeof botVoiceJoinOptionsSchema>;
 export const botVoiceJoinSchema = botVoiceJoinOptionsSchema.extend({
   channelId: id, isMuted: z.boolean().optional(), isDeafened: z.boolean().optional(),
 }).strict();
 export const botVoiceChannelSchema = z.object({ channelId: id });
+export const botVoiceStateUpdateSchema = z.object({
+  isMuted: z.boolean().optional(), isDeafened: z.boolean().optional(), isSpeaking: z.boolean().optional(),
+}).strict();
+export function isReceivingBotVoice(state: {
+  receivesVoice?: boolean; isDeafened?: boolean; serverDeafened?: boolean;
+} | null | undefined): boolean {
+  return state?.receivesVoice === true && !state.isDeafened && !state.serverDeafened;
+}
 export const botVoiceAuthSchema = z.object({
   currentUser: z.object({ id, sessionId: id }),
   server: z.object({ voiceMode: z.enum(['p2p', 'sfu']) }),
@@ -29,9 +40,15 @@ export const botVoiceParticipantSchema = z.object({
   user: z.object({ id, sessionId: id.optional(), isBot: z.boolean().optional() }),
   voiceState: z.object({
     sessionId: id, channelId: id,
+    isMuted: z.boolean().optional(), isDeafened: z.boolean().optional(), receivesVoice: z.boolean().optional(),
+    botVoicePermissions: z.object({
+      publish: z.boolean(), receive: z.boolean(),
+      publishRequested: z.boolean(), receiveRequested: z.boolean(),
+    }).optional(),
     serverMuted: z.boolean().optional(), serverDeafened: z.boolean().optional(),
   }),
 });
+export type BotVoiceParticipant = z.infer<typeof botVoiceParticipantSchema>;
 export const botVoiceJoinedSchema = z.object({
   channelId: id, sessionId: id,
   user: botVoiceParticipantSchema.shape.user,
@@ -52,8 +69,15 @@ export const botVoiceSignalSchema = z.object({
 });
 export type BotVoiceSignal = z.infer<typeof botVoiceSignalSchema>;
 
-/** P2P bot links have one audio publisher, never a channel-media receiver. */
+/** Legacy publishing policy; reception always requires an explicit grant. */
 export function isBotPublishSignalAllowed(input: unknown, fromBot: boolean): boolean {
+  return isBotVoiceSignalAllowed(input, fromBot, { publish: true, receive: false });
+}
+
+/** A bot link negotiates one microphone, never screen media, video or data. */
+export function isBotVoiceSignalAllowed(
+  input: unknown, fromBot: boolean, permissions: { publish: boolean; receive: boolean },
+): boolean {
   const parsed = botVoiceSignalSchema.safeParse(input);
   if (!parsed.success) return false;
   const signal = parsed.data;
@@ -84,7 +108,11 @@ export function isBotPublishSignalAllowed(input: unknown, fromBot: boolean): boo
     if (section.port === '0' && !section.bundleOnly) return true;
     const direction = section.directions[0] ?? sessionDirections[0] ?? 'sendrecv';
     if (direction === 'inactive') return true;
-    return section.kind === 'audio' && ++audio === 1 && direction === (fromBot ? 'sendonly' : 'recvonly');
+    if (section.kind !== 'audio' || ++audio !== 1) return false;
+    const sends = direction === 'sendonly' || direction === 'sendrecv';
+    const receives = direction === 'recvonly' || direction === 'sendrecv';
+    return (!sends || (fromBot ? permissions.publish : permissions.receive)) &&
+      (!receives || (fromBot ? permissions.receive : permissions.publish));
   });
 }
 
@@ -107,3 +135,26 @@ export const botVoiceTransportSchema = z.object({
   }),
 });
 export type BotVoiceTransportOptions = z.infer<typeof botVoiceTransportSchema>['transportOptions'];
+
+export const botVoiceProducerSchema = z.object({
+  channelId: id, producerId: id, producerSessionId: id, kind: z.literal('audio'),
+  appData: z.object({ mediaType: z.literal('mic') }),
+});
+export type BotVoiceProducer = z.infer<typeof botVoiceProducerSchema>;
+export const botVoiceProducersSchema = z.object({
+  channelId: id, producers: z.array(botVoiceProducerSchema).max(1000),
+  participants: z.array(botVoiceParticipantSchema).max(1000),
+});
+export const botVoiceConsumerSchema = z.object({
+  channelId: id, id, producerId: id, producerSessionId: id, kind: z.literal('audio'),
+  appData: z.object({ mediaType: z.literal('mic') }),
+  rtpParameters: z.object({
+    codecs: z.array(z.object({
+      mimeType: z.string().refine((value) => value.toLowerCase() === 'audio/opus'),
+      payloadType: z.number().int().min(0).max(127),
+      clockRate: z.literal(48000), channels: z.literal(2),
+    })).length(1),
+    encodings: z.array(z.object({ ssrc: z.number().int().min(1).max(0xffffffff) })).length(1),
+  }),
+});
+export type BotVoiceConsumer = z.infer<typeof botVoiceConsumerSchema>;

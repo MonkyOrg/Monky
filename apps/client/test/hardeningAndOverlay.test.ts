@@ -1,0 +1,65 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { stabilizePersonMask } from '../src/renderer/utils/cameraEffects';
+import { registerServerInviteProtocol } from '../src/main/serverInvites';
+import { arrangeOverlayCards, fitOverlayCards } from '../src/renderer/utils/overlayLayout';
+
+test('only an installed app repairs a missing invitation association', () => {
+  let registered = 0;
+  const app = { isPackaged: false, isDefaultProtocolClient: () => false,
+    setAsDefaultProtocolClient: (scheme: string) => { assert.equal(scheme, 'monky'); registered++; return true; } };
+  registerServerInviteProtocol(app);
+  assert.equal(registered, 0);
+  app.isPackaged = true;
+  registerServerInviteProtocol(app);
+  assert.equal(registered, 1);
+  app.isDefaultProtocolClient = () => true;
+  registerServerInviteProtocol(app);
+  assert.equal(registered, 1);
+});
+
+test('overlay cards retain aspect ratio and fit after joins and resizing', () => {
+  for (const [width, height] of [[340, 200], [160, 90], [800, 600]]) {
+    for (const count of [1, 2, 3, 6, 12]) {
+      for (const mode of ['grid', 'horizontal', 'vertical']) {
+        const layout = fitOverlayCards(width, height, count, mode);
+        assert.ok(Math.abs(layout.width / layout.height - 16 / 9) < 0.001);
+        assert.ok(layout.columns * layout.width + (layout.columns - 1) * 6 <= width + 0.001);
+        const rows = Math.ceil(count / layout.columns);
+        assert.ok(rows * layout.height + (rows - 1) * 6 <= height + 0.001);
+      }
+    }
+  }
+});
+
+test('initial fit and subsequent arrangement use the same grid; unconstrained resize fills both dimensions', () => {
+  for (const [width, height] of [[312, 642], [1000, 100], [600, 400]]) {
+    for (const count of [1, 4, 5, 9]) {
+      for (const mode of ['grid', 'horizontal', 'vertical']) {
+        for (const preserve of [true, false]) {
+          const size = fitOverlayCards(width, height, count, mode, preserve);
+          const arranged = arrangeOverlayCards(size, count, mode);
+          assert.equal(size.columns, arranged.columns);
+          assert.ok(arranged.width <= width + 0.001 && arranged.height <= height + 0.001);
+          if (!preserve) {
+            assert.ok(Math.abs(arranged.width - width) < 0.001);
+            assert.ok(Math.abs(arranged.height - height) < 0.001);
+          }
+        }
+      }
+    }
+  }
+});
+
+test('segmentation reduces stationary-edge jitter without lagging fast movements', () => {
+  let previous: Float32Array | null = null;
+  const outputs: number[] = [];
+  for (let frame = 0; frame < 60; frame++) {
+    previous = stabilizePersonMask(new Float32Array([frame % 2 ? 0.55 : 0.45]), previous);
+    if (frame > 10) outputs.push(previous[0]);
+  }
+  assert.ok(Math.max(...outputs) - Math.min(...outputs) < 0.04, 'stationary jitter shrinks by at least 60%');
+  assert.equal(stabilizePersonMask(new Float32Array([0]), previous)[0], 0, 'departing foreground is removed immediately');
+  assert.equal(stabilizePersonMask(new Float32Array([1]), previous)[0], 1, 'new foreground is included immediately');
+  assert.throws(() => stabilizePersonMask(new Float32Array([NaN]), null));
+});

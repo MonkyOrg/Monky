@@ -1,9 +1,10 @@
 const assert = require('node:assert/strict');
+const { randomUUID } = require('node:crypto');
 const http = require('node:http');
 const path = require('node:path');
 const { mock } = require('node:test');
 const { app, BrowserWindow } = require('electron');
-const { MessageType } = require('@monky/shared');
+const { MessageType, rtcSignalSchema } = require('@monky/shared');
 const { createServerFixture } = require('./server_fixture.cjs');
 const { NativeClient } = require('./native_client.cjs');
 
@@ -33,6 +34,10 @@ async function run() {
     const native = new NativeClient(fixture, { nickname: 'Native peer' });
     const auth = await native.wait('authenticated');
     const browser = await fixture.connectHuman('Chromium peer');
+    const subscriptionId = randomUUID();
+    const sendSignal = payload => browser.peer.send(MessageType.RTC_SIGNAL, rtcSignalSchema.parse({
+      ...payload, fromSessionId: browser.auth.currentUser.sessionId, targetSessionId: auth.sessionId, subscriptionId,
+    }));
     const channelId = auth.channels.find(channel => channel.type === 'VOICE').id;
     const bundle = mode === 'sfu' ? require('esbuild').buildSync({
       stdin: { contents: 'export { Device } from "mediasoup-client";', resolveDir: path.resolve(__dirname, '..', '..', 'client') },
@@ -80,9 +85,7 @@ async function run() {
       let event;
       try { event = JSON.parse(text.slice('LIGHT_FIXTURE:'.length)); } catch (error) { fail(error); return; }
       if (event.kind === 'signal') {
-        browser.peer.send(MessageType.RTC_SIGNAL, {
-          ...event.payload, fromSessionId: browser.auth.currentUser.sessionId, targetSessionId: auth.sessionId,
-        });
+        try { sendSignal(event.payload); } catch (error) { fail(error); }
       } else if (event.kind === 'rpc') {
         const accepted = replies.get(event.type);
         if (!accepted) { fail(new Error(`Unexpected browser fixture RPC: ${event.type}`)); return; }
@@ -112,10 +115,12 @@ async function run() {
       [MessageType.VOICE_USER_JOINED]);
     if (mode === 'p2p') {
       const streamId = await evaluate('peerFixture.screenStreamId');
-      browser.peer.send(MessageType.RTC_SIGNAL, {
-        fromSessionId: browser.auth.currentUser.sessionId, targetSessionId: auth.sessionId,
-        signalType: 'screen-audio-meta', streamId,
-      });
+      const videoId = await evaluate('peerFixture.videoStreamId');
+      assert.notEqual(streamId, videoId, 'Screen audio and video must use distinct stream identities');
+      await browser.peer.request(MessageType.VOICE_STATE_UPDATE, {
+        screenShareIds: [videoId], isScreenSharing: true, isSharingScreenAudio: true,
+      }, [MessageType.VOICE_STATE_CHANGED]);
+      sendSignal({ signalType: 'screen-audio-meta', streamId });
     }
     await evaluate('peerFixture.start()');
     await native.untilState(value => {
@@ -250,6 +255,7 @@ async function setupBrowserPeer(config) {
   globalThis.peerFixture = {
     microphoneGain: microphone.gain,
     screenStreamId: screen.destination.stream.id,
+    videoStreamId: video.id,
     complete({ id, result, error }) {
       const request = pending.get(id);
       if (!request) throw new Error('Unexpected fixture RPC completion');

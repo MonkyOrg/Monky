@@ -1,4 +1,5 @@
 import type { TranslationKey } from '../i18n';
+import type { OnboardingShot } from '../views/onboardingShots';
 
 /** A single slide in an in-app tutorial. */
 export interface TutorialStep {
@@ -8,6 +9,8 @@ export interface TutorialStep {
   content: TranslationKey;
   /** Optional tip/callout shown below the main content. */
   tip?: TranslationKey;
+  /** Optional Monky screenshots illustrating the step, in the app language. */
+  images?: { shot: OnboardingShot; alt: TranslationKey }[];
 }
 
 /** Full definition of a step-by-step tutorial rendered by `TutorialViewer`. */

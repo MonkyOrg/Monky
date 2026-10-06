@@ -1,4 +1,5 @@
 import '../styles/tooltips.css';
+import { cancelSurfaceMotion, hideWithMotion, showWithMotion } from '../utils/surfaceMotion';
 
 const HOVER_DELAY = 150;
 const instances = new WeakMap<Document, () => void>();
@@ -41,6 +42,7 @@ export function initTooltips(doc: Document = document): () => void {
   let dismissed = false;
   let timer: number | undefined;
   let disposed = false;
+  let shown = false;
 
   const sourceTitle = (element: Element): string | null =>
     suppressed.get(element)?.value ?? (suppressed.has(element) ? null : element.getAttribute('title'));
@@ -67,8 +69,10 @@ export function initTooltips(doc: Document = document): () => void {
   function hide(): void {
     win!.clearTimeout(timer);
     timer = undefined;
-    tooltip.hidden = true;
-    content.textContent = '';
+    if (shown) {
+      shown = false;
+      hideWithMotion(tooltip, 'popover', () => { content.textContent = ''; });
+    }
     if (anchor) {
       const ids = (anchor.getAttribute('aria-describedby') ?? '').split(/\s+/)
         .filter((id) => id && id !== tooltip.id);
@@ -179,7 +183,7 @@ export function initTooltips(doc: Document = document): () => void {
     const left = Math.max(margin, Math.min(center - width / 2, win!.innerWidth - width - margin));
     const top = below ? rect.bottom + gap : rect.top - height - gap;
     tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${Math.max(margin, Math.min(top, win!.innerHeight - height - margin))}px`;
+    tooltip.style.top = `${Math.max(margin, Math.min(top, win!.innerHeight - height - margin - 4))}px`;
     tooltip.style.setProperty('--tooltip-pointer-x', `${Math.max(12, Math.min(center - left, width - 12))}px`);
     tooltip.dataset.placement = below ? 'bottom' : 'top';
   }
@@ -188,7 +192,9 @@ export function initTooltips(doc: Document = document): () => void {
     timer = undefined;
     if (dismissed || !anchor || !visible(anchor) || !textFor(anchor).trim()) return;
     content.textContent = textFor(anchor);
-    tooltip.hidden = false;
+    const entering = !shown;
+    shown = true;
+    if (entering) showWithMotion(tooltip, 'popover');
     const ids = new Set((anchor.getAttribute('aria-describedby') ?? '').split(/\s+/).filter(Boolean));
     ids.add(tooltip.id);
     anchor.setAttribute('aria-describedby', [...ids].join(' '));
@@ -208,17 +214,17 @@ export function initTooltips(doc: Document = document): () => void {
         if (keyboard && focusTarget) show();
         else timer = win!.setTimeout(show, HOVER_DELAY);
       }
-    } else if (anchor && !tooltip.hidden) {
+    } else if (anchor && shown) {
       if (!visible(anchor) || !textFor(anchor).trim()) hide();
       else {
         if (content.textContent !== textFor(anchor)) content.textContent = textFor(anchor);
         position();
       }
     }
-    if (next && !dismissed && tooltip.hidden && keyboard && focusTarget) {
+    if (next && !dismissed && !shown && keyboard && focusTarget) {
       win!.clearTimeout(timer);
       show();
-    } else if (next && !dismissed && tooltip.hidden && timer === undefined) {
+    } else if (next && !dismissed && !shown && timer === undefined) {
       timer = win!.setTimeout(show, HOVER_DELAY);
     }
   }
@@ -300,6 +306,7 @@ export function initTooltips(doc: Document = document): () => void {
     disposed = true;
     observer.disconnect();
     hide();
+    cancelSurfaceMotion(tooltip);
     for (const [element, state] of suppressed) restore(element, state);
     tooltip.remove();
     doc.removeEventListener('pointerover', onPointerOver, true);

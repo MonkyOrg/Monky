@@ -13,7 +13,10 @@ out/
 release/
 release-server/
 artifacts/
+docs-site/public/install-bot-sdk.cjs
+docs-site/public/install-bot-sdk.cjs.sha256
 .qa/
+.native-screen/
 *.tsbuildinfo
 
 # Módulos Nativos compilados (C/C++)

@@ -9,6 +9,8 @@ import { currentEventOrigin, isForegroundEvent } from '../core/sessionRouting';
 import { getActiveServerStore } from '../stores/serverStore';
 import { settingsStore } from '../stores/settingsStore';
 import { t, type TranslationKey } from '../i18n';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
+import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { enableBackdropClose } from '../utils/modal';
 import { getAvatarUrl } from '../utils/avatar';
 import logoUrl from '../assets/Logo.png';
@@ -23,6 +25,8 @@ import { ServerNotificationsTab } from './serverSettings/tabs/ServerNotification
 import { ServerMembersTab } from './serverSettings/tabs/ServerMembersTab';
 import { ServerRolesTab } from './serverSettings/tabs/ServerRolesTab';
 import { ServerBotsTab } from './serverSettings/tabs/ServerBotsTab';
+import { ServerCommunitySettings } from './serverSettings/ServerCommunitySettings';
+import { sessionManager } from '../core/SessionManager';
 import { SettingsSectionNavigation } from './settings/SettingsSectionNavigation';
 import { ServerSettingsOperations } from './serverSettings/ServerSettingsOperations';
 import type { ServerSettingsContext } from './serverSettings/ServerSettingsContext';
@@ -51,6 +55,7 @@ export class ServerSettingsModal {
   private storageTab = new ServerStorageTab();
   private rolesTab = new ServerRolesTab();
   private botsTab = new ServerBotsTab();
+  private communitySettings: ServerCommunitySettings | null = null;
 
   public open(initialTab?: string): void {
     if (!this.close()) return;
@@ -60,6 +65,8 @@ export class ServerSettingsModal {
     const sessionId = store.currentUser?.sessionId;
     const userId = store.currentUser?.id;
     if (!serverId) return;
+    const community = sessionManager.getActive()?.community;
+    this.communitySettings = community ? new ServerCommunitySettings(community) : null;
     this.invalidated = false;
     this.activeTab = initialTab ?? this.activeTab;
 
@@ -87,7 +94,7 @@ export class ServerSettingsModal {
     };
 
     const tabs = [
-      { id: 'general', icon: 'tune', title: 'serverSettings.tabGeneral', permission: Permission.MANAGE_SERVER, html: this.generalTab.renderHtml() },
+      { id: 'general', icon: 'tune', title: 'serverSettings.tabGeneral', permission: undefined, html: this.generalTab.renderHtml(this.communitySettings) },
       { id: 'security', icon: 'lock', title: 'serverSettings.tabSecurity', permission: Permission.MANAGE_SERVER, html: new ServerSecurityTab().renderHtml() },
       { id: 'voice_video', icon: 'music_note', title: 'serverSettings.tabVoiceVideo', permission: Permission.MANAGE_SERVER, html: new ServerVoiceVideoTab().renderHtml() },
       { id: 'storage', icon: 'cloud', title: 'serverSettings.tabStorage', permission: Permission.MANAGE_SERVER, html: this.storageTab.renderHtml() },
@@ -141,6 +148,7 @@ export class ServerSettingsModal {
         </div>
       </div>`;
     document.body.appendChild(this.modalEl);
+    enterModal(this.modalEl);
     this.domEvents = new AbortController();
     this.attachEvents();
     this.sectionNavigation = new SettingsSectionNavigation(this.modalEl);
@@ -170,13 +178,12 @@ export class ServerSettingsModal {
     const context = this.context;
     if (!root || !context) return;
     const options = { signal: this.domEvents.signal };
+    if (this.communitySettings) this.unbind.push(this.communitySettings.attach(root, context));
     root.querySelector('#modal-close')?.addEventListener('click', () => this.close(), options);
     root.querySelector('#btn-done')?.addEventListener('click', () => this.close(), options);
     root.addEventListener('mousedown', (event) => { if (event.target === root) this.close(); }, options);
     const escape = (event: KeyboardEvent) => {
-      const backdrops = document.querySelectorAll('.modal-backdrop');
-      if (event.key !== 'Escape' || backdrops.item(backdrops.length - 1) !== root) return;
-      if (root.querySelector('.color-picker-popover:popover-open')) return;
+      if (event.key !== 'Escape' || !handlesModalKey(root, event)) return;
       event.preventDefault();
       this.close();
     };
@@ -190,6 +197,15 @@ export class ServerSettingsModal {
       button.addEventListener('click', () => this.switchTab(button.dataset.tab ?? 'general'), options);
     });
     const details = () => context.store.serverDetails;
+    const messageLimitPatch = (): ServerUpdateSettingsPayload => {
+      const value = Number(root.querySelector<HTMLInputElement>('#input-message-limit')?.value);
+      return { maxMessageLength: root.querySelector<HTMLInputElement>('#toggle-message-limit')?.checked
+        ? value >= 1 ? value : Number.NaN : 0 };
+    };
+    this.bindSetting('#toggle-message-limit', 'messageLength', 'serverSettings.messageLimit',
+      () => String((details()?.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH) > 0), messageLimitPatch);
+    this.bindSetting('#input-message-limit', 'messageLength', 'serverSettings.messageLimit',
+      () => String(details()?.maxMessageLength || LIMITS.MAX_MESSAGE_LENGTH), messageLimitPatch);
     this.bindSetting('#input-server-name', 'name', 'serverSettings.nameLabel',
       () => details()?.name ?? '', (value) => ({ name: value.trim() }));
     this.bindSetting('#input-server-pass', 'password', 'invite.passwordLabel', () => '',
@@ -213,10 +229,21 @@ export class ServerSettingsModal {
       (value) => ({ maxAttachmentStorageBytes: Math.round(Number(value) * 1024 * 1024) }));
     this.bindSetting('#checkbox-allow-soundboard', 'soundboard', 'serverSettings.allowSoundboard',
       () => String(details()?.allowSoundboard !== false), (value) => ({ allowSoundboard: value === 'true' }));
+    this.bindSetting('#checkbox-recent-sounds', 'recentSounds', 'serverSettings.recentSounds',
+      () => String(Boolean(details()?.recentSoundCacheEnabled)),
+      (value) => ({ recentSoundCacheEnabled: value === 'true' }));
+    this.bindSetting('#input-recent-sounds-limit', 'recentSoundsLimit', 'serverSettings.recentSoundsLimit',
+      () => String(details()?.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT),
+      (value) => ({ recentSoundCacheLimit: Number(value) }));
+    this.bindSetting('#checkbox-dm-relay-enabled', 'dmRelay', 'serverSettings.dmRelayEnabled',
+      () => String(details()?.dmRelayEnabled !== false), (value) => ({ dmRelayEnabled: value === 'true' }));
     this.bindSetting('#checkbox-allow-everyone-mention', 'everyone', 'serverSettings.allowEveryoneMention',
       () => String(details()?.allowEveryoneMention !== false), (value) => ({ allowEveryoneMention: value === 'true' }));
     this.bindSetting('#checkbox-allow-message-edit', 'messageEdit', 'serverSettings.allowMessageEdit',
       () => String(details()?.allowMessageEdit !== false), (value) => ({ allowMessageEdit: value === 'true' }));
+    this.bindSetting('#input-delete-undo', 'deleteUndo', 'serverSettings.deleteUndo',
+      () => String(details()?.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS),
+      value => ({ messageDeleteUndoSeconds: Number(value) }));
     this.bindSetting('#checkbox-show-role-badges', 'roleBadges', 'roles.badgeVisibility',
       () => String(details()?.showRoleBadgesToEveryone !== false), (value) => ({ showRoleBadgesToEveryone: value === 'true' }));
     this.bindSetting('#checkbox-turn-enabled', 'turn', 'serverSettings.turnEnabled',
@@ -245,7 +272,9 @@ export class ServerSettingsModal {
       void context.operations.run('icon', t('serverSettings.iconAlt'), Permission.MANAGE_SERVER, async () => {
         const action = await this.showIconActionModal(Boolean(details()?.iconUrl));
         if (!action) return;
-        const image = action === 'change' ? await pickAndCropImage() : null;
+        const image = action === 'change' ? await pickAndCropImage(
+          root.querySelector<HTMLElement>('#server-icon-wrapper')!,
+        ) : null;
         if (action === 'change' && !image) return;
         await context.request<ServerSettingsUpdatedPayload>(
           MessageType.SERVER_UPDATE_SETTINGS, { iconBase64: image }, Permission.MANAGE_SERVER, 11 * 60 * 1000,
@@ -378,12 +407,20 @@ export class ServerSettingsModal {
       const permission = Number(fieldset.dataset.serverPermission);
       fieldset.disabled = this.invalidated || (!fieldset.hasAttribute('data-server-local') && !store.hasPermission(permission));
     });
+    const allowSoundboard = root.querySelector<HTMLInputElement>('#checkbox-allow-soundboard')?.checked !== false;
+    const recentSounds = root.querySelector<HTMLInputElement>('#checkbox-recent-sounds');
+    if (recentSounds) recentSounds.disabled = pending || !allowSoundboard;
+    const recentLimit = root.querySelector<HTMLInputElement>('#input-recent-sounds-limit');
+    if (recentLimit) recentLimit.disabled = pending || !allowSoundboard || !recentSounds?.checked;
     for (const [tab, permission] of [['members', Permission.MANAGE_ROLES], ['roles', Permission.MANAGE_ROLES], ['bots', Permission.MANAGE_BOTS]] as const) {
       const button = root.querySelector<HTMLButtonElement>(`[data-tab="${tab}"]`);
       if (button) button.hidden = !store.hasPermission(permission) && !(tab === 'roles' && store.hasPermission(Permission.MANAGE_SERVER));
       if (button?.hidden && this.activeTab === tab) this.switchTab('general');
     }
-    if (this.invalidated || !context.isCurrent()) return;
+    if (this.invalidated || !context.isCurrent()) {
+      this.rolesTab.refreshState();
+      return;
+    }
     for (const binding of this.bindings) {
       binding.input.setAttribute('aria-busy', String(operations.isPending(binding.key)));
       if (operations.isPending(binding.key) || binding.dirty) continue;
@@ -395,7 +432,7 @@ export class ServerSettingsModal {
     const s = store.serverDetails;
     if (!s) return;
     const limitGroup = root.querySelector<HTMLElement>('#max-users-group');
-    if (limitGroup) limitGroup.hidden = !root.querySelector<HTMLInputElement>('#checkbox-limit-members')?.checked;
+    if (limitGroup) setSurfaceVisible(limitGroup, !!root.querySelector<HTMLInputElement>('#checkbox-limit-members')?.checked);
     if (!operations.isPending('voiceMode')) this.syncVoiceCards(s.voiceMode ?? 'p2p');
     const voiceCards = root.querySelector('#server-voice-mode-cards');
     voiceCards?.setAttribute('aria-busy', String(operations.isPending('voiceMode')));
@@ -434,6 +471,7 @@ export class ServerSettingsModal {
     this.rolesTab.refreshState();
     this.botsTab.refreshPermissions();
     this.storageTab.refreshState(root);
+    this.communitySettings?.refreshState(root, context);
   }
 
   private syncVoiceCards(mode: 'p2p' | 'sfu'): void {
@@ -468,10 +506,11 @@ export class ServerSettingsModal {
         </div>`;
       const settle = (result: 'change' | 'remove' | null) => {
         document.removeEventListener('keydown', keydown, true);
-        backdrop.remove();
+        exitModal(backdrop);
         resolve(result);
       };
       const keydown = (event: KeyboardEvent) => {
+        if (!handlesModalKey(backdrop, event)) return;
         if (event.key === 'Escape') { event.stopPropagation(); settle(null); }
       };
       backdrop.querySelectorAll<HTMLButtonElement>('[data-action]').forEach((button) => {
@@ -483,6 +522,7 @@ export class ServerSettingsModal {
       enableBackdropClose(backdrop, () => settle(null));
       document.addEventListener('keydown', keydown, true);
       document.body.appendChild(backdrop);
+      enterModal(backdrop);
     });
   }
 
@@ -491,7 +531,7 @@ export class ServerSettingsModal {
     const stage = this.modalEl?.querySelector('#turn-install-stage');
     const percent = this.modalEl?.querySelector('#turn-install-percent');
     const fill = this.modalEl?.querySelector<HTMLElement>('#turn-install-bar-fill');
-    if (panel) panel.hidden = false;
+    if (panel) setSurfaceVisible(panel, true);
     if (stage) stage.textContent = t('serverSettings.turnInstallTitle');
     if (percent) percent.textContent = '0%';
     if (fill) fill.style.width = '0%';
@@ -507,13 +547,14 @@ export class ServerSettingsModal {
       if (percent) percent.textContent = `${value}%`;
       if (fill) fill.style.width = `${value}%`;
     });
-    return () => { unsubscribe(); if (panel) panel.hidden = true; };
+    return () => { unsubscribe(); if (panel) setSurfaceVisible(panel, false); };
   }
 
   private finishEditing(): void {
     // Public close/reopen and Escape do not naturally blur an input. Committing
     // before checking the lock closes those otherwise easy-to-miss paths.
     for (const binding of this.bindings) if (binding.dirty) binding.commit();
+    this.rolesTab.finishEditing();
     const active = document.activeElement;
     if ((active instanceof HTMLInputElement || active instanceof HTMLSelectElement || active instanceof HTMLTextAreaElement) &&
       this.modalEl?.contains(active)) active.blur();
@@ -530,7 +571,7 @@ export class ServerSettingsModal {
     this.unbind = [];
     this.rolesTab.detachEvents();
     this.botsTab.detachEvents();
-    this.modalEl.remove();
+    exitModal(this.modalEl);
     this.modalEl = null;
     this.context = null;
     this.bindings = [];

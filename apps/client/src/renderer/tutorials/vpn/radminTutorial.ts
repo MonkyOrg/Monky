@@ -25,6 +25,7 @@ export const radminTutorial: TutorialDefinition = {
     {
       title: 'tutorial.radmin.step5.title',
       content: 'tutorial.radmin.step5.content',
+      images: [{ shot: 'add-server-create', alt: 'tutorial.shotCreateAlt' }, { shot: 'invite-radmin', alt: 'tutorial.shotInviteAlt' }],
       tip: 'tutorial.radmin.step5.tip',
     },
   ],

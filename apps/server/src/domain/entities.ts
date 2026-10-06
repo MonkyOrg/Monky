@@ -3,6 +3,8 @@ import { ChannelType, UserStatus, VoiceMode } from '@monky/shared';
 export type { VoiceRestrictions } from '@monky/shared';
 
 export interface ServerRecord {
+  everyonePermissions?: number;
+  maxMessageLength?: number;
   id: string;
   name: string;
   passwordHash: string;
@@ -10,9 +12,13 @@ export interface ServerRecord {
   maxUsers: number;
   ownerUserId?: string | null;
   allowSoundboard?: boolean;
+  dmRelayEnabled?: boolean;
+  recentSoundCacheEnabled?: boolean;
+  recentSoundCacheLimit?: number;
   /** Whether `@todos` / `@everyone` pings the whole channel (#464). */
   allowEveryoneMention?: boolean;
   allowMessageEdit?: boolean;
+  messageDeleteUndoSeconds?: number;
   /**
    * Whether role badges in the member list are shown to everyone (#530).
    * When off, a badge is only visible to members who hold that same role.
@@ -48,6 +54,12 @@ export interface UserRecord {
 }
 
 export interface ChannelRecord {
+  permissionOverwrites?: import('@monky/shared').ChannelPermissionOverwrite[];
+  forumId?: string | null;
+  forumLocked?: boolean;
+  forumClosed?: boolean;
+  categoryId?: string | null;
+  inheritCategoryPermissions?: boolean;
   botCommandsEnabled: boolean;
   id: string;
   serverId: string;
@@ -56,13 +68,15 @@ export interface ChannelRecord {
   position: number;
   createdAt: number;
   maxParticipants: number;
-  /** Private channels (#384). */
+  /** Effective privacy, including inherited category access. */
   isPrivate: boolean;
-  /** Roles allowed in, loaded from `channel_allowed_roles`. */
+  /** Effective allowed roles. Repository reads resolve inheritance centrally. */
   allowedRoleIds: string[];
 }
 
 export interface MessageRecord {
+  blocks?: import('@monky/shared').MessageBlock[];
+  localizations?: import('@monky/shared').BotMessageLocalizations;
   replyToMessageId?: string;
   /** The owner backs the existing user FK; readers expose the bot's real ID. */
   botAuthor?: { id: string; name: string; avatarPath: string | null; ownerUserId: string };
@@ -77,6 +91,28 @@ export interface MessageRecord {
   editedAt?: number | null;
   /** Set when the message was deleted; its content is blanked at the same time (#504). */
   deletedAt?: number | null;
+  revision?: number;
+  deletedByUserId?: string | null;
+  deleteUndoUntil?: number | null;
+}
+
+export interface NativePollRecord {
+  id: string;
+  messageId: string;
+  channelId: string;
+  creatorUserId: string;
+  question: string;
+  allowMultiple: boolean;
+  imagePaths: string[];
+  options: Array<{ id: string; label: string; emoji: string | null }>;
+  allowChange: boolean;
+  closesAt: number | null;
+  maxVoters: number | null;
+  closedAt: number | null;
+  liveAction: boolean;
+  createdAt: number;
+  revision: number;
+  audience: import('@monky/shared').ResourceAudience;
 }
 
 export interface MentionRecord {
@@ -119,6 +155,7 @@ export interface RoleRecord {
   name: string;
   color: string | null;
   position: number;
+  /** Bits the role grants on top of Everyone. */
   permissions: number;
   isDefault: boolean;
   createdAt: number;

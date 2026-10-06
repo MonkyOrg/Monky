@@ -25,6 +25,8 @@ import { getActiveChatStore, type BotInvocation, type ChatStore, type CommandDra
 import { type ServerStore } from '../stores/serverStore';
 import { t, type TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
+import { cancelSurfaceMotion } from '../utils/surfaceMotion';
 import { renderLoadingIndicator } from '../utils/loadingIndicator';
 import { getAvatarUrl } from '../utils/avatar';
 import {
@@ -38,7 +40,9 @@ import {
   visibleCommandValues,
   type BotInputField,
 } from '../utils/botInputs';
-import { applyBotFieldAction, readBotFieldChange, renderBotFields, type BotFieldContext } from './botFields';
+import { addBotFieldImage, applyBotFieldAction, readBotFieldChange, renderBotFields, type BotFieldContext } from './botFields';
+import { imageCarouselNavigationButton, moveImageCarousel } from './ImageCarousel';
+import { cropDroppedImages, readDroppedImages } from './ImageCropModal';
 import {
   commandParameterChoices, commandParameterHint, commandParameterLabel, commandParameterError, renderCompactCommand,
   renderParameterChoices, renderParameterChoiceItems,
@@ -58,6 +62,7 @@ import { botSettingsMenuItem } from './BotSettingsModal';
 import { contextMenu } from './ContextMenu';
 import { currentEventOrigin } from '../core/sessionRouting';
 import { commandVoiceContextKey, commandVoiceError } from '../utils/botVoice';
+import { smoothScrollIntoView } from '../utils/scroll';
 import { translateProtocolError } from '../i18n/protocolErrors';
 
 const FINISH_KEYS: Record<Exclude<BotInvocation['status'], 'active'>, TranslationKey> = {
@@ -204,6 +209,9 @@ export class BotChatView {
       root.addEventListener('input', this.onInput);
       root.addEventListener('change', this.onInput);
       root.addEventListener('click', this.onClick);
+      root.addEventListener('dragover', this.onImageDragOver);
+      root.addEventListener('dragleave', this.onImageDragLeave);
+      root.addEventListener('drop', this.onImageDrop);
       root.addEventListener('contextmenu', this.onContextMenu);
       root.addEventListener('submit', this.onSubmit);
       root.addEventListener('keydown', this.onKeyDown);
@@ -219,6 +227,9 @@ export class BotChatView {
         root.removeEventListener('input', this.onInput);
         root.removeEventListener('change', this.onInput);
         root.removeEventListener('click', this.onClick);
+        root.removeEventListener('dragover', this.onImageDragOver);
+        root.removeEventListener('dragleave', this.onImageDragLeave);
+        root.removeEventListener('drop', this.onImageDrop);
         root.removeEventListener('contextmenu', this.onContextMenu);
         root.removeEventListener('submit', this.onSubmit);
         root.removeEventListener('keydown', this.onKeyDown);
@@ -330,9 +341,9 @@ export class BotChatView {
 
   private canSend(): boolean {
     const channel = this.server.serverDetails?.channels.find((candidate) => candidate.id === this.channelId);
-    return channel?.type === 'TEXT' && channel.botCommandsEnabled &&
-      this.server.hasPermission(Permission.USE_BOT_COMMANDS) &&
-      this.server.hasPermission(Permission.SEND_MESSAGES) && this.client.getStatus() === 'CONNECTED';
+    return (channel?.type === 'TEXT' || channel?.type === 'VOICE') && channel.botCommandsEnabled &&
+      this.server.hasPermission(Permission.USE_BOT_COMMANDS, this.channelId) &&
+      this.server.hasPermission(Permission.SEND_MESSAGES, this.channelId) && this.client.getStatus() === 'CONNECTED';
   }
 
   private voiceError(command: Pick<SlashCommand, 'botId' | 'voiceRequirement'>): string | undefined {
@@ -445,9 +456,8 @@ export class BotChatView {
       } : undefined;
     this.closeParameterMenu();
     const draft = this.store.getCommandDraft(this.channelId);
-    this.composer.hidden = !draft;
     if (!draft) {
-      this.composer.innerHTML = '';
+      setSurfaceVisible(this.composer, false, 'panel', undefined, () => this.composer.replaceChildren());
       this.onComposerChanged();
       return;
     }
@@ -458,6 +468,7 @@ export class BotChatView {
       botLocaleFor(this.client, this.server, draft.command.botId),
       this.preparingCommand === draft,
     );
+    setSurfaceVisible(this.composer, true);
     this.onComposerChanged();
     if (menu?.kind === 'autocomplete') this.openAutocomplete(menu.fieldName);
     else if (menu) this.openParameterMenu(menu, activeChoice);
@@ -559,6 +570,7 @@ export class BotChatView {
         prefix: `${invocation.invocationId}-${form.interactionId}`,
         disabled: !this.canSend() || !!this.voiceError(invocation) || invocation.status !== 'active' || invocation.cancelPending || form.status !== 'editing',
         volumeScope: commandPreviewVolumeScope(this.server.serverDetails?.id, invocation.botId, invocation.commandName),
+        imageUpload: { client: this.client, channelId: this.channelId },
       },
       save: (values) => this.store.setFormValues(invocation.invocationId, form.interactionId, values),
     };
@@ -701,7 +713,6 @@ export class BotChatView {
     }
     const element = this.composer.querySelector<HTMLElement>('#bot-parameter-options');
     if (!element) return;
-    element.hidden = false;
     element.innerHTML = renderParameterChoices(choices, menu.activeIndex,
       menu.kind === 'optional' ? t('botChat.addParameters') : t('botChat.parameterChoices', {
         name: commandParameterLabel(this.localizedCommand(draft.command), menu.fieldName),
@@ -709,6 +720,7 @@ export class BotChatView {
       this.parameterChoiceScope(menu.kind === 'optional' ? 'optional' : menu.fieldName),
       commandPreviewVolumeScope(this.server.serverDetails?.id, draft.command.botId, draft.command.name));
     element.style.left = '';
+    setSurfaceVisible(element, true, 'popover');
     trigger?.setAttribute('aria-expanded', 'true');
     trigger?.setAttribute('aria-controls', 'bot-parameter-options');
     element.querySelectorAll<HTMLElement>('[data-parameter-option]').forEach((option) => {
@@ -725,7 +737,7 @@ export class BotChatView {
       option.classList.toggle('active', active);
       option.setAttribute('aria-selected', String(active));
       option.tabIndex = active ? 0 : -1;
-      if (active && scroll) option.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      if (active && scroll) smoothScrollIntoView(option, { block: 'nearest', inline: 'nearest' });
     });
     this.parameterMenuTrigger()?.setAttribute('aria-activedescendant', `bot-parameter-option-${index}`);
   }
@@ -745,7 +757,7 @@ export class BotChatView {
     this.menuChoices = [];
     audioPreviewService.release(this.composer);
     const element = this.composer.querySelector<HTMLElement>('#bot-parameter-options');
-    if (element) { element.hidden = true; element.innerHTML = ''; }
+    if (element) setSurfaceVisible(element, false, 'popover', undefined, () => element.replaceChildren());
     trigger?.setAttribute('aria-expanded', 'false');
     trigger?.removeAttribute('aria-controls');
     trigger?.removeAttribute('aria-activedescendant');
@@ -1050,7 +1062,7 @@ export class BotChatView {
     } as const;
     const busy = state.status === 'loading' || state.status === 'preparing';
     const message = state.status === 'failed' && state.error ? state.error : t(keys[state.status]);
-    menu.hidden = false;
+    setSurfaceVisible(menu, true, 'popover');
     const label = t('botChat.parameterChoices', { name: commandParameterLabel(this.localizedCommand(draft.command), fieldName) });
     const volumeScope = commandPreviewVolumeScope(this.server.serverDetails?.id, draft.command.botId, draft.command.name);
     if (continuing) {
@@ -1183,6 +1195,8 @@ export class BotChatView {
   private onClick = (event: Event): void => {
     if (!(event.target instanceof HTMLElement) || !this.isCurrent()) return;
     if (event.defaultPrevented || audioPreviewService.ownsEventTarget(event.target)) return;
+    const carouselButton = imageCarouselNavigationButton(event.target);
+    if (carouselButton?.closest('[data-field-type="image-list"]') && moveImageCarousel(carouselButton)) return;
     const parameterOption = event.target.closest<HTMLElement>('[data-parameter-option]');
     if (parameterOption && this.composer.contains(parameterOption)) {
       event.preventDefault();
@@ -1213,10 +1227,20 @@ export class BotChatView {
       this.autocomplete.loadMore();
     } else if (button.dataset.botSelectValue !== undefined) {
       this.chooseBotSelectValue(button);
-    } else if (button.dataset.fieldAction) {
+    } else if (button.dataset.fieldAction || button.dataset.carouselEdit) {
       const binding = this.fieldBinding(button);
       if (!binding) return;
       const error = button.closest('form')?.querySelector<HTMLElement>('.bot-error');
+      if (button.dataset.carouselEdit === 'add' || button.dataset.fieldAction === 'image-add') {
+        button.disabled = true;
+        void addBotFieldImage(button, binding.fields, binding.values, binding.context)
+          .then(values => { if (values) binding.save(values); })
+          .catch(failure => {
+            if (error) { error.textContent = failure instanceof Error ? failure.message : t('poll.imageUploadFailed'); error.hidden = false; }
+          })
+          .finally(() => { if (button.isConnected) button.disabled = false; });
+        return;
+      }
       const values = applyBotFieldAction(button, binding.fields, binding.values, binding.context);
       if (values) {
         binding.save(values);
@@ -1227,6 +1251,52 @@ export class BotChatView {
       const id = button.closest<HTMLElement>('[data-invocation-id]')?.dataset.invocationId;
       if (id) void this.cancelInvocation(id);
     }
+  };
+
+  private onImageDragOver = (event: DragEvent): void => {
+    const dropzone = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-carousel-dropzone]') : null;
+    if (!dropzone || dropzone.disabled || !this.isCurrent()) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    dropzone.classList.add('is-dragging');
+  };
+
+  private onImageDragLeave = (event: DragEvent): void => {
+    const dropzone = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-carousel-dropzone]') : null;
+    if (dropzone && (!event.relatedTarget || !dropzone.contains(event.relatedTarget as Node))) {
+      dropzone.classList.remove('is-dragging');
+    }
+  };
+
+  private onImageDrop = (event: DragEvent): void => {
+    const dropzone = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-carousel-dropzone]') : null;
+    if (!dropzone || dropzone.disabled || !event.dataTransfer?.files.length || !this.isCurrent()) return;
+    const binding = this.fieldBinding(dropzone);
+    if (!binding) return;
+    const fieldName = dropzone.closest<HTMLElement>('[data-field-name]')?.dataset.fieldName;
+    const field = binding.fields.find(entry => entry.name === fieldName);
+    if (field?.type !== 'image-list') return;
+    event.preventDefault();
+    dropzone.classList.remove('is-dragging');
+    dropzone.disabled = true;
+    const prepare = field.presentation?.fit === 'contain'
+      ? readDroppedImages(event.dataTransfer.files, field.maxItems ?? LIMITS.MAX_LIVE_ACTION_IMAGES)
+      : cropDroppedImages(
+          event.dataTransfer.files,
+          field.maxItems ?? LIMITS.MAX_LIVE_ACTION_IMAGES,
+          field.presentation?.format ?? 'banner',
+        );
+    void prepare
+      .then(images => addBotFieldImage(dropzone, binding.fields, binding.values, binding.context, images))
+      .then(values => { if (values) binding.save(values); })
+      .catch(failure => {
+        const error = dropzone.closest('form')?.querySelector<HTMLElement>('.bot-error');
+        if (error) {
+          error.textContent = failure instanceof Error ? failure.message : t('poll.imageUploadFailed');
+          error.hidden = false;
+        }
+      })
+      .finally(() => { if (dropzone.isConnected) dropzone.disabled = false; });
   };
 
   private onSubmit = (event: Event): void => {
@@ -1500,6 +1570,10 @@ export class BotChatView {
   public destroy(): void {
     this.cancelLocalPreparation();
     this.closeParameterMenu();
+    const options = this.composer.querySelector<HTMLElement>('#bot-parameter-options');
+    if (options) { cancelSurfaceMotion(options); options.hidden = true; options.replaceChildren(); }
+    cancelVisibilityMotion(this.composer);
+    this.composer.hidden = true;
     this.destroyed = true;
     if (this.expiryTimer) clearTimeout(this.expiryTimer);
     this.expiryTimer = null;

@@ -3,13 +3,20 @@ import { escapeHtml } from '../utils/html';
 import { type BotInputField } from '../utils/botInputs';
 import { t } from '../i18n';
 import { choicesHaveAudio, renderAudioPreviewVolume, renderSelectionChoiceList } from '../utils/selectionChoices';
+import type { NetworkClient } from '../core/NetworkClient';
+import { communityImagePreview, uploadCommunityImage } from '../utils/communityImages';
+import { pickAndCropImages, pickImages } from './ImageCropModal';
+import { renderImageCarouselEditor, renderImageDropzone } from './ImageCarousel';
 
 export interface BotFieldContext {
   prefix: string;
   disabled: boolean;
+  nativeForm?: boolean;
+  readOnly?: boolean;
   members?: Pick<UserSummary, 'id' | 'nickname'>[];
   volumeScope?: string;
   persistentSelection?: boolean;
+  imageUpload?: { client: NetworkClient; channelId: string };
 }
 
 function listRows(field: BotInputField, value: BotFormValues[string] | undefined): string[] {
@@ -42,7 +49,20 @@ export function renderBotField(field: BotInputField, values: BotFormValues, cont
   const placeholder = 'placeholder' in field ? field.placeholder : undefined;
   const common = `id="${id}" name="${name}" data-bot-input ${disabled} aria-required="${!!field.required}"`;
   let control: string;
-  if (field.type === 'boolean') {
+  if (field.type === 'rating') {
+    const selected = typeof value === 'number' ? value : 0;
+    control = `<div class="native-form-rating" id="${id}" role="group" aria-label="${escapeHtml(field.label)}">
+      ${Array.from({ length: 5 }, (_, index) => {
+        const rating = index + 1;
+        return `<button type="button" data-field-action="set-rating" data-rating-value="${rating}"
+          aria-label="${escapeHtml(t('liveForm.ratingValue', { value: rating }))}"
+          aria-pressed="${selected === rating}" ${disabled}>
+          <span class="native-form-rating-number" aria-hidden="true">${rating}</span>
+          <span class="material-symbols-outlined" aria-hidden="true">${selected >= rating ? 'star' : 'star_outline'}</span>
+        </button>`;
+      }).join('')}
+    </div>`;
+  } else if (field.type === 'boolean') {
     const state = typeof value === 'boolean'
       ? t(value ? 'botChat.switchOn' : 'botChat.switchOff')
       : t('botChat.skipped');
@@ -52,6 +72,23 @@ export function renderBotField(field: BotInputField, values: BotFormValues, cont
         <span class="toggle-slider"></span>
       </label>
       <span class="bot-switch-value">${state}</span>
+    </div>`;
+  } else if (field.type === 'image-list') {
+    const images = Array.isArray(value) ? value : [];
+    const max = field.maxItems ?? LIMITS.MAX_LIVE_ACTION_IMAGES;
+    const previews = images.map(ref => communityImagePreview(ref) ??
+      'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=');
+    control = `<div class="bot-image-inputs">
+      ${images.length ? renderImageCarouselEditor(previews, {
+        label: field.label,
+        addLabel: t('botChat.addImage'),
+        removeLabel: t('botChat.removeImage'),
+        moveBackLabel: t('botChat.moveImageBack'),
+        moveForwardLabel: t('botChat.moveImageForward'),
+        disabled: context.disabled,
+        addDisabled: images.length >= max,
+        presentation: field.presentation ?? {},
+      }) : renderImageDropzone(context.disabled || images.length >= max, field.presentation)}
     </div>`;
   } else if (field.type === 'select' && choicesHaveAudio(field.choices)) {
     control = `<div class="bot-field-choice-list" id="${id}" data-bot-choice-list="${name}" tabindex="-1" aria-label="${escapeHtml(field.label)}">
@@ -68,10 +105,35 @@ export function renderBotField(field: BotInputField, values: BotFormValues, cont
         optionAttributes: (choice) => `data-bot-select-value="${escapeHtml(choice.value)}" data-bot-select-submit="${field.presentation === 'buttons' ? 'true' : 'false'}"`,
       })}
     </div>`;
+  } else if (field.type === 'select' && field.presentation === 'buttons' && context.nativeForm) {
+    control = `<div class="native-form-choice-list native-form-choice-list--single" id="${id}" role="group" aria-label="${escapeHtml(field.label)}">
+      ${field.choices.map((choice) => `<button type="button" class="native-form-choice-option"
+        data-bot-select-value="${escapeHtml(choice.value)}" aria-pressed="${choice.value === value}" ${disabled}>
+        <span class="native-form-answer-marker" aria-hidden="true"></span>
+        <span>${escapeHtml(choice.label)}</span>
+      </button>`).join('')}
+    </div>`;
   } else if (field.type === 'select' && field.presentation === 'buttons') {
     control = `<div class="bot-choice-buttons" id="${id}" role="group" aria-label="${escapeHtml(field.label)}">
       ${field.choices.map((choice) => `<button type="button" class="btn btn-secondary"
         data-bot-select-value="${escapeHtml(choice.value)}" ${disabled}${context.persistentSelection ? ` aria-pressed="${choice.value === value}"` : ''}>${escapeHtml(choice.label)}</button>`).join('')}
+    </div>`;
+  } else if (field.type === 'multi-select' && context.nativeForm) {
+    const selected = Array.isArray(value) ? value : [];
+    control = `<div class="native-form-choice-list native-form-choice-list--multiple" id="${id}" role="group" aria-label="${escapeHtml(field.label)}">
+      ${field.choices.map(choice => `<button type="button" class="native-form-choice-option"
+        data-field-action="toggle-choice" data-choice-value="${escapeHtml(choice.value)}"
+        aria-pressed="${selected.includes(choice.value)}" ${disabled}>
+        <span class="native-form-answer-marker" aria-hidden="true"></span>
+        <span>${escapeHtml(choice.label)}</span>
+      </button>`).join('')}
+    </div>`;
+  } else if (field.type === 'multi-select') {
+    const selected = Array.isArray(value) ? value : [];
+    control = `<div class="bot-choice-buttons" id="${id}" role="group" aria-label="${escapeHtml(field.label)}">
+    ${field.choices.map(choice => `<button type="button" class="btn btn-secondary"
+      data-field-action="toggle-choice" data-choice-value="${escapeHtml(choice.value)}"
+      aria-pressed="${selected.includes(choice.value)}" ${disabled}>${escapeHtml(choice.label)}</button>`).join('')}
     </div>`;
   } else if (field.type === 'select' || field.type === 'user') {
     const choices = field.type === 'select'
@@ -105,16 +167,22 @@ export function renderBotField(field: BotInputField, values: BotFormValues, cont
       ? `<textarea class="input-field bot-textarea" rows="2" ${common} maxlength="${field.maxLength ?? LIMITS.MAX_MESSAGE_LENGTH}"
           placeholder="${escapeHtml(prompt)}">
 ${escapeHtml(text)}</textarea>`
-      : `<input class="input-field" type="text" ${field.type === 'integer' ? 'inputmode="numeric"' : ''}
-          ${common} value="${escapeHtml(text)}" ${field.type === 'text' ? `maxlength="${field.maxLength ?? LIMITS.MAX_MESSAGE_LENGTH}"` : 'maxlength="30"'}
+      : `<input class="input-field" type="${field.type === 'integer' ? 'number' : 'text'}" ${field.type === 'integer'
+        ? `inputmode="numeric" step="1"${field.min !== undefined ? ` min="${field.min}"` : ''}${field.max !== undefined ? ` max="${field.max}"` : ''}`
+        : ''}
+          ${common} value="${escapeHtml(text)}" ${field.type === 'text' ? `maxlength="${field.maxLength ?? LIMITS.MAX_MESSAGE_LENGTH}"` : ''}
           placeholder="${escapeHtml(prompt)}">`;
   }
   const hint = constraints(field);
-  return `<div class="bot-field" data-field-name="${name}">
+  const hasValue = value !== undefined && value !== null
+    && (typeof value !== 'string' || value.trim().length > 0)
+    && (!Array.isArray(value) || value.length > 0);
+  return `<div class="bot-field${context.nativeForm ? ' native-form-question' : ''}" data-field-name="${name}" data-field-type="${field.type}">
     <div class="bot-field-heading">
       <label for="${field.type === 'string-list' ? `${id}-0` : id}">${escapeHtml(field.label)}</label>
-      <span class="bot-field-requirement">${t(field.required ? 'botChat.required' : 'botChat.optional')}</span>
-      ${!field.required ? `<button type="button" class="bot-field-clear" data-field-action="clear" ${disabled}>${t('botChat.clear')}</button>` : ''}
+      <span class="bot-field-requirement${field.required ? ' bot-field-requirement--required' : ''}">${t(field.required ? 'botChat.required' : 'botChat.optional')}</span>
+      ${!field.required && !context.readOnly ? `<button type="button" class="bot-field-clear" data-field-action="clear"
+        ${context.nativeForm && !hasValue ? 'hidden' : ''} ${disabled}>${t(context.nativeForm ? 'common.clear' : 'botChat.clear')}</button>` : ''}
     </div>
     ${field.description ? `<div class="bot-field-description">${escapeHtml(field.description)}</div>` : ''}
     ${control}
@@ -124,7 +192,7 @@ ${escapeHtml(text)}</textarea>`
 
 export function renderBotFields(fields: BotInputField[], values: BotFormValues, context: BotFieldContext): string {
   const hasAudio = fields.some((field) => field.type === 'select' && choicesHaveAudio(field.choices));
-  return `<div class="bot-fields">${hasAudio ? renderAudioPreviewVolume(context.volumeScope ?? context.prefix) : ''}
+  return `<div class="bot-fields${context.nativeForm ? ' native-form-fields' : ''}${context.readOnly ? ' native-form-fields--readonly' : ''}">${hasAudio ? renderAudioPreviewVolume(context.volumeScope ?? context.prefix) : ''}
     ${fields.map((field) => renderBotField(field, values, context)).join('')}</div>`;
 }
 
@@ -162,6 +230,17 @@ export function applyBotFieldAction(
   const next = { ...values };
   if (button.dataset.fieldAction === 'clear' && !field.required) {
     delete next[field.name];
+  } else if (field.type === 'rating' && button.dataset.fieldAction === 'set-rating') {
+    const rating = Number(button.dataset.ratingValue);
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) return null;
+    next[field.name] = rating;
+  } else if (field.type === 'multi-select' && button.dataset.fieldAction === 'toggle-choice') {
+    const value = button.dataset.choiceValue;
+    if (!value || !field.choices.some(choice => choice.value === value)) return null;
+    const selected = Array.isArray(values[field.name]) ? [...values[field.name] as string[]] : [];
+    next[field.name] = selected.includes(value)
+      ? selected.filter(entry => entry !== value)
+      : [...selected, value];
   } else if (field.type === 'string-list') {
     const rows = [...listRows(field, values[field.name])];
     if (button.dataset.fieldAction === 'add' && rows.length < (field.maxItems ?? LIMITS.MAX_BOT_FORM_LIST_ITEMS)) rows.push('');
@@ -171,11 +250,63 @@ export function applyBotFieldAction(
       rows.splice(index, 1);
     } else return null;
     next[field.name] = rows;
+  } else if (field.type === 'image-list') {
+    const images = Array.isArray(values[field.name]) ? [...values[field.name] as string[]] : [];
+    const index = Number(button.dataset.listIndex ??
+      button.closest<HTMLElement>('[data-image-carousel]')?.dataset.carouselIndex);
+    const action = button.dataset.carouselEdit ?? button.dataset.fieldAction?.replace('image-', '');
+    if (action === 'remove' && Number.isInteger(index) && index >= 0 && index < images.length) {
+      images.splice(index, 1);
+    } else if ((action === 'back' || action === 'forward') && Number.isInteger(index)) {
+      const target = index + (action === 'back' ? -1 : 1);
+      if (target < 0 || target >= images.length) return null;
+      [images[index], images[target]] = [images[target], images[index]];
+    } else return null;
+    next[field.name] = images;
   } else return null;
+  const parent = root.parentElement;
   root.outerHTML = renderBotField(field, next, context);
+  if (field.type === 'multi-select' || field.type === 'rating') {
+    const selector = field.type === 'multi-select'
+      ? `[data-choice-value="${CSS.escape(button.dataset.choiceValue ?? '')}"]`
+      : `[data-rating-value="${CSS.escape(button.dataset.ratingValue ?? '')}"]`;
+    parent?.querySelector<HTMLElement>(
+      `[data-field-name="${CSS.escape(field.name)}"] ${selector}`,
+    )?.focus();
+    return next;
+  }
   const rows = field.type === 'string-list' ? listRows(field, next[field.name]) : [];
   const index = button.dataset.fieldAction === 'add' ? rows.length - 1 :
     Math.min(Number(button.dataset.listIndex ?? 0), Math.max(0, rows.length - 1));
   document.getElementById(`${context.prefix}-${field.name}${field.type === 'string-list' ? `-${index}` : ''}`)?.focus();
+  return next;
+}
+
+export async function addBotFieldImage(
+  button: HTMLButtonElement,
+  fields: BotInputField[],
+  values: BotFormValues,
+  context: BotFieldContext,
+  droppedImages?: string[],
+): Promise<BotFormValues | null> {
+  if (context.disabled || !context.imageUpload ||
+      (button.dataset.carouselEdit ?? button.dataset.fieldAction?.replace('image-', '')) !== 'add') return null;
+  const root = button.closest<HTMLElement>('[data-field-name]');
+  const field = fields.find(entry => entry.name === root?.dataset.fieldName);
+  if (!root || field?.type !== 'image-list') return null;
+  const images = Array.isArray(values[field.name]) ? [...values[field.name] as string[]] : [];
+  const remaining = (field.maxItems ?? LIMITS.MAX_LIVE_ACTION_IMAGES) - images.length;
+  if (remaining <= 0) return null;
+  const selected = droppedImages?.slice(0, remaining) ??
+    (field.presentation?.fit === 'contain'
+      ? await pickImages(button, remaining)
+      : await pickAndCropImages(button, remaining, field.presentation?.format ?? 'banner'));
+  if (selected.length === 0) return null;
+  const uploaded = [];
+  for (const data of selected) {
+    uploaded.push(await uploadCommunityImage(context.imageUpload.client, context.imageUpload.channelId, data));
+  }
+  const next = { ...values, [field.name]: [...images, ...uploaded.map(image => image.ref)] };
+  root.outerHTML = renderBotField(field, next, context);
   return next;
 }

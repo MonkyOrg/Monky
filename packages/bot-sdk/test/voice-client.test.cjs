@@ -6,6 +6,7 @@ const path = require('node:path');
 const { WebSocketServer } = require('ws');
 const { RTCPeerConnection } = require('werift');
 const { BotClient, MessageType } = require('../dist');
+const { rtcSignalSchema } = require('@monky/shared');
 const { opusCodec } = require('../dist/voice/OpusPeer');
 const { BotVoiceConnection, validateOpus } = require('../dist/voice/BotVoiceConnection');
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -29,13 +30,16 @@ test('text-only BotClient does not load the WebRTC transport dependency', () => 
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
-async function fixture(t, withHuman = false) {
+async function fixture(t, withHuman = false, {
+  requestedCapabilities = ['commands', 'publish_voice'], grantedCapabilities = requestedCapabilities,
+} = {}) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await once(server, 'listening');
   let socket;
   let joins = 0;
   const joinPayloads = [];
   const voiceUpdates = [];
+  const rtcSignals = [];
   const remote = new RTCPeerConnection({ codecs: { audio: [opusCodec()] }, iceServers: [] });
   const packets = [];
   let received;
@@ -54,28 +58,34 @@ async function fixture(t, withHuman = false) {
       } else if (msg.type === MessageType.VOICE_JOIN) {
         joins++;
         joinPayloads.push(msg.payload);
+        const joined = { ...self, voiceState: { ...self.voiceState, receivesVoice: msg.payload.receiveAudio === true,
+          botVoicePermissions: {
+            publish: grantedCapabilities.includes('publish_voice'), receive: grantedCapabilities.includes('receive_voice'),
+            publishRequested: requestedCapabilities.includes('publish_voice'), receiveRequested: requestedCapabilities.includes('receive_voice'),
+          } } };
         send(MessageType.VOICE_USER_JOINED, {
-          channelId: 'voice', sessionId: self.voiceState.sessionId, ...self,
-          participants: withHuman ? [self, human] : [self],
+          channelId: 'voice', sessionId: self.voiceState.sessionId, ...joined,
+          participants: withHuman ? [joined, human] : [joined],
         }, msg.requestId);
       } else if (msg.type === MessageType.VOICE_LEAVE) {
         send(MessageType.VOICE_USER_LEFT, { channelId: 'voice', sessionId: self.voiceState.sessionId }, msg.requestId);
       } else if (msg.type === MessageType.VOICE_STATE_UPDATE) {
         voiceUpdates.push(msg.payload);
       } else if (msg.type === MessageType.RTC_SIGNAL && msg.payload.signalType === 'offer') {
+        rtcSignals.push(msg.payload);
         signaling = signaling.then(async () => {
           await remote.setRemoteDescription(msg.payload.sdp);
           await remote.setLocalDescription(await remote.createAnswer());
           send(MessageType.RTC_SIGNAL, {
             fromSessionId: human.voiceState.sessionId, targetSessionId: self.voiceState.sessionId,
-            signalType: 'answer', sdp: remote.localDescription,
+            signalType: 'answer', subscriptionId: 'human-peer-epoch', sdp: remote.localDescription,
           });
         }).catch((error) => errors.push(error));
       }
     });
   });
   function send(type, payload, requestId) { socket.send(JSON.stringify({ type, payload, requestId })); }
-  const bot = new BotClient({ publicKey: 'a'.repeat(64), requestedCapabilities: ['commands', 'publish_voice'], token: 'token', serverUrl: `ws://127.0.0.1:${server.address().port}`, autoReconnect: false });
+  const bot = new BotClient({ publicKey: 'a'.repeat(64), requestedCapabilities, token: 'token', serverUrl: `ws://127.0.0.1:${server.address().port}`, autoReconnect: false });
   bot.on('error', (error) => errors.push(error));
   const connected = once(bot, 'connected');
   bot.connect({ serverId: 'server' });
@@ -87,13 +97,14 @@ async function fixture(t, withHuman = false) {
     for (const ws of server.clients) ws.terminate();
     await new Promise((resolve) => server.close(resolve));
   });
-  return { bot, send, packets, delivered, errors, joinPayloads, voiceUpdates, joins: () => joins, remote, disconnect: () => socket.close() };
+  return { bot, send, packets, delivered, errors, joinPayloads, voiceUpdates, rtcSignals, joins: () => joins, remote, disconnect: () => socket.close() };
 }
 
 test('invocation voice join options travel only with their admission request', async (t) => {
   const f = await fixture(t);
   await assert.rejects(f.bot.joinVoice('server', 'voice', { invocationId: '' }), /Invalid voice join options/);
   await assert.rejects(f.bot.joinVoice('server', 'voice', { sessionId: 'forged' }), /Invalid voice join options/);
+  await assert.rejects(f.bot.joinVoice('server', 'voice', { receiveAudio: true }), /Declare receive_voice/);
   await f.bot.joinVoice('server', 'voice', { invocationId: 'command-invocation' });
   assert.equal(f.joinPayloads[0].invocationId, 'command-invocation');
   assert.equal(f.joinPayloads[0].isMuted, false);
@@ -105,12 +116,37 @@ test('invocation voice join options travel only with their admission request', a
   assert.deepEqual(f.errors, []);
 });
 
+test('concurrent receive joins share admission and honor its authoritative publication grant', async t => {
+  const f = await fixture(t, false, {
+    requestedCapabilities: ['commands', 'publish_voice', 'receive_voice'],
+    grantedCapabilities: ['commands', 'receive_voice'],
+  });
+  const first = f.bot.joinVoice('server', 'voice', { receiveAudio: true });
+  const second = f.bot.joinVoice('server', 'voice', { receiveAudio: true });
+  assert.equal(first, second);
+  const voice = await first;
+  assert.equal(f.joins(), 1);
+  assert.equal(voice.isReceivingAudio, true);
+  await assert.rejects(voice.writeOpus(SILENCE), /receive-only/);
+  await assert.rejects(f.bot.joinVoice('server', 'voice'), /reception/);
+  const receiver = voice.receiveAudio();
+  const pending = receiver.next();
+  const disconnected = once(f.bot, 'voiceDisconnected');
+  f.disconnect();
+  await disconnected;
+  assert.equal((await pending).done, true);
+  assert.equal(voice.isReceivingAudio, false);
+  assert.deepEqual(f.errors, []);
+});
 test('BotClient joins once, preserves transport on roster changes, sends real Opus and leaves cleanly', { timeout: 30000 }, async (t) => {
   const f = await fixture(t, true);
   const first = f.bot.joinVoice('server', 'voice');
   const second = f.bot.joinVoice('server', 'voice');
   assert.equal(first, second);
   const voice = await first;
+  assert.equal(f.rtcSignals.length, 1);
+  assert.equal(rtcSignalSchema.safeParse(f.rtcSignals[0]).success, true);
+  assert.match(f.rtcSignals[0].subscriptionId, /^[a-f0-9-]{36}$/);
   assert.equal(f.joins(), 1);
   assert.equal(voice.humanParticipantCount, 1);
   await assert.rejects(f.bot.joinVoice('server', 'other'), /Leave/);

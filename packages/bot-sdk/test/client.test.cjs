@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { WebSocketServer } = require('ws');
+const { MIN_BOT_PROTOCOL } = require('@monky/shared');
 const {
   BotClient, BOT_CAPABILITIES, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, resolveBotSettingsValues,
   getCommandPresentation, localizeCommand,
@@ -96,7 +97,7 @@ function makeBot(t, server, options = {}) {
 }
 
 test('bot capabilities require an explicit supported declaration without inferred access', async (t) => {
-  for (const requestedCapabilities of [undefined, ['receive_voice'], ['commands', 'commands']]) {
+  for (const requestedCapabilities of [undefined, ['receive_camera'], ['commands', 'commands']]) {
     assert.throws(() => new BotClient({ publicKey: 'a'.repeat(64), requestedCapabilities }));
   }
   const server = await makeServer(t);
@@ -109,6 +110,8 @@ test('bot capabilities require an explicit supported declaration without inferre
   assert.throws(() => bot.command({ name: 'local', description: 'Missing local grant declaration',
     localCapabilities: ['media.search'], handler() {} }), /requestedCapabilities/);
   const passive = makeBot(t, server, { requestedCapabilities: [] }).bot;
+  const voiceListener = makeBot(t, server, { requestedCapabilities: ['receive_voice'] }).bot;
+  assert.deepEqual(voiceListener.options.requestedCapabilities, ['receive_voice']);
   assert.throws(() => passive.command({ name: 'ping', description: 'Undeclared commands', handler() {} }), /requestedCapabilities/);
   const listener = await bot.serve({ name: 'Declared bot', host: '127.0.0.1', port: 0 });
   const manifest = await (await fetch(`http://127.0.0.1:${listener.address().port}/manifest`)).json();
@@ -570,6 +573,75 @@ function registerAt(listener, registration) {
   });
 }
 
+test('native live actions bind invocation/channel and correlate updates, submissions and closure', { timeout: 10000 }, async t => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  let action;
+  bot.command({ name: 'live', description: 'Native interaction', handler: async ctx => {
+    action = await ctx.createLiveAction({
+      title: 'Form', description: '', content: { kind: 'form', form }, expiresAt: Date.now() + 60000,
+      imageAssetRefs: ['f2b47144-577a-4ea0-8d09-93e0d39a6b6e'],
+      audience: { visibility: 'private', userIds: ['audience-user'], roleIds: ['audience-role'] },
+    });
+  } });
+  const connected = once(bot, 'connected');
+  bot.connect({ serverId: 'live-server' });
+  await connected;
+  server.invoke('live-invocation', 'live');
+  const create = await server.next(MessageType.LIVE_ACTION_CREATE);
+  assert.equal(create.payload.channelId, 'channel-one');
+  assert.equal(create.payload.invocationId, 'live-invocation');
+  assert.deepEqual(create.payload.imageAssetRefs, ['f2b47144-577a-4ea0-8d09-93e0d39a6b6e']);
+  assert.deepEqual(create.payload.audience,
+    { visibility: 'private', userIds: ['audience-user'], roleIds: ['audience-role'] });
+  const { invocationId, imageAssetRefs: _imageAssetRefs, ...definition } = create.payload;
+  const snapshot = {
+    ...definition, imageUrls: [], id: 'live-one', botId: 'bot-one',
+    creatorUserId: 'live-invocation', createdAt: 1, revision: 0,
+  };
+  server.send(MessageType.LIVE_ACTION_SNAPSHOT, snapshot, create.requestId);
+  await server.next(MessageType.COMMAND_FINISH);
+  assert.equal(action.id, snapshot.id);
+  const listing = bot.listLiveActions('live-server');
+  const list = await server.next(MessageType.LIVE_ACTION_LIST);
+  server.send(MessageType.LIVE_ACTION_LIST_RESULT, { liveActions: [snapshot] }, list.requestId);
+  assert.deepEqual((await listing)[0].audience, snapshot.audience);
+  const updatePromise = bot.updateLiveAction('live-server', {
+    id: snapshot.id, expectedRevision: 0, title: 'Updated', audience: { visibility: 'public' },
+  });
+  const update = await server.next(MessageType.LIVE_ACTION_UPDATE);
+  assert.deepEqual(update.payload.audience, { visibility: 'public' });
+  server.send(MessageType.LIVE_ACTION_SNAPSHOT,
+    { ...snapshot, title: 'Updated', audience: { visibility: 'public' }, revision: 1 }, update.requestId);
+  assert.equal((await updatePromise).revision, 1);
+  await assert.rejects(bot.updateLiveAction('live-server', {
+    id: snapshot.id, expectedRevision: 1,
+    audience: { visibility: 'private', userIds: [], roleIds: [] },
+  }));
+  const publicCreation = bot.createLiveAction('live-server', {
+    channelId: 'channel-one', invocationId: 'public-invocation', title: 'Public',
+    description: '', content: { kind: 'form', form }, expiresAt: Date.now() + 60000,
+  });
+  const publicCreate = await server.next(MessageType.LIVE_ACTION_CREATE);
+  assert.deepEqual(publicCreate.payload.audience, { visibility: 'public' });
+  const { invocationId: _publicInvocationId, ...publicDefinition } = publicCreate.payload;
+  server.send(MessageType.LIVE_ACTION_SNAPSHOT, {
+    ...publicDefinition, id: 'live-public', botId: 'bot-one',
+    creatorUserId: 'human', imageUrls: [], createdAt: 2, revision: 0,
+  }, publicCreate.requestId);
+  assert.deepEqual((await publicCreation).audience, { visibility: 'public' });
+  const submitted = once(bot, 'liveActionSubmission');
+  const submission = { id: snapshot.id, expectedRevision: 1, values: { answer: 'hello' }, locale: 'en',
+    submissionId: 'submission-one', channelId: 'channel-one', userId: 'human', userNickname: 'Human' };
+  server.send(MessageType.LIVE_ACTION_SUBMITTED, submission);
+  assert.deepEqual((await submitted)[0], submission);
+  const closing = bot.closeLiveAction('live-server', snapshot.id);
+  const close = await server.next(MessageType.LIVE_ACTION_CLOSE);
+  server.send(MessageType.COMMUNITY_ACK, {}, close.requestId);
+  await closing;
+  assert.equal(errors.length, 0);
+});
+
 test('durable selectors correlate acknowledgements, emit updates and outlive invocations', { timeout: 10000 }, async (t) => {
   const server = await makeServer(t);
   const { bot, errors } = makeBot(t, server);
@@ -619,8 +691,10 @@ test('durable selectors correlate acknowledgements, emit updates and outlive inv
   const closedSelector = { ...selector, closedAt: 2 };
   server.send(MessageType.SELECTOR_SNAPSHOT, closedSelector, closeRequest.requestId);
   await close;
-  const finalize = bot.finalizeSelector('selector-server', selector.id, 'Final result');
+  const localizations = { 'pt-BR': 'Resultado final', en: 'Final result' };
+  const finalize = bot.finalizeSelector('selector-server', selector.id, { content: 'Final result', localizations });
   const finalRequest = await server.next(MessageType.SELECTOR_FINALIZE);
+  assert.deepEqual(finalRequest.payload.localizations, localizations);
   server.send(MessageType.SELECTOR_SNAPSHOT, { ...closedSelector, resultMessageId: 'final-one' }, finalRequest.requestId);
   assert.equal((await finalize).resultMessageId, 'final-one');
   const denied = bot.closeSelector('selector-server', 'another-bots-selector');
@@ -641,15 +715,19 @@ test('public message reply option preserves trusted acknowledgement metadata', {
   const connected = once(bot, 'connected');
   bot.connect({ serverId: 'reply-server' });
   await connected;
-  const sent = bot.sendMessage('reply-server', 'channel-one', 'Answer', { replyToMessageId: 'original' });
+  const localizations = { 'pt-BR': 'Resposta', en: 'Answer' };
+  const sent = bot.sendMessage('reply-server', 'channel-one', { content: 'Answer', localizations }, { replyToMessageId: 'original' });
   const frame = await server.next(MessageType.CHAT_SEND);
+  assert.deepEqual(frame.payload.localizations, localizations);
   assert.equal(frame.payload.replyToMessageId, 'original');
   const reply = { messageId: 'original', userNickname: 'Alice', content: 'Question', deleted: false, hasAttachments: false };
   server.send(MessageType.CHAT_MESSAGE, {
     id: 'response', channelId: 'channel-one', userId: 'bot-one', userNickname: 'Answer bot',
-    content: frame.payload.content, createdAt: Date.now(), isBot: true, reply,
+    content: frame.payload.content, localizations: frame.payload.localizations, createdAt: Date.now(), isBot: true, reply,
   }, frame.requestId);
   assert.deepEqual((await sent).reply, reply);
+  assert.deepEqual((await sent).localizations, localizations);
+  await assert.rejects(bot.sendMessage('reply-server', 'channel-one', { content: 'Fallback', localizations: { en: '' } }));
   await assert.rejects(bot.sendMessage('reply-server', 'channel-one', 'Invalid', { replyToMessageId: '' }));
   await bot.close();
   assert.deepEqual(errors, []);
@@ -757,7 +835,7 @@ test('named options retain their types and public output is explicit', { timeout
     handler: (ctx) => {
       context = ctx;
       ctx.reply('Only you');
-      ctx.publish('For the channel');
+      ctx.publish({ content: 'For the channel', localizations: { 'pt-BR': 'Para o canal', en: 'For the channel' } });
     },
   });
   bot.connect();
@@ -770,6 +848,7 @@ test('named options retain their types and public output is explicit', { timeout
   assert.equal(context.locale, 'en');
   assert.equal(privateReply.payload.ephemeral, true);
   assert.equal(publicReply.payload.ephemeral, false);
+  assert.deepEqual(publicReply.payload.localizations, { 'pt-BR': 'Para o canal', en: 'For the channel' });
   assert.equal(privateReply.payload.invocationId, 'typed');
   assert.equal(completed.payload.failed, false);
   assert.equal(context.signal.aborted, true);
@@ -1312,7 +1391,7 @@ test('a protocol mismatch can recover after the server is updated', { timeout: 1
         type: MessageType.SERVER_ERROR,
         payload: {
           code: ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED,
-          message: 'Update the server.', serverProtocolVersion: PROTOCOL_VERSION - 1,
+          message: 'Update the server.', serverProtocolVersion: MIN_BOT_PROTOCOL - 1,
         },
       }
       : { type: MessageType.AUTH_SUCCESS, payload: {} })),
@@ -1332,6 +1411,28 @@ const autocompleteOptions = [
   { name: 'count', description: 'Count', type: 'integer', min: 0, max: 10 },
   { name: 'enabled', description: 'Enabled', type: 'boolean' },
 ];
+
+test('new SDK reconnects using the known legacy bot contract without an update warning', async t => {
+  const offered = [];
+  const server = await makeServer(t, { authenticate: (ws, message) => {
+    offered.push(message.payload);
+    ws.send(JSON.stringify(offered.length === 1
+      ? { type: MessageType.SERVER_ERROR, payload: { code: ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED, serverProtocolVersion: 24 } }
+      : { type: MessageType.AUTH_SUCCESS, payload: {} }));
+  } });
+  const { bot, errors } = makeBot(t, server);
+  bot.command({ name: 'ping', description: 'Ping', handler() {} });
+  bot.connect();
+  await server.next(MessageType.COMMAND_REGISTER);
+  assert.deepEqual(offered.map(offer => offer.protocolVersion), [36, 24]);
+  assert.equal(PROTOCOL_VERSION, 36);
+  assert.equal(offered[0].protocolOffer.minimumVersion, 24);
+  assert.equal(offered[0].publicKey, offered[1].publicKey);
+  assert.equal(offered[0].botToken, offered[1].botToken);
+  assert.equal(offered[0].protocolOffer.features.includes('chat-blocks'), false);
+  assert.equal(offered[0].protocolOffer.features.includes('message-delete-undo'), false);
+  assert.equal(errors.length, 0);
+});
 const soundDownloadRequest = { url: 'https://example.com/sound.mp3', fileName: 'sound.mp3', title: 'Sound' };
 
 function autocompleteRequest(query, options = {}) {
@@ -2002,7 +2103,7 @@ test('settings validate defaults, register cloned declarations and hydrate immut
   const declaration = settingsDefinition();
   const expected = structuredClone(declaration);
   const snapshot = serverSettings();
-  assert.equal(PROTOCOL_VERSION, 21);
+  assert.equal(PROTOCOL_VERSION, 36);
   assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
   assert.equal(bot.settings(declaration), bot);
   const invalid = settingsDefinition();

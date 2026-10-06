@@ -1,8 +1,9 @@
 import type { SelectionChoice } from './selection.js';
 import type { CommandLocalizations } from './botLocales.js';
 import type { LocalCapabilityId } from './localExecution.js';
+import type { NativeScreenSource } from './screenSharing.js';
 
-export type ChannelType = 'VOICE' | 'TEXT';
+export type ChannelType = 'VOICE' | 'TEXT' | 'FORUM';
 
 export type VoiceMode = 'p2p' | 'sfu';
 
@@ -69,6 +70,8 @@ export interface UserActivity {
 export interface UserSummary {
   id: string;
   clientId: string;
+  /** Full normalized Ed25519 SPKI public key for human identities. */
+  publicKey?: string;
   nickname: string;
   avatarUrl?: string | null;
   status: UserStatus;
@@ -98,7 +101,26 @@ export interface UserSummary {
   activity?: UserActivity | null;
 }
 
+export interface ChannelCategory {
+  permissionOverwrites?: import('./permissions.js').ChannelPermissionOverwrite[];
+  id: string;
+  serverId: string;
+  name: string;
+  position: number;
+  createdAt: number;
+  isPrivate: boolean;
+  allowedRoleIds: string[];
+}
+
 export interface ChannelSummary {
+  /** Effective rules, resolved from the category or forum parent by the server. */
+  permissionOverwrites?: import('./permissions.js').ChannelPermissionOverwrite[];
+  forumId?: string | null;
+  forumLocked?: boolean;
+  forumClosed?: boolean;
+  /** No category means this channel uses its own access rules. */
+  categoryId?: string | null;
+  inheritCategoryPermissions?: boolean;
   botCommandsEnabled: boolean;
   id: string;
   serverId: string;
@@ -108,7 +130,10 @@ export interface ChannelSummary {
   createdAt: number;
   maxParticipants?: number;
   /**
-   * Restricts the channel to members holding one of `allowedRoleIds` (#384).
+   * Effective access: inherited from the category unless overridden.
+   * Canonical access is governed by `permissionOverwrites`; allowedRoleIds is
+   * the legacy visibility projection. Migrated private channels can allow
+   * Everyone while retaining this flag to exclude bots.
    * The server never sends a channel the recipient cannot access, so receiving
    * one already means it is visible to you — this flag only drives the UI badge
    * and the editing form.
@@ -116,7 +141,7 @@ export interface ChannelSummary {
   isPrivate: boolean;
   /**
    * Roles allowed into a private channel. Empty on public channels, and also
-   * valid on a private one, where it means "managers only".
+   * valid on a private one. Owners and administrators always bypass its rules.
    */
   allowedRoleIds: string[];
 }
@@ -162,6 +187,9 @@ export interface BotCommandContext {
 
 /** Resolved by the server from the original, never supplied by the sender. */
 export interface MessageReply {
+  createdAt?: number;
+  isBot?: boolean;
+  localizations?: import('./botMessages.js').BotMessageLocalizations;
   messageId: string;
   userNickname: string;
   content: string;
@@ -170,6 +198,9 @@ export interface MessageReply {
 }
 
 export interface ChatMessage {
+  botComponents?: import('./botCarousels.js').BotMessageComponent[];
+  blocks?: import('./messageBlocks.js').ResolvedMessageBlock[];
+  localizations?: import('./botMessages.js').BotMessageLocalizations;
   reply?: MessageReply;
   reactions?: import('./reactions.js').MessageReaction[];
   id: string;
@@ -191,6 +222,10 @@ export interface ChatMessage {
    * would silently rewrite the conversation for everyone reading it.
    */
   deletedAt?: number | null;
+  /** Monotonic server revision prevents delayed edit/delete events undoing a restoration. */
+  revision?: number;
+  deletedByUserId?: string | null;
+  deleteUndoUntil?: number | null;
   /**
    * True when this message is only visible to the invoking user (#569).
    * Ephemeral messages are not persisted and disappear on reconnect.
@@ -199,6 +234,8 @@ export interface ChatMessage {
   isBot?: boolean;
   /** Server-authenticated attribution; private argument values are never included. */
   botCommand?: BotCommandContext;
+  /** Native poll attached to this message, personalized with the current member's vote. */
+  poll?: import('./nativePolls.js').NativePoll;
 }
 
 export interface Role {
@@ -206,7 +243,10 @@ export interface Role {
   name: string;
   color: string | null;
   position: number;
+  /** Bits this role grants on top of Everyone. Servers before 36.1 send a full mask instead. */
   permissions: number;
+  /** Denied bits; only 36.1 servers send it. */
+  deny?: number;
   isDefault: boolean;
 }
 
@@ -225,6 +265,7 @@ export interface VoiceRosterParticipant {
 export interface VoiceRestrictions {
   serverMuted: boolean;
   serverDeafened: boolean;
+  permissionMuted?: boolean;
 }
 
 export interface VoiceParticipantState extends VoiceRestrictions {
@@ -238,6 +279,15 @@ export interface VoiceParticipantState extends VoiceRestrictions {
   isCameraOn: boolean;
   isScreenSharing: boolean;
   isSharingScreenAudio: boolean;
+  /** Server-authorized bot microphone reception; never granted by a renderer update. */
+  receivesVoice?: boolean;
+  /** Requested and granted bot directions, independent of administrative mute/deafen. */
+  botVoicePermissions?: {
+    publish: boolean;
+    receive: boolean;
+    publishRequested: boolean;
+    receiveRequested: boolean;
+  };
   /** SFU transport health, measured by the server rather than signaling presence. */
   connectionHealth?: VoiceConnectionHealth;
   /**
@@ -248,6 +298,8 @@ export interface VoiceParticipantState extends VoiceRestrictions {
    * source of truth for clients that predate this field.
    */
   screenShareIds?: string[];
+  /** Descriptors only: native capture starts when an authenticated viewer watches. */
+  nativeScreenShares?: NativeScreenSource[];
 }
 
 /** CPU and RAM of the machine hosting the server, as measured by the server. */
@@ -303,6 +355,8 @@ export interface SlashCommand {
 
 /** A bot account visible in the management UI. */
 export interface BotInfo {
+  protocolCompatible?: boolean;
+  minimumProtocolVersion?: number;
   id: string;
   name: string;
   avatarUrl?: string | null;
@@ -328,6 +382,9 @@ export interface BotCompatibilitySummary {
 // ── End bot types ─────────────────────────────────────────────────────────
 
 export interface ServerDetails {
+  everyonePermissions?: number;
+  protocol?: import('./protocolCompatibility.js').ProtocolAgreement;
+  maxMessageLength?: number;
   id: string;
   name: string;
   /** Version of the running server, not the connected desktop application. */
@@ -336,6 +393,9 @@ export interface ServerDetails {
   maxUsers: number;
   hasPassword?: boolean;
   allowSoundboard?: boolean;
+  dmRelayEnabled?: boolean;
+  recentSoundCacheEnabled?: boolean;
+  recentSoundCacheLimit?: number;
   /** Whether `@todos` / `@everyone` mentions the whole channel (#464). */
   allowEveryoneMention?: boolean;
   /**
@@ -343,6 +403,7 @@ export interface ServerDetails {
    * allowed: this switch is about rewriting history, not about taking it back.
    */
   allowMessageEdit?: boolean;
+  messageDeleteUndoSeconds?: number;
   /**
    * Whether role badges in the member list are visible to everyone (#530).
    * When false, each badge is only rendered for members holding that role.
@@ -368,6 +429,7 @@ export interface ServerDetails {
   hostSpecs?: HostSpecs;
   iconUrl?: string | null;
   channels: ChannelSummary[];
+  categories?: ChannelCategory[];
   /** One entry per live connection: a user signed in from two devices appears twice (#309). */
   members: UserSummary[];
   // All users who have ever connected (online + offline), used to allow
@@ -430,14 +492,32 @@ export interface TurnAvailability {
  */
 export type TurnInstallStage = 'refreshing' | 'installing' | 'configuring';
 
+export type RtcTransportPurpose = 'call' | 'screen';
+
 export interface WebRtcSignalPayload {
   /** Peers are addressed per connection, not per person (#309). */
   targetSessionId: string;
   fromSessionId: string;
-  signalType: 'offer' | 'answer' | 'candidate' | 'user-left' | 'screen-audio-meta' | 'screen-video-meta';
+  signalType: 'offer' | 'answer' | 'candidate' | 'user-left' | 'screen-audio-meta' | 'screen-video-meta' | 'screen-watch';
   sdp?: any; // RTCSessionDescriptionInit
   candidate?: any; // RTCIceCandidateInit
   streamId?: string; // For screen-audio-meta/screen-video-meta: the MediaStream ID of the screen track
+  /** Sender's epoch for SDP/metadata; publisher's epoch for a Watch command. */
+  subscriptionId?: string;
+  /** Prevents a previous call on the same device/session ID from authorizing reception. */
+  watcherSubscriptionId?: string;
+  watching?: boolean;
+  /** Monotonic per share and subscriptionId, including Stop commands. */
+  subscriptionRevision?: number;
+}
+
+export interface ScreenWatchSignalPayload extends WebRtcSignalPayload {
+  signalType: 'screen-watch';
+  streamId: string;
+  subscriptionId: string;
+  watcherSubscriptionId: string;
+  subscriptionRevision: number;
+  watching: boolean;
 }
 
 export interface BandwidthSettings {

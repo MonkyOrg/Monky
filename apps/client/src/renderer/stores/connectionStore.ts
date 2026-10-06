@@ -66,6 +66,7 @@ export class ConnectionStore {
     this.loadSavedServers();
     this.loadRailLayout();
     this.loadCreatedServers();
+    this.syncCreatedServersIntoSavedServers(false);
     this.loadUserProfile();
   }
 
@@ -455,6 +456,7 @@ export class ConnectionStore {
     try {
       localStorage.setItem('monky_created_servers', JSON.stringify(this.createdServers));
     } catch (e) {}
+    this.syncCreatedServersIntoSavedServers();
   }
 
   public removeCreatedServer(id: string): void {
@@ -469,6 +471,33 @@ export class ConnectionStore {
     this.publicKey = identity?.publicKey || '';
     this.clientId = identity?.clientId || '';
     this.hasIdentity = !!identity;
+  }
+
+  /**
+   * Logout: forgets every saved and created server (with their passwords), the
+   * rail layout and the profile. Server favorites and automatic entry are
+   * reconciled against the now empty list, so no ghosts survive.
+   */
+  public clearAccountData(): void {
+    this.savedServers = [];
+    this.createdServers = [];
+    this.railLayout = [];
+    this.savedNickname = '';
+    this.savedAvatarBase64 = '';
+    this.syncSavedServerFavorites();
+    for (const key of [
+      ConnectionStore.SAVED_SERVERS_STORAGE_KEY,
+      ConnectionStore.RAIL_LAYOUT_STORAGE_KEY,
+      'monky_created_servers',
+      'monky_nickname',
+      'monky_avatar',
+      'monky_profile_at',
+    ]) {
+      try {
+        localStorage.removeItem(key);
+      } catch (e) {}
+    }
+    appEvents.emit('connection.saved_servers_changed');
   }
 
   private saveSavedServers(): void {
@@ -579,6 +608,40 @@ export class ConnectionStore {
 
     this.railLayout = nextLayout;
     if (persist) this.saveRailLayout();
+  }
+
+  private syncCreatedServersIntoSavedServers(persist: boolean = true): void {
+    let changed = false;
+    for (const server of this.createdServers) {
+      const existing = this.savedServers.find(item => item.host === '127.0.0.1' && item.port === server.port);
+      if (!existing) {
+        this.savedServers.push({
+          host: '127.0.0.1',
+          port: server.port,
+          name: server.name,
+          password: server.password,
+          lastConnected: server.lastStarted || server.createdAt || Date.now(),
+        });
+        changed = true;
+        continue;
+      }
+      if (existing.name !== server.name || existing.password !== server.password) {
+        existing.name = server.name;
+        existing.password = server.password;
+        changed = true;
+      }
+    }
+    if (!changed) {
+      this.syncRailLayoutWithSavedServers(persist);
+      return;
+    }
+    this.savedServers.sort((a, b) => b.lastConnected - a.lastConnected);
+    this.syncSavedServerFavorites();
+    this.syncRailLayoutWithSavedServers(persist);
+    if (persist) {
+      this.saveSavedServers();
+      appEvents.emit('connection.saved_servers_changed');
+    }
   }
 
   private replaceServerReference(oldHost: string, oldPort: number, newHost: string, newPort: number): void {
