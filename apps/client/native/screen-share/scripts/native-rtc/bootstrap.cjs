@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const windowsToolchain = require('../windowsToolchain.cjs');
+const { transientNetworkFailure } = require('../buildTools.cjs');
 
 const OWNER = '.native-rtc-owner.json';
 const STATE = '.native-rtc-state.json';
@@ -119,6 +120,7 @@ function createContext(overrides = {}) {
     nodeVersion: overrides.nodeVersion || process.versions.node,
     env: { ...(overrides.env || process.env) },
     runner: overrides.runner || spawnRunner,
+    sleep: overrides.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms))),
     log: overrides.log || (() => {}),
     randomId: overrides.randomId || crypto.randomUUID,
     tools: {},
@@ -708,8 +710,19 @@ async function acquire(context, name) {
       { mutating: true, label: `Record official ${name} origin` });
     context.log(`FETCH ${name} ${definition.commit} from ${definition.url}`);
     ++context.downloadCommands;
-    await git(context, directory, ['fetch', '--no-tags', '--depth=1', 'origin', definition.commit],
-      { mutating: true, label: `Fetch exact ${name} SHA (not HEAD)` });
+    // A transient upstream 5xx or dropped connection is retried with backoff; the pinned SHA is
+    // still verified by inspectCheckout, and any other failure stops at once.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await git(context, directory, ['fetch', '--no-tags', '--depth=1', 'origin', definition.commit],
+          { mutating: true, label: `Fetch exact ${name} SHA (not HEAD)` });
+        break;
+      } catch (error) {
+        if (attempt >= 4 || error?.code !== 'ERR_RTC_COMMAND' || !transientNetworkFailure(error)) throw error;
+        context.log(`FETCH ${name}: transient network failure on attempt ${attempt}/4; retrying.`);
+        await context.sleep([10_000, 30_000, 60_000][attempt - 1]);
+      }
+    }
     await git(context, directory, ['checkout', '--detach', definition.commit],
       { mutating: true, label: `Check out newly fetched ${name} SHA` });
   }
