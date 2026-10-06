@@ -1100,14 +1100,16 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     let beforeQueries = 0;
     let beforeInvocations = 0;
     let scenario;
+    let choicePointer = null;
     const events = [];
-    for (const eventName of ['input', 'change', 'keydown', 'focusout']) {
+    for (const eventName of ['input', 'change', 'keydown', 'focusout', 'pointerdown', 'click']) {
       const listener = event => {
         const draft = store.getCommandDraft('chat');
         events.push({
           event: eventName, key: event.key, trusted: event.isTrusted, target: event.target.id,
           value: event.target.value, query: draft?.autocomplete.busca?.query,
           selected: draft?.autocomplete.busca?.selected?.value, pending: draft?.pending,
+          ...(eventName === 'pointerdown' || eventName === 'click' ? { element: String(event.target.className) } : {}),
         });
       };
       root.addEventListener(eventName, listener, true);
@@ -1124,7 +1126,7 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
         };
         store.setCommands([currentCommand]); server.setSlashCommands([currentCommand]);
         joinBotOnInvoke = !!scenario.botJoins;
-        beforeQueries = queries.length; beforeInvocations = invoked.length; events.length = 0;
+        beforeQueries = queries.length; beforeInvocations = invoked.length; events.length = 0; choicePointer = null;
         root.querySelector('#chat-message-input').focus();
       },
       results: async () => {
@@ -1135,9 +1137,21 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
         reply(queries.at(-1), { status: 'ok', choices });
         await waitFor(() => root.querySelectorAll('[data-parameter-option]').length === 2, 'Native music choices did not render');
       },
-      choicePoint: () => {
-        const box = root.querySelector('[data-parameter-option="1"] .bot-choice-copy').getBoundingClientRect();
-        return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      choicePoint: async () => {
+        // Click only once the highlighted choice is the hit-test target at the same point in two
+        // consecutive samples; a point taken while the list settles can land elsewhere and only blur the search.
+        let previous = '';
+        for (let sample = 0; sample < 100; sample++) {
+          const option = root.querySelector('[data-parameter-option="1"] .bot-choice-copy');
+          const box = option?.getBoundingClientRect();
+          const point = box && { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
+          const hit = point && document.elementFromPoint(point.x, point.y);
+          choicePointer = { sample, point, hit: hit?.outerHTML.slice(0, 160) ?? null };
+          if (option?.contains(hit) && JSON.stringify(point) === previous) return point;
+          previous = option?.contains(hit) ? JSON.stringify(point) : '';
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        throw new Error(`The highlighted music choice never became a stable pointer target: ${JSON.stringify(choicePointer)}`);
       },
       verifyOptional: () => {
         check(invoked.length === beforeInvocations, 'Native selection leaves optional parameters open for editing');
@@ -1158,7 +1172,8 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
           await waitFor(() => invoked.length === beforeInvocations + 1 && !store.getCommandDraft('chat'),
             'First native Enter must select the highlighted music and close the composer');
         } catch (error) {
-          throw new Error(`${error.message}\nScenario: ${JSON.stringify(scenario)}\nNative events: ${JSON.stringify(events)}`);
+          throw new Error(`${error.message}\nScenario: ${JSON.stringify(scenario)}\nNative events: ${JSON.stringify(events)}` +
+            `\nPointer: ${JSON.stringify(choicePointer)}`);
         }
         check(invoked.at(-1).options.busca === choices[1].value, 'Native selection sends the highlighted music URL exactly once');
         check(invoked.at(-1).commandName === 'play' && invoked.at(-1).botId === command.botId,

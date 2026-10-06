@@ -20,6 +20,7 @@ if (require.main === module || process.argv[1] === __filename) {
   } else {
     const { app, BrowserWindow } = require('electron');
     app.setPath('userData', process.env.MONKY_AUDIO_DEVICE_TEST_PROFILE);
+    app.on('window-all-closed', () => {});
     require('./fixtures/ciGraphics.cjs')(app);
     let vite;
     let window;

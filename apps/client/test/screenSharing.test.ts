@@ -26,7 +26,7 @@ function gate() {
 }
 
 test('all presets and custom use one per-publication audio/camera/screen encoding policy', () => {
-  const presets: QualityPresetType[] = ['ECONOMIC', 'NORMAL', 'HIGH', 'GAMING', 'ULTRA', 'CUSTOM'];
+  const presets: QualityPresetType[] = ['ECONOMIC', 'NORMAL', 'HIGH', 'GAMING', 'QHD', 'UHD', 'UHD120', 'CUSTOM'];
   for (const preset of presets) {
     const profile = preset === 'CUSTOM' ? {
       ...DEFAULT_CUSTOM_PROFILE, screenFps: 120, screenBitrateKbps: 20000,
@@ -40,7 +40,8 @@ test('all presets and custom use one per-publication audio/camera/screen encodin
       [screen, profile.screenBitrateKbps, profile.screenFps],
     ] as const) {
       assert.deepEqual(policy.encoding, { maxBitrate: bitrate * 1000, maxFramerate: fps });
-      assert.equal(policy.degradationPreference, preset === 'GAMING' ? 'maintain-framerate' : 'maintain-resolution');
+      assert.equal(policy.degradationPreference, ['GAMING', 'QHD', 'UHD', 'UHD120'].includes(preset)
+        ? 'maintain-framerate' : 'maintain-resolution', 'Named 60+ FPS profiles hold frame rate; CUSTOM keeps resolution.');
     }
   }
 });
@@ -113,7 +114,7 @@ test('codec and quality share a sender transaction queue without blocking other 
   assert.deepEqual(events, ['read', 'write-1', 'read', 'verified', 'read', 'write-2']);
   assert.equal(current.encodings[0].active, true);
   assert.equal(current.encodings[0].codec?.mimeType, 'video/H264');
-  assert.equal(current.encodings[0].maxBitrate, 3500000);
+  assert.equal(current.encodings[0].maxBitrate, QUALITY_PRESETS.HIGH.screenBitrateKbps * 1000);
 });
 
 test('sender failures reach callers without poisoning later updates; cancellation skips writing', async () => {

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Quando alguém muda a qualidade da própria transmissão, quem está assistindo não vê mais um aviso falso de falha com botão de tentar novamente. A imagem só se reconecta.",
+  "en": "When someone changes their stream quality, viewers no longer see a false failure notice with a retry button. The picture simply reconnects."
+}

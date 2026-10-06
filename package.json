@@ -22,6 +22,7 @@
     "start": "npm run start --workspace=apps/client",
     "qa": "npm run build && node scripts/qa.js",
     "test:qa": "node --test scripts/test-qa.js",
+    "ci:local": "node scripts/ci-local.cjs",
     "test:legal": "node --test scripts/test-legal.js scripts/test-native-source-release.js",
     "app": "npm run start --workspace=apps/client",
     "package": "npm run build && node scripts/package.js",

@@ -11,7 +11,7 @@ voz e vídeo estejam passando; TURN não corrige o endereço de login.
 | Nickname já em uso | Nicknames são únicos por servidor — escolha outro |
 | Entrei, mas ninguém me ouve | Confira Configurações › Voz e Vídeo, o medidor, o limite de detecção, PTT, mute pessoal e eventual bloqueio administrativo |
 | Ouço uma pessoa, mas o avatar não indica sua fala | Atualize o cliente. O indicador acompanha o áudio decodificado de cada microfone em P2P e SFU, mesmo quando as estatísticas RTP informam nível zero. Ele fica oculto enquanto você está ensurdecido; áudio de tela não deve acioná-lo |
-| Ouço todo mundo cortando | Use perfil Econômico, peça o mesmo a quem transmite e prefira cabo a Wi-Fi |
+| Ouço todo mundo cortando | Use o perfil Leve, peça o mesmo a quem transmite e prefira cabo a Wi-Fi |
 | Tela compartilhada sem som | Confira se a fonte/plataforma oferece áudio de compartilhamento, a opção escolhida e os volumes da origem e do receptor |
 | Nada em Servidores na Rede | A descoberta só funciona na mesma LAN; clique em Buscar de novo e verifique UDP `41234` no firewall |
 | Um participante ficou mudo só para mim | Clique com o botão direito nele e volte o volume individual para 100% |

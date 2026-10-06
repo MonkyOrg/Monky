@@ -482,16 +482,18 @@ export class WebRtcManager {
     }
   }
 
-  public setQualityPreset(preset: QualityPresetType): void {
+  // Resolves with the active native shares now using the profile, or null after a reported failure.
+  public setQualityPreset(preset: QualityPresetType): Promise<number | null> {
     this.assertScreenSharingSettings(preset === 'CUSTOM' ? settingsStore.customProfile : QUALITY_PRESETS[preset]);
     this.currentPreset = preset;
     videoService.applyQualityPreset(preset).catch((err) => {
       clientLog.warn('WEBRTC', 'Error applying quality preset to videoService', { error: String(err) });
     });
     this.applyBitrateConstraints();
-    void this.nativeScreens.applyQuality(this.getQualityProfile()).catch(error => {
+    return this.nativeScreens.applyQuality(this.getQualityProfile()).catch(error => {
       this.nativeScreens.report(error);
       appEvents.emit('native_screen.source_failed', { reason: 'runtime' });
+      return null;
     });
   }
 

@@ -28,6 +28,7 @@ if (!process.versions.electron) {
 } else {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_UPDATE_COMPAT_PROFILE);
+  app.on('window-all-closed', () => {});
   let vite;
   let browser;
   let timeout;

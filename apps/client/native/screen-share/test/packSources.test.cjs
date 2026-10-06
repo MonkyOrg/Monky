@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
-const { archiveEntryAllowed, sourceEntries, options } = require('../scripts/packSources.cjs');
+const { archiveEntryAllowed, sourceEntries, options, packSources } = require('../scripts/packSources.cjs');
 
 test('corresponding source keeps SDK identity and required tools, not build products or Git user records', () => {
   for (const name of [
@@ -32,6 +32,22 @@ test('source archive names use an unprefixed semantic version and reject path in
   assert.equal(options(['--version=9.0.0-beta']).version, '9.0.0-beta');
   for (const version of ['v9.0.0', '../9.0.0', '9.0.0/beta', '9.0.0\nother'])
     assert.throws(() => options([`--version=${version}`]));
+});
+
+test('a sources-only macOS job declares both architectures explicitly and in canonical order', async () => {
+  assert.equal(options(['--version=1.0.0']).architectures, undefined);
+  assert.deepEqual(options(['--version=1.0.0', '--architectures=x64,arm64']).architectures, ['arm64', 'x64']);
+  assert.deepEqual(options(['--architectures=arm64']).architectures, ['arm64']);
+  for (const value of ['', 'arm64,arm64', 'arm64,ppc', 'x86_64'])
+    assert.throws(() => options([`--architectures=${value}`]));
+  assert.throws(() => options(['--architectures=arm64', '--architectures=x64']));
+  await assert.rejects(packSources({ architectures: ['arm64', 'x64'] }), /only applies to macOS/u,
+    'Windows sources must not silently accept a macOS-only option.');
+  const { macArchitectures } = require('../scripts/notices.cjs');
+  assert.equal(macArchitectures(undefined), undefined);
+  assert.deepEqual(macArchitectures('--architectures=x64,arm64'), ['arm64', 'x64']);
+  for (const option of ['--architectures=', '--architectures=arm64,arm64', '--architectures=ppc', '--arch=arm64'])
+    assert.throws(() => macArchitectures(option));
 });
 
 const python = process.env.PYTHON ?? path.resolve(__dirname, '..', '..', '..', '..', '..', '.native-screen',
@@ -65,6 +81,19 @@ test('the source archiver preserves a real file inventory without local-account 
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.equal(JSON.parse(result.stdout.trim()).sourceArchiveVerified, true);
     assert.equal(fs.statSync(path.join(directory, 'source.tar.xz')).size > 0, true);
+    const single = spawnSync(python, [
+      '-I', path.resolve(__dirname, '..', 'scripts', 'sourceArchive.py'),
+      `--root=${path.join(directory, 'input')}`, `--list=${path.join(directory, 'members.txt')}`,
+      `--metadata=${path.join(directory, 'metadata')}`, `--output=${path.join(directory, 'single.tar.xz')}`,
+    ], { encoding: 'utf8', timeout: 30000, env: { ...process.env, MONKY_SOURCE_XZ: 'python' } });
+    assert.equal(single.status, 0, single.stdout + single.stderr);
+    assert.equal(JSON.parse(single.stdout.trim()).compressor, 'python-lzma');
+    const tarBytes = spawnSync(python, ['-I', '-c',
+      'import hashlib, lzma, sys; print(*(hashlib.sha256(lzma.open(name).read()).hexdigest() for name in sys.argv[1:]))',
+      path.join(directory, 'source.tar.xz'), path.join(directory, 'single.tar.xz')], { encoding: 'utf8', timeout: 30000 });
+    assert.equal(tarBytes.status, 0, tarBytes.stderr);
+    const [parallelTar, singleTar] = tarBytes.stdout.trim().split(' ');
+    assert.equal(parallelTar, singleTar, 'Parallel xz must archive exactly the same tar stream as Python lzma.');
     const extracted = path.join(directory, 'extracted');
     const extraction = spawnSync(python, ['-I', '-c',
       "import sys, tarfile; tarfile.open(sys.argv[1], 'r|xz').extractall(sys.argv[2], filter='data')",

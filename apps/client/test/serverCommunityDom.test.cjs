@@ -416,6 +416,24 @@ async function* regression(locale, inviteModule) {
       document.removeEventListener('scroll', noteScroll, { capture: true });
     }
   };
+  const waitForQuietValue = async (read, description, { quietMs = 650, timeoutMs = 5000, tolerance = 1 } = {}) => {
+    const started = performance.now();
+    let last = read();
+    let quietSince = performance.now();
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      const current = read();
+      if (Math.abs(current - last) > tolerance) {
+        last = current;
+        quietSince = performance.now();
+      } else if (performance.now() - quietSince >= quietMs) {
+        return current;
+      }
+      if (performance.now() - started > timeoutMs) {
+        throw new Error(`Value did not stay quiet for ${description}: ${JSON.stringify({ last, current })}`);
+      }
+    }
+  };
   const now = Date.now();
   const event = { id: 'event', creatorUserId: 'owner', title: '<img src=x onerror=alert(1)>',
     description: 'Details', location: { kind: 'voice', channelId: 'voice' }, startsAt: now - 1000,
@@ -1469,8 +1487,8 @@ async function* regression(locale, inviteModule) {
     hidden: audiencePopup.hidden, before: eventScrollBeforeDrag, after: eventStepScroller.scrollTop,
   })}`);
   const eventScrollAfterDrag = eventStepScroller.scrollTop;
-  await new Promise(resolve => setTimeout(resolve, 650));
-  check(Math.abs(eventStepScroller.scrollTop - eventScrollAfterDrag) <= 1 && audiencePopup.hidden,
+  const settledAfterDrag = await waitForQuietValue(() => eventStepScroller.scrollTop, 'manual audience scrollbar drag');
+  check(Math.abs(settledAfterDrag - eventScrollAfterDrag) <= 1 && audiencePopup.hidden,
     'Automatic audience positioning never scrolls back after a manual scrollbar drag');
   const audienceScrollSpace = document.createElement('div');
   audienceScrollSpace.style.height = '360px';
@@ -1483,8 +1501,9 @@ async function* regression(locale, inviteModule) {
   check(audiencePopup.hidden && eventAudienceTrigger.getAttribute('aria-expanded') === 'false',
     'A scrollbar drag also dismisses the audience picker while its opening scroll is in progress');
   const interruptedAudienceScroll = eventStepScroller.scrollTop;
-  await new Promise(resolve => setTimeout(resolve, 650));
-  check(Math.abs(eventStepScroller.scrollTop - interruptedAudienceScroll) <= 1,
+  const settledInterruptedScroll = await waitForQuietValue(() => eventStepScroller.scrollTop,
+    'interrupted audience opening scroll');
+  check(Math.abs(settledInterruptedScroll - interruptedAudienceScroll) <= 1,
     'Interrupting the opening scroll cancels its animation and pending reposition timer');
   audienceScrollSpace.remove();
   for (let index = 0; index < 40; index++) server.knownMembers.delete(`scroll-audience-${index}`);

@@ -22,3 +22,11 @@ test('native preparation can select Git explicitly without accepting ambiguous o
   assert.throws(() => options([`--python=${python}`, '--git=relative.exe']));
   assert.throws(() => options([`--python=${python}`, `--git=${git}`, `--git=${git}`]));
 });
+
+test('native preparation can stop after fetching the pinned sources for verified cached binaries', () => {
+  const python = path.resolve('tools', 'python.exe');
+  assert.deepEqual(options([`--python=${python}`, '--fetch-only']), { python, jobs: 4, fetchOnly: true });
+  assert.equal(options([`--python=${python}`]).fetchOnly, undefined);
+  assert.throws(() => options([`--python=${python}`, '--fetch-only', '--fetch-only']));
+  assert.throws(() => options([`--python=${python}`, '--fetch-only=true']));
+});
