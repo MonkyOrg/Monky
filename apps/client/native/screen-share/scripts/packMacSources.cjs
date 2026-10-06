@@ -12,9 +12,13 @@ const pins = require('./native-rtc/pins.json');
 
 async function packMacSources(config) {
   assert.equal(process.platform, 'darwin');
-  const architectures = ['arm64', 'x64'].filter(arch => fs.existsSync(path.join(root, 'bin', `darwin-${arch}`)));
+  const built = ['arm64', 'x64'].filter(arch => fs.existsSync(path.join(root, 'bin', `darwin-${arch}`)));
+  // A sources-only CI job declares the architectures; packaging then verifies the binaries against these sources.
+  const architectures = config.architectures ?? built;
   assert.ok(architectures.length);
-  for (const arch of architectures) verifyMacSourceInputs(arch);
+  assert.ok(architectures.every(arch => ['arm64', 'x64'].includes(arch)) &&
+    new Set(architectures).size === architectures.length, 'Invalid macOS source architectures.');
+  for (const arch of built) verifyMacSourceInputs(arch);
   verifyLegalFiles(root, 'darwin');
   const omitted = ['webrtc/src/third_party/llvm-build', 'webrtc/src/third_party/ninja',
     'webrtc/src/buildtools/mac', 'webrtc/.gclient_entries', 'webrtc/.gclient_previous_sync_commits'];
@@ -26,6 +30,8 @@ async function packMacSources(config) {
   const archive = path.join(config.output, `${basename}.tar.xz`);
   const manifest = path.join(config.output, `${basename}.json`);
   assert.ok(!fs.existsSync(archive) && !fs.existsSync(manifest), 'macOS source package already exists.');
+  // Sources-only jobs have not compiled anything, so the module build directory may not exist yet.
+  fs.mkdirSync(path.join(root, 'build'), { recursive: true });
   const temporary = fs.mkdtempSync(path.join(root, 'build', 'mac-source-package-'));
   const partial = archive + '.' + randomUUID() + '.partial';
   try {

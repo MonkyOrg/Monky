@@ -612,11 +612,19 @@ e da rede, e não garantem essa taxa sustentada em todo Mac.
 
 | Perfil | Áudio | Câmera | Tela | Quando usar |
 |---|---|---|---|---|
-| Econômico | 24 kbps | 360p | 480p | Internet lenta ou instável |
-| Normal | 32 kbps | 480p | 720p | Uso geral |
-| Alta Qualidade | 48 kbps | 720p | 1080p | Internet rápida e PC sobrando |
-| Gaming | 28 kbps | reduzida | fluida (60 FPS) | Jogando: prioriza voz e tela fluida |
-| Ultra | 64 kbps | 1080p / 60 FPS | 1080p / 60 FPS | Banda e hardware suficientes para taxas mais altas |
+| Leve | 24 kbps | 360p | 360p / 30 FPS | Internet lenta ou instável |
+| Padrão | 32 kbps | 480p | 720p / 30 FPS | Uso geral (recomendado) |
+| Nítido | 48 kbps | 720p | 1080p / 30 FPS | Textos, código e documentos |
+| Fluido | 64 kbps | 1080p | 1080p / 60 FPS | Jogos e vídeos |
+| Ultra | 64 kbps | 1080p | 1440p / 60 FPS | Monitores 1440p |
+| Cinema | 64 kbps | 1080p | 4K / 60 FPS | Internet e GPU fortes |
+| Extremo | 64 kbps | 1080p | 4K / 120 FPS | O máximo do Monky; GPU com AV1 recomendada |
+
+Nenhum perfil fica abaixo de 30 FPS, e a câmera sempre usa 30 FPS. Se o
+encoder não aceitar o perfil (por exemplo, H.264 por hardware AMD em 4K/120),
+o Monky reduz o FPS, avisa e salva o resultado como Personalizado.
+Configurações antigas em Gaming ou no antigo Ultra (1080p a 60 FPS) passam
+para Fluido, o mesmo degrau.
 
 São alvos de configuração, não uma garantia de FPS ou bitrate observado.
 Dispositivo, codec, rede, número de participantes e conteúdo afetam o resultado.

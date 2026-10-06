@@ -7,10 +7,10 @@ const { root, execute, write, digest, fingerprint, regularFiles } = require('./b
 const { workspace, checkSpace } = require('./prepareMacRtc.cjs');
 const pins = require('./native-rtc/pins.json');
 
-function build({ arch = process.arch, jobs = 4 } = {}) {
+// Copies the owned inputs and generates the GN graph; notices only need this graph, not compiled objects.
+function configure({ arch = process.arch } = {}) {
   assert.equal(process.platform, 'darwin');
   assert.ok(['arm64', 'x64'].includes(arch));
-  assert.ok(Number.isInteger(jobs) && jobs >= 1 && jobs <= 16);
   const sdk = path.join(workspace, 'webrtc', 'src');
   const python = path.join(workspace, 'python-3.11', 'bin', 'python3');
   const revision = pins.repositories.webrtc.commit;
@@ -18,65 +18,73 @@ function build({ arch = process.arch, jobs = 4 } = {}) {
   const compiler = path.join(sdk, 'third_party', 'llvm-build', 'Release+Asserts', 'bin', 'clang++');
   assert.match(execute(compiler, ['--version'], { capture: true }), /21\.0\.0git[\s\S]*bd809ffb/u);
   checkSpace();
+  const source = path.join(root, 'src');
+  const key = digest(fs.realpathSync(root)).slice(0, 8);
+  const inputs = path.join(sdk, 'out', `monky-${key}-inputs`);
+  const output = path.join(sdk, 'out', `monky-${key}-${arch}`);
+  for (const directory of [inputs, output]) {
+    const marker = path.join(directory, '.monky-owner.json');
+    const expected = { root: fs.realpathSync(root), revision };
+    if (fs.existsSync(directory)) {
+      assert.ok(!fs.lstatSync(directory).isSymbolicLink());
+      assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), expected);
+    } else {
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(marker, JSON.stringify(expected) + '\n', { flag: 'wx' });
+    }
+  }
+  const sourceFiles = ['rtc', 'mac'].flatMap(directory =>
+    regularFiles(path.join(source, directory)).map(relative => {
+      const name = path.join(directory, relative), bytes = fs.readFileSync(path.join(source, name));
+      write(path.join(inputs, name), bytes);
+      return { path: name, sha256: digest(bytes) };
+    }));
+  const overlay = JSON.parse(fs.readFileSync(path.join(source, 'rtc', 'level6-upstream.json'), 'utf8'));
+  assert.equal(overlay.revision, revision);
+  for (const file of overlay.files)
+    assert.equal(digest(fs.readFileSync(path.join(sdk, file.path))), file.sha256,
+      `The native RTC overlay requires its pinned upstream source: ${file.path}`);
+  const overlayFiles = sourceFiles.filter(file => file.path.startsWith('rtc/inputs/sdk/'));
+  const vfs = path.join(inputs, 'sdk-vfs.json');
+  write(vfs, JSON.stringify({ version: 0, 'case-sensitive': true, 'use-external-names': false,
+    roots: overlayFiles.map(file => ({ type: 'file',
+      name: path.join(sdk, path.relative('rtc/inputs/sdk', file.path)),
+      'external-contents': path.join(inputs, file.path) })),
+  }, null, 2) + '\n');
+  const wrapper = path.join(inputs, 'rtc', 'inputs', 'build', 'rtc_overlay_compiler.py');
+  const overlayHash = digest(JSON.stringify(overlayFiles) + digest(fs.readFileSync(wrapper)));
+  const target = `//out/${path.basename(inputs)}/rtc`;
+  const values = {
+    target_os: 'mac', target_cpu: arch, is_debug: false, is_component_build: false, is_official_build: false,
+    is_clang: true, use_custom_libcxx: true, use_custom_libcxx_for_host: true, use_rtti: true,
+    use_thin_lto: false, symbol_level: 0, treat_warnings_as_errors: false,
+    use_siso: false, use_remoteexec: false, clang_use_chrome_plugins: false,
+    rtc_include_tests: false, rtc_build_examples: false, rtc_build_tools: false,
+    rtc_enable_protobuf: false, rtc_use_h264: false, rtc_use_h265: false,
+    enable_libaom: true, enable_rust: false, enable_rust_cxx: false, enable_chromium_prelude: false,
+    mac_deployment_target: '14.0', mac_min_system_version: '14.0',
+    cc_wrapper: `"${python}" -I -S -B "${wrapper}" "${vfs}" ${overlayHash} --`,
+  };
+  write(path.join(output, 'args.gn'), Object.entries(values)
+    .map(([name, value]) => `${name}=${JSON.stringify(value)}`).join('\n') + '\n');
+  const env = { ...process.env, PATH: `${path.dirname(python)}:${process.env.PATH}`,
+    DEPOT_TOOLS_UPDATE: '0', DEPOT_TOOLS_WIN_TOOLCHAIN: '0' };
+  delete env.FORCE_MAC_TOOLCHAIN;
+  const gn = path.join(sdk, 'buildtools', 'mac', 'gn');
+  execute(gn, ['gen', output, '--fail-on-unused-args', `--root=${sdk}`, `--root-target=${target}`,
+    `--script-executable=${python}`], { cwd: sdk, env });
+  return { sdk, python, revision, source, output, sourceFiles, env };
+}
+
+function build({ arch = process.arch, jobs = 4 } = {}) {
+  assert.equal(process.platform, 'darwin');
+  assert.ok(['arm64', 'x64'].includes(arch));
+  assert.ok(Number.isInteger(jobs) && jobs >= 1 && jobs <= 16);
   const localBuild = path.join(root, 'build', `rtc-mac-${arch}`);
   fs.mkdirSync(localBuild, { recursive: true });
   const lock = path.join(localBuild, 'compile.lock'), handle = fs.openSync(lock, 'wx');
   try {
-    const source = path.join(root, 'src');
-    const key = digest(fs.realpathSync(root)).slice(0, 8);
-    const inputs = path.join(sdk, 'out', `monky-${key}-inputs`);
-    const output = path.join(sdk, 'out', `monky-${key}-${arch}`);
-    for (const directory of [inputs, output]) {
-      const marker = path.join(directory, '.monky-owner.json');
-      const expected = { root: fs.realpathSync(root), revision };
-      if (fs.existsSync(directory)) {
-        assert.ok(!fs.lstatSync(directory).isSymbolicLink());
-        assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), expected);
-      } else {
-        fs.mkdirSync(directory, { recursive: true });
-        fs.writeFileSync(marker, JSON.stringify(expected) + '\n', { flag: 'wx' });
-      }
-    }
-    const sourceFiles = ['rtc', 'mac'].flatMap(directory =>
-      regularFiles(path.join(source, directory)).map(relative => {
-        const name = path.join(directory, relative), bytes = fs.readFileSync(path.join(source, name));
-        write(path.join(inputs, name), bytes);
-        return { path: name, sha256: digest(bytes) };
-      }));
-    const overlay = JSON.parse(fs.readFileSync(path.join(source, 'rtc', 'level6-upstream.json'), 'utf8'));
-    assert.equal(overlay.revision, revision);
-    for (const file of overlay.files)
-      assert.equal(digest(fs.readFileSync(path.join(sdk, file.path))), file.sha256,
-        `The native RTC overlay requires its pinned upstream source: ${file.path}`);
-    const overlayFiles = sourceFiles.filter(file => file.path.startsWith('rtc/inputs/sdk/'));
-    const vfs = path.join(inputs, 'sdk-vfs.json');
-    write(vfs, JSON.stringify({ version: 0, 'case-sensitive': true, 'use-external-names': false,
-      roots: overlayFiles.map(file => ({ type: 'file',
-        name: path.join(sdk, path.relative('rtc/inputs/sdk', file.path)),
-        'external-contents': path.join(inputs, file.path) })),
-    }, null, 2) + '\n');
-    const wrapper = path.join(inputs, 'rtc', 'inputs', 'build', 'rtc_overlay_compiler.py');
-    const overlayHash = digest(JSON.stringify(overlayFiles) + digest(fs.readFileSync(wrapper)));
-    const target = `//out/${path.basename(inputs)}/rtc`;
-    const values = {
-      target_os: 'mac', target_cpu: arch, is_debug: false, is_component_build: false, is_official_build: false,
-      is_clang: true, use_custom_libcxx: true, use_custom_libcxx_for_host: true, use_rtti: true,
-      use_thin_lto: false, symbol_level: 0, treat_warnings_as_errors: false,
-      use_siso: false, use_remoteexec: false, clang_use_chrome_plugins: false,
-      rtc_include_tests: false, rtc_build_examples: false, rtc_build_tools: false,
-      rtc_enable_protobuf: false, rtc_use_h264: false, rtc_use_h265: false,
-      enable_libaom: true, enable_rust: false, enable_rust_cxx: false, enable_chromium_prelude: false,
-      mac_deployment_target: '14.0', mac_min_system_version: '14.0',
-      cc_wrapper: `"${python}" -I -S -B "${wrapper}" "${vfs}" ${overlayHash} --`,
-    };
-    write(path.join(output, 'args.gn'), Object.entries(values)
-      .map(([name, value]) => `${name}=${JSON.stringify(value)}`).join('\n') + '\n');
-    const env = { ...process.env, PATH: `${path.dirname(python)}:${process.env.PATH}`,
-      DEPOT_TOOLS_UPDATE: '0', DEPOT_TOOLS_WIN_TOOLCHAIN: '0' };
-    delete env.FORCE_MAC_TOOLCHAIN;
-    const gn = path.join(sdk, 'buildtools', 'mac', 'gn');
-    execute(gn, ['gen', output, '--fail-on-unused-args', `--root=${sdk}`, `--root-target=${target}`,
-      `--script-executable=${python}`], { cwd: sdk, env });
+    const { sdk, python, revision, source, output, sourceFiles, env } = configure({ arch });
     execute(path.join(sdk, 'third_party', 'ninja', 'ninja'), ['-C', output, `-j${jobs}`, 'monky_screen_rtc', 'monky_av1'],
       { cwd: sdk, env });
     checkSpace();
@@ -133,11 +141,13 @@ function build({ arch = process.arch, jobs = 4 } = {}) {
   } finally { fs.closeSync(handle); fs.unlinkSync(lock); }
 }
 
-module.exports = { build };
+module.exports = { build, configure };
 if (require.main === module) {
   try {
     const args = process.argv.slice(2);
-    assert.ok(args.length <= 1 && (!args.length || /^--arch=(x64|arm64)$/.test(args[0])));
-    build(args.length ? { arch: args[0].slice(7) } : {});
+    const configureOnly = args.at(-1) === '--configure';
+    const rest = configureOnly ? args.slice(0, -1) : args;
+    assert.ok(rest.length <= 1 && (!rest.length || /^--arch=(x64|arm64)$/.test(rest[0])));
+    (configureOnly ? configure : build)(rest.length ? { arch: rest[0].slice(7) } : {});
   } catch (error) { console.error(error); process.exitCode = 1; }
 }

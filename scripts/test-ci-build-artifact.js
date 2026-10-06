@@ -165,6 +165,27 @@ test('build restoration rejects changed lockfiles, foreign runs, platforms, arch
   await assert.rejects(collectBuild(f.root, path.join(f.directory, 'dirty'), 'cli', context), /clean source checkout/);
 });
 
+test('desktop artifacts record the exact native cache key CI tested so the release can seed main caches', async t => {
+  const key = `native-win-v1-${'a'.repeat(16)}-${'b'.repeat(64)}`;
+  const f = await fixture(t, 'win');
+  assert.equal(f.manifest.nativeCacheKey, undefined, 'Builds without a native cache keep the original manifest.');
+  const staged = path.join(f.directory, 'keyed');
+  const manifest = await collectBuild(f.root, staged, 'win', { ...f.environment, nativeCacheKey: key });
+  assert.equal(manifest.nativeCacheKey, key);
+  assert.equal((await validateBuild(staged, f.root, 'win', f.environment)).nativeCacheKey, key);
+  for (const [variant, environment, invalid] of [
+    ['win', f.environment, `native-mac-v1-${'a'.repeat(16)}-${'b'.repeat(64)}`],
+    ['win', f.environment, 'native-win-v1-short'],
+    ['win', f.environment, `${key}\nrestore-keys: native-`],
+    ['cli', context, key],
+  ]) {
+    await assert.rejects(collectBuild(f.root, path.join(f.directory, `rejected-${variant}`), variant,
+      { ...environment, nativeCacheKey: invalid }), /Invalid native cache key/);
+  }
+  await fs.writeFile(path.join(staged, 'build-manifest.json'), JSON.stringify({ ...manifest, nativeCacheKey: 'native-win-v1-x' }));
+  await assert.rejects(validateBuild(staged, f.root, 'win', f.environment), /Invalid native cache key/);
+});
+
 test('every file is inventoried and hashed before any release outputs can be restored', async t => {
   const f = await fixture(t);
   const file = path.join(f.staged, roots.cli[0], 'index.js');

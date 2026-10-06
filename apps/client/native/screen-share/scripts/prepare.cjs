@@ -12,6 +12,11 @@ function options(argv) {
   const result = { python: process.env.PYTHON, jobs: 4 };
   const seen = new Set();
   for (const argument of argv) {
+    if (argument === '--fetch-only') {
+      assert.ok(!result.fetchOnly, 'Use --fetch-only once.');
+      result.fetchOnly = true;
+      continue;
+    }
     const at = argument.indexOf('='), key = argument.slice(0, at), value = argument.slice(at + 1);
     assert.ok(at > 0 && value && !seen.has(key), 'Use unique --python=, --git=, --jobs=, --vs-install=, --sdk-root= and --vswhere= options.');
     seen.add(key);
@@ -50,6 +55,11 @@ async function prepare(config) {
     ...windowsToolchain.selectionArguments(selected),
     ...(config.git ? [`--git=${config.git}`] : [])], { env });
   const capture = await fetchObs();
+  // Verified cached binaries still need the pinned upstream trees to package their corresponding sources.
+  if (config.fetchOnly) {
+    console.log(JSON.stringify({ nativeScreenSourcesFetched: true }));
+    return;
+  }
   require('./buildRtc.cjs').build({
     webrtcRoot: path.join(cache, 'rtc', 'webrtc', 'src'), python: interpreter, jobs: config.jobs, ...selected,
   });

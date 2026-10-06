@@ -1,4 +1,4 @@
-import type { QualityPresetType, QualityProfile } from '@monky/shared';
+import { isMotionQualityPreset, type QualityPresetType, type QualityProfile } from '@monky/shared';
 
 export type OutboundMediaKind = 'audio' | 'camera' | 'screen';
 
@@ -20,7 +20,7 @@ export function getMediaEncodingPolicy(
       maxBitrate: (screen ? profile.screenBitrateKbps : profile.cameraBitrateKbps) * 1000,
       maxFramerate: screen ? profile.screenFps : profile.cameraFps,
     },
-    degradationPreference: preset === 'GAMING' ? 'maintain-framerate' : 'maintain-resolution',
+    degradationPreference: isMotionQualityPreset(preset) ? 'maintain-framerate' : 'maintain-resolution',
   };
 }
 

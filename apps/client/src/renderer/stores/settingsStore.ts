@@ -2,6 +2,7 @@ import {
   QualityPresetType,
   QualityProfile,
   DEFAULT_CUSTOM_PROFILE,
+  restoreQualityPreset,
   PttKeyBinding,
   OverlayMode,
   OverlayLayout,
@@ -179,6 +180,7 @@ export class SettingsStore {
           throw new TypeError('Saved settings must be an object');
         }
         Object.assign(this, parsed);
+        this.qualityPreset = restoreQualityPreset(parsed.qualityPreset);
         this.screenEncodingMode = parsed.screenEncodingMode === 'software' ? 'software' : 'hardware';
         this.preferredScreenCodec = parsed.preferredScreenCodec === 'av1' ? 'av1' : 'h264';
         this.screenEncodingStrategy = parsed.screenEncodingStrategy === 'manual' ? 'manual'

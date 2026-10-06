@@ -186,6 +186,8 @@ if (!process.versions.electron) {
       // Native input is delivered asynchronously; measure only after the renderer starts the drag.
       const targetAfter = await browser.webContents.executeJavaScript(`new Promise(resolve => {
         const started = performance.now();
+        let lastTop = null;
+        let stableFrames = 0;
         const measure = () => {
           if (!document.querySelector('.channel-reorder-active .channel-dragging')) {
             if (performance.now() - started > 3000) resolve({ failure: 'The channel pointer drag did not start' });
@@ -194,9 +196,26 @@ if (!process.versions.electron) {
           }
           const target = document.querySelector(${JSON.stringify(selector)});
           const box = target.getBoundingClientRect();
-          resolve({ x: Math.round(box.left + Math.min(80, box.width / 2)), y: Math.round(box.top + box.height * ${yRatio}),
+          const sample = { x: Math.round(box.left + Math.min(80, box.width / 2)), y: Math.round(box.top + box.height * ${yRatio}),
             top: box.top, layoutTop: box.top - target.closest('#channel-categories-list').getBoundingClientRect().top,
-            scroll: target.closest('.channels-list-container').scrollTop });
+            scroll: target.closest('.channels-list-container').scrollTop };
+          if (sample.top > ${JSON.stringify(targetBefore.top)} + 1) {
+            if (lastTop !== null && Math.abs(sample.top - lastTop) <= 0.5) stableFrames++;
+            else stableFrames = 0;
+            lastTop = sample.top;
+            if (stableFrames >= 2) {
+              resolve(sample);
+              return;
+            }
+          } else {
+            stableFrames = 0;
+            lastTop = sample.top;
+          }
+          if (performance.now() - started > 3000) {
+            resolve({ failure: 'The destination category did not shift during channel drag', sample });
+            return;
+          }
+          requestAnimationFrame(measure);
         };
         measure();
       })`);

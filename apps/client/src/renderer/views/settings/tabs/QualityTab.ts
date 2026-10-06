@@ -1,14 +1,14 @@
 import { QUALITY_PRESETS, QualityPresetType, QualityProfile, NATIVE_SCREEN_VIDEO_LIMITS, type NativeScreenVideoProfile } from '@monky/shared';
 import { settingsStore } from '../../../stores/settingsStore';
 import { webRtcManager } from '../../../core/WebRtcManager';
-import { t } from '../../../i18n';
+import { t, type TranslationKey } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
 import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import {
   CUSTOM_QUALITY_FIELDS, customQualityBounds, normalizeCustomQualityProfile, type QualityNumberKey,
 } from '../../../utils/qualityProfileLimits';
 import { showAlert } from '../../Dialog';
-import { showInfoToast } from '../../CopyToast';
+import { showInfoToast, showSuccessToast } from '../../CopyToast';
 import { ScreenEncodingControls } from '../../ScreenEncodingControls';
 import { nativeScreenProfile } from '../../../core/webrtc/NativeScreenController';
 import {
@@ -24,15 +24,30 @@ import {
   formatResolution,
 } from '../qualityOptions';
 
+// From the lightest to the heaviest profile; Custom stays last.
+const QUALITY_PRESET_OPTIONS = [
+  ['ECONOMIC', 'settings.presetEconomic'],
+  ['NORMAL', 'settings.presetNormal'],
+  ['HIGH', 'settings.presetHigh'],
+  ['GAMING', 'settings.presetGaming'],
+  ['QHD', 'settings.presetQhd'],
+  ['UHD', 'settings.presetUhd'],
+  ['UHD120', 'settings.presetUhd120'],
+  ['CUSTOM', 'settings.presetCustom'],
+] as const satisfies readonly (readonly [QualityPresetType, TranslationKey])[];
+
 export class QualityTab {
   private eventController: AbortController | null = null;
   private customProfileController: AbortController | null = null;
   private clearQualityToast: (() => void) | null = null;
   private container: HTMLElement | null = null;
-  private requestedQuality: { preset: QualityPresetType; profile: QualityProfile } | null = null;
+  private requestedQuality: { preset: QualityPresetType; profile: QualityProfile; noticeShown: boolean } | null = null;
+  // The modal closed while the user's request was still being verified; it keeps applying.
+  private released = false;
   private appliedEncoding = '';
   private readonly encoding = new ScreenEncodingControls(() => nativeScreenProfile(this.qualityProfile()),
-    undefined, profile => this.applyCompatibleProfile(profile), () => this.rejectQualityRequest());
+    undefined, profile => this.applyCompatibleProfile(profile), () => this.rejectQualityRequest(),
+    () => this.settleReleasedRequest());
 
   private qualityProfile(): QualityProfile {
     return this.requestedQuality?.profile ?? (settingsStore.qualityPreset === 'CUSTOM'
@@ -44,8 +59,8 @@ export class QualityTab {
       settingsStore.screenEncodingMode, settingsStore.preferredScreenCodec]);
   }
 
-  private requestQualityChanges(preset: QualityPresetType, profile: QualityProfile): void {
-    this.requestedQuality = { preset, profile };
+  private requestQualityChanges(preset: QualityPresetType, profile: QualityProfile, noticeShown = false): void {
+    this.requestedQuality = { preset, profile, noticeShown };
     void this.encoding.refresh(true);
   }
 
@@ -73,13 +88,20 @@ export class QualityTab {
     this.renderQualityDetails();
   }
 
-  private commitQualityChanges(preset: QualityPresetType, customProfile?: QualityProfile, persist = true): void {
+  private settleReleasedRequest(): void {
+    this.released = false;
+    this.requestedQuality = null;
+  }
+
+  private commitQualityChanges(preset: QualityPresetType, customProfile?: QualityProfile, persist = true,
+    confirm = false): void {
     const previousPreset = settingsStore.qualityPreset, previousCustom = settingsStore.customProfile;
     const profile = preset === 'CUSTOM' ? customProfile ?? previousCustom : QUALITY_PRESETS[preset];
     webRtcManager.assertScreenSharingSettings(profile);
     settingsStore.qualityPreset = preset;
     if (customProfile) settingsStore.customProfile = customProfile;
-    try { webRtcManager.setQualityPreset(preset); }
+    let applied: Promise<number | null>;
+    try { applied = webRtcManager.setQualityPreset(preset); }
     catch (error) {
       settingsStore.qualityPreset = previousPreset;
       settingsStore.customProfile = previousCustom;
@@ -87,19 +109,33 @@ export class QualityTab {
     }
     if (persist) settingsStore.save();
     void this.encoding.refresh();
+    if (confirm) this.confirmQualityChange(profile, applied);
+  }
+
+  // Active shares confirm only after their replacement source is live; failures are reported by the share.
+  private confirmQualityChange(profile: QualityProfile, applied: Promise<number | null>): void {
+    const values = { width: profile.screenWidth, height: profile.screenHeight, fps: profile.screenFps };
+    void Promise.resolve(applied).then(shares => {
+      if (shares === null) return;
+      showSuccessToast(t(shares > 0 ? 'settings.qualityAppliedLive' : 'settings.qualitySaved', values), 5000);
+    });
   }
 
   private applyCompatibleProfile(profile: NativeScreenVideoProfile): void {
-    if (!this.container || this.eventController?.signal.aborted) throw new Error('Quality settings were closed.');
+    if (!this.released && (!this.container || this.eventController?.signal.aborted))
+      throw new Error('Quality settings were closed.');
     const previous = this.qualityProfile();
     const adjusted = previous.screenFps !== profile.fps;
     if (!this.requestedQuality && !adjusted && this.appliedEncoding === this.encodingKey()) return;
     const preset = adjusted ? 'CUSTOM' : this.requestedQuality?.preset ?? settingsStore.qualityPreset;
     const persist = !!this.requestedQuality || adjusted;
+    // A clamp notice or FPS adjustment already explains the applied value; never replace it.
+    const confirm = !!this.requestedQuality && !this.requestedQuality.noticeShown && !adjusted;
     const encoding = this.encodingKey();
     this.requestedQuality = null;
     try {
-      this.commitQualityChanges(preset, preset === 'CUSTOM' ? { ...previous, screenFps: profile.fps } : undefined, persist);
+      this.commitQualityChanges(preset, preset === 'CUSTOM' ? { ...previous, screenFps: profile.fps } : undefined,
+        persist, confirm);
       this.appliedEncoding = encoding;
     } catch (error) {
       this.renderQualityDetails();
@@ -117,6 +153,8 @@ export class QualityTab {
   }
 
   public renderHtml(): string {
+    // Reopening while a request is still being verified shows that request, not the old value.
+    const preset = this.requestedQuality?.preset ?? settingsStore.qualityPreset;
     return `
       ${ScreenEncodingControls.html()}
       <div data-settings-section="screen-receiver" data-settings-label="${escapeHtml(t('settings.screenReceiverSection'))}" class="form-group">
@@ -145,15 +183,11 @@ export class QualityTab {
           <span class="material-symbols-outlined md-16" style="color: var(--text-muted); cursor: help;" title="${t('settings.qualityHelp')}">help</span>
         </label>
         <select id="select-preset">
-          <option value="ECONOMIC" ${settingsStore.qualityPreset === 'ECONOMIC' ? 'selected' : ''}>${t('settings.presetEconomic')}</option>
-          <option value="NORMAL" ${settingsStore.qualityPreset === 'NORMAL' ? 'selected' : ''}>${t('settings.presetNormal')}</option>
-          <option value="HIGH" ${settingsStore.qualityPreset === 'HIGH' ? 'selected' : ''}>${t('settings.presetHigh')}</option>
-          <option value="GAMING" ${settingsStore.qualityPreset === 'GAMING' ? 'selected' : ''}>${t('settings.presetGaming')}</option>
-          <option value="ULTRA" ${settingsStore.qualityPreset === 'ULTRA' ? 'selected' : ''}>${t('settings.presetUltra')}</option>
-          <option value="CUSTOM" ${settingsStore.qualityPreset === 'CUSTOM' ? 'selected' : ''}>${t('settings.presetCustom')}</option>
+          ${QUALITY_PRESET_OPTIONS.map(([value, label]) =>
+            `<option value="${value}" ${preset === value ? 'selected' : ''}>${t(label)}</option>`).join('')}
         </select>
         <div id="preset-details" style="margin-top: 8px; padding: 10px 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
-          ${this.getPresetDetailsHtml(settingsStore.qualityPreset)}
+          ${this.getPresetDetailsHtml(preset)}
         </div>
         <small style="display: block; margin-top: 6px; color: var(--text-muted); font-size: 11px;">
           ${t('settings.qualityFootnote')}
@@ -387,6 +421,7 @@ export class QualityTab {
     this.cleanup();
     this.eventController = new AbortController();
     this.container = container;
+    this.released = false;
     this.appliedEncoding = this.encodingKey();
     this.encoding.attach(container);
     const options = { signal: this.eventController.signal };
@@ -449,8 +484,7 @@ export class QualityTab {
     }, options);
 
     selectPreset?.addEventListener('change', () => {
-      const choices: QualityPresetType[] = ['ECONOMIC', 'NORMAL', 'HIGH', 'GAMING', 'ULTRA', 'CUSTOM'];
-      const val = choices.find(choice => choice === selectPreset.value);
+      const val = QUALITY_PRESET_OPTIONS.map(([choice]) => choice).find(choice => choice === selectPreset.value);
       if (!val) {
         console.warn('[QualityTab] Invalid quality preset:', selectPreset.value);
         selectPreset.value = settingsStore.qualityPreset;
@@ -462,7 +496,7 @@ export class QualityTab {
       this.renderQualityDetails();
     }, options);
 
-    if (settingsStore.qualityPreset === 'CUSTOM') {
+    if ((this.requestedQuality?.preset ?? settingsStore.qualityPreset) === 'CUSTOM') {
       this.attachCustomProfileListeners(container);
     }
   }
@@ -508,7 +542,7 @@ export class QualityTab {
       const adjusted = CUSTOM_QUALITY_FIELDS.some(key => normalized[key] !== requested[key]);
       editedProfile = normalized;
       notify(adjusted ? 'settings.qualityValueAdjusted' : null);
-      this.requestQualityChanges('CUSTOM', normalized);
+      this.requestQualityChanges('CUSTOM', normalized, adjusted);
       syncInputs();
     };
 
@@ -614,9 +648,15 @@ export class QualityTab {
   }
 
   public cleanup(): void {
-    this.requestedQuality = null;
+    if (this.encoding.hasPendingRequest) {
+      this.released = true;
+      this.encoding.release();
+    } else {
+      this.released = false;
+      this.requestedQuality = null;
+      this.encoding.cleanup();
+    }
     this.container = null;
-    this.encoding.cleanup();
     this.clearQualityToast?.();
     this.clearQualityToast = null;
     this.eventController?.abort();

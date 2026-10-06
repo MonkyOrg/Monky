@@ -776,38 +776,60 @@ alheias. Produz `release\win-unpacked\Monky.exe` e
 `release\Monky-Windows.zip`. O empacotamento falha se binários, fontes
 compiladas, runtime, CRT ou avisos de terceiros estiverem inconsistentes.
 
-## Reaproveitamento no CI e na release Windows
+## Reaproveitamento no CI e na release
 
-O CI executa a suíte DOM Windows em outro runner `windows-2022`, em paralelo
-ao preparo nativo e ao empacotamento. Os testes continuam sequenciais dentro
-desse runner para não disputar fixtures de desktop/áudio. Os dois checks
-`Build check` existentes aguardam o empacotamento nas duas plataformas e a
-suíte DOM Windows; falha, cancelamento ou uma etapa paralela pulada não aprova
-esses gates. A suíte DOM macOS continua no job de empacotamento.
+O CI executa a suíte DOM desde o início do run, sem esperar o runtime nativo:
+no Windows, em duas partes balanceadas pelo custo medido (`MONKY_DOM_SHARD`);
+no macOS, inteira em outro runner. Os testes continuam sequenciais dentro de
+cada runner para não disputar fixtures de desktop/áudio, e cada parte executa
+todos os seus comandos e lista todas as falhas antes de reprovar. Os dois checks
+`Build check` aguardam o empacotamento nas duas plataformas, as suítes DOM e a
+validação nativa no hardware macOS; falha, cancelamento ou uma etapa pulada não
+aprova esses gates.
 
-CI e release mantêm cache somente de `.native-screen\downloads`: arquivos
-compactados de runtime/dependências OBS, identificados pelo conteúdo, e os
-arquivos de fontes selecionados pelas receitas OBS fixadas. A chave inclui
-Windows x64, os manifestos e as receitas de download/verificação, sem fallback
-por prefixo. CI e release usam namespaces separados. Antes do uso, cada arquivo
-restaurado é conferido contra o SHA-256 confiável e o tamanho, quando fixado;
-corrupção falha explicitamente, sem baixar uma substituição silenciosa. Sem
-cache, os arquivos são baixados e verificados normalmente.
+No macOS, o runtime nativo é compilado (ou restaurado) uma única vez no job
+`mac-native` e validado nos dois hardwares (`mac-native-sources`): Apple Silicon
+e Intel exercitam exatamente os binários que o empacotamento publica, em vez de
+compilarem binários próprios. Em paralelo, o job `mac-sources` prepara o SDK
+fixado, gera o grafo GN das duas arquiteturas (`buildMacRtc.cjs --configure`,
+sem compilar) para os avisos de terceiros e empacota as fontes correspondentes.
+O empacotamento confere os binários contra essas fontes antes de exportar o
+artefato.
 
-Isso **não é cache de binários nativos**: alterações de ABI do Electron,
-compilador e fontes continuam compilando do zero. Não são restaurados árvore
-WebRTC, marcadores de propriedade do checkout, venv Python, ferramentas
-extraídas nem resultados de compilação nativa. Permanecem a seleção de Python
-3.11, VS2022 v143 e SDK 10.0.26100.0, os contratos nativos, as verificações de
-pacote, as licenças e os gates de geração/publicação das fontes correspondentes.
+CI e release mantêm cache de `.native-screen\downloads`: arquivos compactados
+de runtime/dependências OBS, identificados pelo conteúdo, e os arquivos de
+fontes selecionados pelas receitas OBS fixadas. A chave inclui Windows x64, os
+manifestos e as receitas de download/verificação, sem fallback por prefixo. CI
+e release usam namespaces separados. Antes do uso, cada arquivo restaurado é
+conferido contra o SHA-256 confiável e o tamanho, quando fixado; corrupção
+falha explicitamente, sem baixar uma substituição silenciosa.
 
-A execução fria ganha somente a oportunidade de sobrepor DOM Windows ao
-trabalho nativo, ao custo da instalação e do build dos workspaces em outro
-runner. A execução quente pode também evitar esses downloads OBS, mas ainda
-extrai, valida, compila WebRTC e gera o arquivo de fontes da release. Não há
-promessa de duração nem eliminação do custo principal da compilação nativa;
-meça as execuções reais de CI/release antes de afirmar ganho de tempo.
+O runtime compilado (`bin/darwin-*` no macOS; `bin/win32-x64`, `licenses/`,
+`LICENSE` e `THIRD_PARTY_NOTICES` no Windows) só é reaproveitado por uma chave
+exata, calculada por `scripts/native-cache-key.cjs` a partir do conteúdo de
+todas as fontes, receitas e pins nativos, mais Xcode/SDK ou MSVC/Windows SDK,
+Node, node-gyp, Python e a imagem do runner. Não há fallback por prefixo:
+qualquer mudança compila do zero. O binário restaurado ou recém-compilado passa
+pelas mesmas verificações (`scripts/verifyOutputs.cjs`): fontes e receita contra
+os manifestos, hashes, capacidades registradas, self-test do executável e carga
+do addon. O cache só é gravado depois delas e, no Windows, dos testes nativos.
 
+Caches de PR só ficam visíveis para o próprio PR: novas rodadas que não mudam o
+código nativo pulam a compilação. A release grava no cache da `main` o runtime
+aprovado que restaurou do artefato do CI, com a chave registrada no manifesto,
+sem compilar; PRs seguintes com as mesmas entradas o reaproveitam. A release
+nunca restaura binários de cache. Árvore WebRTC, marcadores de propriedade do
+checkout, venv Python e ferramentas extraídas continuam fora de qualquer cache.
+Com o runtime restaurado, o Windows ainda baixa as fontes fixadas
+(`prepare:native-screen --fetch-only`) para gerar o arquivo de fontes.
+
+O `.tar.xz` de fontes usa `xz --threads=0` quando disponível; no CI ele é
+obrigatório (`MONKY_SOURCE_XZ=required`). É o mesmo fluxo tar, num único stream
+xz dividido em blocos e comprimido em todos os núcleos. Sem `xz`,
+`sourceArchive.py` usa o `lzma` do Python em uma thread, e
+`MONKY_SOURCE_XZ=python` força esse caminho. Inventário e releitura continuam
+verificados. Meça as execuções reais de CI/release antes de afirmar ganho de
+tempo.
 ## Licença e fontes correspondentes
 
 Antes de atualizar licenças ou assinar, o empacotamento separa os hard links

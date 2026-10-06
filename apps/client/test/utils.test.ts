@@ -620,30 +620,30 @@ function runTests() {
   const { videoService } = require('../src/renderer/core/VideoService');
   const { settingsStore: globalSettingsStore } = require('../src/renderer/stores/settingsStore');
 
-  // Testar ULTRA preset
-  globalSettingsStore.qualityPreset = 'ULTRA';
-  videoService.applyQualityPreset('ULTRA');
-  const ultraProfile = videoService.getProfile();
-  assert(ultraProfile.screenWidth === 1920, 'ULTRA preset define resolução de tela 1920 de largura');
-  assert(ultraProfile.screenHeight === 1080, 'ULTRA preset define resolução de tela 1080 de altura');
-  assert(ultraProfile.screenFps === 60, 'ULTRA preset define 60 fps para tela');
-  assert(ultraProfile.screenBitrateKbps === 8000, 'ULTRA preset define 8000 kbps para tela');
+  // Testar Extremo (4K 120), o topo dos perfis
+  globalSettingsStore.qualityPreset = 'UHD120';
+  videoService.applyQualityPreset('UHD120');
+  const uhdProfile = videoService.getProfile();
+  assert(uhdProfile.screenWidth === 3840, 'UHD120 preset define resolução de tela 3840 de largura');
+  assert(uhdProfile.screenHeight === 2160, 'UHD120 preset define resolução de tela 2160 de altura');
+  assert(uhdProfile.screenFps === 120, 'UHD120 preset define 120 fps para tela');
+  assert(uhdProfile.screenBitrateKbps === 40000, 'UHD120 preset define 40000 kbps para tela');
 
-  // Testar GAMING preset
+  // Testar GAMING (Fluido) preset
   globalSettingsStore.qualityPreset = 'GAMING';
   videoService.applyQualityPreset('GAMING');
   const gamingProfile = videoService.getProfile();
   assert(gamingProfile.screenWidth === 1920 && gamingProfile.screenHeight === 1080, 'GAMING preset é 1080p');
   assert(gamingProfile.screenFps === 60, 'GAMING preset é 60 fps');
-  assert(gamingProfile.screenBitrateKbps === 6000, 'GAMING preset define 6000 kbps');
+  assert(gamingProfile.screenBitrateKbps === 8000, 'GAMING preset define 8000 kbps');
 
   // Testar ECONOMIC preset
   globalSettingsStore.qualityPreset = 'ECONOMIC';
   videoService.applyQualityPreset('ECONOMIC');
   const economicProfile = videoService.getProfile();
-  assert(economicProfile.screenWidth === 854 && economicProfile.screenHeight === 480, 'ECONOMIC preset é 480p');
-  assert(economicProfile.screenFps === 15, 'ECONOMIC preset capa em 15 fps');
-  assert(economicProfile.screenBitrateKbps === 900, 'ECONOMIC preset capa bitrate em 900 kbps');
+  assert(economicProfile.screenWidth === 640 && economicProfile.screenHeight === 360, 'ECONOMIC preset é 360p');
+  assert(economicProfile.screenFps === 30, 'ECONOMIC preset não fica abaixo de 30 fps');
+  assert(economicProfile.screenBitrateKbps === 700, 'ECONOMIC preset capa bitrate em 700 kbps');
 
   // Testar CUSTOM preset
   globalSettingsStore.qualityPreset = 'CUSTOM';
