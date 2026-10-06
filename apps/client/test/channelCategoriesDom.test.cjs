@@ -407,6 +407,41 @@ if (!process.versions.electron) {
       if (!await browser.webContents.executeJavaScript(`window.categoryTestRequests.at(-1).payload.inheritCategoryPermissions === true && !('permissionOverwrites' in window.categoryTestRequests.at(-1).payload)`)) {
         throw new Error('Saving synchronization did not preserve live category inheritance');
       }
+      // Shared root: loose channels sit anywhere among categories, moved with a real pointer.
+      const layout = await browser.webContents.executeJavaScript('window.categoryTreeFixture()');
+      if (JSON.stringify(layout) !== JSON.stringify(['category:voice|text', ':loose', 'destination:', ':tail', 'end:'])) {
+        throw new Error('The shared root did not interleave loose channels with categories: ' + JSON.stringify(layout));
+      }
+      const rootRequest = async (expected, label) => {
+        const found = await pageBecomes(`window.categoryTestRequests.some(({ type, payload }) =>
+          type === 'CHANNEL_REORDER' && payload.categoryId === null && payload.orderedIds.join(',') === ${JSON.stringify(expected.join(','))})`);
+        if (!found) throw new Error(`${label}: ${JSON.stringify(await browser.webContents.executeJavaScript('window.categoryTestRequests'))}`);
+        await browser.webContents.executeJavaScript('window.categoryTestRequests.length = 0');
+      };
+      const rootPoint = (selector, yRatio = 0.5) => browser.webContents.executeJavaScript(`(() => {
+        const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+        return { x: Math.round(box.left + Math.min(80, box.width / 2)), y: Math.round(box.top + box.height * ${yRatio}) };
+      })()`);
+      await dragChannelToSelector(await rootPoint('.channel-item[data-channel-id="tail"]'),
+        '[data-category-id="destination"] > .category-title', 0.2);
+      await rootRequest(['category', 'loose', 'tail', 'destination'], 'A loose channel did not move above a category');
+      await dragChannelToSelector(await rootPoint('.channel-item[data-channel-id="voice"]'),
+        '[data-category-id="destination"] > .category-title', 0.2);
+      if (!await pageBecomes(`window.categoryTestRequests.some(({ type, payload }) =>
+        type === 'CHANNEL_UPDATE' && payload.channelId === 'voice' && payload.categoryId === null)`)) {
+        throw new Error('Leaving a category between two categories did not detach the channel first');
+      }
+      await rootRequest(['category', 'loose', 'voice', 'destination', 'tail'], 'A channel did not leave its category into the root slot');
+      await drag(await rootPoint('[data-category-id="destination"] > .category-title'),
+        await rootPoint('.channel-item[data-channel-id="loose"]', 0.2));
+      await rootRequest(['category', 'destination', 'loose', 'tail'], 'A category did not move above a loose channel');
+      await browser.webContents.executeJavaScript(`document.querySelector('[data-category-channels=""]').style.minHeight = '96px'`);
+      await dragChannelToSelector(await rootPoint('.channel-item[data-channel-id="text"]'), '[data-category-channels=""]', 0.85);
+      await rootRequest(['category', 'loose', 'text', 'destination', 'tail'],
+        'Releasing over the empty part of a loose group did not keep the channel in that group');
+      await browser.webContents.executeJavaScript(`document.querySelector('[data-category-channels=""]').style.minHeight = ''`);
+      await dragChannelToSelector(await rootPoint('.channel-item[data-channel-id="loose"]'), '.channel-tree-end-dropzone', 0.5);
+      await rootRequest(['category', 'destination', 'tail', 'loose'], 'A loose channel did not move to the end of the list');
       console.log(`Category DOM ${locale}: forms, mixed groups, keyboard, menus, scoped persistence passed`);
     }
     await finish(0);
@@ -837,6 +872,23 @@ async function regression(locale) {
     }, true);
   }
   root.querySelector('[data-collapse-category="category"]').focus();
+  // A server with the shared root interleaves loose channels with categories.
+  window.categoryTreeFixture = () => {
+    document.querySelectorAll('.modal-backdrop').forEach(element => element.remove());
+    requests.length = 0;
+    if (store.isCategoryCollapsed('category')) store.toggleCategoryCollapsed('category');
+    store.setServerDetails({
+      ...details,
+      protocol: { version: 36, minimumVersion: 35, features: ['channel-tree-order'] },
+      categories: [{ ...category, position: 0 }, { ...destination, position: 2 }],
+      channels: [channel('voice', 'VOICE', category.id), channel('text', 'TEXT', category.id),
+        { ...channel('loose', 'TEXT', null), position: 1 }, { ...channel('tail', 'TEXT', null), position: 3 }],
+    }, user);
+    view.renderChannels();
+    return [...document.querySelectorAll('#channel-categories-list > *')].map(element =>
+      `${element.classList.contains('channel-tree-end-dropzone') ? 'end' : element.dataset.categoryId}:` +
+      [...element.querySelectorAll('.channel-item')].map(item => item.dataset.channelId).join('|'));
+  };
   // Kept for the real key event dispatched from Electron after returning.
   window.categoryTestCleanup = () => { off(); view.destroy(); };
 }

@@ -71,6 +71,8 @@ export interface ICategoryRepository {
   /** Detaches children and snapshots inherited ACLs in the same transaction. */
   deletePreservingAccess(id: string): Promise<void>;
   reorder(orderedIds: string[]): Promise<void>;
+  /** Writes root positions shared with loose channels, in one transaction. */
+  updatePositions(positions: Array<{ categoryId: string; position: number }>): Promise<void>;
 }
 
 export interface IMessageRepository {

@@ -928,9 +928,20 @@ input:focus, textarea:focus, select:focus {
   justify-content: center;
 }
 
-.server-rail-item[draggable='true'],
-.server-rail-folder-header[draggable='true'] {
+.server-rail-item[data-rail-draggable='true'],
+.server-rail-folder-header[data-rail-draggable='true'] {
   cursor: grab;
+}
+
+.server-rail--dragging,
+.server-rail--dragging * {
+  cursor: grabbing !important;
+  user-select: none;
+}
+
+/* Rail icons are pointer-dragged; a native image drag would carry the picture. */
+.server-rail-avatar > img {
+  -webkit-user-drag: none;
 }
 
 .server-rail-item.dragging,

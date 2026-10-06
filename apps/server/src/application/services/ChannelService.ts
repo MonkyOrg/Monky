@@ -28,6 +28,9 @@ import {
   categoryUpdateSchema,
   categoryDeleteSchema,
   categoryReorderSchema,
+  channelTreeRoot,
+  reorderChannelTreeRoot,
+  type ChannelTreeRootItem,
 } from '@monky/shared';
 import { ChannelRecord } from '../../domain/entities';
 import { ICategoryRepository, IChannelRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
@@ -115,6 +118,41 @@ export class ChannelService {
 
   public getRoleAccessVersion(): number | null {
     return this.permissionService.getRoleAccessVersion();
+  }
+
+  /** Loose channels and categories in their shared root order. */
+  private async readRoot(serverId: string): Promise<ChannelTreeRootItem[]> {
+    const [channels, categories] = await Promise.all([
+      this.channelRepo.listByServerId(serverId),
+      this.categoryRepo?.listByServerId(serverId) ?? Promise.resolve([]),
+    ]);
+    return channelTreeRoot(channels, categories);
+  }
+
+  /** The next free root position, where new loose channels and categories go. */
+  private async nextRootPosition(serverId: string, excludeId?: string): Promise<number> {
+    const root = (await this.readRoot(serverId)).filter((item) => item.id !== excludeId);
+    return Math.max(-1, ...root.map((item) => item.position)) + 1;
+  }
+
+  /**
+   * Numbers the root 0..n in the given order, touching only what moved.
+   * Returns the root channel positions and whether any category moved.
+   */
+  private async writeRoot(
+    current: readonly ChannelTreeRootItem[], next: readonly ChannelTreeRootItem[],
+  ): Promise<{ channelPositions: Array<{ channelId: string; position: number }>; categoriesChanged: boolean }> {
+    const before = new Map(current.map((item) => [item.id, item.position]));
+    const channelPositions = next.flatMap((item, position) => item.kind === 'channel' ? [{ channelId: item.id, position }] : []);
+    const categoryPositions = next.flatMap((item, position) => item.kind === 'category' ? [{ categoryId: item.id, position }] : []);
+    const movedChannels = channelPositions.filter(({ channelId, position }) => before.get(channelId) !== position);
+    const movedCategories = categoryPositions.filter(({ categoryId, position }) => before.get(categoryId) !== position);
+    if (movedChannels.length) {
+      if (this.channelRepo.updatePositions) await this.channelRepo.updatePositions(movedChannels);
+      else for (const { channelId, position } of movedChannels) await this.channelRepo.updatePosition(channelId, position);
+    }
+    if (movedCategories.length) await this.categoryRepo?.updatePositions(movedCategories);
+    return { channelPositions, categoriesChanged: movedCategories.length > 0 };
   }
 
   public async getAccessContext(userId: string, channelId?: string): Promise<ChannelAccessContext> {
@@ -212,7 +250,9 @@ export class ChannelService {
       serverId: server.id,
       name: parseResult.data.name,
       type: parseResult.data.type,
-      position: Math.max(-1, ...existingChannels.filter((channel) => (channel.categoryId ?? null) === categoryId).map((channel) => channel.position)) + 1,
+      position: categoryId
+        ? Math.max(-1, ...existingChannels.filter((channel) => !channel.forumId && channel.categoryId === categoryId).map((channel) => channel.position)) + 1
+        : await this.nextRootPosition(server.id),
       createdAt: Date.now(),
       maxParticipants: parseResult.data.maxParticipants || 10,
       isPrivate,
@@ -280,6 +320,15 @@ export class ChannelService {
         ? withChannelPrivacy(channelOverwrites(existing), nextIsPrivate, nextRoleIds)
         : channelOverwrites(existing));
 
+    // A channel moved to another container lands at its end: positions are only
+    // comparable inside one category, or across the shared root.
+    const movesContainer = nextCategoryId !== (existing.categoryId ?? null);
+    const movedPosition = !movesContainer ? undefined : nextCategoryId
+      ? Math.max(-1, ...(await this.channelRepo.listByServerId(existing.serverId))
+        .filter((channel) => channel.id !== channelId && !channel.forumId && channel.categoryId === nextCategoryId)
+        .map((channel) => channel.position)) + 1
+      : await this.nextRootPosition(existing.serverId, channelId);
+
     await this.channelRepo.update(channelId, {
       ...(changesAccess ? {
         permissionOverwrites: nextOverwrites,
@@ -294,6 +343,7 @@ export class ChannelService {
       ...(maxParticipants !== undefined ? { maxParticipants } : {}),
       botCommandsEnabled: nextBotCommandsEnabled,
     });
+    if (movedPosition !== undefined) await this.channelRepo.updatePosition(channelId, movedPosition);
 
     return {
       success: true,
@@ -309,14 +359,18 @@ export class ChannelService {
   }
 
   /**
-   * Reorders one mixed category (or a legacy type-scoped request). Unknown,
-   * duplicate and out-of-scope ids are ignored; omitted channels stay at the
-   * end so an out-of-date client cannot remove them from the ordering.
+   * Reorders one mixed category, the shared root (`categoryId: null`) or a
+   * legacy type-scoped request. Unknown, duplicate and out-of-scope ids are
+   * ignored; omitted entries stay at the end so an out-of-date client cannot
+   * remove them from the ordering.
    */
   public async reorderChannels(
     payload: ChannelReorderPayload,
     actorUserId?: string,
-  ): Promise<{ success: boolean; errorCode?: ProtocolErrorCode; errorMessage?: string; positions?: Array<{ channelId: string; position: number }> }> {
+  ): Promise<{
+    success: boolean; errorCode?: ProtocolErrorCode; errorMessage?: string;
+    positions?: Array<{ channelId: string; position: number }>; categoriesChanged?: boolean;
+  }> {
     const parseResult = channelReorderSchema.safeParse(payload);
     if (!parseResult.success) {
       return {
@@ -336,6 +390,21 @@ export class ChannelService {
     }
 
     const { type, categoryId, orderedIds } = parseResult.data;
+    const assertManager = async (moved: boolean) => {
+      if (!actorUserId || !moved) return true;
+      return hasPermission((await this.getAccessContext(actorUserId)).permissions, Permission.MANAGE_CHANNELS);
+    };
+    const denied = { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Permissão insuficiente para reordenar estes canais.' };
+    if (categoryId === null) {
+      // The root holds loose channels and categories together. A request that
+      // names only channels (older clients) leaves every category in its slot.
+      const current = await this.readRoot(server.id);
+      const next = reorderChannelTreeRoot(current, orderedIds);
+      if (!await assertManager(next.some((item, index) => current[index] !== item))) return denied;
+      const { channelPositions, categoriesChanged } = await this.writeRoot(current, next);
+      return { success: true, positions: channelPositions, categoriesChanged };
+    }
+
     const ofType = (await this.channelRepo.listByServerId(server.id)).filter((c) =>
       !c.forumId && (categoryId !== undefined ? (c.categoryId ?? null) === categoryId : c.type === type));
     const byId = new Map(ofType.map((c) => [c.id, c]));
@@ -352,13 +421,7 @@ export class ChannelService {
     }
 
     const positions = ordered.map((channelId, index) => ({ channelId, position: index }));
-    if (actorUserId) {
-      const context = await this.getAccessContext(actorUserId);
-      if (!hasPermission(context.permissions, Permission.MANAGE_CHANNELS) &&
-          positions.some(position => byId.get(position.channelId)!.position !== position.position)) {
-        return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Permissão insuficiente para reordenar estes canais.' };
-      }
-    }
+    if (!await assertManager(positions.some(position => byId.get(position.channelId)!.position !== position.position))) return denied;
     if (this.channelRepo.updatePositions) await this.channelRepo.updatePositions(positions);
     else for (const { channelId, position } of positions) await this.channelRepo.updatePosition(channelId, position);
 
@@ -403,7 +466,7 @@ export class ChannelService {
       if (categories.length >= 200) return invalid;
       await repo.create({
         ...parsed.data, id: uuidv4(), serverId: server.id, createdAt: Date.now(),
-        position: Math.max(-1, ...categories.map((category) => category.position)) + 1,
+        position: await this.nextRootPosition(server.id),
         allowedRoleIds: parsed.data.isPrivate ? await this.sanitizeRoleIds(parsed.data.allowedRoleIds) : [],
       });
     } else if (operation === 'update') {
@@ -424,22 +487,30 @@ export class ChannelService {
     } else if (operation === 'delete') {
       const parsed = categoryDeleteSchema.safeParse(payload);
       if (!parsed.success || (await repo.findById(parsed.data.categoryId))?.serverId !== server.id) return invalid;
-      await repo.deletePreservingAccess(parsed.data.categoryId);
+      // Its channels take the category's place at the root, in their order.
+      const deletedId = parsed.data.categoryId;
+      const children = (await this.channelRepo.listByServerId(server.id))
+        .filter((channel) => !channel.forumId && channel.categoryId === deletedId)
+        .sort((a, b) => a.position - b.position || a.createdAt - b.createdAt);
+      const current = await this.readRoot(server.id);
+      const next = current.flatMap((item) => item.kind === 'category' && item.id === deletedId
+        ? children.map((channel) => ({ kind: 'channel' as const, id: channel.id, position: channel.position, createdAt: channel.createdAt }))
+        : [item]);
+      await repo.deletePreservingAccess(deletedId);
+      await this.writeRoot(await this.readRoot(server.id), next);
     } else {
       const parsed = categoryReorderSchema.safeParse(payload);
       if (!parsed.success) return invalid;
-      const categories = await repo.listByServerId(server.id);
-      const known = new Set(categories.map((category) => category.id));
-      const ordered = [...new Set(parsed.data.orderedIds)].filter((id) => known.has(id));
-      const next = [...ordered, ...categories.map(category => category.id).filter(id => !ordered.includes(id))];
-      if (actorUserId) {
+      // Loose channels share the root with categories and keep their slots.
+      const current = await this.readRoot(server.id);
+      const next = reorderChannelTreeRoot(current, parsed.data.orderedIds);
+      if (actorUserId && next.some((item, index) => current[index] !== item)) {
         const context = await this.getAccessContext(actorUserId);
-        if (categories.some(category => category.position !== next.indexOf(category.id) &&
-          !hasPermission(context.permissions, Permission.MANAGE_CHANNELS))) {
+        if (!hasPermission(context.permissions, Permission.MANAGE_CHANNELS)) {
           return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Permissão insuficiente para reordenar estas categorias.' };
         }
       }
-      await repo.reorder(next);
+      await this.writeRoot(current, next);
     }
     return { success: true };
   }

@@ -7,6 +7,7 @@ import {
   toLegacyRoles, toRoleDenyRoles, withVoicePresence, type ChannelPermissionOverwrite,
 } from '../src/permissions';
 import { channelPermissionOverwritesSchema, roleCreateSchema, roleUpdateSchema } from '../src/validators';
+import { channelTreeRoot, reorderChannelTreeRoot } from '../src/channelTree';
 
 const rules = (permissionOverwrites: ChannelPermissionOverwrite[]) => ({
   isPrivate: false, allowedRoleIds: [], permissionOverwrites,
@@ -237,4 +238,28 @@ test('a member inside a voice room keeps seeing it while every other rule still 
     'bots never enter private rooms through presence');
   assert.equal(hasChannelPermission(withVoicePresence({ isPrivate: false, allowedRoleIds: [] }, 'guest'),
     DEFAULT_PERMISSIONS, [], Permission.SPEAK, false, 'guest'), true, 'legacy public rooms keep their base permissions');
+});
+
+test('loose channels and categories share one root order that legacy requests cannot scramble', () => {
+  const channels = [
+    { id: 'loose-a', position: 2, createdAt: 1, categoryId: null },
+    { id: 'inside', position: 0, createdAt: 1, categoryId: 'cat-a' },
+    { id: 'orphan', position: 4, createdAt: 1, categoryId: 'deleted' },
+    { id: 'thread', position: 0, createdAt: 1, categoryId: null, forumId: 'forum' },
+    { id: 'loose-b', position: 0, createdAt: 1, categoryId: null },
+  ];
+  const categories = [{ id: 'cat-a', position: 1, createdAt: 1 }, { id: 'cat-b', position: 3, createdAt: 1 }];
+  const root = channelTreeRoot(channels, categories);
+  assert.deepEqual(root.map(item => item.id), ['loose-b', 'cat-a', 'loose-a', 'cat-b', 'orphan'],
+    'a loose channel can sit between categories; threads and channels inside categories stay out of the root');
+  assert.deepEqual(channelTreeRoot(channels, categories, true).map(item => item.id), ['loose-b', 'loose-a', 'orphan', 'cat-a', 'cat-b'],
+    'servers without the tree order keep loose channels on top');
+  const ids = (items: { id: string }[]) => items.map(item => item.id);
+  assert.deepEqual(ids(reorderChannelTreeRoot(root, ['cat-b', 'loose-a', 'cat-a', 'loose-b', 'orphan'])),
+    ['cat-b', 'loose-a', 'cat-a', 'loose-b', 'orphan'], 'a mixed request defines the whole root');
+  assert.deepEqual(ids(reorderChannelTreeRoot(root, ['orphan', 'loose-b'])), ['orphan', 'cat-a', 'loose-b', 'cat-b', 'loose-a'],
+    'a channels-only request keeps every category in its slot and appends forgotten channels');
+  assert.deepEqual(ids(reorderChannelTreeRoot(root, ['cat-b', 'cat-a', 'missing', 'cat-b'])), ['loose-b', 'cat-b', 'loose-a', 'cat-a', 'orphan'],
+    'a categories-only request keeps loose channels in place and ignores unknown or repeated ids');
+  assert.deepEqual(ids(reorderChannelTreeRoot(root, ['thread', 'inside'])), ids(root), 'ids outside the root change nothing');
 });

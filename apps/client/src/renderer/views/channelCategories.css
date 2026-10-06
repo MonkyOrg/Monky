@@ -28,6 +28,9 @@
   min-height: 8px;
 }
 .channel-category + .channel-category { margin-top: 16px; }
+/* With a shared root, the end of the list is where items leave every category. */
+.channel-tree-end-dropzone { margin-top: 8px; }
+.category-reorder-active .channel-tree-end-dropzone { display: flex; }
 .category-modal { width: min(480px, calc(100vw - 32px)); }
 .category-modal .modal-footer > .btn { flex: 1; }
 .category-modal #input-category-name { padding-right: 36px; }

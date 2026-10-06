@@ -2864,6 +2864,9 @@ export class WebSocketServer {
       );
       return;
     }
+    // Categories share the root with loose channels: when they move, everyone
+    // receives their new positions before the channel positions land.
+    if (result.categoriesChanged) await this.reconcileChannelVisibility();
 
     const positions = result.positions;
     const visibleTo = (peer: ClientSession) =>

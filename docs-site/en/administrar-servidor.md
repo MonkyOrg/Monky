@@ -81,8 +81,9 @@ Right-click an empty area of the channel list to **Create Channel**,
 
 Use the **+** beside a category. Choose any channel type,
 enter a name and review the switches before creating it. Categories can mix
-text, voice and forums; uncategorized channels appear directly in the list
-without an artificial category heading.
+text, voice and forums. Uncategorized channels appear directly in the list
+without an artificial category heading, and can sit anywhere: above, below or
+between categories.
 
 To edit or delete, open the channel's **More options** menu. Deletion is
 destructive: check the name and its effect on history before confirming.
@@ -207,9 +208,13 @@ features, but live actions require a compatible server.
 
 **Create category** is in the empty channel area's right-click menu.
 Right-click a category name to edit its name and access, move it up/down, or delete it.
-Use **Move to category** in a channel's menu to move it, or drag channels to
-move and reorder them. Category arrows collapse their lists; the choice is
-remembered per server and identity on this device.
+Use **Move to category** in a channel's menu to move it, or drag channels and
+categories to move and reorder them. Channels and categories share one order in
+the list: drop a channel on the top half of a category's name to place it right
+above that category, outside every category, or at the end of the list to place
+it last. **Move up/down** in the menus follows the same order. Category arrows
+collapse their lists; the choice is remembered per server and identity on this
+device.
 
 New servers start with **Text channels** and **Voice channels** (named in the
 app's selected language). Existing servers migrate to these two groups;
@@ -228,9 +233,9 @@ category synchronization, including when reverting an edit.
 Moving a synchronized channel adopts the
 destination's access; moving to **Uncategorized** preserves current effective
 access. Deleting a category **does not delete channels or history**: channels
-become uncategorized and retain their permissions. Revoking access also hides
-channels and disconnects voice participants; chat, attachment uploads and bots all
-enforce the same access.
+become uncategorized, in its place, and retain their permissions. Revoking
+access also hides channels; whoever is already in the call stays until they
+leave. Chat, attachment uploads and bots all enforce the same access.
 
 Each permission for **Everyone**, a role or an individual member has three states:
 **X — Deny**, **— — Inherit**, and **✓ — Allow**. Inherit neither grants nor

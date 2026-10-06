@@ -3,7 +3,7 @@ import { appEvents, EventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { clientLog } from '../core/ClientLogService';
 import type { ChannelCategory } from '@monky/shared';
-import { getChannelPermissions, hasChannelPermission, resolveLegacyMemberPermissions, resolveMemberPermissions, resolveRoleDenyMemberPermissions, resolveChannelPermissions, roleModelFor, withVoicePresence, type ChannelAccessRules, type RoleModel } from '@monky/shared';
+import { getChannelPermissions, hasChannelPermission, resolveLegacyMemberPermissions, resolveMemberPermissions, resolveRoleDenyMemberPermissions, resolveChannelPermissions, roleModelFor, withVoicePresence, channelTreeRoot, type ChannelAccessRules, type ChannelTreeRootItem, type RoleModel } from '@monky/shared';
 
 export class ServerStore {
   /**
@@ -196,7 +196,18 @@ export class ServerStore {
     if (index === -1) return;
 
     this.serverDetails.channels[index] = channel;
+    this.sortChannels();
     this.bus.emit('server.updated');
+  }
+
+  /** Servers with `channel-tree-order` let loose channels sit anywhere among the categories. */
+  public get hasChannelTreeOrder(): boolean {
+    return !!this.serverDetails?.protocol?.features.includes('channel-tree-order');
+  }
+
+  /** Loose channels and categories as the sidebar shows them; older servers keep loose channels on top. */
+  public getChannelTreeRoot(): ChannelTreeRootItem[] {
+    return channelTreeRoot(this.serverDetails?.channels ?? [], this.serverDetails?.categories ?? [], !this.hasChannelTreeOrder);
   }
 
   /**

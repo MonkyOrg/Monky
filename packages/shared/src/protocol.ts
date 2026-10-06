@@ -463,6 +463,10 @@ export interface ChannelDeletePayload {
  */
 export interface ChannelReorderPayload {
   type?: ChannelType;
+  /**
+   * The category being reordered. `null` is the root: with `channel-tree-order`
+   * it lists loose channels and categories together, in display order.
+   */
   categoryId?: string | null;
   /** Every channel of the selected category or type, in display order. */
   orderedIds: string[];

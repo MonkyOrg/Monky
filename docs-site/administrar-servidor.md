@@ -84,8 +84,9 @@ exigem **Gerenciar canais**; não há um botão fixo de criar categoria na lista
 
 Use o **+** ao lado de uma categoria. Escolha qualquer tipo de canal,
 informe o nome e revise os switches antes de criar. Uma categoria pode misturar
-texto, voz e fóruns; canais sem categoria aparecem diretamente na lista, sem
-um cabeçalho de categoria artificial.
+texto, voz e fóruns. Canais sem categoria aparecem diretamente na lista, sem
+um cabeçalho de categoria artificial, e podem ficar em qualquer posição: acima,
+abaixo ou entre as categorias.
 
 Para editar ou excluir, abra **Mais opções** no canal. A exclusão é uma ação
 destrutiva: confira o nome e o impacto no histórico antes de confirmar.
@@ -215,7 +216,11 @@ anteriores, mas ações ao vivo precisam de servidor compatível.
 Clique com o botão direito no nome de uma categoria para editar nome e acesso,
 mover para cima/baixo ou excluir.
 No menu de um canal, **Mover para categoria** muda seu agrupamento;
-arrastar também move e reordena canais. As setas das categorias recolhem
+arrastar também move e reordena canais e categorias. Canais e categorias
+dividem a mesma ordem na lista: solte um canal na metade de cima do nome de uma
+categoria para deixá-lo logo acima dela, fora de qualquer categoria, ou no fim
+da lista para deixá-lo por último. **Mover para cima/baixo**, nos menus, segue
+a mesma ordem. As setas das categorias recolhem
 suas listas, lembrando a escolha por servidor e identidade neste dispositivo.
 
 Novos servidores começam com **Canais de texto** e **Canais de voz** (nomes no
@@ -234,9 +239,10 @@ que diferem da categoria viram regras próprias ao salvar e exibem
 o rascunho. Regras iguais às da categoria usam a sincronização, inclusive ao
 desfazer uma alteração. Mover um canal sincronizado adota o acesso do destino;
 mover para **Sem categoria** preserva o acesso efetivo atual. Excluir uma
-categoria **não exclui canais nem histórico**: eles ficam sem categoria e
-mantêm suas permissões. Revogar acesso também remove o canal da lista e
-desconecta quem estava na voz; chat, envio de anexos e bots respeitam o mesmo acesso.
+categoria **não exclui canais nem histórico**: eles ficam sem categoria, no
+lugar dela, e mantêm suas permissões. Revogar acesso também remove o canal da
+lista; quem já está na chamada continua nela até sair. Chat, envio de anexos e
+bots respeitam o mesmo acesso.
 
 Cada permissão de **Todos**, de um cargo ou de uma pessoa possui três estados:
 **X — Negar**, **— — Herdar** e **✓ — Permitir**. Herdar não concede nem nega;
