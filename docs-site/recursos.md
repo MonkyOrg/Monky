@@ -19,8 +19,8 @@ Windows e macOS; não é preciso programar ou instalar um bot para conversar.
   controladas pelo servidor.
 
 Veja [Conversas, voz e mídia](/usando-o-app) e
-[Configurações](/configuracoes). Os perfis Econômico, Normal, Alta Qualidade,
-Gaming, Ultra e Personalizado ajustam a transmissão, não garantem uma taxa
+[Configurações](/configuracoes). Os perfis vão de Leve (360p30) a Extremo (4K120)
+e, com o Personalizado, ajustam a transmissão; não garantem uma taxa
 de quadros em qualquer hardware.
 
 ## Servidores e comunidade

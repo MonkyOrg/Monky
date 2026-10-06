@@ -19,7 +19,7 @@ and macOS; you do not need to program or install a bot to talk.
   permissions.
 
 See [Chat, voice and media](/en/usando-o-app) and [Settings](/en/configuracoes).
-Economy, Normal, High Quality, Gaming, Ultra and Custom profiles configure
+Profiles from Light (360p30) up to Extreme (4K120), plus Custom, configure
 transmission; they do not guarantee a frame rate on every device.
 
 ## Servers and community

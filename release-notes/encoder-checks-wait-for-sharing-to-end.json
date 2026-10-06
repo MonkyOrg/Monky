@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Abrir as configurações de qualidade durante um compartilhamento não testa mais todos os codecs de uma vez, disputando a placa de vídeo com a sua transmissão. Esses testes esperam você parar de compartilhar.",
+  "en": "Opening quality settings while sharing no longer tests every codec at once, competing with your stream for the graphics card. Those checks wait until you stop sharing."
+}

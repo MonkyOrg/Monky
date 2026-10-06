@@ -192,7 +192,7 @@ async function runDropdownSmoke() {
   let saves = 0;
   let applies = 0;
   settings.save = () => { saves++; };
-  rtc.setQualityPreset = () => { applies++; };
+  rtc.setQualityPreset = async () => { applies++; return 0; };
   rtc.reapplyCodecPreferences = async () => {};
   settings.qualityPreset = 'NORMAL';
   language.setLanguage('en');

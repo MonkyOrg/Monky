@@ -291,8 +291,9 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     try {
       settings.customProfile = { ...profile, screenFps: 120, screenBitrateKbps: 20000 };
       for (const [name, bitrate, fps, degradation] of [
-        ['NORMAL', 2000000, 30, 'maintain-resolution'],
-        ['GAMING', 6000000, 60, 'maintain-framerate'],
+        ['NORMAL', 2500000, 30, 'maintain-resolution'],
+        ['GAMING', 8000000, 60, 'maintain-framerate'],
+        ['UHD120', 40000000, 120, 'maintain-framerate'],
         ['CUSTOM', 20000000, 120, 'maintain-resolution'],
       ]) {
         rtc.currentPreset = name;

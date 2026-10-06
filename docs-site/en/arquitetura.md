@@ -612,24 +612,32 @@ the actual capture/encoder/transport pipeline:
 
 | Profile | Audio | Camera | Screen |
 |---|---|---|---|
-| **Economic** | 24 kbps | 640×360 @ 24fps · 250 kbps | 854×480 @ 15fps · 900 kbps |
-| **Normal** | 32 kbps | 854×480 @ 30fps · 450 kbps | 1280×720 @ 30fps · 2000 kbps |
-| **High Quality** | 48 kbps | 1280×720 @ 30fps · 600 kbps | 1920×1080 @ 30fps · 3500 kbps |
-| **Gaming Mode** | 28 kbps | 640×360 @ 20fps · 300 kbps | 1920×1080 @ 60fps · 6000 kbps |
+| **Light** | 24 kbps | 640×360 @ 30fps · 300 kbps | 640×360 @ 30fps · 700 kbps |
+| **Standard** | 32 kbps | 854×480 @ 30fps · 500 kbps | 1280×720 @ 30fps · 2500 kbps |
+| **Sharp** | 48 kbps | 1280×720 @ 30fps · 1000 kbps | 1920×1080 @ 30fps · 4500 kbps |
+| **Smooth** | 64 kbps | 1920×1080 @ 30fps · 2000 kbps | 1920×1080 @ 60fps · 8000 kbps |
+| **Ultra** | 64 kbps | 1920×1080 @ 30fps · 2000 kbps | 2560×1440 @ 60fps · 12000 kbps |
+| **Cinema** | 64 kbps | 1920×1080 @ 30fps · 2000 kbps | 3840×2160 @ 60fps · 25000 kbps |
+| **Extreme** | 64 kbps | 1920×1080 @ 30fps · 2000 kbps | 3840×2160 @ 120fps · 40000 kbps |
 
-**Gaming Mode** is the most telling one: it *reduces* the camera to spend
-everything on the screen at 60fps. And only there does the degradation preference
-become `maintain-framerate` — under tight bandwidth Monky sacrifices resolution to
-hold 60fps, because in a game smoothness matters more than sharpness. In the other
-profiles it is the opposite on the Chromium path. The native path requests
-the chosen real profile and does not hide degradation behind an FPS setting.
+Each step improves the screen without lowering camera or audio, and none goes
+below 30fps. Ceilings sit above usual streaming values because capture encoders
+emit a keyframe every second. 4K at 120fps needs H.264 level 6.0 or AV1;
+when a profile is chosen, Monky checks the encoder and lowers the FPS if it refuses.
 
-The Custom profile can request up to 1080p120 on the native path.
+In named profiles from 60fps up (Smooth to Extreme), the degradation preference
+becomes `maintain-framerate`: under tight bandwidth Monky sacrifices resolution
+to hold the frame rate, because in games and video smoothness matters more than
+sharpness. In the other profiles it is the opposite on the Chromium path. The
+native path requests the chosen real profile and does not hide degradation
+behind an FPS setting.
+
+The Custom profile accepts up to 3840×2160 and 240 FPS (120 FPS at 4K).
 Viewers can request Source, 1080p60, 720p60 or 480p30 (852×480); different
 profiles allocate separate pipelines rather than merely resizing the player.
 
-Remember these numbers are **per peer**. Sharing a screen in High Quality to 4
-people asks for roughly 14 Mbps of uplink.
+Remember these numbers are **per peer**. Sharing a screen in Sharp to 4
+people asks for roughly 18 Mbps of uplink.
 
 ### Telemetry
 
