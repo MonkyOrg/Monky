@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
-const { archiveEntryAllowed, sourceEntries, options } = require('../scripts/packSources.cjs');
+const { archiveEntryAllowed, sourceEntries, options, packSources } = require('../scripts/packSources.cjs');
 
 test('corresponding source keeps SDK identity and required tools, not build products or Git user records', () => {
   for (const name of [
@@ -32,6 +32,22 @@ test('source archive names use an unprefixed semantic version and reject path in
   assert.equal(options(['--version=9.0.0-beta']).version, '9.0.0-beta');
   for (const version of ['v9.0.0', '../9.0.0', '9.0.0/beta', '9.0.0\nother'])
     assert.throws(() => options([`--version=${version}`]));
+});
+
+test('a sources-only macOS job declares both architectures explicitly and in canonical order', async () => {
+  assert.equal(options(['--version=1.0.0']).architectures, undefined);
+  assert.deepEqual(options(['--version=1.0.0', '--architectures=x64,arm64']).architectures, ['arm64', 'x64']);
+  assert.deepEqual(options(['--architectures=arm64']).architectures, ['arm64']);
+  for (const value of ['', 'arm64,arm64', 'arm64,ppc', 'x86_64'])
+    assert.throws(() => options([`--architectures=${value}`]));
+  assert.throws(() => options(['--architectures=arm64', '--architectures=x64']));
+  await assert.rejects(packSources({ architectures: ['arm64', 'x64'] }), /only applies to macOS/u,
+    'Windows sources must not silently accept a macOS-only option.');
+  const { macArchitectures } = require('../scripts/notices.cjs');
+  assert.equal(macArchitectures(undefined), undefined);
+  assert.deepEqual(macArchitectures('--architectures=x64,arm64'), ['arm64', 'x64']);
+  for (const option of ['--architectures=', '--architectures=arm64,arm64', '--architectures=ppc', '--arch=arm64'])
+    assert.throws(() => macArchitectures(option));
 });
 
 const python = process.env.PYTHON ?? path.resolve(__dirname, '..', '..', '..', '..', '..', '.native-screen',
