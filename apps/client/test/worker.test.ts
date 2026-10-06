@@ -11,6 +11,7 @@ const paths = { node: process.execPath, ytDlp: path.resolve('fixture-ytdlp'), ff
 const track = { id: 'abcdefghijk', title: 'Controlled fixture',
   url: 'https://www.youtube.com/watch?v=abcdefghijk', duration: 0.12, audioUrl: 'https://rr1.googlevideo.com/videoplayback' };
 const frame = Uint8Array.of(0xf8, 0xff, 0xfe);
+const playlistUrl = 'https://www.youtube.com/playlist?list=PLcontrolledFixture';
 const tick = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
 
 async function until(predicate: () => boolean): Promise<void> {
@@ -42,13 +43,18 @@ function fixture(
     if (expected === undefined) await stopped;
     else await assert.rejects(stopped, error => error === expected);
   });
-  const start = (operation: 'youtube.stream' | 'youtube.resolve' | 'youtube.preview' | 'youtube.search' = 'youtube.stream'): void => {
+  const start = (
+    operation: 'youtube.stream' | 'youtube.resolve' | 'youtube.preview' | 'youtube.search' | 'youtube.playlist' = 'youtube.stream',
+    limit = 3,
+  ): void => {
     const base = { type: 'start' as const, id: 'worker-fixture', paths,
       directory: path.resolve('cache', 'task-00000000-0000-0000-0000-000000000000'),
       mode: 'task' as const };
     const input: WorkerStart = operation === 'youtube.search'
       ? { ...base, spec: { operation, query: 'controlled fixture' } }
-      : { ...base, spec: { operation, url: track.url } };
+      : operation === 'youtube.playlist'
+        ? { ...base, spec: { operation, url: playlistUrl, limit } }
+        : { ...base, spec: { operation, url: track.url } };
     receive(input);
   };
   return {
@@ -64,12 +70,13 @@ function source(open: MusicSource['open']): MusicSource {
   return {
     check: async () => undefined, search: async () => [track],
     resolve: async () => track, preview: async () => Uint8Array.from(Buffer.from('OggS')),
+    playlist: async () => ({ title: 'Controlled list', total: 9, tracks: [track, track], skipped: 1 }),
     open,
   };
 }
 
 test('worker strips internal audio URLs from metadata and closes one-shot jobs', async t => {
-  for (const operation of ['youtube.search', 'youtube.resolve', 'youtube.preview'] as const) {
+  for (const operation of ['youtube.search', 'youtube.resolve', 'youtube.preview', 'youtube.playlist'] as const) {
     const f = fixture(t, source(async () => { throw new Error('Metadata must not open playback'); }));
     f.start(operation);
     await f.runtime.closed;
@@ -81,17 +88,44 @@ test('worker strips internal audio URLs from metadata and closes one-shot jobs',
   }
 });
 
+test('worker reads playlists within the requested limit, in provider order, with policy skips counted', async t => {
+  const listed = source(async () => { throw new Error('A playlist read must not open playback'); });
+  const calls: [string, number][] = [];
+  listed.playlist = async (url, limit) => {
+    calls.push([url, limit]);
+    return { title: null, total: null, tracks: [track, { ...track, title: 'Second fixture' }, track], skipped: 2 };
+  };
+  const f = fixture(t, listed);
+  f.start('youtube.playlist', 5);
+  await f.runtime.closed;
+  assert.deepEqual(calls, [[playlistUrl, 5]]);
+  const result = f.messages.find(message => message.type === 'result');
+  assert.ok(result && result.type === 'result');
+  const publicTrack = { id: track.id, title: track.title, url: track.url, duration: track.duration };
+  assert.deepEqual(result.result, { operation: 'youtube.playlist', title: null, total: null,
+    tracks: [publicTrack, { ...publicTrack, title: 'Second fixture' }, publicTrack], skipped: 2 });
+  assert.doesNotMatch(JSON.stringify(result), /audioUrl|googlevideo|videoplayback/);
+
+  // A source that ignores the limit is a broken provider adapter, never a longer queue.
+  const oversized = fixture(t, listed);
+  oversized.start('youtube.playlist', 4);
+  await assert.rejects(oversized.runtime.closed, { reason: 'worker_failed' });
+  assert.equal(oversized.messages.some(message => message.type === 'result'), false);
+  assert.equal(oversized.messages.at(-1)?.type, 'closed');
+});
+
 test('metadata source failures retain their canonical codes through worker shutdown', async t => {
   for (const [operation, code, reason] of [
     ['youtube.search', 'input', 'invalid_request'],
     ['youtube.resolve', 'unsupported', 'invalid_request'],
     ['youtube.preview', 'tools', 'tools_missing'],
+    ['youtube.playlist', 'unavailable', 'provider_unavailable'],
   ] as const) {
     const fail = async (): Promise<never> => {
       throw new MediaError(code, 'https://rr1.googlevideo.com/videoplayback?signature=private');
     };
     const f = fixture(t, {
-      check: fail, search: fail, resolve: fail, preview: fail, open: fail,
+      check: fail, search: fail, resolve: fail, preview: fail, playlist: fail, open: fail,
     });
     f.start(operation);
     await assert.rejects(f.runtime.closed, { reason, sourceFailure: { code } });

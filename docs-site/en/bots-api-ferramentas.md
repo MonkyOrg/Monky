@@ -843,7 +843,7 @@ export enum MessageType {
 [Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/constants.ts#L1)
 
 ```ts
-export const PROTOCOL_VERSION = 37;
+export const PROTOCOL_VERSION = 38;
 ```
 
 ## `ProtocolErrorCode` {#protocolerrorcode}

@@ -77,7 +77,7 @@ assert.deepEqual(motion.filter(isMotionQualityPreset), motion);
 console.log('✔ Presets de Qualidade verificados');
 
 // Test Protocol Version
-assert.equal(PROTOCOL_VERSION, 37);
+assert.equal(PROTOCOL_VERSION, 38);
 console.assert(LIMITS.SFU_DEFAULT_MIN_PORT === 40000, 'Porta mínima padrão SFU');
 console.assert(LIMITS.SFU_DEFAULT_MAX_PORT === 49151, 'Porta máxima padrão SFU');
 console.assert(

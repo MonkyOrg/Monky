@@ -10,6 +10,7 @@ import {
   type LocalMediaTrack,
   type LocalMetadataTaskSpec,
   type LocalOpusStream,
+  type LocalPlaylistResult,
   type LocalSourceContext,
   type LocalTaskCancellationCause,
   type LocalTaskFailureReason,
@@ -33,6 +34,19 @@ export async function adapterContracts(
   );
   const spec: LocalMetadataTaskSpec = { operation: 'youtube.resolve', url: track.url };
   await executor.execute(spec);
+  if (client.supports('youtube.playlist')) {
+    const playlist: LocalPlaylistResult = await executor.execute({
+      operation: 'youtube.playlist', url: 'https://www.youtube.com/playlist?list=PLabcdefghijklmnop', limit: 50,
+    });
+    const listed: LocalMediaTrack[] = playlist.tracks;
+    const counts: [number | null, number] = [playlist.total, playlist.skipped];
+    void listed;
+    void counts;
+    // @ts-expect-error A playlist read always states how many entries it may return.
+    executor.execute({ operation: 'youtube.playlist', url: 'https://www.youtube.com/playlist?list=PLabcdefghijklmnop' });
+  }
+  // @ts-expect-error Support checks name a known local operation.
+  client.supports('youtube.download');
   const definition: CommandDefinition = {
     name: 'search', description: 'Search', localCapabilities: ['youtube-audio'],
     audioPreview: () => preview,

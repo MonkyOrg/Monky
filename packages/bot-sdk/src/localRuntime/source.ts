@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
-import { LIMITS } from '@monky/shared';
+import {
+  LIMITS, LOCAL_PLAYLIST_MAX_TRACKS, LOCAL_YOUTUBE_PLAYLIST_URL_PREFIX, isLocalYoutubePlaylistId,
+} from '@monky/shared';
 import { MediaError, aborted } from './errors';
 import { capture, captureBytes, bounded, cancellable, safeDiagnostic, terminate } from './process';
 import { OggOpusParser } from './ogg';
@@ -8,6 +10,9 @@ import { createPersistentInput, type AudioRequest, type PersistentInput } from '
 import { checkMediaTools, youtubeExtractorArgs, type MediaToolPaths } from './toolChecks';
 
 export const MUSIC_PREVIEW_DURATION_MS = 10_000;
+// Below the 45 s local task deadline; flat metadata for 500 entries stays well under this output bound.
+const PLAYLIST_TIMEOUT_MS = 35_000;
+const PLAYLIST_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 export interface Track {
   id: string;
@@ -16,6 +21,14 @@ export interface Track {
   duration: number;
 }
 export interface ResolvedTrack extends Track { audioUrl: string }
+/** Flat playlist metadata in provider order; entries outside the track policy are only counted. */
+export interface Playlist {
+  title: string | null;
+  /** The provider's own entry count, when it reports one. */
+  total: number | null;
+  tracks: Track[];
+  skipped: number;
+}
 export interface AudioStream {
   /** Encoded Opus packets, 48 kHz stereo, 20 ms each. Consumption supplies backpressure. */
   frames: AsyncIterable<Uint8Array>;
@@ -42,6 +55,8 @@ export interface MusicSource {
   check(signal: AbortSignal): Promise<void>;
   search(query: string, signal: AbortSignal): Promise<Track[]>;
   resolve(url: string, signal: AbortSignal): Promise<ResolvedTrack>;
+  /** Read at most `limit` entries; every track still needs resolve() before playback. */
+  playlist(url: string, limit: number, signal: AbortSignal): Promise<Playlist>;
   preview(url: string, signal: AbortSignal): Promise<Uint8Array>;
   /** Supply a playback lifetime signal, independent of a completed inclusion/search/preview request. */
   open(track: ResolvedTrack, signal: AbortSignal, options?: SourceOpenOptions): Promise<AudioStream>;
@@ -76,18 +91,21 @@ function requireCompleteAudio(expectedMs: number, packets: number): void {
 
 const ID = /^[a-zA-Z0-9_-]{11}$/;
 const VIDEO_HOSTS = new Set(['youtu.be', 'youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com']);
-export function videoUrl(input: string): string {
+function youtubeLink(input: unknown): { host: string; url: URL } {
   if (typeof input !== 'string' || /[\\\u0000-\u001f\u007f]/.test(input)) throw new MediaError('unsupported');
   const value = input.trim();
   // Inspect the authority before URL normalizes empty userinfo or default ports away.
   const host = /^https?:\/\/([^/?#]+)/i.exec(value)?.[1]?.toLowerCase();
   if (!host || !VIDEO_HOSTS.has(host)) throw new MediaError('unsupported');
-  let url: URL;
-  try { url = new URL(value); }
+  try { return { host, url: new URL(value) }; }
   catch (error: unknown) {
     if (error instanceof TypeError) throw new MediaError('unsupported');
     throw error;
   }
+}
+
+export function videoUrl(input: string): string {
+  const { host, url } = youtubeLink(input);
   let id: string | undefined;
   if (host === 'youtu.be') id = url.pathname.slice(1);
   else {
@@ -102,6 +120,36 @@ export function videoUrl(input: string): string {
   if (!id || id.length !== 11 || !ID.test(id)) throw new MediaError('unsupported');
   // Playlist/radio context must never reach the single-video extractor.
   return `https://www.youtube.com/watch?v=${id}`;
+}
+
+export type PlaylistLink = { kind: 'playlist'; url: string } | { kind: 'mix' };
+
+/**
+ * The list context of a YouTube playlist, album or video link, or null when there is none.
+ * Mixes (`RD…`) are reported, never canonicalized: they are endless and personalized per account.
+ */
+export function playlistLink(input: unknown): PlaylistLink | null {
+  if (typeof input !== 'string') return null;
+  let url: URL;
+  try {
+    const link = youtubeLink(input);
+    // Outside /playlist, the list must travel with a valid single-video link.
+    if (link.host === 'youtu.be' || link.url.pathname !== '/playlist') videoUrl(input);
+    url = link.url;
+  } catch (error: unknown) {
+    if (error instanceof MediaError) return null;
+    throw error;
+  }
+  const lists = url.searchParams.getAll('list');
+  if (lists.length !== 1 || !/^[A-Za-z0-9_-]{2,64}$/.test(lists[0])) return null;
+  if (lists[0].startsWith('RD')) return { kind: 'mix' };
+  return isLocalYoutubePlaylistId(lists[0]) ? { kind: 'playlist', url: `${LOCAL_YOUTUBE_PLAYLIST_URL_PREFIX}${lists[0]}` } : null;
+}
+
+export function playlistUrl(input: unknown): string {
+  const link = playlistLink(input);
+  if (link?.kind === 'playlist') return link.url;
+  throw new MediaError('unsupported', link?.kind === 'mix' ? 'YouTube mixes are not supported.' : undefined);
 }
 
 export function musicInput(input: unknown): { kind: 'url' | 'search'; value: string } {
@@ -230,6 +278,40 @@ export class YouTubeSource implements MusicSource {
     const track = parseTrack(data, true);
     if (track.url !== canonical) throw new MediaError('unsupported', 'Resolved video ID did not match the selected public video.');
     return { ...track, audioUrl: audioUrl(data.url) };
+  }
+
+  async playlist(url: string, limit: number, signal: AbortSignal): Promise<Playlist> {
+    aborted(signal);
+    const canonical = playlistUrl(url);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > LOCAL_PLAYLIST_MAX_TRACKS) throw new MediaError('input');
+    // Flat entries are paged lazily, so --playlist-end also bounds the provider requests.
+    const json = await this.run(this.paths.ytDlp, [
+      ...this.extractorArgs(), '--skip-download', '--flat-playlist', '--dump-single-json',
+      '--playlist-end', String(limit), '--socket-timeout', '10', '--retries', '1',
+      '--', canonical,
+    ], signal, PLAYLIST_TIMEOUT_MS, PLAYLIST_OUTPUT_BYTES);
+    aborted(signal);
+    const data = metadata(json);
+    if (data.id !== canonical.slice(LOCAL_YOUTUBE_PLAYLIST_URL_PREFIX.length) || !Array.isArray(data.entries)) {
+      throw new MediaError('unavailable', 'yt-dlp did not return the requested playlist.');
+    }
+    const tracks: Track[] = [];
+    let skipped = 0;
+    for (const entry of data.entries.slice(0, limit)) {
+      try { tracks.push(parseTrack(entry)); }
+      catch (error: unknown) {
+        // Flat entries omit age limits; resolve() still enforces them before playback.
+        if (error instanceof MediaError && error.code === 'unsupported') skipped++;
+        else throw error;
+      }
+    }
+    const title = typeof data.title === 'string' ? data.title.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 150) : '';
+    const total = data.playlist_count;
+    return {
+      title: title || null,
+      total: typeof total === 'number' && Number.isSafeInteger(total) && total >= 0 ? total : null,
+      tracks, skipped,
+    };
   }
 
   private transcodeArgs(track: ResolvedTrack, durationSeconds: number, recover = false): string[] {

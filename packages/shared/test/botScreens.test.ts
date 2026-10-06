@@ -12,7 +12,7 @@ import {
 
 test('authentication shape allows negotiation while the compatibility floor rejects obsolete peers', () => {
   const input = { nickname: 'Member', publicKey: 'ab'.repeat(32), protocolVersion: PROTOCOL_VERSION };
-  assert.equal(PROTOCOL_VERSION, 37);
+  assert.equal(PROTOCOL_VERSION, 38);
   assert.equal(MIN_CLIENT_PROTOCOL, 35);
   assert.equal(MIN_BOT_PROTOCOL, 24);
   assert.equal(authConnectSchema.safeParse(input).success, true);
@@ -26,7 +26,7 @@ test('authentication shape allows negotiation while the compatibility floor reje
       assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: version, protocolOffer }).success, true);
       assert.equal(negotiateProtocol(version, protocolOffer, 'client'), null);
       assert.deepEqual(negotiateProtocol(version, protocolOffer, 'bot'), {
-        version: 37, minimumVersion: 24, features: protocolOffer ? ['message-length-setting'] : [],
+        version: 38, minimumVersion: 24, features: protocolOffer ? ['message-length-setting'] : [],
       });
     }
     assert.equal(legacyProtocolFallback(version, 'client'), null);
@@ -36,27 +36,51 @@ test('authentication shape allows negotiation while the compatibility floor reje
 
 test('DM relay, role models, the channel tree order and poll voters negotiate as human-only features without raising the compatibility floor', () => {
   assert.deepEqual(createProtocolOffer('client'), {
-    minimumVersion: 35, features: ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'channel-tree-order', 'poll-voters', 'poll-edit'],
+    minimumVersion: 35, features: ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist'],
   });
-  assert.deepEqual(createProtocolOffer('bot'), { minimumVersion: 24, features: ['message-length-setting', 'server-community'] });
-  assert.deepEqual(negotiateProtocol(37, undefined, 'client'), { version: 37, ...createProtocolOffer('client') });
-  assert.deepEqual(negotiateProtocol(36, undefined, 'client'), { version: 37, minimumVersion: 35, features: [] });
-  assert.deepEqual(negotiateProtocol(35, undefined, 'client'), { version: 37, minimumVersion: 35, features: [] });
+  assert.deepEqual(createProtocolOffer('bot'), { minimumVersion: 24, features: ['message-length-setting', 'server-community', 'local-youtube-playlist'] });
+  assert.deepEqual(negotiateProtocol(38, undefined, 'client'), { version: 38, ...createProtocolOffer('client') });
+  for (const version of [35, 36, 37]) {
+    assert.deepEqual(negotiateProtocol(version, undefined, 'client'), { version: 38, minimumVersion: 35, features: [] });
+  }
   for (const version of [31, 32, 33, 34]) assert.equal(negotiateProtocol(version, undefined, 'client'), null);
   assert.deepEqual(negotiateProtocol(35, {
     minimumVersion: 35, features: ['native-polls', 'native-live-forms'],
   }, 'client'), {
-    version: 37, minimumVersion: 35, features: ['native-polls', 'native-live-forms'],
+    version: 38, minimumVersion: 35, features: ['native-polls', 'native-live-forms'],
   });
   assert.equal(negotiateProtocol(30, undefined, 'client'), null);
   assert.deepEqual(negotiateProtocol(36, { minimumVersion: 35, features: ['chat-blocks', 'message-delete-undo', 'dm-relay', 'unknown'] }, 'client'), {
-    version: 37, minimumVersion: 35, features: ['chat-blocks', 'message-delete-undo', 'dm-relay'],
+    version: 38, minimumVersion: 35, features: ['chat-blocks', 'message-delete-undo', 'dm-relay'],
   });
-  assert.equal(negotiateProtocol(38, undefined, 'client'), null);
-  assert.equal(negotiateProtocol(38, { minimumVersion: 38, features: [] }, 'client'), null);
+  assert.equal(negotiateProtocol(39, undefined, 'client'), null);
+  assert.equal(negotiateProtocol(39, { minimumVersion: 39, features: [] }, 'client'), null);
   for (const offer of [null, { minimumVersion: 29, features: 'chat-blocks' }, { minimumVersion: 30, features: [] }]) {
     assert.equal(negotiateProtocol(29, offer, 'client'), null);
   }
+});
+
+test('local playlists negotiate per peer so pinned 36/37 clients and bots keep connecting without them', () => {
+  const full = createProtocolOffer('client').features;
+  const without = full.filter((feature) => feature !== 'local-youtube-playlist');
+  for (const version of [36, 37]) {
+    const pinned = negotiateProtocol(version, { minimumVersion: 35, features: without }, 'client');
+    assert.equal(pinned?.version, 38);
+    assert.equal(pinned?.features.includes('local-youtube-playlist'), false);
+    assert.equal(pinned?.features.includes('role-grants'), true);
+    assert.equal(negotiateProtocol(version, undefined, 'client')?.features.includes('local-youtube-playlist'), false);
+    // The SDK 37 bot (#769) offers only its known features; it keeps working without playlists.
+    const pinnedBot = { minimumVersion: 24, features: ['message-length-setting', 'server-community'] };
+    assert.deepEqual(negotiateProtocol(version, pinnedBot, 'bot'), { version: 38, ...pinnedBot });
+    assert.equal(legacyProtocolFallback(version, 'client'), version);
+    assert.equal(legacyProtocolFallback(version, 'bot'), version);
+  }
+  assert.equal(negotiateProtocol(38, { minimumVersion: 35, features: full }, 'client')?.features.includes('local-youtube-playlist'), true);
+  assert.deepEqual(negotiateProtocol(38, createProtocolOffer('bot'), 'bot'), { version: 38, ...createProtocolOffer('bot') });
+  // A newer peer reaching this server keeps only the features this build knows.
+  assert.deepEqual(negotiateProtocol(39, { minimumVersion: 24, features: ['local-youtube-playlist', 'future-feature'] }, 'bot'),
+    { version: 38, minimumVersion: 24, features: ['local-youtube-playlist'] });
+  assert.equal(legacyProtocolFallback(38, 'bot'), null);
 });
 
 test('screen JSON is finite, bounded, cycle-safe and rejects executable values', () => {

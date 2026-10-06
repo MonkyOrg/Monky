@@ -19,7 +19,7 @@ const request = {
 };
 
 test('protocol 37 publishes the pre-authentication bot diagnostic messages', () => {
-  assert.equal(PROTOCOL_VERSION, 37);
+  assert.ok(PROTOCOL_VERSION >= 37);
   assert.equal(MessageType.BOT_DIAGNOSTIC, 'BOT_DIAGNOSTIC');
   assert.equal(MessageType.BOT_DIAGNOSTIC_RESULT, 'BOT_DIAGNOSTIC_RESULT');
 });

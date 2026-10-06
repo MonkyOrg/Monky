@@ -142,6 +142,7 @@ import {
   adminDeafenUserSchema,
   hasPermission,
   localBotIdentitySchema,
+  localOperationNegotiated,
   botInstallPreviewRequestSchema,
   botInstallSchema,
   botPermissionsGetSchema,
@@ -476,6 +477,7 @@ export class WebSocketServer {
       async () => (await this.serverRepo.getServer())?.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH);
     this.botLocalExecution = new BotLocalExecutionService({
       isCurrent: (session) => this.isCurrentBotOperation(session, 'local_execution'),
+      negotiated: (session, operation) => localOperationNegotiated(operation, session.protocol?.features),
       accessVersion: () => {
         const roles = this.channelService.getRoleAccessVersion();
         return roles === null || this.pendingLocalAccessMutations > 0

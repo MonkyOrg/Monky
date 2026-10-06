@@ -1740,6 +1740,7 @@ export const en: TranslationMap = {
   'localExecution.operation.youtube.resolve': 'Look up media',
   'localExecution.operation.youtube.preview': 'Prepare preview',
   'localExecution.operation.youtube.stream': 'Stream audio',
+  'localExecution.operation.youtube.playlist': 'Read playlist',
   'localExecution.phase.consent': 'Awaiting authorization',
   'localExecution.phase.installing': 'Preparing tools',
   'localExecution.phase.running': 'Running',

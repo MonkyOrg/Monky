@@ -18,6 +18,7 @@ import {
   localTaskRequestSchema,
   type LocalCapabilityId,
   type LocalMediaSignal,
+  type LocalOperation,
   type LocalPreviewReference,
   type LocalRequestContext,
   type LocalSourceContext,
@@ -56,6 +57,8 @@ export interface BotLocalContext<Session extends BotLocalSession> {
 
 export interface BotLocalExecutionTransport<Session extends BotLocalSession> {
   isCurrent(session: Session): boolean;
+  /** Whether this peer's negotiated protocol includes the operation; older clients drop unknown offers silently. */
+  negotiated(session: Session, operation: LocalOperation): boolean;
   accessVersion(): string | null;
   authorizeContext(
     session: Session, context: Exclude<LocalRequestContext, { kind: 'source' }>, capability: LocalCapabilityId,
@@ -577,6 +580,9 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
   private async admitTask(session: Session, input: LocalTaskRequest, requestId: string, admission: Admission<Session>): Promise<void> {
     const startDeadline = admission.deadline;
     const capability = LOCAL_OPERATION_CAPABILITY[input.spec.operation];
+    if (!this.transport.negotiated(session, input.spec.operation)) {
+      throw new LocalAdmissionError('invalid_request', ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+    }
     let source: Source<Session> | undefined;
     let scope: BotLocalContext<Session> | undefined;
     if (input.context.kind === 'source') {
@@ -591,6 +597,10 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
       if (scope) this.bindAdmission(admission, scope);
     }
     if (!scope) throw new LocalAdmissionError('permission_denied');
+    // Refuse before any offer: an outdated executor would ignore it and leave the bot waiting for the timeout.
+    if (!this.transport.negotiated(scope.origin, input.spec.operation)) {
+      throw new LocalAdmissionError('executor_unavailable', ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+    }
     await this.authorizeAdmission(admission, session, bot.botPublicKey, scope, input.voiceChannelId);
     this.assertAdmission(admission);
     if (Date.now() >= startDeadline) throw new LocalAdmissionError('timeout', ProtocolErrorCode.BOT_INTERACTION_EXPIRED);

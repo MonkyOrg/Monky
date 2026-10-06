@@ -3,14 +3,14 @@ import test from 'node:test';
 import {
   LOCAL_CAPABILITY_IDS, LOCAL_EXECUTION_PROTOCOL_LIMITS, LOCAL_EXECUTION_RUNTIME_LIMITS,
   LOCAL_MEDIA_CHANNEL_LABEL, LOCAL_MEDIA_CHANNEL_OPTIONS, LOCAL_MEDIA_FORMAT,
-  LOCAL_MEDIA_MAX_RECORD_BYTES, LOCAL_MEDIA_PROTOCOL, LOCAL_OPERATION_CAPABILITY,
+  LOCAL_MEDIA_MAX_RECORD_BYTES, LOCAL_MEDIA_PROTOCOL, LOCAL_OPERATION_CAPABILITY, LOCAL_OPERATION_FEATURE,
   MessageType, PROTOCOL_VERSION, advanceLocalMediaFlow, assertLocalMediaChannel,
   commandAudioPreviewExecutionSchema, commandAudioPreviewResultSchema, commandAudioPreviewSchema,
   commandAutocompleteExecutionSchema, commandAutocompleteSchema, commandCallerContextSchema,
   commandDefinitionSchema, commandExecutionSchema, commandInvokeSchema, commandLocalMetadataSchema,
   createLocalMediaFlowState, decodeLocalMediaRecord, encodeLocalMediaRecord, isLocalMediaSdp,
   isLocalOpusPacket, localCapabilitiesSchema, localCommandPreparationSchema, localMediaRecordSchema,
-  localMediaSignalSchema, localOperationSchema, localRequestContextSchema, localSourceContextSchema,
+  localMediaSignalSchema, localOperationNegotiated, localOperationSchema, localRequestContextSchema, localSourceContextSchema,
   localRuntimeSourceFailureSchema, localSourceFailureSchema,
   localSourceRequestSchema, localSourceResultSchema, localTaskAcceptMatchesOffer, localTaskAcceptSchema,
   localTaskControlSchema, localTaskEventSchema, localTaskMatchesSource, localTaskOfferSchema,
@@ -49,7 +49,7 @@ const opus = Uint8Array.of(0xf8, 0xff, 0xfe);
 const dataSdp = 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=sctp-port:5000\r\n';
 
 test('the current protocol publishes dedicated control messages without adding WebSocket audio', () => {
-  assert.equal(PROTOCOL_VERSION, 37);
+  assert.equal(PROTOCOL_VERSION, 38);
   for (const name of [
     'BOT_LOCAL_SOURCE_REQUEST', 'BOT_LOCAL_SOURCE_RESULT', 'BOT_LOCAL_TASK_REQUEST', 'BOT_LOCAL_TASK_OFFER',
     'BOT_LOCAL_TASK_ACCEPT', 'BOT_LOCAL_TASK_CONTROL', 'BOT_LOCAL_TASK_EVENT', 'BOT_LOCAL_MEDIA_SIGNAL',
@@ -219,6 +219,42 @@ test('task acceptance cannot replace the requested media or claim a different op
   assert.equal(localTaskAcceptMatchesOffer(offer, { taskId: 'task', result: { operation: 'youtube.stream', track: otherTrack } }), false);
   assert.equal(localTaskAcceptMatchesOffer(offer, { taskId: 'task', result: { operation: 'youtube.resolve', track } }), false);
   assert.equal(localWireTaskResultSchema.safeParse({ operation: 'youtube.search', tracks: Array(21).fill(track) }).success, false);
+});
+
+test('playlists are bounded metadata reads that never bind a source, a voice room or private media', () => {
+  const playlistUrl = 'https://www.youtube.com/playlist?list=PLabcdefghijklmnop';
+  const spec = { operation: 'youtube.playlist', url: playlistUrl, limit: 3 } as const;
+  assert.equal(LOCAL_OPERATION_CAPABILITY['youtube.playlist'], 'youtube-audio');
+  assert.equal(LOCAL_OPERATION_FEATURE['youtube.playlist'], 'local-youtube-playlist');
+  assert.equal(localOperationNegotiated('youtube.playlist', ['local-youtube-playlist']), true);
+  for (const features of [undefined, [], ['role-grants']]) {
+    assert.equal(localOperationNegotiated('youtube.playlist', features), false);
+    assert.equal(localOperationNegotiated('youtube.stream', features), true, 'Baseline operations need no feature');
+  }
+  const request = { context: { kind: 'invocation', invocationId: 'invocation' }, spec };
+  assert.equal(localTaskRequestSchema.safeParse(request).success, true);
+  assert.equal(localTaskRequestSchema.safeParse({ ...request, context: { kind: 'autocomplete', requestId: 'query' } }).success, true);
+  for (const context of [{ kind: 'audio-preview', requestId: 'preview' }, { kind: 'source', sourceContextId: 'source' }]) {
+    assert.equal(localTaskRequestSchema.safeParse({ ...request, context }).success, false, context.kind);
+    assert.equal(localTaskOfferSchema.safeParse({ ...offer, spec, context, media: undefined, voiceChannelId: undefined }).success, false);
+  }
+  assert.equal(localTaskRequestSchema.safeParse({ ...request, voiceChannelId: 'voice' }).success, false);
+  assert.equal(localTaskMatchesSource({ ...source, url: playlistUrl }, spec), false);
+  assert.equal(localTaskMatchesSource(source, spec), false);
+  const playlistOffer = localTaskOfferSchema.parse({ ...offer, spec, media: undefined, voiceChannelId: undefined });
+  assert.equal(localTaskOfferSchema.safeParse({ ...playlistOffer, media }).success, false);
+  const result = { operation: 'youtube.playlist' as const, title: 'Synthetic list', total: 40, tracks: [track, track], skipped: 1 };
+  const accept = localTaskAcceptSchema.parse({ taskId: 'task', result });
+  assert.equal(localTaskAcceptMatchesOffer(playlistOffer, accept), true, 'Duplicates keep the provider order');
+  assert.equal(localTaskAcceptMatchesOffer(playlistOffer, { ...accept, result: { ...result, skipped: 2 } }), false);
+  assert.equal(localTaskAcceptMatchesOffer(offer, accept), false);
+  assert.equal(localTaskAcceptMatchesOffer(playlistOffer, { taskId: 'task', result: { operation: 'youtube.resolve', track } }), false);
+  assert.equal(localWireTaskResultSchema.safeParse({ ...result, title: null, total: null }).success, true);
+  assert.equal(localWireTaskResultSchema.safeParse({ ...result, tracks: Array(501).fill(track) }).success, false);
+  assert.equal(localWireTaskResultSchema.safeParse({ ...result, tracks: Array(500).fill(track), skipped: 0 }).success, true);
+  for (const changed of [{ skipped: -1 }, { total: 1.5 }, { title: '' }, { url: playlistUrl }, { audioUrl: 'https://private.example.test' }]) {
+    assert.equal(localWireTaskResultSchema.safeParse({ ...result, ...changed }).success, false);
+  }
 });
 
 test('wire source failures reuse the canonical runtime schema and recovery bound without diagnostics', () => {
