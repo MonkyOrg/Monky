@@ -61,7 +61,7 @@ struct Authenticated {
 enum class SessionEventKind {
   authenticated, admitted, rosterChanged, peerJoined, peerLeft, policyChanged,
   rtcSignal, sfuEvent, topologyChanged, teardown, disconnected, reconnectRequested,
-  kicked, failure
+  kicked, channelsChanged, failure
 };
 
 struct SessionEvent {

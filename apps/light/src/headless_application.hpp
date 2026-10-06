@@ -1,10 +1,12 @@
 #pragma once
 
+#include "core_commands.hpp"
 #include "media/voice_engine.hpp"
 #include "platform/audio_device_watcher.hpp"
 #include "platform/microphone_access.hpp"
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -24,6 +26,9 @@ struct HeadlessConfiguration {
   media::AudioPolicy processing;
   std::optional<int> networkIgnoreMask;
   RequestMicrophoneAccess requestMicrophoneAccess;
+  // Optional native interface for --tray. Without it the core keeps the main
+  // thread and behaves exactly as the qualified headless client.
+  std::function<std::unique_ptr<CoreInterface>(CoreCommands)> createInterface;
 };
 
 int runHeadless(std::vector<std::string> arguments, HeadlessConfiguration configuration);

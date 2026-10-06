@@ -48,6 +48,10 @@ test('native P2P engines exchange decoded synthetic PCM and stop devices under m
   run('monky-light-media-loopback-test', []);
 });
 
+test('native tray state follows the session and turns menu rows into core commands', () => {
+  run('monky-light-tray-test', []);
+});
+
 test('macOS transport fixtures share the production bundle network policy, not its identity',
   { skip: process.platform !== 'darwin' }, () => {
     for (const [target, identifier] of [

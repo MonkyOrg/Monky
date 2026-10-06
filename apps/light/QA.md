@@ -101,3 +101,37 @@ Execute em Intel e Apple Silicon e, se possível, no macOS 12.
 | 5.7 | Conexão `ws://` na LAN e `wss://` com certificado válido | Conectam | | |
 | 5.8 | `wss://` com certificado não confiável | Recusada | | |
 | 5.9 | Chamada audível com o Monky completo (seção 1) | Igual ao Windows | | |
+| 5.10 | Bandeja com `--tray` (seção 6) | Igual ao Windows | | |
+
+## 6. Interface de bandeja
+
+Execute com `--tray` além das opções normais. O controle por stdin continua
+valendo, então o terminal serve para conferir o que cada clique fez.
+
+```powershell
+& .\apps\light\build\windows-x64\bin\monky-light.exe --tray `
+  --profile "$env:LOCALAPPDATA\Monky-Light-qa" `
+  --server ws://127.0.0.1:8080 --nickname QA
+```
+
+| # | Passo | Esperado | Windows | macOS |
+|---|---|---|---|---|
+| 6.1 | Iniciar com `--tray` | O ícone aparece e a dica traz o nome do servidor e o estado | | |
+| 6.2 | Abrir o menu | Canais de voz, mute/deafen, dispositivos, reconectar e sair | | |
+| 6.3 | Entrar num canal pelo menu | Entra na chamada, o canal fica marcado e o ícone fica verde | | |
+| 6.4 | Falar com alguém no Monky completo | Áudio nos dois sentidos, como na seção 1 | | |
+| 6.5 | Mute e deafen pelo menu | Ficam marcados, o ícone fica vermelho com a barra e o terminal mostra `command-accepted` | | |
+| 6.6 | Moderador aplica mute de servidor | O item fica marcado e desabilitado, com a nota de que foi o servidor | | |
+| 6.7 | Trocar entrada e saída pelo submenu de dispositivos | O áudio muda de dispositivo sem cair a chamada | | |
+| 6.8 | Escolher `Padrão do sistema` | Volta ao dispositivo padrão e `devices` no terminal mostra `null` | | |
+| 6.9 | Desconectar o dispositivo escolhido e reabrir o menu | Ele aparece como indisponível e a preferência continua marcada | | |
+| 6.10 | Reconectar o dispositivo e reabrir o menu | A marca de indisponível desaparece e o áudio volta a ele | | |
+| 6.11 | Criar, renomear e apagar um canal de voz no servidor | O menu reflete a mudança na abertura seguinte, sem reiniciar o Light | | |
+| 6.12 | Apagar o canal em que o Light está | Sai da chamada, o ícone volta ao estado conectado e o canal desaparece | | |
+| 6.13 | Parar o servidor | O ícone indica reconexão e o erro aparece (balão no Windows, primeira linha do menu no macOS) | | |
+| 6.14 | `Sair do Monky Light` | O ícone desaparece, o processo encerra com `stopped` e não sobra processo | | |
+| 6.15 | `quit` pelo stdin com o menu fechado | Mesmo encerramento, sem ícone fantasma na área de notificação | | |
+| 6.16 | Reiniciar o Explorer (só Windows) | O ícone volta sozinho, sem reiniciar o Light | | |
+| 6.17 | Sistema em português e em inglês | Menu e dica no idioma do sistema | | |
+| 6.18 | Leitor de tela (Narrador, VoiceOver) sobre o ícone | Lê o estado atual, não apenas "ícone" | | |
+| 6.19 | Medir a mesma fase com `--tray` e sem | A bandeja não muda o consumo em repouso de forma perceptível | | |

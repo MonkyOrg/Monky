@@ -100,3 +100,37 @@ Run on Intel and Apple Silicon and, if possible, on macOS 12.
 | 5.7 | `ws://` on the LAN and `wss://` with a valid certificate | Connect | | |
 | 5.8 | `wss://` with an untrusted certificate | Refused | | |
 | 5.9 | Audible call with the full client (section 1) | Same as Windows | | |
+| 5.10 | Tray with `--tray` (section 6) | Same as Windows | | |
+
+## 6. Tray interface
+
+Run with `--tray` alongside the normal options. The stdin control stays
+available, so the terminal shows what each click did.
+
+```powershell
+& .\apps\light\build\windows-x64\bin\monky-light.exe --tray `
+  --profile "$env:LOCALAPPDATA\Monky-Light-qa" `
+  --server ws://127.0.0.1:8080 --nickname QA
+```
+
+| # | Step | Expected | Windows | macOS |
+|---|---|---|---|---|
+| 6.1 | Start with `--tray` | The icon appears and the tooltip carries the server name and the state | | |
+| 6.2 | Open the menu | Voice channels, mute/deafen, devices, reconnect, and quit | | |
+| 6.3 | Join a channel from the menu | It joins the call, the channel is marked, and the icon turns green | | |
+| 6.4 | Talk to someone on the full client | Audio both ways, as in section 1 | | |
+| 6.5 | Mute and deafen from the menu | They are marked, the icon turns red with the bar, and the terminal shows `command-accepted` | | |
+| 6.6 | A moderator applies a server mute | The row is marked and disabled, with the note that the server forced it | | |
+| 6.7 | Change input and output from the devices submenu | Audio moves to the chosen device without dropping the call | | |
+| 6.8 | Choose `System default` | It returns to the default device and `devices` shows `null` in the terminal | | |
+| 6.9 | Unplug the chosen device and reopen the menu | It shows as unavailable and the preference stays marked | | |
+| 6.10 | Plug the device back and reopen the menu | The unavailable note disappears and audio returns to it | | |
+| 6.11 | Create, rename, and delete a voice channel on the server | The menu reflects the change the next time it opens, without restarting the Light | | |
+| 6.12 | Delete the channel the Light is in | It leaves the call, the icon returns to connected, and the channel disappears | | |
+| 6.13 | Stop the server | The icon reports reconnecting and the failure appears (balloon on Windows, first menu row on macOS) | | |
+| 6.14 | `Quit Monky Light` | The icon disappears, the process ends with `stopped`, and no process is left | | |
+| 6.15 | `quit` on stdin with the menu closed | Same shutdown, with no stale icon in the notification area | | |
+| 6.16 | Restart Explorer (Windows only) | The icon comes back on its own, without restarting the Light | | |
+| 6.17 | System in Portuguese and in English | Menu and tooltip in the system language | | |
+| 6.18 | Screen reader (Narrator, VoiceOver) over the icon | Reads the current state, not just "icon" | | |
+| 6.19 | Measure the same phase with and without `--tray` | The tray does not measurably change idle resource use | | |

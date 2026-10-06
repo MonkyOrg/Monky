@@ -1,5 +1,6 @@
 #include "headless_application.hpp"
 #include "platform/utf8.hpp"
+#include "ui/tray.hpp"
 
 #include <api/audio/create_audio_device_module.h>
 #include <api/environment/environment_factory.h>
@@ -10,6 +11,7 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 
 namespace {
 
@@ -48,6 +50,9 @@ int run(std::vector<std::string> arguments) {
   };
   audio.enumerateDevices = enumerateAudioDevices;
   audio.watchDevices = monky::light::watchAudioDevices;
+  audio.createInterface = [](monky::light::CoreCommands core) {
+    return monky::light::ui::createTray(std::move(core), monky::light::ui::systemLanguage());
+  };
 #ifdef __APPLE__
   audio.requestMicrophoneAccess = monky::light::requestMicrophoneAccess;
 #endif
