@@ -634,8 +634,12 @@ test('ci:local mirrors CI commands from ci.yml and the DOM runner, skipping only
     assert.ok(skipped.some(label => label.includes('electron-builder')), 'Packaging is opt-in locally.');
     assert.equal(steps.filter(candidate => candidate.stage === 'native').every(candidate => !!candidate.skip), !nativeReady);
     assert.equal(skipped.length, nativeReady ? 3 : 6);
+    const addon = labels.indexOf('npm exec --no -- node-gyp rebuild --directory=apps/client/native/screen-audio');
+    assert.ok(addon >= 0 && addon < labels.indexOf('node apps/client/test/shortcutsDomSmoke.cjs'),
+      'Without packaging, the screen-audio addon must be built before the shortcut smokes load it.');
     assert.ok(!plan({ base: 'a', head: 'b', platform, nativeReady, packageApp: true })
-      .some(candidate => candidate.label.includes('electron-builder') && candidate.skip));
+      .some(candidate => (candidate.label.includes('electron-builder') && candidate.skip)
+        || candidate.label.includes('node-gyp rebuild --directory=apps/client/native/screen-audio')));
   }
   assert.ok(pairs(ci).some(([pt, en]) => pt === 'CONTRIBUTING.md' && en === 'CONTRIBUTING.en.md'));
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).scripts['ci:local'], 'node scripts/ci-local.cjs');

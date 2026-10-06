@@ -62,6 +62,8 @@ function plan({ base, head, title = '', packageApp = false, platform = process.p
       cwd: path.join(root, 'apps', 'client'),
       skip: packageApp ? undefined : 'PULADO (use --package para empacotar)',
     }),
+    // In CI the packaging step above builds the N-API screen-audio addon that the shortcut smokes load.
+    ...packageApp ? [] : [shell('package', 'npm exec --no -- node-gyp rebuild --directory=apps/client/native/screen-audio')],
     ...lines(packaging, 'Exercise shortcut capture and worker recovery').map(command => shell('package', command)),
     shell('package', 'node scripts/ci-build-artifact.js collect', { skip: ciOnly }),
     ...dom.commands.map(command => shell('dom', command.join(' '),
