@@ -143,6 +143,8 @@ export class SessionManager {
   public setGameActivity(activity: UserActivity | null): void {
     for (const session of this.sessions.values()) {
       if (session.client.getStatus() !== 'CONNECTED') continue;
+      // A server that did not negotiate the feature would answer with an error.
+      if (!session.serverStore.serverDetails?.protocol?.features.includes('game-activity')) continue;
       session.client.send(MessageType.USER_UPDATE_ACTIVITY, { activity });
     }
   }

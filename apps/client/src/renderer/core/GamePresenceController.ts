@@ -26,10 +26,12 @@ export class GamePresenceController {
     if (off) this.disposers.push(off);
 
     // A server joined after the game started still has to learn about it.
-    this.disposers.push(appEvents.on('network.connected', () => {
+    // Deferred past this dispatch: the listener that stores the server details,
+    // and with them the negotiated features, is registered after this one.
+    this.disposers.push(appEvents.on('network.connected', () => queueMicrotask(() => {
       if (!settingsStore.shareGameActivity || !this.current) return;
       this.sessionManager.setGameActivity(this.current);
-    }));
+    })));
 
     void this.setEnabled(settingsStore.shareGameActivity);
   }
