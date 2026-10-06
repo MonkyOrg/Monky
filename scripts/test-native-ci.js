@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 
 const require = createRequire(import.meta.url);
 const { load } = require('js-yaml');
-const { commands, run, shard } = require('./test-client-dom.cjs');
+const { commands, durations, run, shard } = require('./test-client-dom.cjs');
 const { focusTooltipPreview } = require('../apps/client/test/tooltipSmoke.cjs');
 const root = fileURLToPath(new URL('..', import.meta.url));
 const workflow = name => load(fs.readFileSync(path.join(root, '.github', 'workflows', name), 'utf8'));
@@ -135,21 +135,19 @@ test('DOM lanes run from the start on both systems, independently of native comp
   const dom = ci.jobs['client-dom'];
   assert.equal(dom['runs-on'], 'windows-2022');
   assert.equal(dom.needs, undefined);
-  assert.deepEqual(dom.strategy.matrix.shard, [1, 2]);
-  assert.equal(dom.strategy['fail-fast'], false);
-  const windowsDom = step(dom, 'Exercise client DOM and microphone state in Electron');
-  assert.equal(windowsDom.run, 'node scripts/test-client-dom.cjs');
-  assert.deepEqual(windowsDom.env, { MONKY_DOM_SHARD: '${{ matrix.shard }}/2' });
-  assert.equal(dom.strategy.matrix.shard.length, Number(windowsDom.env.MONKY_DOM_SHARD.split('/')[1]),
-    'Every DOM shard must have a matrix lane.');
-
   const mac = ci.jobs['client-dom-mac'];
   assert.equal(mac['runs-on'], 'macos-15');
   assert.equal(mac.needs, undefined);
-  assert.equal(mac.strategy, undefined, 'The macOS lane runs the whole DOM suite.');
+  for (const [job, shards, label] of [[dom, [1, 2, 3], 'Windows'], [mac, [1, 2], 'macOS']]) {
+    assert.deepEqual(job.strategy.matrix.shard, shards);
+    assert.equal(job.strategy['fail-fast'], false);
+    assert.equal(job.name, `Client DOM (${label} \${{ matrix.shard }}/${shards.length})`);
+    const lane = step(job, 'Exercise client DOM and microphone state in Electron');
+    assert.equal(lane.run, 'node scripts/test-client-dom.cjs');
+    assert.deepEqual(lane.env, { MONKY_DOM_SHARD: `\${{ matrix.shard }}/${shards.length}` },
+      'Every DOM shard must have exactly one matrix lane.');
+  }
   const macDom = step(mac, 'Exercise client DOM and microphone state in Electron');
-  assert.equal(macDom.run, 'node scripts/test-client-dom.cjs');
-  assert.equal(macDom.env, undefined);
   assert.ok(mac.steps.indexOf(step(mac, 'Prepare an isolated macOS test Keychain')) < mac.steps.indexOf(macDom));
   assert.equal(step(mac, 'Restore macOS Keychain configuration').if, 'always()');
 
@@ -542,7 +540,10 @@ test('the extracted DOM lane preserves every existing test command and its order
     'node apps/client/test/settingsNavigationSmoke.cjs --screen-audience',
     'node apps/client/test/settingsNavigationSmoke.cjs --overlay-window',
     'npm run test:settings:ui --workspace=apps/client',
-    'npm run test:camera --workspace=apps/client',
+    'node apps/client/test/cameraEffectsSmoke.cjs',
+    'node apps/client/test/cameraEffectsSmoke.cjs --packaged',
+    'node apps/client/test/cameraEffectsSmoke.cjs --packaged --cpu-compositor --chroma-only --transitions-only',
+    'node apps/client/test/cameraPublicationSmoke.cjs',
     'node apps/client/test/footerControlsSmoke.cjs',
     'npm run test:transport --workspace=apps/client',
     'npm run test:bot-marketplace --workspace=apps/client',
@@ -550,10 +551,18 @@ test('the extracted DOM lane preserves every existing test command and its order
     'npm run test:community --workspace=apps/client',
     'npm run test:pip --workspace=apps/client',
   ]);
+  const scripts = JSON.parse(fs.readFileSync(path.join(root, 'apps', 'client', 'package.json'), 'utf8')).scripts;
   for (const [executable, scriptOrRun, script] of commands) {
     if (executable === 'node') assert.ok(fs.existsSync(path.join(root, ...scriptOrRun.split('/'))));
-    else assert.ok(JSON.parse(fs.readFileSync(path.join(root, 'apps', 'client', 'package.json'), 'utf8')).scripts[script]);
+    else assert.ok(scripts[script]);
   }
+  // The camera suite runs as separate commands so shards can balance it; it must stay exactly test:camera.
+  const camera = scripts['test:camera'].split('&&').map(part => part.trim().replace(/^node test\//u, 'node apps/client/test/'));
+  assert.ok(camera.every(part => part.startsWith('node apps/client/test/')), 'test:camera must stay a chain of node commands.');
+  const runner = commands.map(command => command.join(' '));
+  const start = runner.indexOf(camera[0]);
+  assert.deepEqual(runner.slice(start, start + camera.length), camera, 'The DOM runner must run every test:camera command, in order.');
+  assert.ok(!runner.includes('npm run test:camera --workspace=apps/client'), 'Camera tests must not run twice.');
 });
 
 test('DOM runner preserves Windows npm shell handling, runs every command and reports all failures at the end', t => {
@@ -610,14 +619,19 @@ test('DOM shards run every command exactly once, keep the suite order and balanc
       assert.deepEqual(part, commands.filter(command => part.includes(command)), 'Shards keep the original order.');
     }
   }
-  const camera = 'npm run test:camera --workspace=apps/client';
-  const [first, second] = [shard('1/2'), shard('2/2')].map(part => part.map(command => command.join(' ')));
-  assert.ok(first.includes(camera) !== second.includes(camera));
-  assert.ok(Math.min(first.length, second.length) >= 5, 'The long camera suite must not leave one shard nearly empty.');
+  for (const [platform, count] of [['win32', 3], ['darwin', 2]]) {
+    const cost = command => durations[platform][command.join(' ')] ?? 10;
+    const loads = Array.from({ length: count }, (_, index) =>
+      shard(`${index + 1}/${count}`, commands, platform).reduce((total, command) => total + cost(command), 0));
+    assert.ok(Math.max(...loads) <= 1.1 * Math.min(...loads), `Unbalanced ${platform} DOM shards: ${loads.join(' / ')} s`);
+    for (const command of Object.keys(durations[platform]))
+      assert.ok(commands.some(candidate => candidate.join(' ') === command), `Stale DOM duration: ${command}`);
+  }
+  const second = shard('2/2', commands, 'darwin').map(command => command.join(' '));
   const seen = [];
   run((executable, args) => { seen.push([executable === process.execPath ? 'node' : executable, ...args].join(' ')); return { status: 0 }; },
     'darwin', { MONKY_DOM_SHARD: '2/2' });
-  assert.deepEqual(seen, second);
+  assert.deepEqual(seen, second, 'The runner uses the shard of its own platform.');
 });
 
 test('ci:local mirrors CI commands from ci.yml and the DOM runner, skipping only runner-only steps', () => {
