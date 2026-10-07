@@ -337,9 +337,12 @@ jobs:
       - name: Install FFmpeg for generated voice fixtures
         shell: pwsh
         run: |
-          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+          # The Chocolatey community feed sometimes answers 504, and choco then reports success with
+          # 0 packages installed. Retry with backoff and judge by the command actually being present.
+          for ($attempt = 1; -not (Get-Command ffmpeg -ErrorAction SilentlyContinue); $attempt++) {
+            if ($attempt -gt 4) { throw 'FFmpeg is still missing after 4 Chocolatey attempts.' }
+            if ($attempt -gt 1) { Start-Sleep -Seconds (15 * [Math]::Pow(2, $attempt - 2)) }
             choco install ffmpeg --yes --no-progress --limit-output
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           ffmpeg -hide_banner -version
       - name: Exercise client DOM and microphone state in Electron
@@ -639,6 +642,8 @@ jobs:
         run: node apps/client/native/screen-share/scripts/verifyOutputs.cjs win
 
       - name: Exercise native screen contracts and legal metadata
+        # ~1 min normally; bounds a test file that hangs instead of waiting for the job timeout.
+        timeout-minutes: 10
         run: |
           npm run test:native-screen --workspace=apps/client
           npm run test:legal
@@ -675,9 +680,12 @@ jobs:
       - name: Install FFmpeg for generated voice fixtures
         shell: pwsh
         run: |
-          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+          # The Chocolatey community feed sometimes answers 504, and choco then reports success with
+          # 0 packages installed. Retry with backoff and judge by the command actually being present.
+          for ($attempt = 1; -not (Get-Command ffmpeg -ErrorAction SilentlyContinue); $attempt++) {
+            if ($attempt -gt 4) { throw 'FFmpeg is still missing after 4 Chocolatey attempts.' }
+            if ($attempt -gt 1) { Start-Sleep -Seconds (15 * [Math]::Pow(2, $attempt - 2)) }
             choco install ffmpeg --yes --no-progress --limit-output
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           ffmpeg -hide_banner -version
 
@@ -780,6 +788,8 @@ jobs:
           node apps/client/native/screen-share/scripts/verifyOutputs.cjs mac --legal
 
       - name: Exercise native screen contracts and legal metadata
+        # ~1 min normally; bounds a test file that hangs instead of waiting for the job timeout.
+        timeout-minutes: 10
         run: |
           npm run test:native-screen --workspace=apps/client
           npm run test:legal
