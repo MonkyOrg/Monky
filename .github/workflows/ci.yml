@@ -581,14 +581,6 @@ jobs:
       - name: Build workspaces
         run: npm run build
 
-      # Only content-addressed upstream archives are shared here. Compiled outputs use the
-      # exact-key runtime cache below and are verified against this checkout after restore.
-      - name: Cache verified native screen archives (Windows)
-        uses: actions/cache@v4
-        with:
-          path: .native-screen\downloads
-          key: native-screen-archives-v1-ci-windows-x64-${{ hashFiles('apps/client/native/screen-share/scripts/fetchObs.cjs', 'apps/client/native/screen-share/scripts/buildTools.cjs', 'apps/client/native/screen-share/src/vendor/obs/sources.json', 'apps/client/native/screen-share/src/vendor/obs/runtime-inputs.json', 'apps/client/native/screen-share/src/capture/runtime-additions.json') }}
-
       - name: Select Python for native tooling (Windows)
         shell: pwsh
         run: '"PYTHON=$((Get-Command python).Source)" >> $env:GITHUB_ENV'
@@ -617,6 +609,17 @@ jobs:
             release/monky-native-sources-0.0.0-ci.json
             release/monky-native-sources-0.0.0-ci.tar.xz
           key: ${{ steps.key.outputs.sources_key }}
+
+      # Only content-addressed upstream archives are shared here. Compiled outputs use the
+      # exact-key runtime cache above and are verified against this checkout after restore.
+      # The archives (~240 MB) feed only the build or the source fetch below, so they are not
+      # restored, nor saved again in this PR's scope, when both exact caches hit.
+      - name: Cache verified native screen archives (Windows)
+        if: steps.cache.outputs.cache-hit != 'true' || steps.sources.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: .native-screen\downloads
+          key: native-screen-archives-v1-ci-windows-x64-${{ hashFiles('apps/client/native/screen-share/scripts/fetchObs.cjs', 'apps/client/native/screen-share/scripts/buildTools.cjs', 'apps/client/native/screen-share/src/vendor/obs/sources.json', 'apps/client/native/screen-share/src/vendor/obs/runtime-inputs.json', 'apps/client/native/screen-share/src/capture/runtime-additions.json') }}
 
       - name: Build native screen runtime and corresponding-source inputs (Windows)
         if: steps.cache.outputs.cache-hit != 'true'

@@ -443,9 +443,12 @@ Assets do renderer sem extensão usam nomes sem ponto final, inclusive as licen�
 a exportação e a extração rejeitam caminhos ambíguos no Windows.
 Comparar a árvore, e não apenas o SHA do commit, permite o squash sem aceitar
 código diferente do testado. A release também grava no cache da `main` o
-runtime nativo aprovado, com a chave exata registrada pelo CI, sem compilar: o
-próximo PR com as mesmas fontes nativas o reaproveita depois de verificá-lo de
-novo.
+runtime nativo e as fontes correspondentes aprovados, com as chaves exatas
+registradas pelo CI, sem compilar: o próximo PR com as mesmas entradas nativas
+os reaproveita depois de verificá-los de novo. Como um PR só lê os caches da
+`main`, nunca os de outro PR, o workflow **Warm CI caches** grava ali, a cada
+push na `main`, os SDKs e o CMake fixados do Light e o worker do mediasoup
+verificado, com as mesmas chaves do CI; quando eles já existem, só os consulta.
 
 O artefato Windows inclui os arquivos gerados `LICENSE` e
 `THIRD_PARTY_NOTICES` na raiz do módulo `screen-share`, além de `licenses/`,

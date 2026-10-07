@@ -447,9 +447,13 @@ credentials or signed installers. Release reuses only artifacts from a successfu
 run of the merged PR: it verifies provenance, run attempt, the ZIP and per-file
 SHA-256 digests, lockfile, platform and complete Git tree. Comparing trees rather
 than just commit SHAs supports squash merges without accepting untested code.
-Release also saves the approved native runtime to the `main` cache under the
-exact key CI recorded, without compiling: the next PR with the same native
-sources reuses it after verifying it again.
+Release also saves the approved native runtime and corresponding sources to the
+`main` cache under the exact keys CI recorded, without compiling: the next PR
+with the same native inputs reuses them after verifying them again. Because a
+PR only reads caches from `main`, never another PR's, the **Warm CI caches**
+workflow saves the pinned Light SDKs and CMake and the verified mediasoup
+worker there on every push to `main`, under the same keys CI uses; when they
+already exist, it only looks them up.
 Extensionless renderer assets, including licenses, use names without a trailing
 dot; export and extraction reject ambiguous Windows paths.
 

@@ -218,7 +218,7 @@ test('both build lanes and release retain the qualified Windows toolchain and no
 
 test('every CI and release job has a bounded runtime instead of the six-hour default', () => {
   for (const [name, definition] of [['ci.yml', ci], ['release.yml', release],
-    ['native-macos-validation.yml', workflow('native-macos-validation.yml')]]) {
+    ['native-macos-validation.yml', workflow('native-macos-validation.yml')], ['warm-ci-caches.yml', workflow('warm-ci-caches.yml')]]) {
     for (const [id, job] of Object.entries(definition.jobs)) {
       if (job.uses) continue;
       assert.ok(Number.isInteger(job['timeout-minutes']) && job['timeout-minutes'] > 0 && job['timeout-minutes'] <= 180,
@@ -238,7 +238,11 @@ test('download caches stay download-only; compiled native outputs reuse only exa
       assert.match(cache.if, /runner\.os == 'Windows'/u);
       assert.match(cache.if, /needs\.version\.outputs\.reuse_build != 'true'/u);
     } else {
-      assert.equal(cache.if, undefined);
+      assert.equal(cache.if, "steps.cache.outputs.cache-hit != 'true' || steps.sources.outputs.cache-hit != 'true'",
+        'Upstream archives feed only a build or a source fetch; two exact hits skip ~240 MB of cache traffic.');
+      assert.ok(job.steps.indexOf(cache) > job.steps.indexOf(step(job, 'Restore verified corresponding sources (Windows)')));
+      assert.ok(job.steps.indexOf(cache) < job.steps.indexOf(
+        step(job, 'Fetch corresponding-source inputs for the cached runtime (Windows)')));
       assert.equal(job['runs-on'], 'windows-2022');
     }
     assert.ok(cache.with.key.startsWith(`native-screen-archives-v1-${namespace}-windows-x64-`));
@@ -838,6 +842,58 @@ test('the mediasoup worker cache pins the locked package, host and compiler, and
   fs.mkdirSync(path.dirname(fake), { recursive: true });
   fs.copyFileSync(process.execPath, fake);
   await assert.rejects(verifyWorker({ base }), /does not run on this host/u, 'A binary that is not the worker is rejected.');
+});
+
+test('main keeps the Light caches that pull requests can only read, under the exact keys CI uses', () => {
+  const warm = workflow('warm-ci-caches.yml');
+  assert.deepEqual(warm.on, { push: { branches: ['main'] }, workflow_dispatch: null });
+  assert.deepEqual(warm.permissions, { contents: 'read' });
+  assert.equal(warm.concurrency['cancel-in-progress'], false, 'A newer push must not discard a compile in progress.');
+  assert.deepEqual(Object.keys(warm.jobs), ['light']);
+  const job = warm.jobs.light;
+  const light = ci.jobs['light-native'];
+  assert.deepEqual(job.strategy.matrix, light.strategy.matrix);
+  assert.equal(job['runs-on'], light['runs-on']);
+  assert.equal(job.steps.filter(candidate => candidate.uses === 'actions/cache@v4').length, 0,
+    'Saves happen only after the producing step succeeded.');
+
+  for (const uses of ['actions/checkout@v4', 'actions/setup-node@v4', 'actions/setup-python@v5']) {
+    assert.deepEqual(job.steps.find(candidate => candidate.uses === uses), light.steps.find(candidate => candidate.uses === uses),
+      `${uses} must match CI so setup-node/setup-python compute the same npm and pip keys.`);
+  }
+  for (const name of ['Read native toolchain pins', 'Select the qualified Xcode toolchain', 'Install the compatible CMake series',
+    'Install build-time JavaScript dependencies', 'Identify the mediasoup worker build', 'Install the mediasoup worker']) {
+    assert.deepEqual(step(job, name), step(light, name), `${name} must match CI.`);
+  }
+
+  const sdk = step(light, 'Cache verified SDK archives').with;
+  const sdkLookup = step(job, 'Look up the verified SDK archives');
+  assert.equal(sdkLookup.uses, 'actions/cache/restore@v4');
+  assert.deepEqual(sdkLookup.with, { ...sdk, 'lookup-only': true }, 'Looking up never downloads the archives.');
+  const download = step(job, 'Download the SDK archives through the native build');
+  assert.equal(download.run, step(light, 'Build native components').run);
+  const sdkSave = step(job, 'Save the verified SDK archives');
+  assert.equal(sdkSave.uses, 'actions/cache/save@v4');
+  assert.deepEqual(sdkSave.with, sdk);
+  for (const candidate of [download, sdkSave]) assert.equal(candidate.if, "steps.sdk.outputs.cache-hit != 'true'");
+
+  const worker = step(light, 'Restore the verified mediasoup worker').with;
+  const workerLookup = step(job, 'Look up the verified mediasoup worker');
+  assert.equal(workerLookup.id, 'mediasoup-cache');
+  assert.equal(workerLookup.uses, 'actions/cache/restore@v4');
+  assert.deepEqual(workerLookup.with, { ...worker, 'lookup-only': true });
+  const verify = step(job, 'Verify the mediasoup worker on this host');
+  assert.equal(verify.run, step(light, 'Verify the mediasoup worker on this host').run);
+  const workerSave = step(job, 'Save the verified mediasoup worker');
+  assert.deepEqual(workerSave, step(light, 'Save the verified mediasoup worker'));
+  for (const candidate of [verify, workerSave]) assert.equal(candidate.if, "steps.mediasoup-cache.outputs.cache-hit != 'true'");
+
+  const position = name => job.steps.indexOf(step(job, name));
+  const order = ['Install the compatible CMake series', 'Look up the verified SDK archives', 'Identify the mediasoup worker build',
+    'Look up the verified mediasoup worker', 'Install build-time JavaScript dependencies',
+    'Download the SDK archives through the native build', 'Save the verified SDK archives', 'Install the mediasoup worker',
+    'Verify the mediasoup worker on this host', 'Save the verified mediasoup worker'].map(position);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b), 'Each cache is saved only after it was produced and verified.');
 });
 
 test('native tooltip input requires actual window and renderer focus, not a fixed showInactive delay', async () => {
