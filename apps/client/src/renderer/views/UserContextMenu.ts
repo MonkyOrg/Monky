@@ -20,6 +20,8 @@ import { animateEnter, ownSurface, removeWithMotion, topModal } from '../utils/s
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { botSettingsMenuItem } from './BotSettingsModal';
 import { dmStore } from '../stores/dmStore';
+import { gameShareRequests } from '../core/GameShareRequests';
+import { canAskToWatchGame } from '../core/gameShareEligibility';
 import { confirmBlock, openDirectMessage, reportDmFailure, sendFriendRequest } from './home/friendActions';
 
 export class UserContextMenu {
@@ -61,10 +63,17 @@ export class UserContextMenu {
       serverStore.hasPermission(Permission.MANAGE_ROLES);
     const showAdminSection = canMuteMembers || canDeafenMembers || canKickMembers || canMoveMembers || canManageRoles || canManageAdmin;
 
-    // Jogo em andamento (#675). O pedido só aparece para quem está compartilhando,
-    // e o convite só para quem tem uma partida própria para oferecer.
+    // Jogo em andamento (#675) e o pedido para ver a partida (#763).
     const targetActivity = user.activity ?? null;
     const activityArt = targetActivity ? activityIconSrc(targetActivity.iconBase64) : null;
+    const canAskToWatch = canAskToWatchGame({
+      isSelf,
+      activity: targetActivity,
+      features: serverStore.serverDetails?.protocol?.features,
+      myVoiceChannelId: voiceStore.currentVoiceChannelId,
+      targetVoiceStates: participantManager.getSessionsOfUser(user.id)
+        .flatMap(participant => participant.voiceState ? [participant.voiceState] : []),
+    });
 
     this.menuEl = document.createElement('div');
     this.menuEl.className = 'user-context-menu';
@@ -101,6 +110,10 @@ export class UserContextMenu {
             </span>
           </div>
         </div>
+        ${canAskToWatch ? `<button type="button" class="btn btn-secondary" data-action="ask-to-watch-game">
+          <span class="material-symbols-outlined md-18" aria-hidden="true">screen_share</span>
+          ${escapeHtml(t('userMenu.askToWatchGame'))}
+        </button>` : ''}
       </div>
       ` : ''}
 
@@ -506,6 +519,11 @@ export class UserContextMenu {
   private attachEvents(user: UserSummary, targetPermissionMuted = false): void {
     if (!this.menuEl) return;
     this.attachFriendEvents(user);
+
+    this.menuEl.querySelector('[data-action="ask-to-watch-game"]')?.addEventListener('click', () => {
+      this.close();
+      void gameShareRequests.ask({ id: user.id, nickname: user.nickname });
+    });
 
     if (user.isBot) {
       const settingsAction = botSettingsMenuItem(user.id, getActiveNetworkClient(), getActiveServerStore());

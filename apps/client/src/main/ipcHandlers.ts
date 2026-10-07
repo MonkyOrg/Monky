@@ -40,6 +40,7 @@ import { TrayManager, VoiceStatus } from './trayManager';
 import type { DesktopSource, IpcInvokeChannels, OverlayBounds, OverlayConfig, OverlaySignalPayload, OverlaySyncState } from '@monky/shared';
 import { OverlayManager } from './overlayManager';
 import { SteamPresence } from './steamPresence';
+import { gameWindowIds } from './gameWindows';
 import {
   HOME_MIN_HEIGHT,
   HOME_MIN_WIDTH,
@@ -1348,6 +1349,19 @@ export function setupIpcHandlers(
   });
 
   ipcMain.handle('game-presence:get-current', () => steamPresence.getCurrent());
+
+  // Listing here also registers the ids, so the picker can resolve them (#763).
+  ipcMain.handle('game-share:find-windows', async () => {
+    if (process.platform !== 'win32') return [];
+    const folders = await steamPresence.currentGameFolders();
+    if (folders.length === 0) return [];
+    try {
+      return gameWindowIds(nativeSources.listWindows(), folders);
+    } catch (error) {
+      console.warn('[GameShare] Could not list the game windows:', (error as Error).message);
+      return [];
+    }
+  });
 
   ipcMain.handle('app:open-external', async (_, url: string) => {
     try {

@@ -204,6 +204,18 @@ export enum MessageType {
   USER_UPDATE_VISIBILITY = 'USER_UPDATE_VISIBILITY',
   /** Client -> server: publish (or clear, with null) the game being played (#675). */
   USER_UPDATE_ACTIVITY = 'USER_UPDATE_ACTIVITY',
+  /** Client -> server: ask a player in the same voice channel to share their game window (#763). */
+  GAME_SHARE_REQUEST = 'GAME_SHARE_REQUEST',
+  /** Server -> requester: the ask reached the player; carries the id the answer will refer to (#763). */
+  GAME_SHARE_REQUEST_SENT = 'GAME_SHARE_REQUEST_SENT',
+  /** Server -> player: someone asked to watch the game (#763). */
+  GAME_SHARE_REQUESTED = 'GAME_SHARE_REQUESTED',
+  /** Client -> server: the player's answer (#763). */
+  GAME_SHARE_RESPONSE = 'GAME_SHARE_RESPONSE',
+  /** Server -> requester: accepted or not; a refusal and a timeout look the same on purpose (#763). */
+  GAME_SHARE_ANSWERED = 'GAME_SHARE_ANSWERED',
+  /** Server -> player: the ask is over (answered elsewhere, expired, already sharing), close the prompt (#763). */
+  GAME_SHARE_CLOSED = 'GAME_SHARE_CLOSED',
   SERVER_GET_INVITE_INFO = 'SERVER_GET_INVITE_INFO',
 
   // SFU Client <-> Server Messages (#515)
@@ -871,6 +883,47 @@ export interface UserUpdateVisibilityPayload {
  */
 export interface UserUpdateActivityPayload {
   activity: UserActivity | null;
+}
+
+/** Client -> server: "Pedir para ver a partida" (#763). */
+export interface GameShareRequestPayload {
+  targetUserId: string;
+}
+
+/** Server -> requester: the ask was delivered and is pending (#763). */
+export interface GameShareRequestSentPayload {
+  shareRequestId: string;
+  expiresInMs: number;
+}
+
+/** Server -> player: someone in the same voice channel wants to watch the game (#763). */
+export interface GameShareRequestedPayload {
+  shareRequestId: string;
+  fromUserId: string;
+  nickname: string;
+  /** The game as the server last saw it published, so the prompt names it. */
+  gameName: string;
+  expiresInMs: number;
+}
+
+/** Client -> server: the player's answer (#763). */
+export interface GameShareResponsePayload {
+  shareRequestId: string;
+  accepted: boolean;
+}
+
+/**
+ * Server -> requester (#763). Only two outcomes: telling a refusal apart from
+ * a timeout would let the requester learn whether the player is at the screen.
+ */
+export interface GameShareAnsweredPayload {
+  shareRequestId: string;
+  outcome: 'accepted' | 'not-accepted';
+}
+
+/** Server -> player: dismiss the prompt for this ask (#763). */
+export interface GameShareClosedPayload {
+  shareRequestId: string;
 }
 
 export interface ChannelCreatedPayload {

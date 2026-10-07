@@ -133,6 +133,9 @@ export class SettingsStore {
   // Share the game being played with the channel (#675). Off by default: this
   // reads what is running on the machine, so it is never opt-out.
   public shareGameActivity: boolean = false;
+  // "Pedir para ver a partida" (#763) uses Normal capture unless the player
+  // opts into game capture once here: the hook can upset anti-cheat software.
+  public gameShareUseGameCapture: boolean = false;
   // Per-server / per-channel overrides of the global chat-sound mode (#153).
   // A missing entry (or 'inherit') means "use the level above".
   public chatSoundServerOverrides: Record<string, ChatSoundMode> = {};
@@ -321,6 +324,9 @@ export class SettingsStore {
         }
         if (typeof this.shareGameActivity !== 'boolean') {
           this.shareGameActivity = false;
+        }
+        if (typeof this.gameShareUseGameCapture !== 'boolean') {
+          this.gameShareUseGameCapture = false;
         }
         this.chatSoundServerOverrides = this.sanitizeModeMap(parsed.chatSoundServerOverrides);
         this.chatSoundChannelOverrides = this.sanitizeModeMap(this.chatSoundChannelOverrides);
@@ -751,6 +757,7 @@ export class SettingsStore {
         askShutdownOnLastLeave: this.askShutdownOnLastLeave,
         appearOffline: this.appearOffline,
         shareGameActivity: this.shareGameActivity,
+        gameShareUseGameCapture: this.gameShareUseGameCapture,
         chatSoundServerOverrides: this.chatSoundServerOverrides,
         chatSoundChannelOverrides: this.chatSoundChannelOverrides,
         onboardingCompleted: this.onboardingCompleted,
