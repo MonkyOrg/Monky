@@ -1,4 +1,4 @@
-import { app, ipcMain, sharedTexture, MessageChannelMain, BrowserWindow, type IpcMainInvokeEvent, type WebFrameMain } from 'electron';
+import { app, ipcMain, sharedTexture, MessageChannelMain, BrowserWindow, screen, type IpcMainInvokeEvent, type WebFrameMain } from 'electron';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import path from 'node:path';
@@ -345,12 +345,20 @@ class NativeScreenSharingService {
   private encodingQueue: Promise<unknown> = Promise.resolve();
   private encodingRetirementFailure: unknown;
   private readonly encodingRequests = new Map<string, AbortController>();
+  // Counts Windows display changes. A monitor identity read can wait behind another program's registry
+  // writes while holding the system display lock, freezing every screen, so it never runs on a timer.
+  private displayGeneration = 0;
+  private readonly onDisplayChanged = (): void => { this.displayGeneration++; };
 
   constructor(
     private readonly window: BrowserWindow,
     private readonly resolveSource: (sourceId: string, kind: NativeScreenCaptureKind) => NativeScreenCaptureTarget | Promise<NativeScreenCaptureTarget>,
     private readonly logger?: Pick<ClientLogger, 'write'>,
-  ) {}
+  ) {
+    screen.on('display-added', this.onDisplayChanged);
+    screen.on('display-removed', this.onDisplayChanged);
+    screen.on('display-metrics-changed', this.onDisplayChanged);
+  }
 
   private log(operation: string, data: DiagnosticData = {}, level: 'INFO' | 'WARN' | 'ERROR' = 'INFO'): void {
     try {
@@ -913,15 +921,19 @@ class NativeScreenSharingService {
         ? capturedBrowserEngine(target) : null;
       let paused = false;
       let sourceFailure: unknown;
+      let checkedDisplayGeneration: number | null = null;
       const sourceState = (): void => {
         if (sourceFailure) throw sourceFailure;
         if (target.platform === 'darwin') return; // The helper verifies ownership again before each captured frame.
         if (target.kind === 'monitor') {
+          if (checkedDisplayGeneration === this.displayGeneration) return;
+          const generation = this.displayGeneration;
           const current = screenAudio.getMonitorState(target.deviceId);
           if (!current || current.deviceId !== target.deviceId || current.deviceName !== target.deviceName
             || !isDeepStrictEqual(current.bounds, target.bounds))
             throw Object.assign(new Error('The selected monitor disconnected or changed its bounds. Select it again explicitly.'),
               { code: 'ERR_SCREEN_CAPTURE_SOURCE_LOST' });
+          checkedDisplayGeneration = generation;
           return;
         }
         const state = screenAudio.getWindowState(target.hwnd);
@@ -1515,6 +1527,9 @@ class NativeScreenSharingService {
       await Promise.all([this.retireEncodingProbes(), this.closeCalls()]);
       if (this.requests.size) throw new Error('Native screen IPC still owns pending requests.');
       this.disposed = true;
+      screen.removeListener('display-added', this.onDisplayChanged);
+      screen.removeListener('display-removed', this.onDisplayChanged);
+      screen.removeListener('display-metrics-changed', this.onDisplayChanged);
       this.recentFailures.clear();
     });
     this.disposal = work;

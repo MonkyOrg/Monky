@@ -11,6 +11,10 @@ static HMONITOR selected_monitor;
 static char selected_monitor_id[128], selected_monitor_name[32];
 static RECT selected_bounds;
 static bool binding_retired;
+/* The device interface read can wait behind another program's registry writes while holding the
+ * system display lock, freezing every screen. It is repeated only after the host reports a display change. */
+static volatile LONG identity_generation;
+static volatile LONG verified_generation = -1;
 
 static uint64_t creation_time(HANDLE process)
 {
@@ -97,17 +101,30 @@ MODULE_EXPORT bool monky_bind_monitor_target(uint64_t monitor, const char *devic
 	return monky_monitor_matches(selected_monitor, selected_monitor_id, 2);
 }
 
+MODULE_EXPORT void monky_invalidate_monitor_identity(void)
+{
+	InterlockedIncrement(&identity_generation);
+}
+
 bool monky_monitor_matches(HMONITOR monitor, const char *device_id, int method)
 {
 	if (binding_retired || !selected_monitor || monitor != selected_monitor || method != 2 || !device_id ||
 	    strcmp(device_id, selected_monitor_id) != 0)
 		return false;
 	MONITORINFOEXA info = {.cbSize = sizeof(info)};
+	if (!GetMonitorInfoA(monitor, (MONITORINFO *)&info) || strcmp(info.szDevice, selected_monitor_name) != 0 ||
+	    !EqualRect(&info.rcMonitor, &selected_bounds))
+		return false;
+	const LONG generation = InterlockedCompareExchange(&identity_generation, 0, 0);
+	if (InterlockedCompareExchange(&verified_generation, 0, 0) == generation)
+		return true;
 	DISPLAY_DEVICEA device = {.cb = sizeof(device)};
-	return GetMonitorInfoA(monitor, (MONITORINFO *)&info) &&
-	       EnumDisplayDevicesA(info.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME) &&
-	       strcmp(info.szDevice, selected_monitor_name) == 0 && strcmp(device.DeviceID, selected_monitor_id) == 0 &&
-	       EqualRect(&info.rcMonitor, &selected_bounds);
+	if (!EnumDisplayDevicesA(info.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME) ||
+	    strcmp(device.DeviceID, selected_monitor_id) != 0)
+		return false;
+	/* A concurrent invalidation leaves this older generation stale, so the next call verifies again. */
+	InterlockedExchange(&verified_generation, generation);
+	return true;
 }
 
 void monky_retire_source_binding(void)

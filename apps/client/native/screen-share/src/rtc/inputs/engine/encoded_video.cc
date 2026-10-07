@@ -304,6 +304,9 @@ struct State : std::enable_shared_from_this<State> {
     } catch (...) { Fail("ERR_RTC_ENCODED_FEEDBACK", "Cannot retire encoded feedback state"); }
   }
   void Recover(std::uint64_t expected_generation, std::uint64_t frame, const char* reason);
+  void AwaitDispatch(const std::shared_ptr<Token>& token,
+      std::chrono::microseconds recover_after = std::chrono::microseconds(kEncodedMaximumAgeUs),
+      std::chrono::microseconds fail_after = std::chrono::microseconds(kEncodedDispatchFailureUs));
   bool AcceptClockMapping(const CaptureClockMapping& mapping, std::uint64_t generation, std::uint64_t frame) {
     if (mapping.status == CaptureClockStatus::kSampleUncertain) {
       Recover(generation, frame, "clock-sample-uncertain");
@@ -391,7 +394,8 @@ void State::Recover(std::uint64_t expected_generation, std::uint64_t frame, cons
     CheckRecoveryDeadline();
     if (!recovering) { recovering = true; recovery_frames = 0; }
     ++generation; need_idr = true; ++recovery_requests;
-    if (std::string_view(reason) != "rtc-unconsumed" && std::string_view(reason) != "clock-sample-uncertain") ++expired;
+    if (std::string_view(reason) != "rtc-unconsumed" && std::string_view(reason) != "clock-sample-uncertain"
+        && std::string_view(reason) != "dispatch-delayed") ++expired;
     discarded.swap(queue); recovery_discards += discarded.size();
     for (const auto& queued : discarded) queued->cancelled.store(true);
     feedback = {{"sourceId", id}, {"kind", "recovery"}, {"frameId", frame},
@@ -401,6 +405,21 @@ void State::Recover(std::uint64_t expected_generation, std::uint64_t frame, cons
   Event("source.encodedFeedback", std::move(feedback));
   discarded.clear();
   wake.notify_all();
+}
+
+// RTC normally retires one dispatch within a frame. A system-wide stall (for example a network stack blocked by
+// a firewall rebuilding its filters) can hold it longer than the age bound; every queued picture is stale by
+// then, so they are fenced and publication resumes from the next real IDR instead of ending the share.
+void State::AwaitDispatch(const std::shared_ptr<Token>& token, std::chrono::microseconds recover_after,
+    std::chrono::microseconds fail_after) {
+  const auto retired = [&] { return token->dispatch_retired.load() || stopping.load() || failed.load(); };
+  std::unique_lock lock(mutex);
+  if (wake.wait_for(lock, recover_after, retired)) return;
+  lock.unlock();
+  Recover(token->generation, token->metadata.frame_id, "dispatch-delayed");
+  lock.lock();
+  Require(wake.wait_for(lock, fail_after, retired),
+      "RTC encoded dispatch exceeded its 5 s retirement bound", MONKY_ENGINE_TIMEOUT);
 }
 
 void State::DispatchRetired(Token& token, const webrtc::VideoFrameBuffer* buffer) noexcept {
@@ -991,10 +1010,7 @@ class Source final : public VideoSource {
         // RTC's raw-frame cadence adapter discards older queued pictures. Keep
         // compressed dependencies in our bounded queue, with one dispatch at a
         // time; encoded-byte/network references have a separate lifetime.
-        std::unique_lock lock(state_->mutex);
-        Require(state_->wake.wait_for(lock, std::chrono::microseconds(kEncodedMaximumAgeUs), [&] {
-          return token->dispatch_retired.load() || state_->stopping.load() || state_->failed.load();
-        }), "RTC encoded dispatch exceeded its500ms retirement bound", MONKY_ENGINE_TIMEOUT);
+        state_->AwaitDispatch(token);
       }
     } catch (const std::exception& error) { state_->Fail("ERR_RTC_ENCODED_SOURCE", error.what()); }
     catch (...) { state_->Fail("ERR_RTC_ENCODED_SOURCE", "Unknown encoded source worker failure"); }
@@ -1501,6 +1517,32 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
       invalid.status = status;
       rejects([&] { state->AcceptClockMapping(invalid, state->generation, 11); });
     }
+  }
+  {
+    const auto requests = state->recovery_requests, expired = state->expired, generation = state->generation;
+    auto delayed = retain(12), dependent = retain(13);
+    state->queue.push_back(dependent);
+    auto held = webrtc::make_ref_counted<NativeBuffer>(delayed);
+    // The modeled RTC thread retires the dispatch only after the stall has already been recovered.
+    std::thread rtc([&] {
+      std::unique_lock lock(state->mutex);
+      state->wake.wait(lock, [&] { return state->generation != generation; });
+      lock.unlock();
+      held = nullptr;
+    });
+    state->AwaitDispatch(delayed, std::chrono::microseconds(1000), std::chrono::seconds(5));
+    rtc.join();
+    check(delayed->dispatch_retired.load() && !delayed->unconsumed.load() && !state->failed.load() &&
+        state->generation == generation + 1 && state->need_idr && state->recovering &&
+        dependent->cancelled.load() && state->queue.empty() && state->recovery_requests == requests + 1 &&
+        state->expired == expired,
+        "A dispatch delayed past the age bound must fence stale dependencies and resume without ending the source");
+    auto stuck = retain(14);
+    auto never = webrtc::make_ref_counted<NativeBuffer>(stuck);
+    rejects([&] { state->AwaitDispatch(stuck, std::chrono::microseconds(1000), std::chrono::microseconds(1000)); });
+    never = nullptr;
+    delayed.reset(); dependent.reset(); stuck.reset();
+    check(state->retained.empty(), "Delayed dispatch recovery must still retire every owned byte");
   }
   state->Recover(state->generation, 4, "input-expired");
   state->recovery_frames = 5;
