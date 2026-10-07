@@ -434,7 +434,9 @@ async function setupFirstLaunchGuideSmoke() {
   ]);
   new HomeTestApp();
   await until(() => !!document.querySelector('#home-view'), 'Home shell did not render');
-  await until(() => !!document.querySelector('.onboarding-card--guide #onboarding-next'), 'guide did not open for a new profile');
+  await until(() => !!document.querySelector('#add-server-modal .onboarding-card #onboarding-next'), 'guide did not open for a new profile');
+  const guideModal = document.querySelector('#add-server-modal');
+  const guideCard = guideModal.querySelector('.modal-card');
   check(settings.onboardingCompleted !== true, 'the guide is still pending while it is open');
   await new Promise(resolve => setTimeout(resolve, 150));
   check(sockets.length === 0, 'startup connections wait until the guide closes');
@@ -443,6 +445,8 @@ async function setupFirstLaunchGuideSmoke() {
   await until(() => !!document.querySelector('#onboarding-join'), 'guide did not advance to the join/create choice');
   document.querySelector('#onboarding-join').click();
   await until(() => !!document.querySelector('#add-server-join-form'), 'choosing join in the guide did not open the join form');
+  check(document.querySelector('#add-server-modal') === guideModal && guideModal.querySelector('.modal-card') === guideCard
+    && !guideModal.hasAttribute('data-ui-closing'), 'the join form continues in the guide modal instead of opening another');
   check(settings.onboardingCompleted === true, 'finishing the guide marks it as completed');
   await until(() => sockets.length === 1, 'startup connections did not resume after the guide');
   check(true, 'startup connections resume after the guide');
@@ -451,13 +455,19 @@ async function setupFirstLaunchGuideSmoke() {
   await until(() => !!document.querySelector('#add-server-option-create'), 'join form did not return to the choice screen');
   document.querySelector('#add-server-option-create').click();
   await until(() => !!document.querySelector('#add-server-open-tutorials'), 'create form did not render');
-  document.querySelector('#add-server-open-tutorials').click();
-  await until(() => !!document.querySelector('#onboarding-back'), 'hosting tutorials did not open');
   const card = document.querySelector('#add-server-modal .add-server-card');
+  const name = document.querySelector('#add-server-name');
+  name.value = 'Servidor digitado';
+  document.querySelector('#add-server-open-tutorials').click();
+  await until(() => !!document.querySelector('#onboarding-back') && !card.querySelector('[data-ui-closing]'), 'hosting tutorials did not open');
+  check(document.querySelector('#add-server-modal .modal-card') === card && document.querySelectorAll('.modal-backdrop').length === 1,
+    'hosting tutorials open inside the add-server card');
   check(!document.querySelector('#onboarding-welcome-title, #onboarding-next'), 'hosting tutorials skip the guide welcome');
   document.querySelector('#onboarding-back').click();
-  await until(() => !card.hidden && !document.querySelector('#onboarding-back'), 'Back did not close the hosting tutorials');
-  check(!!document.querySelector('#add-server-create-form') && !document.querySelector('#add-server-modal').inert,
-    'Back from hosting tutorials returns to the create-server form');
+  await until(() => !document.querySelector('#onboarding-back') && !card.querySelector('[data-ui-closing]'), 'Back did not close the hosting tutorials');
+  check(!!document.querySelector('#add-server-create-form') && card.classList.contains('add-server-card')
+    && !document.querySelector('#add-server-modal').inert, 'Back from hosting tutorials returns to the create-server form');
+  check(document.querySelector('#add-server-name') === name && name.value === 'Servidor digitado',
+    'the create form keeps what was typed while the tutorials were open');
   return checks;
 }

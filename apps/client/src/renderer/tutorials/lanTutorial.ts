@@ -8,6 +8,7 @@ export const lanTutorial: TutorialDefinition = {
     {
       title: 'tutorial.lan.step1.title',
       content: 'tutorial.lan.step1.content',
+      images: [{ shot: 'illustration-lan', alt: 'tutorial.shotLanAlt' }],
     },
     {
       title: 'tutorial.lan.step2.title',

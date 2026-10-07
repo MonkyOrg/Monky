@@ -1,9 +1,8 @@
 import { t } from '../i18n';
-import { enterModal, exitModal } from '../utils/modalSurface';
 import { replaceModalStep } from '../utils/modalSteps';
 import { settingsStore } from '../stores/settingsStore';
-import { enableBackdropClose } from '../utils/modal';
-import { tutorialViewer } from '../tutorials/TutorialViewer';
+import type { TutorialDefinition } from '../tutorials/TutorialDefinition';
+import { attachTutorialStep, renderTutorialStep, tutorialStepShots } from '../tutorials/TutorialViewer';
 import { radminTutorial } from '../tutorials/vpn/radminTutorial';
 import { tailscaleTutorial } from '../tutorials/vpn/tailscaleTutorial';
 import { hamachiTutorial } from '../tutorials/vpn/hamachiTutorial';
@@ -11,530 +10,373 @@ import { zerotierTutorial } from '../tutorials/vpn/zerotierTutorial';
 import { portForwardTutorial } from '../tutorials/portForwardTutorial';
 import { lanTutorial } from '../tutorials/lanTutorial';
 import { vpsOracleFreeTutorial, vpsGenericTutorial } from '../tutorials/vpsTutorial';
-import { renderOnboardingShot } from './onboardingShots';
+import { preloadOnboardingShots, renderOnboardingShot, type OnboardingShot } from './onboardingShots';
 
-type WizardScreen = 'welcome' | 'choose' | 'host-method' | 'vpn-select' | 'vps-select';
+type WizardScreen = 'welcome' | 'choose' | 'host-method' | 'vpn-select' | 'vps-select' | 'tutorial';
 /** `guide` is the full getting-started flow; `host-tutorials` is opened from the create-server form. */
-type WizardEntry = 'guide' | 'host-tutorials';
+export type WizardEntry = 'guide' | 'host-tutorials';
+/**
+ * Where the modal continues when the wizard hands its card back: the join or
+ * create form, back to whatever opened the wizard, or closed.
+ */
+export type WizardExit = 'join' | 'host' | 'leave' | 'close';
+
+interface WizardSession {
+  root: HTMLElement;
+  entry: WizardEntry;
+  exit: (result: WizardExit) => void;
+}
+
+interface OpenTutorial {
+  definition: TutorialDefinition;
+  step: number;
+  from: WizardScreen;
+}
 
 const SUGGEST_URL = 'https://github.com/MonkyOrg/Monky/discussions/categories/ideas';
 const CONTRIBUTE_URL = 'https://github.com/MonkyOrg/Monky';
-const SCREEN_ORDER: WizardScreen[] = ['welcome', 'choose', 'host-method', 'vpn-select', 'vps-select'];
+
+const VPN_TUTORIALS: Record<string, TutorialDefinition> = {
+  radmin: radminTutorial,
+  tailscale: tailscaleTutorial,
+  hamachi: hamachiTutorial,
+  zerotier: zerotierTutorial,
+};
+const VPS_TUTORIALS: Record<string, TutorialDefinition> = {
+  oracle: vpsOracleFreeTutorial,
+  generic: vpsGenericTutorial,
+};
+
+/** Pictures of the next screen each screen can open, decoded ahead so it never appears half drawn. */
+function nextShots(screen: WizardScreen): OnboardingShot[] {
+  const firstSteps = (tutorials: TutorialDefinition[]) =>
+    tutorials.flatMap((definition) => tutorialStepShots(definition, 0));
+  switch (screen) {
+    case 'welcome': return ['add-server-choice'];
+    case 'host-method': return firstSteps([lanTutorial, portForwardTutorial]);
+    case 'vpn-select': return firstSteps(Object.values(VPN_TUTORIALS));
+    case 'vps-select': return firstSteps(Object.values(VPS_TUTORIALS));
+    default: return [];
+  }
+}
 
 /**
- * Multi-step onboarding wizard that shows a new user around Home and guides
- * them to join or create a Monky server.  Renders as a modal overlay; all
- * tutorials run in-app via `TutorialViewer`.
+ * Getting-started guide and hosting tutorials. It renders inside the card of
+ * an already open modal (the add-server modal), replacing the card content
+ * step by step, so the user never sees one dialog close and another open.
  */
 export class OnboardingWizard {
-  private modalEl: HTMLElement | null = null;
+  private session: WizardSession | null = null;
   private screen: WizardScreen = 'welcome';
-  private renderedScreen: WizardScreen = 'welcome';
-  private entry: WizardEntry = 'guide';
-  private onFinish: ((action: 'join' | 'host' | null) => void) | null = null;
+  private tutorial: OpenTutorial | null = null;
 
   /**
-   * Opens the getting-started guide.
-   * @param onFinish Called when the wizard closes.  Receives `'join'` or
-   *   `'host'` if the user chose a path, or `null` if they skipped/closed.
+   * Shows the first screen in `root`'s card. `direction` 0 fills a modal that
+   * is about to enter; otherwise the current card slides to the wizard.
    */
-  public open(onFinish?: (action: 'join' | 'host' | null) => void): void {
-    this.close(null, true);
-    this.entry = 'guide';
-    this.screen = 'welcome';
-    this.renderedScreen = 'welcome';
-    this.onFinish = onFinish ?? null;
-    this.render();
+  public start(root: HTMLElement, entry: WizardEntry, exit: (result: WizardExit) => void, direction = 1): HTMLElement {
+    this.session = { root, entry, exit };
+    this.tutorial = null;
+    this.screen = entry === 'guide' ? 'welcome' : 'host-method';
+    return this.show(direction);
   }
 
-  /** Opens only the hosting guides; Back returns to whatever opened them. */
-  public openHostTutorials(onFinish?: (action: 'join' | 'host' | null) => void): void {
-    this.close(null, true);
-    this.entry = 'host-tutorials';
-    this.screen = 'host-method';
-    this.renderedScreen = 'host-method';
-    this.onFinish = onFinish ?? null;
-    this.render();
-  }
-
-  /** Any user-driven close counts as having seen the guide. */
-  public close(action: 'join' | 'host' | null = null, silent = false): void {
-    if (this.modalEl) {
-      exitModal(this.modalEl);
-      this.modalEl = null;
+  /** The owner took the card back or closed the modal. Any end of the guide counts as having seen it. */
+  public stop(): void {
+    const session = this.session;
+    if (!session) return;
+    this.session = null;
+    this.tutorial = null;
+    if (session.entry === 'guide') {
+      settingsStore.onboardingCompleted = true;
+      settingsStore.save();
     }
-    const finish = this.onFinish;
-    this.onFinish = null;
-    if (silent) return;
-    this.markCompleted();
-    finish?.(action);
   }
 
-  public get isOpen(): boolean {
-    return this.modalEl !== null;
+  public get active(): boolean {
+    return this.session !== null;
+  }
+
+  private go(screen: WizardScreen, direction: number): void {
+    this.screen = screen;
+    if (screen !== 'tutorial') this.tutorial = null;
+    this.show(direction);
+  }
+
+  private leave(result: WizardExit): void {
+    this.session?.exit(result);
+  }
+
+  private openTutorial(definition: TutorialDefinition): void {
+    this.tutorial = { definition, step: 0, from: this.screen };
+    this.go('tutorial', 1);
+  }
+
+  private show(direction: number): HTMLElement {
+    const session = this.session!;
+    const holder = document.createElement('div');
+    holder.innerHTML = this.markup(session.entry);
+    const content = replaceModalStep(session.root, holder.firstElementChild as HTMLElement, direction);
+    const card = session.root.querySelector<HTMLElement>(':scope > .modal-card');
+    card?.setAttribute('aria-labelledby', this.tutorial ? 'tutorial-step-title' : 'onboarding-title');
+    this.attachEvents(content);
+    if (direction !== 0) content.querySelector<HTMLElement>('button')?.focus({ preventScroll: true });
+    preloadOnboardingShots(this.tutorial
+      ? tutorialStepShots(this.tutorial.definition, this.tutorial.step + 1)
+      : nextShots(this.screen));
+    return content;
   }
 
   /* ─── screens ───────────────────────────────────────────────────────── */
 
-  private render(): void {
-    const opening = !this.modalEl;
-    if (!this.modalEl) {
-      this.modalEl = document.createElement('div');
-      this.modalEl.className = 'modal-backdrop';
-      document.body.appendChild(this.modalEl);
-      enableBackdropClose(this.modalEl, () => this.close());
-    }
-
-    const next = document.createElement('div');
+  private markup(entry: WizardEntry): string {
+    if (this.tutorial) return renderTutorialStep(this.tutorial.definition, this.tutorial.step);
     switch (this.screen) {
-      case 'welcome':
-        this.renderWelcome(next);
-        break;
-      case 'choose':
-        this.renderChoose(next);
-        break;
-      case 'host-method':
-        this.renderHostMethod(next);
-        break;
-      case 'vpn-select':
-        this.renderVpnSelect(next);
-        break;
-      case 'vps-select':
-        this.renderVpsSelect(next);
-        break;
+      case 'welcome': return this.renderWelcome();
+      case 'choose': return this.renderChoose();
+      case 'host-method': return this.renderHostMethod(entry === 'guide');
+      case 'vpn-select': return this.renderVpnSelect();
+      default: return this.renderVpsSelect();
     }
+  }
 
-    const content = replaceModalStep(this.modalEl!, next.firstElementChild as HTMLElement,
-      SCREEN_ORDER.indexOf(this.screen) - SCREEN_ORDER.indexOf(this.renderedScreen));
-    this.renderedScreen = this.screen;
-    this.attachEvents(content);
-    if (opening) enterModal(this.modalEl!);
-    else content.querySelector<HTMLElement>('button')?.focus({ preventScroll: true });
+  private card(body: string): string {
+    return `<section class="modal-card onboarding-card" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">${body}</section>`;
+  }
+
+  private heading(icon: string, title: string, subtitle: string, start = true): string {
+    return `
+      <div class="onboarding-heading${start ? ' onboarding-heading--start' : ''}">
+        <span class="material-symbols-outlined" aria-hidden="true">${icon}</span>
+        <h2 id="onboarding-title">${title}</h2>
+        <p>${subtitle}</p>
+      </div>
+    `;
   }
 
   private renderStepDots(active: number): string {
-    if (this.entry !== 'guide') return '';
+    if (this.session?.entry !== 'guide') return '';
     return `<div class="onboarding-step-dots" aria-hidden="true">
       ${[0, 1, 2].map((index) => `<div class="onboarding-step-dot ${index < active ? 'completed' : index === active ? 'active' : ''}"></div>`).join('')}
     </div>`;
   }
 
+  private backButton(id: string): string {
+    return `
+      <button type="button" class="btn btn-secondary" id="${id}">
+        <span class="material-symbols-outlined md-16" aria-hidden="true">arrow_back</span>
+        ${t('common.back')}
+      </button>
+    `;
+  }
+
+  private optionCard(id: string, icon: string, title: string, description: string, trailing: string, extra = ''): string {
+    return `
+      <button type="button" class="onboarding-option-card${extra}" id="${id}">
+        <span class="material-symbols-outlined onboarding-option-icon" aria-hidden="true">${icon}</span>
+        <span class="onboarding-option-text">
+          <span class="onboarding-option-title">${title}</span>
+          ${description ? `<span class="onboarding-option-desc">${description}</span>` : ''}
+        </span>
+        ${trailing}
+      </button>
+    `;
+  }
+
+  private arrow(): string {
+    return '<span class="material-symbols-outlined onboarding-option-arrow" aria-hidden="true">chevron_right</span>';
+  }
+
   /* ── Step 1: Welcome — where things are on Home ── */
 
-  private renderWelcome(target: HTMLElement): void {
-    target.innerHTML = `
-      <div class="modal-card onboarding-card onboarding-card--guide">
-        <div class="onboarding-heading">
-          <span class="material-symbols-outlined" aria-hidden="true">explore</span>
-          <h2>${t('onboarding.welcomeTitle')}</h2>
-          <p>${t('onboarding.welcomeSubtitle')}</p>
-        </div>
-
-        ${this.renderStepDots(0)}
-
-        ${renderOnboardingShot('home', t('onboarding.homeShotAlt'))}
-
-        <ul class="onboarding-pointers">
-          <li>
-            <span class="onboarding-pointer-icon onboarding-pointer-icon--add material-symbols-outlined" aria-hidden="true">add</span>
-            <div>
-              <strong>${t('onboarding.pointerAddTitle')}</strong>
-              <span>${t('onboarding.pointerAddDesc')}</span>
-            </div>
-          </li>
-          <li>
-            <span class="onboarding-pointer-icon material-symbols-outlined" aria-hidden="true">group</span>
-            <div>
-              <strong>${t('onboarding.pointerFriendsTitle')}</strong>
-              <span>${t('onboarding.pointerFriendsDesc')}</span>
-            </div>
-          </li>
-        </ul>
-
-        <div class="onboarding-footer">
-          <button class="btn btn-secondary" id="onboarding-skip">${t('onboarding.skip')}</button>
-          <button class="btn btn-primary" id="onboarding-next">
-            ${t('common.next')}
-            <span class="material-symbols-outlined md-16" aria-hidden="true">arrow_forward</span>
-          </button>
-        </div>
+  private renderWelcome(): string {
+    return this.card(`
+      ${this.heading('explore', t('onboarding.welcomeTitle'), t('onboarding.welcomeSubtitle'), false)}
+      ${this.renderStepDots(0)}
+      ${renderOnboardingShot('home', t('onboarding.homeShotAlt'))}
+      <ul class="onboarding-pointers">
+        <li>
+          <span class="onboarding-pointer-icon onboarding-pointer-icon--add material-symbols-outlined" aria-hidden="true">add</span>
+          <div>
+            <strong>${t('onboarding.pointerAddTitle')}</strong>
+            <span>${t('onboarding.pointerAddDesc')}</span>
+          </div>
+        </li>
+        <li>
+          <span class="onboarding-pointer-icon material-symbols-outlined" aria-hidden="true">group</span>
+          <div>
+            <strong>${t('onboarding.pointerFriendsTitle')}</strong>
+            <span>${t('onboarding.pointerFriendsDesc')}</span>
+          </div>
+        </li>
+      </ul>
+      <div class="onboarding-footer">
+        <button type="button" class="btn btn-secondary" id="onboarding-skip">${t('onboarding.skip')}</button>
+        <button type="button" class="btn btn-primary" id="onboarding-next">
+          ${t('common.next')}
+          <span class="material-symbols-outlined md-16" aria-hidden="true">arrow_forward</span>
+        </button>
       </div>
-    `;
+    `);
   }
 
   /* ── Step 2: Create or join, as offered by the rail "+" ── */
 
-  private renderChoose(target: HTMLElement): void {
-    target.innerHTML = `
-      <div class="modal-card onboarding-card onboarding-card--guide">
-        <div class="onboarding-heading onboarding-heading--start">
-          <span class="material-symbols-outlined" aria-hidden="true">add_circle</span>
-          <h2>${t('onboarding.chooseTitle')}</h2>
-          <p>${t('onboarding.chooseSubtitle')}</p>
-        </div>
-
-        ${this.renderStepDots(1)}
-
-        ${renderOnboardingShot('add-server-choice', t('onboarding.choiceShotAlt'))}
-
-        <div style="display: flex; flex-direction: column; gap: 10px;">
-          <button class="onboarding-option-card" id="onboarding-join">
-            <span class="material-symbols-outlined onboarding-option-icon">login</span>
-            <div class="onboarding-option-text">
-              <span class="onboarding-option-title">${t('onboarding.joinTitle')}</span>
-              <span class="onboarding-option-desc">${t('onboarding.joinDesc')}</span>
-            </div>
-            <span class="material-symbols-outlined onboarding-option-arrow">chevron_right</span>
-          </button>
-
-          <button class="onboarding-option-card" id="onboarding-host">
-            <span class="material-symbols-outlined onboarding-option-icon">dns</span>
-            <div class="onboarding-option-text">
-              <span class="onboarding-option-title">${t('onboarding.hostTitle')}</span>
-              <span class="onboarding-option-desc">${t('onboarding.hostDesc')}</span>
-            </div>
-            <span class="material-symbols-outlined onboarding-option-arrow">chevron_right</span>
-          </button>
-        </div>
-
-        <div class="onboarding-footer">
-          <button class="btn btn-secondary" id="onboarding-choose-back">
-            <span class="material-symbols-outlined md-16" aria-hidden="true">arrow_back</span>
-            ${t('common.back')}
-          </button>
-          <button class="btn btn-secondary" id="onboarding-skip-choose">${t('onboarding.skip')}</button>
-        </div>
+  private renderChoose(): string {
+    return this.card(`
+      ${this.heading('add_circle', t('onboarding.chooseTitle'), t('onboarding.chooseSubtitle'))}
+      ${this.renderStepDots(1)}
+      ${renderOnboardingShot('add-server-choice', t('onboarding.choiceShotAlt'))}
+      <div class="onboarding-options">
+        ${this.optionCard('onboarding-join', 'login', t('onboarding.joinTitle'), t('onboarding.joinDesc'), this.arrow())}
+        ${this.optionCard('onboarding-host', 'dns', t('onboarding.hostTitle'), t('onboarding.hostDesc'), this.arrow())}
       </div>
-    `;
+      <div class="onboarding-footer">
+        ${this.backButton('onboarding-choose-back')}
+        <button type="button" class="btn btn-secondary" id="onboarding-skip-choose">${t('onboarding.skip')}</button>
+      </div>
+    `);
   }
 
   /* ── Step 3: Host method ── */
 
-  private renderHostMethod(target: HTMLElement): void {
-    const guide = this.entry === 'guide';
-    target.innerHTML = `
-      <div class="modal-card onboarding-card" style="max-width: 520px;">
-        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-          <span class="material-symbols-outlined" style="color: var(--accent-primary);">dns</span>
-          <h2 style="font-size: 17px; font-weight: 800; color: var(--text-primary); margin: 0;">
-            ${t('onboarding.hostMethodTitle')}
-          </h2>
-        </div>
-        <p style="font-size: 13px; color: var(--text-secondary); margin: 0 0 14px 0; line-height: 1.5;">
-          ${t('onboarding.hostMethodSubtitle')}
-        </p>
-
-        ${this.renderStepDots(2)}
-
-        <div style="display: flex; flex-direction: column; gap: 8px;">
-          <button class="onboarding-option-card" id="onboarding-lan">
-            <span class="material-symbols-outlined onboarding-option-icon">home</span>
-            <div class="onboarding-option-text">
-              <span class="onboarding-option-title">${t('onboarding.lanTitle')}</span>
-              <span class="onboarding-option-desc">${t('onboarding.lanDesc')}</span>
-            </div>
-            <span class="onboarding-badge easy">${t('onboarding.badgeEasy')}</span>
-          </button>
-
-          <button class="onboarding-option-card" id="onboarding-vpn">
-            <span class="material-symbols-outlined onboarding-option-icon">vpn_lock</span>
-            <div class="onboarding-option-text">
-              <span class="onboarding-option-title">${t('onboarding.vpnTitle')}</span>
-              <span class="onboarding-option-desc">${t('onboarding.vpnDesc')}</span>
-            </div>
-            <span class="onboarding-badge easy">${t('onboarding.badgeEasy')}</span>
-          </button>
-
-          <button class="onboarding-option-card" id="onboarding-port">
-            <span class="material-symbols-outlined onboarding-option-icon">router</span>
-            <div class="onboarding-option-text">
-              <span class="onboarding-option-title">${t('onboarding.portTitle')}</span>
-              <span class="onboarding-option-desc">${t('onboarding.portDesc')}</span>
-            </div>
-            <span class="onboarding-badge medium">${t('onboarding.badgeMedium')}</span>
-          </button>
-
-          <button class="onboarding-option-card" id="onboarding-vps">
-            <span class="material-symbols-outlined onboarding-option-icon">cloud</span>
-            <div class="onboarding-option-text">
-              <span class="onboarding-option-title">${t('onboarding.vpsTitle')}</span>
-              <span class="onboarding-option-desc">${t('onboarding.vpsDesc')}</span>
-            </div>
-            <span class="onboarding-badge advanced">${t('onboarding.badgeAdvanced')}</span>
-          </button>
-        </div>
-
-        ${guide ? `
-          <button class="onboarding-option-card onboarding-option-card--primary" id="onboarding-create-now">
-            <span class="material-symbols-outlined onboarding-option-icon">add_circle</span>
-            <div class="onboarding-option-text">
-              <span class="onboarding-option-title">${t('onboarding.createNowTitle')}</span>
-              <span class="onboarding-option-desc">${t('onboarding.createNowDesc')}</span>
-            </div>
-            <span class="material-symbols-outlined onboarding-option-arrow">chevron_right</span>
-          </button>
-        ` : ''}
-
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 14px;">
-          <button class="btn btn-secondary" id="onboarding-back" style="font-size: 12px; padding: 6px 14px;">
-            <span class="material-symbols-outlined md-16" style="margin-right: 4px;">arrow_back</span>
-            ${t('common.back')}
-          </button>
-          ${guide ? `
-            <button class="btn btn-secondary" id="onboarding-skip2" style="font-size: 12px; padding: 6px 14px;">
-              ${t('onboarding.skip')}
-            </button>
-          ` : ''}
-        </div>
+  private renderHostMethod(guide: boolean): string {
+    const badge = (level: 'easy' | 'medium' | 'advanced', label: string) =>
+      `<span class="onboarding-badge ${level}">${label}</span>`;
+    return this.card(`
+      ${this.heading('dns', t('onboarding.hostMethodTitle'), t('onboarding.hostMethodSubtitle'))}
+      ${this.renderStepDots(2)}
+      <div class="onboarding-options">
+        ${this.optionCard('onboarding-lan', 'home', t('onboarding.lanTitle'), t('onboarding.lanDesc'), badge('easy', t('onboarding.badgeEasy')))}
+        ${this.optionCard('onboarding-vpn', 'vpn_lock', t('onboarding.vpnTitle'), t('onboarding.vpnDesc'), badge('easy', t('onboarding.badgeEasy')))}
+        ${this.optionCard('onboarding-port', 'router', t('onboarding.portTitle'), t('onboarding.portDesc'), badge('medium', t('onboarding.badgeMedium')))}
+        ${this.optionCard('onboarding-vps', 'cloud', t('onboarding.vpsTitle'), t('onboarding.vpsDesc'), badge('advanced', t('onboarding.badgeAdvanced')))}
+        ${guide ? this.optionCard('onboarding-create-now', 'add_circle', t('onboarding.createNowTitle'), t('onboarding.createNowDesc'), this.arrow(), ' onboarding-option-card--primary') : ''}
       </div>
-    `;
+      <div class="onboarding-footer">
+        ${this.backButton('onboarding-back')}
+        ${guide ? `<button type="button" class="btn btn-secondary" id="onboarding-skip2">${t('onboarding.skip')}</button>` : ''}
+      </div>
+    `);
   }
 
-  /* ── VPN selection ── */
+  /* ── VPN and VPS selection ── */
 
-  private renderVpnSelect(target: HTMLElement): void {
-    const vpns = [
-      { id: 'radmin', name: 'Radmin VPN', icon: 'vpn_lock' },
-      { id: 'tailscale', name: 'Tailscale', icon: 'vpn_lock' },
-      { id: 'hamachi', name: 'Hamachi', icon: 'vpn_lock' },
-      { id: 'zerotier', name: 'ZeroTier', icon: 'vpn_lock' },
-    ];
-
-    target.innerHTML = `
-      <div class="modal-card onboarding-card" style="max-width: 480px;">
-        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-          <span class="material-symbols-outlined" style="color: var(--accent-primary);">vpn_lock</span>
-          <h2 style="font-size: 17px; font-weight: 800; color: var(--text-primary); margin: 0;">
-            ${t('onboarding.vpnSelectTitle')}
-          </h2>
-        </div>
-        <p style="font-size: 13px; color: var(--text-secondary); margin: 0 0 14px 0; line-height: 1.5;">
-          ${t('onboarding.vpnSelectSubtitle')}
-        </p>
-
-        <div style="display: flex; flex-direction: column; gap: 8px;">
-          ${vpns.map((vpn) => `
-            <button class="onboarding-option-card onboarding-tutorial-trigger" data-vpn="${vpn.id}">
-              <span class="material-symbols-outlined onboarding-option-icon">${vpn.icon}</span>
-              <div class="onboarding-option-text">
-                <span class="onboarding-option-title">${vpn.name}</span>
-              </div>
-              <span style="font-size: 12px; color: var(--accent-primary); font-weight: 600; white-space: nowrap;">
-                ${t('onboarding.followTutorial')}
-                <span class="material-symbols-outlined md-16" style="vertical-align: middle;">arrow_forward</span>
-              </span>
-            </button>
-          `).join('')}
-        </div>
-
-        <!-- Contribute CTA -->
-        <div style="margin-top: 14px; padding: 12px; background: rgba(88, 101, 242, 0.06); border: 1px solid rgba(88, 101, 242, 0.2); border-radius: var(--radius-md);">
-          <div style="font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">
-            💡 ${t('onboarding.contributeTitle')}
-          </div>
-          <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.45; margin-bottom: 8px;">
-            ${t('onboarding.contributeDesc')}
-          </div>
-          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-            <button class="btn btn-secondary" id="onboarding-suggest" style="font-size: 12px; padding: 5px 12px;">
-              <span class="material-symbols-outlined md-16" style="margin-right: 4px;">lightbulb</span>
-              ${t('onboarding.suggestBtn')}
-            </button>
-            <button class="btn btn-secondary" id="onboarding-contribute" style="font-size: 12px; padding: 5px 12px;">
-              <span class="material-symbols-outlined md-16" style="margin-right: 4px;">code</span>
-              ${t('onboarding.contributeBtn')}
-            </button>
-          </div>
-        </div>
-
-        <div style="margin-top: 12px;">
-          <button class="btn btn-secondary" id="onboarding-vpn-back" style="font-size: 12px; padding: 6px 14px;">
-            <span class="material-symbols-outlined md-16" style="margin-right: 4px;">arrow_back</span>
-            ${t('common.back')}
+  private renderTutorialList(
+    icon: string, title: string, subtitle: string,
+    items: { attribute: string; id: string; name: string }[], idSuffix: string,
+  ): string {
+    const follow = `<span class="onboarding-option-cta">${t('onboarding.followTutorial')}
+      <span class="material-symbols-outlined md-16" aria-hidden="true">arrow_forward</span></span>`;
+    return this.card(`
+      ${this.heading(icon, title, subtitle)}
+      <div class="onboarding-options">
+        ${items.map((item) => `
+          <button type="button" class="onboarding-option-card" ${item.attribute}="${item.id}">
+            <span class="material-symbols-outlined onboarding-option-icon" aria-hidden="true">${icon}</span>
+            <span class="onboarding-option-text"><span class="onboarding-option-title">${item.name}</span></span>
+            ${follow}
+          </button>
+        `).join('')}
+      </div>
+      <div class="onboarding-contribute">
+        <strong>
+          <span class="material-symbols-outlined md-16" aria-hidden="true">lightbulb</span>
+          ${t('onboarding.contributeTitle')}
+        </strong>
+        <span>${t('onboarding.contributeDesc')}</span>
+        <div class="onboarding-contribute-actions">
+          <button type="button" class="btn btn-secondary" id="onboarding-suggest${idSuffix}">
+            <span class="material-symbols-outlined md-16" aria-hidden="true">lightbulb</span>
+            ${t('onboarding.suggestBtn')}
+          </button>
+          <button type="button" class="btn btn-secondary" id="onboarding-contribute${idSuffix}">
+            <span class="material-symbols-outlined md-16" aria-hidden="true">code</span>
+            ${t('onboarding.contributeBtn')}
           </button>
         </div>
       </div>
-    `;
+      <div class="onboarding-footer">
+        ${this.backButton(`onboarding-${idSuffix ? 'vps' : 'vpn'}-back`)}
+      </div>
+    `);
   }
 
-  /* ── VPS selection ── */
+  private renderVpnSelect(): string {
+    return this.renderTutorialList('vpn_lock', t('onboarding.vpnSelectTitle'), t('onboarding.vpnSelectSubtitle'), [
+      { attribute: 'data-vpn', id: 'radmin', name: 'Radmin VPN' },
+      { attribute: 'data-vpn', id: 'tailscale', name: 'Tailscale' },
+      { attribute: 'data-vpn', id: 'hamachi', name: 'Hamachi' },
+      { attribute: 'data-vpn', id: 'zerotier', name: 'ZeroTier' },
+    ], '');
+  }
 
-  private renderVpsSelect(target: HTMLElement): void {
-    const providers = [
-      { id: 'oracle', name: 'Oracle Cloud (Free Tier)', icon: 'cloud' },
-      { id: 'generic', name: t('onboarding.vpsGenericProvider'), icon: 'cloud' },
-    ];
-
-    target.innerHTML = `
-      <div class="modal-card onboarding-card" style="max-width: 480px;">
-        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-          <span class="material-symbols-outlined" style="color: var(--accent-primary);">cloud</span>
-          <h2 style="font-size: 17px; font-weight: 800; color: var(--text-primary); margin: 0;">
-            ${t('onboarding.vpsSelectTitle')}
-          </h2>
-        </div>
-        <p style="font-size: 13px; color: var(--text-secondary); margin: 0 0 14px 0; line-height: 1.5;">
-          ${t('onboarding.vpsSelectSubtitle')}
-        </p>
-
-        <div style="display: flex; flex-direction: column; gap: 8px;">
-          ${providers.map((p) => `
-            <button class="onboarding-option-card onboarding-tutorial-trigger" data-vps="${p.id}">
-              <span class="material-symbols-outlined onboarding-option-icon">${p.icon}</span>
-              <div class="onboarding-option-text">
-                <span class="onboarding-option-title">${p.name}</span>
-              </div>
-              <span style="font-size: 12px; color: var(--accent-primary); font-weight: 600; white-space: nowrap;">
-                ${t('onboarding.followTutorial')}
-                <span class="material-symbols-outlined md-16" style="vertical-align: middle;">arrow_forward</span>
-              </span>
-            </button>
-          `).join('')}
-        </div>
-
-        <!-- Contribute CTA -->
-        <div style="margin-top: 14px; padding: 12px; background: rgba(88, 101, 242, 0.06); border: 1px solid rgba(88, 101, 242, 0.2); border-radius: var(--radius-md);">
-          <div style="font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">
-            💡 ${t('onboarding.contributeTitle')}
-          </div>
-          <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.45; margin-bottom: 8px;">
-            ${t('onboarding.contributeDesc')}
-          </div>
-          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-            <button class="btn btn-secondary" id="onboarding-suggest-vps" style="font-size: 12px; padding: 5px 12px;">
-              <span class="material-symbols-outlined md-16" style="margin-right: 4px;">lightbulb</span>
-              ${t('onboarding.suggestBtn')}
-            </button>
-            <button class="btn btn-secondary" id="onboarding-contribute-vps" style="font-size: 12px; padding: 5px 12px;">
-              <span class="material-symbols-outlined md-16" style="margin-right: 4px;">code</span>
-              ${t('onboarding.contributeBtn')}
-            </button>
-          </div>
-        </div>
-
-        <div style="margin-top: 12px;">
-          <button class="btn btn-secondary" id="onboarding-vps-back" style="font-size: 12px; padding: 6px 14px;">
-            <span class="material-symbols-outlined md-16" style="margin-right: 4px;">arrow_back</span>
-            ${t('common.back')}
-          </button>
-        </div>
-      </div>
-    `;
+  private renderVpsSelect(): string {
+    return this.renderTutorialList('cloud', t('onboarding.vpsSelectTitle'), t('onboarding.vpsSelectSubtitle'), [
+      { attribute: 'data-vps', id: 'oracle', name: 'Oracle Cloud (Free Tier)' },
+      { attribute: 'data-vps', id: 'generic', name: t('onboarding.vpsGenericProvider') },
+    ], '-vps');
   }
 
   /* ─── events ────────────────────────────────────────────────────────── */
 
   private attachEvents(content: HTMLElement): void {
-    // Welcome screen
-    content.querySelector('#onboarding-next')?.addEventListener('click', () => {
-      this.screen = 'choose';
-      this.render();
-    });
-    content.querySelector('#onboarding-skip')?.addEventListener('click', () => this.close());
+    const on = (selector: string, handler: () => void) =>
+      content.querySelector(selector)?.addEventListener('click', handler);
 
-    // Create or join
-    content.querySelector('#onboarding-join')?.addEventListener('click', () => this.close('join'));
-    content.querySelector('#onboarding-host')?.addEventListener('click', () => {
-      this.screen = 'host-method';
-      this.render();
-    });
-    content.querySelector('#onboarding-choose-back')?.addEventListener('click', () => {
-      this.screen = 'welcome';
-      this.render();
-    });
-    content.querySelector('#onboarding-skip-choose')?.addEventListener('click', () => this.close());
-
-    // Host method screen
-    content.querySelector('#onboarding-lan')?.addEventListener('click', () => {
-      this.close('host');
-      tutorialViewer.open(lanTutorial);
-    });
-    content.querySelector('#onboarding-vpn')?.addEventListener('click', () => {
-      this.screen = 'vpn-select';
-      this.render();
-    });
-    content.querySelector('#onboarding-port')?.addEventListener('click', () => {
-      this.close('host');
-      tutorialViewer.open(portForwardTutorial);
-    });
-    content.querySelector('#onboarding-vps')?.addEventListener('click', () => {
-      this.screen = 'vps-select';
-      this.render();
-    });
-    content.querySelector('#onboarding-create-now')?.addEventListener('click', () => this.close('host'));
-    content.querySelector('#onboarding-back')?.addEventListener('click', () => {
-      // From the create-server form, Back goes back to that form.
-      if (this.entry === 'host-tutorials') {
-        this.close();
-        return;
-      }
-      this.screen = 'choose';
-      this.render();
-    });
-    content.querySelector('#onboarding-skip2')?.addEventListener('click', () => this.close());
-
-    // VPN selection
-    content.querySelectorAll('[data-vpn]').forEach((el) => {
-      el.addEventListener('click', () => {
-        const vpnId = el.getAttribute('data-vpn');
-        this.close('host');
-        const tutorial = this.getVpnTutorial(vpnId);
-        if (tutorial) tutorialViewer.open(tutorial);
+    const tutorial = this.tutorial;
+    if (tutorial) {
+      attachTutorialStep(content, {
+        previous: () => {
+          if (tutorial.step === 0) {
+            this.go(tutorial.from, -1);
+            return;
+          }
+          tutorial.step--;
+          this.show(-1);
+        },
+        next: () => {
+          if (tutorial.step >= tutorial.definition.steps.length - 1) return;
+          tutorial.step++;
+          this.show(1);
+        },
+        // From the create form, finishing a tutorial returns to it; in the guide it opens the form.
+        finish: () => this.leave(this.session?.entry === 'guide' ? 'host' : 'leave'),
+        close: () => this.leave('close'),
       });
-    });
-    content.querySelector('#onboarding-vpn-back')?.addEventListener('click', () => {
-      this.screen = 'host-method';
-      this.render();
-    });
-    content.querySelector('#onboarding-contribute')?.addEventListener('click', () => {
-      window.api?.openExternal?.(CONTRIBUTE_URL);
-    });
-    content.querySelector('#onboarding-suggest')?.addEventListener('click', () => {
-      window.api?.openExternal?.(SUGGEST_URL);
-    });
-
-    // VPS selection
-    content.querySelectorAll('[data-vps]').forEach((el) => {
-      el.addEventListener('click', () => {
-        const vpsId = el.getAttribute('data-vps');
-        this.close('host');
-        const tutorial = this.getVpsTutorial(vpsId);
-        if (tutorial) tutorialViewer.open(tutorial);
-      });
-    });
-    content.querySelector('#onboarding-vps-back')?.addEventListener('click', () => {
-      this.screen = 'host-method';
-      this.render();
-    });
-    content.querySelector('#onboarding-contribute-vps')?.addEventListener('click', () => {
-      window.api?.openExternal?.(CONTRIBUTE_URL);
-    });
-    this.modalEl?.querySelector('#onboarding-suggest-vps')?.addEventListener('click', () => {
-      window.api?.openExternal?.(SUGGEST_URL);
-    });
-  }
-
-  private getVpnTutorial(id: string | null) {
-    switch (id) {
-      case 'radmin': return radminTutorial;
-      case 'tailscale': return tailscaleTutorial;
-      case 'hamachi': return hamachiTutorial;
-      case 'zerotier': return zerotierTutorial;
-      default: return null;
+      return;
     }
-  }
 
-  private getVpsTutorial(id: string | null) {
-    switch (id) {
-      case 'oracle': return vpsOracleFreeTutorial;
-      case 'generic': return vpsGenericTutorial;
-      default: return null;
+    on('#onboarding-next', () => this.go('choose', 1));
+    on('#onboarding-skip', () => this.leave('leave'));
+
+    on('#onboarding-join', () => this.leave('join'));
+    on('#onboarding-host', () => this.go('host-method', 1));
+    on('#onboarding-choose-back', () => this.go('welcome', -1));
+    on('#onboarding-skip-choose', () => this.leave('leave'));
+
+    on('#onboarding-lan', () => this.openTutorial(lanTutorial));
+    on('#onboarding-vpn', () => this.go('vpn-select', 1));
+    on('#onboarding-port', () => this.openTutorial(portForwardTutorial));
+    on('#onboarding-vps', () => this.go('vps-select', 1));
+    on('#onboarding-create-now', () => this.leave('host'));
+    // From the create-server form, Back returns to that form instead of the guide start.
+    on('#onboarding-back', () => {
+      if (this.session?.entry === 'host-tutorials') this.leave('leave');
+      else this.go('choose', -1);
+    });
+    on('#onboarding-skip2', () => this.leave('leave'));
+
+    content.querySelectorAll<HTMLElement>('[data-vpn], [data-vps]').forEach((element) => {
+      const definition = VPN_TUTORIALS[element.dataset.vpn ?? ''] ?? VPS_TUTORIALS[element.dataset.vps ?? ''];
+      element.addEventListener('click', () => { if (definition) this.openTutorial(definition); });
+    });
+    on('#onboarding-vpn-back', () => this.go('host-method', -1));
+    on('#onboarding-vps-back', () => this.go('host-method', -1));
+    for (const suffix of ['', '-vps']) {
+      on(`#onboarding-suggest${suffix}`, () => window.api?.openExternal?.(SUGGEST_URL));
+      on(`#onboarding-contribute${suffix}`, () => window.api?.openExternal?.(CONTRIBUTE_URL));
     }
-  }
-
-  private markCompleted(): void {
-    settingsStore.onboardingCompleted = true;
-    settingsStore.save();
   }
 }
 

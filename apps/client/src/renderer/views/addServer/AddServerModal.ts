@@ -4,6 +4,7 @@ import { settingsStore } from '../../stores/settingsStore';
 import { t } from '../../i18n';
 import { escapeHtml } from '../../utils/html';
 import { enterModal, exitModal, handlesModalKey } from '../../utils/modalSurface';
+import { cancelModalStep, replaceModalStep } from '../../utils/modalSteps';
 import { setSurfaceVisible } from '../../utils/surfaceVisibility';
 import { animateEnter, cancelSurfaceMotion } from '../../utils/surfaceMotion';
 import { attachCapacityEstimatorEvents, renderCapacityEstimatorHtml, renderWhatPassesWhereTableHtml } from '../../utils/voiceModeInfo';
@@ -13,9 +14,18 @@ import { ensureHostedServerStarted, findOwnedServer } from '../../core/hostedSer
 import { checkServerOnline } from '../../utils/serverStatus';
 import { showAlert, showConfirm } from '../Dialog';
 import { joinInviteModal } from '../JoinInviteModal';
-import { onboardingWizard } from '../OnboardingWizard';
+import { onboardingWizard, type WizardExit } from '../OnboardingWizard';
 
 type AddServerScreen = 'choice' | 'join' | 'create';
+
+/** The guide or the hosting tutorials are borrowing this modal's card. */
+interface GuideVisit {
+  /** Screen to show when the guide hands the card back; `null` closes the modal. */
+  returnTo: AddServerScreen | null;
+  /** Form kept aside so whatever the user typed is still there on return. */
+  parked: { className: string; nodes: ChildNode[] } | null;
+  onClosed?: () => void;
+}
 
 interface DiscoveredServer {
   host: string;
@@ -32,44 +42,63 @@ class AddServerModal {
   private lanScanTimeout: ReturnType<typeof setTimeout> | null = null;
   private readonly discoveredServers = new Map<string, DiscoveredServer>();
   private readonly unbindLanListeners: Array<() => void> = [];
+  private guide: GuideVisit | null = null;
 
   public open(screen: AddServerScreen = 'choice'): void {
     this.close(true);
     this.screen = screen;
-    this.setupLanDiscoveryListeners();
-    this.modalEl = document.createElement('div');
-    this.modalEl.className = 'modal-backdrop';
-    this.modalEl.id = 'add-server-modal';
-    document.body.appendChild(this.modalEl);
-    this.render();
-    enterModal(this.modalEl);
+    const modal = this.createBackdrop();
+    modal.innerHTML = this.cardMarkup();
+    this.bindCard(modal);
+    enterModal(modal);
   }
 
-  /** Opens the getting-started guide and continues in the path the user picks. */
+  /**
+   * Opens the getting-started guide and continues in the path the user picks.
+   * The guide uses this modal's card, so joining or creating continues in the
+   * same dialog instead of closing one and opening another.
+   */
   public openGuide(onClosed?: () => void): void {
-    onboardingWizard.open((action) => {
-      if (action) {
-        const screen = action === 'join' ? 'join' : 'create';
-        if (this.modalEl) this.switchScreen(screen);
-        else this.open(screen);
-      }
-      onClosed?.();
-    });
+    if (this.guide) return;
+    const opening = !this.modalEl;
+    const modal = this.modalEl ?? this.createBackdrop();
+    this.stopLanDiscovery();
+    this.guide = { returnTo: opening ? null : this.screen, parked: null, onClosed };
+    onboardingWizard.start(modal, 'guide', (result) => this.leaveGuide(result), opening ? 0 : 1);
+    if (opening) enterModal(modal);
   }
 
   public close(immediate = false): void {
     if (!this.modalEl) return;
     const element = this.modalEl;
+    const guide = this.guide;
     this.modalEl = null;
+    this.guide = null;
+    if (guide) onboardingWizard.stop();
     this.stopLanDiscovery();
     for (const off of this.unbindLanListeners.splice(0)) off();
     document.removeEventListener('keydown', this.handleKeyDown, true);
     exitModal(element, immediate);
+    guide?.onClosed?.();
   }
 
-  private render(): void {
-    if (!this.modalEl) return;
-    this.modalEl.innerHTML = `
+  private createBackdrop(): HTMLElement {
+    this.setupLanDiscoveryListeners();
+    const modal = document.createElement('div');
+    modal.className = 'modal-backdrop';
+    modal.id = 'add-server-modal';
+    modal.addEventListener('mousedown', (event) => {
+      if (event.target === modal) this.close();
+    });
+    document.body.appendChild(modal);
+    this.modalEl = modal;
+    document.removeEventListener('keydown', this.handleKeyDown, true);
+    document.addEventListener('keydown', this.handleKeyDown, true);
+    return modal;
+  }
+
+  private cardMarkup(): string {
+    return `
       <section class="modal-card add-server-card" role="dialog" aria-modal="true" aria-labelledby="add-server-title">
         <header class="modal-header">
           <div class="modal-title" id="add-server-title">
@@ -83,11 +112,63 @@ class AddServerModal {
         </div>
       </section>
     `;
+  }
+
+  /** `content` holds the card's new children, which sit in a transition panel while a step animates. */
+  private bindCard(content: HTMLElement): void {
     this.attachEvents();
     this.setConnectionPending(this.connectionPending);
-    document.removeEventListener('keydown', this.handleKeyDown, true);
-    document.addEventListener('keydown', this.handleKeyDown, true);
-    this.modalEl.querySelector<HTMLElement>('button, input')?.focus({ preventScroll: true });
+    content.querySelector<HTMLElement>('button, input')?.focus({ preventScroll: true });
+  }
+
+  /** The guide hands the card back: slide to the chosen form, back to where it was opened, or close. */
+  private leaveGuide(result: WizardExit): void {
+    const guide = this.guide;
+    const modal = this.modalEl;
+    if (!guide || !modal) return;
+    this.guide = null;
+    onboardingWizard.stop();
+    if (result === 'join' || result === 'host') {
+      this.screen = result === 'join' ? 'join' : 'create';
+      this.showCard(modal, 1);
+    } else if (result === 'leave' && guide.returnTo) {
+      this.screen = guide.returnTo;
+      if (guide.parked) this.restoreCard(modal, guide.parked);
+      else this.showCard(modal, -1);
+    } else {
+      this.close();
+    }
+    guide.onClosed?.();
+  }
+
+  private showCard(modal: HTMLElement, direction: number): void {
+    const holder = document.createElement('div');
+    holder.innerHTML = this.cardMarkup();
+    const content = replaceModalStep(modal, holder.firstElementChild as HTMLElement, direction);
+    modal.querySelector(':scope > .modal-card')?.setAttribute('aria-labelledby', 'add-server-title');
+    this.bindCard(content);
+  }
+
+  /** Puts the parked form back as it was; its listeners stayed attached to the same nodes. */
+  private restoreCard(modal: HTMLElement, parked: NonNullable<GuideVisit['parked']>): void {
+    const card = document.createElement('section');
+    card.className = parked.className;
+    card.append(...parked.nodes);
+    const content = replaceModalStep(modal, card, -1);
+    modal.querySelector(':scope > .modal-card')?.setAttribute('aria-labelledby', 'add-server-title');
+    this.setConnectionPending(this.connectionPending);
+    content.querySelector<HTMLElement>('#add-server-open-tutorials')?.focus({ preventScroll: true });
+  }
+
+  private openHostTutorials(): void {
+    const modal = this.modalEl;
+    if (!modal || this.guide) return;
+    // Settle any running step so the card holds the real form nodes, not transition panels.
+    cancelModalStep(modal);
+    const card = modal.querySelector<HTMLElement>(':scope > .modal-card');
+    if (!card) return;
+    this.guide = { returnTo: this.screen, parked: { className: card.className, nodes: [...card.childNodes] } };
+    onboardingWizard.start(modal, 'host-tutorials', (result) => this.leaveGuide(result));
   }
 
   private renderContent(): string {
@@ -275,17 +356,11 @@ class AddServerModal {
   private attachEvents(): void {
     if (!this.modalEl) return;
     this.modalEl.querySelector('#add-server-close')?.addEventListener('click', () => this.close());
-    this.modalEl.addEventListener('mousedown', (event) => {
-      if (event.target === this.modalEl) this.close();
-    });
     this.modalEl.querySelector('#add-server-option-create')?.addEventListener('click', () => this.switchScreen('create'));
     this.modalEl.querySelector('#add-server-option-join')?.addEventListener('click', () => this.switchScreen('join'));
     this.modalEl.querySelector('#add-server-join-back')?.addEventListener('click', () => this.switchScreen('choice'));
     this.modalEl.querySelector('#add-server-create-back')?.addEventListener('click', () => this.switchScreen('choice'));
-    // Both open as a child dialog, so closing the guide brings this card back.
-    this.modalEl.querySelector('#add-server-open-tutorials')?.addEventListener('click', () => {
-      onboardingWizard.openHostTutorials();
-    });
+    this.modalEl.querySelector('#add-server-open-tutorials')?.addEventListener('click', () => this.openHostTutorials());
     this.modalEl.querySelector('#add-server-open-guide')?.addEventListener('click', () => this.openGuide());
     this.attachJoinEvents();
     this.attachCreateEvents();
