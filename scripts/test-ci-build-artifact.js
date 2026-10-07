@@ -9,6 +9,8 @@ import { test } from 'node:test';
 import { collectBuild, validateBuild, selectBuild, downloadBuild, restoreBuild, safePath, roots, hashFile } from './ci-build-artifact.js';
 import { rebindSources } from '../apps/client/native/screen-share/scripts/packSources.cjs';
 import { checkNativeSourceRelease } from './check-native-source-release.js';
+import { sourceInputs, sourcesKey } from './native-cache-key.cjs';
+import { verifySources } from './native-sources-cache.cjs';
 
 const repository = 'MonkyOrg/Monky';
 const scripts = path.dirname(fileURLToPath(import.meta.url));
@@ -408,13 +410,32 @@ test('ZIP extraction refuses traversal, aliases, reserved devices and duplicate 
   }
 });
 
-async function sourceFixture(t, platform = 'win32') {
+const commitAll = (f, message) => {
+  f.git('add', '--all');
+  f.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
+    'commit', '--quiet', '-m', message);
+};
+
+// Commits every committed input the corresponding-source key covers, so the fixture has a real key.
+async function writeNativeInputs(f, content = 'original') {
+  for (const relative of new Set(Object.values(sourceInputs).flat())) {
+    const file = /(\.[a-z]+|LICENSE)$/u.test(relative) ? relative : `${relative}/input.txt`;
+    await fs.mkdir(path.dirname(path.join(f.root, file)), { recursive: true });
+    await fs.writeFile(path.join(f.root, file), `${content} ${relative}\n`);
+  }
+  commitAll(f, 'Native inputs');
+}
+
+async function sourceFixture(t, platform = 'win32', { nativeInputs = false } = {}) {
   const f = await fixture(t);
+  if (nativeInputs) await writeNativeInputs(f);
+  const sourceCommit = f.git('rev-parse', 'HEAD'), sourceTree = f.git('rev-parse', 'HEAD^{tree}');
   const output = path.join(f.root, 'release');
   await fs.mkdir(output);
   const input = path.join(output, `monky-native-${platform === 'darwin' ? 'macos-' : ''}sources-0.0.0-ci`);
-  const metadata = { schemaVersion: 1, version: '0.0.0-ci', sourceCommit: f.manifest.sourceCommit,
-    sourceTree: f.manifest.sourceTree, publicationReady: true, monkySource: `https://github.com/${repository}/tree/${f.manifest.sourceCommit}`,
+  const metadata = { schemaVersion: 1, version: '0.0.0-ci', sourceCommit,
+    sourceTree, publicationReady: true, monkySource: `https://github.com/${repository}/tree/${sourceCommit}`,
+    ...(nativeInputs ? { nativeSourceKey: sourcesKey(platform === 'darwin' ? 'mac' : 'win', { base: f.root }) } : {}),
     webrtcRevision: '36ea4535a500ac137dbf1f577ce40dc1aaa774ef', obsRevision: '7272af1375b38bc3cf4e0f98a5d999e8b76e9309',
     sourceFiles: 1001, repositories: Array.from({ length: 40 }, () => ({})), libraries: Array.from({ length: 24 }, () => ({})) };
   if (platform === 'darwin') {
@@ -477,6 +498,68 @@ test('native source reuse rejects changed trees, archive corruption and mismatch
   await fs.writeFile(`${f.input}.json`, JSON.stringify({ ...f.metadata, monkySource: 'mismatched-source' }));
   await assert.rejects(rebindSources(config, f.root), /exited/);
   await assert.rejects(fs.stat(path.join(f.output, 'monky-native-sources-9.0.0-beta.tar.xz')), { code: 'ENOENT' });
+});
+
+for (const platform of ['win32', 'darwin']) test(
+  `${platform}: cached sources rebind to another tree only when the committed native inputs are identical`, async t => {
+  const name = platform === 'darwin' ? 'mac' : 'win';
+  const keyFor = base => key => sourcesKey(key, { base });
+  const f = await sourceFixture(t, platform, { nativeInputs: true });
+  await fs.writeFile(path.join(f.root, 'unrelated.txt'), 'A later PR that does not touch native code\n');
+  commitAll(f, 'Unrelated change');
+  assert.notEqual(f.git('rev-parse', 'HEAD^{tree}'), f.metadata.sourceTree);
+  const version = '9.0.0-beta';
+  const result = await rebindSources({ output: f.output, version }, f.root, platform);
+  const head = f.git('rev-parse', 'HEAD');
+  const metadata = await checkNativeSourceRelease(f.output, version, head, platform, { sourcesKeyFor: keyFor(f.root) });
+  assert.equal(metadata.sourceTree, f.git('rev-parse', 'HEAD^{tree}'));
+  assert.equal(metadata.archiveManifest.sourceTree, f.metadata.sourceTree, 'The archive keeps the tree it was packed from.');
+  assert.equal(metadata.builtFromCommit, f.metadata.sourceCommit);
+  assert.equal(metadata.nativeSourceKey, f.metadata.nativeSourceKey);
+  assert.equal(await hashFile(result.archive), f.metadata.archive.sha256, 'Reuse never recompresses the archive.');
+  await assert.rejects(checkNativeSourceRelease(f.output, version, head, platform,
+    { sourcesKeyFor: () => `native-sources-${name}-v1-${'0'.repeat(64)}` }), /native inputs/u,
+  'The publish gate recomputes the key from the release checkout.');
+  const { nativeSourceKey, ...withoutKey } = metadata;
+  await fs.writeFile(result.manifest, JSON.stringify(withoutKey));
+  await assert.rejects(checkNativeSourceRelease(f.output, version, head, platform, { sourcesKeyFor: keyFor(f.root) }),
+    /provenance/u, 'Another tree is never accepted without a native source key.');
+
+  const changed = await sourceFixture(t, platform, { nativeInputs: true });
+  await fs.writeFile(path.join(changed.root, 'apps', 'client', 'native', 'screen-share', 'README.md'), 'changed\n');
+  commitAll(changed, 'Native input change');
+  await assert.rejects(rebindSources({ output: changed.output, version }, changed.root, platform), /native inputs differ/u);
+  await assert.rejects(fs.stat(path.join(changed.output, `${path.basename(changed.input).replace('0.0.0-ci', version)}.tar.xz`)),
+    { code: 'ENOENT' });
+});
+
+test('cached sources are verified against the committed native inputs before CI or the release uses them', async t => {
+  const f = await sourceFixture(t, 'win32', { nativeInputs: true });
+  const key = sourcesKey('win', { base: f.root });
+  assert.deepEqual(await verifySources('win', { base: f.root }), { key, legacy: false });
+  await fs.writeFile(path.join(f.root, 'unrelated.txt'), 'unrelated\n');
+  commitAll(f, 'Unrelated change');
+  assert.deepEqual(await verifySources('win', { base: f.root }), { key, legacy: false }, 'Unrelated commits keep the key.');
+  await fs.writeFile(path.join(f.root, 'apps', 'client', 'native', 'screen-share', 'src', 'input.txt'), 'changed\n');
+  commitAll(f, 'Native change');
+  await assert.rejects(verifySources('win', { base: f.root }), /other committed native inputs/u);
+  await assert.rejects(verifySources('mac', { base: f.root }), /ENOENT/u, 'Each platform verifies its own archive.');
+  const json = `${f.input}.json`, original = await fs.readFile(json, 'utf8');
+  for (const [change, pattern] of [
+    [{ archive: { ...f.metadata.archive, sha256: '0'.repeat(64) } }, /checksum mismatch/u],
+    [{ archive: { ...f.metadata.archive, bytes: 1 } }, /size mismatch/u],
+    [{ publicationReady: false }, /dirty checkout/u],
+    [{ schemaVersion: 2 }, /unbound CI archive/u],
+    [{ nativeSourceKey: 'native-sources-win-v1-short' }, /no native source key/u],
+  ]) {
+    await fs.writeFile(json, JSON.stringify({ ...JSON.parse(original), ...change }));
+    await assert.rejects(verifySources('win', { base: f.root, key: JSON.parse(original).nativeSourceKey }), pattern, JSON.stringify(change));
+  }
+  const { nativeSourceKey, ...legacy } = JSON.parse(original);
+  await fs.writeFile(json, JSON.stringify(legacy));
+  await assert.rejects(verifySources('win', { base: f.root }), /no native source key/u);
+  assert.deepEqual(await verifySources('win', { base: f.root, legacyOk: true }), { key: '', legacy: true },
+    'The release does not share artifacts that predate source keys, and does not fail on them.');
 });
 
 test('macOS source reuse retains SDK links and both architectures while rebinding the approved source tree', async t => {

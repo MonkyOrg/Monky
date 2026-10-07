@@ -7,6 +7,7 @@ const path = require('node:path');
 const { root, execute, write } = require('./buildTools.cjs');
 const { cache } = require('./fetchObs.cjs');
 const { verifySourceInputs, verifyLegalFiles } = require('./checkPackage.cjs');
+const { sourcesKey, SOURCES_KEY } = require('../../../../../scripts/native-cache-key.cjs');
 
 const repository = path.resolve(root, '..', '..', '..', '..');
 const sdkGit = 'rtc/webrtc/src/.git';
@@ -123,6 +124,8 @@ async function packSources(config) {
     const snapshot = {
       schemaVersion: 1, version: config.version, sourceCommit, sourceTree, publicationReady,
       monkySource: `https://github.com/MonkyOrg/Monky/tree/${sourceCommit}`,
+      // Identifies the committed native inputs this archive corresponds to, independently of the commit.
+      nativeSourceKey: sourcesKey('win', { base: repository }),
       webrtcRevision: legal.webrtcRevision, obsRevision: legal.obsRevision, recipesRevision: obs.recipesRevision,
       repositories: rtc.repositories.map(({ directory, url, commit }) => ({ directory, url, commit })),
       libraries: obs.sources, omittedBuildTools: omitted,
@@ -173,7 +176,12 @@ async function rebindSources(config, sourceRoot = repository, platform = 'win32'
   }
   assert.equal(previous.publicationReady, true, 'CI sources were not publication-ready.');
   assert.match(previous.sourceCommit, /^[a-f0-9]{40}$/u);
-  assert.equal(previous.sourceTree, sourceTree, 'Cannot rebind sources from a different source tree.');
+  if (previous.sourceTree !== sourceTree) {
+    // CI may reuse an archive packed at another commit whose committed native inputs are identical.
+    assert.ok(SOURCES_KEY.test(previous.nativeSourceKey ?? ''), 'Cannot rebind sources from a different source tree.');
+    assert.equal(previous.nativeSourceKey, sourcesKey(platform === 'darwin' ? 'mac' : 'win', { base: sourceRoot }),
+      'Cannot rebind sources whose native inputs differ from this source tree.');
+  }
   assert.equal(execute('git', ['-C', sourceRoot, 'status', '--porcelain', '--untracked-files=normal'], { capture: true }), '',
     'Source rebinding requires the clean merged checkout.');
   assert.equal(await fileHash(`${input}.tar.xz`), previous.archive.sha256, 'CI source archive checksum mismatch.');

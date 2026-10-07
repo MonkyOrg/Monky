@@ -381,8 +381,8 @@ Every PR runs the **CI** workflow. Beyond the build, it has checks that block th
 merge and tend to catch people off guard:
 
 - **Build check (win/mac)** — requires packaging with `electron-builder --dir`
-  on both platforms, without publishing, the DOM suite (Windows in two shards and
-  macOS) and native validation on Apple Silicon and Intel hardware. Catches
+  on both platforms, without publishing, the DOM suite (three shards on Windows
+  and two on macOS) and native validation on Apple Silicon and Intel hardware. Catches
   native build regressions before the merge.
 - **Docs traduzidos em sincronia** — every page in `docs-site/` needs its PT/EN
   counterpart. Adding only one of the languages fails the PR.
@@ -447,9 +447,13 @@ credentials or signed installers. Release reuses only artifacts from a successfu
 run of the merged PR: it verifies provenance, run attempt, the ZIP and per-file
 SHA-256 digests, lockfile, platform and complete Git tree. Comparing trees rather
 than just commit SHAs supports squash merges without accepting untested code.
-Release also saves the approved native runtime to the `main` cache under the
-exact key CI recorded, without compiling: the next PR with the same native
-sources reuses it after verifying it again.
+Release also saves the approved native runtime and corresponding sources to the
+`main` cache under the exact keys CI recorded, without compiling: the next PR
+with the same native inputs reuses them after verifying them again. Because a
+PR only reads caches from `main`, never another PR's, the **Warm CI caches**
+workflow saves the pinned Light SDKs and CMake and the verified mediasoup
+worker there on every push to `main`, under the same keys CI uses; when they
+already exist, it only looks them up.
 Extensionless renderer assets, including licenses, use names without a trailing
 dot; export and extraction reject ambiguous Windows paths.
 
@@ -465,7 +469,9 @@ native sources also come from CI: the `.tar.xz` is verified and reused byte for
 byte, without recompiling the runtime or recompressing sources. The schema-2
 external manifest binds the release version/commit to the original CI
 `archiveManifest`, which remains inside the archive. Both must describe the
-same Git tree.
+same Git tree, unless CI reused an archive from another commit with the same
+committed native inputs: then the `nativeSourceKey` recomputed from the
+published commit must match the archive's.
 
 Missing or expired artifacts use the original build with a warning in the workflow
 summary; promotions of betas predating the optimization are also supported.

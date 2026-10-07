@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 
 const require = createRequire(import.meta.url);
 const { load } = require('js-yaml');
-const { commands, run, shard } = require('./test-client-dom.cjs');
+const { commands, durations, run, shard } = require('./test-client-dom.cjs');
 const { focusTooltipPreview } = require('../apps/client/test/tooltipSmoke.cjs');
 const root = fileURLToPath(new URL('..', import.meta.url));
 const workflow = name => load(fs.readFileSync(path.join(root, '.github', 'workflows', name), 'utf8'));
@@ -135,21 +135,19 @@ test('DOM lanes run from the start on both systems, independently of native comp
   const dom = ci.jobs['client-dom'];
   assert.equal(dom['runs-on'], 'windows-2022');
   assert.equal(dom.needs, undefined);
-  assert.deepEqual(dom.strategy.matrix.shard, [1, 2]);
-  assert.equal(dom.strategy['fail-fast'], false);
-  const windowsDom = step(dom, 'Exercise client DOM and microphone state in Electron');
-  assert.equal(windowsDom.run, 'node scripts/test-client-dom.cjs');
-  assert.deepEqual(windowsDom.env, { MONKY_DOM_SHARD: '${{ matrix.shard }}/2' });
-  assert.equal(dom.strategy.matrix.shard.length, Number(windowsDom.env.MONKY_DOM_SHARD.split('/')[1]),
-    'Every DOM shard must have a matrix lane.');
-
   const mac = ci.jobs['client-dom-mac'];
   assert.equal(mac['runs-on'], 'macos-15');
   assert.equal(mac.needs, undefined);
-  assert.equal(mac.strategy, undefined, 'The macOS lane runs the whole DOM suite.');
+  for (const [job, shards, label] of [[dom, [1, 2, 3], 'Windows'], [mac, [1, 2], 'macOS']]) {
+    assert.deepEqual(job.strategy.matrix.shard, shards);
+    assert.equal(job.strategy['fail-fast'], false);
+    assert.equal(job.name, `Client DOM (${label} \${{ matrix.shard }}/${shards.length})`);
+    const lane = step(job, 'Exercise client DOM and microphone state in Electron');
+    assert.equal(lane.run, 'node scripts/test-client-dom.cjs');
+    assert.deepEqual(lane.env, { MONKY_DOM_SHARD: `\${{ matrix.shard }}/${shards.length}` },
+      'Every DOM shard must have exactly one matrix lane.');
+  }
   const macDom = step(mac, 'Exercise client DOM and microphone state in Electron');
-  assert.equal(macDom.run, 'node scripts/test-client-dom.cjs');
-  assert.equal(macDom.env, undefined);
   assert.ok(mac.steps.indexOf(step(mac, 'Prepare an isolated macOS test Keychain')) < mac.steps.indexOf(macDom));
   assert.equal(step(mac, 'Restore macOS Keychain configuration').if, 'always()');
 
@@ -220,7 +218,7 @@ test('both build lanes and release retain the qualified Windows toolchain and no
 
 test('every CI and release job has a bounded runtime instead of the six-hour default', () => {
   for (const [name, definition] of [['ci.yml', ci], ['release.yml', release],
-    ['native-macos-validation.yml', workflow('native-macos-validation.yml')]]) {
+    ['native-macos-validation.yml', workflow('native-macos-validation.yml')], ['warm-ci-caches.yml', workflow('warm-ci-caches.yml')]]) {
     for (const [id, job] of Object.entries(definition.jobs)) {
       if (job.uses) continue;
       assert.ok(Number.isInteger(job['timeout-minutes']) && job['timeout-minutes'] > 0 && job['timeout-minutes'] <= 180,
@@ -240,7 +238,11 @@ test('download caches stay download-only; compiled native outputs reuse only exa
       assert.match(cache.if, /runner\.os == 'Windows'/u);
       assert.match(cache.if, /needs\.version\.outputs\.reuse_build != 'true'/u);
     } else {
-      assert.equal(cache.if, undefined);
+      assert.equal(cache.if, "steps.cache.outputs.cache-hit != 'true' || steps.sources.outputs.cache-hit != 'true'",
+        'Upstream archives feed only a build or a source fetch; two exact hits skip ~240 MB of cache traffic.');
+      assert.ok(job.steps.indexOf(cache) > job.steps.indexOf(step(job, 'Restore verified corresponding sources (Windows)')));
+      assert.ok(job.steps.indexOf(cache) < job.steps.indexOf(
+        step(job, 'Fetch corresponding-source inputs for the cached runtime (Windows)')));
       assert.equal(job['runs-on'], 'windows-2022');
     }
     assert.ok(cache.with.key.startsWith(`native-screen-archives-v1-${namespace}-windows-x64-`));
@@ -290,7 +292,8 @@ test('download caches stay download-only; compiled native outputs reuse only exa
     assert.ok(order.every((index, position) => position === 0 || index >= order[position - 1]), `${platform} cache order`);
   }
   const fetch = step(ci.jobs['package-win'], 'Fetch corresponding-source inputs for the cached runtime (Windows)');
-  assert.equal(fetch.if, "steps.cache.outputs.cache-hit == 'true'");
+  assert.equal(fetch.if, "steps.cache.outputs.cache-hit == 'true' && steps.sources.outputs.cache-hit != 'true'",
+    'Pinned sources are fetched only when a cached runtime still needs its source archive packed.');
   assert.match(fetch.run, /npm run prepare:native-screen -- --python="\$env:PYTHON" --git="\$Git" --fetch-only$/mu);
   assert.ok(ci.jobs['package-win'].steps.indexOf(fetch)
     < ci.jobs['package-win'].steps.indexOf(step(ci.jobs['package-win'], 'Package reusable corresponding sources (Windows)')));
@@ -319,8 +322,118 @@ test('download caches stay download-only; compiled native outputs reuse only exa
       'A runtime is shared only right after passing the same acceptance checks as CI.');
     order.push(build.steps.indexOf(verify), build.steps.indexOf(share));
   }
+  const { cachePaths } = require('./native-sources-cache.cjs');
+  for (const [os, platform, id] of [['macOS', 'mac', 'mac-sources'], ['Windows', 'win', 'win-sources']]) {
+    const verify = step(build, `Verify the approved corresponding sources before sharing them (${os})`);
+    assert.equal(verify.id, id);
+    assert.equal(verify.if, `needs.version.outputs.reuse_build == 'true' && runner.os == '${os}'`);
+    assert.equal(verify.run, `node scripts/native-sources-cache.cjs verify ${platform} --legacy-ok`);
+    const share = step(build, `Share the approved corresponding sources with later CI (${os})`);
+    assert.equal(share.uses, 'actions/cache/save@v4');
+    assert.equal(share.if, `needs.version.outputs.reuse_build == 'true' && runner.os == '${os}' && steps.${id}.outputs.key != ''`,
+      'Artifacts packed before source keys existed are not shared.');
+    assert.equal(share.with.key, `\${{ steps.${id}.outputs.key }}`);
+    assert.deepEqual(lines(share.with.path), cachePaths[platform], 'Release seeds exactly the paths CI restores.');
+    assert.equal(build.steps.indexOf(share), build.steps.indexOf(verify) + 1);
+    order.push(build.steps.indexOf(verify), build.steps.indexOf(share));
+  }
   assert.deepEqual(order, order.map((_, index) => build.steps.indexOf(restored) + 1 + index),
     'Verify and seed straight from the restored artifact, before any release step can touch the outputs.');
+  assert.ok(order.every(index => index < build.steps.indexOf(step(build, 'Bind approved corresponding sources to release (Windows)'))
+    && index < build.steps.indexOf(step(build, 'Bind approved corresponding sources to release (macOS)'))),
+  'Sources are shared before rebinding moves them to the release name.');
+});
+
+test('corresponding sources are packed once per committed native inputs and verified before every use', () => {
+  const { cachePaths } = require('./native-sources-cache.cjs');
+  const lines = value => value.trim().split('\n');
+  for (const [job, platform, ids, prepare, pack, verifyName, saveName, restoreName] of [
+    [ci.jobs['mac-sources'], 'mac', { cache: 'cache' }, ['Prepare the pinned macOS RTC SDK', 'Generate notices from both GN target graphs'],
+      'Package corresponding sources with parallel xz', 'Verify corresponding sources against this checkout',
+      'Save verified corresponding sources', 'Restore verified corresponding sources'],
+    [ci.jobs['package-win'], 'win', { cache: 'sources' }, ['Fetch corresponding-source inputs for the cached runtime (Windows)'],
+      'Package reusable corresponding sources (Windows)', 'Verify corresponding sources against this checkout (Windows)',
+      'Save verified corresponding sources (Windows)', 'Restore verified corresponding sources (Windows)'],
+  ]) {
+    const key = job.steps.find(candidate => candidate.id === 'key');
+    assert.equal(key.run, `node scripts/native-cache-key.cjs ${platform}`);
+    const restore = step(job, restoreName);
+    assert.equal(restore.id, ids.cache);
+    assert.equal(restore.uses, 'actions/cache/restore@v4');
+    assert.deepEqual(restore.with, { path: restore.with.path, key: '${{ steps.key.outputs.sources_key }}' },
+      'Only the exact source key may restore an archive; no restore-keys.');
+    assert.deepEqual(lines(restore.with.path), cachePaths[platform]);
+    const miss = `steps.${ids.cache}.outputs.cache-hit != 'true'`;
+    for (const name of [...prepare, pack]) assert.match(step(job, name).if, new RegExp(miss.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')), name);
+    const verify = step(job, verifyName);
+    assert.equal(verify.if, undefined, 'Restored and freshly packed sources pass the same checks.');
+    assert.equal(verify.run, `node scripts/native-sources-cache.cjs verify ${platform}`, 'CI never accepts legacy archives.');
+    const save = step(job, saveName);
+    assert.equal(save.if, miss);
+    assert.deepEqual(save.with, restore.with);
+    const order = [key, restore, step(job, pack), verify, save].map(candidate => job.steps.indexOf(candidate));
+    assert.deepEqual(order, [...order].sort((a, b) => a - b), `${platform} sources cache order`);
+  }
+  const select = step(ci.jobs['package-win'], 'Select Python for native tooling (Windows)');
+  assert.equal(select.if, undefined, 'Source archive tests need Python even when nothing is compiled.');
+  assert.ok(ci.jobs['package-win'].steps.indexOf(select)
+    < ci.jobs['package-win'].steps.indexOf(step(ci.jobs['package-win'], 'Exercise native screen contracts and legal metadata')));
+  for (const file of ['packSources.cjs', 'packMacSources.cjs']) {
+    const packer = fs.readFileSync(path.join(root, 'apps', 'client', 'native', 'screen-share', 'scripts', file), 'utf8');
+    assert.match(packer, /nativeSourceKey: sourcesKey\('(?:win|mac)', \{ base: repository \}\)/u,
+      `${file} must record the committed native inputs its archive corresponds to.`);
+  }
+});
+
+test('the corresponding-source key covers every packed checkout input, is OS-independent and ignores unrelated files', t => {
+  const { sourceInputs, sourcesKey, SOURCES_KEY, inputs } = require('./native-cache-key.cjs');
+  const base = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'monky-sources-key-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const git = (...args) => spawnSync('git', args, { cwd: base, encoding: 'utf8' });
+  git('-c', 'init.templateDir=', 'init', '--quiet');
+  const isFile = entry => /(\.[a-z]+|LICENSE)$/u.test(entry);
+  const write = (relative, text) => {
+    fs.mkdirSync(path.dirname(path.join(base, relative)), { recursive: true });
+    fs.writeFileSync(path.join(base, relative), text);
+  };
+  const commit = message => {
+    git('add', '--all');
+    assert.equal(git('-c', 'user.name=F', '-c', 'user.email=f@example.invalid', '-c', 'commit.gpgsign=false',
+      'commit', '--quiet', '--allow-empty', '-m', message).status, 0);
+  };
+  const all = [...new Set(Object.values(sourceInputs).flat())];
+  // Everything the packers copy from the checkout into the archive or its notices must be in the key.
+  const native = 'apps/client/native/screen-share';
+  const packed = {
+    win: [`${native}/src`, `${native}/scripts`, `${native}/README.md`, `${native}/README.en.md`,
+      'patches/h264-profile-level-id+2.3.3.patch', 'LICENSE', 'scripts/legal.cjs'],
+    mac: [`${native}/src/rtc`, `${native}/src/mac`, `${native}/scripts`, `${native}/README.md`, `${native}/README.en.md`,
+      'LICENSE', 'scripts/legal.cjs'],
+  };
+  for (const platform of ['mac', 'win'])
+    for (const entry of packed[platform]) assert.ok(sourceInputs[platform].includes(entry), `${platform} source key misses ${entry}`);
+  for (const entry of all) write(isFile(entry) ? entry : `${entry}/input.txt`, `original ${entry}\n`);
+  write('apps/client/src/unrelated.ts', 'original');
+  commit('inputs');
+  for (const platform of ['mac', 'win']) {
+    for (const entry of inputs[platform]) assert.ok(sourceInputs[platform].includes(entry), `Sources cover runtime input ${entry}`);
+    const original = sourcesKey(platform, { base });
+    assert.match(original, SOURCES_KEY);
+    write('apps/client/src/unrelated.ts', 'changed'); commit('unrelated');
+    assert.equal(sourcesKey(platform, { base }), original, 'Unrelated commits keep the archive reusable.');
+    write(isFile(sourceInputs[platform][0]) ? sourceInputs[platform][0] : `${sourceInputs[platform][0]}/input.txt`, 'dirty');
+    assert.equal(sourcesKey(platform, { base }), original, 'The key describes committed content; packing requires a clean tree.');
+    git('checkout', '--', '.');
+    for (const entry of sourceInputs[platform]) {
+      const relative = isFile(entry) ? entry : `${entry}/input.txt`;
+      write(relative, 'changed\r\n'); commit(`change ${entry}`);
+      assert.notEqual(sourcesKey(platform, { base }), original, `${entry} must be part of the source key`);
+      write(relative, `original ${entry}\n`); commit(`restore ${entry}`);
+      assert.equal(sourcesKey(platform, { base }), original);
+    }
+  }
+  for (const entry of all) assert.ok(fs.existsSync(path.join(root, ...entry.split('/'))), `Missing source input: ${entry}`);
+  assert.throws(() => sourcesKey('linux', { base }), /mac or win/u);
 });
 
 test('the native cache key changes with every compiled input and toolchain, and ignores unrelated files', t => {
@@ -542,7 +655,10 @@ test('the extracted DOM lane preserves every existing test command and its order
     'node apps/client/test/settingsNavigationSmoke.cjs --screen-audience',
     'node apps/client/test/settingsNavigationSmoke.cjs --overlay-window',
     'npm run test:settings:ui --workspace=apps/client',
-    'npm run test:camera --workspace=apps/client',
+    'node apps/client/test/cameraEffectsSmoke.cjs',
+    'node apps/client/test/cameraEffectsSmoke.cjs --packaged',
+    'node apps/client/test/cameraEffectsSmoke.cjs --packaged --cpu-compositor --chroma-only --transitions-only',
+    'node apps/client/test/cameraPublicationSmoke.cjs',
     'node apps/client/test/footerControlsSmoke.cjs',
     'npm run test:transport --workspace=apps/client',
     'npm run test:bot-marketplace --workspace=apps/client',
@@ -550,10 +666,18 @@ test('the extracted DOM lane preserves every existing test command and its order
     'npm run test:community --workspace=apps/client',
     'npm run test:pip --workspace=apps/client',
   ]);
+  const scripts = JSON.parse(fs.readFileSync(path.join(root, 'apps', 'client', 'package.json'), 'utf8')).scripts;
   for (const [executable, scriptOrRun, script] of commands) {
     if (executable === 'node') assert.ok(fs.existsSync(path.join(root, ...scriptOrRun.split('/'))));
-    else assert.ok(JSON.parse(fs.readFileSync(path.join(root, 'apps', 'client', 'package.json'), 'utf8')).scripts[script]);
+    else assert.ok(scripts[script]);
   }
+  // The camera suite runs as separate commands so shards can balance it; it must stay exactly test:camera.
+  const camera = scripts['test:camera'].split('&&').map(part => part.trim().replace(/^node test\//u, 'node apps/client/test/'));
+  assert.ok(camera.every(part => part.startsWith('node apps/client/test/')), 'test:camera must stay a chain of node commands.');
+  const runner = commands.map(command => command.join(' '));
+  const start = runner.indexOf(camera[0]);
+  assert.deepEqual(runner.slice(start, start + camera.length), camera, 'The DOM runner must run every test:camera command, in order.');
+  assert.ok(!runner.includes('npm run test:camera --workspace=apps/client'), 'Camera tests must not run twice.');
 });
 
 test('DOM runner preserves Windows npm shell handling, runs every command and reports all failures at the end', t => {
@@ -610,14 +734,19 @@ test('DOM shards run every command exactly once, keep the suite order and balanc
       assert.deepEqual(part, commands.filter(command => part.includes(command)), 'Shards keep the original order.');
     }
   }
-  const camera = 'npm run test:camera --workspace=apps/client';
-  const [first, second] = [shard('1/2'), shard('2/2')].map(part => part.map(command => command.join(' ')));
-  assert.ok(first.includes(camera) !== second.includes(camera));
-  assert.ok(Math.min(first.length, second.length) >= 5, 'The long camera suite must not leave one shard nearly empty.');
+  for (const [platform, count] of [['win32', 3], ['darwin', 2]]) {
+    const cost = command => durations[platform][command.join(' ')] ?? 10;
+    const loads = Array.from({ length: count }, (_, index) =>
+      shard(`${index + 1}/${count}`, commands, platform).reduce((total, command) => total + cost(command), 0));
+    assert.ok(Math.max(...loads) <= 1.1 * Math.min(...loads), `Unbalanced ${platform} DOM shards: ${loads.join(' / ')} s`);
+    for (const command of Object.keys(durations[platform]))
+      assert.ok(commands.some(candidate => candidate.join(' ') === command), `Stale DOM duration: ${command}`);
+  }
+  const second = shard('2/2', commands, 'darwin').map(command => command.join(' '));
   const seen = [];
   run((executable, args) => { seen.push([executable === process.execPath ? 'node' : executable, ...args].join(' ')); return { status: 0 }; },
     'darwin', { MONKY_DOM_SHARD: '2/2' });
-  assert.deepEqual(seen, second);
+  assert.deepEqual(seen, second, 'The runner uses the shard of its own platform.');
 });
 
 test('ci:local mirrors CI commands from ci.yml and the DOM runner, skipping only runner-only steps', () => {
@@ -660,6 +789,111 @@ test('ci:local mirrors CI commands from ci.yml and the DOM runner, skipping only
   checkClean(new Set([' M scripts/edited.js']), new Set([' M scripts/edited.js']));
   assert.throws(() => checkClean(new Set([' M scripts/edited.js']), new Set([' M scripts/edited.js', '?? scripts/__pycache__/'])),
     /scripts\/__pycache__/u, 'Files left by the steps must fail locally, as the CI build export does.');
+});
+
+test('the mediasoup worker cache pins the locked package, host and compiler, and restores only verified workers', async t => {
+  const { workerKey, verifyWorker, binary } = require('./mediasoup-worker.cjs');
+  const base = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'monky-mediasoup-key-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const writeLock = (version, integrity) => fs.writeFileSync(path.join(base, 'package-lock.json'),
+    JSON.stringify({ packages: { 'node_modules/mediasoup': { version, integrity } } }));
+  const writeXcode = version => {
+    fs.mkdirSync(path.join(base, 'apps', 'light'), { recursive: true });
+    fs.writeFileSync(path.join(base, 'apps', 'light', 'dependencies.json'), JSON.stringify({ buildTools: { ciXcode: version } }));
+  };
+  writeLock('3.26.0', 'sha512-a'); writeXcode('16.4');
+  const key = (overrides = {}) => workerKey({ base, platform: 'darwin', arch: 'x64', image: 'macos15', ...overrides });
+  const original = key();
+  assert.match(original, /^mediasoup-worker-v1-darwin-x64-[a-f0-9]{12}-3\.26\.0-[a-f0-9]{16}$/u);
+  assert.equal(key(), original);
+  for (const changed of [{ arch: 'arm64' }, { platform: 'linux' }, { image: 'macos26' }])
+    assert.notEqual(key(changed), original, JSON.stringify(changed));
+  writeXcode('26.0'); assert.notEqual(key(), original, 'The compiler selection is part of the key.'); writeXcode('16.4');
+  writeLock('3.26.0', 'sha512-b'); assert.notEqual(key(), original, 'The exact locked package is part of the key.');
+  writeLock('3.27.0', 'sha512-a'); assert.notEqual(key(), original);
+  writeLock('3.26.0', undefined); assert.throws(() => key(), /integrity/u);
+
+  assert.equal(binary, `node_modules/mediasoup/worker/out/Release/mediasoup-worker${process.platform === 'win32' ? '.exe' : ''}`);
+  const job = ci.jobs['light-native'];
+  const id = step(job, 'Identify the mediasoup worker build');
+  const restore = step(job, 'Restore the verified mediasoup worker');
+  const install = step(job, 'Install the mediasoup worker');
+  const verify = step(job, 'Verify the mediasoup worker on this host');
+  const tests = step(job, 'Exercise native and Chromium voice through a real isolated server');
+  const save = step(job, 'Save the verified mediasoup worker');
+  assert.equal(id.run, 'node scripts/mediasoup-worker.cjs key');
+  assert.equal(restore.uses, 'actions/cache/restore@v4');
+  assert.deepEqual(restore.with, { path: '${{ steps.mediasoup.outputs.path }}', key: '${{ steps.mediasoup.outputs.key }}' });
+  assert.equal(install.if, "steps.mediasoup-cache.outputs.cache-hit != 'true'");
+  assert.equal(install.run, 'npm rebuild mediasoup');
+  assert.equal(verify.if, undefined, 'Restored and freshly installed workers pass the same checks.');
+  assert.equal(save.if, "steps.mediasoup-cache.outputs.cache-hit != 'true'");
+  assert.deepEqual(save.with, restore.with);
+  const order = [id, restore, install, verify, tests, save].map(candidate => job.steps.indexOf(candidate));
+  assert.deepEqual(order, [...order].sort((a, b) => a - b), 'A worker is cached only after it ran the real interop tests.');
+  assert.doesNotMatch(step(job, 'Prepare disposable voice interoperability fixtures').run, /mediasoup/u);
+  const python = job.steps.find(candidate => candidate.uses === 'actions/setup-python@v5');
+  assert.deepEqual(python.with, { 'python-version': '3.11', cache: 'pip', 'cache-dependency-path': 'apps/light/dependencies.json' },
+    'The pinned CMake wheel comes from the pip cache, keyed by the manifest that pins it.');
+  assert.match(step(job, 'Install the compatible CMake series').run, /cmake==\$\{\{ steps\.native-tools\.outputs\.cmake \}\}/u);
+
+  const fake = path.join(base, ...binary.split('/'));
+  await assert.rejects(verifyWorker({ base }), /ENOENT|Missing mediasoup worker/u);
+  fs.mkdirSync(path.dirname(fake), { recursive: true });
+  fs.copyFileSync(process.execPath, fake);
+  await assert.rejects(verifyWorker({ base }), /does not run on this host/u, 'A binary that is not the worker is rejected.');
+});
+
+test('main keeps the Light caches that pull requests can only read, under the exact keys CI uses', () => {
+  const warm = workflow('warm-ci-caches.yml');
+  assert.deepEqual(warm.on, { push: { branches: ['main'] }, workflow_dispatch: null });
+  assert.deepEqual(warm.permissions, { contents: 'read' });
+  assert.equal(warm.concurrency['cancel-in-progress'], false, 'A newer push must not discard a compile in progress.');
+  assert.deepEqual(Object.keys(warm.jobs), ['light']);
+  const job = warm.jobs.light;
+  const light = ci.jobs['light-native'];
+  assert.deepEqual(job.strategy.matrix, light.strategy.matrix);
+  assert.equal(job['runs-on'], light['runs-on']);
+  assert.equal(job.steps.filter(candidate => candidate.uses === 'actions/cache@v4').length, 0,
+    'Saves happen only after the producing step succeeded.');
+
+  for (const uses of ['actions/checkout@v4', 'actions/setup-node@v4', 'actions/setup-python@v5']) {
+    assert.deepEqual(job.steps.find(candidate => candidate.uses === uses), light.steps.find(candidate => candidate.uses === uses),
+      `${uses} must match CI so setup-node/setup-python compute the same npm and pip keys.`);
+  }
+  for (const name of ['Read native toolchain pins', 'Select the qualified Xcode toolchain', 'Install the compatible CMake series',
+    'Install build-time JavaScript dependencies', 'Identify the mediasoup worker build', 'Install the mediasoup worker']) {
+    assert.deepEqual(step(job, name), step(light, name), `${name} must match CI.`);
+  }
+
+  const sdk = step(light, 'Cache verified SDK archives').with;
+  const sdkLookup = step(job, 'Look up the verified SDK archives');
+  assert.equal(sdkLookup.uses, 'actions/cache/restore@v4');
+  assert.deepEqual(sdkLookup.with, { ...sdk, 'lookup-only': true }, 'Looking up never downloads the archives.');
+  const download = step(job, 'Download the SDK archives through the native build');
+  assert.equal(download.run, step(light, 'Build native components').run);
+  const sdkSave = step(job, 'Save the verified SDK archives');
+  assert.equal(sdkSave.uses, 'actions/cache/save@v4');
+  assert.deepEqual(sdkSave.with, sdk);
+  for (const candidate of [download, sdkSave]) assert.equal(candidate.if, "steps.sdk.outputs.cache-hit != 'true'");
+
+  const worker = step(light, 'Restore the verified mediasoup worker').with;
+  const workerLookup = step(job, 'Look up the verified mediasoup worker');
+  assert.equal(workerLookup.id, 'mediasoup-cache');
+  assert.equal(workerLookup.uses, 'actions/cache/restore@v4');
+  assert.deepEqual(workerLookup.with, { ...worker, 'lookup-only': true });
+  const verify = step(job, 'Verify the mediasoup worker on this host');
+  assert.equal(verify.run, step(light, 'Verify the mediasoup worker on this host').run);
+  const workerSave = step(job, 'Save the verified mediasoup worker');
+  assert.deepEqual(workerSave, step(light, 'Save the verified mediasoup worker'));
+  for (const candidate of [verify, workerSave]) assert.equal(candidate.if, "steps.mediasoup-cache.outputs.cache-hit != 'true'");
+
+  const position = name => job.steps.indexOf(step(job, name));
+  const order = ['Install the compatible CMake series', 'Look up the verified SDK archives', 'Identify the mediasoup worker build',
+    'Look up the verified mediasoup worker', 'Install build-time JavaScript dependencies',
+    'Download the SDK archives through the native build', 'Save the verified SDK archives', 'Install the mediasoup worker',
+    'Verify the mediasoup worker on this host', 'Save the verified mediasoup worker'].map(position);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b), 'Each cache is saved only after it was produced and verified.');
 });
 
 test('native tooltip input requires actual window and renderer focus, not a fixed showInactive delay', async () => {

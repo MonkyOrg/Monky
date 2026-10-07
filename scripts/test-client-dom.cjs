@@ -27,7 +27,12 @@ const commands = [
   ['node', 'apps/client/test/settingsNavigationSmoke.cjs', '--screen-audience'],
   ['node', 'apps/client/test/settingsNavigationSmoke.cjs', '--overlay-window'],
   ['npm', 'run', 'test:settings:ui', '--workspace=apps/client'],
-  ['npm', 'run', 'test:camera', '--workspace=apps/client'],
+  // test:camera split into its own commands so the long camera suite can be balanced across shards;
+  // a contract test keeps this list identical to the apps/client test:camera script.
+  ['node', 'apps/client/test/cameraEffectsSmoke.cjs'],
+  ['node', 'apps/client/test/cameraEffectsSmoke.cjs', '--packaged'],
+  ['node', 'apps/client/test/cameraEffectsSmoke.cjs', '--packaged', '--cpu-compositor', '--chroma-only', '--transitions-only'],
+  ['node', 'apps/client/test/cameraPublicationSmoke.cjs'],
   ['node', 'apps/client/test/footerControlsSmoke.cjs'],
   ['npm', 'run', 'test:transport', '--workspace=apps/client'],
   ['npm', 'run', 'test:bot-marketplace', '--workspace=apps/client'],
@@ -36,28 +41,55 @@ const commands = [
   ['npm', 'run', 'test:pip', '--workspace=apps/client'],
 ];
 
-// Seconds measured on windows-2022. They only balance shards; every command still runs in exactly one shard.
+// Seconds measured in CI (windows-2022, macos-15). They only balance shards; every command still runs
+// in exactly one shard. Unlisted commands count as 10 s.
 const durations = {
-  'npm run test:camera --workspace=apps/client': 520,
-  'npm run test:bots:ui --workspace=apps/client': 100,
-  'npm run test:community --workspace=apps/client': 75,
-  'node packages/bot-sdk/test-browser/voiceRendererSmoke.cjs': 70,
-  'npm run test:soundboard --workspace=apps/client': 60,
-  'npm run test:settings:ui --workspace=apps/client': 50,
-  'npm run test:transport --workspace=apps/client': 50,
-  'npm run test:editing --workspace=apps/client': 40,
-  'node apps/client/test/settingsNavigationSmoke.cjs --quality-settings': 40,
-  'node apps/client/test/audioDeviceSmoke.cjs': 30,
-  'npm run test:screens --workspace=apps/client': 25,
+  win32: {
+    'node apps/client/test/cameraEffectsSmoke.cjs --packaged': 286,
+    'node apps/client/test/cameraEffectsSmoke.cjs': 254,
+    'npm run test:bots:ui --workspace=apps/client': 104,
+    'node apps/client/test/cameraEffectsSmoke.cjs --packaged --cpu-compositor --chroma-only --transitions-only': 100,
+    'npm run test:community --workspace=apps/client': 80,
+    'node packages/bot-sdk/test-browser/voiceRendererSmoke.cjs': 71,
+    'npm run test:soundboard --workspace=apps/client': 67,
+    'npm run test:settings:ui --workspace=apps/client': 56,
+    'npm run test:transport --workspace=apps/client': 56,
+    'npm run test:editing --workspace=apps/client': 44,
+    'node apps/client/test/settingsNavigationSmoke.cjs --quality-settings': 40,
+    'node apps/client/test/cameraPublicationSmoke.cjs': 36,
+    'npm run test:screens --workspace=apps/client': 33,
+    'node apps/client/test/audioDeviceSmoke.cjs': 32,
+    'npm run test:pip --workspace=apps/client': 21,
+    'npm run test:clipboard --workspace=apps/client': 16,
+    'node apps/client/test/footerControlsSmoke.cjs': 15,
+  },
+  darwin: {
+    'node apps/client/test/cameraEffectsSmoke.cjs': 225,
+    'node apps/client/test/cameraEffectsSmoke.cjs --packaged': 177,
+    'npm run test:bots:ui --workspace=apps/client': 112,
+    'npm run test:community --workspace=apps/client': 85,
+    'node apps/client/test/cameraEffectsSmoke.cjs --packaged --cpu-compositor --chroma-only --transitions-only': 75,
+    'node packages/bot-sdk/test-browser/voiceRendererSmoke.cjs': 73,
+    'node apps/client/test/audioDeviceSmoke.cjs': 60,
+    'node apps/client/test/settingsNavigationSmoke.cjs --quality-settings': 60,
+    'npm run test:editing --workspace=apps/client': 56,
+    'npm run test:soundboard --workspace=apps/client': 53,
+    'npm run test:settings:ui --workspace=apps/client': 51,
+    'npm run test:transport --workspace=apps/client': 50,
+    'npm run test:screens --workspace=apps/client': 37,
+    'npm run test:pip --workspace=apps/client': 23,
+    'npm run test:clipboard --workspace=apps/client': 20,
+    'node apps/client/test/footerControlsSmoke.cjs': 17,
+  },
 };
 
-function shard(selection, list = commands) {
+function shard(selection, list = commands, platform = process.platform) {
   if (selection === undefined || selection === '') return list;
   const match = /^([1-9][0-9]*)\/([1-9][0-9]*)$/u.exec(selection);
   if (!match || Number(match[1]) > Number(match[2]))
     throw new Error(`Invalid DOM shard "${selection}"; use <index>/<count>, for example 1/2.`);
   const index = Number(match[1]) - 1, count = Number(match[2]);
-  const cost = command => durations[command.join(' ')] ?? 10;
+  const cost = command => (durations[platform] ?? durations.win32)[command.join(' ')] ?? 10;
   const loads = new Array(count).fill(0), owners = new Map();
   // Longest first onto the lightest shard; the stable sort keeps ties deterministic.
   for (const command of [...list].sort((a, b) => cost(b) - cost(a))) {
@@ -71,7 +103,7 @@ function shard(selection, list = commands) {
 // Runs every command so one CI round reports all failures; MONKY_DOM_FAIL_FAST=1 stops at the first one.
 function run(runCommand = spawnSync, platform = process.platform, env = process.env) {
   const failures = [];
-  for (const [executable, ...args] of shard(env.MONKY_DOM_SHARD)) {
+  for (const [executable, ...args] of shard(env.MONKY_DOM_SHARD, commands, platform)) {
     const label = [executable, ...args].join(' ');
     console.log(`> ${label}`);
     // npm.cmd requires cmd.exe on Windows; only the fixed commands above enter it.
@@ -90,7 +122,7 @@ function run(runCommand = spawnSync, platform = process.platform, env = process.
   if (failures.length) throw new Error(`${failures.length} DOM command(s) failed: ${failures.join('; ')}`);
 }
 
-module.exports = { commands, run, shard };
+module.exports = { commands, durations, run, shard };
 if (require.main === module) {
   try { run(); }
   catch (error) { console.error(error); process.exitCode = 1; }

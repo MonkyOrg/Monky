@@ -6,6 +6,7 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { EventEmitter } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import { parseQaArguments, isolatedEnvironment, runQa, repoRoot, scenarios } from './qa.js';
 import { startOwnedProcess } from './qa/process.js';
 
@@ -231,7 +232,7 @@ test('invalid readiness callbacks reject and still allow clean owned shutdown', 
   try { await assert.rejects(child.ready, /malformed readiness/); } finally { await child.stop(); }
 });
 
-test('unresponsive shutdown kills only the owned tree and reports forced cleanup', { timeout: 15_000 }, async () => {
+test('unresponsive shutdown kills only the owned tree and reports forced cleanup', { timeout: 20_000 }, async () => {
   const runId = randomUUID();
   let descendant;
   const child = startOwnedProcess(process.execPath, [processes, 'tree', runId], {
@@ -242,6 +243,9 @@ test('unresponsive shutdown kills only the owned tree and reports forced cleanup
   assert.ok(alive(descendant));
   await assert.rejects(child.stop(), /forced process-tree cleanup/);
   assert.equal(alive(child.child.pid), false);
+  // The killed descendant is orphaned to init/launchd, which reaps it asynchronously; until then
+  // the zombie still answers kill(pid, 0). A descendant that survives SIGKILL still fails here.
+  for (const deadline = Date.now() + 5000; alive(descendant) && Date.now() < deadline;) await delay(50);
   assert.equal(alive(descendant), false);
   assert.ok(alive(process.pid));
 });

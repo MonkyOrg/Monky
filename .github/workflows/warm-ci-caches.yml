@@ -1,0 +1,112 @@
+name: Warm CI caches
+
+# A pull request restores caches saved on main, never another pull request's. CI runs only on
+# pull requests, so without this the first run of every PR downloads the Light SDKs and the
+# pinned CMake wheel again and compiles mediasoup on Intel (~8-12 min). Every push to main
+# saves them under the exact keys CI uses; when they already exist, the jobs only look them up.
+# Nothing here gates a release or a merge.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: warm-ci-caches
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  light:
+    name: Light caches (${{ matrix.target }})
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: windows-x64
+            arch: x64
+          - os: macos-15-intel
+            target: macos-x64
+            arch: x64
+          - os: macos-15
+            target: macos-arm64
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          architecture: ${{ matrix.arch }}
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: apps/light/dependencies.json
+      - name: Read native toolchain pins
+        id: native-tools
+        shell: pwsh
+        run: |
+          $manifest = Join-Path 'apps' (Join-Path 'light' 'dependencies.json')
+          $tools = (Get-Content -Raw -LiteralPath $manifest | ConvertFrom-Json).buildTools
+          if ($tools.ciCmake -notmatch '^\d+\.\d+\.\d+$' -or $tools.ciXcode -notmatch '^\d+\.\d+(\.\d+)?$') {
+            throw 'Invalid native toolchain version in dependencies.json'
+          }
+          "cmake=$($tools.ciCmake)" >> $env:GITHUB_OUTPUT
+          "xcode=$($tools.ciXcode)" >> $env:GITHUB_OUTPUT
+      - name: Select the qualified Xcode toolchain
+        if: runner.os == 'macOS'
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_${{ steps.native-tools.outputs.xcode }}.app/Contents/Developer"
+          xcodebuild -version
+          xcrun --show-sdk-version
+      - name: Install the compatible CMake series
+        run: python -m pip install --disable-pip-version-check cmake==${{ steps.native-tools.outputs.cmake }}
+      - name: Look up the verified SDK archives
+        id: sdk
+        uses: actions/cache/restore@v4
+        with:
+          path: apps/light/build/downloads
+          key: light-sdk-${{ matrix.target }}-${{ hashFiles('apps/light/dependencies.json') }}
+          lookup-only: true
+      - name: Identify the mediasoup worker build
+        id: mediasoup
+        run: node scripts/mediasoup-worker.cjs key
+      - name: Look up the verified mediasoup worker
+        id: mediasoup-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.mediasoup.outputs.path }}
+          key: ${{ steps.mediasoup.outputs.key }}
+          lookup-only: true
+      # Always installed so setup-node also saves the npm cache for hosts the release never runs.
+      - name: Install build-time JavaScript dependencies
+        run: |
+          npm ci --ignore-scripts
+          npm run postinstall
+      # The native build downloads the pinned SDKs and checks their hashes before using them.
+      - name: Download the SDK archives through the native build
+        if: steps.sdk.outputs.cache-hit != 'true'
+        run: npm run build:light -- --arch ${{ matrix.arch }}
+      - name: Save the verified SDK archives
+        if: steps.sdk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: apps/light/build/downloads
+          key: light-sdk-${{ matrix.target }}-${{ hashFiles('apps/light/dependencies.json') }}
+      - name: Install the mediasoup worker
+        if: steps.mediasoup-cache.outputs.cache-hit != 'true'
+        run: npm rebuild mediasoup
+      - name: Verify the mediasoup worker on this host
+        if: steps.mediasoup-cache.outputs.cache-hit != 'true'
+        run: node scripts/mediasoup-worker.cjs verify
+      - name: Save the verified mediasoup worker
+        if: steps.mediasoup-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.mediasoup.outputs.path }}
+          key: ${{ steps.mediasoup.outputs.key }}

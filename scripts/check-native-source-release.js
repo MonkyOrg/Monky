@@ -3,8 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { fileHash } from '../apps/client/native/screen-share/scripts/packSources.cjs';
+import { sourcesKey, SOURCES_KEY } from './native-cache-key.cjs';
 
-export async function checkNativeSourceRelease(directory, version, commit, platform = 'win32') {
+export async function checkNativeSourceRelease(directory, version, commit, platform = 'win32',
+  { sourcesKeyFor = sourcesKey } = {}) {
   assert.match(version, /^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/iu);
   assert.match(commit, /^[a-f0-9]{40}$/u);
   assert.ok(['win32', 'darwin'].includes(platform));
@@ -18,8 +20,18 @@ export async function checkNativeSourceRelease(directory, version, commit, platf
     assert.match(metadata.builtFromCommit, /^[a-f0-9]{40}$/u);
     assert.match(metadata.sourceTree, /^[a-f0-9]{40}$/u);
     const { archive, archiveManifest, builtFromCommit, ...releaseManifest } = metadata;
+    const otherTree = archiveManifest?.sourceTree !== metadata.sourceTree;
+    if (otherTree) {
+      // An archive packed at another commit is only publishable when the committed native inputs match.
+      assert.match(archiveManifest?.sourceTree ?? '', /^[a-f0-9]{40}$/u, 'Reused source provenance has no source tree.');
+      assert.ok(SOURCES_KEY.test(metadata.nativeSourceKey ?? ''),
+        'Reused source provenance does not match the released source tree and dependencies.');
+      assert.equal(metadata.nativeSourceKey, sourcesKeyFor(platform === 'darwin' ? 'mac' : 'win'),
+        'Reused source provenance does not match the released native inputs.');
+    }
     assert.deepEqual(archiveManifest, { ...releaseManifest, schemaVersion: 1, version: '0.0.0-ci',
-      sourceCommit: builtFromCommit, monkySource: `https://github.com/MonkyOrg/Monky/tree/${builtFromCommit}` },
+      sourceCommit: builtFromCommit, monkySource: `https://github.com/MonkyOrg/Monky/tree/${builtFromCommit}`,
+      ...(otherTree ? { sourceTree: archiveManifest.sourceTree } : {}) },
     'Reused source provenance does not match the released source tree and dependencies.');
   }
   assert.equal(metadata.webrtcRevision, '36ea4535a500ac137dbf1f577ce40dc1aaa774ef');
