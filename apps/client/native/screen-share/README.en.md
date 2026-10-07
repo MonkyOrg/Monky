@@ -261,6 +261,11 @@ and closure proofs are unchanged; retirement deadlines have not increased.
 `maxBackpressureMs` reports the observed wait, not a latency ceiling. The native
 build requires the device-free pipe regression with parent reads delayed 1200 ms.
 
+An RTC dispatch still outstanding after 500 ms, such as when the system network
+stack is blocked by a firewall rebuilding its filters, fences the stale queued
+dependencies and resumes through the next real IDR without ending the share for
+its viewers. Only a dispatch held for 5 seconds still ends the source.
+
 `nativeRtcProcess.test.cjs` covers a real abort, timeout, pending-operation
 rejection, credits and recovery. `nativeCaptureSmoke.cjs --rtc-fault=receive`
 (or `publish`, with `--quality`) terminates the host during real presentation,
@@ -317,7 +322,13 @@ seconds, 256 entries and 8 MiB. Icons use the system file-icon API.
 
 Disconnecting the monitor or changing its identity, position or resolution
 ends the source and requires explicit reselection; it never switches to the
-primary display. Minimizing or hiding a window/game is treated as a pause,
+primary display. The monitor device interface is read on admission, at capture
+start and when Windows reports a display change (`WM_DISPLAYCHANGE`,
+`WM_DEVICECHANGE` or a changed monitor list), never per frame: that read queries
+the registry while holding the system display lock, and repeating it while
+another program writes to the registry froze every screen. Each capture tick
+checks only the GDI name and bounds, which come from cached metadata. The main
+process follows Electron's screen events for the same read. Minimizing or hiding a window/game is treated as a pause,
 not an identity loss. Restoring it allows frames to resume. The title is not
 part of the identity either: browsers, editors and players rename their window
 for every page or file, and sharing continues. A changed window class or

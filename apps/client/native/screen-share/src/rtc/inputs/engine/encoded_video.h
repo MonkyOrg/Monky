@@ -11,6 +11,9 @@ constexpr std::size_t kEncodedMaximumBytes = 8 * 1024 * 1024;
 constexpr std::size_t kEncodedMaximumPacket = 4 * 1024 * 1024;
 constexpr std::size_t kEncodedMaximumFrames = 16;
 constexpr std::int64_t kEncodedMaximumAgeUs = 500000;
+// A dispatch delayed past the age bound recovers through the next real IDR; only an RTC pipeline that
+// keeps one compressed picture this long is treated as wedged.
+constexpr std::int64_t kEncodedDispatchFailureUs = 5000000;
 constexpr std::uint32_t kEncodedBitrateCeiling = 80000000;
 constexpr std::uint8_t kEncodedH264Level = 60;
 

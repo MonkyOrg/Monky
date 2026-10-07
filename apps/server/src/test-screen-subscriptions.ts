@@ -1306,6 +1306,36 @@ test('native screen subscriptions cannot cross channel changes or replacement so
   f.manager.close();
 });
 
+test('a publisher Closed for a subscription the viewer already stopped is acknowledged without forwarding', async () => {
+  const f = await signalingFixture();
+  const instanceId = '5d0f6a38-0c1b-4f53-9a51-2b7a0f0c9e41';
+  f.service.updateVoiceState('publisher', { nativeScreenShares: [{ shareId: 'one', instanceId, audio: false,
+    video: { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 8000 } }] });
+  const scope = {
+    fromSessionId: 'viewer-a', targetSessionId: 'publisher', publisherSessionId: 'publisher', channelId: 'room',
+    shareId: 'one', sourceInstanceId: instanceId, subscriptionId: crypto.randomUUID(),
+  };
+  const closed = nativeScreenSignalSchema.parse({
+    ...scope, fromSessionId: 'publisher', targetSessionId: 'viewer-a', action: 'closed', reason: 'connection-failed',
+  });
+  assert.equal(f.service.authorizeNativeScreenSignal(
+    nativeScreenSignalSchema.parse({ ...scope, action: 'watch', quality: 'source', backend: 'native' })).success, true);
+  assert.deepEqual(f.service.authorizeNativeScreenSignal(closed), { success: true },
+    'Closing a live subscription is forwarded to its viewer.');
+  assert.deepEqual(f.service.authorizeNativeScreenSignal(closed), { success: true, forward: false },
+    'A repeated Closed has nothing left to retire.');
+  assert.equal(f.service.authorizeNativeScreenSignal(
+    nativeScreenSignalSchema.parse({ ...scope, action: 'watch', quality: 'source', backend: 'native' })).success, true);
+  assert.deepEqual(f.service.authorizeNativeScreenSignal(nativeScreenSignalSchema.parse({ ...scope, action: 'stop' })),
+    { success: true });
+  assert.deepEqual(f.service.authorizeNativeScreenSignal(closed), { success: true, forward: false },
+    'The viewer stopped first; the late Closed must not fail the publisher retirement.');
+  assert.equal(f.service.authorizeNativeScreenSignal(nativeScreenSignalSchema.parse({
+    ...closed, channelId: 'other-room',
+  })).success, false, 'A Closed for another call is still rejected.');
+  f.manager.close();
+});
+
 test('native SFU publications match their announced profile and exact engine transport before worker I/O', async () => {
   const f = await signalingFixture();
   const publisher = f.clients[2];

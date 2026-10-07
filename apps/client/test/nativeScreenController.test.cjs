@@ -181,7 +181,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
     } } },
     '../sessionRouting': { emitOutsideRouting: run => run() },
     '../ClientLogService': { clientLog: {
-      error: (...value) => errors.push(value), warn: (...value) => errors.push(value),
+      error: (...value) => errors.push(value), warn: (...value) => errors.push(value), info: () => {},
     } },
     '../VideoService': { videoService: {
       getNativeScreenCapture: id => captures.get(id) ?? null,
@@ -724,6 +724,85 @@ test('a publisher quality replacement reconnects the viewer without presenting a
   t.mock.timers.tick(8000);
   assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing',
     'The retired presentation wait cannot fail its replacement.');
+});
+
+const settle = async () => { for (let index = 0; index < 20; index++) await tick(); };
+const watchCommands = f => f.commands.filter(command => command.action === 'watch');
+const dropWatch = (f, presentationId) => {
+  const scope = { type: 'state', publisherSessionId: 'publisher', shareId: f.remote.shareId,
+    sourceInstanceId: f.remote.instanceId, presentationId };
+  f.emit({ ...scope, state: 'unavailable', reason: 'connection-failed' });
+  f.emit({ ...scope, state: 'closed' });
+};
+
+test('a dropped connection to a still-announced source reconnects the viewer without a manual retry', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(t);
+  f.watching(true);
+  await f.controller.sync();
+  const first = watchCommands(f).at(-1);
+  dropWatch(f, first.presentationId);
+  assert.deepEqual(f.controller.getWatchState('publisher', f.remote.shareId), { state: 'connecting', receiver: 'native' },
+    'The viewer sees a reconnection instead of an error while the automatic Watch is pending.');
+  t.mock.timers.tick(999);
+  await settle();
+  assert.equal(watchCommands(f).length, 1);
+  t.mock.timers.tick(1);
+  await settle();
+  const second = watchCommands(f).at(-1);
+  assert.equal(watchCommands(f).length, 2);
+  assert.notEqual(second.presentationId, first.presentationId);
+  assert.ok(f.stopped.includes(first.presentationId), 'The failed presentation is retired before its replacement.');
+  assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
+  // A picture resets the attempts: a later drop reconnects after the first delay again.
+  dropWatch(f, second.presentationId);
+  t.mock.timers.tick(1000);
+  await settle();
+  assert.equal(watchCommands(f).length, 3);
+  assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
+});
+
+test('automatic reconnection is bounded and then leaves the manual retry to the viewer', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(t);
+  f.watching(true);
+  await f.controller.sync();
+  f.hook(async command => { if (command.action === 'watch') throw new Error('Modeled native Watch failure.'); });
+  dropWatch(f, watchCommands(f).at(-1).presentationId);
+  for (const delay of [1000, 3000, 8000]) {
+    assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'connecting');
+    t.mock.timers.tick(delay);
+    await settle();
+  }
+  assert.equal(watchCommands(f).length, 4, 'Exactly three automatic Watch attempts follow the original one.');
+  assert.deepEqual(f.controller.getWatchState('publisher', f.remote.shareId),
+    { state: 'unavailable', reason: 'connection-failed', receiver: 'native' });
+  t.mock.timers.tick(60000);
+  await settle();
+  assert.equal(watchCommands(f).length, 4, 'A persistent failure stops reconnecting on its own.');
+  f.hook(async () => {});
+  await f.controller.retry('publisher', f.remote.shareId);
+  assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
+});
+
+test('a pending automatic reconnection is abandoned when the viewer stops watching or leaves', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(t);
+  f.watching(true);
+  await f.controller.sync();
+  dropWatch(f, watchCommands(f).at(-1).presentationId);
+  f.watching(false);
+  await f.controller.sync();
+  t.mock.timers.tick(1000);
+  await settle();
+  assert.equal(watchCommands(f).length, 1, 'An ended Watch is never restarted by a stale reconnection.');
+  f.watching(true);
+  await f.controller.sync();
+  dropWatch(f, watchCommands(f).at(-1).presentationId);
+  await f.controller.close();
+  t.mock.timers.tick(1000);
+  await settle();
+  assert.equal(watchCommands(f).length, 2, 'A retired call cancels its pending reconnection.');
 });
 
 test('active local Game Capture errors preserve the typed code, public reason and raw diagnostics without fallback', async t => {

@@ -255,7 +255,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   let frameProbeMode = 'frozen', nextFrameProbe = 1;
   const frameProbes = new Map();
   let focused = true;
-  let monitor = structuredClone(monitorTarget);
+  let monitor = structuredClone(monitorTarget), monitorReads = 0;
   const frame = { url: 'file:///C:/monky-test/index.html', detached: false, isDestroyed: () => frameDestroyed, postMessage() {} };
   const contents = new EventEmitter();
   Object.assign(contents, { mainFrame: frame, isDestroyed: () => contentDestroyed, getURL: () => contents.mainFrame.url });
@@ -265,6 +265,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
       getGPUInfo: async () => assert.fail('Adapter labels cannot establish native hardware availability.'),
       getPath: () => path.join(__dirname, 'modeled-native-profile'),
     }),
+    screen: new EventEmitter(),
     BrowserWindow: { getFocusedWindow: () => focused ? window : null },
     ipcMain: {
       handle(channel, handler) { assert.equal(handlers.has(channel), false); handlers.set(channel, handler); },
@@ -355,7 +356,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
       return windowOpen ? { processId: target.expectedProcessId, processCreationTime100ns: creationTime,
         isIconic: windowPaused, isVisible: !windowPaused, isTopLevel: true } : null;
     },
-    getMonitorState: id => monitor && id === monitor.deviceId ? structuredClone(monitor) : null,
+    getMonitorState: id => { monitorReads++; return monitor && id === monitor.deviceId ? structuredClone(monitor) : null; },
     listWindows: () => windowProcessPath === null ? [] : [{ hwnd: target.hwnd, processId: target.expectedProcessId,
       processPath: windowProcessPath }],
     getWindowOcclusion: hwnd => {
@@ -473,10 +474,14 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
     assert.equal(contents.listenerCount('destroyed'), 0);
     assert.equal(electron.app.listenerCount('browser-window-focus'), 0);
     assert.equal(electron.app.listenerCount('browser-window-blur'), 0);
+    for (const name of ['display-added', 'display-removed', 'display-metrics-changed'])
+      assert.equal(electron.screen.listenerCount(name), 0, `Disposal must release the ${name} listener.`);
   });
   return { service, config, command, invoke, reply, source, join, addSource, participants, watch, accepted,
     frame, contents, event, endpoints, sent, errors, selections, captures, directories, probes, removedDirectories, captureModule, logs, ports, encodingProbes,
-    replaceMonitor: value => { monitor = value; },
+    // Windows reports topology and bounds changes; Electron forwards them as screen events.
+    replaceMonitor: value => { monitor = value; electron.screen.emit('display-metrics-changed'); },
+    monitorReads: () => monitorReads,
     allowProbeRetirement: () => { probeRetires = true; },
     setProbeFailure: value => { probeFailure = value; },
     replaceTarget: value => { target = value; },
@@ -1251,6 +1256,22 @@ test('a resolved nativeClosed snapshot without the original child exit retains s
   await f.command({ action: 'source-remove', shareId: f.source.shareId });
   assert.equal(f.probes[0].closed, true); assert.equal(f.removedDirectories.length, f.encodingProbes.length + 1);
   assert.equal((await f.addSource()).kind, 'source');
+});
+
+test('a shared monitor identity is read on admission and display changes, never by the periodic source check', async t => {
+  const f = fixture(t);
+  await f.join();
+  await f.addSource('selected', { captureKind: 'monitor', desktopSourceId: monitorId });
+  const admitted = f.monitorReads();
+  assert.ok(admitted > 0, 'Admission verifies the selected monitor identity.');
+  // The source check runs every 250 ms; a device identity read there froze every screen behind slow registry writers.
+  await new Promise(resolve => setTimeout(resolve, 800));
+  assert.equal(f.monitorReads(), admitted, 'An unchanged display configuration is never re-enumerated.');
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 1);
+  f.replaceMonitor(structuredClone(monitorTarget));
+  await new Promise(resolve => setTimeout(resolve, 350));
+  assert.equal(f.monitorReads(), admitted + 1, 'A display change is verified once.');
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 1, 'An unchanged monitor keeps its source.');
 });
 
 test('a selected monitor bounds change or disconnect retires its armed metadata and requires reselection', async t => {

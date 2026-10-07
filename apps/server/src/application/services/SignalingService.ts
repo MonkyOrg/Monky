@@ -436,6 +436,11 @@ export class SignalingService {
     if (!this.validateSignalRouting(signal) || publisher?.channelId !== signal.channelId) {
       return reject('A transmissão pertence a outra chamada.');
     }
+    if (signal.action === 'closed' && (!current || current.request.subscriptionId !== signal.subscriptionId
+      || current.request.sourceInstanceId !== signal.sourceInstanceId)) {
+      // The viewer already stopped this subscription while the publisher was retiring it.
+      return { success: true, forward: false };
+    }
     const source = publisher.nativeScreenShares?.find(value =>
       value.shareId === signal.shareId && value.instanceId === signal.sourceInstanceId);
     if (!source || !publisher.screenShareIds?.includes(source.shareId)) {

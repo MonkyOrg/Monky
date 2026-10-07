@@ -1,4 +1,5 @@
 #include <Windows.h>
+#include <Dbt.h>
 #include <TlHelp32.h>
 #include <bcrypt.h>
 #include <d3d11.h>
@@ -178,11 +179,11 @@ struct Target {
 
   void Verify() const {
     if (kind == CaptureKind::Monitor) {
+      // Runs every capture tick, so it only reads cached monitor metadata. The device interface read can
+      // wait behind another program's registry writes while holding the system display lock, freezing
+      // every screen; VerifyUnique performs it on admission, start and reported display changes.
       MONITORINFOEXW info{}; info.cbSize = sizeof(info);
-      DISPLAY_DEVICEW device{}; device.cb = sizeof(device);
-      Require(monitor && GetMonitorInfoW(monitor, &info) &&
-              EnumDisplayDevicesW(info.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME) &&
-              monitorIdentity.deviceId == device.DeviceID && monitorIdentity.deviceName == info.szDevice,
+      Require(monitor && GetMonitorInfoW(monitor, &info) && monitorIdentity.deviceName == info.szDevice,
               "Selected monitor was disconnected or its device identity changed; reselect explicitly",
               "ERR_SCREEN_CAPTURE_MONITOR_LOST");
       Require(info.rcMonitor.left == monitorIdentity.x && info.rcMonitor.top == monitorIdentity.y &&
@@ -227,6 +228,13 @@ struct Target {
   void VerifyUnique() const {
     Verify();
     if (kind == CaptureKind::Monitor) {
+      MONITORINFOEXW info{}; info.cbSize = sizeof(info);
+      DISPLAY_DEVICEW device{}; device.cb = sizeof(device);
+      Require(GetMonitorInfoW(monitor, &info) &&
+              EnumDisplayDevicesW(info.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME) &&
+              monitorIdentity.deviceId == device.DeviceID,
+              "Selected monitor was disconnected or its device identity changed; reselect explicitly",
+              "ERR_SCREEN_CAPTURE_MONITOR_LOST");
       Monitors context{&monitorIdentity};
       Require(EnumDisplayMonitors(nullptr, nullptr, EnumerateMonitor, reinterpret_cast<LPARAM>(&context)) &&
               !context.failed && context.matches == 1 && context.matched == monitor,
@@ -268,6 +276,76 @@ Target BindTarget(const Arguments& arguments) {
   value.VerifyUnique();
   return value;
 }
+
+// Tells a monitor capture when its full identity must be read again. Windows broadcasts display and device
+// changes to top-level windows, so a hidden one on the host STA receives them while PumpMessages runs; a cheap
+// snapshot of cached monitor metadata also catches changes whose broadcast was missed.
+class DisplayChanges {
+ public:
+  DisplayChanges() = default;
+  DisplayChanges(const DisplayChanges&) = delete;
+  DisplayChanges& operator=(const DisplayChanges&) = delete;
+  ~DisplayChanges() { if (window_) DestroyWindow(window_); }
+
+  void Start() {
+    const auto instance = GetModuleHandleW(nullptr);
+    WNDCLASSEXW windowClass{};
+    windowClass.cbSize = sizeof(windowClass);
+    windowClass.lpfnWndProc = Procedure;
+    windowClass.hInstance = instance;
+    windowClass.lpszClassName = L"MonkyScreenCaptureDisplayChanges";
+    Require(RegisterClassExW(&windowClass) != 0, "Cannot register the display change observer",
+        "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
+    window_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, windowClass.lpszClassName, L"", WS_POPUP,
+        0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
+    Require(window_ != nullptr, "Cannot create the display change observer", "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
+    snapshot_ = Snapshot();
+  }
+
+  // Consumes any reported or observed change since the previous call.
+  bool Changed() {
+    auto current = Snapshot();
+    const bool changed = pending_.exchange(false) || current != snapshot_;
+    snapshot_ = std::move(current);
+    return changed;
+  }
+
+ private:
+  struct Monitor {
+    HMONITOR handle = nullptr;
+    LONG left = 0, top = 0, right = 0, bottom = 0;
+    std::wstring device;
+    bool operator==(const Monitor&) const = default;
+  };
+  struct Collection { std::vector<Monitor> monitors; bool failed = false; };
+
+  static LRESULT CALLBACK Procedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) noexcept {
+    if (message == WM_DISPLAYCHANGE || (message == WM_DEVICECHANGE && wParam == DBT_DEVNODES_CHANGED))
+      pending_.store(true);
+    return DefWindowProcW(window, message, wParam, lParam);
+  }
+  static BOOL CALLBACK Collect(HMONITOR handle, HDC, LPRECT, LPARAM parameter) noexcept {
+    auto& collection = *reinterpret_cast<Collection*>(parameter);
+    MONITORINFOEXW info{}; info.cbSize = sizeof(info);
+    if (collection.monitors.size() >= 64 || !GetMonitorInfoW(handle, &info)) { collection.failed = true; return FALSE; }
+    try {
+      collection.monitors.push_back({handle, info.rcMonitor.left, info.rcMonitor.top, info.rcMonitor.right,
+          info.rcMonitor.bottom, info.szDevice});
+    } catch (...) { collection.failed = true; return FALSE; }
+    return TRUE;
+  }
+  // GetMonitorInfoW reads cached topology without the device registry, so it is safe on every check.
+  static std::vector<Monitor> Snapshot() {
+    Collection collection;
+    if (!EnumDisplayMonitors(nullptr, nullptr, Collect, reinterpret_cast<LPARAM>(&collection)) || collection.failed)
+      collection.monitors.clear();
+    return std::move(collection.monitors);
+  }
+
+  inline static std::atomic<bool> pending_{false};
+  HWND window_ = nullptr;
+  std::vector<Monitor> snapshot_;
+};
 
 struct Parent { Handle process; DWORD pid = 0; std::uint64_t creation = 0; };
 
@@ -680,6 +758,7 @@ class Host {
         target_ = BindTarget(arguments_);
         common_.processCreationTime100ns = target_.creation;
         targetBound_ = true;
+        if (target_.kind == CaptureKind::Monitor) displayChanges_.Start();
       }
       Prepare();
       while (life_.phase != Phase::Stopping) {
@@ -1425,6 +1504,7 @@ class Host {
       Require(Symbol<Bind>(image, "monky_bind_monitor_target")(reinterpret_cast<std::uintptr_t>(target_.monitor),
           Utf8(monitor.deviceId).c_str(), Utf8(monitor.deviceName).c_str(), monitor.x, monitor.y, monitor.width, monitor.height),
           "Monitor capture could not bind the selected physical display", "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
+      invalidateMonitorIdentity_ = Symbol<void (*)()>(image, "monky_invalidate_monitor_identity");
     }
     const auto stamp = AtNow();
     AppendLog("{\"schemaVersion\":1,\"kind\":\"screen-capture-module\",\"runId\":" + JsonString(arguments_.runId) +
@@ -1725,7 +1805,13 @@ class Host {
       return;
     }
     const auto now = GetTickCount64();
-    if (now - lastUniqueCheck_ >= 100) { target_.VerifyUnique(); lastUniqueCheck_ = now; }
+    if (target_.kind == CaptureKind::Monitor && now - lastDisplayCheck_ >= 100) {
+      lastDisplayCheck_ = now;
+      if (displayChanges_.Changed()) {
+        if (invalidateMonitorIdentity_) invalidateMonitorIdentity_();
+        target_.VerifyUnique();
+      }
+    }
     abi::CallData data{};
     bool attached = false;
     std::optional<SourceKey> observed;
@@ -1903,7 +1989,9 @@ class Host {
   std::atomic<std::uint64_t> captureStarted_{0}, stopStarted_{0}, progress_{0};
   std::thread watchdog_;
   const std::uint64_t processStarted_;
-  std::uint64_t lastUniqueCheck_ = 0;
+  DisplayChanges displayChanges_;
+  void (*invalidateMonitorIdentity_)() = nullptr;
+  std::uint64_t lastDisplayCheck_ = 0;
   bool eof_ = false, obsStarted_ = false, videoStarted_ = false, comInitialized_ = false;
   bool targetBound_ = false;
   bool matchingDevice_ = false, nvencProbeVerified_ = false, sourcePlatformVerified_ = false, encoderInitialized_ = false;

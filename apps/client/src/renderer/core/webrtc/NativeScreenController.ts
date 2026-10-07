@@ -104,6 +104,7 @@ interface Call {
   readonly sourceTasks: Map<string, Promise<void>>;
   readonly presentations: Map<string, Presentation>;
   readonly watchTasks: Map<string, Promise<void>>;
+  readonly rewatches: Map<string, Rewatch>;
   readonly unbind: Array<() => void>;
   readonly controls: Set<Promise<NativeScreenCommandResult>>;
   joining: Promise<void>;
@@ -122,6 +123,16 @@ const messageOf = (error: unknown): string => error instanceof Error ? error.mes
 // A publisher quality change retires its old instance before announcing the
 // replacement; viewers see that gap as source-unavailable for a few hundred ms.
 const SOURCE_REPLACEMENT_GRACE_MS = 8000;
+// A broken connection to a still-announced source is watched again automatically;
+// the attempts restart once a picture plays, so only a persistent failure offers a retry.
+const AUTOMATIC_REWATCH_DELAYS_MS = [1000, 3000, 8000] as const;
+
+interface Rewatch {
+  attempts: number;
+  timer: ReturnType<typeof setTimeout> | null;
+  // Scheduled or awaiting its replacement presentation; the stage shows it as connecting.
+  pending: boolean;
+}
 
 export function nativeScreenProfile(profile: QualityProfile): NativeScreenVideoProfile | null {
   if (profile.screenFps > customVideoFpsLimit(profile.screenWidth, profile.screenHeight)) return null;
@@ -189,6 +200,50 @@ export class NativeScreenController {
     entry.replacementGrace = null;
   }
 
+  private presentationOutcome(call: Call, entry: Presentation): void {
+    const key = keyOf(entry.publisherSessionId, entry.source.shareId);
+    const previous = call.rewatches.get(key);
+    if (entry.state.state === 'playing') {
+      if (previous?.timer) clearTimeout(previous.timer);
+      call.rewatches.delete(key);
+      return;
+    }
+    if (entry.state.state !== 'unavailable' || entry.state.reason !== 'connection-failed' || call.stopping) return;
+    const rewatch = previous ?? { attempts: 0, timer: null, pending: false };
+    if (rewatch.pending || rewatch.attempts >= AUTOMATIC_REWATCH_DELAYS_MS.length) return;
+    call.rewatches.set(key, rewatch);
+    rewatch.pending = true;
+    const delay = AUTOMATIC_REWATCH_DELAYS_MS[rewatch.attempts++];
+    clientLog.info('SCREEN_SHARE', 'Native screen watch will reconnect automatically',
+      { attempt: rewatch.attempts, delayMs: delay });
+    rewatch.timer = setTimeout(() => {
+      rewatch.timer = null;
+      // A manual retry, a new source or an ended Watch already replaced this presentation.
+      if (call.stopping || this.call !== call || call.presentations.get(key) !== entry
+        || !voiceStore.isWatchingScreen(entry.publisherSessionId, entry.source.shareId)) {
+        rewatch.pending = false;
+        this.changed();
+        return;
+      }
+      entry.restart = true;
+      void this.sync().catch(error => this.report(error)).finally(() => {
+        rewatch.pending = false;
+        const current = call.presentations.get(key);
+        if (current && current !== entry && call.rewatches.get(key) === rewatch) this.presentationOutcome(call, current);
+        this.changed();
+      });
+    }, delay);
+  }
+
+  private endRewatches(call: Call): void {
+    for (const rewatch of call.rewatches.values()) {
+      if (rewatch.timer) clearTimeout(rewatch.timer);
+      rewatch.timer = null;
+      rewatch.pending = false;
+    }
+    call.rewatches.clear();
+  }
+
   public report(error: unknown): void {
     if (error instanceof Error && error.name === 'AbortError') return;
     clientLog.error('SCREEN_SHARE', 'Native screen operation failed', { error: messageOf(error) });
@@ -238,7 +293,7 @@ export class NativeScreenController {
       };
       const call: Call = {
         config, context, api, connectionId: context.client.getConnectionId(), sources: new Map(), presentations: new Map(),
-        sourceTasks: new Map(), watchTasks: new Map(), unbind: [], controls: new Set(), joining: Promise.resolve(),
+        sourceTasks: new Map(), watchTasks: new Map(), rewatches: new Map(), unbind: [], controls: new Set(), joining: Promise.resolve(),
         ready: Promise.resolve(), roster: '', rosterTask: Promise.resolve(), stopping: false,
       };
       this.call = call;
@@ -434,6 +489,7 @@ export class NativeScreenController {
         entry.state = event.type === 'state' && (event.state === 'playing' || event.state === 'connecting')
           ? { state: event.state } : { state: 'unavailable', reason: event.reason ?? 'connection-failed' };
       this.awaitReplacement(entry);
+      this.presentationOutcome(call, entry);
       this.changed();
     }
   }
@@ -826,6 +882,7 @@ export class NativeScreenController {
     if (entry.stopping) return;
     this.report(error);
     entry.state = { state: 'unavailable', reason: 'connection-failed' };
+    this.presentationOutcome(call, entry);
     this.changed();
     void this.stopPresentation(call, entry).catch(cleanupError => this.report(cleanupError));
   }
@@ -835,6 +892,7 @@ export class NativeScreenController {
       if (entry.stopping) return;
       entry.browser?.playing();
       entry.state = { state: 'playing' };
+      this.presentationOutcome(call, entry);
       this.changed();
     };
     return new BrowserScreenSubscription({
@@ -867,6 +925,7 @@ export class NativeScreenController {
         if (entry.stopping) return;
         entry.state = { state: 'unavailable', reason };
         this.awaitReplacement(entry);
+        this.presentationOutcome(call, entry);
         this.changed();
         void this.stopPresentation(call, entry).catch(error => this.report(error));
       },
@@ -944,7 +1003,8 @@ export class NativeScreenController {
   public getWatchState(sessionId: string, shareId: string): NativeScreenWatchState | null {
     const entry = this.call?.presentations.get(keyOf(sessionId, shareId));
     if (!entry) return null;
-    if (entry.replacementGrace && entry.state.state === 'unavailable') return { state: 'connecting', receiver: entry.receiver };
+    if ((entry.replacementGrace || this.call?.rewatches.get(keyOf(sessionId, shareId))?.pending)
+      && entry.state.state === 'unavailable') return { state: 'connecting', receiver: entry.receiver };
     return { ...entry.state, receiver: entry.receiver };
   }
 
@@ -1076,6 +1136,7 @@ export class NativeScreenController {
       await Promise.allSettled([call.ready, ...call.watchTasks.values(), ...call.sourceTasks.values(),
         ...[...call.sources.values()].map(source => source.ready)]);
       for (const entry of call.presentations.values()) this.endReplacementGrace(entry);
+      this.endRewatches(call);
       await Promise.all([...call.presentations.values()].map(entry => this.releasePresentation(call, entry)));
       await Promise.all([...call.sources.values()].map(entry => this.releaseLocalPreview(call, entry)));
       for (const unbind of call.unbind.splice(0)) unbind();

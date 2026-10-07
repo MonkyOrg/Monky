@@ -259,6 +259,12 @@ os prazos de retirada também não aumentaram. `maxBackpressureMs` registra a
 espera observada, não um teto de latência. O build nativo exige a regressão de
 pipe com leitura do pai atrasada por 1200 ms, sem GPU.
 
+Um despacho ao RTC que continua pendente depois de 500 ms, como quando a pilha
+de rede do sistema fica bloqueada por um firewall reconstruindo seus filtros,
+descarta as dependências já vencidas da fila e retoma pelo próximo IDR real, sem
+encerrar a transmissão para quem assiste. Só um despacho retido por 5 segundos
+ainda encerra a fonte.
+
 `nativeRtcProcess.test.cjs` verifica abort real, timeout, rejeição de operações,
 créditos e recuperação. `nativeCaptureSmoke.cjs --rtc-fault=receive` (ou
 `publish`, com `--quality`) encerra o host durante apresentação real, verifica
@@ -315,6 +321,14 @@ dez segundos, 256 entradas e 8 MiB. Ícones vêm da API de arquivos do sistema.
 
 Desconectar o monitor ou alterar sua identidade, posição ou resolução encerra
 a fonte e exige nova seleção explícita; não se troca para a tela principal.
+A interface do dispositivo do monitor é lida na admissão, no início da captura
+e quando o Windows informa uma mudança de telas (`WM_DISPLAYCHANGE`,
+`WM_DEVICECHANGE` ou alteração na lista de monitores), nunca a cada quadro:
+essa leitura consulta o registro segurando o bloqueio de exibição do sistema, e
+repeti-la enquanto outro programa grava no registro congelava todas as telas.
+A cada ciclo, a captura confere só o nome GDI e os limites, que vêm de metadados
+em cache. No processo principal, a mesma leitura acompanha os eventos de tela do
+Electron.
 Minimizar ou ocultar uma janela/jogo é tratado como pausa, não como perda da
 identidade. Restaurar permite retomar os frames. O título também não faz parte
 da identidade: navegadores, editores e players renomeiam a janela a cada página

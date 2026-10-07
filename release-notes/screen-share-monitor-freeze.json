@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Compartilhar a tela inteira não congela mais todos os monitores a cada poucos segundos, mesmo com antivírus ou firewall mexendo no Windows. E, se a transmissão cair, quem está assistindo reconecta sozinho, sem precisar clicar em assistir de novo.",
+  "en": "Sharing your whole screen no longer freezes every monitor every few seconds, even with antivirus or firewall software busy in the background. And if the stream drops, viewers reconnect on their own instead of clicking watch again."
+}

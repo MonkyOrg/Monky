@@ -147,7 +147,7 @@ function build(config) {
       'user32.lib', 'gdi32.lib', 'shell32.lib', 'advapi32.lib', 'kernel32.lib']);
     const moduleExports = execute(path.join(compiler, 'dumpbin.exe'), ['/nologo', '/exports', module], { env, capture: true });
     for (const name of ['monky_configure_capture_startup', 'monky_bind_window_target', 'monky_bind_monitor_target',
-      'obs_module_load', 'obs_module_unload', 'obs_module_ver'])
+      'monky_invalidate_monitor_identity', 'obs_module_load', 'obs_module_unload', 'obs_module_ver'])
       assert.ok(new RegExp(`\\b${name}\\b`, 'u').test(moduleExports), `Missing capture module export: ${name}`);
 
     const winrtModule = path.join(buildDirectory, 'libobs-winrt.dll');
