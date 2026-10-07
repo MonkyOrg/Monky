@@ -60,6 +60,8 @@ jobs:
           tar -xf "$RUNNER_TEMP/mac-native/mac-native-runtime.tar" -C apps/client/native/screen-share
           node apps/client/native/screen-share/scripts/verifyOutputs.cjs mac --arch=${{ matrix.arch }}
       - name: Exercise native screen contracts
+        # ~1 min normally; bounds a test file that hangs instead of waiting for the job timeout.
+        timeout-minutes: 10
         run: npm run test:native-screen --workspace=apps/client
       - name: Verify bounded native source transport and cleanup
         run: |

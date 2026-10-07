@@ -114,6 +114,35 @@ test('macOS fixtures use the complete FFmpeg codec set even when minimal FFmpeg 
   }
 });
 
+const pwsh = spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0']).status === 0;
+test('Windows FFmpeg survives a Chocolatey feed outage that choco reports as success', { skip: !pwsh && 'pwsh unavailable' }, () => {
+  const [install, ...others] = [ci.jobs['client-dom'], ci.jobs['package-win']]
+    .map(job => step(job, 'Install FFmpeg for generated voice fixtures'));
+  for (const other of others) assert.deepEqual(other, install, 'Both Windows jobs install FFmpeg the same way.');
+  assert.equal(install.shell, 'pwsh');
+  assert.equal(install['continue-on-error'], undefined);
+  assert.doesNotMatch(install.run, /LASTEXITCODE/u, 'choco exits 0 after a 504 with nothing installed.');
+  // Runs the real step with choco/ffmpeg/Start-Sleep stubbed: success is judged by ffmpeg existing.
+  const run = installsAt => spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', [
+    '$ErrorActionPreference = "Stop"; $env:PATH = ""; $global:calls = 0; $global:slept = @()',
+    'function Start-Sleep([int]$Seconds) { $global:slept += $Seconds }',
+    `function choco { $global:calls++; if ($global:calls -eq ${installsAt}) { function global:ffmpeg { 'ffmpeg stub' } } }`,
+    ...installsAt === 0 ? ["function global:ffmpeg { 'ffmpeg stub' }"] : [],
+    'try {', install.run, '} finally { Write-Output "calls=$global:calls slept=$($global:slept -join \',\')" }',
+  ].join('\n')], { encoding: 'utf8' });
+  const present = run(0);
+  assert.equal(present.status, 0, present.stderr);
+  assert.match(present.stdout, /calls=0 slept=$/mu, 'An existing FFmpeg is used without Chocolatey.');
+  const recovered = run(3);
+  assert.equal(recovered.status, 0, recovered.stderr);
+  assert.match(recovered.stdout, /ffmpeg stub/u);
+  assert.match(recovered.stdout, /calls=3 slept=15,30$/mu);
+  const outage = run(99);
+  assert.notEqual(outage.status, 0);
+  assert.match(outage.stdout + outage.stderr, /FFmpeg is still missing after 4 Chocolatey attempts/u);
+  assert.match(outage.stdout, /calls=4 slept=15,30,60$/mu, 'Attempts and backoff are bounded.');
+});
+
 test('camera graphics use supported CI backends without weakening macOS or changing local startup', () => {
   const source = fs.readFileSync(path.join(root, 'apps/client/test/fixtures/ciGraphics.cjs'), 'utf8');
   for (const platform of ['win32', 'darwin', 'linux']) {
@@ -225,6 +254,16 @@ test('every CI and release job has a bounded runtime instead of the six-hour def
         `${name} ${id} needs timeout-minutes`);
     }
   }
+  // A native test file that keeps a live owned host would otherwise run until the job timeout.
+  const validation = workflow('native-macos-validation.yml');
+  for (const [job, name] of [[ci.jobs['package-win'], 'Exercise native screen contracts and legal metadata'],
+    [ci.jobs['package-mac'], 'Exercise native screen contracts and legal metadata'],
+    [Object.values(validation.jobs)[0], 'Exercise native screen contracts']]) {
+    const suite = step(job, name);
+    assert.match(suite.run, /npm run test:native-screen/u);
+    assert.equal(suite['timeout-minutes'], 10, `${name} is bounded well below its job timeout.`);
+  }
+  assert.equal(Object.values(validation.jobs).length, 1);
 });
 
 test('download caches stay download-only; compiled native outputs reuse only exact, re-verified keys', () => {

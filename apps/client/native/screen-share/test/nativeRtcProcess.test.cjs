@@ -3,12 +3,13 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { test } = require('node:test');
+const { test, afterEach } = require('node:test');
 const { ProcessEngine } = require('../runtime/nativeRtc/engine/node/process.cjs');
 const { LiveSenderFlow } = require('../runtime/encodedSender.cjs');
 const { NativeRtcCommands } = require('../runtime/nativeRtcCommands.cjs');
 const { NativeAudioOutputOwner } = require('../runtime/nativeAudioOutputOwner.cjs');
 
+const engines = new Set();
 function fixture(options = {}) {
   const events = [];
   const engine = new ProcessEngine({
@@ -16,8 +17,30 @@ function fixture(options = {}) {
     capabilities: { fixture: 'owned-rtc-process' },
     options: { operationTimeoutMs: 1000, ...options }, onEvent: event => events.push(event),
   });
+  engines.add(engine);
   return { engine, events };
 }
+
+async function nextEvent(events, type, timeoutMs = 5000) {
+  for (const deadline = Date.now() + timeoutMs; ; await new Promise(resolve => setTimeout(resolve, 5))) {
+    const event = events.find(candidate => candidate.type === type);
+    if (event) return event;
+    assert.ok(Date.now() < deadline, `No ${type} event within ${timeoutMs} ms.`);
+  }
+}
+
+// A failed assertion skips the test's own close, and its live owned host would keep this file
+// running until the CI job times out. Reap it here and report the leak instead.
+afterEach(async () => {
+  const running = [...engines].filter(engine => !engine.hostExited);
+  engines.clear();
+  if (!running.length) return;
+  const exited = Promise.all(running.map(engine => engine.exitState.promise));
+  if (await Promise.race([exited.then(() => true), new Promise(resolve => setTimeout(resolve, 1000, false))])) return;
+  for (const engine of running) if (!engine.hostExited) engine.fail(new Error('Test ended with its RTC host running.'));
+  await exited;
+  assert.fail(`${running.length} owned RTC host(s) were still running when the test ended.`);
+});
 
 test('a burst of audio clock feedback retains only the latest observation without exhausting RTC IPC credits', async () => {
   const { engine } = fixture({ feedbackDelayMs: 60, operationTimeoutMs: 2000 });
@@ -160,8 +183,7 @@ test('video admission waits for the native acknowledgement without a JavaScript 
   assert.equal(flow.snapshot().admitted, 1);
   assert.equal(flow.packet(frame), undefined);
   assert.equal((await engine.refreshSnapshot()).copied, 1);
-  await new Promise(resolve => setTimeout(resolve, 35));
-  flow.released(events.find(event => event.type === 'source.encodedFrameReleased'));
+  flow.released(await nextEvent(events, 'source.encodedFrameReleased'));
   await flow.close();
   const commands = new NativeRtcCommands(engine);
   await commands.closeEngine();
