@@ -217,9 +217,10 @@ Clique com o botão direito no nome de uma categoria para editar nome e acesso,
 mover para cima/baixo ou excluir.
 No menu de um canal, **Mover para categoria** muda seu agrupamento;
 arrastar também move e reordena canais e categorias. Canais e categorias
-dividem a mesma ordem na lista: solte um canal na metade de cima do nome de uma
-categoria para deixá-lo logo acima dela, fora de qualquer categoria, ou no fim
-da lista para deixá-lo por último. **Mover para cima/baixo**, nos menus, segue
+dividem a mesma ordem na lista: durante o arraste, abrem-se faixas acima das
+categorias e no fim da lista para deixar o canal fora de qualquer categoria;
+soltar sobre o nome de uma categoria coloca o canal dentro dela. **Mover para
+cima/baixo**, nos menus, segue
 a mesma ordem. As setas das categorias recolhem
 suas listas, lembrando a escolha por servidor e identidade neste dispositivo.
 

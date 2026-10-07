@@ -13,13 +13,13 @@ ou mover entre categorias e arrastar o cabeçalho das próprias categorias para
 reordená-las. Canais sem categoria e categorias dividem a mesma ordem, então um
 canal solto pode ficar acima, abaixo ou entre as categorias. Durante o arraste,
 a categoria de destino recebe o mesmo destaque tracejado usado ao mover
-participantes entre canais de voz. Esse contorno aparece somente sobre a metade
-de baixo do nome da categoria; na metade de cima, uma linha indica que o canal
-fica logo acima dela, fora da categoria. Sobre os canais, uma linha indica a
-posição exata. Categorias recolhidas também aceitam o canal. Para levar um
-canal ao fim da lista, fora de qualquer categoria, solte-o em **Sem categoria**,
-que aparece no fim da lista durante o arraste. Servidores ainda não atualizados
-mantêm os canais sem categoria no topo.
+participantes entre canais de voz: soltar em qualquer parte do nome dela coloca
+o canal dentro da categoria. Sobre os canais, uma linha indica a posição exata.
+Categorias recolhidas também aceitam o canal. Para deixar um canal fora de
+qualquer categoria, use as faixas **Sem categoria** que se abrem durante o
+arraste acima das categorias e no fim da lista; a faixa sob o cursor fica
+destacada. Onde já há um canal solto, solte ao lado dele. Servidores ainda não
+atualizados mantêm os canais sem categoria no topo.
 
 Na barra de servidores à esquerda, arraste qualquer servidor, inclusive o que
 está aberto, para mudar a ordem ou para dentro e fora de uma pasta.

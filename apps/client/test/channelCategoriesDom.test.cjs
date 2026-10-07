@@ -166,7 +166,7 @@ if (!process.versions.electron) {
       browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
       await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     };
-    const dragChannelToSelector = async (from, selector, yRatio = 0.5, expectShift = true) => {
+    const dragChannelToSelector = async (from, selector, yRatio = 0.5, expectShift = true, beforeRelease = null) => {
       const targetBefore = await browser.webContents.executeJavaScript(`(() => {
         const target = document.querySelector(${JSON.stringify(selector)});
         const box = target.getBoundingClientRect();
@@ -186,7 +186,7 @@ if (!process.versions.electron) {
       // Native input is delivered asynchronously; measure only after the renderer starts the drag.
       const targetAfter = await browser.webContents.executeJavaScript(`new Promise(resolve => {
         const started = performance.now();
-        let lastTop = null;
+        let lastY = null;
         let stableFrames = 0;
         const measure = () => {
           if (!document.querySelector('.channel-reorder-active .channel-dragging')) {
@@ -200,18 +200,19 @@ if (!process.versions.electron) {
             top: box.top, layoutTop: box.top - target.closest('#channel-categories-list').getBoundingClientRect().top,
             scroll: target.closest('.channels-list-container').scrollTop };
           // Older servers reveal Uncategorized above the categories during a drag;
-          // the shared root keeps the layout still and adds its target at the end.
+          // the shared root widens its slots instead. Either way, aim only once
+          // the target has settled.
           if (!${JSON.stringify(expectShift)} || sample.top > ${JSON.stringify(targetBefore.top)} + 1) {
-            if (lastTop !== null && Math.abs(sample.top - lastTop) <= 0.5) stableFrames++;
+            if (lastY !== null && Math.abs(sample.y - lastY) <= 0.5) stableFrames++;
             else stableFrames = 0;
-            lastTop = sample.top;
+            lastY = sample.y;
             if (stableFrames >= 2) {
               resolve(sample);
               return;
             }
           } else {
             stableFrames = 0;
-            lastTop = sample.top;
+            lastY = sample.y;
           }
           if (performance.now() - started > 3000) {
             resolve({ failure: 'The destination category did not shift during channel drag', sample });
@@ -231,6 +232,7 @@ if (!process.versions.electron) {
         });
         await new Promise(resolve => setTimeout(resolve, 10));
       }
+      if (beforeRelease) await beforeRelease();
       browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: targetAfter.x, y: targetAfter.y });
       await new Promise(resolve => setTimeout(resolve, 80));
       return { targetBefore, targetAfter };
@@ -410,8 +412,9 @@ if (!process.versions.electron) {
         throw new Error('Saving synchronization did not preserve live category inheritance');
       }
       // Shared root: loose channels sit anywhere among categories, moved with a real pointer.
-      const layout = await browser.webContents.executeJavaScript('window.categoryTreeFixture()');
-      if (JSON.stringify(layout) !== JSON.stringify(['category:voice|text', ':loose', 'destination:', ':tail', 'end:'])) {
+      const treeLayout = adjacent => browser.webContents.executeJavaScript(`window.categoryTreeFixture(${adjacent})`);
+      const layout = await treeLayout(false);
+      if (JSON.stringify(layout) !== JSON.stringify(['gap:', 'category:voice|text', ':loose', 'destination:', ':tail', 'end:'])) {
         throw new Error('The shared root did not interleave loose channels with categories: ' + JSON.stringify(layout));
       }
       const rootRequest = async (expected, label) => {
@@ -424,16 +427,48 @@ if (!process.versions.electron) {
         const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
         return { x: Math.round(box.left + Math.min(80, box.width / 2)), y: Math.round(box.top + box.height * ${yRatio}) };
       })()`);
+      // Any part of a category's name takes the channel in; leaving is the slots' job.
       await dragChannelToSelector(await rootPoint('.channel-item[data-channel-id="tail"]'),
         '[data-category-id="destination"] > .category-title', 0.2, false);
-      await rootRequest(['category', 'loose', 'tail', 'destination'], 'A loose channel did not move above a category');
-      await dragChannelToSelector(await rootPoint('.channel-item[data-channel-id="voice"]'),
-        '[data-category-id="destination"] > .category-title', 0.2, false);
+      if (!await pageBecomes(`window.categoryTestRequests.some(({ type, payload }) =>
+          type === 'CHANNEL_UPDATE' && payload.channelId === 'tail' && payload.categoryId === 'destination') &&
+        window.categoryTestRequests.some(({ type, payload }) =>
+          type === 'CHANNEL_REORDER' && payload.categoryId === 'destination' && payload.orderedIds.join(',') === 'tail')`)) {
+        throw new Error('The top of a category name did not move the channel into that category: ' +
+          JSON.stringify(await browser.webContents.executeJavaScript('window.categoryTestRequests')));
+      }
+      await browser.webContents.executeJavaScript('window.categoryTestRequests.length = 0');
+      await dragChannelToSelector(await rootPoint('.channel-item[data-channel-id="tail"]'), '[data-root-gap="category"]', 0.5, false, async () => {
+        // Every slot names itself while dragging; only the one under the pointer is highlighted.
+        if (!await pageBecomes(`(() => {
+          const label = selector => document.querySelector(selector + ' .channel-tree-gap-label');
+          const shown = selector => getComputedStyle(label(selector)).opacity === '1' && label(selector).textContent.trim().length > 0;
+          return document.querySelector('[data-root-gap="category"]').classList.contains('channel-category-drop-target') &&
+            !document.querySelector('.channel-tree-end-dropzone').classList.contains('channel-category-drop-target') &&
+            shown('[data-root-gap="category"]') && shown('.channel-tree-end-dropzone') &&
+            document.querySelector('[data-root-gap="category"]').getBoundingClientRect().height >= 24;
+        })()`)) {
+          throw new Error('The slots were not all labelled or the slot under the pointer was not the only one highlighted');
+        }
+      });
+      await rootRequest(['tail', 'category', 'loose', 'destination'], 'A loose channel did not move into the slot above the first category');
+      // Categories next to each other get a slot between them, sized as the usual spacing at rest.
+      const adjacentLayout = await treeLayout(true);
+      if (JSON.stringify(adjacentLayout) !== JSON.stringify(['gap:', 'category:voice|text', 'gap:', 'destination:', ':loose|tail', 'end:'])) {
+        throw new Error('Adjacent categories did not get a slot between them: ' + JSON.stringify(adjacentLayout));
+      }
+      const restingSlots = await browser.webContents.executeJavaScript(`[...document.querySelectorAll('[data-root-gap]')]
+        .map(slot => slot.getBoundingClientRect().height + ':' + getComputedStyle(slot.querySelector('.channel-tree-gap-label')).opacity)`);
+      if (JSON.stringify(restingSlots) !== JSON.stringify(['0:0', '16:0', '0:0'])) {
+        throw new Error('Resting slots changed the list spacing or showed their label: ' + JSON.stringify(restingSlots));
+      }
+      await dragChannelToSelector(await rootPoint('.channel-item[data-channel-id="voice"]'), '[data-root-gap="destination"]', 0.5, false);
       if (!await pageBecomes(`window.categoryTestRequests.some(({ type, payload }) =>
         type === 'CHANNEL_UPDATE' && payload.channelId === 'voice' && payload.categoryId === null)`)) {
         throw new Error('Leaving a category between two categories did not detach the channel first');
       }
-      await rootRequest(['category', 'loose', 'voice', 'destination', 'tail'], 'A channel did not leave its category into the root slot');
+      await rootRequest(['category', 'voice', 'destination', 'loose', 'tail'], 'A channel did not leave its category into the slot between categories');
+      await treeLayout(false);
       await drag(await rootPoint('[data-category-id="destination"] > .category-title'),
         await rootPoint('.channel-item[data-channel-id="loose"]', 0.2));
       await rootRequest(['category', 'destination', 'loose', 'tail'], 'A category did not move above a loose channel');
@@ -874,8 +909,9 @@ async function regression(locale) {
     }, true);
   }
   root.querySelector('[data-collapse-category="category"]').focus();
-  // A server with the shared root interleaves loose channels with categories.
-  window.categoryTreeFixture = () => {
+  // A server with the shared root interleaves loose channels with categories;
+  // `adjacent` puts the two categories next to each other.
+  window.categoryTreeFixture = (adjacent = false) => {
     document.querySelectorAll('.modal-backdrop').forEach(element => element.remove());
     requests.length = 0;
     if (store.isCategoryCollapsed('category')) store.toggleCategoryCollapsed('category');
@@ -884,11 +920,11 @@ async function regression(locale) {
       protocol: { version: 36, minimumVersion: 35, features: ['channel-tree-order'] },
       categories: [{ ...category, position: 0 }, { ...destination, position: 2 }],
       channels: [channel('voice', 'VOICE', category.id), channel('text', 'TEXT', category.id),
-        { ...channel('loose', 'TEXT', null), position: 1 }, { ...channel('tail', 'TEXT', null), position: 3 }],
+        { ...channel('loose', 'TEXT', null), position: adjacent ? 3 : 1 }, { ...channel('tail', 'TEXT', null), position: adjacent ? 4 : 3 }],
     }, user);
     view.renderChannels();
     return [...document.querySelectorAll('#channel-categories-list > *')].map(element =>
-      `${element.classList.contains('channel-tree-end-dropzone') ? 'end' : element.dataset.categoryId}:` +
+      `${element.classList.contains('channel-tree-end-dropzone') ? 'end' : element.matches('[data-root-gap]') ? 'gap' : element.dataset.categoryId}:` +
       [...element.querySelectorAll('.channel-item')].map(item => item.dataset.channelId).join('|'));
   };
   // Kept for the real key event dispatched from Electron after returning.

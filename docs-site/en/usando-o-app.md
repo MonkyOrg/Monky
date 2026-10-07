@@ -13,13 +13,13 @@ between categories, and drag category headers to reorder the categories
 themselves. Uncategorized channels and categories share one order, so a loose
 channel can sit above, below or between categories. While dragging, the
 destination category gets the same dashed highlight used when moving
-participants between voice channels. This outline appears only over the bottom
-half of the category name; on the top half, a line shows the channel will sit
-right above that category, outside it. Over channels, a line marks the exact
-position. Collapsed categories also accept the channel. To take a channel to the
-end of the list, outside every category, drop it on **Uncategorized**, which
-appears at the end of the list while dragging. Servers not yet updated keep
-uncategorized channels at the top.
+participants between voice channels: dropping anywhere on its name puts the
+channel inside that category. Over channels, a line marks the exact position.
+Collapsed categories also accept the channel. To keep a channel outside every
+category, use the **Uncategorized** slots that open above the categories and at
+the end of the list while dragging; the slot under the pointer is highlighted.
+Where a loose channel is already there, drop next to it. Servers not yet updated
+keep uncategorized channels at the top.
 
 In the server bar on the left, drag any server, including the open one, to
 change the order or to move it into and out of a folder.

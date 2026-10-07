@@ -210,9 +210,9 @@ features, but live actions require a compatible server.
 Right-click a category name to edit its name and access, move it up/down, or delete it.
 Use **Move to category** in a channel's menu to move it, or drag channels and
 categories to move and reorder them. Channels and categories share one order in
-the list: drop a channel on the top half of a category's name to place it right
-above that category, outside every category, or at the end of the list to place
-it last. **Move up/down** in the menus follows the same order. Category arrows
+the list: while dragging, slots open above the categories and at the end of the
+list to keep a channel outside every category; dropping on a category's name
+puts the channel inside it. **Move up/down** in the menus follows the same order. Category arrows
 collapse their lists; the choice is remembered per server and identity on this
 device.
 

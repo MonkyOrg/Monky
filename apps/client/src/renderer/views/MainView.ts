@@ -1393,11 +1393,23 @@ export class MainView {
         if (run && !run.id) run.channels.push(channel);
         else groups.push({ id: '', name: t('categories.uncategorized'), channels: [channel] });
       }
-      categoryList.innerHTML = groups.map((group) => {
+      // While a channel is dragged, the space before a category with no loose
+      // channel above it, and the end of the list, become slots outside every
+      // category. Elsewhere the loose channels themselves mark the position.
+      const placesAtRoot = treeOrder && canManageChannels;
+      const rootGap = (beforeCategoryId: string) => `<div class="channel-tree-gap${beforeCategoryId ? '' : ' channel-tree-end-dropzone'}" data-root-gap="${escapeHtml(beforeCategoryId)}" aria-hidden="true">
+            <span class="channel-tree-gap-label">
+              <span class="material-symbols-outlined md-16">drive_file_move</span>
+              <span>${escapeHtml(t('categories.uncategorized'))}</span>
+            </span>
+          </div>`;
+      categoryList.innerHTML = groups.map((group, index) => {
         const canManage = canManageChannels;
         const channels = group.channels;
         const collapsed = !!group.id && serverStore.isCategoryCollapsed(group.id);
-        return `<section class="channel-category${group.id ? '' : ' channel-category--uncategorized'}${channels.length ? '' : ' channel-category--empty'}" data-category-id="${escapeHtml(group.id)}">
+        const previous = groups[index - 1];
+        const gap = placesAtRoot && group.id && (!previous || previous.id) ? rootGap(group.id) : '';
+        return `${gap}<section class="channel-category${group.id ? '' : ' channel-category--uncategorized'}${channels.length ? '' : ' channel-category--empty'}" data-category-id="${escapeHtml(group.id)}">
           ${group.id ? `<div class="category-title" data-category-dropzone="${escapeHtml(group.id)}">
             <button class="category-collapse-btn" data-collapse-category="${escapeHtml(group.id)}" aria-expanded="${!collapsed}">
               <span class="material-symbols-outlined md-16">${collapsed ? 'chevron_right' : 'expand_more'}</span>
@@ -1413,10 +1425,7 @@ export class MainView {
             ${channels.map((channel) => rows.get(channel.id) ?? '').join('')}
           </div>
         </section>`;
-      }).join('') + (treeOrder && canManageChannels ? `<div class="category-uncategorized-dropzone channel-tree-end-dropzone" data-category-dropzone="">
-            <span class="material-symbols-outlined md-16">drive_file_move</span>
-            <span>${escapeHtml(t('categories.uncategorized'))}</span>
-          </div>` : '');
+      }).join('') + (placesAtRoot ? rootGap('') : '');
       categoryList.querySelectorAll<HTMLButtonElement>('[data-collapse-category]').forEach((button) => {
         button.addEventListener('click', () => {
           const id = button.dataset.collapseCategory ?? '';
@@ -1638,8 +1647,8 @@ export class MainView {
       this.container.querySelectorAll('.channel-category-drop-target').forEach((element) => {
         element.classList.remove('channel-category-drop-target');
       });
-      this.container.querySelectorAll('.channel-drop-before, .channel-drop-after, .category-drop-before').forEach((element) => {
-        element.classList.remove('channel-drop-before', 'channel-drop-after', 'category-drop-before');
+      this.container.querySelectorAll('.channel-drop-before, .channel-drop-after').forEach((element) => {
+        element.classList.remove('channel-drop-before', 'channel-drop-after');
       });
     };
     const pointerDropTarget = (clientX: number, clientY: number) => {
@@ -1657,32 +1666,28 @@ export class MainView {
           after: clientY > rect.top + rect.height / 2,
           targetRow,
           dropzone: null as HTMLElement | null,
-          beforeSection: null as HTMLElement | null,
+        };
+      }
+      // A slot outside every category: right above its category, or the end.
+      const gap = element?.closest<HTMLElement>('[data-root-gap]');
+      if (gap) {
+        const beforeCategoryId = gap.dataset.rootGap;
+        return {
+          categoryId: null,
+          target: beforeCategoryId ? { kind: 'category' as const, id: beforeCategoryId } : null,
+          after: false,
+          targetRow: null as HTMLElement | null,
+          dropzone: gap,
         };
       }
       const dropzone = element?.closest<HTMLElement>('[data-category-dropzone]');
       if (dropzone) {
-        const categoryId = dropzone.dataset.categoryDropzone || null;
-        const rect = dropzone.getBoundingClientRect();
-        // With a shared root, the top half of a category title places the
-        // channel right above that category instead of inside it.
-        if (treeOrder && categoryId && clientY < rect.top + rect.height / 2) {
-          return {
-            categoryId: null,
-            target: { kind: 'category' as const, id: categoryId },
-            after: false,
-            targetRow: null as HTMLElement | null,
-            dropzone: null as HTMLElement | null,
-            beforeSection: dropzone.closest<HTMLElement>('.channel-category'),
-          };
-        }
         return {
-          categoryId,
+          categoryId: dropzone.dataset.categoryDropzone || null,
           target: null,
           after: true,
           targetRow: null as HTMLElement | null,
           dropzone,
-          beforeSection: null as HTMLElement | null,
         };
       }
       const list = element?.closest<HTMLElement>('[data-category-channels]');
@@ -1704,7 +1709,6 @@ export class MainView {
           after,
           targetRow: row,
           dropzone: null as HTMLElement | null,
-          beforeSection: null as HTMLElement | null,
         };
       }
       return {
@@ -1713,7 +1717,6 @@ export class MainView {
         after: true,
         targetRow: null as HTMLElement | null,
         dropzone: null as HTMLElement | null,
-        beforeSection: null as HTMLElement | null,
       };
     };
     const showPointerDropTarget = (target: ReturnType<typeof pointerDropTarget>) => {
@@ -1722,7 +1725,6 @@ export class MainView {
       if (!target) return;
       target.dropzone?.classList.add('channel-category-drop-target');
       target.targetRow?.classList.add(target.after ? 'channel-drop-after' : 'channel-drop-before');
-      target.beforeSection?.classList.add('category-drop-before');
     };
 
     for (const { el: listEl, categoryId } of lists) {
