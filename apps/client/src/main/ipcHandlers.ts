@@ -39,6 +39,7 @@ import { fetchLinkPreview } from './linkPreview';
 import { TrayManager, VoiceStatus } from './trayManager';
 import type { DesktopSource, IpcInvokeChannels, OverlayBounds, OverlayConfig, OverlaySignalPayload, OverlaySyncState } from '@monky/shared';
 import { OverlayManager } from './overlayManager';
+import { SteamPresence } from './steamPresence';
 import {
   HOME_MIN_HEIGHT,
   HOME_MIN_WIDTH,
@@ -344,6 +345,10 @@ export function setupIpcHandlers(
   let soundboardTools: LocalTools | undefined;
   const localExecution = setupLocalExecutionIpc(mainWindow, (notifications) =>
     createLocalExecutionService(mainWindow, app.getPath('userData'), notifications, tools => { soundboardTools = tools; }));
+  // Presença de jogo (#675): só roda quando a pessoa liga nas configurações.
+  const steamPresence = new SteamPresence((activity) => {
+    if (!mainWindow.isDestroyed()) mainWindow.webContents.send('game-presence:changed', activity);
+  });
   const nativeSources = new NativeDesktopSources({
     windows: listNativeWindows,
     isWindowExcluded: hwnd => overlayManager.isScreenShareSource(`window:${hwnd}:0`),
@@ -1338,6 +1343,12 @@ export function setupIpcHandlers(
   ipcMain.handle('app:get-version', () => app.getVersion());
 
   // Open an external URL in the default browser
+  ipcMain.handle('game-presence:set-enabled', (_event, enabled: boolean) => {
+    steamPresence.setEnabled(enabled === true);
+  });
+
+  ipcMain.handle('game-presence:get-current', () => steamPresence.getCurrent());
+
   ipcMain.handle('app:open-external', async (_, url: string) => {
     try {
       const parsed = new URL(url);

@@ -2312,7 +2312,12 @@ Não implementar inicialmente:
 - integração com Spotify;
 - Rich Presence.
 
-Esses recursos podem ser adicionados posteriormente.
+Esses recursos podem ser adicionados posteriormente. Parte desta lista já saiu do
+papel — bots, por exemplo — e a presença de jogo da Steam chegou em #675 como um
+recorte pequeno de Rich Presence: quem está no canal vê o jogo, o ícone e o
+tempo de partida. Opcional, desligada por padrão e limitada ao que a Steam
+expõe — entrar na partida do outro fica de fora, porque exigiria o Steamworks
+SDK ou colar links de lobby à mão.
 
 ---
 

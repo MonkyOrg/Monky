@@ -38,6 +38,7 @@ import { callClient, leaveCurrentCall, rejoinCallOnSession, showHome, suspendCal
 import { VoiceModeReconnect, type VoiceReconnectCall } from './core/VoiceModeReconnect';
 import { participantManager } from './core/ParticipantManager';
 import { sessionManager } from './core/SessionManager';
+import { gamePresence } from './core/GamePresenceController';
 import type { LocalExecutionTaskNotice } from './core/LocalExecutionController';
 import { currentEventOrigin, emitOutsideRouting, isForegroundEvent } from './core/sessionRouting';
 import { soundEffects } from './core/SoundEffects';
@@ -181,6 +182,8 @@ class App {
       soundEffects.play('chat_message');
       showInfoToast(t('community.started', { event: notice.title, server: notice.serverName }), 7000);
     });
+    // Only starts polling if the person turned game sharing on (#675).
+    gamePresence.start();
     this.homeView = new HomeView();
     this.mainView = new MainView(this.appContainer, this.homeView);
     appEvents.on<string>('dm.open', (peer) => {
@@ -189,6 +192,7 @@ class App {
     });
     window.addEventListener('pagehide', () => {
       this.autoEntryService.dispose();
+      gamePresence.dispose();
       this.homeView.destroy();
       void sessionManager.dispose().catch((error: unknown) => {
         clientLog.error('CONNECTION', 'Failed to dispose sessions after page retirement', {

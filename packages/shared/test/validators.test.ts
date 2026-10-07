@@ -22,6 +22,8 @@ import {
   voiceRestrictionsUpdatedSchema,
   dmRelaySendSchema,
   ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX,
+  userActivitySchema,
+  userUpdateActivitySchema,
 } from '../src/index.js';
 import './botInteractions.test.js';
 import './botSettings.test.js';
@@ -203,5 +205,62 @@ console.assert(
   'Nome curto demais deve ser rejeitado na edição'
 );
 console.log('✔ Schemas de criação e edição de canal verificados (#384)');
+
+// Presença de jogo e convites de partida (#675)
+console.assert(
+  userActivitySchema.safeParse({
+    source: 'steam', appId: 548430, name: 'Deep Rock Galactic', startedAt: 1_700_000_000_000,
+  }).success === true,
+  'Atividade da Steam com appid, nome e início é válida'
+);
+console.assert(
+  userActivitySchema.safeParse({ source: 'steam', appId: 548430, name: 'Deep Rock Galactic' }).success === false,
+  'Sem o início não há contador: o campo é obrigatório'
+);
+console.assert(
+  userActivitySchema.safeParse({
+    source: 'steam', appId: 1, name: 'x', startedAt: -1,
+  }).success === false,
+  'Início negativo é rejeitado'
+);
+console.assert(
+  userActivitySchema.safeParse({
+    source: 'steam', appId: 1, name: 'x', startedAt: 1, iconBase64: '/9j/4AAQSkZJRg==',
+  }).success === true,
+  'Base64 de JPEG é aceito como ícone'
+);
+console.assert(
+  userActivitySchema.safeParse({
+    source: 'steam', appId: 1, name: 'x', startedAt: 1, iconBase64: 'iVBORw0KGgo=',
+  }).success === false,
+  'Só JPEG: o prefixo /9j/ é o que autoriza virar data URI'
+);
+console.assert(
+  userActivitySchema.safeParse({
+    source: 'steam', appId: 1, name: 'x', startedAt: 1,
+    iconBase64: `/9j/${'A'.repeat(LIMITS.MAX_ACTIVITY_ICON_LENGTH)}`,
+  }).success === false,
+  'O ícone tem teto: o campo não é um canal para dados em massa'
+);
+console.assert(
+  userUpdateActivitySchema.safeParse({ activity: null }).success === true,
+  'Limpar a atividade é tão válido quanto publicá-la — é o que o toggle desligado envia'
+);
+console.assert(
+  userActivitySchema.safeParse({ source: 'epic', appId: 1, name: 'x' }).success === false,
+  'Só a Steam é aceita como fonte hoje'
+);
+console.assert(
+  userActivitySchema.safeParse({ source: 'steam', appId: 0, name: 'x' }).success === false,
+  'AppId precisa ser positivo'
+);
+console.assert(
+  userActivitySchema.safeParse({
+    source: 'steam', appId: 1, name: 'x', executablePath: 'C:/jogo.exe',
+  }).success === false,
+  'Campos extras são rejeitados: caminho de executável nunca deve trafegar'
+);
+
+console.log('✔ Schemas de presença de jogo verificados (#675)');
 
 console.log('=== Todos os testes unitários passaram com sucesso! ===');

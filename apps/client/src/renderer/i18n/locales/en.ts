@@ -1195,6 +1195,7 @@ export const en: TranslationMap = {
   'main.screenShareGoToStage': 'Go to stage',
   'main.screenShareBackToStage': 'Back to stage',
   'main.cameraOn': 'Camera on',
+  'main.playingGame': 'Playing {game}',
   'main.reconnecting': 'Reconnecting…',
   'main.connecting': 'Connecting…',
   'main.connectingTitle': 'Establishing the voice connection',
@@ -1557,6 +1558,11 @@ export const en: TranslationMap = {
   'settings.dmSection': 'Direct messages',
   'settings.dmMaxFileLabel': 'Maximum received file size',
   'settings.dmMaxFileHint': 'Your friends see this limit and cannot send you larger files.',
+  'settings.gameActivitySection': 'Game activity',
+  'settings.gameActivityLabel': 'Show the game I am playing',
+  'settings.gameActivityHint': 'People in your servers see the game open on Steam when they click you and in the voice channel list.',
+  'userMenu.playingNow': 'Playing now',
+  'userMenu.playingElapsed': 'Time in match',
 
   // ── Keyboard Shortcuts (KeybindsTab.ts) ──────────────────────────────────
   'keybinds.title': 'Keyboard Shortcuts',

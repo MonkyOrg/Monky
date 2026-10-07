@@ -1,4 +1,6 @@
 import { sessionManager } from '../core/SessionManager';
+import { gamePresence } from '../core/GamePresenceController';
+import { serverStore } from '../stores/serverStore';
 import { applyProfileEverywhere, recordProfileChange } from '../core/profileSync';
 import { connectionStore } from '../stores/connectionStore';
 import { t } from '../i18n';
@@ -256,6 +258,9 @@ export class SettingsModal {
       showError: (msg: string) => this.showError(msg),
       onVisibilityChanged: (appearOffline: boolean) => {
         sessionManager.setAppearOffline(appearOffline);
+      },
+      onGameActivityChanged: (enabled: boolean) => {
+        void gamePresence.setEnabled(enabled);
       },
     });
 

@@ -85,6 +85,7 @@ import {
   UserUpdateAvatarPayload,
   UserUpdatedPayload,
   UserUpdateVisibilityPayload,
+  UserUpdateActivityPayload,
   BotCreatedPayload,
   BotInstallPayload,
   BotInstalledPayload,
@@ -199,6 +200,7 @@ import { RateLimiter } from '../security/RateLimiter';
 import { describeFailure, ServerResourceScope } from '../lifecycle/ServerResourceScope';
 import { BotInteractionHandler, BotInteractionSession } from './BotInteractionHandler';
 import { botVoiceJoinSchema, botVoiceChannelSchema, botVoiceSignalSchema } from '@monky/shared';
+import { userUpdateActivitySchema } from '@monky/shared';
 
 const BOT_LOCAL_ALLOWED_MESSAGES = new Set<MessageType>([
   MessageType.BOT_LOCAL_SOURCE_REQUEST,
@@ -288,6 +290,7 @@ export class WebSocketServer {
     expiresAt: number;
     inFlight: boolean;
   }>();
+  /** Last "ask to join" per requester/host pair, for the spam guard (#675). */
   private botInteractions: BotInteractionHandler;
   private botLocalExecution: BotLocalExecutionService<BotInteractionSession>;
   private botSelectors?: BotSelectorHandler;
@@ -967,6 +970,10 @@ export class WebSocketServer {
         this.handleUserUpdateVisibility(session, payload as UserUpdateVisibilityPayload, requestId);
         break;
 
+      case MessageType.USER_UPDATE_ACTIVITY:
+        this.handleUserUpdateActivity(session, payload as UserUpdateActivityPayload, requestId);
+        break;
+
       case MessageType.SERVER_UPDATE_SETTINGS:
         if (!(await this.requirePermission(session, Permission.MANAGE_SERVER, requestId))) return;
         await this.handleServerUpdateSettings(session, payload as ServerUpdateSettingsPayload, requestId);
@@ -1486,7 +1493,7 @@ export class WebSocketServer {
     // so an intervening join/leave cannot be erased by an older auth snapshot.
     successPayload.server.members = Array.from(this.getOnlineUsersMap().values())
       .filter(({ user }) => !user.invisible || user.id === result.user!.id)
-      .map(({ user }) => user);
+      .map(({ user }) => this.userForRecipient(session, user));
     successPayload.server.voiceStates = Object.fromEntries(
       Object.entries(this.signalingService.getAllVoiceStates())
         .filter(([, state]) => session.visibleChannelIds?.has(state.channelId))
@@ -2953,18 +2960,32 @@ export class WebSocketServer {
     this.broadcastUserUpdate(result.updatedUser, requestId);
   }
 
+  /**
+   * Drops the game for peers that did not negotiate `game-activity` (#675).
+   * Older clients would ignore the field anyway, but the icon is up to 32 KB
+   * per update and nothing on their side would ever show it.
+   */
+  private userForRecipient(recipient: ClientSession, user: UserSummary): UserSummary {
+    if (user.activity === undefined || recipient.protocol?.features.includes('game-activity')) return user;
+    return { ...user, activity: undefined };
+  }
+
   /** Presence updates must not masquerade as a physical disconnect from voice. */
   private broadcastUserUpdate(user: UserSummary, requestId?: string): void {
     const invisible = this.getSessionsOfUser(user.id).some((session) => session.invisible);
     const publicUser: UserSummary = {
       ...user,
       invisible: undefined,
-      ...(invisible ? { status: 'DISCONNECTED', sessionId: undefined, connectedAt: undefined } : {}),
+      // Hiding has to hide the game too, or "aparecer offline" leaks what the
+      // person is doing while claiming they are offline (#675).
+      ...(invisible
+        ? { status: 'DISCONNECTED', sessionId: undefined, connectedAt: undefined, activity: undefined }
+        : {}),
     };
     for (const recipient of this.sessions.values()) {
       if (!recipient.user) continue;
       const payload: UserUpdatedPayload = {
-        user: recipient.user.id === user.id ? recipient.user : publicUser,
+        user: recipient.user.id === user.id ? recipient.user : this.userForRecipient(recipient, publicUser),
       };
       this.send(recipient.ws, { type: MessageType.USER_UPDATED, requestId, payload });
     }
@@ -2995,14 +3016,56 @@ export class WebSocketServer {
       // Tell everyone else the user joined (for each device session).
       for (const s of userSessions) {
         if (!s.user) continue;
-        const joinPayload: UserJoinedPayload = {
-          user: { ...s.user, invisible: undefined },
-        };
-        this.broadcast({ type: MessageType.USER_JOINED, payload: joinPayload }, s.ws);
+        // Same delivery rules as broadcast(), but the game is per recipient.
+        const user: UserSummary = { ...s.user, invisible: undefined };
+        for (const [ws, recipient] of this.sessions.entries()) {
+          if (ws === s.ws || ws.readyState !== WebSocket.OPEN || !recipient.user || recipient.replaced) continue;
+          const joinPayload: UserJoinedPayload = { user: this.userForRecipient(recipient, user) };
+          const message: ProtocolMessage = { type: MessageType.USER_JOINED, payload: joinPayload };
+          if (this.canDeliverBotEvent(recipient, message)) this.send(ws, message);
+        }
       }
     }
 
     Logger.info('NETWORK', `User ${session.user.nickname} is now ${nowInvisible ? 'invisible' : 'visible'}.`);
+  }
+
+  /**
+   * Publishes what this person is playing, or clears it (#675).
+   *
+   * Clearing matters as much as setting: when the settings toggle goes off the
+   * client sends `null`, and without that the last game would stay frozen on
+   * everyone else's card forever.
+   */
+  private handleUserUpdateActivity(
+    session: ClientSession,
+    payload: UserUpdateActivityPayload,
+    requestId?: string
+  ): void {
+    if (!session.user) return;
+    if (session.isBot) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED,
+        'Bots não publicam atividade de jogo.', requestId);
+      return;
+    }
+    if (!session.protocol?.features.includes('game-activity')) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE,
+        'Mostrar o jogo exige um cliente e servidor atualizados.', requestId);
+      return;
+    }
+    const parsed = userUpdateActivitySchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Atividade inválida.', requestId);
+      return;
+    }
+
+    const { activity } = parsed.data;
+    // Applied to every device of this person: otherwise a later broadcast from
+    // another session (a nickname change, say) would carry a stale activity.
+    for (const target of this.getSessionsOfUser(session.user.id)) {
+      if (target.user) target.user = { ...target.user, activity };
+    }
+    this.broadcastUserUpdate(session.user, requestId);
   }
 
   private async handleServerUpdateSettings(

@@ -12,9 +12,10 @@ import { PROTOCOL_VERSION } from './constants.js';
 // Protocol 36 adds the negotiated human-only DM relay.
 // role-deny: 36.1 roles carry allow/deny over Everyone; clients without it receive legacy full masks.
 // role-grants: roles only grant on top of Everyone and add up; clients with only role-deny receive nothing denied.
+// game-activity: USER_UPDATE_ACTIVITY and UserSummary.activity (#675); peers without it never see the game.
 export const MIN_CLIENT_PROTOCOL = 35;
 export const MIN_BOT_PROTOCOL = 24;
-export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants'] as const;
+export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];
 export const protocolOfferSchema = z.object({
   minimumVersion: z.number().int().positive(),
@@ -28,7 +29,7 @@ export function createProtocolOffer(kind: 'client' | 'bot'): ProtocolOffer {
       feature !== 'chat-delivery' && feature !== 'message-delete-undo' && feature !== 'screen-viewers' &&
       feature !== 'message-search' && feature !== 'forums' && feature !== 'native-polls' &&
       feature !== 'native-live-forms' && feature !== 'recent-sounds' && feature !== 'dm-relay' &&
-      feature !== 'role-deny' && feature !== 'role-grants')) };
+      feature !== 'role-deny' && feature !== 'role-grants' && feature !== 'game-activity')) };
 }
 export function negotiateProtocol(version: unknown, offer: unknown, kind: 'client' | 'bot'): ProtocolAgreement | null {
   const minimumVersion = kind === 'bot' ? MIN_BOT_PROTOCOL : MIN_CLIENT_PROTOCOL;

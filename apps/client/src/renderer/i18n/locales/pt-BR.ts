@@ -1157,6 +1157,7 @@ export const ptBR = {
   'main.screenShareGoToStage': 'Ir para o palco',
   'main.screenShareBackToStage': 'Voltar ao palco',
   'main.cameraOn': 'Câmera ligada',
+  'main.playingGame': 'Jogando {game}',
   'main.reconnecting': 'Reconectando…',
   'main.connecting': 'Conectando…',
   'main.connectingTitle': 'Estabelecendo a conexão de voz',
@@ -1519,6 +1520,11 @@ export const ptBR = {
   'settings.dmSection': 'Mensagens diretas',
   'settings.dmMaxFileLabel': 'Tamanho máximo de arquivo recebido',
   'settings.dmMaxFileHint': 'Seus amigos veem esse limite e não conseguem enviar arquivos maiores para você.',
+  'settings.gameActivitySection': 'Atividade de jogo',
+  'settings.gameActivityLabel': 'Mostrar o jogo que estou jogando',
+  'settings.gameActivityHint': 'Quem estiver nos seus servidores vê o jogo aberto na Steam ao clicar em você e na lista do canal de voz.',
+  'userMenu.playingNow': 'Jogando agora',
+  'userMenu.playingElapsed': 'Tempo de partida',
 
   // ── Atalhos de Teclado (KeybindsTab.ts) ──────────────────────────────────
   'keybinds.title': 'Atalhos do Teclado',
