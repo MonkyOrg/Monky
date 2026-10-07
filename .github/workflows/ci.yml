@@ -44,9 +44,13 @@ jobs:
           node-version: 22
           architecture: ${{ matrix.arch }}
           cache: npm
+      # The pinned CMake wheel (36-48 MB) can take minutes from PyPI; keep it in the pip cache,
+      # keyed by the manifest that pins its version.
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: pip
+          cache-dependency-path: apps/light/dependencies.json
       - name: Read native toolchain pins
         id: native-tools
         shell: pwsh

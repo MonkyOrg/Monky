@@ -828,6 +828,10 @@ test('the mediasoup worker cache pins the locked package, host and compiler, and
   const order = [id, restore, install, verify, tests, save].map(candidate => job.steps.indexOf(candidate));
   assert.deepEqual(order, [...order].sort((a, b) => a - b), 'A worker is cached only after it ran the real interop tests.');
   assert.doesNotMatch(step(job, 'Prepare disposable voice interoperability fixtures').run, /mediasoup/u);
+  const python = job.steps.find(candidate => candidate.uses === 'actions/setup-python@v5');
+  assert.deepEqual(python.with, { 'python-version': '3.11', cache: 'pip', 'cache-dependency-path': 'apps/light/dependencies.json' },
+    'The pinned CMake wheel comes from the pip cache, keyed by the manifest that pins it.');
+  assert.match(step(job, 'Install the compatible CMake series').run, /cmake==\$\{\{ steps\.native-tools\.outputs\.cmake \}\}/u);
 
   const fake = path.join(base, ...binary.split('/'));
   await assert.rejects(verifyWorker({ base }), /ENOENT|Missing mediasoup worker/u);
