@@ -8,6 +8,7 @@ const { root, execute, write } = require('./buildTools.cjs');
 const { workspace } = require('./prepareMacRtc.cjs');
 const { options, sourceEntries, fileHash, rebindSources } = require('./packSources.cjs');
 const { verifyMacSourceInputs, verifyLegalFiles } = require('./checkPackage.cjs');
+const { sourcesKey } = require('../../../../../scripts/native-cache-key.cjs');
 const pins = require('./native-rtc/pins.json');
 
 async function packMacSources(config) {
@@ -42,6 +43,8 @@ async function packMacSources(config) {
       '--untracked-files=normal'], { capture: true }) === '';
     const snapshot = { schemaVersion: 1, platform: 'darwin', version: config.version, sourceCommit, sourceTree,
       publicationReady, architectures, monkySource: `https://github.com/MonkyOrg/Monky/tree/${sourceCommit}`,
+      // Identifies the committed native inputs this archive corresponds to, independently of the commit.
+      nativeSourceKey: sourcesKey('mac', { base: repository }),
       webrtcRevision: pins.repositories.webrtc.commit,
       repositories: pins.repositories, omittedBuildTools: omitted,
       sourceFiles: entries.filter(entry => !entry.endsWith('/')).length,

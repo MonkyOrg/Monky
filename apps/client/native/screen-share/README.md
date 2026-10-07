@@ -152,7 +152,11 @@ os reaproveita e vincula a proveniência ao commit integrado, sem recompilar
 o SDK quando a árvore de fontes e o ambiente conferem. O `.tar.xz` aprovado não
 é recomprimido: seu manifesto interno continua identificando o build do CI.
 O manifesto externo de esquema 2 registra essa identidade em `archiveManifest`
-e a vincula à versão/commit da release, com a mesma árvore Git e o mesmo SHA-256.
+e a vincula à versão/commit da release, com o mesmo SHA-256 e a mesma árvore Git.
+A árvore só pode diferir quando o CI reaproveitou o arquivo de outro commit com
+entradas nativas idênticas: o `nativeSourceKey` recalculado a partir do commit
+publicado precisa ser igual ao do arquivo, e `archiveManifest` mantém a árvore
+em que ele foi empacotado.
 
 ### Backend Windows
 
@@ -778,9 +782,10 @@ compiladas, runtime, CRT ou avisos de terceiros estiverem inconsistentes.
 
 ## Reaproveitamento no CI e na release
 
-O CI executa a suíte DOM desde o início do run, sem esperar o runtime nativo:
-no Windows, em duas partes balanceadas pelo custo medido (`MONKY_DOM_SHARD`);
-no macOS, inteira em outro runner. Os testes continuam sequenciais dentro de
+O CI executa a suíte DOM desde o início do run, sem esperar o runtime nativo,
+em três partes no Windows e duas no macOS, balanceadas pelo custo medido em cada
+sistema (`MONKY_DOM_SHARD`). A suíte da câmera roda como comandos separados,
+idênticos ao script `test:camera`, para poder ser distribuída. Os testes continuam sequenciais dentro de
 cada runner para não disputar fixtures de desktop/áudio, e cada parte executa
 todos os seus comandos e lista todas as falhas antes de reprovar. Os dois checks
 `Build check` aguardam o empacotamento nas duas plataformas, as suítes DOM e a
@@ -820,8 +825,19 @@ aprovado que restaurou do artefato do CI, com a chave registrada no manifesto,
 sem compilar; PRs seguintes com as mesmas entradas o reaproveitam. A release
 nunca restaura binários de cache. Árvore WebRTC, marcadores de propriedade do
 checkout, venv Python e ferramentas extraídas continuam fora de qualquer cache.
-Com o runtime restaurado, o Windows ainda baixa as fontes fixadas
-(`prepare:native-screen --fetch-only`) para gerar o arquivo de fontes.
+
+As fontes correspondentes (o `.tar.xz`, seu manifesto e, no macOS, os avisos
+gerados pelo grafo GN) têm uma chave própria, `sourcesKey`, calculada pelos IDs
+Git das entradas nativas commitadas: fontes, receitas e pins, o README deste
+módulo, os patches mantidos e os textos legais. Ela não depende do toolchain nem
+do sistema, então o gate de publicação em Ubuntu calcula a mesma chave dos jobs
+Windows e macOS. O manifesto do arquivo registra essa chave em
+`nativeSourceKey`. Com a chave no cache, o CI reaproveita o arquivo já
+empacotado, sem baixar o SDK nem recomprimir. Antes de usar, confere o
+SHA-256, o tamanho, a chave e, no macOS, os avisos legais
+(`scripts/native-sources-cache.cjs`). Só sem o cache o Windows baixa as fontes
+fixadas (`prepare:native-screen --fetch-only`) para gerar o arquivo. A release
+verifica e grava o arquivo aprovado no cache da `main`, como faz com o runtime.
 
 O `.tar.xz` de fontes usa `xz --threads=0` quando disponível; no CI ele é
 obrigatório (`MONKY_SOURCE_XZ=required`). É o mesmo fluxo tar, num único stream
@@ -830,6 +846,7 @@ xz dividido em blocos e comprimido em todos os núcleos. Sem `xz`,
 `MONKY_SOURCE_XZ=python` força esse caminho. Inventário e releitura continuam
 verificados. Meça as execuções reais de CI/release antes de afirmar ganho de
 tempo.
+
 ## Licença e fontes correspondentes
 
 Antes de atualizar licenças ou assinar, o empacotamento separa os hard links

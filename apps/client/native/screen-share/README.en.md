@@ -150,7 +150,11 @@ reuses them and binds provenance to the integrated commit without recompiling
 the SDK when the source tree and environment match. The approved `.tar.xz` is
 not recompressed: its embedded manifest still identifies the CI build.
 The schema-2 external manifest records that identity in `archiveManifest` and
-binds it to the release version/commit, with the same Git tree and SHA-256.
+binds it to the release version/commit, with the same SHA-256 and Git tree. The
+tree may differ only when CI reused an archive from another commit with
+identical native inputs: the `nativeSourceKey` recomputed from the published
+commit must match the archive's, and `archiveManifest` keeps the tree it was
+packed from.
 
 ### Windows backend
 
@@ -761,8 +765,9 @@ runtime, CRT or third-party notices are inconsistent.
 ## CI and release reuse
 
 CI runs the DOM suite from the start of the run, without waiting for the native
-runtime: on Windows in two shards balanced by measured cost (`MONKY_DOM_SHARD`),
-on macOS as a whole on another runner. Tests remain sequential within each
+runtime, in three shards on Windows and two on macOS, balanced by the cost
+measured on each system (`MONKY_DOM_SHARD`). The camera suite runs as separate
+commands, identical to the `test:camera` script, so it can be distributed. Tests remain sequential within each
 runner to avoid competing desktop/audio fixtures, and every shard runs all of
 its commands and lists every failure before failing. Both `Build check` checks
 wait for packaging on both platforms, the DOM suites and native validation on
@@ -800,9 +805,20 @@ native code skip compilation. The release saves to the `main` cache the approved
 runtime it restored from the CI artifact, under the key recorded in its
 manifest, without compiling; later PRs with the same inputs reuse it. The release
 never restores binaries from a cache. The WebRTC tree, checkout ownership
-markers, Python venv and extracted tools remain outside every cache. With a
-restored runtime, Windows still fetches the pinned sources
-(`prepare:native-screen --fetch-only`) to build the source archive.
+markers, Python venv and extracted tools remain outside every cache.
+
+Corresponding Source (the `.tar.xz`, its manifest and, on macOS, the notices
+generated from the GN graph) has its own key, `sourcesKey`, computed from the
+Git IDs of the committed native inputs: sources, recipes and pins, this module's
+README, maintained patches and legal texts. It depends on neither the toolchain
+nor the OS, so the Ubuntu publication gate computes the same key as the Windows
+and macOS jobs. The archive manifest records it as `nativeSourceKey`. On a hit,
+CI reuses the archive already packed, without fetching the SDK or recompressing.
+Before use, it checks the SHA-256, size, key and, on macOS, legal notices
+(`scripts/native-sources-cache.cjs`). Only without the cache does Windows fetch
+the pinned sources (`prepare:native-screen --fetch-only`) to build the archive.
+The release verifies and saves the approved archive to the `main` cache, as it
+does for the runtime.
 
 The source `.tar.xz` uses `xz --threads=0` when available; CI requires it
 (`MONKY_SOURCE_XZ=required`). It is the same tar stream in a single xz stream
@@ -810,6 +826,7 @@ split into blocks and compressed on every core. Without `xz`,
 `sourceArchive.py` uses Python's single-threaded `lzma`, and
 `MONKY_SOURCE_XZ=python` forces that path. Inventory and read-back remain
 verified. Measure actual CI/release runs before claiming a speedup.
+
 ## License and Corresponding Source
 
 Before refreshing licenses or signing, packaging detaches the hard links created

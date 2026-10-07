@@ -378,8 +378,8 @@ Todo PR roda o workflow de **CI**. Além do build, ele tem verificações que ba
 o merge e costumam pegar de surpresa quem não as conhece:
 
 - **Build check (win/mac)** — exige o empacotamento com `electron-builder --dir`
-  nas duas plataformas, sem publicar, a suíte DOM (Windows em duas partes e
-  macOS) e a validação nativa no hardware Apple Silicon e Intel. Pega regressão
+  nas duas plataformas, sem publicar, a suíte DOM (três partes no Windows e
+  duas no macOS) e a validação nativa no hardware Apple Silicon e Intel. Pega regressão
   de módulo nativo antes do merge.
 - **Docs traduzidos em sincronia** — toda página em `docs-site/` precisa do par
   PT/EN. Adicionar só um dos idiomas reprova o PR.
@@ -458,7 +458,10 @@ e tarballs, testa o SDK empacotado e assina/publica os arquivos. As fontes nativ
 correspondentes também vêm do CI: o `.tar.xz` é verificado e reutilizado byte a byte,
 sem recompilar o runtime nem recomprimir os fontes. O manifesto externo de esquema
 2 vincula a versão/commit da release ao `archiveManifest` original do CI, que
-permanece dentro do arquivo. Ambos precisam representar a mesma árvore Git.
+permanece dentro do arquivo. Ambos precisam representar a mesma árvore Git, a
+não ser que o CI tenha reaproveitado o arquivo de outro commit com as mesmas
+entradas nativas commitadas: nesse caso, a chave `nativeSourceKey` recalculada a
+partir do commit publicado precisa ser igual à do arquivo.
 
 Artefatos ausentes ou expirados usam o build original com aviso no resumo do
 workflow; promoções de betas anteriores à otimização também são suportadas.

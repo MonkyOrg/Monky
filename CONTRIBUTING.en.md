@@ -381,8 +381,8 @@ Every PR runs the **CI** workflow. Beyond the build, it has checks that block th
 merge and tend to catch people off guard:
 
 - **Build check (win/mac)** — requires packaging with `electron-builder --dir`
-  on both platforms, without publishing, the DOM suite (Windows in two shards and
-  macOS) and native validation on Apple Silicon and Intel hardware. Catches
+  on both platforms, without publishing, the DOM suite (three shards on Windows
+  and two on macOS) and native validation on Apple Silicon and Intel hardware. Catches
   native build regressions before the merge.
 - **Docs traduzidos em sincronia** — every page in `docs-site/` needs its PT/EN
   counterpart. Adding only one of the languages fails the PR.
@@ -465,7 +465,9 @@ native sources also come from CI: the `.tar.xz` is verified and reused byte for
 byte, without recompiling the runtime or recompressing sources. The schema-2
 external manifest binds the release version/commit to the original CI
 `archiveManifest`, which remains inside the archive. Both must describe the
-same Git tree.
+same Git tree, unless CI reused an archive from another commit with the same
+committed native inputs: then the `nativeSourceKey` recomputed from the
+published commit must match the archive's.
 
 Missing or expired artifacts use the original build with a warning in the workflow
 summary; promotions of betas predating the optimization are also supported.

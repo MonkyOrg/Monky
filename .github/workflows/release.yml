@@ -214,6 +214,40 @@ jobs:
             apps/client/native/screen-share/THIRD_PARTY_NOTICES
           key: ${{ steps.restore.outputs.native_cache_key }}
 
+      # Corresponding sources are keyed by their committed native inputs (sourcesKey in
+      # scripts/native-cache-key.cjs), verified the same way before sharing. Artifacts packed before
+      # those keys existed are simply not shared.
+      - name: Verify the approved corresponding sources before sharing them (macOS)
+        id: mac-sources
+        if: needs.version.outputs.reuse_build == 'true' && runner.os == 'macOS'
+        run: node scripts/native-sources-cache.cjs verify mac --legacy-ok
+
+      - name: Share the approved corresponding sources with later CI (macOS)
+        if: needs.version.outputs.reuse_build == 'true' && runner.os == 'macOS' && steps.mac-sources.outputs.key != ''
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            release/monky-native-macos-sources-0.0.0-ci.json
+            release/monky-native-macos-sources-0.0.0-ci.tar.xz
+            apps/client/native/screen-share/licenses
+            apps/client/native/screen-share/LICENSE
+            apps/client/native/screen-share/THIRD_PARTY_NOTICES
+          key: ${{ steps.mac-sources.outputs.key }}
+
+      - name: Verify the approved corresponding sources before sharing them (Windows)
+        id: win-sources
+        if: needs.version.outputs.reuse_build == 'true' && runner.os == 'Windows'
+        run: node scripts/native-sources-cache.cjs verify win --legacy-ok
+
+      - name: Share the approved corresponding sources with later CI (Windows)
+        if: needs.version.outputs.reuse_build == 'true' && runner.os == 'Windows' && steps.win-sources.outputs.key != ''
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            release/monky-native-sources-0.0.0-ci.json
+            release/monky-native-sources-0.0.0-ci.tar.xz
+          key: ${{ steps.win-sources.outputs.key }}
+
       - name: Verify macOS DMG packaging dependencies
         if: runner.os == 'macOS'
         run: node -e "require('dmg-builder/out/dmgLicense.js')"

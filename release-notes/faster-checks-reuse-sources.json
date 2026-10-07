@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "As novas versões do Monky ficam prontas ainda mais rápido: as verificações automáticas se dividem melhor entre as máquinas e reaproveitam o que não mudou, sem pular nenhum teste.",
+  "en": "New Monky versions are ready even sooner: automated checks are split better across machines and reuse what has not changed, without skipping any test."
+}

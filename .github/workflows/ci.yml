@@ -454,7 +454,9 @@ jobs:
           retention-days: 1
 
   # Corresponding sources and notices need the pinned checkout and the GN graph, not compiled
-  # objects, so they run beside compilation. Packaging verifies the binaries against them.
+  # objects, so they run beside compilation. Packaging verifies the binaries against them. They
+  # depend only on the committed native inputs and pins (sources_key, independent of the toolchain),
+  # so a hit returns the exact archive CI already packed, verified again before use.
   mac-sources:
     name: Native macOS corresponding sources
     timeout-minutes: 60
@@ -474,20 +476,50 @@ jobs:
         run: |
           npm ci --ignore-scripts
           npm run postinstall
+      - name: Identify native source inputs
+        id: key
+        run: node scripts/native-cache-key.cjs mac
+      - name: Restore verified corresponding sources
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            release/monky-native-macos-sources-0.0.0-ci.json
+            release/monky-native-macos-sources-0.0.0-ci.tar.xz
+            apps/client/native/screen-share/licenses
+            apps/client/native/screen-share/LICENSE
+            apps/client/native/screen-share/THIRD_PARTY_NOTICES
+          key: ${{ steps.key.outputs.sources_key }}
       - name: Prepare the pinned macOS RTC SDK
+        if: steps.cache.outputs.cache-hit != 'true'
         run: node apps/client/native/screen-share/scripts/prepareMacRtc.cjs
       - name: Generate notices from both GN target graphs
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           for architecture in arm64 x64; do
             node apps/client/native/screen-share/scripts/buildMacRtc.cjs --arch=$architecture --configure
           done
           node apps/client/native/screen-share/scripts/notices.cjs --mac --architectures=arm64,x64
       - name: Package corresponding sources with parallel xz
+        if: steps.cache.outputs.cache-hit != 'true'
         env:
           MONKY_SOURCE_XZ: required
         run: |
           command -v xz >/dev/null || brew install xz
           node apps/client/native/screen-share/scripts/packMacSources.cjs --version=0.0.0-ci --architectures=arm64,x64
+      - name: Verify corresponding sources against this checkout
+        run: node scripts/native-sources-cache.cjs verify mac
+      - name: Save verified corresponding sources
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            release/monky-native-macos-sources-0.0.0-ci.json
+            release/monky-native-macos-sources-0.0.0-ci.tar.xz
+            apps/client/native/screen-share/licenses
+            apps/client/native/screen-share/LICENSE
+            apps/client/native/screen-share/THIRD_PARTY_NOTICES
+          key: ${{ steps.key.outputs.sources_key }}
       - name: Bundle corresponding sources and notices
         run: >-
           tar -cf "$RUNNER_TEMP/mac-native-sources.tar"
@@ -553,6 +585,10 @@ jobs:
           path: .native-screen\downloads
           key: native-screen-archives-v1-ci-windows-x64-${{ hashFiles('apps/client/native/screen-share/scripts/fetchObs.cjs', 'apps/client/native/screen-share/scripts/buildTools.cjs', 'apps/client/native/screen-share/src/vendor/obs/sources.json', 'apps/client/native/screen-share/src/vendor/obs/runtime-inputs.json', 'apps/client/native/screen-share/src/capture/runtime-additions.json') }}
 
+      - name: Select Python for native tooling (Windows)
+        shell: pwsh
+        run: '"PYTHON=$((Get-Command python).Source)" >> $env:GITHUB_ENV'
+
       - name: Identify native runtime inputs and toolchain
         id: key
         run: node scripts/native-cache-key.cjs win
@@ -568,21 +604,27 @@ jobs:
             apps/client/native/screen-share/THIRD_PARTY_NOTICES
           key: ${{ steps.key.outputs.key }}
 
+      # Corresponding sources depend only on the committed native inputs and pins (sources_key).
+      - name: Restore verified corresponding sources (Windows)
+        id: sources
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            release/monky-native-sources-0.0.0-ci.json
+            release/monky-native-sources-0.0.0-ci.tar.xz
+          key: ${{ steps.key.outputs.sources_key }}
+
       - name: Build native screen runtime and corresponding-source inputs (Windows)
         if: steps.cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          $env:PYTHON = (Get-Command python).Source
-          "PYTHON=$env:PYTHON" >> $env:GITHUB_ENV
           $Git = (Get-Command git -CommandType Application | Select-Object -First 1).Source
           npm run prepare:native-screen -- --python="$env:PYTHON" --git="$Git" --jobs=4
 
       - name: Fetch corresponding-source inputs for the cached runtime (Windows)
-        if: steps.cache.outputs.cache-hit == 'true'
+        if: steps.cache.outputs.cache-hit == 'true' && steps.sources.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          $env:PYTHON = (Get-Command python).Source
-          "PYTHON=$env:PYTHON" >> $env:GITHUB_ENV
           $Git = (Get-Command git -CommandType Application | Select-Object -First 1).Source
           npm run prepare:native-screen -- --python="$env:PYTHON" --git="$Git" --fetch-only
 
@@ -606,9 +648,22 @@ jobs:
           key: ${{ steps.key.outputs.key }}
 
       - name: Package reusable corresponding sources (Windows)
+        if: steps.sources.outputs.cache-hit != 'true'
         env:
           MONKY_SOURCE_XZ: required
         run: npm run pack:native-sources -- --version=0.0.0-ci
+
+      - name: Verify corresponding sources against this checkout (Windows)
+        run: node scripts/native-sources-cache.cjs verify win
+
+      - name: Save verified corresponding sources (Windows)
+        if: steps.sources.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            release/monky-native-sources-0.0.0-ci.json
+            release/monky-native-sources-0.0.0-ci.tar.xz
+          key: ${{ steps.key.outputs.sources_key }}
 
       - name: Install FFmpeg for generated voice fixtures
         shell: pwsh

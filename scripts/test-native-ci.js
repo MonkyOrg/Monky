@@ -288,7 +288,8 @@ test('download caches stay download-only; compiled native outputs reuse only exa
     assert.ok(order.every((index, position) => position === 0 || index >= order[position - 1]), `${platform} cache order`);
   }
   const fetch = step(ci.jobs['package-win'], 'Fetch corresponding-source inputs for the cached runtime (Windows)');
-  assert.equal(fetch.if, "steps.cache.outputs.cache-hit == 'true'");
+  assert.equal(fetch.if, "steps.cache.outputs.cache-hit == 'true' && steps.sources.outputs.cache-hit != 'true'",
+    'Pinned sources are fetched only when a cached runtime still needs its source archive packed.');
   assert.match(fetch.run, /npm run prepare:native-screen -- --python="\$env:PYTHON" --git="\$Git" --fetch-only$/mu);
   assert.ok(ci.jobs['package-win'].steps.indexOf(fetch)
     < ci.jobs['package-win'].steps.indexOf(step(ci.jobs['package-win'], 'Package reusable corresponding sources (Windows)')));
@@ -317,8 +318,118 @@ test('download caches stay download-only; compiled native outputs reuse only exa
       'A runtime is shared only right after passing the same acceptance checks as CI.');
     order.push(build.steps.indexOf(verify), build.steps.indexOf(share));
   }
+  const { cachePaths } = require('./native-sources-cache.cjs');
+  for (const [os, platform, id] of [['macOS', 'mac', 'mac-sources'], ['Windows', 'win', 'win-sources']]) {
+    const verify = step(build, `Verify the approved corresponding sources before sharing them (${os})`);
+    assert.equal(verify.id, id);
+    assert.equal(verify.if, `needs.version.outputs.reuse_build == 'true' && runner.os == '${os}'`);
+    assert.equal(verify.run, `node scripts/native-sources-cache.cjs verify ${platform} --legacy-ok`);
+    const share = step(build, `Share the approved corresponding sources with later CI (${os})`);
+    assert.equal(share.uses, 'actions/cache/save@v4');
+    assert.equal(share.if, `needs.version.outputs.reuse_build == 'true' && runner.os == '${os}' && steps.${id}.outputs.key != ''`,
+      'Artifacts packed before source keys existed are not shared.');
+    assert.equal(share.with.key, `\${{ steps.${id}.outputs.key }}`);
+    assert.deepEqual(lines(share.with.path), cachePaths[platform], 'Release seeds exactly the paths CI restores.');
+    assert.equal(build.steps.indexOf(share), build.steps.indexOf(verify) + 1);
+    order.push(build.steps.indexOf(verify), build.steps.indexOf(share));
+  }
   assert.deepEqual(order, order.map((_, index) => build.steps.indexOf(restored) + 1 + index),
     'Verify and seed straight from the restored artifact, before any release step can touch the outputs.');
+  assert.ok(order.every(index => index < build.steps.indexOf(step(build, 'Bind approved corresponding sources to release (Windows)'))
+    && index < build.steps.indexOf(step(build, 'Bind approved corresponding sources to release (macOS)'))),
+  'Sources are shared before rebinding moves them to the release name.');
+});
+
+test('corresponding sources are packed once per committed native inputs and verified before every use', () => {
+  const { cachePaths } = require('./native-sources-cache.cjs');
+  const lines = value => value.trim().split('\n');
+  for (const [job, platform, ids, prepare, pack, verifyName, saveName, restoreName] of [
+    [ci.jobs['mac-sources'], 'mac', { cache: 'cache' }, ['Prepare the pinned macOS RTC SDK', 'Generate notices from both GN target graphs'],
+      'Package corresponding sources with parallel xz', 'Verify corresponding sources against this checkout',
+      'Save verified corresponding sources', 'Restore verified corresponding sources'],
+    [ci.jobs['package-win'], 'win', { cache: 'sources' }, ['Fetch corresponding-source inputs for the cached runtime (Windows)'],
+      'Package reusable corresponding sources (Windows)', 'Verify corresponding sources against this checkout (Windows)',
+      'Save verified corresponding sources (Windows)', 'Restore verified corresponding sources (Windows)'],
+  ]) {
+    const key = job.steps.find(candidate => candidate.id === 'key');
+    assert.equal(key.run, `node scripts/native-cache-key.cjs ${platform}`);
+    const restore = step(job, restoreName);
+    assert.equal(restore.id, ids.cache);
+    assert.equal(restore.uses, 'actions/cache/restore@v4');
+    assert.deepEqual(restore.with, { path: restore.with.path, key: '${{ steps.key.outputs.sources_key }}' },
+      'Only the exact source key may restore an archive; no restore-keys.');
+    assert.deepEqual(lines(restore.with.path), cachePaths[platform]);
+    const miss = `steps.${ids.cache}.outputs.cache-hit != 'true'`;
+    for (const name of [...prepare, pack]) assert.match(step(job, name).if, new RegExp(miss.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')), name);
+    const verify = step(job, verifyName);
+    assert.equal(verify.if, undefined, 'Restored and freshly packed sources pass the same checks.');
+    assert.equal(verify.run, `node scripts/native-sources-cache.cjs verify ${platform}`, 'CI never accepts legacy archives.');
+    const save = step(job, saveName);
+    assert.equal(save.if, miss);
+    assert.deepEqual(save.with, restore.with);
+    const order = [key, restore, step(job, pack), verify, save].map(candidate => job.steps.indexOf(candidate));
+    assert.deepEqual(order, [...order].sort((a, b) => a - b), `${platform} sources cache order`);
+  }
+  const select = step(ci.jobs['package-win'], 'Select Python for native tooling (Windows)');
+  assert.equal(select.if, undefined, 'Source archive tests need Python even when nothing is compiled.');
+  assert.ok(ci.jobs['package-win'].steps.indexOf(select)
+    < ci.jobs['package-win'].steps.indexOf(step(ci.jobs['package-win'], 'Exercise native screen contracts and legal metadata')));
+  for (const file of ['packSources.cjs', 'packMacSources.cjs']) {
+    const packer = fs.readFileSync(path.join(root, 'apps', 'client', 'native', 'screen-share', 'scripts', file), 'utf8');
+    assert.match(packer, /nativeSourceKey: sourcesKey\('(?:win|mac)', \{ base: repository \}\)/u,
+      `${file} must record the committed native inputs its archive corresponds to.`);
+  }
+});
+
+test('the corresponding-source key covers every packed checkout input, is OS-independent and ignores unrelated files', t => {
+  const { sourceInputs, sourcesKey, SOURCES_KEY, inputs } = require('./native-cache-key.cjs');
+  const base = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'monky-sources-key-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const git = (...args) => spawnSync('git', args, { cwd: base, encoding: 'utf8' });
+  git('-c', 'init.templateDir=', 'init', '--quiet');
+  const isFile = entry => /(\.[a-z]+|LICENSE)$/u.test(entry);
+  const write = (relative, text) => {
+    fs.mkdirSync(path.dirname(path.join(base, relative)), { recursive: true });
+    fs.writeFileSync(path.join(base, relative), text);
+  };
+  const commit = message => {
+    git('add', '--all');
+    assert.equal(git('-c', 'user.name=F', '-c', 'user.email=f@example.invalid', '-c', 'commit.gpgsign=false',
+      'commit', '--quiet', '--allow-empty', '-m', message).status, 0);
+  };
+  const all = [...new Set(Object.values(sourceInputs).flat())];
+  // Everything the packers copy from the checkout into the archive or its notices must be in the key.
+  const native = 'apps/client/native/screen-share';
+  const packed = {
+    win: [`${native}/src`, `${native}/scripts`, `${native}/README.md`, `${native}/README.en.md`,
+      'patches/h264-profile-level-id+2.3.3.patch', 'LICENSE', 'scripts/legal.cjs'],
+    mac: [`${native}/src/rtc`, `${native}/src/mac`, `${native}/scripts`, `${native}/README.md`, `${native}/README.en.md`,
+      'LICENSE', 'scripts/legal.cjs'],
+  };
+  for (const platform of ['mac', 'win'])
+    for (const entry of packed[platform]) assert.ok(sourceInputs[platform].includes(entry), `${platform} source key misses ${entry}`);
+  for (const entry of all) write(isFile(entry) ? entry : `${entry}/input.txt`, `original ${entry}\n`);
+  write('apps/client/src/unrelated.ts', 'original');
+  commit('inputs');
+  for (const platform of ['mac', 'win']) {
+    for (const entry of inputs[platform]) assert.ok(sourceInputs[platform].includes(entry), `Sources cover runtime input ${entry}`);
+    const original = sourcesKey(platform, { base });
+    assert.match(original, SOURCES_KEY);
+    write('apps/client/src/unrelated.ts', 'changed'); commit('unrelated');
+    assert.equal(sourcesKey(platform, { base }), original, 'Unrelated commits keep the archive reusable.');
+    write(isFile(sourceInputs[platform][0]) ? sourceInputs[platform][0] : `${sourceInputs[platform][0]}/input.txt`, 'dirty');
+    assert.equal(sourcesKey(platform, { base }), original, 'The key describes committed content; packing requires a clean tree.');
+    git('checkout', '--', '.');
+    for (const entry of sourceInputs[platform]) {
+      const relative = isFile(entry) ? entry : `${entry}/input.txt`;
+      write(relative, 'changed\r\n'); commit(`change ${entry}`);
+      assert.notEqual(sourcesKey(platform, { base }), original, `${entry} must be part of the source key`);
+      write(relative, `original ${entry}\n`); commit(`restore ${entry}`);
+      assert.equal(sourcesKey(platform, { base }), original);
+    }
+  }
+  for (const entry of all) assert.ok(fs.existsSync(path.join(root, ...entry.split('/'))), `Missing source input: ${entry}`);
+  assert.throws(() => sourcesKey('linux', { base }), /mac or win/u);
 });
 
 test('the native cache key changes with every compiled input and toolchain, and ignores unrelated files', t => {
