@@ -61,6 +61,17 @@ if (!process.versions.electron) {
     } });
     const evaluate = (code) => browser.webContents.executeJavaScript(code, true);
     const frames = () => evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+    // Chromium delivers mouse moves aligned to animation frames, so on a slow
+    // runner they can still be queued when the next script runs: wait for the
+    // effect instead of assuming it after a fixed delay.
+    const waitFor = async (expression, timeoutMs = 3000) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (await evaluate(expression)) return true;
+        await frames();
+      }
+      return false;
+    };
     const center = (selector) => evaluate(`(() => {
       const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
       return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2), bottom: Math.round(box.bottom) };
@@ -79,6 +90,7 @@ if (!process.versions.electron) {
         if (step === 5 && midway) await midway();
       }
       browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...to });
+      await waitFor(`!document.querySelector('.server-rail--dragging')`);
       await new Promise(resolve => setTimeout(resolve, 60));
       await frames();
     };
@@ -102,7 +114,9 @@ if (!process.versions.electron) {
       const connected = await center('.server-rail-item.active[data-port="5101"] img');
       const last = await center('.server-rail-item[data-port="5103"]');
       await drag(connected, { x: last.x, y: last.bottom - 4 }, async () => {
+        await check(await waitFor(`!!document.querySelector('.server-rail--dragging')`), 'the drag starts before the repaint');
         await evaluate(`import('/core/EventBus.ts').then(({ appEvents }) => appEvents.emit('community.updated'))`);
+        await frames();
         await check(await evaluate(`!!document.querySelector('.server-rail--dragging .server-rail-item.dragging[data-port="5101"]')`),
           'a repaint during the drag keeps the dragged server marked');
       });
@@ -164,7 +178,15 @@ async function setupRail() {
   serverRailView.connectToSavedServer = async () => { window.connectCalls++; };
   window.railOrder = () => connectionStore.railLayout.flatMap(node => node.type === 'server'
     ? [node.port] : node.children.map(child => `folder:${child.port}`));
-  window.railState = () => ({ order: window.railOrder(), html: document.querySelector('#server-rail').innerHTML.slice(0, 600) });
+  window.railState = () => {
+    const rail = document.querySelector('#server-rail');
+    return {
+      order: window.railOrder(),
+      dragging: rail.classList.contains('server-rail--dragging'),
+      marked: [...rail.querySelectorAll('.dragging')].map(node => node.dataset.port ?? node.dataset.folderId),
+      html: rail.innerHTML.slice(0, 600),
+    };
+  };
   window.createFolder = () => connectionStore.createFolder('Group');
   const { appEvents } = await import('/core/EventBus.ts');
   appEvents.on('connection.saved_servers_changed', () => serverRailView.render());
