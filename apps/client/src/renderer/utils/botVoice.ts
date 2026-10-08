@@ -1,4 +1,4 @@
-import { ProtocolErrorCode, canAccessChannel, type SlashCommand, type UserSummary } from '@monky/shared';
+import { Permission, ProtocolErrorCode, type SlashCommand, type UserSummary } from '@monky/shared';
 import type { NetworkClient } from '../core/NetworkClient';
 import { sessionManager, type ServerSession } from '../core/SessionManager';
 import type { ServerStore } from '../stores/serverStore';
@@ -20,7 +20,7 @@ export function getBotVoiceContext(): BotVoiceContext | null {
   if (session.participants.get(user.sessionId)?.voiceState?.channelId !== channelId) return null;
   const channel = session.serverStore.getChannel(channelId);
   if (!channel || channel.type !== 'VOICE' ||
-      !canAccessChannel(channel, session.serverStore.myPermissions, session.serverStore.getUserRoleIds(user.id), false, user.id)) return null;
+      !session.serverStore.hasPermission(Permission.VIEW_CHANNEL, channelId)) return null;
   return { session, channelId, user };
 }
 

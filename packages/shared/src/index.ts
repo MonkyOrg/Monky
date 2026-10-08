@@ -34,6 +34,7 @@ export * from './protocol.js';
 export * from './validators.js';
 export * from './identity.js';
 export * from './permissions.js';
+export * from './channelTree.js';
 export * from './ipc.js';
 export * from './developmentQa.js';
 export * from './bugReport.js';

@@ -100,4 +100,11 @@ export class SqliteCategoryRepository implements ICategoryRepository {
       orderedIds.forEach((id, position) => this.db.prepare('UPDATE channel_categories SET position = ? WHERE id = ?').run(position, id));
     })();
   }
+
+  async updatePositions(positions: Array<{ categoryId: string; position: number }>): Promise<void> {
+    this.db.transaction(() => {
+      const statement = this.db.prepare('UPDATE channel_categories SET position = ? WHERE id = ?');
+      for (const { categoryId, position } of positions) statement.run(position, categoryId);
+    })();
+  }
 }

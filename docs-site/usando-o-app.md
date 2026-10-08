@@ -10,12 +10,19 @@ Conectar ao servidor e entrar em uma chamada são ações separadas.
 
 Quem possui permissão para gerenciar canais pode arrastar canais para reordenar
 ou mover entre categorias e arrastar o cabeçalho das próprias categorias para
-reordená-las. Durante o arraste, a categoria de destino recebe o mesmo destaque
-tracejado usado ao mover participantes entre canais de voz. Esse contorno
-aparece somente sobre o nome da categoria; sobre os canais, uma linha indica a
-posição exata. Categorias recolhidas também aceitam o canal. Para removê-lo de
-uma categoria, arraste até **Sem categoria**, que aparece no topo e empurra as
-categorias para baixo.
+reordená-las. Canais sem categoria e categorias dividem a mesma ordem, então um
+canal solto pode ficar acima, abaixo ou entre as categorias. Durante o arraste,
+a categoria de destino recebe o mesmo destaque tracejado usado ao mover
+participantes entre canais de voz: soltar em qualquer parte do nome dela coloca
+o canal dentro da categoria. Sobre os canais, uma linha indica a posição exata.
+Categorias recolhidas também aceitam o canal. Para deixar um canal fora de
+qualquer categoria, use as faixas **Sem categoria** que se abrem durante o
+arraste acima das categorias e no fim da lista; a faixa sob o cursor fica
+destacada. Onde já há um canal solto, solte ao lado dele. Servidores ainda não
+atualizados mantêm os canais sem categoria no topo.
+
+Na barra de servidores à esquerda, arraste qualquer servidor, inclusive o que
+está aberto, para mudar a ordem ou para dentro e fora de uma pasta.
 
 ## Fóruns
 
