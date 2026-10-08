@@ -699,26 +699,66 @@ async function runRenderer(MessageType, roster, humanId) {
     check(audio.srcObject.getAudioTracks().length === 1, `${category}: expected one microphone track`);
     check(rtc.mediaRouter.voicePipelines.has(botId), `${category}: missing voice output graph`);
     check(!rtc.mediaRouter.screenAudioPipelines.has(botId), `${category}: unexpected screen graph`);
-    await until(() => !audio.paused && audio.readyState >= 2, `${category}: audio decoder did not play`);
+    await until(() => {
+      const playing = rtc.mediaRouter.getAudioElement(botId);
+      return playing && !playing.paused && playing.readyState >= 2;
+    }, `${category}: audio decoder did not play`);
     // Decode counters alone cannot prove audible audio; tap the actual voice
     // GainNode while the isolated fixture's physical output remains muted.
-    const pipeline = rtc.mediaRouter.voicePipelines.get(botId);
-    const analyser = pipeline.gain.context.createAnalyser();
-    analyser.fftSize = 2048;
-    const silentSink = pipeline.gain.context.createGain();
-    silentSink.gain.value = 0;
-    pipeline.gain.connect(analyser);
-    analyser.connect(silentSink);
-    silentSink.connect(pipeline.gain.context.destination);
-    const samples = new Float32Array(analyser.fftSize);
+    // The route is read live on every use (#766): a renegotiation may hand the
+    // bot a new track mid-assertion, which legitimately rebuilds the element or
+    // the graph, and the product applies deafen and volume to the live ones.
+    // Holding the first ones made the checks inspect a retired route.
+    const liveAudio = () => rtc.mediaRouter.getAudioElement(botId);
+    const livePipeline = () => rtc.mediaRouter.voicePipelines.get(botId);
+    const route = { audio: audio, pipeline: livePipeline(), replaced: 0 };
+    const samples = new Float32Array(2048);
+    let probe = null;
+    const detachProbe = () => {
+      if (!probe) return;
+      try { probe.pipeline.gain.disconnect(probe.analyser); } catch {}
+      probe.analyser.disconnect();
+      probe.silentSink.disconnect();
+      probe = null;
+    };
+    const attachProbe = (pipeline) => {
+      const analyser = pipeline.gain.context.createAnalyser();
+      analyser.fftSize = samples.length;
+      const silentSink = pipeline.gain.context.createGain();
+      silentSink.gain.value = 0;
+      pipeline.gain.connect(analyser);
+      analyser.connect(silentSink);
+      silentSink.connect(pipeline.gain.context.destination);
+      probe = { pipeline, analyser, silentSink };
+    };
+    const followRoute = () => {
+      const audioNow = liveAudio();
+      const pipelineNow = livePipeline();
+      if ((audioNow && audioNow !== route.audio) || (pipelineNow && pipelineNow !== route.pipeline)) {
+        route.replaced++;
+        console.log(`VOICE TEST ${category}: playback route replaced during assertion (${route.replaced}x, ` +
+          `element ${audioNow !== route.audio ? 'replaced' : 'kept'}, graph ${pipelineNow !== route.pipeline ? 'replaced' : 'kept'})`);
+        if (audioNow) route.audio = audioNow;
+        if (pipelineNow) route.pipeline = pipelineNow;
+      }
+      if (route.pipeline && probe?.pipeline !== route.pipeline) {
+        detachProbe();
+        attachProbe(route.pipeline);
+      }
+    };
+    followRoute();
     const rms = () => {
-      analyser.getFloatTimeDomainData(samples);
+      followRoute();
+      probe.analyser.getFloatTimeDomainData(samples);
       return Math.sqrt(samples.reduce((sum, value) => sum + value * value, 0) / samples.length);
     };
+    const routeState = () => {
+      followRoute();
+      return { muted: route.audio.muted, gain: route.pipeline.gain.gain.value, replaced: route.replaced,
+        track: route.audio.srcObject?.getAudioTracks()[0]?.id ?? null };
+    };
     const disposeProbe = () => {
-      try { pipeline.gain.disconnect(analyser); } catch {}
-      analyser.disconnect();
-      silentSink.disconnect();
+      detachProbe();
       audioProbes.delete(disposeProbe);
     };
     audioProbes.add(disposeProbe);
@@ -740,7 +780,7 @@ async function runRenderer(MessageType, roster, humanId) {
       throw new Error(`${error.message}: ${JSON.stringify(lastAudioStats)}`);
     });
     await until(() => rms() > 0.005, `${category}: decoded Opus never reached the voice output graph`).catch(error => {
-      throw new Error(`${error.message}: ${JSON.stringify({ ...lastAudioStats, rms: rms(), context: pipeline.gain.context.state })}`);
+      throw new Error(`${error.message}: ${JSON.stringify({ ...lastAudioStats, rms: rms(), context: route.pipeline.gain.context.state, route: routeState() })}`);
     });
     if (checkActivity) {
       await until(async () => (await syncVoiceState()).voiceState.isSpeaking, `${category}: missing transmission activity`);
@@ -759,11 +799,13 @@ async function runRenderer(MessageType, roster, humanId) {
     rtc.setPeerVolume(botId, 100);
     await until(() => rms() > 0.005, `${category}: per-listener unmute failed to restore current audio`);
     rtc.setDeafened(true);
-    check(audio.muted && rtc.mediaRouter.voicePipelines.get(botId).gain.gain.value === 0,
-      `${category}: bot microphone bypassed voice deafen`);
+    const deafened = routeState();
+    check(deafened.muted && deafened.gain === 0,
+      `${category}: bot microphone bypassed voice deafen: ${JSON.stringify(deafened)}`);
     rtc.setDeafened(false);
-    check(!audio.muted && rtc.mediaRouter.voicePipelines.get(botId).gain.gain.value > 0,
-      `${category}: bot microphone did not restore its voice volume`);
+    const restored = routeState();
+    check(!restored.muted && restored.gain > 0,
+      `${category}: bot microphone did not restore its voice volume: ${JSON.stringify(restored)}`);
     if (checkActivity) {
       const beforeRestriction = await syncVoiceState();
       await request('fixture.restrict', category.includes('rejoin')
@@ -836,7 +878,7 @@ async function runRenderer(MessageType, roster, humanId) {
       check(Math.abs(wallMs - packetMs) < 500, `${category}: RTP clock drift ${wallMs - packetMs} ms: ${JSON.stringify(continuous)}`);
       check(continuous.concealmentRatio < 0.05, `${category}: excessive concealment ${JSON.stringify(continuous)}`);
       check(continuous.decodedSamples > continuousMs * 40 && continuous.silentProbes <= 1,
-        `${category}: generated audio was not continuously decoded`);
+        `${category}: generated audio was not continuously decoded: ${JSON.stringify({ ...continuous, route: routeState() })}`);
       if (checkActivity) {
         // Snapshot before any wire-state synchronization could repair a stale roster.
         const renderer = rendererSpeakingState();
@@ -850,7 +892,8 @@ async function runRenderer(MessageType, roster, humanId) {
       console.log(`VOICE TEST ${category} continuous: ${JSON.stringify(continuous)}`);
     }
     disposeProbe();
-    return { packets: resumed.packetsReceived, decodedSamples, resumeDelayMs, continuous, trackId: audio.srcObject.getAudioTracks()[0].id };
+    return { packets: resumed.packetsReceived, decodedSamples, resumeDelayMs, continuous,
+      trackId: route.audio.srcObject.getAudioTracks()[0].id, routeReplaced: route.replaced };
   }
   const receiveDescription = async (type) => until(async () => {
     const { signals } = await request('fixture.signals');
