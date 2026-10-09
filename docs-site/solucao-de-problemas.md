@@ -23,6 +23,7 @@ voz e vídeo estejam passando; TURN não corrige o endereço de login.
 | O TURN está ligado mas ninguém conecta via relay | As portas podem estar fechadas. Veja o [guia completo de portas](/turn#portas-necessarias). Rode `monky status` — deve aparecer `✔ acessível` |
 | No macOS, o compartilhamento de tela pede autorização mesmo já estando liberado | A permissão ficou presa na versão anterior — veja [macOS: a permissão de tela para de valer após atualizar](#macos-a-permissao-de-tela-para-de-valer-apos-atualizar) |
 | Bot online, mas sem comandos | Confira capacidades aprovadas, permissão do cargo e switch do canal. Veja [Diagnóstico de bots](/bots#quando-algo-nao-funciona) |
+| Bot não inicia, a instalação por URL falha ou um recurso do bot (como jogos) não abre para os outros | Na máquina do bot, rode `<bot> requirements` para ver as portas e configurações e `<bot> doctor` para saber o que falta, inclusive se o servidor consegue acessar as portas públicas. Veja [Portas, configurações e verificação](/bots-distribuicao#portas-configuracoes-e-verificacao) |
 
 ## Antivírus: Avast e similares
 

@@ -14,6 +14,7 @@ const pm2 = require('../dist/cli/pm2');
 const ports = require('../dist/cli/ports');
 const processHelpers = require('../dist/cli/process');
 const prompts = require('../dist/cli/prompts');
+const readiness = require('../dist/cli/manifestReadiness');
 
 function json(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -198,7 +199,7 @@ test('interactive setup defaults to the recommended URL installation for fresh p
   const f = fixture(t);
   withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
   const port = await unusedPort(t);
-  const questions = interactiveAnswers(t, ['', '', String(port), 'bot.example.test', '']);
+  const questions = interactiveAnswers(t, ['', '', String(port), 'bot.example.test', '', 'yes']);
   const lines = captureLogs(t);
   await runBotCli(f.bot, ['setup']);
   const config = cliConfig.readConfig(cliConfig.createCliContext(f.bot));
@@ -217,7 +218,7 @@ test('interactive setup opts into the advanced manual flow and saves a hidden to
   const f = fixture(t);
   withEnv(t, { MONKY_BOT_CLI_HOME: f.state, MONKY_BOT_TOKEN: undefined });
   const token = 'fixture-manual-token';
-  const questions = interactiveAnswers(t, ['2', '', '192.0.2.15:3000', token, 'My Sound Bot']);
+  const questions = interactiveAnswers(t, ['2', '', '192.0.2.15:3000', token, 'My Sound Bot', 'yes']);
   const lines = captureLogs(t);
   const terminal = [];
   const write = t.mock.method(process.stdout, 'write', (chunk) => { terminal.push(String(chunk)); return true; });
@@ -257,7 +258,7 @@ test('interactive marketplace setup retries invalid fields and never requests a 
   const f = fixture(t);
   withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
   const port = await unusedPort(t);
-  const questions = interactiveAnswers(t, ['1', '', 'not-a-port', String(port), '', 'https://bot.example.test', 'bot.example.test', '']);
+  const questions = interactiveAnswers(t, ['1', '', 'not-a-port', String(port), '', 'https://bot.example.test', 'bot.example.test', '', 'yes']);
   const errors = [];
   t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
   captureLogs(t);
@@ -268,7 +269,8 @@ test('interactive marketplace setup retries invalid fields and never requests a 
   assert.equal(config.publicHost, 'bot.example.test');
   assert.equal(config.botName, 'Sound Bot');
   assert.equal(questions.some((question) => /Token do bot|URL do servidor/.test(question)), false);
-  assert.match(questions.at(-1), /Nome do bot/);
+  assert.match(questions.at(-2), /Nome do bot/);
+  assert.match(questions.at(-1), /Autorizar a execução/);
   assert.equal(errors.length, 3);
   assert.equal('botToken' in config, false);
   assert.equal('tokenEnv' in config, false);
@@ -277,7 +279,7 @@ test('interactive marketplace setup retries invalid fields and never requests a 
 test('interactive manual setup retries an invalid URL and token instead of abandoning previous answers', async (t) => {
   const f = fixture(t);
   withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
-  interactiveAnswers(t, ['2', '', 'https://invalid.example.test', '[::1]:3000', '', 'saved-token', '']);
+  interactiveAnswers(t, ['2', '', 'https://invalid.example.test', '[::1]:3000', '', 'saved-token', '', 'yes']);
   const errors = [];
   t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
   captureLogs(t);
@@ -299,7 +301,7 @@ test('interactive reconfiguration preserves the existing token and data director
     serverUrl: 'wss://existing.example.test',
   });
   cliConfig.writeConfig(context, existing);
-  const questions = interactiveAnswers(t, ['s', '', '', '', '', '']);
+  const questions = interactiveAnswers(t, ['s', '', '', '', '', '', 'yes']);
   captureLogs(t);
   await runBotCli(f.bot, ['setup']);
   assert.equal(questions[1], 'Escolha o modo de operação:');
@@ -317,7 +319,7 @@ test('interactive reconfiguration preserves the existing URL installation choice
     publicHost: 'bot.example.test',
   });
   cliConfig.writeConfig(context, existing);
-  const questions = interactiveAnswers(t, ['s', '', '', '', '', '']);
+  const questions = interactiveAnswers(t, ['s', '', '', '', '', '', 'yes']);
   captureLogs(t);
   await runBotCli(f.bot, ['setup']);
   assert.equal(questions[1], 'Escolha o modo de operação:');
@@ -340,7 +342,7 @@ test('closing interactive setup leaves the previous configuration untouched', as
 test('interactive setup skips the mode chooser for manual-only projects', async (t) => {
   const f = fixture(t, { modes: ['manual'] });
   withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
-  const questions = interactiveAnswers(t, ['', '192.0.2.15:3000', 'saved-token', '']);
+  const questions = interactiveAnswers(t, ['', '192.0.2.15:3000', 'saved-token', '', 'yes']);
   captureLogs(t);
   await runBotCli(f.bot, ['setup']);
   const config = cliConfig.readConfig(cliConfig.createCliContext(f.bot));
@@ -425,7 +427,7 @@ test('interactive setup retries an occupied port without changing or stopping it
   withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
   const occupied = await listenOnPort(t);
   const available = await unusedPort(t);
-  const questions = interactiveAnswers(t, ['', '', String(occupied.port), String(available), 'bot.example.test', '']);
+  const questions = interactiveAnswers(t, ['', '', String(occupied.port), String(available), 'bot.example.test', '', 'yes']);
   const errors = [];
   t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
   t.mock.method(pm2, 'findProcess', () => assert.fail('setup must not inspect or stop PM2'));
@@ -842,6 +844,7 @@ test('bot ecosystem uses isolated runner metadata and never embeds token values'
   assert.deepEqual(apps[0].env, {
     MONKY_BOT_CLI_CONFIG_FILE: context.configFile,
     MONKY_BOT_CLI_ENTRY: entry,
+    MONKY_BOT_CLI_PACKAGE_ROOT: context.packageRoot,
     MONKY_BOT_LOCALE: context.locale,
   });
   if (process.platform !== 'win32') {
@@ -964,6 +967,10 @@ for (const foreground of [false, true]) {
     const ensured = t.mock.method(pm2, 'ensurePm2ForStart', () => {});
     const started = t.mock.method(pm2, 'startOrRestart', () => {});
     const saved = t.mock.method(pm2, 'saveProcessList', () => {});
+    const ready = t.mock.method(readiness, 'confirmRuntimeReady', async () => {
+      assert.equal(saved.mock.callCount(), 0, 'PM2 state is saved only after readiness');
+      return { url: `http://bot.example.test:${port}/manifest`, nameMatches: true };
+    });
     const child = new EventEmitter();
     child.kill = () => true;
     const spawned = t.mock.method(processHelpers, 'spawnCommand', () => {
@@ -978,6 +985,7 @@ for (const foreground of [false, true]) {
     assert.equal(ensured.mock.callCount(), foreground ? 0 : 1);
     assert.equal(started.mock.callCount(), foreground ? 0 : 1);
     assert.equal(saved.mock.callCount(), foreground ? 0 : 1);
+    assert.equal(ready.mock.callCount(), foreground ? 0 : 1);
     if (!foreground) {
       assert.ok(lines.includes(`Manifest: http://bot.example.test:${port}/manifest`));
       assert.deepEqual(started.mock.calls[0].arguments, [context, context.botEcosystemFile]);
@@ -996,11 +1004,36 @@ test('starting an already managed bot is idempotent even while its port is occup
   t.mock.method(pm2, 'findProcess', () => ({ pid: 123, pm2_env: { status: 'online' } }));
   t.mock.method(pm2, 'ensurePm2ForStart', () => assert.fail('must not launch a second instance'));
   t.mock.method(pm2, 'startOrRestart', () => assert.fail('must not restart'));
+  const ready = t.mock.method(readiness, 'confirmRuntimeReady', async (...args) => {
+    assert.equal(args[4], false, 'an online process is verified once, without waiting');
+    return { url: `http://localhost:${occupied.port}/manifest`, nameMatches: true };
+  });
   const lines = captureLogs(t);
   await runBotCli(f.bot, ['start']);
   assert.match(lines.join('\n'), /rodando/);
-  assert.doesNotMatch(lines.join('\n'), /Manifest:/);
+  assert.match(lines.join('\n'), /Manifest verificado nesta máquina/);
+  assert.equal(ready.mock.callCount(), 1);
   assert.equal(occupied.server.listening, true);
+});
+
+test('an online process whose manifest does not answer as this bot is recreated and verified again', async (t) => {
+  const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
+  const context = cliConfig.createCliContext(f.bot);
+  cliConfig.writeConfig(context, cliConfig.marketplaceConfig(context, { servePort: await unusedPort(t) }));
+  const commands = mockManagedProcess(t, context, () => {});
+  let attempts = 0;
+  t.mock.method(readiness, 'confirmRuntimeReady', async () => {
+    if (++attempts === 1) throw new readiness.ManifestReadinessError('fixture manifest is not this bot');
+    return { url: 'http://localhost/manifest', nameMatches: true };
+  });
+  const lines = captureLogs(t);
+  await runBotCli(f.bot, ['start']);
+  const operations = commands.map((args) => args[0]);
+  assert.equal(attempts, 2);
+  assert.ok(operations.indexOf('stop') < operations.indexOf('startOrRestart'));
+  assert.ok(operations.indexOf('startOrRestart') < operations.lastIndexOf('save'));
+  assert.match(lines.join('\n'), /Recriando somente o processo deste perfil/);
 });
 
 test('marketplace restart stops only its managed process before probing and keeps its keys', async (t) => {
@@ -1012,6 +1045,7 @@ test('marketplace restart stops only its managed process before probing and keep
   cliConfig.writeConfig(context, config);
   const identity = keys.loadOrCreateBotKeys(config.botDir);
   const commands = mockManagedProcess(t, context, () => own.server.close());
+  t.mock.method(readiness, 'confirmRuntimeReady', async () => null);
   const lines = captureLogs(t);
 
   await runBotCli(f.bot, ['restart']);
@@ -1033,6 +1067,7 @@ test('fresh restart of a stopped marketplace bot checks the free port and recrea
   cliConfig.writeConfig(context, config);
   const identity = keys.loadOrCreateBotKeys(config.botDir);
   const commands = mockManagedProcess(t, context, () => assert.fail('the bot is already stopped'), 'stopped');
+  t.mock.method(readiness, 'confirmRuntimeReady', async () => null);
   captureLogs(t);
 
   await runBotCli(f.bot, ['restart', '--fresh']);

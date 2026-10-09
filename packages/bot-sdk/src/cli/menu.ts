@@ -1,15 +1,41 @@
 import type { CliContext } from './config';
 import { readConfig, validateTokenEnv } from './config';
 import { askCliChoice, askCliText, askCliValue, type CliChoice } from './prompts';
-import { cliText, languageCommand } from './locale';
+import { CliError, cliText, languageCommand } from './locale';
 import { configCommand, logsCommand, restartCommand, startCommand, statusCommand, stopCommand } from './commands/lifecycle';
 import { setupCommand } from './commands/setup';
 import { autoUpdateCommand, updateCommand } from './commands/update';
+import { consentCommand } from './consent';
+import { configEnvCommand, declaredVariables, printDeclaredVariables, readProfileEnvironment } from './profileEnvironment';
+import { requirementsCommand } from './requirementsView';
 import { updateSourceConfigCommand } from './updateConfiguration';
 import { updateCredentialCommand } from './updateCredentials';
 
 function choice(context: CliContext, value: string, pt: string, en: string): CliChoice<string> {
   return { value, label: cliText(context.locale, pt, en) };
+}
+
+async function variablesMenu(context: CliContext): Promise<void> {
+  const variables = declaredVariables(context.project.definition.requirements);
+  while (true) {
+    printDeclaredVariables(context);
+    if (!variables.length) return;
+    const saved = readProfileEnvironment(context.homeDir);
+    const selected = await askCliChoice(context.locale, cliText(context.locale, 'Configuração > Variáveis do bot', 'Configuration > Bot variables'), [
+      ...variables.map((variable) => ({
+        value: variable.name,
+        label: `${variable.name}${variable.name in saved ? cliText(context.locale, ' (salva)', ' (saved)') : ''}`,
+      })),
+      choice(context, 'back', 'Voltar', 'Back'),
+    ]);
+    if (selected === 'back') return;
+    const operation = await askCliChoice(context.locale, selected, [
+      choice(context, 'set', 'Definir valor', 'Set value'),
+      ...(selected in saved ? [choice(context, 'unset', 'Remover valor salvo', 'Remove saved value')] : []),
+      choice(context, 'back', 'Voltar', 'Back'),
+    ]);
+    if (operation !== 'back') await configEnvCommand(context, [operation, selected]);
+  }
 }
 
 async function updatesMenu(context: CliContext): Promise<void> {
@@ -95,6 +121,8 @@ export async function configurationMenu(context: CliContext): Promise<void> {
       choice(context, 'show', 'Mostrar configuração (segredos ocultos)', 'Show configuration (secrets hidden)'),
       choice(context, 'setup', 'Configurar conexão e identidade', 'Configure connection and identity'),
       choice(context, 'edit', 'Alterar uma configuração', 'Change a setting'),
+      choice(context, 'env', 'Variáveis do bot', 'Bot variables'),
+      choice(context, 'consent', 'Autorização de quem hospeda', 'Host operator authorization'),
       choice(context, 'language', 'Idioma / Language', 'Idioma / Language'),
       choice(context, 'updates', 'Atualizações', 'Updates'),
       choice(context, 'back', 'Voltar', 'Back'),
@@ -104,6 +132,8 @@ export async function configurationMenu(context: CliContext): Promise<void> {
     else if (action === 'setup') await setupCommand(context, []);
     else if (action === 'language') await languageCommand(context, []);
     else if (action === 'updates') await updatesMenu(context);
+    else if (action === 'env') await variablesMenu(context);
+    else if (action === 'consent') await consentCommand(context, [], readConfig(context), true);
     else {
       const config = readConfig(context);
       if (!config) { await setupCommand(context, []); continue; }
@@ -133,6 +163,8 @@ export async function botCliMenu(context: CliContext): Promise<void> {
       choice(context, 'setup', 'Configurar bot', 'Set up bot'), choice(context, 'start', 'Iniciar', 'Start'),
       choice(context, 'stop', 'Parar', 'Stop'), choice(context, 'restart', 'Reiniciar', 'Restart'),
       choice(context, 'status', 'Estado do bot', 'Bot status'), choice(context, 'logs', 'Logs recentes', 'Recent logs'),
+      choice(context, 'doctor', 'Verificar se o bot pode operar (doctor)', 'Check whether the bot can operate (doctor)'),
+      choice(context, 'requirements', 'Portas e configurações necessárias', 'Required ports and settings'),
       choice(context, 'config', 'Configuração', 'Configuration'), choice(context, 'language', 'Idioma / Language', 'Idioma / Language'),
       choice(context, 'exit', 'Sair do menu (mantém o bot)', 'Exit menu (keep the bot running)'),
     ]);
@@ -143,6 +175,15 @@ export async function botCliMenu(context: CliContext): Promise<void> {
     else if (action === 'restart') await restartCommand(context, []);
     else if (action === 'status') statusCommand(context, []);
     else if (action === 'logs') logsCommand(context, ['--no-follow']);
+    else if (action === 'doctor') {
+      const { doctorCommand } = await import('./commands/doctor');
+      try {
+        await doctorCommand(context, []);
+      } catch (error: unknown) {
+        if (!(error instanceof CliError)) throw error;
+        console.error(cliText(context.locale, error.portuguese, error.english));
+      }
+    } else if (action === 'requirements') requirementsCommand(context, [], readConfig(context));
     else if (action === 'config') await configurationMenu(context);
     else await languageCommand(context, []);
   }

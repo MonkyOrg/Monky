@@ -178,6 +178,7 @@ import { ChatService } from '../../application/services/ChatService';
 import { PermissionService } from '../../application/services/PermissionService';
 import { RoleService } from '../../application/services/RoleService';
 import { BotService } from '../../application/services/BotService';
+import { BotDiagnosticService } from '../../application/services/BotDiagnosticService';
 import { BotPermissionError } from '../../application/services/BotPermissionService';
 import { BOT_CHAT_EVENTS, botMessageCapabilities } from './botCapabilityPolicy';
 import { BotSettingsError, BotSettingsService } from '../../application/services/BotSettingsService';
@@ -305,6 +306,7 @@ export class WebSocketServer {
   private voicePresenceSync: Promise<void> = Promise.resolve();
   /** Last "ask to join" per requester/host pair, for the spam guard (#675). */
   private botInteractions: BotInteractionHandler;
+  private readonly botDiagnostics?: BotDiagnosticService;
   private botLocalExecution: BotLocalExecutionService<BotInteractionSession>;
   private botSelectors?: BotSelectorHandler;
   private botScreens?: BotScreenHandler;
@@ -348,6 +350,7 @@ export class WebSocketServer {
     private readonly pollService?: NativePollService,
     private readonly recentSoundCache?: RecentSoundCacheService,
   ) {
+    if (botService) this.botDiagnostics = new BotDiagnosticService(botService, rateLimiter);
     this.dmRelay = new DmRelayService<ClientSession>({
       isCurrent: (session) => this.isCurrentSession(session),
       send: (session, message) => this.send(session.ws, message),
@@ -791,6 +794,13 @@ export class WebSocketServer {
 
     if (type === MessageType.AUTH_CHALLENGE_RESPONSE) {
       await this.handleAuthChallengeResponse(session, payload as AuthChallengeResponsePayload, requestId);
+      return;
+    }
+
+    // Pre-authentication: a separate connection used by `<bot> doctor`, so it
+    // never creates, replaces or binds a bot session.
+    if (type === MessageType.BOT_DIAGNOSTIC) {
+      await this.handleBotDiagnostic(session, payload, requestId);
       return;
     }
 
@@ -1634,6 +1644,27 @@ export class WebSocketServer {
   }
 
   // ── Bot authentication (token-based, no challenge) ───────────────────────
+  private async handleBotDiagnostic(session: ClientSession, payload: unknown, requestId?: string): Promise<void> {
+    if (session.user) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Use uma conexão própria, sem autenticação, para o diagnóstico.', requestId);
+      return;
+    }
+    if (!this.botDiagnostics) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'Este servidor não aceita bots.', requestId);
+      return;
+    }
+    const outcome = await this.botDiagnostics.diagnose(payload, session.ip);
+    if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
+    if (outcome.kind === 'invalid') {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Diagnóstico de bot inválido.', requestId);
+    } else if (outcome.kind === 'rate_limited') {
+      Logger.security(`Bot diagnostic rate limit reached for ${session.ip}`);
+      this.sendError(session.ws, ProtocolErrorCode.AUTH_RATE_LIMITED, 'Muitas tentativas de conexão. Aguarde um minuto.', requestId);
+    } else {
+      this.send(session.ws, { type: MessageType.BOT_DIAGNOSTIC_RESULT, requestId, payload: outcome.result });
+    }
+  }
+
   private async handleBotAuth(
     session: ClientSession,
     payload: AuthConnectPayload,

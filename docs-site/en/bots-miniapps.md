@@ -114,7 +114,8 @@ opening again shows the notice. Confirming an opening cannot bypass permissions
 denied by the administrator or confirm for other participants. Local tool execution
 retains its own confirmations on the executing computer.
 
-The operator hosting MonkyBot separately consents to execution on their
+The operator hosting a bot with the SDK runtime CLI separately
+[consents to execution](/en/bots-distribuicao#consentimento-de-quem-hospeda) on their
 machine/VPS. This consent grants no capabilities on Monky servers and does not
 create an operating-system sandbox.
 
@@ -138,5 +139,11 @@ a child iframe when the app needs to retain the bridge. Popups and navigation
 of Monky's main window remain blocked. Origin storage is cleared when the view closes.
 
 Authenticate external connections through an action received by the bot; never trust a browser-supplied `userId` or publish tokens in shared state. Close connections, Workers, audio, and timers when leaving the view. If an app relies on an external service, check its availability and show an explicit error before starting the activity.
+
+When the bot itself serves the miniapp's resources from its own port, declare it
+in [`monkyBot.requirements`](/en/bots-distribuicao#portas-configuracoes-e-verificacao)
+(usually `exposure: "public"` and `when: "on-demand"`) and call
+`handleReachabilityProbe(request, response)` at the start of that HTTP handler.
+The operator then sees which port to open, and `doctor` can prove it is reachable.
 
 Control-envelope limits are 128 KiB of initial HTML, 64 KiB of state, and 8 KiB per action; JSON allows up to 12 levels and 8,192 nodes. There may be up to four miniapps per voice room, 16 per bot, and 64 per server, with rate limits and action deduplication. They live in memory and are removed on bot restart/disconnection, loss of room authorization, or authorized termination. Leaving the room, even emptying it, does not automatically delete state. Game expiry belongs to the bot. If you persist games, persist their terminal status too: a bot restart must not restore an explicitly ended game.

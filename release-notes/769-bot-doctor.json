@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Quem hospeda bots sabe o que abrir e configurar: requirements lista as portas e configurações de cada bot, e doctor verifica se o bot pode operar, até pedindo ao servidor Monky que teste as portas públicas de fora. O start só é confirmado quando o bot responde.",
+  "en": "Bot hosts now know what to open and configure: requirements lists each bot's ports and settings, and doctor checks whether the bot can operate, even asking the Monky server to test its public ports from outside. Start is confirmed only once the bot answers."
+}

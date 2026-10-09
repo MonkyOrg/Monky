@@ -16,12 +16,66 @@ import {
   writeUpdaterEcosystem,
   type Pm2Process,
 } from '../pm2';
-import { compareVersions } from '../updateReleases';
+import { compareVersions, readPackageManifestFromTarball } from '../updateReleases';
 import { configuredUpdateSource, withUpdateCandidate } from '../updateSources';
 import { projectForUpdates } from '../updateConfiguration';
 import { updateEnvironment } from '../updateCredentials';
 import { CliError, cliText } from '../locale';
 import { createUpdateProgressReporter } from '../updateProgress';
+import {
+  candidateHostConsent, HOST_CONSENT_ENV, hostAccessNotice, hostConsentFingerprint, hostConsentStatus, writeHostConsent,
+} from '../consent';
+import { updateRestartEnvironment } from '../profileEnvironment';
+import type { BotRequirements } from '../../tooling/requirements';
+
+class UpdateDeferred extends Error {}
+
+interface CandidateConsent {
+  fingerprint: string;
+  requirements?: BotRequirements;
+  /** Set when the operator approved the new access during this update. */
+  approved: boolean;
+}
+
+/**
+ * A release that changes the declared host access is installed only after the
+ * operator approves it; unattended updates skip it so the running bot is kept.
+ */
+async function reviewCandidateConsent(
+  context: CliContext, config: BotConfig | null, file: string, assumeYes: boolean,
+): Promise<CandidateConsent> {
+  const candidate = candidateHostConsent(readPackageManifestFromTarball(file).monkyBot);
+  const result: CandidateConsent = {
+    fingerprint: candidate.fingerprint, approved: false,
+    ...(candidate.definition?.requirements ? { requirements: candidate.definition.requirements } : {}),
+  };
+  if (!config) return result;
+  const status = hostConsentStatus(context.homeDir, config.botDir, candidate.fingerprint);
+  if (status.ok && (status.state !== 'legacy' || candidate.fingerprint === hostConsentFingerprint(context.project.definition))) {
+    return result;
+  }
+  const text = (pt: string, en: string): string => cliText(context.locale, pt, en);
+  if (assumeYes) {
+    console.log(text(
+      `A nova versão altera os acessos que o bot usa nesta máquina e precisa da sua autorização. Ela não foi instalada; o bot atual continua rodando. ` +
+      `Execute "${context.cliName} update" em um terminal para revisar, ou defina ${HOST_CONSENT_ENV}=${candidate.fingerprint} no ambiente da atualização.`,
+      `The new version changes the access the bot uses on this machine and needs your authorization. It was not installed; the current bot keeps running. ` +
+      `Run "${context.cliName} update" in a terminal to review it, or set ${HOST_CONSENT_ENV}=${candidate.fingerprint} in the update environment.`));
+    throw new UpdateDeferred();
+  }
+  console.log(text('A nova versão altera os acessos que o bot usa nesta máquina:', 'The new version changes the access the bot uses on this machine:'));
+  if (candidate.definition) {
+    console.log(hostAccessNotice(context.locale, context.displayName, config.botDir, candidate.definition, context.pm2Home));
+  } else {
+    console.log(text('Esta versão do CLI não consegue exibir a nova declaração. Para atualizar, instale o pacote manualmente e revise os acessos com consent antes de reiniciar.',
+      'This CLI version cannot display the new declaration. To update, install the package manually and review the access with consent before restarting.'));
+  }
+  if (!candidate.definition || !(await promptYesNo(text('Autorizar esses acessos e instalar?', 'Allow this access and install?'), false, context.locale))) {
+    console.log(text('Atualização não instalada; o bot atual continua rodando.', 'Update not installed; the current bot keeps running.'));
+    throw new UpdateDeferred();
+  }
+  return { ...result, approved: true };
+}
 
 function promptYesNo(question: string, defaultYes: boolean, locale: BotLocale): Promise<boolean> {
   const hint = defaultYes ? cliText(locale, '[S/n]', '[Y/n]') : cliText(locale, '[s/N]', '[y/N]');
@@ -116,7 +170,9 @@ function verifyInstalledRelease(context: CliContext, expectedVersion: string): v
   }
 }
 
-function restartInstalledCli(context: CliContext, config: BotConfig, runningProcess: Pm2Process): void {
+function restartInstalledCli(
+  context: CliContext, config: BotConfig, runningProcess: Pm2Process, nextRequirements?: BotRequirements,
+): void {
   let wrapper: string;
   try {
     const root = fs.realpathSync(context.packageRoot);
@@ -130,7 +186,11 @@ function restartInstalledCli(context: CliContext, config: BotConfig, runningProc
       'O pacote foi atualizado, mas o novo CLI não está disponível. O bot não foi reiniciado.',
       'The package was updated, but the new CLI is unavailable. The bot was not restarted.'));
   }
-  const env: NodeJS.ProcessEnv = { ...process.env, MONKY_BOT_LOCALE: context.locale };
+  // Declared variables follow the managed bot process, never the updater's older copies.
+  const runningEnv = runningProcess.pm2_env?.env ?? {};
+  let env: NodeJS.ProcessEnv = updateRestartEnvironment(context.project.definition.requirements,
+    { ...process.env, MONKY_BOT_LOCALE: context.locale }, runningEnv);
+  if (nextRequirements) env = updateRestartEnvironment(nextRequirements, env, runningEnv);
   if (config.mode === 'manual' && config.tokenEnv !== undefined && env[config.tokenEnv] === undefined) {
     // The shell that originally started PM2 may no longer exist. Recover only
     // the declared credential, without copying unrelated managed secrets.
@@ -199,27 +259,36 @@ export async function updateCommand(context: CliContext, args: string[]): Promis
 
       requireExternalRuntimeData(context);
       const runningProcess = findProcess(context);
-      await latest.withVerifiedArchive((file) => {
-        progress.report({ stage: 'installing' });
-        try {
-          runNpm(['install', '-g', '--ignore-scripts', '--offline', '--no-audit', '--no-fund', file], {
-            stdio: 'pipe',
-            timeout: 300_000,
-          });
-        } catch {
-          // npm diagnostics can contain environment credentials or authenticated registry URLs.
-          throw new CliError('A instalação offline com npm falhou. O bot em execução não foi reiniciado.',
-            'The offline npm installation failed. The running bot was not restarted.');
-        }
-      });
+      const profile = readConfig(context);
+      let consent: CandidateConsent | undefined;
+      try {
+        await latest.withVerifiedArchive(async (file) => {
+          consent = await reviewCandidateConsent(context, profile, file, options.assumeYes);
+          progress.report({ stage: 'installing' });
+          try {
+            runNpm(['install', '-g', '--ignore-scripts', '--offline', '--no-audit', '--no-fund', file], {
+              stdio: 'pipe',
+              timeout: 300_000,
+            });
+          } catch {
+            // npm diagnostics can contain environment credentials or authenticated registry URLs.
+            throw new CliError('A instalação offline com npm falhou. O bot em execução não foi reiniciado.',
+              'The offline npm installation failed. The running bot was not restarted.');
+          }
+        });
+      } catch (error: unknown) {
+        if (error instanceof UpdateDeferred) return;
+        throw error;
+      }
       verifyInstalledRelease(context, latest.version);
+      if (consent?.approved && profile) writeHostConsent(context.homeDir, 'accepted', consent.fingerprint, profile.botDir);
       console.log(text(`Atualizado para ${latest.version}.`, `Updated to ${latest.version}.`));
       if (runningProcess?.pm2_env?.status === 'online') {
         const config = readConfig(context);
         if (!config) throw new CliError('O pacote foi atualizado, mas a configuração desapareceu antes do reinício.',
           'The bot package was updated, but the config disappeared before the process could be restarted.');
         progress.report({ stage: 'restarting' });
-        restartInstalledCli(context, config, runningProcess);
+        restartInstalledCli(context, config, runningProcess, consent?.requirements);
         console.log(text('Processo reiniciado com a mesma configuração.', 'Process restarted with the same configuration.'));
       }
     }, updateEnvironment(context, project), progress.report);

@@ -4,6 +4,11 @@ import { CliError, cliErrorMessage, cliText } from '../locale';
 import { askCliChoice, askCliText } from '../prompts';
 import { assertManifestPortAvailable } from '../ports';
 import {
+  HOST_CONSENT_ENV, hostAccessNotice, hostConsentFingerprint, hostConsentStatus, readHostConsent, reviewHostConsent,
+  writeHostConsent,
+} from '../consent';
+import { printRequirements } from '../requirementsView';
+import {
   ANSI,
   color,
   DEFAULT_MANUAL_SERVER_URL,
@@ -133,6 +138,35 @@ function setupWillOverwrite(context: CliContext, existing: BotConfig | null, ass
     `A config already exists at ${context.configFile}. Re-run with --yes to replace it.`);
 }
 
+/** True when the operator already approved exactly these accesses for this directory. */
+function consentAlreadyGiven(context: CliContext, botDir: string): boolean {
+  const status = hostConsentStatus(context.homeDir, botDir, hostConsentFingerprint(context.project.definition));
+  return status.ok && (status.state === 'accepted' || status.state === 'environment');
+}
+
+/**
+ * Non-interactive setup never approves on its own: an explicit matching
+ * MONKY_HOST_CONSENT records the approval, otherwise the profile stays pending.
+ * A legacy profile (config without a consent file) keeps running as before.
+ */
+function recordNonInteractiveConsent(context: CliContext, existing: BotConfig | null, config: BotConfig): void {
+  const text = (pt: string, en: string): string => cliText(context.locale, pt, en);
+  const fingerprint = hostConsentFingerprint(context.project.definition);
+  if (process.env[HOST_CONSENT_ENV] === fingerprint) {
+    writeHostConsent(context.homeDir, 'accepted', fingerprint, config.botDir);
+    console.log(text(`Consentimento registrado por ${HOST_CONSENT_ENV}.`, `Consent recorded through ${HOST_CONSENT_ENV}.`));
+    return;
+  }
+  if (consentAlreadyGiven(context, config.botDir) || (existing && !readHostConsent(context.homeDir))) return;
+  writeHostConsent(context.homeDir, 'pending', fingerprint, config.botDir);
+  console.log(hostAccessNotice(context.locale, context.displayName, config.botDir, context.project.definition, context.pm2Home));
+  console.log(text(
+    `O bot só inicia depois da sua confirmação: "${context.cliName} consent" em um terminal, ` +
+    `"${context.cliName} consent --accept ${fingerprint}" ou ${HOST_CONSENT_ENV}=${fingerprint} no ambiente do serviço.`,
+    `The bot only starts after your confirmation: "${context.cliName} consent" in a terminal, ` +
+    `"${context.cliName} consent --accept ${fingerprint}" or ${HOST_CONSENT_ENV}=${fingerprint} in the service environment.`));
+}
+
 export async function setupCommand(context: CliContext, args: string[]): Promise<void> {
   const text = (pt: string, en: string): string => cliText(context.locale, pt, en);
   const existing = readConfig(context);
@@ -157,6 +191,8 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
       console.log(text(`Defina ${config.tokenEnv} no ambiente antes de executar ${context.cliName} start.`,
         `Set ${config.tokenEnv} in the environment before running ${context.cliName} start.`));
     }
+    recordNonInteractiveConsent(context, existing, config);
+    printRequirements(context, config);
     return;
   }
 
@@ -266,7 +302,18 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
       await assertManifestPortAvailable(config.servePort, context.cliName, undefined, context.locale);
     }
     if (closed) throw new Error(text(SETUP_CANCELLED_MESSAGE, 'Setup cancelled; the configuration was not changed.'));
+    const approve = !consentAlreadyGiven(context, config.botDir);
+    if (approve) {
+      console.log();
+      if (!await reviewHostConsent(context.locale, context.displayName, config.botDir, context.project.definition, context.pm2Home)) {
+        console.log(text('Execução não autorizada. A configuração não foi alterada e o bot não foi iniciado.',
+          'Execution not authorized. The configuration was not changed and the bot was not started.'));
+        return;
+      }
+    }
+    if (closed) throw new Error(text(SETUP_CANCELLED_MESSAGE, 'Setup cancelled; the configuration was not changed.'));
     writeConfig(context, config);
+    if (approve) writeHostConsent(context.homeDir, 'accepted', hostConsentFingerprint(context.project.definition), config.botDir);
     console.log();
     console.log(color(text('Configuração salva!', 'Configuration saved!'), ANSI.green));
     console.log(text(`Configuração salva em ${context.configFile}.`, `Configuration saved to ${context.configFile}.`));
@@ -275,8 +322,11 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
         `Set ${config.tokenEnv} in the environment before running ${context.cliName} start.`));
     }
     console.log();
+    printRequirements(context, config);
+    console.log();
     console.log(color(text('Próximos passos:', 'Next steps:'), ANSI.bold));
     console.log(text(`  ${context.cliName} start    — Inicia o bot em background`, `  ${context.cliName} start    — Start the bot in the background`));
+    console.log(text(`  ${context.cliName} doctor   — Verifica se o bot pode operar`, `  ${context.cliName} doctor   — Check whether the bot can operate`));
     console.log(text(`  ${context.cliName} status   — Verifica o estado`, `  ${context.cliName} status   — Check the status`));
     console.log(text(`  ${context.cliName} logs     — Exibe os logs`, `  ${context.cliName} logs     — Show the logs`));
   } finally {

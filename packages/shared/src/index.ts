@@ -59,6 +59,7 @@ export * from './localExecution.js';
 export * from './localExecutionProtocol.js';
 export * from './botPermissions.js';
 export * from './protocolCompatibility.js';
+export * from './botDiagnostics.js';
 export * from './messageBlocks.js';
 export * from './nativePolls.js';
 export * from './nativeLiveForms.js';
