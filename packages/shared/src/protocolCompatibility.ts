@@ -16,6 +16,7 @@ import { PROTOCOL_VERSION } from './constants.js';
 // channel-tree-order: categories and loose channels share one root order, sent as one CHANNEL_REORDER with categoryId null.
 // poll-voters: polls carry anonymity and voters, votes can be withdrawn; other clients receive the earlier poll shape.
 // poll-edit: the creator or a server manager may change an open poll; reset answers receive new ids.
+// Protocol 37 adds the pre-authentication BOT_DIAGNOSTIC; older servers answer it as a malformed message.
 export const MIN_CLIENT_PROTOCOL = 35;
 export const MIN_BOT_PROTOCOL = 24;
 export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'channel-tree-order', 'poll-voters', 'poll-edit'] as const;

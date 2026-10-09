@@ -1,7 +1,14 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { readConfigFile, type BotConfig } from './config';
+import { normalizeBotLocale } from '@monky/shared';
+import { defaultBotName, readConfigFile, type BotConfig } from './config';
+import { assertHostConsent } from './consent';
 import { keyPaths, loadBotKeys } from './keys';
+import { cliErrorMessage } from './locale';
+import { profileRuntimeValues, readProfileEnvironment } from './profileEnvironment';
+import { createReachabilityIdentity, setRuntimeBotIdentity } from '../reachability';
+import { loadBotProject, type BotProject } from '../tooling/config';
 
 export interface RuntimeEnvironmentPlan {
   values: Record<string, string>;
@@ -19,9 +26,11 @@ function requiredEnvironmentValue(name: string, env: NodeJS.ProcessEnv = process
 export function createRuntimeEnvironment(
   config: BotConfig,
   publicKeyHex: string,
-  inheritedEnv: NodeJS.ProcessEnv = process.env
+  inheritedEnv: NodeJS.ProcessEnv = process.env,
+  profileValues: Record<string, string> = {},
 ): RuntimeEnvironmentPlan {
   const values: Record<string, string> = {
+    ...profileValues,
     MONKY_BOT_PUBLIC_KEY: publicKeyHex,
     MONKY_BOT_NAME: config.botName,
   };
@@ -44,12 +53,38 @@ export function createRuntimeEnvironment(
   return { values, clear: ['MONKY_SERVER_URL', 'MONKY_BOT_TOKEN'] };
 }
 
+/** Finds the installed bot package; ecosystems written before 37 do not name it. */
+function runtimeProject(entry: string, env: NodeJS.ProcessEnv): BotProject {
+  if (env.MONKY_BOT_CLI_PACKAGE_ROOT) return loadBotProject(env.MONKY_BOT_CLI_PACKAGE_ROOT);
+  let directory = path.dirname(entry);
+  for (let depth = 0; depth < 6; depth++) {
+    if (fs.existsSync(path.join(directory, 'package.json'))) {
+      try {
+        const project = loadBotProject(directory);
+        const relative = path.relative(project.root, fs.realpathSync(entry));
+        if (relative && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) return project;
+      } catch {
+        // A nested package.json (e.g. dist/package.json) is not the bot package.
+      }
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  throw new Error('The installed bot package could not be located from its entry.');
+}
+
 export async function runConfiguredBot(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const configFile = requiredEnvironmentValue('MONKY_BOT_CLI_CONFIG_FILE', env);
   const entry = path.resolve(requiredEnvironmentValue('MONKY_BOT_CLI_ENTRY', env));
-  const config = readConfigFile(configFile);
-  const { publicKeyHex } = loadBotKeys(config.botDir);
-  const plan = createRuntimeEnvironment(config, publicKeyHex, env);
+  const project = runtimeProject(entry, env);
+  const config = readConfigFile(configFile, { botName: defaultBotName({ displayName: project.definition.displayName }) });
+  const homeDir = path.dirname(configFile);
+  assertHostConsent(homeDir, config.botDir, project.definition, project.definition.cliName, env);
+  const keys = loadBotKeys(config.botDir);
+  const plan = createRuntimeEnvironment(config, keys.publicKeyHex, env,
+    profileRuntimeValues(project.definition.requirements, readProfileEnvironment(homeDir), env));
+  setRuntimeBotIdentity(createReachabilityIdentity(keys.publicKeyHex, keys.privateKeyPem));
 
   process.chdir(config.botDir);
   process.argv[1] = entry;
@@ -60,7 +95,7 @@ export async function runConfiguredBot(env: NodeJS.ProcessEnv = process.env): Pr
 
 if (require.main === module) {
   void runConfiguredBot().catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : 'Bot runner failed.');
+    console.error(cliErrorMessage(error, normalizeBotLocale(process.env.MONKY_BOT_LOCALE) ?? 'pt-BR') || 'Bot runner failed.');
     process.exitCode = 1;
   });
 }

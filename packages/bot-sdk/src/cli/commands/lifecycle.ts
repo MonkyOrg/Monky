@@ -20,7 +20,9 @@ import {
   type CliContext,
 } from '../config';
 import { DEFAULT_MANUAL_SERVER_URL, DEFAULT_MARKETPLACE_PORT } from '../constants';
+import { describeHostConsent, ensureContextHostConsent } from '../consent';
 import { loadOrCreateBotKeys } from '../keys';
+import { confirmRuntimeReady, ManifestReadinessError, printReadiness, type ManifestReadiness } from '../manifestReadiness';
 import {
   ensurePm2ForStart,
   findProcess,
@@ -37,6 +39,8 @@ import {
 } from '../pm2';
 import { assertManifestPortAvailable, getManifestBindHost } from '../ports';
 import { spawnCommand } from '../process';
+import { configEnvCommand } from '../profileEnvironment';
+import { printRequirements } from '../requirementsView';
 import { createRuntimeEnvironment } from '../runner';
 import { loadBotProject } from '../../tooling/config';
 import { runNpm } from '../../tooling/process';
@@ -67,12 +71,17 @@ function resolveEntryForLaunch(context: CliContext): string {
   return resolveInstalledEntry({ ...context, project: loadBotProject(context.project.root) });
 }
 
-function ensureRuntimeState(context: CliContext, config: BotConfig): string {
+interface RuntimeState {
+  entry: string;
+  publicKeyHex: string;
+}
+
+function ensureRuntimeState(context: CliContext, config: BotConfig): RuntimeState {
   ensureModeSupported(context, config.mode);
   fs.mkdirSync(config.botDir, { recursive: true, mode: 0o700 });
   const keys = loadOrCreateBotKeys(config.botDir);
   createRuntimeEnvironment(config, keys.publicKeyHex);
-  return resolveEntryForLaunch(context);
+  return { entry: resolveEntryForLaunch(context), publicKeyHex: keys.publicKeyHex };
 }
 
 async function waitForForeground(child: ReturnType<typeof spawnCommand>): Promise<void> {
@@ -221,25 +230,48 @@ export async function startCommand(context: CliContext, args: string[]): Promise
   const invalid = args.find((argument) => !['--foreground'].includes(argument));
   if (invalid) throw new CliError('Opção de start desconhecida.', 'Unknown start option.');
   const config = loadConfigOrThrow(context);
-  const manualEntry = config.mode === 'manual' ? ensureRuntimeState(context, config) : null;
+  ensureModeSupported(context, config.mode);
+  ensureContextHostConsent(context, config);
+  const manualRuntime = config.mode === 'manual' ? ensureRuntimeState(context, config) : null;
   const current = foreground ? null : findProcess(context);
   if (current?.pm2_env?.status === 'online') {
+    const runtime = manualRuntime ?? ensureRuntimeState(context, config);
+    const bindHost = getManifestBindHost(current.pm2_env);
+    let readiness: ManifestReadiness | null;
+    try {
+      readiness = await confirmRuntimeReady(context, config, runtime.publicKeyHex, bindHost, false);
+    } catch (error: unknown) {
+      if (!(error instanceof ManifestReadinessError) || config.mode !== 'marketplace') throw error;
+      console.log(cliText(context.locale,
+        `O processo está online, mas o manifest não respondeu como este bot. Recriando somente o processo deste perfil. ${error.message}`,
+        `The process is online, but the manifest did not answer as this bot. Recreating only this profile's process. ${error.message}`));
+      await restartBotProcess(context, config, runtime.entry, true);
+      readiness = await confirmRuntimeReady(context, config, runtime.publicKeyHex, bindHost);
+      saveProcessList(context);
+      console.log(cliText(context.locale, `${context.displayName} reiniciado com a configuração atual.`,
+        `${context.displayName} restarted with the current configuration.`));
+      printReadiness(context, readiness);
+      return;
+    }
     console.log(cliText(context.locale,
       `${context.displayName} já está rodando (PID ${current.pid ?? 'desconhecido'}).`,
       `${context.displayName} is already running (PID ${current.pid ?? 'unknown'}).`));
+    printReadiness(context, readiness);
     return;
   }
+  const bindHost = getManifestBindHost(current?.pm2_env);
   if (config.mode === 'marketplace') {
-    await assertManifestPortAvailable(config.servePort, context.cliName, getManifestBindHost(current?.pm2_env), context.locale);
+    await assertManifestPortAvailable(config.servePort, context.cliName, bindHost, context.locale);
   }
-  const entry = manualEntry ?? ensureRuntimeState(context, config);
+  const runtime = manualRuntime ?? ensureRuntimeState(context, config);
   if (foreground) {
     const child = spawnCommand(process.execPath, [context.runnerScript], {
       cwd: context.homeDir,
       env: {
         ...process.env,
         MONKY_BOT_CLI_CONFIG_FILE: context.configFile,
-        MONKY_BOT_CLI_ENTRY: entry,
+        MONKY_BOT_CLI_ENTRY: runtime.entry,
+        MONKY_BOT_CLI_PACKAGE_ROOT: context.packageRoot,
         MONKY_BOT_LOCALE: context.locale,
       },
       stdio: 'inherit',
@@ -248,19 +280,17 @@ export async function startCommand(context: CliContext, args: string[]): Promise
     return;
   }
   ensurePm2ForStart(context);
-  startOrRestart(context, writeBotEcosystem(context, entry));
+  startOrRestart(context, writeBotEcosystem(context, runtime.entry));
+  const readiness = await confirmRuntimeReady(context, config, runtime.publicKeyHex, bindHost);
   saveProcessList(context);
   console.log(cliText(context.locale, `${context.displayName} iniciado em background.`, `${context.displayName} started in the background.`));
   console.log(cliText(context.locale, `Modo: ${config.mode}`, `Mode: ${config.mode}`));
   if (config.mode === 'manual') {
     console.log(cliText(context.locale, `Servidor: ${config.serverUrl}`, `Server: ${config.serverUrl}`));
-  } else {
-    const host = config.publicHost.includes(':') && !config.publicHost.startsWith('[')
-      ? `[${config.publicHost}]` : config.publicHost;
-    console.log(`Manifest: http://${host}:${config.servePort}/manifest`);
   }
-  console.log(cliText(context.locale, `Comandos úteis: ${context.cliName} status, logs, restart, stop.`,
-    `Useful commands: ${context.cliName} status, logs, restart, stop.`));
+  printReadiness(context, readiness);
+  console.log(cliText(context.locale, `Comandos úteis: ${context.cliName} status, logs, doctor, restart, stop.`,
+    `Useful commands: ${context.cliName} status, logs, doctor, restart, stop.`));
 }
 
 export function stopCommand(context: CliContext, args: string[]): void {
@@ -281,10 +311,15 @@ export async function restartCommand(context: CliContext, args: string[]): Promi
   const invalid = args.find((argument) => !['--fresh'].includes(argument));
   if (invalid) throw new CliError('Opção de restart desconhecida.', 'Unknown restart option.');
   const config = loadConfigOrThrow(context);
-  const entry = ensureRuntimeState(context, config);
+  ensureModeSupported(context, config.mode);
+  ensureContextHostConsent(context, config);
+  const runtime = ensureRuntimeState(context, config);
   requirePm2(context, 'restart the bot');
-  await restartBotProcess(context, config, entry, fresh);
+  const bindHost = await restartBotProcess(context, config, runtime.entry, fresh);
+  const readiness = await confirmRuntimeReady(context, config, runtime.publicKeyHex, bindHost ?? getManifestBindHost());
+  saveProcessList(context);
   console.log(cliText(context.locale, `${context.displayName} reiniciado.`, `${context.displayName} restarted.`));
+  printReadiness(context, readiness);
 }
 
 export function statusCommand(context: CliContext, args: string[]): void {
@@ -318,6 +353,15 @@ export function statusCommand(context: CliContext, args: string[]): void {
   }
   console.log(cliText(context.locale, 'Configuração:', 'Configuration:'));
   console.log(JSON.stringify(sanitizeConfig(config), null, 2));
+  try {
+    const consent = describeHostConsent(context, config);
+    console.log(cliText(context.locale, `Consentimento: ${consent.label}`, `Consent: ${consent.label}`));
+  } catch (error: unknown) {
+    console.log(cliText(context.locale, 'Consentimento: ilegível', 'Consent: unreadable') +
+      (error instanceof CliError ? ` — ${cliText(context.locale, error.portuguese, error.english)}` : ''));
+  }
+  const runningEnv = processInfo?.pm2_env?.status === 'online' ? processInfo.pm2_env.env ?? {} : process.env;
+  printRequirements(context, config, runningEnv);
 }
 
 export function logsCommand(context: CliContext, args: string[]): void {
@@ -347,6 +391,10 @@ export async function configCommand(context: CliContext, args: string[]): Promis
     updateSourceConfigCommand(context, args.slice(1));
     return;
   }
+  if (args[0] === 'env') {
+    await configEnvCommand(context, args.slice(1));
+    return;
+  }
   if (!args.length || args[0] === 'show') {
     const config = readConfig(context);
     if (!config) {
@@ -372,6 +420,11 @@ export async function configCommand(context: CliContext, args: string[]): Promis
   }
   writeConfig(context, next);
   console.log(cliText(context.locale, 'Configuração atualizada.', 'Configuration updated.'));
+  if (key === 'bot-dir' && next.botDir !== config.botDir) {
+    console.log(cliText(context.locale,
+      `O consentimento vale para um diretório de trabalho; revise-o para o novo diretório com "${context.cliName} consent".`,
+      `Consent applies to one working directory; review it for the new directory with "${context.cliName} consent".`));
+  }
   console.log(cliText(context.locale, `Reinicie o bot para aplicar: ${context.cliName} restart`,
     `Restart the bot to apply: ${context.cliName} restart`));
 }

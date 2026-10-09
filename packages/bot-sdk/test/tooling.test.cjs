@@ -522,3 +522,64 @@ test('packaged bots retain the author update source for GitHub, HTTPS and local 
     assert.equal(installed.definition.releases?.repository, declaration.releases ? 'example/sound-bot' : undefined);
   }
 });
+
+const GAMES_PORT = {
+  id: 'games',
+  description: { 'pt-BR': 'Jogos multiplayer', en: 'Multiplayer games' },
+  portEnv: 'FIXTURE_GAMES_PORT',
+  defaultPort: 7781,
+  hostEnv: 'FIXTURE_GAMES_HOST',
+  publicUrlEnv: 'FIXTURE_GAMES_PUBLIC_URL',
+  when: 'on-demand',
+};
+
+test('declared requirements default safely, stay bounded and never reuse runtime variables', (t) => {
+  const f = fixture(t);
+  const requirements = {
+    notice: { 'pt-BR': 'Conecta ao YouTube.', en: 'Connects to YouTube.' },
+    ports: [GAMES_PORT],
+    settings: [{ env: 'FIXTURE_API_KEY', description: { 'pt-BR': 'Chave da API', en: 'API key' }, required: true, secret: true }],
+  };
+  botAt(f.source, { monkyBot: { cliName: 'sound-bot', displayName: 'Sound Bot', modes: ['manual', 'marketplace'], requirements } });
+  const { definition } = loadBotProject(f.source);
+  assert.deepEqual(definition.requirements.ports[0], {
+    ...GAMES_PORT, protocol: 'tcp', exposure: 'public', modes: ['manual', 'marketplace'],
+  });
+  assert.deepEqual(definition.requirements.settings[0].modes, ['manual', 'marketplace']);
+  botAt(f.source, { monkyBot: { cliName: 'sound-bot', displayName: 'Sound Bot' } });
+  assert.equal(loadBotProject(f.source).definition.requirements, undefined, 'bots without declarations keep their published shape');
+
+  const invalid = [
+    [{ ports: [{ ...GAMES_PORT, id: 'manifest' }] }, /reserved for the marketplace manifest/],
+    [{ ports: [{ ...GAMES_PORT, portEnv: 'MONKY_SERVE_PORT' }] }, /reserved/],
+    [{ ports: [{ ...GAMES_PORT, portEnv: 'MONKY_BOT_CLI_HOME' }] }, /reserved/],
+    [{ settings: [{ env: 'NODE_OPTIONS', description: { 'pt-BR': 'x', en: 'x' } }] }, /reserved/],
+    [{ ports: [GAMES_PORT, { ...GAMES_PORT, id: 'other', portEnv: 'A_PORT', hostEnv: undefined, publicUrlEnv: undefined }] }, /share a default port/],
+    [{ ports: [GAMES_PORT, { ...GAMES_PORT, id: 'games', defaultPort: 7782, portEnv: 'B', hostEnv: undefined, publicUrlEnv: undefined }] }, /ids must be unique/],
+    [{ ports: [GAMES_PORT], settings: [{ env: 'FIXTURE_GAMES_HOST', description: { 'pt-BR': 'x', en: 'x' } }] }, /declared only once/],
+    [{ ports: [{ ...GAMES_PORT, protocol: 'udp' }] }, /publicUrlEnv requires a TCP port/],
+    [{ ports: [{ ...GAMES_PORT, defaultPort: 70000 }] }, /between 1 and 65535/],
+    [{ ports: [{ ...GAMES_PORT, modes: ['marketplace'] }] }, /modes declared in monkyBot\.modes/],
+    [{ ports: [{ ...GAMES_PORT, extra: true }] }, /Unknown monkyBot\.requirements\.ports\[0\] property/],
+    [{ ports: [{ ...GAMES_PORT, description: { 'pt-BR': 'x' } }] }, /\.en must be a non-empty/],
+    [{ ports: Array.from({ length: 9 }, (_, index) => ({ ...GAMES_PORT, id: `p${index}` })) }, /at most 8 ports/],
+    [{ unknown: [] }, /Unknown monkyBot\.requirements property/],
+  ];
+  for (const [declaration, message] of invalid) {
+    botAt(f.source, { monkyBot: { cliName: 'sound-bot', displayName: 'Sound Bot', requirements: declaration } });
+    assert.throws(() => loadBotProject(f.source), message);
+  }
+});
+
+test('packaged bots keep their declared requirements so operators see the same ports and settings', (t) => {
+  const f = fixture(t);
+  const requirements = { ports: [GAMES_PORT], settings: [] };
+  botAt(f.source, { monkyBot: { cliName: 'sound-bot', displayName: 'Sound Bot', requirements } });
+  const source = loadBotProject(f.source).definition.requirements;
+  const result = buildBotPackage({ root: f.source, out: f.output, skipBuild: true });
+  const unpacked = path.join(f.root, 'requirements');
+  fs.mkdirSync(unpacked);
+  require('tar').x({ file: result.file, cwd: unpacked, sync: true });
+  const installed = loadBotProject(path.join(unpacked, 'package'));
+  assert.deepEqual(installed.definition.requirements, source);
+});

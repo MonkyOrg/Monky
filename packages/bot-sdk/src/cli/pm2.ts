@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { BOT_ECOSYSTEM_FILE, UPDATER_ECOSYSTEM_FILE } from './constants';
 import { ensurePrivateDirectory, writePrivateFile } from './fs';
@@ -102,6 +103,7 @@ export function writeBotEcosystem(context: CliContext, entry: string): string {
     env: {
       MONKY_BOT_CLI_CONFIG_FILE: context.configFile,
       MONKY_BOT_CLI_ENTRY: entry,
+      MONKY_BOT_CLI_PACKAGE_ROOT: context.packageRoot,
       MONKY_BOT_LOCALE: context.locale,
     },
   };
@@ -139,22 +141,28 @@ export function startOrRestart(context: CliContext, ecosystemFile: string): void
   if (result.status !== 0) throw new Error(`pm2 startOrRestart failed (${result.status ?? result.signal}).`);
 }
 
+/**
+ * Recreates the managed process and returns the manifest bind host it uses;
+ * callers confirm readiness before saving the PM2 list.
+ */
 export async function restartBotProcess(
   context: CliContext,
   config: BotConfig,
   entry: string,
   fresh = false
-): Promise<void> {
+): Promise<string> {
+  let bindHost = getManifestBindHost();
   if (config.mode === 'marketplace') {
     const current = findProcess(context);
+    bindHost = getManifestBindHost(current?.pm2_env);
     if (current?.pm2_env?.status === 'online') {
       stopProcess(context, context.processName);
     }
-    await assertManifestPortAvailable(config.servePort, context.cliName, getManifestBindHost(current?.pm2_env), context.locale);
+    await assertManifestPortAvailable(config.servePort, context.cliName, bindHost, context.locale);
   }
   if (fresh) deleteProcess(context, context.processName);
   startOrRestart(context, writeBotEcosystem(context, entry));
-  saveProcessList(context);
+  return bindHost;
 }
 
 export function saveProcessList(context: CliContext): void {
@@ -202,3 +210,26 @@ export function cleanupEcosystemFiles(context: CliContext): void {
 }
 
 export const PM2_FILES = { BOT_ECOSYSTEM_FILE, UPDATER_ECOSYSTEM_FILE };
+
+/**
+ * A process with this bot's name in the operator's default PM2 (for example
+ * from a bot's former standalone CLI) is invisible to this profile's isolated
+ * PM2 and may hold its ports. Reads PM2 files only; never starts a daemon.
+ */
+export function findDefaultPm2Process(context: CliContext, env: NodeJS.ProcessEnv = process.env): boolean {
+  const home = path.resolve(env.PM2_HOME || path.join(os.homedir(), '.pm2'));
+  if (home === path.resolve(context.pm2Home)) return false;
+  try {
+    const pids = fs.readdirSync(path.join(home, 'pids'));
+    if (pids.some((file) => file.startsWith(`${context.processName}-`) && file.endsWith('.pid'))) return true;
+  } catch {
+    // No running default daemon.
+  }
+  try {
+    const dump: unknown = JSON.parse(fs.readFileSync(path.join(home, 'dump.pm2'), 'utf8'));
+    return Array.isArray(dump) && dump.some((entry: unknown) =>
+      typeof entry === 'object' && entry !== null && 'name' in entry && entry.name === context.processName);
+  } catch {
+    return false;
+  }
+}

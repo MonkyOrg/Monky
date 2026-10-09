@@ -26,6 +26,8 @@ export type { BotVoicePacket, BotVoiceAudioReceiver } from './voice/VoiceAudioRe
 export { BotScreenClient } from './BotScreenClient';
 export * from './managedTools';
 export * from './localExecution/contracts';
+import { handleReachabilityProbe } from './reachability';
+export { handleReachabilityProbe } from './reachability';
 import {
   LIMITS,
   MessageType,
@@ -1906,8 +1908,9 @@ export class BotClient extends EventEmitter {
         res.end();
         return;
       }
+      if (handleReachabilityProbe(req, res, this.options.publicKey)) return;
       if (req.method === 'GET' && req.url === '/manifest') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, { 'Content-Type': 'application/json', 'X-Monky-Bot-Public-Key': this.options.publicKey.toLowerCase() });
         res.end(JSON.stringify(getManifest()));
         return;
       }
@@ -2047,6 +2050,10 @@ export { askCliChoice, askCliText, askCliValue, CliPromptCancelled, type CliChoi
 export type {
   BotPackageDefinition, GitHubReleaseSource, BotUpdateSource, HttpsUpdateSource, FileUpdateSource,
 } from './tooling/config';
+export type {
+  BotRequirements, BotPortRequirement, BotSettingRequirement, BotLocalizedText,
+  BotPortProtocol, BotPortExposure, BotPortActivation,
+} from './tooling/requirements';
 export type {
   BotSelector, BotSelectorCreate, BotSelectorPatch, BotSelectorPublic, BotSelectorRespondedPayload,
   BotScreen, BotScreenRef, BotScreenCreate, BotScreenPatch, BotScreenActionEvent, BotScreenJson, BotScreenRemoved,

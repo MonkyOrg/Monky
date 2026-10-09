@@ -252,6 +252,13 @@ export enum MessageType {
   BOT_PERMISSIONS_SNAPSHOT = 'BOT_PERMISSIONS_SNAPSHOT',
   BOT_INSTALL_PREVIEW = 'BOT_INSTALL_PREVIEW',
   BOT_INSTALL_PREVIEW_RESULT = 'BOT_INSTALL_PREVIEW_RESULT',
+  /**
+   * Bot runtime CLI -> server, before authentication (protocol 37): checks the
+   * credential and reaches the bot's declared public ports without opening a
+   * bot session, so a running bot is never replaced.
+   */
+  BOT_DIAGNOSTIC = 'BOT_DIAGNOSTIC',
+  BOT_DIAGNOSTIC_RESULT = 'BOT_DIAGNOSTIC_RESULT',
   /** Bot -> server: register slash commands. */
   COMMAND_REGISTER = 'COMMAND_REGISTER',
   /** Server -> bot: commands were registered. */

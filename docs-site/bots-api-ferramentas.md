@@ -66,9 +66,20 @@ export const BOT_CAPABILITIES = [
 export const BOT_LOCALES = ['pt-BR', 'en'] as const;
 ```
 
+## `BotLocalizedText` {#botlocalizedtext}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/requirements.ts#L5)
+
+```ts
+export interface BotLocalizedText {
+    'pt-BR': string;
+    en: string;
+}
+```
+
 ## `BotPackageDefinition` {#botpackagedefinition}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/config.ts#L26)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/config.ts#L27)
 
 ```ts
 export interface BotPackageDefinition {
@@ -80,12 +91,85 @@ export interface BotPackageDefinition {
     modes: BotMode[];
     releases?: GitHubReleaseSource;
     updateSource?: BotUpdateSource;
+    /** Ports and settings the operator must provide; also part of the host consent. */
+    requirements?: BotRequirements;
+}
+```
+
+## `BotPortActivation` {#botportactivation}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/requirements.ts#L14)
+
+```ts
+export type BotPortActivation = "always" | "on-demand";
+```
+
+## `BotPortExposure` {#botportexposure}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/requirements.ts#L12)
+
+```ts
+export type BotPortExposure = "public" | "local";
+```
+
+## `BotPortProtocol` {#botportprotocol}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/requirements.ts#L10)
+
+```ts
+export type BotPortProtocol = "tcp" | "udp";
+```
+
+## `BotPortRequirement` {#botportrequirement}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/requirements.ts#L16)
+
+```ts
+export interface BotPortRequirement {
+    id: string;
+    description: BotLocalizedText;
+    protocol: BotPortProtocol;
+    portEnv: string;
+    defaultPort: number;
+    hostEnv?: string;
+    /** Environment variable holding the public http(s) origin, e.g. behind a reverse proxy. */
+    publicUrlEnv?: string;
+    exposure: BotPortExposure;
+    when: BotPortActivation;
+    modes: BotMode[];
+}
+```
+
+## `BotRequirements` {#botrequirements}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/requirements.ts#L38)
+
+```ts
+export interface BotRequirements {
+    /** Bot-specific host access shown in the operator consent, e.g. external services it contacts. */
+    notice?: BotLocalizedText;
+    ports: BotPortRequirement[];
+    settings: BotSettingRequirement[];
+}
+```
+
+## `BotSettingRequirement` {#botsettingrequirement}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/requirements.ts#L30)
+
+```ts
+export interface BotSettingRequirement {
+    env: string;
+    description: BotLocalizedText;
+    required: boolean;
+    secret: boolean;
+    modes: BotMode[];
 }
 ```
 
 ## `BotUpdateSource` {#botupdatesource}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/config.ts#L24)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/config.ts#L25)
 
 ```ts
 export type BotUpdateSource = HttpsUpdateSource | FileUpdateSource;
@@ -106,7 +190,7 @@ export interface BuildBotOptions {
 
 ## `buildBotPackage` {#buildbotpackage}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/build.ts#L69)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/build.ts#L70)
 
 ```ts
 export function buildBotPackage(options?: BuildBotOptions): BuiltBotPackage;
@@ -176,7 +260,7 @@ export function downloadManagedToolAsset(asset: ManagedToolAsset, destination: s
 
 ## `FileUpdateSource` {#fileupdatesource}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/config.ts#L19)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/config.ts#L20)
 
 ```ts
 export interface FileUpdateSource {
@@ -203,7 +287,7 @@ export function findManagedToolAsset(repository: ManagedToolRepository, name: st
 
 ## `GitHubReleaseSource` {#githubreleasesource}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/config.ts#L6)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/config.ts#L7)
 
 ```ts
 export interface GitHubReleaseSource {
@@ -214,9 +298,17 @@ export interface GitHubReleaseSource {
 }
 ```
 
+## `handleReachabilityProbe` {#handlereachabilityprobe}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/reachability.ts#L95)
+
+```ts
+export function handleReachabilityProbe(request: http.IncomingMessage, response: http.ServerResponse, publicKeyHex?: string): boolean;
+```
+
 ## `HttpsUpdateSource` {#httpsupdatesource}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/config.ts#L13)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tooling/config.ts#L14)
 
 ```ts
 export interface HttpsUpdateSource {
@@ -228,13 +320,20 @@ export interface HttpsUpdateSource {
 
 ## `LIMITS` {#limits}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/constants.ts#L13)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/constants.ts#L15)
 
 ```ts
 export const LIMITS = {
     MESSAGE_DELETE_UNDO_SECONDS: 60,
     MAX_MESSAGE_DELETE_UNDO_SECONDS: 86400,
     MAX_MESSAGE_LENGTH: 16000,
+    // Game titles come from Steam's own manifests (#675); the cap only guards
+    // against a tampered manifest, not against normal names.
+    MAX_ACTIVITY_NAME_LENGTH: 128,
+    // Steam caches app icons as 32x32 JPEGs, a couple of KB at most. The cap is
+    // three orders of magnitude below MAX_AVATAR_SIZE on purpose: this field is
+    // never a place to put bulk data, and the server has no maxPayload of its own.
+    MAX_ACTIVITY_ICON_LENGTH: 32 * 1024,
     MAX_AVATAR_SIZE: 5 * 1024 * 1024, // 5 MB
     MAX_USERS_DEFAULT: 20,
     // Sentinel stored in `max_users` when the owner chose not to cap membership
@@ -279,6 +378,15 @@ export const LIMITS = {
      * são 100 MiB, que qualquer cliente não autenticado podia mandar (#372).
      */
     WS_MAX_PAYLOAD_BYTES: 8 * 1024 * 1024,
+    DM_RELAY_MAX_ITEMS: 50,
+    DM_RELAY_DATA_MAX_LENGTH: 65536,
+    DM_RELAY_FILE_DATA_MAX_LENGTH: 196608,
+    DM_RELAY_TOTAL_DATA_MAX_LENGTH: 6 * 1024 * 1024,
+    DM_RELAY_RATE_ITEMS_PER_SECOND: 40,
+    DM_RELAY_RATE_ITEMS_BURST: 200,
+    DM_RELAY_RATE_BYTES_PER_SECOND: 1572864,
+    DM_RELAY_RATE_BYTES_BURST: 6 * 1024 * 1024,
+    DM_RELAY_FILE_BACKPRESSURE_BYTES: 8 * 1024 * 1024,
     HEARTBEAT_INTERVAL_MS: 5000,
     HEARTBEAT_TIMEOUT_MS: 35000,
     RECONNECT_GRACE_MS: 20000,
@@ -306,6 +414,8 @@ export const LIMITS = {
     MAX_BOT_FORM_FIELDS: 10,
     MAX_BOT_FORM_CHOICES: 20,
     MAX_BOT_FORM_LIST_ITEMS: 20,
+    MAX_LIVE_ACTION_IMAGES: 5,
+    MAX_LIVE_ACTION_IMAGE_DATA_LENGTH: 7000000,
     MAX_BOT_SETTINGS_VALUES_BYTES: 16 * 1024,
     MAX_BOT_SETTINGS_DEFINITION_BYTES: 64 * 1024,
     MAX_BOT_SETTINGS_CATALOG: 1000,
@@ -327,6 +437,13 @@ export const LIMITS = {
     MAX_BOT_AUDIO_PREVIEW_REQUESTS: 100,
     MAX_BOT_AUDIO_PREVIEW_HANDLERS: 4,
     MAX_SOUNDBOARD_FILE_SIZE: 3 * 1024 * 1024,
+    RECENT_SOUND_CACHE_DEFAULT_LIMIT: 20,
+    RECENT_SOUND_CACHE_MIN_LIMIT: 1,
+    RECENT_SOUND_CACHE_MAX_LIMIT: 100,
+    RECENT_SOUND_CACHE_MAX_BYTES: 256 * 1024 * 1024,
+    RECENT_SOUND_DOWNLOAD_RATE_LIMIT: 10,
+    RECENT_SOUND_DOWNLOAD_RATE_WINDOW_MS: 60000,
+    RECENT_SOUND_DOWNLOAD_TIMEOUT_MS: 120000,
     BOT_SOUND_DOWNLOAD_TIMEOUT_MS: 120000,
     // Chat attachments (#11). Both size limits are server-configurable; these are
     // only the initial defaults applied when a server is first created.
@@ -443,15 +560,19 @@ export type ManagedToolRepository = "yt-dlp/yt-dlp" | "yt-dlp/FFmpeg-Builds" | "
 
 ## `MessageType` {#messagetype}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L74)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L75)
 
 ```ts
 export enum MessageType {
     COMMUNITY_GET = 'COMMUNITY_GET',
+    COMMUNITY_IMAGE_UPLOAD = 'COMMUNITY_IMAGE_UPLOAD',
     COMMUNITY_UPDATE_SETTINGS = 'COMMUNITY_UPDATE_SETTINGS',
     COMMUNITY_SNAPSHOT = 'COMMUNITY_SNAPSHOT',
     COMMUNITY_ACK = 'COMMUNITY_ACK',
     EVENT_SAVE = 'EVENT_SAVE',
+    EVENT_GET = 'EVENT_GET',
+    EVENT_GET_INTERESTED = 'EVENT_GET_INTERESTED',
+    EVENT_INTERESTED_LIST = 'EVENT_INTERESTED_LIST',
     EVENT_SAVED = 'EVENT_SAVED',
     EVENT_CONTROL = 'EVENT_CONTROL',
     EVENT_INTEREST = 'EVENT_INTEREST',
@@ -464,10 +585,17 @@ export enum MessageType {
     LIVE_ACTION_SNAPSHOT = 'LIVE_ACTION_SNAPSHOT',
     LIVE_ACTION_SUBMIT = 'LIVE_ACTION_SUBMIT',
     LIVE_ACTION_SUBMITTED = 'LIVE_ACTION_SUBMITTED',
+    NATIVE_FORM_CREATE = 'NATIVE_FORM_CREATE',
+    NATIVE_FORM_SUBMIT = 'NATIVE_FORM_SUBMIT',
+    NATIVE_FORM_CLOSE = 'NATIVE_FORM_CLOSE',
+    NATIVE_FORM_RESULTS = 'NATIVE_FORM_RESULTS',
+    NATIVE_FORM_SNAPSHOT = 'NATIVE_FORM_SNAPSHOT',
+    NATIVE_FORM_RESULTS_RESULT = 'NATIVE_FORM_RESULTS_RESULT',
     FORUM_LIST = 'FORUM_LIST',
     FORUM_LIST_RESULT = 'FORUM_LIST_RESULT',
     FORUM_CREATE_POST = 'FORUM_CREATE_POST',
     FORUM_UPDATE_POST = 'FORUM_UPDATE_POST',
+    FORUM_DELETE_POST = 'FORUM_DELETE_POST',
     FORUM_POST_SAVED = 'FORUM_POST_SAVED',
     CHAT_SEARCH = 'CHAT_SEARCH',
     CHAT_SEARCH_RESULTS = 'CHAT_SEARCH_RESULTS',
@@ -553,6 +681,10 @@ export enum MessageType {
     PING = 'PING',
     USER_LOGOUT = 'USER_LOGOUT',
     SOUNDBOARD_PLAY = 'SOUNDBOARD_PLAY',
+    RECENT_SOUND_RECORD = 'RECENT_SOUND_RECORD',
+    RECENT_SOUNDS_LIST = 'RECENT_SOUNDS_LIST',
+    RECENT_SOUND_DOWNLOAD = 'RECENT_SOUND_DOWNLOAD',
+    DM_RELAY_SEND = 'DM_RELAY_SEND',
     /**
      * Client -> server, when the person who triggered a sound stops it. The audio
      * is broadcast once and then played by each listener on their own, so a stop
@@ -561,6 +693,8 @@ export enum MessageType {
     SOUNDBOARD_STOP = 'SOUNDBOARD_STOP',
     /** Client -> server: toggle appear-offline visibility while connected (#561). */
     USER_UPDATE_VISIBILITY = 'USER_UPDATE_VISIBILITY',
+    /** Client -> server: publish (or clear, with null) the game being played (#675). */
+    USER_UPDATE_ACTIVITY = 'USER_UPDATE_ACTIVITY',
     SERVER_GET_INVITE_INFO = 'SERVER_GET_INVITE_INFO',
     // SFU Client <-> Server Messages (#515)
     SFU_GET_ROUTER_RTP_CAPABILITIES = 'SFU_GET_ROUTER_RTP_CAPABILITIES',
@@ -607,6 +741,13 @@ export enum MessageType {
     BOT_PERMISSIONS_SNAPSHOT = 'BOT_PERMISSIONS_SNAPSHOT',
     BOT_INSTALL_PREVIEW = 'BOT_INSTALL_PREVIEW',
     BOT_INSTALL_PREVIEW_RESULT = 'BOT_INSTALL_PREVIEW_RESULT',
+    /**
+     * Bot runtime CLI -> server, before authentication (protocol 37): checks the
+     * credential and reaches the bot's declared public ports without opening a
+     * bot session, so a running bot is never replaced.
+     */
+    BOT_DIAGNOSTIC = 'BOT_DIAGNOSTIC',
+    BOT_DIAGNOSTIC_RESULT = 'BOT_DIAGNOSTIC_RESULT',
     /** Bot -> server: register slash commands. */
     COMMAND_REGISTER = 'COMMAND_REGISTER',
     /** Server -> bot: commands were registered. */
@@ -669,11 +810,27 @@ export enum MessageType {
     /** Server -> clients: an existing message was edited or deleted (#504). */
     CHAT_MESSAGE_UPDATED = 'CHAT_MESSAGE_UPDATED',
     CHAT_UPLOAD_TOKEN = 'CHAT_UPLOAD_TOKEN',
+    POLL_CREATE = 'POLL_CREATE',
+    POLL_VOTE = 'POLL_VOTE',
+    POLL_CLOSE = 'POLL_CLOSE',
+    POLL_UPDATED = 'POLL_UPDATED',
+    /** Client -> server (`poll-voters`): complete voter list of a poll with public votes. */
+    POLL_VOTERS = 'POLL_VOTERS',
+    POLL_VOTERS_RESULT = 'POLL_VOTERS_RESULT',
+    /** Client -> server (`poll-edit`): changes an open poll; answered with POLL_UPDATED. */
+    POLL_EDIT = 'POLL_EDIT',
+    /** Client -> server (`poll-edit`): the requester's current view of one poll, answered with POLL_UPDATED. */
+    POLL_GET = 'POLL_GET',
     VOICE_USER_JOINED = 'VOICE_USER_JOINED',
     VOICE_USER_LEFT = 'VOICE_USER_LEFT',
     VOICE_STATE_CHANGED = 'VOICE_STATE_CHANGED',
     VOICE_RESTRICTIONS_UPDATED = 'VOICE_RESTRICTIONS_UPDATED',
     SOUNDBOARD_PLAYED = 'SOUNDBOARD_PLAYED',
+    RECENT_SOUND_ADDED = 'RECENT_SOUND_ADDED',
+    RECENT_SOUNDS_RESULT = 'RECENT_SOUNDS_RESULT',
+    RECENT_SOUND_DATA = 'RECENT_SOUND_DATA',
+    DM_RELAY_ACK = 'DM_RELAY_ACK',
+    DM_RELAY_DELIVER = 'DM_RELAY_DELIVER',
     /** Server -> clients in the channel: drop this user's ongoing sound (#499). */
     SOUNDBOARD_STOPPED = 'SOUNDBOARD_STOPPED',
     SERVER_ERROR = 'SERVER_ERROR',
@@ -686,7 +843,7 @@ export enum MessageType {
 [Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/constants.ts#L1)
 
 ```ts
-export const PROTOCOL_VERSION = 31;
+export const PROTOCOL_VERSION = 37;
 ```
 
 ## `ProtocolErrorCode` {#protocolerrorcode}
@@ -725,6 +882,7 @@ export enum ProtocolErrorCode {
     FORUM_INVALID = 'FORUM_INVALID',
     MESSAGE_SEARCH_INVALID = 'MESSAGE_SEARCH_INVALID',
     BOT_OFFLINE = 'BOT_OFFLINE',
+    DM_RELAY_DISABLED = 'DM_RELAY_DISABLED',
     BOT_COMMAND_NOT_FOUND = 'BOT_COMMAND_NOT_FOUND',
     BOT_INVALID_OPTIONS = 'BOT_INVALID_OPTIONS',
     BOT_INTERACTION_EXPIRED = 'BOT_INTERACTION_EXPIRED',
@@ -759,7 +917,7 @@ export enum ProtocolErrorCode {
 
 ## `runBotCli` {#runbotcli}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/index.ts#L111)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/index.ts#L119)
 
 ```ts
 export function runBotCli(packageRoot: string, args?: string[]): Promise<void>;

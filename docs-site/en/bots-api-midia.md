@@ -151,11 +151,11 @@ export interface BotVoiceAudioReceiver {
     readonly droppedPackets: number;
     return: () => Promise<IteratorResult<BotVoicePacket, undefined>>;
     throw: (error: unknown) => Promise<IteratorResult<BotVoicePacket, undefined>>;
-    [Symbol.asyncIterator]: () => AsyncIterableIterator<import("C:/Projetos/Monky/packages/bot-sdk/src/index").BotVoicePacket, undefined, undefined>;
+    [Symbol.asyncIterator]: () => AsyncIterableIterator<import("C:/Users/lucas/copilot-worktrees/Monky/lucastaonline-scaling-spoon/packages/bot-sdk/src/index").BotVoicePacket, undefined, undefined>;
     next: (...[value]: [
     ] | [
         undefined
-    ]) => Promise<IteratorResult<import("C:/Projetos/Monky/packages/bot-sdk/src/index").BotVoicePacket, undefined>>;
+    ]) => Promise<IteratorResult<import("C:/Users/lucas/copilot-worktrees/Monky/lucastaonline-scaling-spoon/packages/bot-sdk/src/index").BotVoicePacket, undefined>>;
 }
 ```
 

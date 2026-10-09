@@ -270,7 +270,7 @@ test('common validation failures follow the selected language without echoing in
 test('interactive setup retries validation in English without persisting an invocation-only locale', async (t) => {
   const f = fixture(t);
   tty(t, true, true);
-  const questions = answers(t, ['', 'https://INVALID_INPUT.example.test', '', 'fixture-token', '']);
+  const questions = answers(t, ['', 'https://INVALID_INPUT.example.test', '', 'fixture-token', '', 'yes']);
   const errors = [];
   t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
   await runBotCli(f.bot, ['--locale', 'en', 'setup']);

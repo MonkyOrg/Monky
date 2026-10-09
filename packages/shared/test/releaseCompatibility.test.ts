@@ -12,16 +12,16 @@ const version = '18.0.0-beta';
 const manifest = { schemaVersion: 1, version, protocolVersion: 16, botSdkVersion: version } as const;
 
 test('release warnings follow the affected protocol floor, not every additive bump', () => {
-  const additive = parseReleaseCompatibility({ ...manifest, protocolVersion: 36, minimumClientProtocol: 35, minimumBotProtocol: 24 }, version);
+  const additive = parseReleaseCompatibility({ ...manifest, protocolVersion: 37, minimumClientProtocol: 35, minimumBotProtocol: 24 }, version);
   assert.ok(additive);
   assert.equal(releaseRequiresProtocolUpdate(additive, 'client'), false);
   assert.equal(releaseRequiresProtocolUpdate(additive, 'bot'), false);
-  const future = { ...additive, protocolVersion: 37, minimumBotProtocol: 37, minimumClientProtocol: 37 };
+  const future = { ...additive, protocolVersion: 38, minimumBotProtocol: 38, minimumClientProtocol: 38 };
   assert.equal(releaseRequiresProtocolUpdate(future, 'bot'), true);
   assert.equal(releaseRequiresProtocolUpdate({ ...future, minimumBotProtocol: 24 }, 'bot'), false);
   assert.equal(releaseRequiresProtocolUpdate(future, 'client'), true);
   assert.equal(releaseRequiresProtocolUpdate({ ...future, minimumClientProtocol: 31 }, 'client'), false);
-  for (const floor of [0, -1, 38, 1.2, '24', null]) {
+  for (const floor of [0, -1, 39, 1.2, '24', null]) {
     assert.equal(parseReleaseCompatibility({ ...additive, minimumBotProtocol: floor }, version), null);
   }
 });
@@ -34,7 +34,7 @@ test('channel permission protocol 35 rejects old client contracts without requir
     assert.equal(releaseRequiresProtocolUpdate(old, 'bot'), false);
     assert.equal(releaseRequiresProtocolUpdate({ ...manifest, protocolVersion }, 'client'), true);
   }
-  const current = parseReleaseCompatibility({ ...manifest, protocolVersion: 36, minimumClientProtocol: 35, minimumBotProtocol: 24 }, version);
+  const current = parseReleaseCompatibility({ ...manifest, protocolVersion: 37, minimumClientProtocol: 35, minimumBotProtocol: 24 }, version);
   assert.ok(current);
   assert.equal(releaseRequiresProtocolUpdate(current, 'client'), false);
   assert.equal(releaseRequiresProtocolUpdate(current, 'bot'), false);

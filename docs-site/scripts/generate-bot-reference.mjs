@@ -71,7 +71,7 @@ const groups = {
 function groupFor(name, declaration) {
   const file = declaration.getSourceFile().fileName;
   if (/^[A-Z_]+$/.test(name)) return groups.tools;
-  if (/managedTools|[\\/]cli[\\/]|[\\/]tooling[\\/]|[\\/]constants\.ts|[\\/]protocol\.ts/.test(file)
+  if (/managedTools|[\\/]cli[\\/]|[\\/]tooling[\\/]|[\\/]reachability\.ts|[\\/]constants\.ts|[\\/]protocol\.ts/.test(file)
     && !['BotManifest', 'CommandResponsePayload'].includes(name)) return groups.tools;
   if (/^(BotVoice|BotScreen|Local)/.test(name)) return groups.media;
   if (path.resolve(file) === entry || ['BotCapability', 'BotPermissions', 'BotManifest'].includes(name)) return groups.client;

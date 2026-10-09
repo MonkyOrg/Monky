@@ -335,6 +335,16 @@ publication. The CI major-version policy for `PROTOCOL_VERSION` changes remains
 in effect.
 :::
 
+Protocol **37** adds `BOT_DIAGNOSTIC`, the only bot message accepted **before**
+authentication. The runtime CLI's `doctor` sends it over its own connection: the
+server checks the token without binding the key (TOFU) or replacing the running
+bot's session, reports protocol compatibility and tests the bot's public ports
+from outside. A port counts as reachable only when it signs a fresh challenge
+with the bot's Ed25519 key; private addresses (other than the requester's own),
+system ports, redirects and timing differences reveal nothing about third-party
+hosts. Older servers answer it as a malformed message. See
+[Ports, settings and checks](/en/bots-distribuicao#portas-configuracoes-e-verificacao).
+
 ### Identity authentication {#authentication-the-server-never-sees-a-password-of-yours}
 
 Login is challenge–response with public-key cryptography. You have no account and

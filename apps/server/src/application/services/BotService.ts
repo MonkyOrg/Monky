@@ -259,6 +259,26 @@ export class BotService {
     });
   }
 
+  /**
+   * Read-only credential check for the pre-authentication diagnostic: never
+   * binds a key (TOFU) and never touches the bot's session. `verifyKey` is the
+   * key reachability proofs must match.
+   */
+  async inspectCredential(rawToken: string, publicKey: string): Promise<
+    | { state: 'valid' | 'pending_binding'; botId: string; verifyKey: string }
+    | { state: 'invalid' | 'key_mismatch' }
+  > {
+    const record = await this.botRepo.findByTokenHash(BotService.hashToken(rawToken));
+    if (!record) return { state: 'invalid' };
+    if (!record.boundPublicKey) return { state: 'pending_binding', botId: record.id, verifyKey: publicKey };
+    if (record.boundPublicKey !== publicKey) return { state: 'key_mismatch' };
+    return { state: 'valid', botId: record.id, verifyKey: record.boundPublicKey };
+  }
+
+  async serverName(): Promise<string | undefined> {
+    return (await this.serverRepo.getServer())?.name || undefined;
+  }
+
   private async fetchManifest(manifestUrl: string): Promise<{ success: true; manifest: BotManifest } | BotFailure> {
     let rawManifest: unknown;
     try {
