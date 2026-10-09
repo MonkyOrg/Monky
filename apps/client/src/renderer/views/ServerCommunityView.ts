@@ -1,6 +1,6 @@
 import {
   MessageType, Permission, botSelectorPublicSchema, validateBotFormValues, validateNativeLiveFormValues,
-  communitySnapshotSchema, nativeLiveFormResultsSchema, nativeLiveFormSchema,
+  communitySnapshotSchema, nativeLiveFormResultsSchema, nativeLiveFormSchema, survivingNativePollSelection,
   type ServerEventPublic, type LiveAction, type EventControl, type NativeLiveForm,
   type NativeLiveFormResults, type NativePoll,
   createServerInviteLink, eventResultSchema, eventInterestedListResultSchema, type EventInterestedListResult,
@@ -18,9 +18,21 @@ import { renderServerEventCard } from './ServerEventCard';
 import { contextMenu } from './ContextMenu';
 import { PublicSelectorView } from './PublicSelectorView';
 import { showConfirm } from './Dialog';
-import { showCopyToast, showInfoToast } from './CopyToast';
+import { showCopyToast, showErrorToast, showInfoToast } from './CopyToast';
 import { audioPreviewService } from '../core/AudioPreviewService';
-import { renderNativePoll, submitNativePollVote } from './nativePoll';
+import {
+  animatePollBars,
+  capturePollBars,
+  capturePollFocus,
+  fetchNativePoll,
+  isNativePollClosed,
+  nativePollVoterProfile,
+  nextNativePollSelection,
+  openNativePollVoters,
+  renderNativePoll,
+  restorePollFocus,
+  submitNativePollVote,
+} from './nativePoll';
 import { openNativePollWizard } from './NativePollWizard';
 import { openNativeLiveFormWizard } from './NativeLiveFormWizard';
 import { DEFAULT_AVATAR_URL } from '../utils/avatar';
@@ -654,11 +666,14 @@ export class ServerCommunityView {
         } else if (menuButton.dataset.liveActionMenu === 'poll') {
           const id = menuButton.closest<HTMLElement>('[data-live-poll-card]')?.dataset.livePollCard;
           const poll = (this.feed.snapshot?.polls ?? []).find(entry => entry.id === id);
-          if (poll) contextMenu.open(rect.left, rect.bottom, [{
-            label: t('community.closeLiveAction'),
-            danger: true,
-            onClick: () => this.runCloseNativePoll(modal, poll, menuButton),
-          }], menuButton);
+          if (poll) contextMenu.open(rect.left, rect.bottom, [
+            ...(this.canEditPoll(poll) ? [{ label: t('poll.edit'), icon: 'edit', onClick: () => this.editPoll(poll) }] : []),
+            {
+              label: t('community.closeLiveAction'),
+              danger: true,
+              onClick: () => this.runCloseNativePoll(modal, poll, menuButton),
+            },
+          ], menuButton);
         } else {
           const id = menuButton.closest<HTMLElement>('[data-native-live-form-card]')?.dataset.nativeLiveFormCard;
           const form = (this.feed.snapshot?.nativeForms ?? []).find(entry => entry.id === id);
@@ -743,76 +758,92 @@ export class ServerCommunityView {
     const modal = this.modal(t('poll.liveAction'));
     modal.element.querySelector('.community-modal')?.classList.add('event-detail-modal', 'live-action-detail-modal');
     let poll = initial;
-    let pending = false;
+    let pendingSelection: string[] | undefined;
     const formatTime = (value: number) => new Intl.DateTimeFormat(getLanguage(), {
       dateStyle: 'short', timeStyle: 'short',
     }).format(value);
+    const profile = () => nativePollVoterProfile(this.feed.server.knownMembers);
+    const snapshotPoll = () => (this.feed.snapshot?.polls ?? []).find(entry => entry.id === poll.id);
     const render = () => {
-      modal.content.innerHTML = `${renderNativePoll(
+      const focused = capturePollFocus(modal.content);
+      const bars = capturePollBars(modal.content);
+      modal.content.innerHTML = renderNativePoll(
         poll,
-        !pending && this.feed.server.hasPermission(Permission.SEND_MESSAGES, poll.channelId),
+        this.feed.server.hasPermission(Permission.SEND_MESSAGES, poll.channelId),
         formatTime,
         this.feed.client.getHttpBaseUrl(),
-      )}`;
+        { pendingSelection, profile: profile() },
+      );
+      restorePollFocus(modal.content, focused);
+      animatePollBars(modal.content, bars);
     };
     modal.content.addEventListener('click', event => {
       const carouselButton = imageCarouselNavigationButton(event.target);
       if (carouselButton && moveImageCarousel(carouselButton)) return;
-      const button = event.target instanceof Element
-        ? event.target.closest<HTMLButtonElement>('[data-native-poll][data-native-poll-option]') : null;
-      const confirm = event.target instanceof Element
-        ? event.target.closest<HTMLButtonElement>('[data-native-poll-confirm]') : null;
-      const card = (button ?? confirm)?.closest<HTMLElement>('[data-native-poll-card]');
-      if (confirm && confirm.dataset.nativePollConfirm && !confirm.disabled && !pending) {
-        const optionIds = [...card?.querySelectorAll<HTMLButtonElement>('[data-native-poll-option][aria-pressed="true"]') ?? []]
-          .map(option => option.dataset.nativePollOption).filter((id): id is string => !!id);
-        if (optionIds.length === 0) return;
-        pending = true;
-        void modal.run(async () => {
-          try {
-            poll = await submitNativePollVote(this.feed.client, confirm.dataset.nativePollConfirm!, optionIds);
-          } finally {
-            pending = false;
-            if (!modal.signal.aborted) render();
-          }
-        });
-        return;
-      }
-      if (!button?.dataset.nativePoll || !button.dataset.nativePollOption || pending) return;
-      if (card?.dataset.pollMultiple === 'true') {
-        const selected = button.getAttribute('aria-pressed') !== 'true';
-        button.setAttribute('aria-pressed', String(selected));
-        button.classList.toggle('native-poll-option--selected', selected);
-        const submit = card.querySelector<HTMLButtonElement>('[data-native-poll-confirm]');
-        if (submit) submit.disabled = card.querySelectorAll('[data-native-poll-option][aria-pressed="true"]').length === 0;
-        return;
-      }
-      pending = true;
-      render();
-      void modal.run(async () => {
-        try {
-          poll = await submitNativePollVote(
-            this.feed.client,
-            button.dataset.nativePoll!,
-            [button.dataset.nativePollOption!],
-          );
-          if (!modal.signal.aborted) render();
-        } finally {
-          pending = false;
-          if (!modal.signal.aborted) render();
+      const target = event.target instanceof Element ? event.target : null;
+      const voters = target?.closest<HTMLButtonElement>('[data-native-poll-voters]');
+      if (voters) {
+        if (!voters.disabled) {
+          openNativePollVoters(this.feed.client, poll, {
+            optionId: voters.dataset.nativePollVotersOption,
+            profile: profile(),
+            subscribe: listener => this.feed.subscribe(() => {
+              const current = snapshotPoll();
+              if (current) listener(current);
+            }),
+          });
         }
-      });
+        return;
+      }
+      const button = target?.closest<HTMLButtonElement>('[data-native-poll][data-native-poll-option]');
+      const optionId = button?.dataset.nativePollOption;
+      if (!button || !optionId || button.disabled || pendingSelection) return;
+      const optionIds = nextNativePollSelection(poll, optionId);
+      if (optionIds.length === 0 && !this.feed.server.serverDetails?.protocol?.features.includes('poll-voters')) {
+        showInfoToast(t('poll.withdrawRequiresUpdate'));
+        return;
+      }
+      pendingSelection = optionIds;
+      render();
+      void submitNativePollVote(this.feed.client, poll.id, optionIds)
+        .then(
+          updated => { if (updated.revision >= poll.revision) poll = updated; },
+          (error: unknown) => {
+            if (!modal.signal.aborted) showErrorToast(error instanceof Error ? error.message : t('poll.voteFailed'));
+          },
+        )
+        .finally(() => {
+          pendingSelection = undefined;
+          if (!modal.signal.aborted) render();
+        });
     }, { signal: modal.signal });
     const unbind = this.feed.subscribe(() => {
-      const current = (this.feed.snapshot?.polls ?? []).find(entry => entry.id === poll.id);
+      const current = snapshotPoll();
       if (!current) { modal.close(true); return; }
+      if (current.revision < poll.revision) return;
       poll = current.myVoteOptionIds === null && poll.myVoteOptionIds !== null
-        ? { ...current, myVoteOptionIds: poll.myVoteOptionIds }
+        ? { ...current, myVoteOptionIds: survivingNativePollSelection(current, poll.myVoteOptionIds) }
         : current;
       render();
     });
     modal.signal.addEventListener('abort', unbind, { once: true });
     render();
+  }
+
+  private canEditPoll(poll: NativePoll): boolean {
+    return !isNativePollClosed(poll) && this.feed.server.serverDetails?.protocol?.features.includes('poll-edit') === true &&
+      (this.feed.server.currentUser?.id === poll.creatorUserId || this.feed.server.hasPermission(Permission.MANAGE_SERVER));
+  }
+
+  private editPoll(poll: NativePoll): void {
+    // The snapshot may be a refresh behind; edit from the current poll so warnings use real counts.
+    void fetchNativePoll(this.feed.client, poll.id).then(current => {
+      if (isNativePollClosed(current)) return;
+      const wizard = openNativePollWizard(this.feed.client, this.feed.server, current.channelId, { edit: current });
+      if (!wizard) return;
+      this.modals.add(wizard.close);
+      wizard.signal.addEventListener('abort', () => this.modals.delete(wizard.close), { once: true });
+    }, (error: unknown) => showErrorToast(error instanceof Error ? error.message : t('poll.editLoadFailed')));
   }
 
   private runCloseNativePoll(

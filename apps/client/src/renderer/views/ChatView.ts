@@ -1,6 +1,6 @@
 import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, getCommandPresentation, getMessageText,
   hasEveryoneMention, messageBlocksContent, messageBlocksInput, parseFencedMessageBlocks } from '@monky/shared';
-import type { AttachmentMeta, BotLocale, ChatMessageUpdatedPayload, ChatSendPayload, CommandPresentation, MessageReply, ResolvedMessageBlock, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
+import type { AttachmentMeta, BotLocale, ChatMessageUpdatedPayload, ChatSendPayload, CommandPresentation, MessageReply, NativePoll, ResolvedMessageBlock, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
@@ -20,7 +20,7 @@ import { getLanguage, t } from '../i18n';
 import { uploadAttachment, UploadHandle } from '../core/AttachmentUploader';
 import { getAttachmentUrl, formatBytes, fileIconName } from '../utils/attachment';
 import { showAlert, showConfirm } from './Dialog';
-import { showCopyToast } from './CopyToast';
+import { showCopyToast, showErrorToast, showInfoToast } from './CopyToast';
 import { ImageClipboard } from '../utils/imageClipboard';
 import { downloadLightboxFile, lightboxModal, LightboxMedia } from './LightboxModal';
 import { linkPreviewService } from '../core/LinkPreviewService';
@@ -41,7 +41,19 @@ import { BotChatView, renderBotInvocation } from './BotChatView';
 import { filterCommands, findCommandsByInputName, groupCommands, type CommandGroup } from '../utils/commandCatalog';
 import { renderCommandCatalog, renderEmptyCommandCatalog } from './commandCatalog';
 import { renderBotCommandContext } from './botResponse';
-import { renderNativePoll, submitNativePollVote } from './nativePoll';
+import {
+  animatePollBars,
+  capturePollBars,
+  capturePollFocus,
+  fetchNativePoll,
+  isNativePollClosed,
+  nativePollVoterProfile,
+  nextNativePollSelection,
+  openNativePollVoters,
+  renderNativePoll,
+  restorePollFocus,
+  submitNativePollVote,
+} from './nativePoll';
 import { openNativePollWizard } from './NativePollWizard';
 import { PublicSelectorView } from './PublicSelectorView';
 import { botSettingsModal, botSettingsMenuItem } from './BotSettingsModal';
@@ -118,6 +130,8 @@ export class ChatView {
   private emojiPicker: EmojiPicker | null = null;
   private reactionPicker: EmojiPicker | null = null;
   private pendingJumpId: string | null = null;
+  /** Answers shown while a poll vote is in flight, keyed by poll id. */
+  private readonly pendingPollVotes = new Map<string, string[]>();
   private copyRequestId = 0;
   private clearCopyFeedback: (() => void) | null = null;
   private readonly imageClipboard = new ImageClipboard();
@@ -558,7 +572,14 @@ export class ChatView {
           onClick: () => { void this.copyMessage(message.id, 'plain', selection); } },
       ],
     });
-    if (isAuthor && editingAllowed) {
+    const poll = message.poll;
+    if (poll) {
+      // Polls are edited as polls, by their creator or a server manager, while they are open.
+      if ((isAuthor || canModerate) && !isNativePollClosed(poll) &&
+          serverStore.serverDetails?.protocol?.features.includes('poll-edit')) {
+        items.push({ label: t('poll.edit'), icon: 'edit', onClick: () => this.editPoll(poll.id) });
+      }
+    } else if (isAuthor && editingAllowed) {
       items.push({
         label: t('chat.editMessage'),
         icon: 'edit',
@@ -759,8 +780,70 @@ export class ChatView {
     const newRow = wrapper.firstElementChild as HTMLElement | null;
     if (!newRow) return;
 
+    const focusedPollControl = capturePollFocus(row);
+    const pollBars = capturePollBars(row);
     row.replaceWith(newRow);
     this.bindMessageElementEvents(newRow);
+    restorePollFocus(newRow, focusedPollControl);
+    animatePollBars(newRow, pollBars);
+  }
+
+  private findPollMessage(pollId: string | undefined): ChatMessage | undefined {
+    if (!pollId || !this.currentChannelId) return undefined;
+    return this.store.getMessages(this.currentChannelId).find(message => message.poll?.id === pollId);
+  }
+
+  /** Each click sends the member's complete answer set; the card shows it at once and ignores clicks until confirmed. */
+  private votePoll(pollId: string, optionId: string): void {
+    const message = this.findPollMessage(pollId);
+    if (!message?.poll || this.pendingPollVotes.has(pollId)) return;
+    const optionIds = nextNativePollSelection(message.poll, optionId);
+    if (optionIds.length === 0 && !this.server.serverDetails?.protocol?.features.includes('poll-voters')) {
+      showInfoToast(t('poll.withdrawRequiresUpdate'));
+      return;
+    }
+    this.pendingPollVotes.set(pollId, optionIds);
+    this.replaceMessageRow(message);
+    void submitNativePollVote(this.client, pollId, optionIds)
+      .then(
+        poll => {
+          this.pendingPollVotes.delete(pollId);
+          this.store.updatePoll(poll);
+        },
+        (error: unknown) => showErrorToast(error instanceof Error ? error.message : t('poll.voteFailed')),
+      )
+      .finally(() => {
+        this.pendingPollVotes.delete(pollId);
+        const current = this.findPollMessage(pollId);
+        // An older revision than the one already shown is not re-rendered by the store.
+        if (current && this.container.isConnected && document.querySelector(
+          `.chat-message-row[data-message-id="${CSS.escape(current.id)}"] [data-native-poll-card][aria-busy]`,
+        )) this.replaceMessageRow(current);
+      });
+  }
+
+  private openPollVoters(poll: NativePoll, optionId?: string): void {
+    openNativePollVoters(this.client, poll, {
+      optionId,
+      profile: nativePollVoterProfile(serverStore.knownMembers),
+      subscribe: listener => appEvents.on('chat.message_updated', (message: ChatMessage) => {
+        if (message.poll) listener(message.poll);
+      }),
+    });
+  }
+
+  private editPoll(pollId: string): void {
+    const poll = this.findPollMessage(pollId)?.poll;
+    if (!poll || isNativePollClosed(poll)) return;
+    // The chat copy lacks the revealed audience and may hold stale counts: edit from the current poll.
+    void fetchNativePoll(this.client, poll.id).then(current => {
+      this.store.updatePoll(current);
+      if (isNativePollClosed(current) || !this.container.isConnected) return;
+      openNativePollWizard(this.client, this.server, current.channelId, {
+        edit: current,
+        onSaved: saved => this.store.updatePoll(saved),
+      });
+    }, (error: unknown) => showErrorToast(error instanceof Error ? error.message : t('poll.editLoadFailed')));
   }
 
   /** Whether the feed is scrolled close enough to the end to count as "at the end" (#270). */
@@ -1104,6 +1187,10 @@ export class ChatView {
           serverStore.hasPermission(Permission.SEND_MESSAGES, this.currentChannelId),
           value => this.formatDateTime(value),
           this.client.getHttpBaseUrl(),
+          {
+            pendingSelection: this.pendingPollVotes.get(m.poll.id),
+            profile: nativePollVoterProfile(serverStore.knownMembers),
+          },
         )
       : '';
     const botComponentsHtml = m.botComponents?.length
@@ -1769,48 +1856,20 @@ export class ChatView {
         event.stopPropagation();
         return;
       }
-      const button = event.target instanceof Element
-        ? event.target.closest<HTMLButtonElement>('[data-native-poll][data-native-poll-option]') : null;
-      const confirm = event.target instanceof Element
-        ? event.target.closest<HTMLButtonElement>('[data-native-poll-confirm]') : null;
-      if (confirm && !confirm.disabled) {
-        const card = confirm.closest<HTMLElement>('[data-native-poll-card]');
-        const optionIds = [...card?.querySelectorAll<HTMLButtonElement>('[data-native-poll-option][aria-pressed="true"]') ?? []]
-          .map(option => option.dataset.nativePollOption).filter((id): id is string => !!id);
-        if (confirm.dataset.nativePollConfirm && optionIds.length > 0) {
-          confirm.disabled = true;
-          void submitNativePollVote(this.client, confirm.dataset.nativePollConfirm, optionIds)
-            .then(poll => this.store.updatePoll(poll))
-            .catch(error => {
-              if (confirm.isConnected) confirm.disabled = false;
-              const failure = card?.querySelector<HTMLElement>('[data-native-poll-error]');
-              if (failure) { failure.hidden = false; failure.textContent = error instanceof Error ? error.message : t('poll.voteFailed'); }
-            });
-        }
+      const target = event.target instanceof Element ? event.target : null;
+      const votersButton = target?.closest<HTMLButtonElement>('[data-native-poll-voters]');
+      if (votersButton) {
+        event.stopPropagation();
+        const poll = this.findPollMessage(votersButton.dataset.nativePollVoters)?.poll;
+        if (poll && !votersButton.disabled) this.openPollVoters(poll, votersButton.dataset.nativePollVotersOption);
         return;
       }
+      const button = target?.closest<HTMLButtonElement>('[data-native-poll][data-native-poll-option]');
       const pollId = button?.dataset.nativePoll;
       const optionId = button?.dataset.nativePollOption;
       if (!button || !pollId || !optionId || button.disabled) return;
       event.stopPropagation();
-      const card = button.closest<HTMLElement>('[data-native-poll-card]');
-      if (card?.dataset.pollMultiple === 'true') {
-        const selected = button.getAttribute('aria-pressed') !== 'true';
-        button.setAttribute('aria-pressed', String(selected));
-        button.classList.toggle('native-poll-option--selected', selected);
-        const selectedCount = card.querySelectorAll('[data-native-poll-option][aria-pressed="true"]').length;
-        const submit = card.querySelector<HTMLButtonElement>('[data-native-poll-confirm]');
-        if (submit) submit.disabled = selectedCount === 0;
-        return;
-      }
-      for (const option of card?.querySelectorAll<HTMLButtonElement>('[data-native-poll-option]') ?? []) option.disabled = true;
-      void submitNativePollVote(this.client, pollId, [optionId])
-        .then(poll => this.store.updatePoll(poll))
-        .catch(error => {
-          for (const option of card?.querySelectorAll<HTMLButtonElement>('[data-native-poll-option]') ?? []) option.disabled = false;
-          const failure = card?.querySelector<HTMLElement>('[data-native-poll-error]');
-          if (failure) { failure.hidden = false; failure.textContent = error instanceof Error ? error.message : t('poll.voteFailed'); }
-        });
+      this.votePoll(pollId, optionId);
     };
     messagesFeed?.addEventListener('click', pollClick);
     const undoTimer = setInterval(() => {

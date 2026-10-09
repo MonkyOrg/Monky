@@ -1,5 +1,5 @@
 import { nativePollSchema, resourceAudienceSchema } from '@monky/shared';
-import type { MessageRecord, NativePollRecord } from '../../domain/entities';
+import type { MessageRecord, NativePollRecord, NativePollVoterRecord } from '../../domain/entities';
 import type { INativePollRepository } from '../../domain/repositories';
 import type { IDatabaseDriver } from './SqliteWrapper';
 import { SqliteResourceAudienceRepository } from './SqliteResourceAudienceRepository';
@@ -11,6 +11,7 @@ interface PollRow {
   creatorUserId: string;
   question: string;
   allowMultiple: number;
+  anonymousVotes: number;
   imagesJson: string;
   optionsJson: string;
   allowChange: number;
@@ -25,7 +26,7 @@ interface PollRow {
 
 const COLUMNS = `id, message_id AS messageId, channel_id AS channelId,
   creator_user_id AS creatorUserId, question, options_json AS optionsJson,
-  allow_multiple AS allowMultiple, images_json AS imagesJson,
+  allow_multiple AS allowMultiple, anonymous_votes AS anonymousVotes, images_json AS imagesJson,
   allow_change AS allowChange, closes_at AS closesAt, max_voters AS maxVoters,
   closed_at AS closedAt, live_action AS liveAction, created_at AS createdAt, revision,
   audience_json AS audienceJson`;
@@ -42,6 +43,7 @@ function record(row: PollRow, audiences: SqliteResourceAudienceRepository): Nati
     creatorUserId: row.creatorUserId,
     question: row.question,
     allowMultiple: Boolean(row.allowMultiple),
+    anonymousVotes: Boolean(row.anonymousVotes),
     imagePaths: nativePollSchema.shape.imageUrls.parse(JSON.parse(row.imagesJson))
       .map(url => url.slice('/avatars/'.length)),
     options: parsed.map(({ id, label, emoji }) => ({ id, label, emoji })),
@@ -106,12 +108,13 @@ export class SqliteNativePollRepository implements INativePollRepository {
         VALUES (?, ?, ?, ?, ?, 0)`)
         .run(message.id, message.channelId, message.userId, message.content, message.createdAt);
       this.db.prepare(`INSERT INTO native_polls
-        (id, message_id, channel_id, creator_user_id, question, allow_multiple, images_json,
+        (id, message_id, channel_id, creator_user_id, question, allow_multiple, anonymous_votes, images_json,
          options_json, allow_change, closes_at, max_voters, closed_at, live_action, created_at, revision,
          audience_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(poll.id, poll.messageId, poll.channelId, poll.creatorUserId, poll.question,
-          poll.allowMultiple ? 1 : 0, JSON.stringify(poll.imagePaths.map(path => `/avatars/${path}`)),
+          poll.allowMultiple ? 1 : 0, poll.anonymousVotes ? 1 : 0,
+          JSON.stringify(poll.imagePaths.map(path => `/avatars/${path}`)),
           JSON.stringify(poll.options), poll.allowChange ? 1 : 0, poll.closesAt, poll.maxVoters,
           poll.closedAt, poll.liveAction ? 1 : 0, poll.createdAt, poll.revision,
           JSON.stringify(resourceAudienceSchema.parse(poll.audience)));
@@ -133,11 +136,15 @@ export class SqliteNativePollRepository implements INativePollRepository {
       if (poll.closedAt !== null || optionIds.some(optionId => !validOptions.has(optionId))) return poll;
       const previous = this.votesForUser(id, userId);
       if (previous.length > 0 && !poll.allowChange) return poll;
-      if (previous.length === optionIds.length && previous.every(optionId => optionIds.includes(optionId))) return poll;
-      this.db.prepare('DELETE FROM native_poll_votes WHERE poll_id = ? AND user_id = ?').run(id, userId);
+      const removed = previous.filter(optionId => !optionIds.includes(optionId));
+      const added = optionIds.filter(optionId => !previous.includes(optionId));
+      if (removed.length === 0 && added.length === 0) return poll;
+      // Kept answers keep their original time, so voter order stays stable while a member toggles others.
+      const remove = this.db.prepare('DELETE FROM native_poll_votes WHERE poll_id = ? AND user_id = ? AND option_id = ?');
+      for (const optionId of removed) remove.run(id, userId, optionId);
       const insert = this.db.prepare(`INSERT INTO native_poll_votes
         (poll_id, user_id, option_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`);
-      for (const optionId of optionIds) insert.run(id, userId, optionId, now, now);
+      for (const optionId of added) insert.run(id, userId, optionId, now, now);
       const total = this.voterCount(id);
       const closes = poll.maxVoters !== null && total >= poll.maxVoters ? now : null;
       this.db.prepare(`UPDATE native_polls SET revision = revision + 1,
@@ -145,6 +152,36 @@ export class SqliteNativePollRepository implements INativePollRepository {
         .run(closes, closes, id);
       poll = this.findById(id);
       return poll;
+    })();
+  }
+
+  edit(poll: NativePollRecord, singleAnswer: boolean, now: number): NativePollRecord | undefined {
+    return this.db.transaction(() => {
+      const current = this.findById(poll.id);
+      if (!current || current.closedAt !== null || (current.closesAt !== null && current.closesAt <= now)) return undefined;
+      // Changed, removed and reset answers carry ids that are no longer in the poll.
+      const optionIds = poll.options.map(option => option.id);
+      this.db.prepare(`DELETE FROM native_poll_votes WHERE poll_id = ?
+        AND option_id NOT IN (${optionIds.map(() => '?').join(',')})`).run(poll.id, ...optionIds);
+      if (singleAnswer) {
+        this.db.prepare(`DELETE FROM native_poll_votes WHERE poll_id = ? AND user_id IN (
+          SELECT user_id FROM native_poll_votes WHERE poll_id = ? GROUP BY user_id HAVING COUNT(*) > 1)`).run(poll.id, poll.id);
+      }
+      this.db.prepare(`UPDATE native_polls SET question = ?, allow_multiple = ?, anonymous_votes = ?, images_json = ?,
+        options_json = ?, closes_at = ?, max_voters = ?, live_action = ?, audience_json = ?, revision = revision + 1
+        WHERE id = ?`).run(
+        poll.question, poll.allowMultiple ? 1 : 0, poll.anonymousVotes ? 1 : 0,
+        JSON.stringify(poll.imagePaths.map(path => `/avatars/${path}`)), JSON.stringify(poll.options),
+        poll.closesAt, poll.maxVoters, poll.liveAction ? 1 : 0,
+        JSON.stringify(resourceAudienceSchema.parse(poll.audience)), poll.id,
+      );
+      this.audiences.replace('poll', poll.id, poll.audience);
+      // The message text is the question: replies and search follow the edit.
+      this.db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(poll.question, poll.messageId);
+      if (poll.maxVoters !== null && this.voterCount(poll.id) >= poll.maxVoters) {
+        this.db.prepare('UPDATE native_polls SET closed_at = ? WHERE id = ?').run(now, poll.id);
+      }
+      return this.findById(poll.id);
     })();
   }
 
@@ -192,5 +229,24 @@ export class SqliteNativePollRepository implements INativePollRepository {
     return (this.db.prepare(`SELECT option_id AS optionId FROM native_poll_votes
       WHERE poll_id = ? AND user_id = ? ORDER BY created_at, option_id`).all(id, userId) as Array<{ optionId: string }>)
       .map(row => row.optionId);
+  }
+
+  votersByOption(id: string, limitPerOption?: number): Map<string, NativePollVoterRecord[]> {
+    const rows = this.db.prepare(`SELECT optionId, userId, nickname, avatarPath FROM (
+        SELECT v.option_id AS optionId, v.user_id AS userId, u.nickname AS nickname, u.avatar_path AS avatarPath,
+          ROW_NUMBER() OVER (PARTITION BY v.option_id ORDER BY v.created_at, v.user_id) AS position
+        FROM native_poll_votes v JOIN users u ON u.id = v.user_id
+        WHERE v.poll_id = ?)
+      WHERE ? IS NULL OR position <= ?
+      ORDER BY optionId, position`).all(id, limitPerOption ?? null, limitPerOption ?? null) as Array<{
+        optionId: string; userId: string; nickname: string; avatarPath: string | null;
+      }>;
+    const voters = new Map<string, NativePollVoterRecord[]>();
+    for (const row of rows) {
+      const list = voters.get(row.optionId) ?? [];
+      list.push({ userId: row.userId, nickname: row.nickname, avatarPath: row.avatarPath });
+      voters.set(row.optionId, list);
+    }
+    return voters;
   }
 }

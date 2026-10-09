@@ -165,6 +165,7 @@ import {
   isReceivingBotVoice,
   botVoiceStateUpdateSchema,
   nativePollCreateSchema,
+  nativePollEditSchema,
   nativePollIdSchema,
   nativePollVoteSchema,
   type NativePollCreate,
@@ -192,6 +193,7 @@ import { SignalingService } from '../../application/services/SignalingService';
 import { UserService } from '../../application/services/UserService';
 import { DmRelayService } from '../../application/services/DmRelayService';
 import { NativePollError, NativePollService } from '../../application/services/NativePollService';
+import { projectLegacyPolls } from './pollProjection';
 import { IServerRepository } from '../../domain/repositories';
 import { scanServerNetworkInterfaces } from '../discovery/ServerIpScanner';
 import { CoturnManager } from '../turn/CoturnManager';
@@ -872,6 +874,18 @@ export class WebSocketServer {
 
       case MessageType.POLL_CLOSE:
         await this.handlePollClose(session, payload, requestId);
+        break;
+
+      case MessageType.POLL_VOTERS:
+        await this.handlePollVoters(session, payload, requestId);
+        break;
+
+      case MessageType.POLL_EDIT:
+        await this.handlePollEdit(session, payload, requestId);
+        break;
+
+      case MessageType.POLL_GET:
+        await this.handlePollGet(session, payload, requestId);
         break;
 
       case MessageType.FORUM_LIST:
@@ -2544,6 +2558,130 @@ export class WebSocketServer {
     }
   }
 
+  private async handlePollVoters(
+    session: ClientSession,
+    payload: unknown,
+    requestId?: string,
+  ): Promise<void> {
+    if (!this.pollService || !session.user || session.isBot || !session.protocol?.features.includes('poll-voters')) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'Poll voters unavailable.', requestId);
+      return;
+    }
+    const parsed = nativePollIdSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Invalid poll.', requestId);
+      return;
+    }
+    try {
+      const poll = this.pollService.get(parsed.data.id);
+      if (!(await this.requirePermission(session, Permission.READ_MESSAGES, requestId, poll.channelId)) ||
+          !(await this.requireChannelAccess(session, poll.channelId, requestId))) return;
+      if (!await this.pollService.canView(session.user.id, poll)) {
+        throw new NativePollError('Poll not found.', ProtocolErrorCode.PERMISSION_DENIED);
+      }
+      this.send(session.ws, {
+        type: MessageType.POLL_VOTERS_RESULT,
+        requestId,
+        payload: this.pollService.voters(poll),
+      });
+    } catch (error: unknown) {
+      this.sendError(
+        session.ws,
+        error instanceof NativePollError ? error.code : ProtocolErrorCode.INTERNAL_ERROR,
+        error instanceof NativePollError ? error.message : 'Could not load poll voters.',
+        requestId,
+      );
+    }
+  }
+
+  /** The creator and server managers may change an open poll. */
+  private async handlePollEdit(
+    session: ClientSession,
+    payload: unknown,
+    requestId?: string,
+  ): Promise<void> {
+    if (!this.pollService || !session.user || session.isBot || !session.protocol?.features.includes('poll-edit')) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'Poll editing unavailable.', requestId);
+      return;
+    }
+    const parsed = nativePollEditSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Invalid poll.', requestId);
+      return;
+    }
+    try {
+      const existing = this.pollService.get(parsed.data.id);
+      if (!(await this.requireChannelAccess(session, existing.channelId, requestId))) return;
+      if (!await this.pollService.canView(session.user.id, existing)) {
+        throw new NativePollError('Poll not found.', ProtocolErrorCode.PERMISSION_DENIED);
+      }
+      if (existing.creatorUserId !== session.user.id &&
+          !await this.permissionService.checkPermission(session.user.id, Permission.MANAGE_SERVER)) {
+        this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Poll unavailable.', requestId);
+        return;
+      }
+      if (parsed.data.liveAction && !existing.liveAction) {
+        if (!(await this.requirePermission(session, Permission.EMIT_LIVE_ACTIONS, requestId, existing.channelId))) return;
+        if (this.communityService && !this.communityService.settings().eventsEnabled) {
+          this.sendError(session.ws, ProtocolErrorCode.COMMUNITY_INVALID, 'Live actions are disabled.', requestId);
+          return;
+        }
+      }
+      const updated = this.pollService.edit(session.user.id, parsed.data);
+      const personalized = await this.pollService.publicPollForUser(updated, session.user.id);
+      this.send(session.ws, { type: MessageType.POLL_UPDATED, requestId, payload: personalized });
+      await this.broadcastToChannel(updated.channelId, {
+        type: MessageType.POLL_UPDATED,
+        payload: this.pollService.publicPoll(updated),
+      });
+      if (existing.liveAction || updated.liveAction) await this.community?.refresh();
+    } catch (error: unknown) {
+      this.sendError(
+        session.ws,
+        error instanceof NativePollError ? error.code : ProtocolErrorCode.INTERNAL_ERROR,
+        error instanceof NativePollError ? error.message : 'Could not edit poll.',
+        requestId,
+      );
+    }
+  }
+
+  /** Broadcast polls carry no personal vote or revealed audience; an editor starts from its own view. */
+  private async handlePollGet(
+    session: ClientSession,
+    payload: unknown,
+    requestId?: string,
+  ): Promise<void> {
+    if (!this.pollService || !session.user || session.isBot || !session.protocol?.features.includes('poll-edit')) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'Poll editing unavailable.', requestId);
+      return;
+    }
+    const parsed = nativePollIdSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Invalid poll.', requestId);
+      return;
+    }
+    try {
+      const poll = this.pollService.get(parsed.data.id);
+      if (!(await this.requirePermission(session, Permission.READ_MESSAGES, requestId, poll.channelId)) ||
+          !(await this.requireChannelAccess(session, poll.channelId, requestId))) return;
+      if (!await this.pollService.canView(session.user.id, poll)) {
+        throw new NativePollError('Poll not found.', ProtocolErrorCode.PERMISSION_DENIED);
+      }
+      this.send(session.ws, {
+        type: MessageType.POLL_UPDATED,
+        requestId,
+        payload: await this.pollService.publicPollForUser(poll, session.user.id),
+      });
+    } catch (error: unknown) {
+      this.sendError(
+        session.ws,
+        error instanceof NativePollError ? error.code : ProtocolErrorCode.INTERNAL_ERROR,
+        error instanceof NativePollError ? error.message : 'Could not load poll.',
+        requestId,
+      );
+    }
+  }
+
   private async publishBotResponse(
     session: BotInteractionSession,
     response: BotCommandMessagePayload,
@@ -2656,7 +2794,12 @@ export class WebSocketServer {
   }
 
   private async broadcastChatMessageUpdated(message: ChatMessage, requestId?: string): Promise<void> {
-    const updatedPayload: ChatMessageUpdatedPayload = { message };
+    // The message was loaded for the actor: its poll must not carry their vote or revealed audience to everyone.
+    const polls = this.pollService;
+    const poll = message.poll && polls ? polls.repository.findById(message.poll.id) : undefined;
+    const updatedPayload: ChatMessageUpdatedPayload = {
+      message: poll && polls ? { ...message, poll: polls.publicPoll(poll) } : message,
+    };
     await this.broadcastToChannel(message.channelId, {
       type: MessageType.CHAT_MESSAGE_UPDATED,
       requestId,
@@ -5505,7 +5648,9 @@ export class WebSocketServer {
     const session = this.sessions.get(ws);
     if (ws.readyState === WebSocket.OPEN && (!session || this.canDeliverBotEvent(session, message))) {
       const projected = session?.user ? this.projectScreenMessage(session, message) : message;
-      if (projected) ws.send(JSON.stringify(projected));
+      if (!projected) return;
+      ws.send(JSON.stringify(session && !session.protocol?.features.includes('poll-voters')
+        ? projectLegacyPolls(projected) : projected));
     }
   }
 

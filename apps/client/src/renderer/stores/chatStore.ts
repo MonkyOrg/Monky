@@ -2,6 +2,7 @@ import {
   LIMITS,
   botFormSchema,
   botMessagePreviewLocalizations,
+  survivingNativePollSelection,
   type BotForm,
   type BotFormValues,
   type ChatMessage,
@@ -325,8 +326,13 @@ export class ChatStore {
       return;
     }
     const previous = list[index];
+    // Broadcast polls carry no personal vote: keep the member's own selection, as poll updates do.
+    const poll = message.poll && message.poll.myVoteOptionIds === null && previous.poll
+      ? { ...message.poll, myVoteOptionIds: survivingNativePollSelection(message.poll, previous.poll.myVoteOptionIds) }
+      : message.poll;
     list[index] = {
       ...message,
+      ...(poll ? { poll } : {}),
       ...(previous.isEphemeral ? { isEphemeral: true } : {}),
       ...(previous.isBot && previous.userId === message.userId
         ? { isBot: true, botCommand: message.botCommand ?? previous.botCommand } : {}),
@@ -342,7 +348,7 @@ export class ChatStore {
       if (!message?.poll || poll.revision < message.poll.revision) continue;
       message.poll = {
         ...poll,
-        myVoteOptionIds: poll.myVoteOptionIds ?? message.poll.myVoteOptionIds,
+        myVoteOptionIds: poll.myVoteOptionIds ?? survivingNativePollSelection(poll, message.poll.myVoteOptionIds),
       };
       this.bus.emit('chat.message_updated', message);
     }

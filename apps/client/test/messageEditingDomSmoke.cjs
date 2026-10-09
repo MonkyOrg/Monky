@@ -472,6 +472,7 @@ async function runNativeSmoke(window) {
     await fixture('settle()');
     await captureScreenshot(window, 'chat-delivery-reference.png');
     checks += await fixture('mediaDeliveryChecks()');
+    checks += await fixture('pollChecks()');
     checks += await runLiveMarkdownSmoke(window);
     return checks;
   } catch (error) {
@@ -1493,6 +1494,111 @@ async function installFixture() {
         client.getHttpBaseUrl = saved.base;
         stickerService.toFile = saved.toFile;
         server.myPermissions = saved.permissions;
+        server.serverDetails.protocol = saved.protocol;
+      }
+    },
+    async pollChecks() {
+      const { client, chatStore: store, serverStore: server } = active.session;
+      const saved = { request: client.sendRequest, protocol: server.serverDetails.protocol };
+      let checks = 0;
+      const check = (value, message) => { if (!value) throw new Error(message); checks++; };
+      const votes = [];
+      let releaseVote;
+      const someone = { userId: 'someone-else', userNickname: 'Someone', userAvatarUrl: null };
+      const poll = {
+        id: 'chat-poll', messageId: 'chat-poll-message', channelId: 'chat', creatorUserId: user.id,
+        question: 'Movie night?', allowMultiple: false, imageUrls: [], totalVotes: 1, myVoteOptionIds: [],
+        anonymousVotes: false, allowChange: true, closesAt: Date.now() + 3_600_000, maxVoters: null, closedAt: null,
+        liveAction: false, createdAt: 200, revision: 1, audience: { visibility: 'public' },
+        options: [
+          { id: 'friday', label: 'Friday', emoji: null, votes: 1, voters: [someone] },
+          { id: 'saturday', label: 'Saturday', emoji: null, votes: 0, voters: [] },
+        ],
+      };
+      const answer = optionIds => ({
+        ...poll, revision: poll.revision + votes.length, myVoteOptionIds: optionIds, totalVotes: optionIds.length ? 2 : 1,
+        options: poll.options.map(option => {
+          const voters = optionIds.includes(option.id)
+            ? [...option.voters, { userId: user.id, userNickname: user.nickname, userAvatarUrl: null }] : option.voters;
+          return { ...option, voters, votes: voters.length };
+        }),
+      });
+      const card = () => find('[data-native-poll-card="chat-poll"]');
+      const option = id => card().querySelector(`[data-native-poll-option="${id}"]`);
+      const visibleMenuLabels = () => [...document.querySelectorAll('.floating-context-menu:not([data-ui-closing]) [role="menuitem"]')]
+        .map(item => item.textContent.trim());
+      try {
+        server.serverDetails.protocol = { ...saved.protocol, features: [...saved.protocol.features, 'poll-voters', 'poll-edit'] };
+        client.sendRequest = async (type, payload, ...args) => {
+          if (type === 'POLL_VOTE') {
+            votes.push(payload.optionIds);
+            await new Promise(resolve => { releaseVote = resolve; });
+            return answer(payload.optionIds);
+          }
+          if (type === 'POLL_VOTERS') return { id: payload.id, options: answer(votes.at(-1) ?? []).options
+            .map(entry => ({ id: entry.id, voters: entry.voters })) };
+          if (type === 'POLL_GET') return answer(votes.at(-1) ?? []);
+          return saved.request.call(client, type, payload, ...args);
+        };
+        store.addMessage({ id: 'chat-poll-message', channelId: 'chat', userId: user.id, userNickname: user.nickname,
+          content: poll.question, createdAt: 200, isSystem: false, poll });
+        await settle();
+        check(!card().querySelector('[data-native-poll-confirm]')
+          && card().querySelector('[data-native-poll-voters-option="friday"]')?.dataset.tooltip === 'Friday\nSomeone'
+          && card().querySelector('.native-poll-view-votes'),
+        'Chat polls vote without a confirm button and show who voted for each answer');
+        option('saturday').focus();
+        option('saturday').click();
+        await settle();
+        check(votes.at(-1).join() === 'saturday' && option('saturday').getAttribute('aria-pressed') === 'true'
+          && card().getAttribute('aria-busy') === 'true' && document.activeElement === option('saturday'),
+        'A chat vote shows the answer at once while the server confirms it, keeping keyboard focus');
+        option('friday').click();
+        check(votes.length === 1, 'Clicks wait for the pending vote instead of racing it');
+        releaseVote();
+        await settle();
+        const fillAnimation = id => card().querySelector(`[data-native-poll-fill="${id}"]`).getAnimations()[0]
+          ?.effect.getKeyframes().map(frame => frame.transform).join(' > ');
+        const animated = matchMedia('(prefers-reduced-motion: reduce)').matches
+          ? !fillAnimation('saturday') && !fillAnimation('friday')
+          : fillAnimation('saturday') === 'scaleX(0) > scaleX(0.5)' && fillAnimation('friday') === 'scaleX(1) > scaleX(0.5)';
+        check(animated && card().querySelector('[data-native-poll-fill="saturday"]').dataset.share === '0.5000',
+          'Chat poll bars grow and shrink from their previous fill, and settle at once with reduced motion');
+        check(!card().hasAttribute('aria-busy') && option('saturday').getAttribute('aria-pressed') === 'true'
+          && card().querySelector('[data-native-poll-voters-option="saturday"]')
+          && document.activeElement === option('saturday'),
+        'The confirmed vote renders the server state and keeps focus on the answer');
+        option('saturday').click();
+        await settle();
+        releaseVote();
+        await settle();
+        check(votes.at(-1).length === 0 && option('saturday').getAttribute('aria-pressed') === 'false',
+          'Clicking the chosen answer again withdraws the vote');
+        card().querySelector('.native-poll-view-votes').click();
+        await settle();
+        const votersModal = find('.native-poll-voters-modal');
+        check(votersModal.querySelector('[data-native-poll-voters-group="friday"] [data-native-poll-voter="someone-else"]'),
+          'View votes lists the voters of each answer from the chat');
+        votersModal.closest('.modal-backdrop').querySelector('[data-community-close]').click();
+        await settle();
+        const more = find('.chat-message-row[data-message-id="chat-poll-message"] [data-message-action="more"]');
+        more.click();
+        await settle();
+        check(visibleMenuLabels().some(label => label.includes(language.t('poll.edit')))
+          && !visibleMenuLabels().some(label => label.includes(language.t('chat.editMessage'))),
+        'The author edits a poll as a poll, not as message text');
+        [...document.querySelectorAll('.floating-context-menu:not([data-ui-closing]) [role="menuitem"]')]
+          .find(item => item.textContent.includes(language.t('poll.edit'))).click();
+        await settle();
+        const wizard = find('.native-poll-wizard');
+        check(wizard.querySelector('.modal-title').textContent === language.t('poll.editTitle')
+          && wizard.querySelector('[data-poll-question]').value === 'Movie night?',
+        'Edit poll opens the prefilled poll steps from the chat');
+        wizard.querySelector('[data-poll-cancel]').click();
+        await settle();
+        return checks;
+      } finally {
+        client.sendRequest = saved.request;
         server.serverDetails.protocol = saved.protocol;
       }
     },

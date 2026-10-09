@@ -184,6 +184,12 @@ message, history, replies, search results, totals, and pagination do not reveal
 that it exists. The creator and **Manage server** moderators retain access,
 always subject to current channel read permission.
 
+While a poll is open, its creator and people with **Manage server** can edit
+all of it, including audience, duration, voter limit, and anonymous votes.
+Turning the live action on during an edit still requires **Emit live actions**.
+Members who lose access to a private poll after an edit stop seeing it once the
+channel reloads.
+
 ## Search messages
 
 Use top-right search or `Ctrl+F` inside a chat to start with its current channel.

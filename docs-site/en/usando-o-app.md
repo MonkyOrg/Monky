@@ -224,10 +224,29 @@ The **+** button opens composer actions. **Attach file** keeps the existing uplo
 flow; **Create poll** opens a three-step flow for the question, 2–10 answers with
 an optional emoji each, up to 5 carousel images selectable at once with an
 animated preview, navigation and reordering, and a duration and/or voter
-limit. A poll can allow one answer or several; in the latter case, each person
-confirms any number of answers together, including all of them. The vote may be
-changed until closure. The first reached limit closes the poll, while its
-message retains final counts and percentages.
+limit. A poll can allow one answer or several. Click an answer to vote and click
+it again to withdraw; with several answers, each click adds or removes only that
+one, and with a single answer, clicking another one switches the vote. This
+works until the poll closes. Each answer shows its vote count on the right, and
+its bar grows or shrinks with its share. The first reached limit closes the
+poll, while its message retains the final counts.
+
+Votes are public by default: voters' avatars appear beside the vote count, and
+hovering over them shows their names. **View votes** opens the complete
+list per answer. With **Anonymous votes**, chosen at creation, nobody sees who
+voted, not even the creator, and the message shows an **Anonymous** badge. Polls
+created before this option show who voted.
+
+The poll creator and people with **Manage server** can edit an open poll from
+the message or live action menu, using the same steps as creation. Changing the
+question resets every vote; changing an answer's text resets only that answer's
+votes; adding or removing answers and changing emojis or images leaves other
+votes untouched. Making anonymous votes public also resets every vote, so secret
+votes are never revealed, and switching to a single answer removes the vote of
+anyone who chose more than one. A new duration counts from the edit, and a voter
+limit already reached closes the poll. These effects appear while you edit, and
+saving asks for confirmation whenever votes would be lost. If votes arrive while
+you edit, Monky shows the updated effects before discarding any of them.
 
 People with **Emit live actions** may also highlight the same poll above the
 channels. The message and live action are two surfaces for one resource: a vote
