@@ -33,7 +33,7 @@ import {
 } from '@monky/shared';
 import { audioProcessor } from './core/AudioProcessor';
 import { appEvents } from './core/EventBus';
-import { networkClient, type ConnectionStatus } from './core/NetworkClient';
+import { networkClient, type ConnectionStatus, type NetworkDisconnectedPayload } from './core/NetworkClient';
 import { callClient, leaveCurrentCall, rejoinCallOnSession, showHome, suspendCallForNetworkLoss } from './core/serverConnection';
 import { VoiceModeReconnect, type VoiceReconnectCall } from './core/VoiceModeReconnect';
 import { participantManager } from './core/ParticipantManager';
@@ -720,10 +720,16 @@ class App {
       }
     });
 
-    appEvents.on('network.disconnected', () => {
+    appEvents.on('network.disconnected', (payload: NetworkDisconnectedPayload) => {
       const origin = currentEventOrigin();
       const ownsCall = !voiceStore.voiceSessionKey || voiceStore.voiceSessionKey === origin;
+      // A server restart, update or removal drops the call just like a voice
+      // kick, so it gets the same leave cue (#533). Leaving on purpose already
+      // played it. Read before leaving: reset() clears the server deafen.
+      const shouldPlayLeaveCue = ownsCall && payload.cause === 'server'
+        && voiceStore.currentVoiceChannelId !== null && !voiceStore.getEffectiveDeafened();
       if (ownsCall) leaveCurrentCall(false);
+      if (shouldPlayLeaveCue) soundEffects.play('leave_voice');
 
       // The stores resolve to the session that dropped, so this clears the
       // right bundle even when a background server is the one going away.
@@ -805,7 +811,7 @@ class App {
         if (isForegroundEvent()) {
           appEvents.emit('network.server_shutdown', { reason: t('app.kickedFromServerMessage') });
         }
-        networkClient.disconnect();
+        networkClient.disconnect('server');
         return;
       }
       serverStore.removeMemberCompletely(payload.userId);

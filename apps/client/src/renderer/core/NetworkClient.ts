@@ -24,6 +24,16 @@ import { settingsStore } from '../stores/settingsStore';
 
 export type ConnectionStatus = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING';
 
+/**
+ * Who ended the session: the user/app (`local`) or the server, by shutting
+ * down, updating or removing this member (`server`).
+ */
+export type DisconnectCause = 'local' | 'server';
+
+export interface NetworkDisconnectedPayload {
+  cause: DisconnectCause;
+}
+
 export class RequestTimeoutError extends Error {
   constructor(public readonly messageType: MessageType) {
     super(`Timeout aguardando resposta para ${messageType}`);
@@ -379,8 +389,8 @@ export class NetworkClient {
     });
   }
 
-  public disconnect(): void {
-    clientLog.info('NETWORK', 'Disconnecting from server');
+  public disconnect(cause: DisconnectCause = 'local'): void {
+    clientLog.info('NETWORK', 'Disconnecting from server', { cause });
     // Emitting again after the socket already died would run the whole teardown
     // twice — and, with one client per server (#400), would ask the session
     // manager to drop a session while it is already being dropped.
@@ -409,7 +419,7 @@ export class NetworkClient {
     // here instead of lingering until their own 8s timeout.
     this.rejectPendingRequests();
     this.setStatus('DISCONNECTED');
-    if (wasLive) this.emitScoped('network.disconnected');
+    if (wasLive) this.emitScoped('network.disconnected', { cause } satisfies NetworkDisconnectedPayload);
   }
 
   private rejectPendingRequests(): void {
@@ -514,13 +524,13 @@ export class NetworkClient {
       const parsed = serverShutdownSchema.safeParse(payload);
       if (!parsed.success) {
         clientLog.warn('NETWORK', 'Invalid server shutdown notice');
-        this.disconnect();
+        this.disconnect('server');
         return;
       }
       this.emitScoped('network.server_shutdown', {
         ...parsed.data, serverName: this.serverName || this.currentServerUrl,
       });
-      this.disconnect();
+      this.disconnect('server');
       return;
     }
 
