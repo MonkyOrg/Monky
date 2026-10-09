@@ -5,11 +5,13 @@ import { randomUUID } from 'node:crypto';
 import { normalizeBotReachabilityOrigin } from '@monky/shared';
 import { isRecord, type BotMode } from '../tooling/config';
 import {
-  EMPTY_BOT_REQUIREMENTS, localizedText, type BotLocalizedText, type BotPortRequirement, type BotRequirements,
+  EMPTY_BOT_REQUIREMENTS, MANIFEST_PORT_ID, localizedText, type BotLocalizedText, type BotPortRequirement, type BotRequirements,
 } from '../tooling/requirements';
-import type { CliContext } from './config';
+import { readConfig, type BotConfig, type CliContext } from './config';
 import { readJsonFile, writePrivateJson } from './fs';
+import { readBotPublicKey } from './keys';
 import { CliError, cliText } from './locale';
+import { assertDeclaredPortAvailable, assertNoOwnPortConflict, portFromValue, type OwnPort } from './ports';
 import { askCliValue } from './prompts';
 
 export const PROFILE_ENVIRONMENT_FILE = 'environment.json';
@@ -157,6 +159,62 @@ export function resolveDeclaredVariables(
   });
 }
 
+export interface DeclaredPortState {
+  requirement: BotPortRequirement;
+  /** The port variable, with the value that applies and where it comes from. */
+  resolved: ResolvedVariable;
+  /** Null when the value that applies is not a valid port. */
+  port: number | null;
+  bindHost: string;
+  publicUrl?: string;
+}
+
+/** Declared ports (only those of `mode`, when given) with the values the bot process would use. */
+export function declaredPortStates(
+  requirements: BotRequirements | undefined, saved: Record<string, string>,
+  env: NodeJS.ProcessEnv | Record<string, unknown>, mode?: BotMode,
+): DeclaredPortState[] {
+  const resolved = resolveDeclaredVariables(requirements, saved, env);
+  const valueOf = (name: string | undefined): string | undefined =>
+    name === undefined ? undefined : resolved.find((entry) => entry.variable.name === name)?.value;
+  const states: DeclaredPortState[] = [];
+  for (const entry of resolved) {
+    const requirement = entry.variable.port;
+    if (entry.variable.kind !== 'port' || !requirement || (mode && !requirement.modes.includes(mode))) continue;
+    const publicUrl = valueOf(requirement.publicUrlEnv);
+    states.push({
+      requirement, resolved: entry, port: portFromValue(entry.value), bindHost: valueOf(requirement.hostEnv) ?? '0.0.0.0',
+      ...(publicUrl === undefined ? {} : { publicUrl }),
+    });
+  }
+  return states;
+}
+
+export function ownPort(requirement: BotPortRequirement, port: number): OwnPort {
+  return { id: requirement.id, protocol: requirement.protocol, port, env: requirement.portEnv };
+}
+
+/** Ports the bot uses with its profile; without one, every declared port counts and the manifest port does not. */
+export function ownPorts(
+  requirements: BotRequirements | undefined, config: BotConfig | null, saved: Record<string, string>,
+  env: NodeJS.ProcessEnv | Record<string, unknown>,
+): OwnPort[] {
+  const ports: OwnPort[] = config?.mode === 'marketplace' ? [{ id: MANIFEST_PORT_ID, protocol: 'tcp', port: config.servePort }] : [];
+  for (const state of declaredPortStates(requirements, saved, env, config?.mode)) {
+    if (state.port !== null) ports.push(ownPort(state.requirement, state.port));
+  }
+  return ports;
+}
+
+/** A new port does not update the public URL, which may still point to the previous one. */
+export function stalePublicUrlNotice(context: CliContext, state: DeclaredPortState, port: number): string | null {
+  const name = state.requirement.publicUrlEnv;
+  if (!name || state.publicUrl === undefined || state.resolved.value === String(port)) return null;
+  return cliText(context.locale,
+    `${name} (${state.publicUrl}) não muda junto com a porta. Se ela apontava para a porta ${state.resolved.value}, atualize-a.`,
+    `${name} (${state.publicUrl}) does not change with the port. If it pointed to port ${state.resolved.value}, update it.`);
+}
+
 /** Saved values the runner injects into the bot process. */
 export function profileRuntimeValues(
   requirements: BotRequirements | undefined, saved: Record<string, string>, env: NodeJS.ProcessEnv,
@@ -264,22 +322,28 @@ export async function configEnvCommand(context: CliContext, args: string[]): Pro
       'Use config env, config env set NAME [VALUE|--from-env VAR] or config env unset NAME.');
   }
   const variable = findVariable(context, name);
+  const portCheck = variable.kind === 'port' ? declaredPortCheck(context, variable) : null;
+  const validate = async (answer: unknown): Promise<string> => {
+    const valid = validateDeclaredValue(variable, answer);
+    await portCheck?.test(Number(valid));
+    return valid;
+  };
   let value: string;
   if (rest[0] === '--from-env') {
     if (rest.length !== 2 || !/^[A-Z_][A-Z0-9_]{0,99}$/.test(rest[1])) {
       throw new CliError('Uso: config env set NOME --from-env VARIAVEL', 'Usage: config env set NAME --from-env VARIABLE');
     }
-    value = validateDeclaredValue(variable, process.env[rest[1]]);
+    value = await validate(process.env[rest[1]]);
   } else if (rest.length) {
     if (variable.secret) {
       throw new CliError(`${variable.name} é um segredo: não o passe como argumento. Use a entrada oculta ou --from-env.`,
         `${variable.name} is a secret: do not pass it as an argument. Use hidden input or --from-env.`);
     }
-    value = validateDeclaredValue(variable, rest.join(' '));
+    value = await validate(rest.join(' '));
   } else {
     console.log(localizedText(variable.description, context.locale));
     value = await askCliValue(context.locale, variable.secret ? text(`${variable.name} (entrada oculta)`, `${variable.name} (hidden input)`)
-      : variable.name, (answer) => validateDeclaredValue(variable, answer), { secret: variable.secret });
+      : variable.name, validate, { secret: variable.secret });
   }
   const saved = readProfileEnvironment(context.homeDir);
   saved[variable.name] = value;
@@ -290,5 +354,32 @@ export async function configEnvCommand(context: CliContext, args: string[]): Pro
     console.log(text(`Atenção: ${variable.name} também está definida no ambiente atual, e o ambiente prevalece.`,
       `Warning: ${variable.name} is also set in the current environment, and the environment takes precedence.`));
   }
+  const notice = portCheck && stalePublicUrlNotice(context, portCheck.state, Number(value));
+  if (notice) console.log(notice);
   console.log(text(`Reinicie o bot para aplicar: ${context.cliName} restart`, `Restart the bot to apply: ${context.cliName} restart`));
+}
+
+interface DeclaredPortCheck {
+  state: DeclaredPortState;
+  test(port: number): Promise<void>;
+}
+
+/** Tests a new value like setup does; null when the profile's mode does not use this port. */
+function declaredPortCheck(context: CliContext, variable: DeclaredVariable): DeclaredPortCheck | null {
+  const config = readConfig(context);
+  const saved = readProfileEnvironment(context.homeDir);
+  const requirements = context.project.definition.requirements;
+  const state = declaredPortStates(requirements, saved, process.env, config?.mode)
+    .find((entry) => entry.resolved.variable.name === variable.name);
+  if (!state) return null;
+  const others = ownPorts(requirements, config, saved, process.env);
+  const publicKey = config ? readBotPublicKey(config.botDir) : undefined;
+  return {
+    state,
+    async test(port) {
+      const target = ownPort(state.requirement, port);
+      assertNoOwnPortConflict(target, others);
+      await assertDeclaredPortAvailable({ ...target, host: state.bindHost }, context.cliName, publicKey);
+    },
+  };
 }

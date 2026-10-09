@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict');
+const dgram = require('node:dgram');
 const fs = require('node:fs');
+const http = require('node:http');
 const net = require('node:net');
 const path = require('node:path');
 const readline = require('node:readline');
@@ -8,6 +10,7 @@ const { test } = require('node:test');
 
 const { runBotCli } = require('../dist/cli');
 const cliConfig = require('../dist/cli/config');
+const environment = require('../dist/cli/profileEnvironment');
 const keys = require('../dist/cli/keys');
 const lifecycle = require('../dist/cli/commands/lifecycle');
 const pm2 = require('../dist/cli/pm2');
@@ -15,6 +18,7 @@ const ports = require('../dist/cli/ports');
 const processHelpers = require('../dist/cli/process');
 const prompts = require('../dist/cli/prompts');
 const readiness = require('../dist/cli/manifestReadiness');
+const reachability = require('../dist/reachability');
 
 function json(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -577,6 +581,197 @@ test('non-interactive setup rejects unsupported modes and missing or mixed mode-
     await assert.rejects(runBotCli(f.bot, ['setup', '--non-interactive', ...args]), error);
   }
   assert.equal(fs.existsSync(cliConfig.createCliContext(f.bot).configFile), false);
+});
+
+const DECLARED_PORT_ENV = {
+  FIXTURE_GAMES_PORT: undefined, FIXTURE_GAMES_PUBLIC_URL: undefined, FIXTURE_STATS_PORT: undefined, FIXTURE_VOICE_PORT: undefined,
+};
+
+function declaredPorts({ games, stats, voice }) {
+  return { requirements: { ports: [
+    { id: 'games', description: { 'pt-BR': 'Jogos', en: 'Games' }, portEnv: 'FIXTURE_GAMES_PORT', defaultPort: games,
+      publicUrlEnv: 'FIXTURE_GAMES_PUBLIC_URL', when: 'on-demand' },
+    { id: 'stats', description: { 'pt-BR': 'Estatísticas', en: 'Stats' }, portEnv: 'FIXTURE_STATS_PORT', defaultPort: stats, exposure: 'local' },
+    { id: 'voice', description: { 'pt-BR': 'Voz', en: 'Voice' }, protocol: 'udp', portEnv: 'FIXTURE_VOICE_PORT', defaultPort: voice,
+      modes: ['manual'] },
+  ] } };
+}
+
+async function unusedPorts(t, count) {
+  const listeners = [];
+  for (let index = 0; index < count; index++) listeners.push(await listenOnPort(t));
+  await Promise.all(listeners.map(({ server }) => closeServer(server)));
+  return listeners.map(({ port }) => port);
+}
+
+async function udpListener(t, port) {
+  const socket = dgram.createSocket('udp4');
+  await new Promise((resolve, reject) => {
+    socket.once('error', reject);
+    socket.bind({ port, address: '0.0.0.0', exclusive: true }, resolve);
+  });
+  let open = true;
+  const close = () => new Promise((resolve) => {
+    if (!open) { resolve(); return; }
+    open = false;
+    socket.close(() => resolve());
+  });
+  t.after(close);
+  return { close };
+}
+
+/** A listener of this bot's running process: it answers the signed challenge with the profile identity. */
+async function botListener(t, identity) {
+  reachability.setRuntimeBotIdentity(reachability.createReachabilityIdentity(identity.publicKeyHex, identity.privateKeyPem));
+  t.after(() => reachability.setRuntimeBotIdentity(undefined));
+  const server = http.createServer((request, response) => {
+    if (reachability.handleReachabilityProbe(request, response)) return;
+    response.writeHead(204);
+    response.end();
+  });
+  t.after(() => new Promise((resolve) => { server.close(() => resolve()); server.closeAllConnections(); }));
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen({ port: 0, host: '0.0.0.0', exclusive: true }, resolve);
+  });
+  return server.address().port;
+}
+
+test('interactive setup asks the declared ports of the mode, retries conflicts and occupied ports, and keeps the environment value', async (t) => {
+  const [manifest, games, otherGames, stats, statsFromEnv, voice] = await unusedPorts(t, 6);
+  const f = fixture(t, declaredPorts({ games, stats, voice }));
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state, ...DECLARED_PORT_ENV, FIXTURE_STATS_PORT: String(statsFromEnv) });
+  const context = cliConfig.createCliContext(f.bot);
+  const publicUrl = `http://bot.example.test:${games}`;
+  environment.writeProfileEnvironment(context.homeDir, { FIXTURE_GAMES_PUBLIC_URL: publicUrl });
+  const foreign = await listenOnPort(t, games);
+  const questions = interactiveAnswers(t, [
+    '', '', String(statsFromEnv), String(manifest), 'bot.example.test', '', String(manifest), String(otherGames), '', 'yes',
+  ]);
+  const errors = [];
+  t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
+  const lines = captureLogs(t);
+
+  await runBotCli(f.bot, ['setup']);
+
+  assert.equal(cliConfig.readConfig(context).servePort, manifest);
+  assert.deepEqual(environment.readProfileEnvironment(context.homeDir),
+    { FIXTURE_GAMES_PUBLIC_URL: publicUrl, FIXTURE_GAMES_PORT: String(otherGames) });
+  assert.equal(questions.filter((question) => question.startsWith('Porta do manifest')).length, 2);
+  assert.equal(questions.filter((question) => question.startsWith(`Porta TCP "games" [${games}]`)).length, 3);
+  assert.equal(questions.some((question) => /stats|voice/.test(question)), false, 'environment and other-mode ports are not asked');
+  assert.equal(errors.length, 3);
+  assert.match(errors[0], new RegExp(`TCP ${statsFromEnv} já é usada por "stats" \\(FIXTURE_STATS_PORT\\)`));
+  assert.match(errors[1], new RegExp(`TCP ${games} \\("games"\\) já está em uso por um bot ou outro serviço`));
+  assert.match(errors[2], new RegExp(`TCP ${manifest} já é usada por "manifest"`));
+  const output = lines.join('\n');
+  assert.match(output, new RegExp(`Porta TCP "stats": ${statsFromEnv}, definida no ambiente em FIXTURE_STATS_PORT`));
+  assert.ok(output.includes(`FIXTURE_GAMES_PUBLIC_URL (${publicUrl}) não muda junto com a porta. Se ela apontava para a porta ${games}`));
+  assert.match(output, /Portas do bot salvas em/);
+  assert.equal(foreign.server.listening, true);
+});
+
+test('non-interactive setup validates --port, fails only on the ports it sets and saves values that differ from the default', async (t) => {
+  const [games, stats, statsFromEnv, voice, otherVoice, foreignPort] = await unusedPorts(t, 6);
+  const f = fixture(t, declaredPorts({ games, stats, voice }));
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state, ...DECLARED_PORT_ENV, FIXTURE_STATS_PORT: String(statsFromEnv) });
+  const context = cliConfig.createCliContext(f.bot);
+  const manual = ['setup', '--non-interactive', '--server-url', 'localhost:3000'];
+  const foreign = await listenOnPort(t, foreignPort);
+  const lines = captureLogs(t);
+  for (const [args, error] of [
+    [['--port', 'unknown=1234'], /não declara essa porta no modo manual\. Portas do modo: games, stats, voice/],
+    [['--port', 'manifest=1234'], /--serve-port/],
+    [['--port', 'games'], /formato <id>=<porta>/],
+    [['--port', 'games=1234', '--port', 'games=1235'], /mais de uma vez/],
+    [['--port', 'games=70000'], /FIXTURE_GAMES_PORT: a porta deve ser um inteiro/],
+    [['--port', 'stats=1234'], /FIXTURE_STATS_PORT está definida no ambiente/],
+    [['--port', `games=${statsFromEnv}`], /já é usada por "stats" \(FIXTURE_STATS_PORT\)/],
+    [['--port', `games=${foreignPort}`], /em uso por um bot ou outro serviço/],
+  ]) {
+    await assert.rejects(runBotCli(f.bot, [...manual, ...args]), error);
+  }
+  await assert.rejects(runBotCli(f.bot, ['setup', '--non-interactive', '--mode', 'marketplace', '--public-host', 'bot.example.test',
+    '--serve-port', String(foreignPort + 1), '--port', 'voice=1234']), /não declara essa porta no modo marketplace/);
+  await assert.rejects(runBotCli(f.bot, ['setup', '--non-interactive', '--mode', 'marketplace', '--public-host', 'bot.example.test',
+    '--serve-port', String(statsFromEnv)]), /já é usada por "stats"/, 'the manifest port must avoid the bot\'s own ports');
+  const udp = await udpListener(t, voice);
+  await assert.rejects(runBotCli(f.bot, [...manual, '--port', `voice=${voice}`]), /UDP .* não pode ser confirmado/);
+  assert.equal(fs.existsSync(context.configFile), false);
+  assert.equal(fs.existsSync(environment.profileEnvironmentFile(context.homeDir)), false);
+
+  const occupiedGames = await listenOnPort(t, games);
+  lines.length = 0;
+  await runBotCli(f.bot, [...manual, '--port', `voice=${otherVoice}`]);
+  assert.equal(cliConfig.readConfig(context).mode, 'manual');
+  assert.deepEqual(environment.readProfileEnvironment(context.homeDir), { FIXTURE_VOICE_PORT: String(otherVoice) });
+  assert.match(lines.join('\n'), new RegExp(`Atenção: A porta TCP ${games} \\("games"\\) já está em uso.*--port games=<porta>`));
+
+  await udp.close();
+  await runBotCli(f.bot, [...manual, '--port', `voice=${voice}`, '--yes']);
+  assert.deepEqual(environment.readProfileEnvironment(context.homeDir), {}, 'choosing the default removes the saved value');
+  assert.equal(occupiedGames.server.listening, true);
+  assert.equal(foreign.server.listening, true);
+});
+
+test('setup accepts ports held by this bot\'s running process only when it proves the profile identity', async (t) => {
+  const [games, stats, voice] = await unusedPorts(t, 3);
+  const f = fixture(t, declaredPorts({ games, stats, voice }));
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state, ...DECLARED_PORT_ENV });
+  const context = cliConfig.createCliContext(f.bot);
+  const existing = cliConfig.manualConfig(context, { botDir: path.join(f.state, 'runtime'), botToken: 'token' });
+  cliConfig.writeConfig(context, existing);
+  const identity = keys.loadOrCreateBotKeys(existing.botDir);
+  const manifest = await botListener(t, identity);
+  const running = await botListener(t, identity);
+  const args = ['setup', '--non-interactive', '--mode', 'marketplace', '--public-host', 'bot.example.test',
+    '--serve-port', String(manifest), '--port', `games=${running}`, '--yes'];
+  const lines = captureLogs(t);
+
+  await runBotCli(f.bot, args);
+  assert.equal(cliConfig.readConfig(context).servePort, manifest);
+  assert.deepEqual(environment.readProfileEnvironment(context.homeDir), { FIXTURE_GAMES_PORT: String(running) });
+  assert.match(lines.join('\n'), /reinicie-o para aplicar: sound-bot restart/);
+
+  reachability.setRuntimeBotIdentity(undefined);
+  cliConfig.writeConfig(context, existing);
+  environment.writeProfileEnvironment(context.homeDir, {});
+  await assert.rejects(runBotCli(f.bot, args), /em uso por um bot ou outro/);
+  assert.deepEqual(cliConfig.readConfig(context), existing);
+  assert.deepEqual(environment.readProfileEnvironment(context.homeDir), {});
+});
+
+test('config env set and config set servePort test declared ports like setup', async (t) => {
+  const [manifest, games, otherGames, stats, statsFromEnv, voice, foreignPort] = await unusedPorts(t, 7);
+  const f = fixture(t, declaredPorts({ games, stats, voice }));
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state, ...DECLARED_PORT_ENV, FIXTURE_STATS_PORT: String(statsFromEnv) });
+  const context = cliConfig.createCliContext(f.bot);
+  const config = cliConfig.marketplaceConfig(context, { servePort: manifest, publicHost: 'bot.example.test' });
+  cliConfig.writeConfig(context, config);
+  await listenOnPort(t, foreignPort);
+  const publicUrl = `http://bot.example.test:${games}`;
+  environment.writeProfileEnvironment(context.homeDir, { FIXTURE_GAMES_PUBLIC_URL: publicUrl });
+  const lines = captureLogs(t);
+  const set = (...args) => runBotCli(f.bot, ['config', 'env', 'set', ...args]);
+
+  await assert.rejects(set('FIXTURE_GAMES_PORT', String(manifest)), /já é usada por "manifest"/);
+  await assert.rejects(set('FIXTURE_GAMES_PORT', String(statsFromEnv)), /já é usada por "stats" \(FIXTURE_STATS_PORT\)/);
+  await assert.rejects(set('FIXTURE_GAMES_PORT', String(foreignPort)), /em uso por um bot ou outro serviço/);
+  process.env.FIXTURE_FROM_SHELL = String(foreignPort);
+  t.after(() => delete process.env.FIXTURE_FROM_SHELL);
+  await assert.rejects(set('FIXTURE_GAMES_PORT', '--from-env', 'FIXTURE_FROM_SHELL'), /em uso por um bot ou outro serviço/);
+  assert.deepEqual(environment.readProfileEnvironment(context.homeDir), { FIXTURE_GAMES_PUBLIC_URL: publicUrl });
+
+  await set('FIXTURE_GAMES_PORT', String(otherGames));
+  assert.equal(environment.readProfileEnvironment(context.homeDir).FIXTURE_GAMES_PORT, String(otherGames));
+  assert.ok(lines.join('\n').includes(`FIXTURE_GAMES_PUBLIC_URL (${publicUrl}) não muda junto com a porta`));
+  await set('FIXTURE_VOICE_PORT', String(foreignPort));
+  assert.equal(environment.readProfileEnvironment(context.homeDir).FIXTURE_VOICE_PORT, String(foreignPort),
+    'a port of another mode is saved without testing');
+
+  await assert.rejects(runBotCli(f.bot, ['config', 'set', 'servePort', String(otherGames)]),
+    /já é usada por "games" \(FIXTURE_GAMES_PORT\)/);
+  assert.deepEqual(cliConfig.readConfig(context), config);
 });
 
 test('manual credentials survive reference config aliases and switching to environment tokens removes the saved secret', async (t) => {

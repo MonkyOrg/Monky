@@ -12,9 +12,9 @@ import { ANSI, color } from '../constants';
 import { describeHostConsent, HOST_CONSENT_ENV } from '../consent';
 import { keyPaths, loadBotKeys, loadOrCreateBotKeys, type KeyPair } from '../keys';
 import { CliError, cliErrorMessage, cliText } from '../locale';
-import { localConnectHost, ManifestReadinessError, verifyManifest } from '../manifestReadiness';
+import { ManifestReadinessError, verifyManifest } from '../manifestReadiness';
 import { findDefaultPm2Process, listProcesses, type Pm2Process } from '../pm2';
-import { checkPortBind } from '../ports';
+import { checkPortBind, localConnectHost } from '../ports';
 import { readProfileEnvironment, resolveDeclaredVariables, validateDeclaredValue } from '../profileEnvironment';
 import { describePort, effectivePorts, type EffectivePort } from '../requirementsView';
 import { requestServerDiagnostic, type ServerDiagnosticOutcome } from '../serverDiagnostic';
@@ -217,6 +217,12 @@ async function checkPorts(
     const label = describePort(context.locale, port);
     if (port.invalid || port.port === null) {
       report.add('fail', `${label}: ${port.invalid?.pt ?? 'porta inválida.'}`, `${label}: ${port.invalid?.en ?? 'invalid port.'}`);
+      continue;
+    }
+    const clash = ports.find((other) => other !== port && other.protocol === port.protocol && other.port === port.port);
+    if (clash) {
+      report.add('fail', `${label}: é a mesma porta de "${clash.id}" deste bot; cada porta do bot precisa ser diferente.`,
+        `${label}: same port as this bot's "${clash.id}"; each of the bot's ports must be different.`);
       continue;
     }
     const bind = await checkPortBind(port.protocol, port.port, port.bindHost);

@@ -385,6 +385,23 @@ test('doctor reports missing settings, foreign listeners and external results, a
   assert.match(lines.join('\n'), /Pronto para operar/);
 });
 
+test('doctor fails when two of the bot\'s own ports share a number, e.g. through the environment', async (t) => {
+  const f = fixture(t);
+  const port = await freePort();
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state, FIXTURE_API_KEY: 'key', FIXTURE_GAMES_PORT: String(port) });
+  const context = cliConfig.createCliContext(f.bot);
+  const botDir = path.join(context.homeDir, 'runtime');
+  cliConfig.writeConfig(context, cliConfig.marketplaceConfig(context, { botDir, servePort: port, publicHost: 'bot.example.test' }));
+  consent.writeHostConsent(context.homeDir, 'accepted', consent.hostConsentFingerprint(context.project.definition), botDir);
+  t.mock.method(pm2, 'listProcesses', () => []);
+  t.mock.method(pm2, 'findDefaultPm2Process', () => false);
+  const lines = captureLogs(t);
+  await assert.rejects(runBotCli(f.bot, ['doctor', '--local']), /impedem o bot de operar/);
+  const output = lines.join('\n');
+  assert.match(output, new RegExp(`manifest: TCP ${port} .*mesma porta de "games"`));
+  assert.match(output, new RegExp(`games: TCP ${port} .*mesma porta de "manifest"`));
+});
+
 function createTarball(file, pkg) {
   const content = Buffer.from(JSON.stringify(pkg));
   const header = Buffer.alloc(512, 0);
