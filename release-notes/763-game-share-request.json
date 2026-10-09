@@ -1,5 +1,5 @@
 {
   "group": "novidades",
-  "pt-BR": "No cartão do jogo da Steam, quem está no mesmo canal de voz pode pedir para ver a partida. Ao aceitar, o Monky compartilha só a janela do jogo, com o áudio dele se você quiser, e nunca a tela inteira.",
-  "en": "On the Steam game card, people in the same voice channel can ask to watch the match. If you accept, Monky shares only the game window, with its audio if you want, and never the whole screen."
+  "pt-BR": "Com um jogo da Steam aberto e você em um canal de voz, o Monky sugere acima dos seus controles compartilhar a partida com um clique. Quem está no mesmo canal também pode pedir para ver pelo cartão do jogo. Nos dois casos, só a janela do jogo é compartilhada, nunca a tela inteira.",
+  "en": "With a Steam game open while you are in a voice channel, Monky suggests sharing the match in one click, above your controls. People in the same channel can also ask to watch from the game card. Either way only the game window is shared, never the whole screen."
 }

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { UserActivity } from '@monky/shared';
-import { canAskToWatchGame, type AskToWatchContext } from '../src/renderer/core/gameShareEligibility';
+import {
+  canAskToWatchGame, gameSessionKey, shouldSuggestGameShare, type AskToWatchContext, type SuggestShareContext,
+} from '../src/renderer/core/gameShareEligibility';
 import { gameWindowIds, type ListedWindow } from '../src/main/gameWindows';
 
 const game: UserActivity = { source: 'steam', appId: 606150, name: 'Moonlighter', startedAt: 1 };
@@ -29,6 +31,22 @@ test('the ask shows only for a playing person in the same call who is not on scr
   assert.equal(canAskToWatchGame(context({ targetVoiceStates: [
     { channelId: 'voice-1', isScreenSharing: false }, { channelId: 'voice-1', isScreenSharing: true },
   ] })), false);
+});
+
+function suggestion(overrides: Partial<SuggestShareContext> = {}): SuggestShareContext {
+  return { activity: game, inVoiceChannel: true, isScreenSharing: false, settledSession: null, ...overrides };
+}
+
+test('the sidebar suggests sharing only in a call, off screen, once per launch of the game (#763)', () => {
+  assert.equal(shouldSuggestGameShare(suggestion()), true);
+  assert.equal(shouldSuggestGameShare(suggestion({ activity: null })), false, 'no game, nothing to suggest');
+  assert.equal(shouldSuggestGameShare(suggestion({ inVoiceChannel: false })), false, 'nobody to share with outside a call');
+  assert.equal(shouldSuggestGameShare(suggestion({ isScreenSharing: true })), false, 'already on screen');
+  assert.equal(shouldSuggestGameShare(suggestion({ settledSession: gameSessionKey(game) })), false, 'dismissed or shared this launch');
+  // The same game opened again is a new launch: the suggestion comes back.
+  const relaunched: UserActivity = { ...game, startedAt: 2 };
+  assert.notEqual(gameSessionKey(relaunched), gameSessionKey(game));
+  assert.equal(shouldSuggestGameShare(suggestion({ activity: relaunched, settledSession: gameSessionKey(game) })), true);
 });
 
 function listed(id: string, processPath: string, flags: Partial<ListedWindow['window']> = {}): ListedWindow {

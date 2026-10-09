@@ -54,6 +54,7 @@ import { isParticipantSpeaking, participantConnectionIndicators, voiceConnection
 import { serverRailView } from './ServerRailView';
 import { soundboardPlayersBar } from './SoundboardPlayersBar';
 import { overlayBridgeService } from '../core/OverlayBridgeService';
+import { gameShareSuggestion } from '../core/GameShareSuggestion';
 import logoUrl from '../assets/Logo.png';
 import { t, tCount } from '../i18n';
 import { getBotVoiceContext } from '../utils/botVoice';
@@ -210,6 +211,7 @@ export class MainView {
             <div id="soundboard-players-slot" class="sb-notice-slot"></div>
             <div id="screenshare-notice-slot"></div>
             <div id="overlay-notice-slot"></div>
+            <div id="game-share-notice-slot"></div>
             <div id="voice-connection-row-slot"></div>
             <div class="user-media-bar" id="user-media-bar">
               <div class="audio-control-group camera-control-group">
@@ -414,6 +416,7 @@ export class MainView {
     this.screenShareNoticeSignature = null;
     this.updateScreenShareNotice();
     this.updateOverlayNotice();
+    gameShareSuggestion.render(false);
 
     const soundboardSlot = document.getElementById('soundboard-players-slot');
     if (soundboardSlot) soundboardPlayersBar.mount(soundboardSlot);
@@ -440,6 +443,7 @@ export class MainView {
             <div id="soundboard-players-slot" class="sb-notice-slot"></div>
             <div id="screenshare-notice-slot"></div>
             <div id="overlay-notice-slot"></div>
+            <div id="game-share-notice-slot"></div>
             <div id="voice-connection-row-slot"></div>
             <div class="user-media-bar" id="user-media-bar">
               <div class="audio-control-group camera-control-group">
@@ -507,6 +511,7 @@ export class MainView {
     this.screenShareNoticeSignature = null;
     this.updateScreenShareNotice();
     this.updateOverlayNotice();
+    gameShareSuggestion.render(false);
     const soundboardSlot = document.getElementById('soundboard-players-slot');
     if (soundboardSlot) soundboardPlayersBar.mount(soundboardSlot);
     if (navigating) this.animateServerEntry();

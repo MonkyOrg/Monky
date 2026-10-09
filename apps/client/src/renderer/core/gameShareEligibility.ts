@@ -27,3 +27,29 @@ export function canAskToWatchGame(context: AskToWatchContext): boolean {
     context.targetVoiceStates.some(state => state.channelId === channel) &&
     !context.targetVoiceStates.some(state => state.isScreenSharing);
 }
+
+/**
+ * One launch of a game. `startedAt` is when it was first seen running, so a
+ * game closed and opened again gets a new key — and the suggestion comes back.
+ */
+export function gameSessionKey(activity: UserActivity): string {
+  return `${activity.source}:${activity.appId}:${activity.startedAt}`;
+}
+
+export interface SuggestShareContext {
+  activity: UserActivity | null | undefined;
+  inVoiceChannel: boolean;
+  isScreenSharing: boolean;
+  /** Game session already dismissed or shared, if any: no second nudge for it. */
+  settledSession: string | null;
+}
+
+/**
+ * Whether the sidebar suggests sharing the game you are playing (#763): only
+ * in a call, since there is nobody to share with otherwise, and not while
+ * already on screen.
+ */
+export function shouldSuggestGameShare(context: SuggestShareContext): boolean {
+  return !!context.activity && context.inVoiceChannel && !context.isScreenSharing &&
+    context.settledSession !== gameSessionKey(context.activity);
+}

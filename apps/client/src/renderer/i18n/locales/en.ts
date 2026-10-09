@@ -1573,6 +1573,7 @@ export const en: TranslationMap = {
   'gameShare.promptAudio': 'Include game audio',
   'gameShare.share': 'Share',
   'gameShare.notNow': 'Not now',
+  'gameShare.suggestion': 'You are playing {game}. Share the match in the channel?',
   'gameShare.windowNotFound': 'Could not find the game window. Pick the window to share.',
   'settings.gameShareCaptureLabel': 'Use game capture when sharing a match on request',
   'settings.gameShareCaptureHint': 'Smoother in some games, but anti-cheat software can block the hook. When off, Normal window capture is used.',

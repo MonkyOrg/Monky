@@ -1535,6 +1535,7 @@ export const ptBR = {
   'gameShare.promptAudio': 'Incluir o áudio do jogo',
   'gameShare.share': 'Compartilhar',
   'gameShare.notNow': 'Agora não',
+  'gameShare.suggestion': 'Você está jogando {game}. Compartilhar a partida no canal?',
   'gameShare.windowNotFound': 'Não encontrei a janela do jogo. Escolha a janela para compartilhar.',
   'settings.gameShareCaptureLabel': 'Usar Captura de jogo ao compartilhar a partida a pedido',
   'settings.gameShareCaptureHint': 'Mais fluida em alguns jogos, mas o hook pode ser bloqueado por anti-cheat. Desligada, usa a captura Normal da janela.',

@@ -112,13 +112,18 @@ export class GameShareRequests {
     }
   }
 
-  /**
-   * The click on "Compartilhar" is the explicit confirmation sharing already
-   * requires; nothing is captured or hooked before it. Only the game's own
-   * windows are offered, and with none found the person picks one by hand.
-   */
   private async accept(id: string, shareAudio: boolean): Promise<void> {
     this.answer(id, true);
+    await this.shareGame(shareAudio);
+  }
+
+  /**
+   * The click on "Compartilhar" — on a request or on the sidebar suggestion —
+   * is the explicit confirmation sharing already requires; nothing is captured
+   * or hooked before it. Only the game's own windows are offered, and with
+   * none found the person picks one by hand.
+   */
+  public async shareGame(shareAudio: boolean): Promise<void> {
     let sourceIds: string[] = [];
     try {
       sourceIds = await window.api?.findGameWindows?.() ?? [];
