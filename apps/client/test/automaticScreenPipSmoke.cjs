@@ -306,6 +306,11 @@ async function runAutomaticScreenPipSmoke() {
       const dismissedRequests = requests.length;
       stage.render();
       stage.setChannel(channel.id);
+      // Re-rendering rebuilds the video, and automatic PiP skips a video with no
+      // frame yet (#766). Without this wait, "no popup" below could pass because
+      // the video was not ready rather than because the dismissal suppressed it,
+      // and a slow runner would make the next departure skip PiP for good.
+      await until(() => selected()?.readyState >= 2, 'The re-rendered screen must be ready before testing suppression');
       deactivateWindow();
       document.dispatchEvent(new Event('visibilitychange'));
       await new Promise(resolve => setTimeout(resolve, 20));
