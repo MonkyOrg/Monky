@@ -14,15 +14,18 @@ export const portForwardTutorial: TutorialDefinition = {
     {
       title: 'tutorial.portForward.step2.title',
       content: 'tutorial.portForward.step2.content',
+      images: [{ shot: 'illustration-router-menu', alt: 'tutorial.shotRouterMenuAlt' }],
     },
     {
       title: 'tutorial.portForward.step3.title',
       content: 'tutorial.portForward.step3.content',
       tip: 'tutorial.portForward.step3.tip',
+      images: [{ shot: 'illustration-router-rule', alt: 'tutorial.shotRouterRuleAlt' }],
     },
     {
       title: 'tutorial.portForward.step4.title',
       content: 'tutorial.portForward.step4.content',
+      images: [{ shot: 'illustration-public-ip', alt: 'tutorial.shotPublicIpAlt' }],
     },
     {
       title: 'tutorial.portForward.step5.title',

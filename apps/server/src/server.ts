@@ -288,7 +288,7 @@ export class MonkyServer {
         await channelService.canUserAccessChannel(userId, poll.channelId, Permission.READ_MESSAGES) &&
         await permissionService.canAccessAudience(userId, poll.creatorUserId, poll.audience),
       canRevealAudience: (userId, poll) => permissionService.canRevealAudience(userId, poll.creatorUserId),
-    });
+    }, avatarPath => avatarStorage.getPublicUrl(avatarPath));
     const chatService = new ChatService(
       messageRepo,
       channelRepo,

@@ -71,6 +71,9 @@ const BOT_ADDRESS_ERRORS = new Map<string, TranslationKey>([
 const COMMUNITY_ERRORS = new Map<string, TranslationKey>([
   ['Live actions are disabled.', 'poll.liveActionsDisabled'],
 ]);
+const POLL_ERRORS = new Map<string, TranslationKey>([
+  ['Poll is closed.', 'poll.closedError'],
+]);
 
 /**
  * The protocol version the server speaks, or `null` when the rejection was not
@@ -108,9 +111,9 @@ export function translateProtocolError(
 ): string {
   const mismatch = detectVersionMismatch(code, serverMessage, serverProtocolVersion);
   if (mismatch) return describeVersionMismatch(mismatch.serverVersion);
-  const botAddressKey = code === ProtocolErrorCode.BAD_REQUEST && serverMessage
-    ? BOT_ADDRESS_ERRORS.get(serverMessage) : undefined;
-  if (botAddressKey) return t(botAddressKey);
+  const badRequestKey = code === ProtocolErrorCode.BAD_REQUEST && serverMessage
+    ? BOT_ADDRESS_ERRORS.get(serverMessage) ?? POLL_ERRORS.get(serverMessage) : undefined;
+  if (badRequestKey) return t(badRequestKey);
   const communityKey = code === ProtocolErrorCode.COMMUNITY_INVALID && serverMessage
     ? COMMUNITY_ERRORS.get(serverMessage) : undefined;
   if (communityKey) return t(communityKey);

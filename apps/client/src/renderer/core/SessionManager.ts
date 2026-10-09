@@ -172,6 +172,7 @@ export class SessionManager {
     const client = createNetworkClient();
     client.sessionKey = key;
     const server = createServerStore();
+    server.connectedVoiceChannelId = () => voiceStore.voiceSessionKey === key ? voiceStore.currentVoiceChannelId : null;
     const participants = createParticipantManager();
     const localExecution = new LocalExecutionController(client, server, () => {
       const user = server.currentUser;

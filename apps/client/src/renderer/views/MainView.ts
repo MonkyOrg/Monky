@@ -1,4 +1,4 @@
-import { MessageType, Permission, UserSummary, canAccessChannel, type ChannelDeletedPayload } from '@monky/shared';
+import { MessageType, Permission, UserSummary, type ChannelDeletedPayload, type ChannelSummary } from '@monky/shared';
 import { categoryModal } from './CategoryModal';
 import './channelCategories.css';
 import { escapeHtml } from '../utils/html';
@@ -62,6 +62,9 @@ import { ServerCommunityView } from './ServerCommunityView';
 import { MessageSearch } from './MessageSearch';
 import { ForumView } from './ForumView';
 import type { MessageSearchResultPayload } from '@monky/shared';
+
+/** A loose channel or a category, the two kinds of entries at the sidebar root. */
+type ChannelTreeTarget = { kind: 'channel' | 'category'; id: string };
 
 export class MainView {
   private container: HTMLElement;
@@ -1175,6 +1178,11 @@ export class MainView {
   }
 
   private handleChannelDeleted(payload: ChannelDeletedPayload): void {
+    // The side chat may belong to another room than the stage on screen: a
+    // voice room that disappears takes its chat with it, wherever it is shown.
+    if (this.voiceChatChannelId && !serverStore.getChannel(this.voiceChatChannelId)) {
+      this.closeVoiceChannelChat(false);
+    }
     if (this.viewedVoiceChannelId && !serverStore.getChannel(this.viewedVoiceChannelId)) {
       this.viewedVoiceChannelId = null;
       this.viewedVoiceSessionKey = null;
@@ -1367,17 +1375,46 @@ export class MainView {
         if (id) rows.set(id, row.outerHTML);
       }
       const categories = serverStore.serverDetails.categories ?? [];
-      const knownCategoryIds = new Set(categories.map((category) => category.id));
-      const groups = [
-        { id: '', name: t('categories.uncategorized') },
-        ...categories.map((category) => ({ id: category.id, name: category.name })),
+      const channelsById = new Map(serverStore.serverDetails.channels.map((channel) => [channel.id, channel]));
+      const treeOrder = serverStore.hasChannelTreeOrder;
+      // The root interleaves categories with runs of loose channels. Older
+      // servers keep every loose channel in one group above the categories,
+      // which stays mounted even when empty so channels can be dropped there.
+      const groups: Array<{ id: string; name: string; channels: ChannelSummary[] }> = treeOrder ? [] : [
+        { id: '', name: t('categories.uncategorized'), channels: [] },
       ];
-      categoryList.innerHTML = groups.map((group) => {
+      for (const item of serverStore.getChannelTreeRoot()) {
+        if (item.kind === 'category') {
+          const category = categories.find((entry) => entry.id === item.id);
+          if (category) {
+            groups.push({ id: category.id, name: category.name, channels: serverStore.serverDetails.channels
+              .filter((channel) => channel.categoryId === category.id) });
+          }
+          continue;
+        }
+        const channel = channelsById.get(item.id);
+        if (!channel) continue;
+        const run = treeOrder ? groups.at(-1) : groups[0];
+        if (run && !run.id) run.channels.push(channel);
+        else groups.push({ id: '', name: t('categories.uncategorized'), channels: [channel] });
+      }
+      // While a channel is dragged, the space before a category with no loose
+      // channel above it, and the end of the list, become slots outside every
+      // category. Elsewhere the loose channels themselves mark the position.
+      const placesAtRoot = treeOrder && canManageChannels;
+      const rootGap = (beforeCategoryId: string) => `<div class="channel-tree-gap${beforeCategoryId ? '' : ' channel-tree-end-dropzone'}" data-root-gap="${escapeHtml(beforeCategoryId)}" aria-hidden="true">
+            <span class="channel-tree-gap-label">
+              <span class="material-symbols-outlined md-16">drive_file_move</span>
+              <span>${escapeHtml(t('categories.uncategorized'))}</span>
+            </span>
+          </div>`;
+      categoryList.innerHTML = groups.map((group, index) => {
         const canManage = canManageChannels;
-        const channels = serverStore.serverDetails!.channels.filter((channel) =>
-          group.id ? channel.categoryId === group.id : !channel.categoryId || !knownCategoryIds.has(channel.categoryId));
+        const channels = group.channels;
         const collapsed = !!group.id && serverStore.isCategoryCollapsed(group.id);
-        return `<section class="channel-category${group.id ? '' : ' channel-category--uncategorized'}${channels.length ? '' : ' channel-category--empty'}" data-category-id="${escapeHtml(group.id)}">
+        const previous = groups[index - 1];
+        const gap = placesAtRoot && group.id && (!previous || previous.id) ? rootGap(group.id) : '';
+        return `${gap}<section class="channel-category${group.id ? '' : ' channel-category--uncategorized'}${channels.length ? '' : ' channel-category--empty'}" data-category-id="${escapeHtml(group.id)}">
           ${group.id ? `<div class="category-title" data-category-dropzone="${escapeHtml(group.id)}">
             <button class="category-collapse-btn" data-collapse-category="${escapeHtml(group.id)}" aria-expanded="${!collapsed}">
               <span class="material-symbols-outlined md-16">${collapsed ? 'chevron_right' : 'expand_more'}</span>
@@ -1385,7 +1422,7 @@ export class MainView {
             </button>
             ${canManage ? `<button class="category-add-btn" data-add-category="${escapeHtml(group.id)}" title="${t('categories.addChannel')}">
               <span class="material-symbols-outlined md-14">add</span></button>` : ''}
-          </div>` : canManage ? `<div class="category-uncategorized-dropzone" data-category-dropzone="">
+          </div>` : canManage && !treeOrder ? `<div class="category-uncategorized-dropzone" data-category-dropzone="">
             <span class="material-symbols-outlined md-16">drive_file_move</span>
             <span>${escapeHtml(group.name)}</span>
           </div>` : ''}
@@ -1393,7 +1430,7 @@ export class MainView {
             ${channels.map((channel) => rows.get(channel.id) ?? '').join('')}
           </div>
         </section>`;
-      }).join('');
+      }).join('') + (placesAtRoot ? rootGap('') : '');
       categoryList.querySelectorAll<HTMLButtonElement>('[data-collapse-category]').forEach((button) => {
         button.addEventListener('click', () => {
           const id = button.dataset.collapseCategory ?? '';
@@ -1609,6 +1646,7 @@ export class MainView {
     const lists = Array.from(this.container.querySelectorAll<HTMLElement>('[data-category-channels]'))
       .map((el) => ({ el, categoryId: el.dataset.categoryChannels || null }));
     const mime = 'text/monky-channel';
+    const treeOrder = serverStore.hasChannelTreeOrder;
     const clearDropTargets = () => {
       categoryList?.classList.remove('channel-reorder-active');
       this.container.querySelectorAll('.channel-category-drop-target').forEach((element) => {
@@ -1626,33 +1664,62 @@ export class MainView {
         let targetRow = targetHandle;
         while (targetRow.parentElement && targetRow.parentElement !== targetList) targetRow = targetRow.parentElement;
         const rect = targetRow.getBoundingClientRect();
+        const targetId = targetHandle.dataset.channelId;
         return {
           categoryId: targetList.dataset.categoryChannels || null,
-          targetId: targetHandle.dataset.channelId ?? null,
+          target: targetId ? { kind: 'channel' as const, id: targetId } : null,
           after: clientY > rect.top + rect.height / 2,
-          targetList,
           targetRow,
           dropzone: null as HTMLElement | null,
+        };
+      }
+      // A slot outside every category: right above its category, or the end.
+      const gap = element?.closest<HTMLElement>('[data-root-gap]');
+      if (gap) {
+        const beforeCategoryId = gap.dataset.rootGap;
+        return {
+          categoryId: null,
+          target: beforeCategoryId ? { kind: 'category' as const, id: beforeCategoryId } : null,
+          after: false,
+          targetRow: null as HTMLElement | null,
+          dropzone: gap,
         };
       }
       const dropzone = element?.closest<HTMLElement>('[data-category-dropzone]');
       if (dropzone) {
         return {
           categoryId: dropzone.dataset.categoryDropzone || null,
-          targetId: null,
+          target: null,
           after: true,
-          targetList: null as HTMLElement | null,
           targetRow: null as HTMLElement | null,
           dropzone,
         };
       }
-      const emptyList = element?.closest<HTMLElement>('[data-category-channels]');
-      if (!emptyList) return null;
+      const list = element?.closest<HTMLElement>('[data-category-channels]');
+      if (!list) return null;
+      // Over a row but off its handle (a voice channel's participants), or over
+      // a gap: place next to that row, or after the list's last channel. A
+      // root group is one of several, so its end is not the end of the root.
+      const rows = Array.from(list.children) as HTMLElement[];
+      const row = rows.find((candidate) => candidate.contains(element)) ??
+        (treeOrder && !list.dataset.categoryChannels ? rows.at(-1) : undefined);
+      const rowHandle = row?.matches('.channel-item[data-channel-id]') ? row : row?.querySelector<HTMLElement>('.channel-item[data-channel-id]');
+      const rowId = rowHandle?.dataset.channelId;
+      if (row && rowId) {
+        const rect = row.getBoundingClientRect();
+        const after = !rows.some((candidate) => candidate.contains(element)) || clientY > rect.top + rect.height / 2;
+        return {
+          categoryId: list.dataset.categoryChannels || null,
+          target: { kind: 'channel' as const, id: rowId },
+          after,
+          targetRow: row,
+          dropzone: null as HTMLElement | null,
+        };
+      }
       return {
-        categoryId: emptyList.dataset.categoryChannels || null,
-        targetId: null,
+        categoryId: list.dataset.categoryChannels || null,
+        target: null,
         after: true,
-        targetList: emptyList,
         targetRow: null as HTMLElement | null,
         dropzone: null as HTMLElement | null,
       };
@@ -1735,11 +1802,11 @@ export class MainView {
           if (!wasActive) return;
           suppressClick = true;
           window.setTimeout(() => { suppressClick = false; }, 0);
-          if (commit && target && target.targetId !== channelId) {
+          if (commit && target && target.target?.id !== channelId) {
             void this.commitChannelOrder(
               target.categoryId,
               channelId,
-              target.targetId,
+              target.target,
               target.after
             );
           }
@@ -1786,7 +1853,7 @@ export class MainView {
           de.preventDefault();
           de.stopPropagation();
           if (draggedId === channelId) return;
-          void this.commitChannelOrder(categoryId, draggedId, channelId, after);
+          void this.commitChannelOrder(categoryId, draggedId, { kind: 'channel', id: channelId }, after);
         });
       }
 
@@ -1809,7 +1876,11 @@ export class MainView {
         if (!draggedId) return;
         de.preventDefault();
         de.stopPropagation();
-        void this.commitChannelOrder(categoryId, draggedId, null, true);
+        // A root group ends before the next category, not at the end of the root.
+        const lastId = treeOrder && categoryId === null
+          ? listEl.querySelector<HTMLElement>(':scope > :last-child .channel-item[data-channel-id], :scope > .channel-item[data-channel-id]:last-child')?.dataset.channelId
+          : undefined;
+        void this.commitChannelOrder(categoryId, draggedId, lastId && lastId !== draggedId ? { kind: 'channel', id: lastId } : null, true);
       });
     }
 
@@ -1848,22 +1919,46 @@ export class MainView {
     const sections = Array.from(categoryList.querySelectorAll<HTMLElement>(
       '.channel-category[data-category-id]:not(.channel-category--uncategorized)'
     ));
+    const treeOrder = serverStore.hasChannelTreeOrder;
     const clearIndicators = () => {
       sections.forEach(section => section.classList.remove('category-drop-before', 'category-drop-after'));
+      categoryList.querySelectorAll('.channel-drop-before, .channel-drop-after, .channel-category-drop-target').forEach(element => {
+        element.classList.remove('channel-drop-before', 'channel-drop-after', 'channel-category-drop-target');
+      });
     };
     const clear = () => {
       categoryList.classList.remove('category-reorder-active');
       sections.forEach(section => section.classList.remove('category-dragging'));
       clearIndicators();
     };
-    const pointerTarget = (clientX: number, clientY: number) => {
-      const title = (document.elementFromPoint(clientX, clientY) as HTMLElement | null)
-        ?.closest<HTMLElement>('.category-title[data-category-dropzone]');
-      const section = title?.closest<HTMLElement>('.channel-category[data-category-id]');
+    // Where a category would land. Older servers only order categories among
+    // themselves; with a shared root, loose channels and the end are targets too.
+    const pointerTarget = (clientX: number, clientY: number): {
+      target: { kind: 'channel' | 'category'; id: string } | null; after: boolean; indicator: HTMLElement; indicatorClass: string;
+    } | null => {
+      const element = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+      const title = element?.closest<HTMLElement>('.category-title[data-category-dropzone]');
+      const section = (title ?? (treeOrder ? element : null))
+        ?.closest<HTMLElement>('.channel-category[data-category-id]:not(.channel-category--uncategorized)');
       const categoryId = section?.dataset.categoryId;
-      if (!title || !section || !categoryId) return null;
-      const rect = title.getBoundingClientRect();
-      return { categoryId, section, after: clientY > rect.top + rect.height / 2 };
+      if (section && categoryId) {
+        const after = title ? clientY > title.getBoundingClientRect().top + title.getBoundingClientRect().height / 2 : true;
+        return { target: { kind: 'category', id: categoryId }, after, indicator: section,
+          indicatorClass: after ? 'category-drop-after' : 'category-drop-before' };
+      }
+      if (!treeOrder || !element) return null;
+      const handle = element.closest<HTMLElement>('.channel-item[data-channel-id]');
+      const list = handle?.closest<HTMLElement>('[data-category-channels=""]');
+      if (handle?.dataset.channelId && list) {
+        let row = handle;
+        while (row.parentElement && row.parentElement !== list) row = row.parentElement;
+        const rect = row.getBoundingClientRect();
+        const after = clientY > rect.top + rect.height / 2;
+        return { target: { kind: 'channel', id: handle.dataset.channelId }, after, indicator: row,
+          indicatorClass: after ? 'channel-drop-after' : 'channel-drop-before' };
+      }
+      const end = element.closest<HTMLElement>('.channel-tree-end-dropzone');
+      return end ? { target: null, after: true, indicator: end, indicatorClass: 'channel-category-drop-target' } : null;
     };
 
     for (const section of sections) {
@@ -1903,7 +1998,7 @@ export class MainView {
         event.preventDefault();
         clearIndicators();
         const target = pointerTarget(event.clientX, event.clientY);
-        target?.section.classList.add(target.after ? 'category-drop-after' : 'category-drop-before');
+        target?.indicator.classList.add(target.indicatorClass);
       };
       const finishPointer = (event: MouseEvent, commit: boolean) => {
         if (!pointer) return;
@@ -1917,8 +2012,8 @@ export class MainView {
         if (!wasActive) return;
         suppressClick = true;
         window.setTimeout(() => { suppressClick = false; }, 0);
-        if (commit && target && target.categoryId !== categoryId) {
-          this.commitCategoryOrder(categoryId, target.categoryId, target.after);
+        if (commit && target && target.target?.id !== categoryId) {
+          this.commitCategoryOrder(categoryId, target.target, target.after);
         }
       };
       const stopPointer = (event: MouseEvent) => finishPointer(event, true);
@@ -1958,18 +2053,47 @@ export class MainView {
         if (!draggedId) return;
         event.preventDefault();
         event.stopPropagation();
-        if (draggedId !== categoryId) this.commitCategoryOrder(draggedId, categoryId, after);
+        if (draggedId !== categoryId) this.commitCategoryOrder(draggedId, { kind: 'category', id: categoryId }, after);
       });
     }
   }
 
-  private commitCategoryOrder(draggedId: string, targetId: string, after: boolean): void {
-    const ids = (serverStore.serverDetails?.categories ?? []).map(category => category.id)
-      .filter(categoryId => categoryId !== draggedId);
-    const targetIndex = ids.indexOf(targetId);
-    if (targetIndex < 0) return;
-    ids.splice(after ? targetIndex + 1 : targetIndex, 0, draggedId);
-    this.requestCategoryChange(MessageType.CATEGORY_REORDER, { orderedIds: ids });
+  /** The sidebar root with one entry moved next to `target`, or to the end without one. */
+  private rootOrderWith(item: ChannelTreeTarget, target: ChannelTreeTarget | null, after: boolean): ChannelTreeTarget[] | null {
+    const root: ChannelTreeTarget[] = serverStore.getChannelTreeRoot()
+      .map(({ kind, id }) => ({ kind, id }))
+      .filter((entry) => entry.kind !== item.kind || entry.id !== item.id);
+    let index = root.length;
+    if (target) {
+      const at = root.findIndex((entry) => entry.kind === target.kind && entry.id === target.id);
+      if (at < 0) return null;
+      index = after ? at + 1 : at;
+    }
+    root.splice(index, 0, item);
+    return root;
+  }
+
+  /**
+   * Sends a new root order. Servers with a shared root take it whole; older
+   * ones order loose channels and categories separately, so only the kind that
+   * moved is sent and the other keeps its place.
+   */
+  private sendRootOrder(root: ChannelTreeTarget[], moved: ChannelTreeTarget['kind']): Promise<unknown> {
+    if (serverStore.hasChannelTreeOrder) {
+      return networkClient.sendRequest(MessageType.CHANNEL_REORDER, { categoryId: null, orderedIds: root.map((entry) => entry.id) });
+    }
+    const orderedIds = root.filter((entry) => entry.kind === moved).map((entry) => entry.id);
+    return moved === 'category'
+      ? networkClient.sendRequest(MessageType.CATEGORY_REORDER, { orderedIds })
+      : networkClient.sendRequest(MessageType.CHANNEL_REORDER, { categoryId: null, orderedIds });
+  }
+
+  private commitCategoryOrder(draggedId: string, target: ChannelTreeTarget | null, after: boolean): void {
+    const root = this.rootOrderWith({ kind: 'category', id: draggedId }, target, after);
+    if (!root) return;
+    void this.sendRootOrder(root, 'category').catch((error: unknown) => {
+      void showAlert({ title: t('common.error'), message: error instanceof Error ? error.message : t('categories.error'), variant: 'danger' });
+    });
   }
 
   /**
@@ -1981,28 +2105,36 @@ export class MainView {
   private async commitChannelOrder(
     categoryId: string | null,
     draggedId: string,
-    targetId: string | null,
+    target: ChannelTreeTarget | null,
     after: boolean
   ): Promise<void> {
     const dragged = serverStore.getChannel(draggedId);
     if (!dragged) return;
-    const channels = serverStore.serverDetails?.channels.filter((c) =>
-      !c.forumId && (c.categoryId ?? null) === categoryId) ?? [];
-    const ids = channels.map((c) => c.id).filter((id) => id !== draggedId);
-
-    let index = ids.length;
-    if (targetId) {
-      const at = ids.indexOf(targetId);
-      if (at === -1) return;
-      index = after ? at + 1 : at;
+    let reorder: () => Promise<unknown>;
+    if (categoryId === null) {
+      // Outside every category the channel takes a slot in the shared root.
+      const root = this.rootOrderWith({ kind: 'channel', id: draggedId }, target, after);
+      if (!root) return;
+      reorder = () => this.sendRootOrder(root, 'channel');
+    } else {
+      const channels = serverStore.serverDetails?.channels.filter((c) =>
+        !c.forumId && (c.categoryId ?? null) === categoryId) ?? [];
+      const ids = channels.map((c) => c.id).filter((id) => id !== draggedId);
+      let index = ids.length;
+      if (target) {
+        const at = target.kind === 'channel' ? ids.indexOf(target.id) : -1;
+        if (at === -1) return;
+        index = after ? at + 1 : at;
+      }
+      ids.splice(index, 0, draggedId);
+      reorder = () => networkClient.sendRequest(MessageType.CHANNEL_REORDER, { categoryId, orderedIds: ids });
     }
-    ids.splice(index, 0, draggedId);
 
     try {
       if ((dragged.categoryId ?? null) !== categoryId) {
         await networkClient.sendRequest(MessageType.CHANNEL_UPDATE, { channelId: draggedId, categoryId });
       }
-      await networkClient.sendRequest(MessageType.CHANNEL_REORDER, { categoryId, orderedIds: ids });
+      await reorder();
     } catch (err: unknown) {
       void showAlert({
         title: t('common.error'),
@@ -2018,18 +2150,20 @@ export class MainView {
     const categories = serverStore.serverDetails?.categories ?? [];
     const category = categories.find((item) => item.id === categoryId);
     if (!category) return;
-    const position = categories.indexOf(category);
+    // A category steps past its root neighbour, loose channels included when
+    // the server shares one root order.
+    const siblings = serverStore.getChannelTreeRoot()
+      .filter((item) => serverStore.hasChannelTreeOrder || item.kind === 'category');
+    const position = siblings.findIndex((item) => item.kind === 'category' && item.id === categoryId);
     const move = (delta: number) => {
-      const ids = categories.map((item) => item.id);
-      ids.splice(position, 1);
-      ids.splice(position + delta, 0, categoryId);
-      this.requestCategoryChange(MessageType.CATEGORY_REORDER, { orderedIds: ids });
+      const neighbor = siblings[position + delta];
+      if (neighbor) this.commitCategoryOrder(categoryId, { kind: neighbor.kind, id: neighbor.id }, delta > 0);
     };
     contextMenu.open(x, y, [
       { label: t('categories.addChannel'), icon: 'add', onClick: () => createChannelModal.open('TEXT', categoryId) },
       { label: t('categories.edit'), icon: 'settings', onClick: () => categoryModal.open(category) },
-      { label: t('categories.moveUp'), icon: 'arrow_upward', disabled: position === 0 || !serverStore.hasPermission(Permission.MANAGE_CHANNELS), onClick: () => move(-1) },
-      { label: t('categories.moveDown'), icon: 'arrow_downward', disabled: position === categories.length - 1 || !serverStore.hasPermission(Permission.MANAGE_CHANNELS), onClick: () => move(1) },
+      { label: t('categories.moveUp'), icon: 'arrow_upward', disabled: position <= 0 || !serverStore.hasPermission(Permission.MANAGE_CHANNELS), onClick: () => move(-1) },
+      { label: t('categories.moveDown'), icon: 'arrow_downward', disabled: position < 0 || position === siblings.length - 1 || !serverStore.hasPermission(Permission.MANAGE_CHANNELS), onClick: () => move(1) },
       {
         label: t('categories.delete'), icon: 'delete', danger: true, onClick: () => {
           void showConfirm({ title: t('categories.delete'), message: t('categories.deleteConfirm'), variant: 'danger' })
@@ -2076,8 +2210,16 @@ export class MainView {
 
     if (serverStore.hasPermission(Permission.MANAGE_CHANNELS)) {
       if (channel && serverStore.hasPermission(Permission.MANAGE_CHANNELS)) {
-        const siblings = serverStore.serverDetails?.channels.filter((item) => (item.categoryId ?? null) === (channel.categoryId ?? null)) ?? [];
-        const at = siblings.findIndex((item) => item.id === channelId);
+        const categoryId = channel.categoryId && serverStore.serverDetails?.categories?.some((item) => item.id === channel.categoryId)
+          ? channel.categoryId : null;
+        // Inside a category a channel moves among its siblings; at the root it
+        // steps past loose channels and, with a shared root, categories too.
+        const siblings: ChannelTreeTarget[] = categoryId
+          ? (serverStore.serverDetails?.channels ?? []).filter((item) => !item.forumId && item.categoryId === categoryId)
+            .map((item) => ({ kind: 'channel', id: item.id }))
+          : serverStore.getChannelTreeRoot().filter((item) => serverStore.hasChannelTreeOrder || item.kind === 'channel')
+            .map(({ kind, id }) => ({ kind, id }));
+        const at = siblings.findIndex((item) => item.kind === 'channel' && item.id === channelId);
         items.push({
           label: t('categories.moveTo'), icon: 'drive_file_move',
           submenu: [
@@ -2085,13 +2227,13 @@ export class MainView {
             ...(serverStore.serverDetails?.categories ?? []),
           ].map((category) => ({
             label: category.name,
-            disabled: category.id === (channel.categoryId ?? null),
+            disabled: category.id === categoryId,
             onClick: () => { void this.commitChannelOrder(category.id, channelId, null, true); },
           })),
         });
         items.push(
-          { label: t('categories.moveUp'), icon: 'arrow_upward', disabled: at <= 0, onClick: () => { void this.commitChannelOrder(channel.categoryId ?? null, channelId, siblings[at - 1]?.id ?? null, false); } },
-          { label: t('categories.moveDown'), icon: 'arrow_downward', disabled: at >= siblings.length - 1, onClick: () => { void this.commitChannelOrder(channel.categoryId ?? null, channelId, siblings[at + 1]?.id ?? null, true); } },
+          { label: t('categories.moveUp'), icon: 'arrow_upward', disabled: at <= 0, onClick: () => { void this.commitChannelOrder(categoryId, channelId, siblings[at - 1] ?? null, false); } },
+          { label: t('categories.moveDown'), icon: 'arrow_downward', disabled: at < 0 || at >= siblings.length - 1, onClick: () => { void this.commitChannelOrder(categoryId, channelId, siblings[at + 1] ?? null, true); } },
         );
       }
       items.push({
@@ -2238,11 +2380,9 @@ export class MainView {
 
     // For private channel visibility: determine which voice channels the local
     // user can see, so members in invisible private channels appear as offline.
-    const myRoleIds = serverStore.getUserRoleIds(serverStore.currentUser?.id ?? '');
-    const myPerms = serverStore.myPermissions;
     const visibleChannelIds = new Set(
       (serverStore.serverDetails.channels ?? [])
-        .filter((ch) => canAccessChannel(ch, myPerms, myRoleIds, false, serverStore.currentUser?.id))
+        .filter((ch) => serverStore.hasPermission(Permission.VIEW_CHANNEL, ch.id))
         .map((ch) => ch.id)
     );
 

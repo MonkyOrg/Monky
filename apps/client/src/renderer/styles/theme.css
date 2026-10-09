@@ -928,9 +928,20 @@ input:focus, textarea:focus, select:focus {
   justify-content: center;
 }
 
-.server-rail-item[draggable='true'],
-.server-rail-folder-header[draggable='true'] {
+.server-rail-item[data-rail-draggable='true'],
+.server-rail-folder-header[data-rail-draggable='true'] {
   cursor: grab;
+}
+
+.server-rail--dragging,
+.server-rail--dragging * {
+  cursor: grabbing !important;
+  user-select: none;
+}
+
+/* Rail icons are pointer-dragged; a native image drag would carry the picture. */
+.server-rail-avatar > img {
+  -webkit-user-drag: none;
 }
 
 .server-rail-item.dragging,
@@ -4356,6 +4367,35 @@ input:focus, textarea:focus, select:focus {
   position: relative;
 }
 
+/* Empty and read-denied conversations share one centered state. */
+.chat-feed-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 100%;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.chat-feed-state-icon {
+  font-size: 44px;
+  color: var(--text-dim);
+}
+
+.chat-feed-state-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.chat-feed-state-text {
+  max-width: 420px;
+  font-size: 13px;
+}
+
 .chat-permission-banner {
   display: flex;
   align-items: center;
@@ -5675,7 +5715,7 @@ input:focus, textarea:focus, select:focus {
 .native-poll-option-editor legend {
   margin-bottom: 6px;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
 }
 .native-poll-option-row {
@@ -5701,7 +5741,7 @@ input:focus, textarea:focus, select:focus {
   background: transparent;
   color: var(--text-primary);
   font: inherit;
-  font-size: 12px;
+  font-size: 14px;
 }
 .native-poll-option-row > input::placeholder { color: var(--text-muted); }
 .native-poll-option-emoji-button,
@@ -5765,7 +5805,7 @@ input:focus, textarea:focus, select:focus {
   background: transparent;
   color: var(--text-primary);
   font: inherit;
-  font-size: 12px;
+  font-size: 14px;
   font-variant-numeric: tabular-nums;
   appearance: textfield;
 }
@@ -5788,8 +5828,44 @@ input:focus, textarea:focus, select:focus {
   outline: none;
 }
 .native-poll-number-control > button:disabled { opacity: 0.45; cursor: default; }
-.native-poll-live-row,
-.native-poll-multiple-row { margin-top: 2px; }
+.native-poll-live-row { margin-top: 2px; }
+/* Switch rows read as one list; the event-wizard label spacing belongs to stacked fields, not to rows. */
+.native-poll-switch-list { display: grid; }
+.native-poll-wizard .bot-permission-row label { margin: 0; }
+.native-poll-switch-list > .native-poll-edit-warning { margin: 8px 0 0; }
+.native-poll-edit-notice,
+.native-poll-edit-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.native-poll-edit-notice > .material-symbols-outlined,
+.native-poll-edit-summary > .material-symbols-outlined { flex: 0 0 auto; color: var(--accent-primary); }
+.native-poll-edit-summary p { margin: 0; }
+.native-poll-edit-summary strong { color: var(--text-primary); }
+.native-poll-edit-summary ul { margin: 4px 0 0; padding-left: 16px; }
+.native-poll-edit-summary--loss { border-color: color-mix(in srgb, var(--warning) 55%, var(--border-color)); }
+.native-poll-edit-summary--loss > .material-symbols-outlined,
+.native-poll-edit-warning > .material-symbols-outlined { color: var(--warning); }
+.native-poll-edit-warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -6px 0 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.native-poll-option-editor .native-poll-edit-warning { margin: 0 0 2px; }
+.native-poll-edit-duration { margin: -6px 0 0; }
 .native-poll-image-editor {
   display: grid;
   gap: 10px;
@@ -11381,6 +11457,28 @@ button:hover .role-option-check:not(.checked) {
 }
 
 .sb-modal-players:not(:empty) { padding-top: 10px; padding-bottom: 10px; }
+.sb-modal-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin: 12px 20px 0;
+  padding: 8px 12px;
+  border: 1px solid;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+}
+.sb-modal-notice--danger {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 15%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+}
+.sb-modal-notice--warning {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 15%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+}
+.sb-modal-local-warning { margin-bottom: 6px; }
 .sb-modal-players .sb-notice-progress-fill { background: var(--text-secondary); }
 .sb-notice-bar.is-paused .sb-notice-icon { opacity: 0.5; }
 .sb-file-menu { width: 28px; height: 28px; flex-shrink: 0; color: var(--text-secondary); }
@@ -11999,19 +12097,13 @@ button:hover .role-option-check:not(.checked) {
 }
 
 /* ── Wizard card ──────────────────────────────────────────────────────────── */
-.onboarding-card {
-  animation: onboarding-fade-in 0.2s ease;
-}
-.onboarding-card--guide {
-  width: min(640px, calc(100vw - 40px));
+/* Same size as the add-server card: the guide, tutorials and forms share one card. */
+.modal-card.onboarding-card {
+  width: min(720px, calc(100vw - 40px));
   max-width: none;
   max-height: calc(100vh - 48px);
   overflow-y: auto;
   gap: 14px;
-}
-@keyframes onboarding-fade-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
 }
 
 .onboarding-heading {
@@ -12042,8 +12134,11 @@ button:hover .role-option-check:not(.checked) {
 }
 
 /* ── App screenshots ──────────────────────────────────────────────────────── */
+/* Never wider than the picture itself, so narrow shots stay sharp. */
 .onboarding-shot {
-  margin: 0;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -12052,7 +12147,7 @@ button:hover .role-option-check:not(.checked) {
 }
 .onboarding-shot img {
   display: block;
-  width: 100%;
+  max-width: 100%;
   height: auto;
   user-select: none;
 }
@@ -12143,6 +12238,11 @@ button:hover .role-option-check:not(.checked) {
 }
 
 /* ── Option cards (clickable rows) ────────────────────────────────────────── */
+.onboarding-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 .onboarding-option-card {
   display: flex;
   align-items: center;
@@ -12194,6 +12294,54 @@ button:hover .role-option-check:not(.checked) {
   font-size: 20px;
   flex-shrink: 0;
 }
+.onboarding-option-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--accent-primary);
+}
+
+/* ── "Didn't find yours?" call to contribute ──────────────────────────────── */
+.onboarding-contribute {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  background: rgba(88, 101, 242, 0.06);
+  border: 1px solid rgba(88, 101, 242, 0.2);
+  border-radius: var(--radius-md);
+}
+.onboarding-contribute strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.onboarding-contribute strong .material-symbols-outlined {
+  color: var(--accent-primary);
+}
+.onboarding-contribute > span {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.onboarding-contribute-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+.onboarding-contribute-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 5px 12px;
+}
 
 /* ── Difficulty badges ────────────────────────────────────────────────────── */
 .onboarding-badge {
@@ -12217,12 +12365,51 @@ button:hover .role-option-check:not(.checked) {
   background: rgba(255, 255, 255, 0.06);
 }
 
-/* ── Tutorial viewer card ─────────────────────────────────────────────────── */
-.onboarding-tutorial-card {
-  max-height: calc(100vh - 48px);
-  animation: onboarding-fade-in 0.2s ease;
-}
+/* ── Tutorial step (same card as the wizard) ──────────────────────────────── */
 /* Steps can stack screenshots: only the step scrolls, header and navigation stay put. */
+.modal-card.onboarding-card--tutorial {
+  overflow: hidden;
+}
+.tutorial-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.tutorial-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.tutorial-name .material-symbols-outlined {
+  color: var(--accent-primary);
+}
+.tutorial-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.tutorial-step-count {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.tutorial-progress {
+  width: 100%;
+  height: 4px;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--bg-tertiary);
+}
+.tutorial-progress-fill {
+  height: 100%;
+  background: var(--accent-primary);
+}
 .tutorial-step-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -12230,20 +12417,46 @@ button:hover .role-option-check:not(.checked) {
   padding: 8px 8px 8px 0;
   margin-right: -8px;
 }
-
-/* ── Tutorial image placeholder ───────────────────────────────────────────── */
-.tutorial-image-placeholder {
+.tutorial-step-title {
+  margin: 0 0 12px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.tutorial-content {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+.tutorial-tip {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  width: 100%;
-  height: 140px;
-  margin-bottom: 14px;
-  background: var(--bg-tertiary);
-  border: 2px dashed var(--border-color);
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: rgba(88, 101, 242, 0.08);
+  border: 1px solid rgba(88, 101, 242, 0.25);
   border-radius: var(--radius-md);
+}
+.tutorial-tip .material-symbols-outlined,
+.tutorial-tip strong {
+  color: var(--accent-primary);
+}
+.tutorial-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color);
+}
+.tutorial-nav .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 /* ── Tutorial clickable links ─────────────────────────────────────────────── */
@@ -13107,14 +13320,21 @@ body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-card.
   font-weight: 700;
   text-transform: uppercase;
 }
-.native-poll-options { display: grid; gap: 7px; }
-.native-poll-confirm { justify-self: end; margin-top: 9px; }
-.native-poll-option {
-  position: relative;
-  isolation: isolate;
+/* One shared grid keeps every bar the same width beside the widest avatar-and-count column. */
+.native-poll-options {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
+  gap: 7px 8px;
+}
+.native-poll-answer { display: contents; }
+.native-poll-option {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
   min-height: 38px;
   overflow: hidden;
   padding: 0 11px;
@@ -13125,33 +13345,84 @@ body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-card.
   font: inherit;
   text-align: left;
   cursor: pointer;
+  transition: border-color var(--motion-popover-duration) var(--motion-easing),
+    box-shadow var(--motion-popover-duration) var(--motion-easing);
 }
 .native-poll-option:not(:disabled):hover,
 .native-poll-option:not(:disabled):focus-visible {
   border-color: var(--accent-primary);
   outline: none;
 }
-.native-poll-option--selected { border-color: var(--accent-primary); }
-.native-poll-option--emoji { grid-template-columns: 22px minmax(0, 1fr) auto; column-gap: 7px; }
+.native-poll-option--selected {
+  border-color: var(--accent-primary);
+  box-shadow: inset 0 0 0 1px var(--accent-primary);
+}
 .native-poll-option:disabled { cursor: default; }
+.native-poll-option[aria-disabled="true"] { cursor: progress; }
+/* Scaled rather than resized, so growing and shrinking animate without layout. */
 .native-poll-option-fill {
   position: absolute;
   z-index: -1;
-  inset: 0 auto 0 0;
+  inset: 0;
   background: color-mix(in srgb, var(--accent-primary) 18%, transparent);
-  transition: width var(--motion-duration-panel, 200ms) ease;
+  transform-origin: left center;
+  pointer-events: none;
 }
 .native-poll-option-label {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   font-size: 12px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.native-poll-option-emoji { font-size: 17px; line-height: 1; }
-.native-poll-option-result { color: var(--text-secondary); font-size: 11px; }
+.native-poll-option-emoji { flex: 0 0 auto; font-size: 17px; line-height: 1; }
+.native-poll-tally {
+  display: inline-flex;
+  align-items: center;
+  justify-self: end;
+  gap: 5px;
+  min-height: 28px;
+  padding: 2px 4px 2px 2px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
+.native-poll-tally-count { min-width: 1ch; text-align: right; font-variant-numeric: tabular-nums; }
+.native-poll-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.native-poll-voters {
+  cursor: pointer;
+  transition: background-color var(--motion-popover-duration) var(--motion-easing);
+}
+.native-poll-voters:not(:disabled):hover { background: var(--bg-card-hover); color: var(--text-primary); }
+.native-poll-voters:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 1px; }
+.native-poll-voters:disabled { cursor: default; }
+.native-poll-voter-avatars { display: inline-flex; align-items: center; }
+.native-poll-voter-avatar {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--bg-card);
+  border-radius: 50%;
+  background: var(--bg-input);
+  object-fit: cover;
+}
+.native-poll-voter-avatar + .native-poll-voter-avatar { margin-left: -7px; }
 .native-poll-footer {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   margin-top: 10px;
@@ -13159,7 +13430,56 @@ body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-card.
   font-size: 10px;
 }
 .native-poll-footer strong { color: var(--text-primary); }
-.native-poll-error { margin: 8px 0 0; color: var(--danger); font-size: 11px; }
+.native-poll-footer-end { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 10px; }
+.native-poll-view-votes {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color var(--motion-popover-duration) var(--motion-easing),
+    border-color var(--motion-popover-duration) var(--motion-easing);
+}
+.native-poll-view-votes:not(:disabled):hover,
+.native-poll-view-votes:focus-visible {
+  border-color: var(--accent-primary);
+  color: var(--text-primary);
+  outline: none;
+}
+.native-poll-view-votes:disabled { opacity: 0.55; cursor: default; }
+.community-modal.native-poll-voters-modal { width: min(460px, calc(100vw - 32px)); }
+.native-poll-voters-question { margin: 0 0 14px; color: var(--text-secondary); font-size: 12px; line-height: 1.4; }
+.native-poll-voters-list { display: grid; gap: 14px; }
+.native-poll-voters-group h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 7px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.native-poll-voters-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.native-poll-voters-count { flex: 0 0 auto; margin-left: auto; color: var(--text-secondary); font-size: 11px; font-weight: 500; }
+.native-poll-voters-group ul { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.native-poll-voters-group li {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.native-poll-voters-group li img { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%; object-fit: cover; }
+.native-poll-voters-group li span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.native-poll-voters-empty { margin: 0; color: var(--text-muted); font-size: 11px; }
 
 .image-carousel {
   position: relative;

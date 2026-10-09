@@ -28,6 +28,54 @@
   min-height: 8px;
 }
 .channel-category + .channel-category { margin-top: 16px; }
+/* With a shared root, the spaces before categories and the end of the list are
+   where a dragged channel leaves every category. At rest a slot is only the
+   usual spacing between categories; while dragging it widens and names itself,
+   and the slot under the pointer is highlighted. */
+.channel-tree-gap {
+  display: flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 8px;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  transition: height var(--motion-popover-duration) var(--motion-easing);
+}
+.channel-tree-gap:first-child,
+.channel-tree-end-dropzone { height: 0; }
+.channel-tree-gap + .channel-category { margin-top: 0; }
+.channel-reorder-active .channel-tree-gap,
+.category-reorder-active .channel-tree-end-dropzone {
+  height: 28px;
+  outline: 1px dashed var(--border-color);
+  outline-offset: -4px;
+}
+.channel-reorder-active .channel-tree-gap.channel-category-drop-target,
+.category-reorder-active .channel-tree-end-dropzone.channel-category-drop-target {
+  color: var(--text-primary);
+  outline: 2px dashed var(--accent-primary);
+  outline-offset: -2px;
+}
+.channel-tree-gap-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  opacity: 0;
+  transition: opacity var(--motion-popover-duration) var(--motion-easing);
+}
+.channel-tree-gap-label > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.channel-reorder-active .channel-tree-gap-label,
+.category-reorder-active .channel-tree-end-dropzone .channel-tree-gap-label { opacity: 1; }
 .category-modal { width: min(480px, calc(100vw - 32px)); }
 .category-modal .modal-footer > .btn { flex: 1; }
 .category-modal #input-category-name { padding-right: 36px; }

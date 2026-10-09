@@ -13,7 +13,7 @@ export interface TutorialStep {
   images?: { shot: OnboardingShot; alt: TranslationKey }[];
 }
 
-/** Full definition of a step-by-step tutorial rendered by `TutorialViewer`. */
+/** Full definition of a step-by-step tutorial rendered inside the onboarding wizard (see `TutorialViewer`). */
 export interface TutorialDefinition {
   /** Unique slug, e.g. 'radmin-vpn', 'port-forward'. */
   id: string;

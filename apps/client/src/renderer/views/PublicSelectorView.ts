@@ -8,6 +8,7 @@ import type { ServerStore } from '../stores/serverStore';
 import { getLanguage, t } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { renderLoadingIndicator } from '../utils/loadingIndicator';
+import { showErrorToast } from './CopyToast';
 import { audioPreviewService } from '../core/AudioPreviewService';
 import { botUserSettingsPayload } from '../utils/botSettingsContext';
 import {
@@ -33,6 +34,7 @@ export class PublicSelectorView {
   private expiryTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
   private loading = false;
+  private loadErrorShown = false;
 
   constructor(
     private feed: HTMLElement,
@@ -74,11 +76,14 @@ export class PublicSelectorView {
 
   private async load(): Promise<void> {
     if (this.destroyed || this.loading || this.client.getStatus() !== 'CONNECTED') return;
+    // Without reading there are no messages to attach controls to, and the
+    // server would refuse the listing anyway.
+    if (!this.server.hasPermission(Permission.READ_MESSAGES, this.channelId)) return;
     this.loading = true;
     try {
       const result = await this.client.sendRequest<{ selectors: unknown[] }>(MessageType.SELECTOR_LIST, { channelId: this.channelId });
       if (this.destroyed || !Array.isArray(result.selectors)) return;
-      this.feed.querySelector('[data-selector-load-error]')?.remove();
+      this.loadErrorShown = false;
       this.snapshots.clear();
       for (const entry of result.selectors) {
         const parsed = parsePublicSelector(entry);
@@ -88,12 +93,9 @@ export class PublicSelectorView {
     } catch (error: unknown) {
       if (!this.destroyed) {
         console.warn('Could not restore public bot selectors.', error);
-        const notice = this.feed.querySelector<HTMLElement>('[data-selector-load-error]') ?? document.createElement('p');
-        notice.dataset.selectorLoadError = '';
-        notice.className = 'bot-error';
-        notice.setAttribute('role', 'alert');
-        notice.textContent = t('botSelector.loadError');
-        this.feed.append(notice);
+        // Retries follow every server update; one toast per outage is enough.
+        if (!this.loadErrorShown) showErrorToast(t('botSelector.loadError'));
+        this.loadErrorShown = true;
       }
     } finally {
       this.loading = false;

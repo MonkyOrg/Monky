@@ -102,11 +102,11 @@ if (!process.versions.electron) {
 async function* regression() {
   const [motion, { openCommunityModal }, dialog, { ContextMenu }, { CodeBlockModal },
     { EmojiPicker }, { ColorPicker }, { selectEnhancer }, { OnboardingWizard },
-    { TutorialViewer }, { setSurfaceVisible }] = await Promise.all([
+    { setSurfaceVisible }] = await Promise.all([
     import('/utils/surfaceMotion.ts'), import('/views/CommunityModal.ts'), import('/views/Dialog.ts'),
     import('/views/ContextMenu.ts'), import('/views/CodeBlockModal.ts'), import('/views/EmojiPicker.ts'),
     import('/views/ColorPicker.ts'), import('/core/SelectEnhancer.ts'), import('/views/OnboardingWizard.ts'),
-    import('/tutorials/TutorialViewer.ts'), import('/utils/surfaceVisibility.ts'),
+    import('/utils/surfaceVisibility.ts'),
   ]);
   let checks = 0;
   const check = (value, message) => { if (!value) throw new Error(message); checks++; };
@@ -263,10 +263,21 @@ async function* regression() {
   check(newCode.hasAttribute('data-ui-closing'), 'Escape closes reopened modal, not stale backdrop');
   await settle(oldCode); await settle(newCode);
 
+  const modals = await import('/utils/modalSurface.ts');
+  const wizardRoot = () => {
+    const root = document.createElement('div');
+    root.className = 'modal-backdrop';
+    document.body.appendChild(root);
+    return root;
+  };
   const wizard = new OnboardingWizard();
-  let wizardFinished = 'pending';
-  wizard.open(action => { wizardFinished = action; });
-  const onboarding = motion.topModal();
+  let wizardExit = 'pending';
+  const onboarding = wizardRoot();
+  wizard.start(onboarding, 'guide', result => { wizardExit = result; }, 0);
+  modals.enterModal(onboarding);
+  const homeShot = onboarding.querySelector('.onboarding-shot img');
+  check(homeShot && homeShot.offsetHeight > 100 && homeShot.getAttribute('width') && homeShot.getAttribute('height'),
+    'Guide pictures reserve their size before loading, so the card never grows when they arrive');
   check(onboarding.getAnimations().length > 0, 'Onboarding enters');
   await settle(onboarding);
   const stableCard = onboarding.querySelector('.modal-card');
@@ -289,31 +300,52 @@ async function* regression() {
   await settle(stableCard);
   check(!stableCard.querySelector('[data-ui-closing]') && !!onboarding.querySelector('#onboarding-host'),
     'Step completion removes old content without replacing the card');
-  wizard.close();
+  onboarding.querySelector('#onboarding-host').click();
+  await settle(stableCard);
+  const width = stableCard.getBoundingClientRect().width;
+  onboarding.querySelector('#onboarding-lan').click();
+  check(motion.topModal() === onboarding && onboarding.querySelector('.modal-card') === stableCard
+    && stableCard.querySelector('[data-ui-closing]')?.inert,
+  'A tutorial slides into the guide card instead of opening another modal');
+  await settle(stableCard);
+  check(stableCard.classList.contains('onboarding-card--tutorial') && stableCard.getBoundingClientRect().width === width,
+    'Tutorial steps keep the guide card width');
+  onboarding.querySelector('#tutorial-next').click();
+  check(stableCard.querySelector('[data-ui-closing]')?.inert, 'Tutorial steps retain outgoing real content during motion');
+  await settle(stableCard);
+  onboarding.querySelector('#tutorial-prev').click();
+  await settle(stableCard);
+  onboarding.querySelector('#tutorial-prev').click();
+  await settle(stableCard);
+  check(!!onboarding.querySelector('#onboarding-lan') && !onboarding.querySelector('.onboarding-card--tutorial'),
+    'Back from the first tutorial step returns to the list that opened it');
+  onboarding.querySelector('#onboarding-port').click();
+  await settle(stableCard);
+  while (onboarding.querySelector('#tutorial-next')) {
+    onboarding.querySelector('#tutorial-next').click();
+    await settle(stableCard);
+  }
+  onboarding.querySelector('#tutorial-finish').click();
+  check(wizardExit === 'host', 'Finishing a tutorial in the guide continues to the create-server form');
+  wizardExit = 'pending';
+  onboarding.querySelector('#tutorial-close').click();
+  check(wizardExit === 'close', 'Closing a tutorial asks the owner to close the modal');
+  wizard.stop();
+  modals.exitModal(onboarding);
   check(onboarding.hasAttribute('data-ui-closing'), 'Onboarding exits');
-  check(wizardFinished === null, 'Closing the guide without a choice reports no action');
   await settle(onboarding);
-  wizardFinished = 'pending';
-  wizard.openHostTutorials(action => { wizardFinished = action; });
-  const hostTutorials = motion.topModal();
+  wizardExit = 'pending';
+  const hostTutorials = wizardRoot();
+  wizard.start(hostTutorials, 'host-tutorials', result => { wizardExit = result; }, 0);
+  modals.enterModal(hostTutorials);
   await settle(hostTutorials);
   check(!hostTutorials.querySelector('.onboarding-step-dots') && !hostTutorials.querySelector('#onboarding-create-now'),
     'Hosting tutorials opened from the create form skip the guide-only controls');
   hostTutorials.querySelector('#onboarding-back').click();
-  check(hostTutorials.hasAttribute('data-ui-closing') && wizardFinished === null,
-    'Back from hosting tutorials closes them instead of jumping to the guide start');
+  check(wizardExit === 'leave', 'Back from hosting tutorials hands the card back instead of jumping to the guide start');
+  wizard.stop();
+  modals.exitModal(hostTutorials);
   await settle(hostTutorials);
-  const tutorial = new TutorialViewer();
-  tutorial.open({ id: 'motion', name: 'common.close', icon: 'info', steps: [
-    { title: 'common.close', content: 'common.close' }, { title: 'common.close', content: 'common.close' },
-  ] });
-  const tutorialRoot = motion.topModal();
-  check(tutorialRoot.getAnimations().length > 0, 'Tutorial enters');
-  await settle(tutorialRoot);
-  tutorialRoot.querySelector('#tutorial-next').click();
-  check(tutorialRoot.querySelector('[data-ui-closing]')?.inert, 'Tutorial steps retain outgoing real content during motion');
-  tutorial.close();
-  await settle(tutorialRoot);
 
   const [{ ScreenViewersView }, { webRtcManager }, { LightboxModal }] = await Promise.all([
     import('/views/ScreenViewersView.ts'), import('/core/WebRtcManager.ts'), import('/views/LightboxModal.ts'),

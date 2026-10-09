@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import http from 'node:http';
 import test from 'node:test';
-import { MessageType, Permission, ProtocolErrorCode, canAccessChannel, DEFAULT_PERMISSIONS, CHANNEL_PERMISSIONS, resolveChannelPermissions } from '@monky/shared';
+import { MessageType, Permission, ProtocolErrorCode, canAccessChannel, channelTreeRoot, DEFAULT_PERMISSIONS, CHANNEL_PERMISSIONS, resolveChannelPermissions } from '@monky/shared';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 import { SqlJsDriver } from './infrastructure/database/SqliteWrapper';
 import { SqliteChannelRepository, SqliteRoleRepository, SqliteServerRepository } from './infrastructure/database/SqliteRepositories';
@@ -131,9 +131,14 @@ test('category CRUD/mixed ordering and revocation cover auth, voice, chat, attac
   const marker = member.peer.messages.length;
   const updated = await owner.peer.request(MessageType.CATEGORY_UPDATE, { categoryId, allowedRoleIds: [] });
   assert.equal(updated.type, MessageType.CATEGORIES_UPDATED);
+  await member.peer.wait((message) => message.type === MessageType.CHANNEL_DELETED && message.payload.channelId === chatId, marker);
+  assert.equal(f.signalingService.getParticipantsInChannel(voiceId).length, 1, 'losing the view never drops someone already inside');
+  assert.equal(member.peer.messages.slice(marker).some((message) =>
+    message.type === MessageType.CHANNEL_DELETED && message.payload.channelId === voiceId), false);
+  await member.peer.error(MessageType.CHAT_SEND, { channelId: chatId, content: 'Revoked' }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  member.peer.send(MessageType.VOICE_LEAVE, { channelId: voiceId });
   await member.peer.wait((message) => message.type === MessageType.CHANNEL_DELETED && message.payload.channelId === voiceId, marker);
   assert.equal(f.signalingService.getParticipantsInChannel(voiceId).length, 0);
-  await member.peer.error(MessageType.CHAT_SEND, { channelId: chatId, content: 'Revoked' }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
   const rejoined = await f.human('Category member', member.keys);
   assert.equal(records(record(rejoined.auth.payload.server).channels).some((channel) => channel.id === chatId), false);
   const order = await owner.peer.request(MessageType.CHANNEL_REORDER, { categoryId, orderedIds: [voiceId, chatId, voiceId, 'missing'] });
@@ -235,4 +240,83 @@ test('HTTP upload tokens cannot outlive inherited access, including an in-flight
   const rejected = await fetch(url, { method: 'POST', body: 'later' });
   assert.equal(rejected.status, 401);
   assert.equal(await f.attachmentRepo.sumActiveBytes(), 0);
+});
+test('the tree order migration keeps the old layout: loose channels first, then categories', async () => {
+  const folder = path.resolve('.qa', `tree-order-migration-${randomUUID()}`);
+  const filename = path.join(folder, 'server.db');
+  const migrationFolder = path.join(__dirname, 'infrastructure', 'database', 'migrations');
+  let legacy: SqlJsDriver | undefined;
+  let connection: DatabaseConnection | undefined;
+  try {
+    legacy = await SqlJsDriver.create(filename);
+    legacy.exec('CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)');
+    for (const file of fs.readdirSync(migrationFolder).filter((file) => file.endsWith('.sql') && file < '049_').sort()) {
+      legacy.exec(fs.readFileSync(path.join(migrationFolder, file), 'utf8'));
+      legacy.prepare('INSERT INTO schema_migrations VALUES (?, ?)').run(file, 1);
+    }
+    legacy.prepare('INSERT INTO server_meta (id, name, password_hash, created_at) VALUES (?, ?, ?, ?)').run('server', 'Legacy', '', 1);
+    const category = legacy.prepare('INSERT INTO channel_categories (id, server_id, name, position, created_at) VALUES (?, ?, ?, ?, ?)');
+    category.run('cat-a', 'server', 'A', 0, 1);
+    category.run('cat-b', 'server', 'B', 1, 1);
+    const channel = legacy.prepare('INSERT INTO channels (id, server_id, name, type, position, created_at, category_id) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    channel.run('loose-late', 'server', 'Late', 'TEXT', 1, 1, null);
+    channel.run('loose-early', 'server', 'Early', 'TEXT', 0, 1, null);
+    channel.run('inside', 'server', 'Inside', 'TEXT', 7, 1, 'cat-a');
+    legacy.close();
+    legacy = undefined;
+    connection = await DatabaseConnection.create(filename);
+    const repo = new SqliteChannelRepository(connection.getDb());
+    const root = channelTreeRoot(await repo.listByServerId('server'), await repo.categories.listByServerId('server'));
+    assert.deepEqual(root.map((item) => [item.id, item.position]), [['loose-early', 0], ['loose-late', 1], ['cat-a', 2], ['cat-b', 3]]);
+    assert.equal((await repo.findById('inside'))?.position, 7, 'positions inside a category are untouched');
+  } finally {
+    legacy?.close();
+    connection?.close();
+    fs.rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test('loose channels and categories share one root order, and older requests keep the other kind in place', async (t) => {
+  const f = await createApprovedBotFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Tree owner');
+  const viewer = await f.human('Tree viewer');
+  const serverId = (await f.serverRepo.getServer())!.id;
+  const root = async () => channelTreeRoot(await f.channelService.listChannels(), await f.channelService.listCategories())
+    .map((item) => item.id);
+  const [textCategory, voiceCategory] = await root();
+  const loose = text(record((await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'Loose', type: 'TEXT' })).payload.channel).id);
+  assert.deepEqual(await root(), [textCategory, voiceCategory, loose], 'a new loose channel goes to the end of the root');
+  const created = await owner.peer.request(MessageType.CATEGORY_CREATE, { name: 'Third' });
+  const third = text(records(created.payload.categories).find((category) => category.name === 'Third')!.id);
+  assert.deepEqual(await root(), [textCategory, voiceCategory, loose, third], 'a new category goes to the end of the root');
+
+  const marker = viewer.peer.messages.length;
+  const reordered = await owner.peer.request(MessageType.CHANNEL_REORDER, { categoryId: null, orderedIds: [voiceCategory, loose, third, textCategory] });
+  assert.equal(reordered.type, MessageType.CHANNELS_REORDERED);
+  assert.deepEqual(await root(), [voiceCategory, loose, third, textCategory], 'a mixed request places a channel between categories');
+  const sortedCategoryIds = (message: { payload: Record<string, unknown> }) => records(message.payload.categories)
+    .sort((a, b) => Number(a.position) - Number(b.position)).map((category) => category.id).join(',');
+  await viewer.peer.wait((message) => message.type === MessageType.CATEGORIES_UPDATED &&
+    sortedCategoryIds(message) === [voiceCategory, third, textCategory].join(','), marker);
+  await viewer.peer.wait((message) => message.type === MessageType.CHANNELS_REORDERED &&
+    records(message.payload.positions).some((position) => position.channelId === loose && position.position === 1), marker);
+
+  await owner.peer.request(MessageType.CATEGORY_REORDER, { orderedIds: [textCategory, third, voiceCategory] });
+  assert.deepEqual(await root(), [textCategory, loose, third, voiceCategory], 'a categories-only request keeps the loose channel in its slot');
+  const second = text(record((await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'Second loose', type: 'VOICE' })).payload.channel).id);
+  await owner.peer.request(MessageType.CHANNEL_REORDER, { categoryId: null, orderedIds: [second, loose] });
+  assert.deepEqual(await root(), [textCategory, second, third, voiceCategory, loose], 'a channels-only request keeps every category in its slot');
+
+  const textChildren = (await f.channelService.listChannels()).filter((channel) => channel.categoryId === textCategory).map((channel) => channel.id);
+  assert.ok(textChildren.length > 0);
+  await owner.peer.request(MessageType.CATEGORY_DELETE, { categoryId: textCategory });
+  assert.deepEqual(await root(), [...textChildren, second, third, voiceCategory, loose], 'a deleted category leaves its channels in its place');
+
+  const moved = await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: loose, categoryId: third });
+  assert.equal(record(moved.payload.channel).position, 0, 'a channel moved into a category lands at its end');
+  await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: loose, categoryId: null });
+  assert.equal((await root()).at(-1), loose, 'a channel moved out of its category lands at the end of the root');
+  await viewer.peer.error(MessageType.CHANNEL_REORDER, { categoryId: null, orderedIds: [loose] }, ProtocolErrorCode.PERMISSION_DENIED);
+  assert.ok(serverId);
 });

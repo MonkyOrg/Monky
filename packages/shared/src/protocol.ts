@@ -331,6 +331,13 @@ export enum MessageType {
   POLL_VOTE = 'POLL_VOTE',
   POLL_CLOSE = 'POLL_CLOSE',
   POLL_UPDATED = 'POLL_UPDATED',
+  /** Client -> server (`poll-voters`): complete voter list of a poll with public votes. */
+  POLL_VOTERS = 'POLL_VOTERS',
+  POLL_VOTERS_RESULT = 'POLL_VOTERS_RESULT',
+  /** Client -> server (`poll-edit`): changes an open poll; answered with POLL_UPDATED. */
+  POLL_EDIT = 'POLL_EDIT',
+  /** Client -> server (`poll-edit`): the requester's current view of one poll, answered with POLL_UPDATED. */
+  POLL_GET = 'POLL_GET',
   VOICE_USER_JOINED = 'VOICE_USER_JOINED',
   VOICE_USER_LEFT = 'VOICE_USER_LEFT',
   VOICE_STATE_CHANGED = 'VOICE_STATE_CHANGED',
@@ -475,6 +482,10 @@ export interface ChannelDeletePayload {
  */
 export interface ChannelReorderPayload {
   type?: ChannelType;
+  /**
+   * The category being reordered. `null` is the root: with `channel-tree-order`
+   * it lists loose channels and categories together, in display order.
+   */
   categoryId?: string | null;
   /** Every channel of the selected category or type, in display order. */
   orderedIds: string[];

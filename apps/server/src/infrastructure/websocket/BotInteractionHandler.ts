@@ -888,11 +888,11 @@ export class BotInteractionHandler {
     const canContinue = (invokerId: string, channelId: string): boolean => {
       const channel = channels.get(channelId);
       const context = contexts.get(invokerId);
-      return !!channel && (channel.type === 'TEXT' || channel.type === 'VOICE') && !!context &&
-        channel.botCommandsEnabled &&
-        hasChannelPermission(channel, context.permissions, context.roleIds, Permission.USE_BOT_COMMANDS, false, context.userId) &&
-        hasChannelPermission(channel, context.permissions, context.roleIds, Permission.SEND_MESSAGES, false, context.userId) &&
-        canAccessChannel(channel, context.permissions, context.roleIds, false, context.userId);
+      if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE') || !context || !channel.botCommandsEnabled) return false;
+      const rules = this.channelService.rulesFor(channel, context);
+      return hasChannelPermission(rules, context.permissions, context.roleIds, Permission.USE_BOT_COMMANDS, false, context.userId) &&
+        hasChannelPermission(rules, context.permissions, context.roleIds, Permission.SEND_MESSAGES, false, context.userId) &&
+        canAccessChannel(rules, context.permissions, context.roleIds, false, context.userId);
     };
     for (const pending of this.autocompletes.values()) {
       if (!canContinue(pending.invokerId, pending.channelId)) {
@@ -1005,7 +1005,7 @@ export class BotInteractionHandler {
       this.channelService.getAccessContext(invocation.invokerId, channelId),
     ]);
     if (!channel || channel.type !== 'VOICE' || (requireSpeak && !hasPermission(context.permissions, Permission.SPEAK)) ||
-        !canAccessChannel(channel, context.permissions, context.roleIds, false, context.userId)) return undefined;
+        !canAccessChannel(this.channelService.rulesFor(channel, context), context.permissions, context.roleIds, false, context.userId)) return undefined;
     const isCurrent = () => this.isActive(invocation) &&
       this.transport.getVoiceChannelId?.(originSessionId) === channelId;
     return isCurrent() ? { creatorUserId: invocation.invokerId, originChannelId: invocation.channelId, isCurrent } : undefined;
@@ -1253,7 +1253,7 @@ export class BotInteractionHandler {
     ]);
     if (!isMember) return ProtocolErrorCode.UNAUTHORIZED;
     if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE') ||
-        !canAccessChannel(channel, context.permissions, context.roleIds, false, context.userId)) {
+        !canAccessChannel(this.channelService.rulesFor(channel, context), context.permissions, context.roleIds, false, context.userId)) {
       return ProtocolErrorCode.CHANNEL_NOT_FOUND;
     }
     if (!hasPermission(context.permissions, Permission.SEND_MESSAGES)) return ProtocolErrorCode.PERMISSION_DENIED;

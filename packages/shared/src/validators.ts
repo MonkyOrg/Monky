@@ -305,14 +305,16 @@ export const channelUpdateSchema = z.object({
   allowedRoleIds: channelAllowedRoleIdsSchema.optional(),
 });
 
-// A category takes precedence over legacy type-scoped ordering.
+// A category takes precedence over legacy type-scoped ordering. With
+// `channel-tree-order`, a null category lists the whole root: loose channels
+// and categories together.
 export const channelReorderSchema = z.object({
   type: z.enum(['VOICE', 'TEXT', 'FORUM']).optional(),
   categoryId: z.string().min(1).nullable().optional(),
   orderedIds: z
     .array(z.string().min(1, 'Canal inválido'))
     .min(1, 'Nenhum canal informado')
-    .max(200, 'Canais demais'),
+    .max(500, 'Canais demais'),
 }).refine((value) => value.type !== undefined || value.categoryId !== undefined, 'Informe uma categoria ou tipo');
 
 export const categoryCreateSchema = z.object({

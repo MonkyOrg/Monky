@@ -8,15 +8,18 @@ export const vpsOracleFreeTutorial: TutorialDefinition = {
     {
       title: 'tutorial.vpsOracle.step1.title',
       content: 'tutorial.vpsOracle.step1.content',
+      images: [{ shot: 'site-oracle-free', alt: 'tutorial.shotOracleSiteAlt' }],
     },
     {
       title: 'tutorial.vpsOracle.step2.title',
       content: 'tutorial.vpsOracle.step2.content',
+      images: [{ shot: 'illustration-oracle-instance', alt: 'tutorial.shotOracleInstanceAlt' }],
     },
     {
       title: 'tutorial.vpsOracle.step3.title',
       content: 'tutorial.vpsOracle.step3.content',
       tip: 'tutorial.vpsOracle.step3.tip',
+      images: [{ shot: 'illustration-oracle-ingress', alt: 'tutorial.shotOracleIngressAlt' }],
     },
     {
       title: 'tutorial.vpsOracle.step4.title',
@@ -40,6 +43,7 @@ export const vpsGenericTutorial: TutorialDefinition = {
     {
       title: 'tutorial.vpsGeneric.step1.title',
       content: 'tutorial.vpsGeneric.step1.content',
+      images: [{ shot: 'illustration-vps-providers', alt: 'tutorial.shotVpsProvidersAlt' }],
     },
     {
       title: 'tutorial.vpsGeneric.step2.title',

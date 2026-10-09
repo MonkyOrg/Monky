@@ -84,8 +84,9 @@ exigem **Gerenciar canais**; não há um botão fixo de criar categoria na lista
 
 Use o **+** ao lado de uma categoria. Escolha qualquer tipo de canal,
 informe o nome e revise os switches antes de criar. Uma categoria pode misturar
-texto, voz e fóruns; canais sem categoria aparecem diretamente na lista, sem
-um cabeçalho de categoria artificial.
+texto, voz e fóruns. Canais sem categoria aparecem diretamente na lista, sem
+um cabeçalho de categoria artificial, e podem ficar em qualquer posição: acima,
+abaixo ou entre as categorias.
 
 Para editar ou excluir, abra **Mais opções** no canal. A exclusão é uma ação
 destrutiva: confira o nome e o impacto no histórico antes de confirmar.
@@ -189,6 +190,12 @@ pertence ao público: mensagem, histórico, respostas, busca, totais e paginaç�
 não revelam sua existência. O criador e gestores com **Gerenciar servidor**
 mantêm acesso, sempre respeitando a permissão atual de leitura do canal.
 
+Enquanto uma enquete está aberta, quem a criou e quem tem **Gerenciar servidor**
+podem editá-la por completo, inclusive público, duração, limite e votos
+anônimos. Ligar a ação ao vivo numa edição continua exigindo **Emitir ações ao
+vivo**. Quem perde acesso a uma enquete privada após a edição deixa de vê-la ao
+recarregar o canal.
+
 ## Buscar mensagens
 
 Use a busca no topo à direita ou `Ctrl+F` dentro de um chat para começar no
@@ -215,7 +222,12 @@ anteriores, mas ações ao vivo precisam de servidor compatível.
 Clique com o botão direito no nome de uma categoria para editar nome e acesso,
 mover para cima/baixo ou excluir.
 No menu de um canal, **Mover para categoria** muda seu agrupamento;
-arrastar também move e reordena canais. As setas das categorias recolhem
+arrastar também move e reordena canais e categorias. Canais e categorias
+dividem a mesma ordem na lista: durante o arraste, abrem-se faixas acima das
+categorias e no fim da lista para deixar o canal fora de qualquer categoria;
+soltar sobre o nome de uma categoria coloca o canal dentro dela. **Mover para
+cima/baixo**, nos menus, segue
+a mesma ordem. As setas das categorias recolhem
 suas listas, lembrando a escolha por servidor e identidade neste dispositivo.
 
 Novos servidores começam com **Canais de texto** e **Canais de voz** (nomes no
@@ -234,9 +246,10 @@ que diferem da categoria viram regras próprias ao salvar e exibem
 o rascunho. Regras iguais às da categoria usam a sincronização, inclusive ao
 desfazer uma alteração. Mover um canal sincronizado adota o acesso do destino;
 mover para **Sem categoria** preserva o acesso efetivo atual. Excluir uma
-categoria **não exclui canais nem histórico**: eles ficam sem categoria e
-mantêm suas permissões. Revogar acesso também remove o canal da lista e
-desconecta quem estava na voz; chat, envio de anexos e bots respeitam o mesmo acesso.
+categoria **não exclui canais nem histórico**: eles ficam sem categoria, no
+lugar dela, e mantêm suas permissões. Revogar acesso também remove o canal da
+lista; quem já está na chamada continua nela até sair. Chat, envio de anexos e
+bots respeitam o mesmo acesso.
 
 Cada permissão de **Todos**, de um cargo ou de uma pessoa possui três estados:
 **X — Negar**, **— — Herdar** e **✓ — Permitir**. Herdar não concede nem nega;
@@ -264,7 +277,16 @@ ao vivo** também são permissões gerais do servidor: elas não aparecem no edi
 de permissões de canal ou categoria e não podem ser concedidas nem negadas por
 regras locais. Regras antigas com essas permissões são ignoradas. **Falar** não bloqueia a entrada em
 um canal de voz; quem tem **Ver canal** entra, mas fica sem microfone,
-soundboard e áudio da tela até receber **Falar** naquele canal.
+soundboard e áudio da tela até receber **Falar** naquele canal. **Usar
+soundboard** também pode ser negado só em um canal; nesse caso, a soundboard
+avisa que o bloqueio vem daquele canal.
+
+**Ver canal** decide quem encontra um canal de voz e entra nele por conta
+própria. Quem tem **Mover membros** e consegue acessar o canal ainda pode trazer
+qualquer pessoa para ele, mesmo que ela não veja o canal; bots são a exceção e
+nunca entram assim em canais privados. Quem está dentro de um canal de voz
+continua vendo o canal, com o chat dele, até sair, mesmo que perca **Ver canal**
+nesse meio-tempo. Depois de sair, só volta sozinho se puder ver o canal.
 
 ### Canal privado
 
