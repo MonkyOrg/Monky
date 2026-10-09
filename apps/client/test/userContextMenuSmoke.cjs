@@ -70,13 +70,15 @@ async function runUserContextMenuSmoke() {
   const [{ userContextMenu: menu }, servers, participants, { voiceStore: voice },
     { settingsStore: settings }, { networkClient: network }, { audioProcessor: audio },
     { webRtcManager: rtc }, { soundEffects: sounds }, { appEvents }, language,
-    { connectionStore: connection }] = await Promise.all([
+    { connectionStore: connection }, { gameShareRequests: shares }, { GameSharePrompt },
+    { gameShareSuggestion: suggestion, GAME_SHARE_SUGGESTION_SLOT: suggestionSlot }] = await Promise.all([
     import('/views/UserContextMenu.ts'), import('/stores/serverStore.ts'),
     import('/core/ParticipantManager.ts'), import('/stores/voiceStore.ts'),
     import('/stores/settingsStore.ts'), import('/core/NetworkClient.ts'),
     import('/core/AudioProcessor.ts'), import('/core/WebRtcManager.ts'),
     import('/core/SoundEffects.ts'), import('/core/EventBus.ts'), import('/i18n/index.ts'),
-    import('/stores/connectionStore.ts'),
+    import('/stores/connectionStore.ts'), import('/core/GameShareRequests.ts'),
+    import('/views/GameSharePrompt.ts'), import('/core/GameShareSuggestion.ts'),
   ]);
   let checks = 0;
   let lastClose;
@@ -186,6 +188,127 @@ async function runUserContextMenuSmoke() {
     voice.currentVoiceChannelId = 'room';
     click('self-mute');
     check(sent.length === 1 && sent[0].payload.isMuted === voice.isMuted, 'In-call manual action sends voice state');
+
+    // "Pedir para ver a partida" (#763): only for someone else, playing, in the
+    // same call, not on screen yet, on a server that negotiated the feature.
+    const asks = [];
+    const originalAsk = shares.ask;
+    shares.ask = target => { asks.push(target); return Promise.resolve(); };
+    const activity = { source: 'steam', appId: 606150, name: 'Moonlighter', startedAt: Date.now() };
+    const playing = { ...remote, activity };
+    server.serverDetails.protocol = { version: 36, minimumVersion: 35, features: ['game-activity', 'game-share-request'] };
+    await open(playing);
+    check(button('ask-to-watch-game')?.closest('.context-menu-activity') !== null, 'Ask to watch sits on the game card');
+    check(!find('input[type="checkbox"],input[type="radio"]'), 'Ask to watch adds no native checkbox');
+    button('ask-to-watch-game').focus();
+    check(document.activeElement === button('ask-to-watch-game'), 'Ask to watch is reachable by keyboard');
+    click('ask-to-watch-game');
+    check(asks.length === 1 && asks[0].id === remote.id && asks[0].nickname === remote.nickname, 'Ask to watch targets the player');
+    await delay();
+    check(!document.querySelector('.user-context-menu:not([data-ui-closing])'), 'Asking closes the menu');
+    await open({ ...user, activity });
+    check(!button('ask-to-watch-game'), 'Nobody asks to watch themselves');
+    manager.updateVoiceState({ ...state(remote), isScreenSharing: true });
+    await open(playing);
+    check(!button('ask-to-watch-game'), 'No ask while the player is already on screen');
+    manager.updateVoiceState({ ...state(remote), channelId: 'other-room' });
+    await open(playing);
+    check(!button('ask-to-watch-game'), 'No ask across different calls');
+    manager.updateVoiceState(state(remote));
+    server.serverDetails.protocol = { version: 36, minimumVersion: 35, features: ['game-activity'] };
+    await open(playing);
+    check(!button('ask-to-watch-game'), 'No ask on a server without the feature');
+    menu.close();
+    server.serverDetails.protocol = undefined;
+    shares.ask = originalAsk;
+
+    // The player's side: a corner card that never takes focus from the game.
+    const answers = [];
+    const focusedBefore = document.activeElement;
+    const prompt = new GameSharePrompt({ nickname: 'Remote', gameName: 'Moonlighter',
+      onShare: audio => answers.push({ share: true, audio }), onDecline: () => answers.push({ share: false }) });
+    prompt.show();
+    const card = document.querySelector('.game-share-prompt');
+    check(card?.getAttribute('role') === 'alertdialog' && card.getAttribute('aria-modal') === 'false', 'Prompt is a non-modal alert');
+    check(document.getElementById(card.getAttribute('aria-labelledby'))?.textContent.includes('Moonlighter'), 'Prompt names the game');
+    check(document.activeElement === focusedBefore, 'Prompt does not steal focus');
+    const audioSwitch = card.querySelector('[data-game-share-audio]');
+    check(audioSwitch?.checked && audioSwitch.closest('.toggle-switch'), 'Game audio is a switch, on by default');
+    audioSwitch.click();
+    card.querySelector('[data-game-share="share"]').click();
+    check(answers.at(-1).share && answers.at(-1).audio === false, 'Share carries the audio choice');
+    card.querySelector('[data-game-share="decline"]').focus();
+    card.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    check(answers.at(-1).share === false, 'Escape means not now');
+    prompt.close();
+    check(!document.querySelector('.game-share-prompt'), 'Closing removes the prompt');
+
+    // The sidebar suggestion, as in Discord: in a call with a game running and
+    // no screen share, a card above the user panel offers to share the match.
+    const slot = document.createElement('div');
+    slot.id = suggestionSlot;
+    document.body.appendChild(slot);
+    const shared = [];
+    const originalShare = shares.shareGame;
+    shares.shareGame = audio => { shared.push(audio); return Promise.resolve(); };
+    const suggested = () => slot.querySelector('.game-share-suggestion:not([data-ui-closing])');
+    const suggestionButton = action => suggested()?.querySelector(`[data-game-share-suggestion="${action}"]`);
+    const settle = () => new Promise(resolve => setTimeout(resolve, 250));
+    try {
+      voice.currentVoiceChannelId = null;
+      voice.isScreenSharing = false;
+      suggestion.start();
+      appEvents.emit('game_presence.changed', activity);
+      check(!suggested(), 'No suggestion outside a call');
+      voice.currentVoiceChannelId = 'room';
+      appEvents.emit('voice.channel_changed', 'room');
+      check(suggested()?.getAttribute('role') === 'status', 'Joining a call with a game running shows the suggestion');
+      check(suggested().textContent.includes('Moonlighter'), 'Suggestion names the game');
+      check(!suggested().querySelector('input[type="checkbox"],input[type="radio"]'), 'Suggestion adds no native checkbox');
+      check(document.activeElement !== suggestionButton('share'), 'Suggestion does not steal focus');
+      suggestionButton('share').focus();
+      check(document.activeElement === suggestionButton('share'), 'Share is reachable by keyboard');
+      appEvents.emit('voice.state_updated');
+      check(suggested()?.dataset.session && slot.querySelectorAll('.game-share-suggestion').length === 1,
+        'Unrelated voice updates keep the same card instead of rebuilding it');
+      suggestionButton('share').click();
+      check(shared.length === 1 && shared[0] === true, 'Share starts the game share with its audio on');
+      await settle();
+      check(!suggested(), 'Sharing settles the suggestion');
+      appEvents.emit('voice.state_updated');
+      check(!suggested(), 'No second nudge for the same launch of the game');
+      const relaunched = { ...activity, startedAt: activity.startedAt + 1 };
+      appEvents.emit('game_presence.changed', relaunched);
+      check(!!suggested(), 'The next launch of the game brings the suggestion back');
+      suggestionButton('dismiss').click();
+      await settle();
+      check(!suggested(), 'Not now dismisses the suggestion');
+      appEvents.emit('game_presence.changed', null);
+      appEvents.emit('game_presence.changed', relaunched);
+      check(!suggested(), 'Dismissing lasts for that launch of the game');
+      appEvents.emit('game_presence.changed', { ...relaunched, startedAt: relaunched.startedAt + 1 });
+      check(!!suggested(), 'Dismissal does not outlive the launch');
+      voice.isScreenSharing = true;
+      appEvents.emit('voice.state_updated');
+      await settle();
+      check(!suggested(), 'Sharing by hand hides the suggestion');
+      voice.isScreenSharing = false;
+      appEvents.emit('voice.state_updated');
+      check(!suggested(), 'Stopping a manual share does not nag about the same launch');
+      appEvents.emit('game_presence.changed', { ...relaunched, startedAt: relaunched.startedAt + 2 });
+      check(!!suggested(), 'A fresh launch after a manual share suggests again');
+      voice.currentVoiceChannelId = null;
+      appEvents.emit('voice.channel_changed', null);
+      await settle();
+      check(!suggested(), 'Leaving the call removes the suggestion');
+      suggestion.dispose();
+      appEvents.emit('game_presence.changed', activity);
+      check(!suggested() && slot.childElementCount === 0, 'Disposal stops listening');
+    } finally {
+      suggestion.dispose();
+      shares.shareGame = originalShare;
+      slot.remove();
+    }
 
     server.myPermissions = 2147483647;
     for (const action of ['server-mute', 'server-deafen', 'kick-voice', 'move-user']) {

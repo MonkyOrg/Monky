@@ -192,6 +192,7 @@ import { BotLocalExecutionService } from '../../application/services/BotLocalExe
 import { SignalingService } from '../../application/services/SignalingService';
 import { UserService } from '../../application/services/UserService';
 import { DmRelayService } from '../../application/services/DmRelayService';
+import { GameShareRequestService } from '../../application/services/GameShareRequestService';
 import { NativePollError, NativePollService } from '../../application/services/NativePollService';
 import { projectLegacyPolls } from './pollProjection';
 import { IServerRepository } from '../../domain/repositories';
@@ -318,6 +319,7 @@ export class WebSocketServer {
   private pendingLocalAccessMutations = 0;
   private shutdownReason: ServerShutdownReason = 'stopped';
   private dmRelay: DmRelayService<ClientSession>;
+  private gameShareRequests: GameShareRequestService<ClientSession>;
 
   constructor(
     private server: http.Server,
@@ -351,6 +353,12 @@ export class WebSocketServer {
     this.dmRelay = new DmRelayService<ClientSession>({
       isCurrent: (session) => this.isCurrentSession(session),
       send: (session, message) => this.send(session.ws, message),
+    });
+    this.gameShareRequests = new GameShareRequestService<ClientSession>({
+      send: (session, message) => this.send(session.ws, message),
+      sessionsOfUser: (userId) => this.getSessionsOfUser(userId),
+      voiceChannelOf: (sessionId) => this.signalingService.getVoiceState(sessionId)?.channelId ?? null,
+      isScreenSharing: (userId) => this.signalingService.getSessionsOfUser(userId).some(state => state.isScreenSharing),
     });
     if (communityService) this.community = new CommunityHandler(communityService, channelService, rateLimiter, {
       sessions: () => this.sessions.values(),
@@ -999,6 +1007,18 @@ export class WebSocketServer {
       case MessageType.USER_UPDATE_ACTIVITY:
         this.handleUserUpdateActivity(session, payload as UserUpdateActivityPayload, requestId);
         break;
+
+      case MessageType.GAME_SHARE_REQUEST: {
+        const error = this.gameShareRequests.request(session, payload, requestId);
+        if (error) this.sendError(session.ws, error.code, error.message, requestId);
+        break;
+      }
+
+      case MessageType.GAME_SHARE_RESPONSE: {
+        const error = this.gameShareRequests.respond(session, payload);
+        if (error) this.sendError(session.ws, error.code, error.message, requestId);
+        break;
+      }
 
       case MessageType.SERVER_UPDATE_SETTINGS:
         if (!(await this.requirePermission(session, Permission.MANAGE_SERVER, requestId))) return;
@@ -4093,6 +4113,7 @@ export class WebSocketServer {
     });
     if (updated) {
       this.reconcileScreenAccess();
+      if (updated.isScreenSharing && !current?.isScreenSharing) this.gameShareRequests.playerStartedSharing(session.user.id);
       if (session.isBot && !isReceivingBotVoice(updated)) {
         this.closeBotVoiceReception(session, updated.channelId);
       }
@@ -5468,6 +5489,7 @@ export class WebSocketServer {
     this.botInteractions.disconnect(session);
     this.disconnectBotScreens(session);
     this.dmRelay.unregister(session);
+    this.gameShareRequests.sessionClosed(session);
 
     // If this session was replaced by a newer connection of the same device, it
     // is a stale/zombie socket. Do not broadcast USER_LEFT nor touch the
@@ -6189,6 +6211,7 @@ export class WebSocketServer {
       this.closing = true;
       this.shutdownReason = reason;
       this.botLocalExecution.close();
+      this.gameShareRequests.dispose();
       this.serverMonitor?.close();
       this.messageSearch?.close();
       this.shutdownResources.defer('server community', () => this.community?.close());

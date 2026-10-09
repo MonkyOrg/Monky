@@ -3276,6 +3276,17 @@ input:focus, textarea:focus, select:focus {
   color: var(--danger);
 }
 
+/* "Agora não" beside "Compartilhar" on the game suggestion (#763). */
+.screenshare-notice-btn--quiet {
+  background-color: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.screenshare-notice-btn--quiet:hover {
+  background-color: var(--bg-active);
+  color: var(--text-primary);
+}
+
 /* Two actions do not fit beside the text in the sidebar; they get their own row. */
 .screenshare-notice--stacked {
   flex-wrap: wrap;

@@ -46,6 +46,22 @@ export class SteamPresence {
     return this.enabled ? this.current : null;
   }
 
+  /**
+   * Where the game on the card is installed, one folder per library that has
+   * it (#763). "Pedir para ver a partida" matches windows by their executable
+   * living under one of these, so no executable catalogue is needed.
+   */
+  public async currentGameFolders(): Promise<string[]> {
+    const activity = this.getCurrent();
+    if (!activity) return [];
+    const folders: string[] = [];
+    for (const library of await this.listLibraries()) {
+      const installDir = readManifestInstallDir(path.join(library, `appmanifest_${activity.appId}.acf`));
+      if (installDir) folders.push(path.join(library, 'common', installDir));
+    }
+    return folders;
+  }
+
   public setEnabled(enabled: boolean): void {
     if (this.enabled === enabled) return;
     this.enabled = enabled;
@@ -229,6 +245,24 @@ function readManifestName(manifestPath: string): string | null {
     const trimmed = name.trim();
     if (!trimmed) return null;
     return trimmed.slice(0, LIMITS.MAX_ACTIVITY_NAME_LENGTH);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A single folder name, never a path: an empty or `..` value would make every
+ * game in the library (or beyond it) count as "the game" (#763).
+ */
+function readManifestInstallDir(manifestPath: string): string | null {
+  try {
+    const parsed = parseVdf(fs.readFileSync(manifestPath, 'utf8'));
+    const state = parsed.AppState;
+    const installDir = isVdfObject(state) ? state.installdir : undefined;
+    if (typeof installDir !== 'string') return null;
+    const trimmed = installDir.trim();
+    if (!trimmed || trimmed === '.' || trimmed === '..' || /[\\/:]/.test(trimmed)) return null;
+    return trimmed;
   } catch {
     return null;
   }

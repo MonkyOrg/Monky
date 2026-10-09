@@ -79,6 +79,17 @@ export class AccountTab {
             <span class="toggle-slider"></span>
           </label>
         </div>
+        ${window.api?.platform === 'win32' ? `
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; margin-top: 8px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
+          <div style="flex: 1; margin-right: 12px;">
+            <div id="game-share-capture-label" style="font-size: 13px; color: var(--text-primary);">${t('settings.gameShareCaptureLabel')}</div>
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('settings.gameShareCaptureHint')}</div>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="toggle-game-share-capture" aria-labelledby="game-share-capture-label" ${settingsStore.gameShareUseGameCapture ? 'checked' : ''}>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>` : ''}
       </div>
 
       <div data-settings-section="connections" data-settings-label="${escapeHtml(t('settings.connectionsSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
@@ -256,6 +267,12 @@ export class AccountTab {
       settingsStore.shareGameActivity = toggleGameActivity.checked;
       settingsStore.save();
       callbacks.onGameActivityChanged?.(toggleGameActivity.checked);
+    });
+
+    const toggleGameShareCapture = container.querySelector<HTMLInputElement>('#toggle-game-share-capture');
+    toggleGameShareCapture?.addEventListener('change', () => {
+      settingsStore.gameShareUseGameCapture = toggleGameShareCapture.checked;
+      settingsStore.save();
     });
 
     const toggleAutoConnect = container.querySelector<HTMLInputElement>('#toggle-auto-connect-servers');

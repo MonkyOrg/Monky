@@ -13,24 +13,26 @@ import { sessionManager, type SessionManager } from './SessionManager';
  * connected when the game started would otherwise show nothing.
  */
 export class GamePresenceController {
-  private current: UserActivity | null = null;
+  private activity: UserActivity | null = null;
   private readonly disposers: Array<() => void> = [];
 
   constructor(private readonly sessionManager: SessionManager) {}
 
+  /** The game running right now, or null when none is or sharing is off. */
+  public get current(): UserActivity | null {
+    return this.activity;
+  }
+
   public start(): void {
-    const off = window.api?.onGamePresenceChanged?.((activity) => {
-      this.current = activity;
-      this.sessionManager.setGameActivity(activity);
-    });
+    const off = window.api?.onGamePresenceChanged?.((activity) => this.update(activity));
     if (off) this.disposers.push(off);
 
     // A server joined after the game started still has to learn about it.
     // Deferred past this dispatch: the listener that stores the server details,
     // and with them the negotiated features, is registered after this one.
     this.disposers.push(appEvents.on('network.connected', () => queueMicrotask(() => {
-      if (!settingsStore.shareGameActivity || !this.current) return;
-      this.sessionManager.setGameActivity(this.current);
+      if (!settingsStore.shareGameActivity || !this.activity) return;
+      this.sessionManager.setGameActivity(this.activity);
     })));
 
     void this.setEnabled(settingsStore.shareGameActivity);
@@ -44,13 +46,17 @@ export class GamePresenceController {
   public async setEnabled(enabled: boolean): Promise<void> {
     await window.api?.setGamePresenceEnabled?.(enabled);
     if (enabled) {
-      const activity = (await window.api?.getCurrentGameActivity?.()) ?? null;
-      this.current = activity;
-      this.sessionManager.setGameActivity(activity);
+      this.update((await window.api?.getCurrentGameActivity?.()) ?? null);
       return;
     }
-    this.current = null;
-    this.sessionManager.setGameActivity(null);
+    this.update(null);
+  }
+
+  /** Servers learn the game through the sessions; the rest of the app, through the event. */
+  private update(activity: UserActivity | null): void {
+    this.activity = activity;
+    this.sessionManager.setGameActivity(activity);
+    appEvents.emit('game_presence.changed', activity);
   }
 
   public dispose(): void {

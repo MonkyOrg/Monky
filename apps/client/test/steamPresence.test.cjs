@@ -258,3 +258,36 @@ test('stays quiet when Steam is installed but idle', async () => {
     cleanup();
   }
 });
+
+test('locates the install folder of the running game for "Pedir para ver a partida" (#763)', async () => {
+  const { root, cleanup } = steamFixture();
+  try {
+    const manifest = path.join(root, 'other-disk', 'steamapps', 'appmanifest_548430.acf');
+    const write = (installdir) => fs.writeFileSync(manifest, `"AppState"
+{
+\t"appid"\t\t"548430"
+\t"name"\t\t"Deep Rock Galactic"
+\t"installdir"\t\t"${installdir}"
+}
+`);
+    const { SteamPresence } = load({ registry: { RunningAppID: '0x85e4e', SteamPath: root } });
+    const presence = new SteamPresence(() => {});
+    assert.deepEqual(await presence.currentGameFolders(), [], 'nothing while sharing is off');
+
+    write('DeepRockGalactic');
+    presence.setEnabled(true);
+    await settle();
+    presence.stop();
+    assert.deepEqual(await presence.currentGameFolders(),
+      [path.join(root, 'other-disk', 'steamapps', 'common', 'DeepRockGalactic')]);
+
+    // A path instead of a folder name would let every game in the library, or
+    // anything beyond it, pass for this one.
+    for (const unsafe of ['', '..', '.', 'common\\\\..', 'C:\\\\Games']) {
+      write(unsafe);
+      assert.deepEqual(await presence.currentGameFolders(), [], `installdir ${JSON.stringify(unsafe)} is refused`);
+    }
+  } finally {
+    cleanup();
+  }
+});
