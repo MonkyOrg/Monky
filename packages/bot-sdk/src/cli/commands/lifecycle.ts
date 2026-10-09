@@ -37,13 +37,14 @@ import {
   updaterEnvironment,
   writeBotEcosystem,
 } from '../pm2';
-import { assertManifestPortAvailable, getManifestBindHost } from '../ports';
+import { assertManifestPortAvailable, assertNoOwnPortConflict, getManifestBindHost } from '../ports';
 import { spawnCommand } from '../process';
-import { configEnvCommand } from '../profileEnvironment';
+import { configEnvCommand, ownPorts, readProfileEnvironment } from '../profileEnvironment';
 import { printRequirements } from '../requirementsView';
 import { createRuntimeEnvironment } from '../runner';
 import { loadBotProject } from '../../tooling/config';
 import { runNpm } from '../../tooling/process';
+import { MANIFEST_PORT_ID } from '../../tooling/requirements';
 import { CliError, cliText, languageCommand } from '../locale';
 import { updateSourceConfigCommand } from '../updateConfiguration';
 import { updateCredentialCommand } from '../updateCredentials';
@@ -416,6 +417,8 @@ export async function configCommand(context: CliContext, args: string[]): Promis
   const next = applyConfigChange(context, config, key, value);
   if (next.mode === 'marketplace' &&
       (config.mode !== 'marketplace' || next.servePort !== config.servePort)) {
+    assertNoOwnPortConflict({ id: MANIFEST_PORT_ID, protocol: 'tcp', port: next.servePort },
+      ownPorts(context.project.definition.requirements, next, readProfileEnvironment(context.homeDir), process.env));
     await assertManifestPortAvailable(next.servePort, context.cliName, undefined, context.locale);
   }
   writeConfig(context, next);

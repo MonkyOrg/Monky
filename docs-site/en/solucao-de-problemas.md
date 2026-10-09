@@ -23,7 +23,7 @@ are passing; TURN does not fix the login address.
 | TURN is enabled but nobody connects via relay | Ports may be closed. See the [full port guide](/en/turn#required-ports). Run `monky status` — it should show `✔ accessible` |
 | On macOS, screen sharing keeps asking for permission even though it is already allowed | The permission is stuck on the previous version — see [macOS: screen permission stops working after an update](#macos-screen-permission-stops-working-after-an-update) |
 | Bot online, but no commands | Check approved capabilities, your role and the channel switch. See [Bot troubleshooting](/en/bots#when-something-goes-wrong) |
-| A bot does not start, install by URL fails, or a bot feature (such as games) does not open for others | On the bot's machine, run `<bot> requirements` to see its ports and settings and `<bot> doctor` to find what is missing, including whether the server reaches its public ports. See [Ports, settings and checks](/en/bots-distribuicao#portas-configuracoes-e-verificacao) |
+| A bot does not start, install by URL fails, or a bot feature (such as games) does not open for others | On the bot's machine, run `<bot> requirements` to see its ports and settings and `<bot> doctor` to find what is missing, including whether the server reaches its public ports. If another bot or service holds the port, choose another by running `<bot> setup` again or with `<bot> config env set`. See [Ports, settings and checks](/en/bots-distribuicao#portas-configuracoes-e-verificacao) and [Choosing the ports](/en/bots-distribuicao#escolher-as-portas) |
 
 ## Antivirus: Avast and similar
 

@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "O setup dos bots agora pergunta e testa cada porta que o bot usa e avisa quando duas portas do mesmo bot coincidem ou quando outro programa já ocupa uma delas. Chega de jogos que não abrem porque outro bot pegou a porta primeiro!",
+  "en": "Bot setup now asks for and tests every port the bot uses, and warns when two of its ports clash or another program already holds one. No more games that won't open because another bot grabbed the port first!"
+}

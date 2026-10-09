@@ -1,8 +1,16 @@
 import os from 'node:os';
 import type { BotLocale } from '@monky/shared';
+import { localizedText, MANIFEST_PORT_ID } from '../../tooling/requirements';
 import { CliError, cliErrorMessage, cliText } from '../locale';
 import { askCliChoice, askCliText } from '../prompts';
-import { assertManifestPortAvailable } from '../ports';
+import { readBotPublicKey } from '../keys';
+import {
+  assertDeclaredPortAvailable, assertManifestPortAvailable, assertNoOwnPortConflict, type OwnPort, type PortUse,
+} from '../ports';
+import {
+  declaredPortStates, ownPort, profileEnvironmentFile, readProfileEnvironment, stalePublicUrlNotice, validateDeclaredValue,
+  writeProfileEnvironment, type DeclaredPortState,
+} from '../profileEnvironment';
 import {
   HOST_CONSENT_ENV, hostAccessNotice, hostConsentFingerprint, hostConsentStatus, readHostConsent, reviewHostConsent,
   writeHostConsent,
@@ -87,7 +95,7 @@ function localIpv4(): string | null {
   return null;
 }
 
-function parseNonInteractiveSetup(args: string[]): NonInteractiveSetupInput | null {
+function parseNonInteractiveSetup(args: string[]): { input: NonInteractiveSetupInput; ports: ReadonlyMap<string, string> } | null {
   if (!args.includes('--non-interactive')) return null;
   let mode: 'manual' | 'marketplace' = 'manual';
   let serverUrl: string | undefined;
@@ -96,11 +104,12 @@ function parseNonInteractiveSetup(args: string[]): NonInteractiveSetupInput | nu
   let publicHost: string | undefined;
   let botName: string | undefined;
   let botDir: string | undefined;
+  const ports = new Map<string, string>();
   for (let index = 0; index < args.length; index++) {
     const argument = args[index];
     if (argument === '--non-interactive') continue;
     if (argument === '--yes' || argument === '-y') continue;
-    if (['--mode', '--server-url', '--token-env', '--serve-port', '--public-host', '--name', '--bot-dir'].includes(argument)) {
+    if (['--mode', '--server-url', '--token-env', '--serve-port', '--public-host', '--name', '--bot-dir', '--port'].includes(argument)) {
       const value = args[++index];
       if (!value || value.startsWith('--')) throw new CliError(`${argument} requer um valor.`, `${argument} requires a value.`);
       if (argument === '--mode') {
@@ -112,7 +121,13 @@ function parseNonInteractiveSetup(args: string[]): NonInteractiveSetupInput | nu
       else if (argument === '--serve-port') servePort = validateServePort(value);
       else if (argument === '--public-host') publicHost = validatePublicHost(value);
       else if (argument === '--name') botName = validateBotName(value);
-      else botDir = normalizeBotDir(value);
+      else if (argument === '--port') {
+        const match = /^([a-z][a-z0-9-]{0,31})=(.+)$/.exec(value);
+        if (!match) throw new CliError('--port usa o formato <id>=<porta>, por exemplo --port games=7790.',
+          '--port uses the <id>=<port> format, for example --port games=7790.');
+        if (ports.has(match[1])) throw new CliError(`--port ${match[1]} foi informada mais de uma vez.`, `--port ${match[1]} was given more than once.`);
+        ports.set(match[1], match[2]);
+      } else botDir = normalizeBotDir(value);
       continue;
     }
     throw new CliError('Opção de setup desconhecida.', 'Unknown setup option.');
@@ -123,13 +138,174 @@ function parseNonInteractiveSetup(args: string[]): NonInteractiveSetupInput | nu
       'Manifest options require --mode marketplace.');
     if (!serverUrl) throw new CliError('setup --non-interactive requer --server-url <ws://...>.',
       'setup --non-interactive requires --server-url <ws://...>.');
-    return { ...common, mode, serverUrl, tokenEnv: tokenEnv ?? DEFAULT_TOKEN_ENV };
+    return { input: { ...common, mode, serverUrl, tokenEnv: tokenEnv ?? DEFAULT_TOKEN_ENV }, ports };
   }
   if (serverUrl !== undefined || tokenEnv !== undefined) throw new CliError('Opções de servidor e token exigem --mode manual.',
     'Server and token options require --mode manual.');
   if (!publicHost) throw new CliError('setup --non-interactive --mode marketplace requer --public-host <domínio-ou-IP>.',
     'setup --non-interactive --mode marketplace requires --public-host <hostname-or-IP>.');
-  return { ...common, mode, servePort: servePort ?? DEFAULT_MARKETPLACE_PORT, publicHost };
+  return { input: { ...common, mode, servePort: servePort ?? DEFAULT_MARKETPLACE_PORT, publicHost }, ports };
+}
+
+/** A declared port whose value this setup sets (and saves in the profile). */
+interface DeclaredPortChoice {
+  state: DeclaredPortState;
+  port: number;
+}
+
+function manifestPort(config: BotConfig): OwnPort[] {
+  return config.mode === 'marketplace' ? [{ id: MANIFEST_PORT_ID, protocol: 'tcp', port: config.servePort }] : [];
+}
+
+/** Ports the environment sets: setup cannot change them, so other answers must avoid them. */
+function environmentPorts(states: readonly DeclaredPortState[]): OwnPort[] {
+  return states.flatMap((state) => state.resolved.source === 'environment' && state.port !== null
+    ? [ownPort(state.requirement, state.port)] : []);
+}
+
+function invalidPortError(state: DeclaredPortState): CliError {
+  return new CliError(`${state.requirement.portEnv} contém uma porta inválida (${state.resolved.value ?? ''}).`,
+    `${state.requirement.portEnv} contains an invalid port (${state.resolved.value ?? ''}).`);
+}
+
+function portFlagChoices(states: readonly DeclaredPortState[], flags: ReadonlyMap<string, string>, mode: SetupMode): DeclaredPortChoice[] {
+  const choices: DeclaredPortChoice[] = [];
+  for (const [id, value] of flags) {
+    if (id === MANIFEST_PORT_ID) {
+      throw new CliError('Use --serve-port para a porta do manifest.', 'Use --serve-port for the manifest port.');
+    }
+    const state = states.find((entry) => entry.requirement.id === id);
+    if (!state) {
+      const declared = states.map((entry) => entry.requirement.id).join(', ') || '—';
+      throw new CliError(`--port ${id}: o bot não declara essa porta no modo ${mode}. Portas do modo: ${declared}.`,
+        `--port ${id}: the bot declares no such port in the ${mode} mode. Ports in this mode: ${declared}.`);
+    }
+    if (state.resolved.source === 'environment') {
+      throw new CliError(`--port ${id}: ${state.requirement.portEnv} está definida no ambiente, que prevalece sobre o perfil. Altere-a no ambiente do serviço.`,
+        `--port ${id}: ${state.requirement.portEnv} is set in the environment, which overrides the profile. Change it in the service environment.`);
+    }
+    choices.push({ state, port: Number(validateDeclaredValue(state.resolved.variable, value)) });
+  }
+  return choices;
+}
+
+/**
+ * Values setup sets (manifest port and --port) must be valid and free; the
+ * others come from the profile, the defaults or the environment and only warn.
+ */
+async function checkNonInteractivePorts(
+  context: CliContext, config: BotConfig, states: readonly DeclaredPortState[], choices: readonly DeclaredPortChoice[],
+  publicKey: string | undefined,
+): Promise<PortUse[]> {
+  const text = (pt: string, en: string): string => cliText(context.locale, pt, en);
+  const valueOf = (state: DeclaredPortState): number | null => choices.find((choice) => choice.state === state)?.port ?? state.port;
+  const planned: OwnPort[] = [
+    ...manifestPort(config),
+    ...states.flatMap((state) => {
+      const port = valueOf(state);
+      return port === null ? [] : [ownPort(state.requirement, port)];
+    }),
+  ];
+  const uses: PortUse[] = [];
+  for (const manifest of manifestPort(config)) {
+    assertNoOwnPortConflict(manifest, planned);
+    uses.push(await assertManifestPortAvailable(manifest.port, context.cliName, undefined, context.locale, publicKey));
+  }
+  for (const state of states) {
+    const chosen = choices.some((choice) => choice.state === state);
+    const port = valueOf(state);
+    try {
+      if (port === null) throw invalidPortError(state);
+      const target = ownPort(state.requirement, port);
+      assertNoOwnPortConflict(target, planned);
+      uses.push(await assertDeclaredPortAvailable({ ...target, host: state.bindHost }, context.cliName, publicKey));
+    } catch (error: unknown) {
+      if (chosen || !(error instanceof Error)) throw error;
+      const { id, portEnv } = state.requirement;
+      console.log(color(`${text('Atenção', 'Warning')}: ${cliErrorMessage(error, context.locale)} ${state.resolved.source === 'environment'
+        ? text(`Corrija ${portEnv} no ambiente do serviço.`, `Fix ${portEnv} in the service environment.`)
+        : text(`Para escolher outra: --port ${id}=<porta>.`, `To choose another: --port ${id}=<port>.`)}`, ANSI.yellow));
+    }
+  }
+  return uses;
+}
+
+async function askDeclaredPorts(
+  context: CliContext, ask: Ask, states: readonly DeclaredPortState[], taken: OwnPort[], publicKey: string | undefined,
+  uses: PortUse[],
+): Promise<DeclaredPortChoice[]> {
+  const text = (pt: string, en: string): string => cliText(context.locale, pt, en);
+  if (!states.length) return [];
+  const fixed = environmentPorts(states);
+  const others = (): OwnPort[] => [...taken, ...fixed.filter((port) => !taken.some((entry) => entry.id === port.id))];
+  const choices: DeclaredPortChoice[] = [];
+  console.log();
+  console.log(color(text('Portas do bot', 'Bot ports'), ANSI.cyan));
+  for (const state of states) {
+    const { requirement } = state;
+    const label = `${requirement.protocol.toUpperCase()} "${requirement.id}"`;
+    console.log(`${requirement.id}: ${localizedText(requirement.description, context.locale)}${requirement.when === 'on-demand'
+      ? text(' (aberta sob demanda)', ' (opened on demand)') : ''}`);
+    if (state.resolved.source === 'environment') {
+      console.log(text(`Porta ${label}: ${state.resolved.value ?? ''}, definida no ambiente em ${requirement.portEnv}, que prevalece sobre o perfil; o setup não a altera.`,
+        `${label} port: ${state.resolved.value ?? ''}, set in the environment through ${requirement.portEnv}, which overrides the profile; setup does not change it.`));
+      try {
+        if (state.port === null) throw invalidPortError(state);
+        const target = ownPort(requirement, state.port);
+        assertNoOwnPortConflict(target, others());
+        uses.push(await assertDeclaredPortAvailable({ ...target, host: state.bindHost }, context.cliName, publicKey));
+        taken.push(target);
+      } catch (error: unknown) {
+        if (!(error instanceof Error)) throw error;
+        console.log(color(`${text('Atenção', 'Warning')}: ${cliErrorMessage(error, context.locale)} ${text(
+          `Corrija ${requirement.portEnv} no ambiente do serviço.`, `Fix ${requirement.portEnv} in the service environment.`)}`, ANSI.yellow));
+      }
+      continue;
+    }
+    const suggested = String(state.port ?? requirement.defaultPort);
+    const port = await validatedPrompt(context.locale, ask, text(`Porta ${label} [${suggested}]: `, `${label} port [${suggested}]: `),
+      async (answer) => {
+        const target = ownPort(requirement, Number(validateDeclaredValue(state.resolved.variable, answer || suggested)));
+        assertNoOwnPortConflict(target, others());
+        uses.push(await assertDeclaredPortAvailable({ ...target, host: state.bindHost }, context.cliName, publicKey));
+        return target.port;
+      });
+    taken.push(ownPort(requirement, port));
+    choices.push({ state, port });
+  }
+  return choices;
+}
+
+/** Saves only values that differ from the declared default, so an unchanged port keeps following it. */
+function saveDeclaredPorts(context: CliContext, choices: readonly DeclaredPortChoice[]): boolean {
+  if (!choices.length) return false;
+  const saved = readProfileEnvironment(context.homeDir);
+  let changed = false;
+  for (const { state: { requirement }, port } of choices) {
+    const next = port === requirement.defaultPort ? undefined : String(port);
+    if (saved[requirement.portEnv] === next) continue;
+    if (next === undefined) delete saved[requirement.portEnv];
+    else saved[requirement.portEnv] = next;
+    changed = true;
+  }
+  if (changed) writeProfileEnvironment(context.homeDir, saved);
+  return changed;
+}
+
+function reportDeclaredPorts(context: CliContext, choices: readonly DeclaredPortChoice[], saved: boolean, uses: readonly PortUse[]): void {
+  const text = (pt: string, en: string): string => cliText(context.locale, pt, en);
+  if (saved) {
+    console.log(text(`Portas do bot salvas em ${profileEnvironmentFile(context.homeDir)}.`,
+      `Bot ports saved to ${profileEnvironmentFile(context.homeDir)}.`));
+  }
+  for (const choice of choices) {
+    const notice = stalePublicUrlNotice(context, choice.state, choice.port);
+    if (notice) console.log(color(notice, ANSI.yellow));
+  }
+  if (uses.includes('this-bot')) {
+    console.log(text(`O bot está em execução nas portas desta configuração; reinicie-o para aplicar: ${context.cliName} restart`,
+      `The bot is running on this configuration's ports; restart it to apply: ${context.cliName} restart`));
+  }
 }
 
 function setupWillOverwrite(context: CliContext, existing: BotConfig | null, assumeYes: boolean): void {
@@ -171,8 +347,10 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
   const text = (pt: string, en: string): string => cliText(context.locale, pt, en);
   const existing = readConfig(context);
   const assumeYes = args.includes('--yes') || args.includes('-y');
-  const nonInteractive = parseNonInteractiveSetup(args);
-  if (nonInteractive) {
+  const publicKey = existing ? readBotPublicKey(existing.botDir) : undefined;
+  const parsed = parseNonInteractiveSetup(args);
+  if (parsed) {
+    const nonInteractive = parsed.input;
     setupWillOverwrite(context, existing, assumeYes);
     const input = {
       ...nonInteractive,
@@ -182,11 +360,14 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
     const config = input.mode === 'manual'
       ? manualConfig(context, input)
       : marketplaceConfig(context, input);
-    if (config.mode === 'marketplace') {
-      await assertManifestPortAvailable(config.servePort, context.cliName, undefined, context.locale);
-    }
+    const states = declaredPortStates(context.project.definition.requirements, readProfileEnvironment(context.homeDir),
+      process.env, config.mode);
+    const choices = portFlagChoices(states, parsed.ports, config.mode);
+    const uses = await checkNonInteractivePorts(context, config, states, choices, publicKey);
+    const portsSaved = saveDeclaredPorts(context, choices);
     writeConfig(context, config);
     console.log(text(`Configuração salva em ${context.configFile}.`, `Configuration saved to ${context.configFile}.`));
+    reportDeclaredPorts(context, choices, portsSaved, uses);
     if (config.mode === 'manual') {
       console.log(text(`Defina ${config.tokenEnv} no ambiente antes de executar ${context.cliName} start.`,
         `Set ${config.tokenEnv} in the environment before running ${context.cliName} start.`));
@@ -240,6 +421,9 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
     }
 
     const current = existing ?? (mode === 'manual' ? manualConfig(context) : marketplaceConfig(context));
+    const portStates = declaredPortStates(context.project.definition.requirements, readProfileEnvironment(context.homeDir),
+      process.env, mode);
+    const portUses: PortUse[] = [];
     const botDir = await validatedPrompt(context.locale, ask, text(`Diretório de trabalho [${current.botDir}]: `, `Working directory [${current.botDir}]: `),
       (answer) => normalizeBotDir(answer || current.botDir));
     let config: BotConfig;
@@ -279,7 +463,8 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
       const servePort = await validatedPrompt(context.locale, ask, text(`Porta do manifest [${defaultPort}]: `, `Manifest port [${defaultPort}]: `),
         async (answer) => {
           const port = validateServePort(answer || String(defaultPort));
-          await assertManifestPortAvailable(port, context.cliName, undefined, context.locale);
+          assertNoOwnPortConflict({ id: MANIFEST_PORT_ID, protocol: 'tcp', port }, environmentPorts(portStates));
+          portUses.push(await assertManifestPortAvailable(port, context.cliName, undefined, context.locale, publicKey));
           return port;
         });
       const detectedIp = localIpv4();
@@ -295,11 +480,15 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
       }
       config = marketplaceConfig(context, { botDir, botName: current.botName, servePort, publicHost });
     }
+    const declaredChoices = await askDeclaredPorts(context, ask, portStates, manifestPort(config), publicKey, portUses);
     config = { ...config, botName: await validatedPrompt(context.locale, ask, text(`Nome do bot [${current.botName}]: `, `Bot name [${current.botName}]: `),
       (answer) => validateBotName(answer || current.botName)) };
 
     if (config.mode === 'marketplace') {
-      await assertManifestPortAvailable(config.servePort, context.cliName, undefined, context.locale);
+      await assertManifestPortAvailable(config.servePort, context.cliName, undefined, context.locale, publicKey);
+    }
+    for (const { state, port } of declaredChoices) {
+      await assertDeclaredPortAvailable({ ...ownPort(state.requirement, port), host: state.bindHost }, context.cliName, publicKey);
     }
     if (closed) throw new Error(text(SETUP_CANCELLED_MESSAGE, 'Setup cancelled; the configuration was not changed.'));
     const approve = !consentAlreadyGiven(context, config.botDir);
@@ -312,11 +501,13 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
       }
     }
     if (closed) throw new Error(text(SETUP_CANCELLED_MESSAGE, 'Setup cancelled; the configuration was not changed.'));
+    const portsSaved = saveDeclaredPorts(context, declaredChoices);
     writeConfig(context, config);
     if (approve) writeHostConsent(context.homeDir, 'accepted', hostConsentFingerprint(context.project.definition), config.botDir);
     console.log();
     console.log(color(text('Configuração salva!', 'Configuration saved!'), ANSI.green));
     console.log(text(`Configuração salva em ${context.configFile}.`, `Configuration saved to ${context.configFile}.`));
+    reportDeclaredPorts(context, declaredChoices, portsSaved, portUses);
     if (config.mode === 'manual' && config.botToken === undefined) {
       console.log(text(`Defina ${config.tokenEnv} no ambiente antes de executar ${context.cliName} start.`,
         `Set ${config.tokenEnv} in the environment before running ${context.cliName} start.`));

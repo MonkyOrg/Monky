@@ -99,8 +99,8 @@ ou `language pt-BR`. `--version` nem sequer lê esse arquivo.
 O CLI passa o idioma efetivo ao processo do bot nessa mesma variável, sem mudar
 identificadores como `setup`, `start`, `mode` ou nomes de variáveis.
 
-O setup segue o fluxo do MonkyBot: modo, diretório de trabalho, dados do modo
-e nome do bot. No fim, mostra o [aviso de acessos](#consentimento-de-quem-hospeda)
+O setup segue o fluxo do MonkyBot: modo, diretório de trabalho, dados do modo,
+[portas declaradas pelo bot](#escolher-as-portas) e nome do bot. No fim, mostra o [aviso de acessos](#consentimento-de-quem-hospeda)
 e pede autorização antes de salvar; recusar não altera nada. Em seguida lista
 as [portas e configurações](#portas-configuracoes-e-verificacao) do bot. Em bots que suportam os dois modos, **instalação por URL é o padrão**
 e a conexão manual é apresentada como **avançada**. Refazer o setup mantém o modo
@@ -126,13 +126,17 @@ o bot. `localhost` só atende servidores na mesma máquina. Declare ambos os mod
 em `monkyBot.modes` para oferecer a escolha.
 
 Cada bot na mesma máquina precisa de uma **porta exclusiva**, por exemplo `7780`
-e `7781`. `/manifest` é um endpoint de cada processo, não um arquivo compartilhado.
+e `7781`, e isso vale também para as portas declaradas por cada bot.
+`/manifest` é um endpoint de cada processo, não um arquivo compartilhado.
 O CLI verifica se consegue usar a porta local antes de salvar; se outro bot ou
 serviço já a ocupa, o setup explica o conflito e pede outra, sem trocar a porta
 automaticamente. O setup não interativo e alterações de porta por `config set`
 falham sem sobrescrever a configuração anterior.
 
-Se o próprio bot estiver usando a porta, execute `meu-bot stop` antes de refazer
+Se a porta estiver em uso pelo próprio bot em execução, o setup confirma a
+identidade com o mesmo desafio assinado do `doctor`, aceita a porta e lembra de
+rodar `meu-bot restart` no fim. Quando não dá para confirmar (porta UDP ou
+listener que não encaminha o desafio), execute `meu-bot stop` antes de refazer
 o setup; a configuração e as chaves são preservadas. `start` também verifica a
 porta antes de iniciar um processo parado; `restart` libera apenas seu processo
 gerenciado antes da checagem, inclusive após atualizações. Essa checagem local
@@ -231,6 +235,7 @@ ser salvas no perfil:
 
 ```text
 meu-bot config env
+meu-bot config env set MEU_BOT_GAMES_PORT 7790
 meu-bot config env set MEU_BOT_GAMES_PUBLIC_URL https://games.example.com
 meu-bot config env set MEU_BOT_API_KEY
 meu-bot config env set MEU_BOT_API_KEY --from-env OUTRA_VARIAVEL
@@ -247,6 +252,39 @@ diferem e diz qual está em uso. No reinício feito pela atualização, o CLI
 descarta as cópias dessas variáveis guardadas no ambiente do atualizador e
 repassa os valores com que o processo do bot estava rodando. Reinicie o bot
 depois de mudar uma configuração.
+
+### Escolher as portas {#escolher-as-portas}
+
+O setup pergunta cada porta declarada que se aplica ao modo escolhido, sugerindo
+o valor salvo no perfil ou o `defaultPort`, e testa a resposta como faz com a
+porta do manifest: TCP ou UDP, conforme o declarado, no endereço de `hostEnv`
+(padrão `0.0.0.0`). Uma porta que já pertence a outra porta do próprio bot
+(manifest ou outra declarada, com o mesmo protocolo) ou que está ocupada por
+outro processo é pedida de novo, sem refazer as outras respostas; nada é salvo
+sem uma porta válida. Só portas diferentes do padrão ficam em `environment.json`:
+escolher o padrão remove o valor salvo. Se a declaração tiver `publicUrlEnv`, o
+setup lembra que a URL pública não muda junto com a porta.
+
+Quando a variável da porta vem do ambiente, o setup mostra o valor e avisa sobre
+conflitos, mas não pergunta nem salva nada, porque o ambiente prevalece; corrija
+o ambiente do serviço. No setup não interativo, informe as portas com
+`--port <id>=<porta>`, uma vez para cada porta:
+
+```text
+meu-bot setup --non-interactive --mode marketplace --public-host bot.example.com --serve-port 7780 --port games=7790
+```
+
+As portas informadas, inclusive a do manifest, precisam estar livres e não
+colidir com outra porta do bot; caso contrário, nada é salvo. As demais (do
+perfil, do padrão ou do ambiente) só geram avisos, para não interromper uma
+automação que já funcionava. `--port` é recusado quando a variável vem do
+ambiente.
+
+`meu-bot config env set` faz o mesmo teste quando a variável é a porta de uma
+declaração do modo atual, e `config set servePort` recusa uma porta já usada por
+outra porta do bot. O teste só enxerga portas abertas no momento: a porta sob
+demanda de **outro bot** parado, ou que ainda não abriu o recurso, não aparece.
+Confira o `requirements` de cada bot da máquina antes de escolher.
 
 ### Consentimento de quem hospeda {#consentimento-de-quem-hospeda}
 
@@ -288,7 +326,8 @@ falha. Ele confere:
   (por exemplo, de um CLI próprio anterior), que pode ocupar as portas;
 - token do modo manual e configurações obrigatórias, no ambiente do processo em
   execução ou deste terminal;
-- cada porta: se está livre ou em uso, e, quando em uso, se responde **como este
+- cada porta: se coincide com outra porta do próprio bot, se está livre ou em
+  uso, e, quando em uso, se responde **como este
   bot** a um desafio assinado com a chave Ed25519; no modo Marketplace, também a
   validade do manifest;
 - a URL pública a partir desta máquina — roteadores sem *hairpin NAT* podem

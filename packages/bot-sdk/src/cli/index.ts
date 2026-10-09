@@ -59,8 +59,8 @@ ${color('OPÇÕES GLOBAIS', ANSI.bold)}
   --locale pt-BR|en-US          Usa este idioma somente nesta execução
 
 ${color('SETUP NÃO INTERATIVO', ANSI.bold)}
-  ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
-  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-ou-domínio> [--serve-port 7780] [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
+  ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--port <id>=<porta>]... [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
+  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-ou-domínio> [--serve-port 7780] [--port <id>=<porta>]... [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
 
 ${color('ORIGEM DAS ATUALIZAÇÕES', ANSI.bold)}
   O padrão vem de monkyBot.releases ou monkyBot.updateSource no package.json.
@@ -106,8 +106,8 @@ ${color('GLOBAL OPTIONS', ANSI.bold)}
   --locale pt-BR|en-US          Use this language for this invocation only
 
 ${color('NON-INTERACTIVE SETUP', ANSI.bold)}
-  ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--name "My Bot"] [--bot-dir <directory>] [--yes]
-  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-or-domain> [--serve-port 7780] [--name "My Bot"] [--bot-dir <directory>] [--yes]
+  ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--port <id>=<port>]... [--name "My Bot"] [--bot-dir <directory>] [--yes]
+  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-or-domain> [--serve-port 7780] [--port <id>=<port>]... [--name "My Bot"] [--bot-dir <directory>] [--yes]
 
 ${color('UPDATE SOURCE', ANSI.bold)}
   Defaults come from monkyBot.releases or monkyBot.updateSource in package.json.

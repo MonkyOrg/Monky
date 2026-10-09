@@ -4,6 +4,7 @@ import { botManifestSchema, type BotLocale } from '@monky/shared';
 import type { BotConfig, CliContext, MarketplaceBotConfig } from './config';
 import { cliText } from './locale';
 import { findProcess } from './pm2';
+import { localConnectHost } from './ports';
 import { BOT_PUBLIC_KEY_HEADER } from '../reachability';
 
 const REQUEST_TIMEOUT_MS = 1_500;
@@ -20,14 +21,6 @@ export class ManifestReadinessError extends Error {
 function errorCode(error: unknown): string {
   return typeof error === 'object' && error !== null && 'code' in error &&
     typeof error.code === 'string' && /^[A-Z0-9_]{1,40}$/.test(error.code) ? error.code : 'UNKNOWN';
-}
-
-/** Address used to reach a listener bound to `bindHost` from this machine. */
-export function localConnectHost(bindHost: string): string {
-  const host = bindHost.startsWith('[') && bindHost.endsWith(']') ? bindHost.slice(1, -1) : bindHost;
-  if (host === '0.0.0.0' || host === '') return '127.0.0.1';
-  if (host === '::' || /^0*:(?:0*:)*0*$/.test(host)) return '::1';
-  return host;
 }
 
 export function manifestUrl(config: Pick<MarketplaceBotConfig, 'publicHost' | 'servePort'>): string {

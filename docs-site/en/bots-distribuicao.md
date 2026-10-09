@@ -100,7 +100,7 @@ variable, without translating identifiers such as `setup`, `start`, `mode`, or
 environment-variable names.
 
 Setup follows MonkyBot's flow: mode, working directory, mode-specific settings,
-and bot name. At the end it shows the [access notice](#consentimento-de-quem-hospeda)
+[ports declared by the bot](#escolher-as-portas) and bot name. At the end it shows the [access notice](#consentimento-de-quem-hospeda)
 and asks for authorization before saving; declining changes nothing. It then
 lists the bot's [ports and settings](#portas-configuracoes-e-verificacao).
 **URL installation is the default** for bots supporting both modes;
@@ -127,14 +127,18 @@ The endpoint must be reachable by installing Monky servers; `localhost` only
 works for servers on the same machine.
 
 Each bot on the same machine needs a **separate port**, for example `7780` and
-`7781`. `/manifest` is an endpoint served by each process, not a shared file.
+`7781`, and so do the ports each bot declares. `/manifest` is an endpoint served
+by each process, not a shared file.
 The CLI checks whether it can bind the local port before saving. If another bot
 or service occupies it, interactive setup explains the conflict and asks for
 another port instead of changing it automatically. Non-interactive setup and
 port changes through `config set` fail without overwriting the previous config.
 
-If the bot itself is using the port, run `my-bot stop` before repeating setup;
-its configuration and keys are preserved. `start` also checks the port before
+If the bot's own running process holds the port, setup confirms its identity
+with the same signed challenge `doctor` uses, accepts the port and reminds you to
+run `my-bot restart` at the end. When that cannot be confirmed (a UDP port, or a
+listener that does not forward the challenge), run `my-bot stop` before repeating
+setup; its configuration and keys are preserved. `start` also checks the port before
 launching a stopped bot; `restart` stops only its own managed process before
 checking, including after updates. This local check does not validate firewall
 rules or reserve the port until the next `start`.
@@ -231,6 +235,7 @@ saved in the profile:
 
 ```text
 my-bot config env
+my-bot config env set MY_BOT_GAMES_PORT 7790
 my-bot config env set MY_BOT_GAMES_PUBLIC_URL https://games.example.com
 my-bot config env set MY_BOT_API_KEY
 my-bot config env set MY_BOT_API_KEY --from-env OTHER_VARIABLE
@@ -247,6 +252,41 @@ says which one is in use. On the restart performed by an update, the CLI drops
 the copies of these variables kept in the updater's environment and carries over
 the values the bot process was running with. Restart the bot after changing a
 setting.
+
+### Choosing the ports {#escolher-as-portas}
+
+Setup asks for each declared port that applies to the chosen mode, suggesting
+the value saved in the profile or the `defaultPort`, and tests the answer as it
+does the manifest port: TCP or UDP, as declared, on the `hostEnv` address
+(default `0.0.0.0`). A port already taken by another of the bot's own ports (the
+manifest or another declared port with the same protocol) or occupied by another
+process is asked for again, without repeating the other answers; nothing is saved
+without a valid port. Only ports that differ from the default go into
+`environment.json`: choosing the default removes the saved value. When the
+declaration has `publicUrlEnv`, setup reminds you that the public URL does not
+change along with the port.
+
+When the port variable comes from the environment, setup shows the value and
+warns about conflicts, but neither asks nor saves anything, because the
+environment wins; fix the service environment instead. Non-interactive setup
+takes the ports through `--port <id>=<port>`, once per port:
+
+```text
+my-bot setup --non-interactive --mode marketplace --public-host bot.example.com --serve-port 7780 --port games=7790
+```
+
+The ports given this way, including the manifest port, must be free and must not
+collide with another of the bot's ports; otherwise nothing is saved. The others
+(from the profile, the default or the environment) only produce warnings, so
+automation that already worked keeps working. `--port` is refused when the
+variable comes from the environment.
+
+`my-bot config env set` runs the same test when the variable is the port of a
+declaration in the current mode, and `config set servePort` refuses a port
+already used by another of the bot's ports. The test only sees ports open at
+that moment: an on-demand port of **another bot** that is stopped, or that has
+not opened the feature yet, does not show up. Check the `requirements` of every
+bot on the machine before choosing.
 
 ### Host operator consent {#consentimento-de-quem-hospeda}
 
@@ -288,7 +328,8 @@ anything fails. It checks:
   default PM2 (for example from a former standalone CLI) that may hold the ports;
 - the manual-mode token and required settings, in the environment of the running
   process or of this terminal;
-- each port: free or in use and, when in use, whether it answers **as this bot**
+- each port: whether it matches another of the bot's own ports, free or in use
+  and, when in use, whether it answers **as this bot**
   to a challenge signed with its Ed25519 key; in Marketplace mode, also the
   manifest's validity;
 - the public URL from this machine — routers without *hairpin NAT* may fail here
