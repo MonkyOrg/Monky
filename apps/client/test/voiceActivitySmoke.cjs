@@ -220,7 +220,22 @@ async function runElectron() {
       const value = await run(b, `window.activity.remote(${JSON.stringify(remoteId)})`);
       return { ...value, ok: !value.hasPipeline && !value.hasVad && !value.ring };
     }, 'Administrative removal still retires remote media and metering');
-    console.log(`VOICE ACTIVITY ${config.mode}: real audio, speech/silence, local mute/deafen, delayed leave echoes and administrative removal passed`);
+    phase = 'server restart and update notices';
+    for (const window of windows) await run(window, 'window.activity.clearCues()');
+    // A was already removed from the call, so its notice only ends the session.
+    await run(a, "window.activity.serverShutdown('stopped')");
+    await until(async () => {
+      const value = await run(a, 'window.activity.snapshot()');
+      return { ...value, ok: !value.connected && !value.inRoom };
+    }, 'A restart notice ends the server session');
+    await run(b, "window.activity.serverShutdown('update')");
+    await until(async () => {
+      const value = await run(b, 'window.activity.snapshot()');
+      return { ...value, ok: !value.connected && !value.inRoom && !value.microphoneOpen && value.leaveCues === 1 };
+    }, 'An update notice drops the call with exactly one leave cue');
+    assert.equal((await run(a, 'window.activity.snapshot()')).leaveCues, 0,
+      'Losing a server while outside a call must not play the leave cue');
+    console.log(`VOICE ACTIVITY ${config.mode}: real audio, speech/silence, local mute/deafen, delayed leave echoes, administrative removal and server shutdown passed`);
   } catch (error) {
     exitCode = 1;
     console.error(`VOICE ACTIVITY ${config.mode} failed during ${phase}:`, error);
@@ -258,12 +273,18 @@ async function prepareRenderer(url, label, MessageType, publicKey) {
   };
   const [
     { ActivityTestApp }, { audioProcessor }, { webRtcManager: rtc }, { voiceStore: voice },
-    { settingsStore: settings }, { sessionManager }, connection, controls,
+    { settingsStore: settings }, { sessionManager }, connection, controls, { soundEffects },
   ] = await Promise.all([
     import('/main.ts'), import('/core/AudioProcessor.ts'), import('/core/WebRtcManager.ts'),
     import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'), import('/core/SessionManager.ts'),
-    import('/core/serverConnection.ts'), import('/core/voiceControls.ts'),
+    import('/core/serverConnection.ts'), import('/core/voiceControls.ts'), import('/core/SoundEffects.ts'),
   ]);
+  const cues = [];
+  const playCue = soundEffects.play;
+  soundEffects.play = function(key) {
+    cues.push(key);
+    return playCue.call(this, key);
+  };
   ActivityTestApp.prototype.init = async () => {};
   const app = new ActivityTestApp();
   app.setupGlobalEventListeners();
@@ -328,7 +349,9 @@ async function prepareRenderer(url, label, MessageType, publicKey) {
     probe = null;
   };
   const snapshot = () => ({
-    errors, sessionId: session.serverStore.currentUser.sessionId, leaveEchoHeld: !!heldLeaveEcho,
+    errors, sessionId: session.serverStore.currentUser?.sessionId, leaveEchoHeld: !!heldLeaveEcho,
+    connected: sessionManager.get(session.key) === session && session.client.getStatus() === 'CONNECTED',
+    leaveCues: cues.filter(cue => cue === 'leave_voice').length,
     inRoom: !!voice.currentVoiceChannelId, connecting: voice.isConnecting, reconnecting: voice.isReconnecting,
     microphoneOpen: voice.microphoneOpen, localSpeaking: voice.isSpeaking,
     active: sessionManager.getActiveKey(), call: voice.voiceSessionKey,
@@ -353,6 +376,11 @@ async function prepareRenderer(url, label, MessageType, publicKey) {
     releaseLeaveEcho,
     kickSelf: () => session.client.sendRequest(MessageType.ADMIN_KICK_VOICE, {
       targetSessionId: session.serverStore.currentUser.sessionId,
+    }),
+    clearCues: () => { cues.length = 0; },
+    // The exact notice a real server broadcasts before restarting or updating.
+    serverShutdown: reasonCode => receive.call(session.client, {
+      type: MessageType.SERVER_SHUTDOWN, payload: { reasonCode },
     }),
     tone: on => { gain.gain.value = on ? 0.15 : 0; },
     leave: () => connection.leaveCurrentCall(),
@@ -390,6 +418,7 @@ async function prepareRenderer(url, label, MessageType, publicKey) {
     },
     async cleanup() {
       clearProbe();
+      soundEffects.play = playCue;
       session.client.handleIncomingMessage = receive;
       session.client.send = send;
       await connection.leaveCurrentCall();
