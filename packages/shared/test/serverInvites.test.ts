@@ -40,7 +40,7 @@ test('compact web and native invitations preserve every supplied field', () => {
       const web = createServerInviteLink(input);
       const native = createServerInviteAppLink(input);
       assert.equal(new URL(web).search, '', 'invitation data never goes in the HTTP query');
-      assert.equal(new URL(web).pathname, '/Monky/');
+      assert.equal(new URL(web).pathname, '/Monky/convite/', 'the dedicated page carries the invitation preview card');
       assert.equal(new URL(native).hostname, '', 'the token is not a hostname that an OS might normalize');
       assert.equal(new URL(native).hash, new URL(web).hash);
       assert.ok(native.startsWith('monky://#~'));
@@ -48,7 +48,14 @@ test('compact web and native invitations preserve every supplied field', () => {
       assert.deepEqual(parseServerInviteLink(native), { ok: true, invite: expected });
       assert.deepEqual(parseServerInviteLink(native.replace('monky://', 'monky:///')), { ok: true, invite: expected },
         'Windows URI canonicalization may insert a slash but must preserve the fragment');
-      assert.deepEqual(parseServerInviteLink(web.replace('/Monky/', '/Monky/en/')), { ok: true, invite: expected });
+      const english = createServerInviteLink(input, 'en');
+      assert.equal(new URL(english).pathname, '/Monky/en/convite/');
+      assert.equal(new URL(english).hash, new URL(web).hash, 'the language never changes the invitation data');
+      assert.deepEqual(parseServerInviteLink(english), { ok: true, invite: expected });
+      for (const path of ['/Monky/', '/Monky/en/', '/Monky/index.html', '/Monky/convite', '/Monky/convite/index.html', '/Monky/en/convite']) {
+        assert.deepEqual(parseServerInviteLink(web.replace('/Monky/convite/', path)), { ok: true, invite: expected },
+          `${path} keeps opening (links shared before the dedicated page used the docs home)`);
+      }
       assert.equal(web.includes(input.password), false);
     }
   }
@@ -167,8 +174,9 @@ test('unrelated pages, query parameters, credentials and the unshipped old forma
   const web = createServerInviteLink(invite);
   for (const value of [
     null, {}, '', '127.0.0.1:3000', web.replace('https:', 'http:'),
-    web.replace('monkyorg.github.io', 'example.org'), web.replace('/Monky/', '/Other/'),
-    web.replace('/Monky/', '/Monky/download.html'), web.replace('/Monky/', '/Monky/convite.html'),
+    web.replace('monkyorg.github.io', 'example.org'), web.replace('/Monky/convite/', '/Other/'),
+    web.replace('/Monky/convite/', '/Monky/download.html'), web.replace('/Monky/convite/', '/Monky/convite.html'),
+    web.replace('/Monky/convite/', '/Monky/convite/extra/'), web.replace('/Monky/convite/', '/Monky/en/download.html'),
     web.replace('#', '?tracking=yes#'), web.replace('https://', 'https://fixture-user@'),
     'monky://other/#~Aw', 'monky://invite:3000/#~Aw', 'monky://extra/path#~Aw',
     oldWebLink(invite), `${SERVER_INVITE_WEB_URL}#${Buffer.from(JSON.stringify(invite)).toString('base64url')}`,

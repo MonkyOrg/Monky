@@ -24,6 +24,7 @@ import { showCopyToast, showErrorToast, showInfoToast } from './CopyToast';
 import { ImageClipboard } from '../utils/imageClipboard';
 import { downloadLightboxFile, lightboxModal, LightboxMedia } from './LightboxModal';
 import { linkPreviewService } from '../core/LinkPreviewService';
+import { mountServerInviteCards, openServerInviteLink, renderComposeServerInvite, serverInviteFromLink } from './ServerInviteCard';
 import { initializeCustomMediaPlayers } from '../utils/videoPlayer';
 import { EmojiPicker } from './EmojiPicker';
 import { buildCodeMessage, codeBlockModal } from './CodeBlockModal';
@@ -372,16 +373,18 @@ export class ChatView {
 
   private bindMessageElementEvents(container: HTMLElement): void {
     // Open markdown links in the external browser instead of navigating the app.
+    // Invitations open the join review directly, without the browser round trip.
     container.querySelectorAll('a.md-link').forEach((link) => {
       link.addEventListener('click', (e) => {
         e.preventDefault();
         const url = link.getAttribute('data-external-link');
-        if (url && window.api?.openExternal) {
+        if (url && !openServerInviteLink(url) && window.api?.openExternal) {
           window.api.openExternal(url);
         }
       });
     });
 
+    mountServerInviteCards(container, row => !!row.dataset.userId && row.dataset.userId === serverStore.currentUser?.id);
     linkPreviewService.initializePreviews(container);
 
     // Copy button on code blocks (#391). Reading the rendered text back means
@@ -1968,6 +1971,28 @@ export class ChatView {
         setSurfaceVisible(composeLinkPreviewEl, false, 'panel', undefined, () => composeLinkPreviewEl.replaceChildren());
         return;
       }
+      const bindComposePreviewDismiss = () => {
+        composeLinkPreviewEl.querySelector('.compose-link-preview-dismiss')?.addEventListener('click', (event) => {
+          event.stopPropagation();
+          setSurfaceVisible(composeLinkPreviewEl, false, 'panel', undefined, () => composeLinkPreviewEl.replaceChildren());
+          lastComposeUrl = '__dismissed__';
+        });
+      };
+      // The docs page could only describe a generic invitation; the link itself names the server.
+      const invite = serverInviteFromLink(url);
+      if (invite) {
+        composeLinkPreviewEl.innerHTML = `
+          <div class="compose-link-preview-card compose-link-preview-card--invite">
+            ${renderComposeServerInvite(invite)}
+            <button type="button" class="compose-link-preview-dismiss" title="${t('common.close')}" aria-label="${t('common.close')}">
+              <span class="material-symbols-outlined md-16">close</span>
+            </button>
+          </div>
+        `;
+        setSurfaceVisible(composeLinkPreviewEl, true, 'panel', 'block');
+        bindComposePreviewDismiss();
+        return;
+      }
       linkPreviewService.fetch(url).then((data) => {
         if (!data || lastComposeUrl !== url) return;
         const imgHtml = data.image ? `<img class="compose-link-preview-img" src="${escapeHtml(data.image)}" alt="">` : '';
@@ -1998,11 +2023,7 @@ export class ChatView {
             openPreviewLink();
           }
         });
-        composeLinkPreviewEl.querySelector('.compose-link-preview-dismiss')?.addEventListener('click', (event) => {
-          event.stopPropagation();
-          setSurfaceVisible(composeLinkPreviewEl, false, 'panel', undefined, () => composeLinkPreviewEl.replaceChildren());
-          lastComposeUrl = '__dismissed__';
-        });
+        bindComposePreviewDismiss();
       }).catch(() => { /* silent */ });
     };
 

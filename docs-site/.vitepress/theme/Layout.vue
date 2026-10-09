@@ -9,8 +9,10 @@ const DefaultLayout = DefaultTheme.Layout;
 const { frontmatter, lang } = useData();
 const route = useRoute();
 const hash = ref('');
-const invitation = computed(() => frontmatter.value.layout === 'home'
-  && hash.value.startsWith(`#${SERVER_INVITE_FRAGMENT_PREFIX}`));
+// The dedicated invitation page always lands here; the home only for links
+// shared before that page existed.
+const invitation = computed(() => frontmatter.value.invite === true || (frontmatter.value.layout === 'home'
+  && hash.value.startsWith(`#${SERVER_INVITE_FRAGMENT_PREFIX}`)));
 const english = computed(() => lang.value.startsWith('en'));
 const updateHash = () => { hash.value = typeof window === 'undefined' ? '' : window.location.hash; };
 

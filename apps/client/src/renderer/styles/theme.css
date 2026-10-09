@@ -4182,6 +4182,91 @@ input:focus, textarea:focus, select:focus {
   pointer-events: none;
 }
 
+/* Invitation links decoded locally: the server, not the generic docs page. */
+.chat-invite-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(100%, 440px);
+  margin-top: 8px;
+}
+
+.chat-invite-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(28, 35, 45, 0.98) 0%, rgba(22, 27, 34, 0.98) 100%);
+}
+
+.chat-invite-card-heading {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.chat-invite-card-body {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.chat-invite-card-icon {
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+  background: rgba(88, 101, 242, 0.18);
+  color: var(--accent-primary);
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.chat-invite-card-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat-invite-card-name,
+.chat-invite-card-address {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-invite-card-name {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.chat-invite-card-address {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.chat-invite-card-join {
+  flex-shrink: 0;
+  padding: 8px 18px;
+  font-weight: 600;
+}
+
+.chat-invite-card-join:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
 .skeleton,
 .chat-link-preview-skeleton-line,
 .chat-link-preview-skeleton-block {
@@ -6323,6 +6408,13 @@ input:focus, textarea:focus, select:focus {
 .compose-link-preview-card:focus-visible {
   outline: 2px solid var(--accent-primary);
   outline-offset: 2px;
+}
+
+/* The invitation preview only informs; the card in the sent message is the one to join from. */
+.compose-link-preview-card--invite,
+.compose-link-preview-card--invite:hover {
+  cursor: default;
+  transform: none;
 }
 
 .compose-link-preview-text {

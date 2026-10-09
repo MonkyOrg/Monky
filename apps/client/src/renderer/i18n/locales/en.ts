@@ -362,6 +362,14 @@ export const en: TranslationMap = {
   'invite.tipLan': '<b>Local Network (Wi-Fi / Cable):</b> Use this address for other computers on the same home network or Wi-Fi.',
   'invite.tipLoopback': '<b>Localhost:</b> This address only works on the same computer where the server is running.',
   'invite.tipCustom': '<b>Custom address:</b> Make sure the host and port <b>{port}</b> are reachable by your friends.',
+  'invite.cardReceived': "You've been invited to join a server",
+  'invite.cardSent': 'You sent an invite to join a server',
+  'invite.cardEventReceived': "You've been invited to an event",
+  'invite.cardEventSent': 'You sent an invite to an event',
+  'invite.cardCompose': 'Server invitation',
+  'invite.cardComposeEvent': 'Event invitation',
+  'invite.cardJoin': 'Join',
+  'invite.cardJoinLabel': 'Join the server {name}',
 
   // ── Server monitor (ServerMonitorModal.ts) ───────────────────────────────
   'serverMonitor.title': 'Server Monitor',
