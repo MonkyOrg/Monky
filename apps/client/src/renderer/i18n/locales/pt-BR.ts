@@ -324,6 +324,14 @@ export const ptBR = {
   'invite.tipLan': '<b>Rede Local (Wi-Fi / Cabo):</b> Use este endereço para outros computadores conectados na mesma rede ou Wi-Fi da sua casa.',
   'invite.tipLoopback': '<b>Localhost:</b> Este endereço só funciona no mesmo computador onde o servidor está em execução.',
   'invite.tipCustom': '<b>Endereço personalizado:</b> Certifique-se de que o host e a porta <b>{port}</b> estão acessíveis pelos seus amigos.',
+  'invite.cardReceived': 'Você recebeu um convite para um servidor',
+  'invite.cardSent': 'Você enviou um convite para um servidor',
+  'invite.cardEventReceived': 'Você recebeu um convite para um evento',
+  'invite.cardEventSent': 'Você enviou um convite para um evento',
+  'invite.cardCompose': 'Convite para um servidor',
+  'invite.cardComposeEvent': 'Convite para um evento',
+  'invite.cardJoin': 'Entrar',
+  'invite.cardJoinLabel': 'Entrar no servidor {name}',
 
   // ── Monitor do servidor (ServerMonitorModal.ts) ──────────────────────────
   'serverMonitor.title': 'Monitor do Servidor',

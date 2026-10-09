@@ -7,7 +7,7 @@ import { sessionManager } from '../core/SessionManager';
 import { findOwnedServer } from '../core/hostedServerStart';
 import { escapeHtml } from '../utils/html';
 import { enableBackdropClose } from '../utils/modal';
-import { t } from '../i18n';
+import { getLanguage, t } from '../i18n';
 import { enterModal, exitModal } from '../utils/modalSurface';
 import { showAlert } from './Dialog';
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
@@ -416,7 +416,7 @@ export class InviteModal {
         const textToCopy = createServerInviteLink({
           v: 1, name: this.serverName, host: this.selectedIp, port: this.selectedPort,
           ...(chkPassword?.checked && this.knownPassword ? { password: this.knownPassword } : {}),
-        });
+        }, getLanguage());
         await navigator.clipboard.writeText(textToCopy);
         if (this.modalEl === modal) triggerCopyFeedback(t('invite.copied'));
       } catch (err) {
