@@ -179,6 +179,27 @@ for (const language of ['pt-BR', 'en']) {
       assert.equal(cancel.disabled, false);
     }
   });
+
+  test(`playlist reads show a localized operation instead of the protocol name (${language})`, () => {
+    const f = fixture(language);
+    const fields = new Map();
+    for (const name of ['identity-title', 'identity-origin', 'identity-details', 'task-operation', 'task-phase', 'task-started']) {
+      fields.set(`[data-field="${name}"]`, { textContent: '' });
+    }
+    fields.set('[data-local-action="cancel"]', { disabled: false, dataset: {}, style: {}, setAttribute() {} });
+    const row = { dataset: {}, querySelector: selector => fields.get(selector) ?? null };
+    f.tab.renderTask(row, {
+      id: 'playlist-1',
+      bot: { serverOrigin: 'wss://example.invalid', serverId: 'server-1', serverName: 'Server', botId: 'bot-1', botName: 'Bot', botPublicKey: 'a'.repeat(64) },
+      capability: 'youtube-audio', operation: 'youtube.playlist', phase: 'running', startedAt: 1000,
+    }, false);
+    const label = fields.get('[data-field="task-operation"]').textContent;
+    assert.equal(label, f.t('localExecution.taskOperation', {
+      capability: f.t('localExecution.capability.youtube-audio'),
+      operation: language === 'en' ? 'Read playlist' : 'Ler playlist',
+    }));
+    assert.ok(!label.includes('youtube.playlist'));
+  });
 }
 
 test('one subscription per mount; a newer change wins over a delayed state read', async () => {

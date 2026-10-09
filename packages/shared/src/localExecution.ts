@@ -61,11 +61,23 @@ export const localOperationSchema = z.enum([
   'youtube.resolve',
   'youtube.preview',
   'youtube.stream',
+  'youtube.playlist',
 ]);
 export type LocalOperation = z.infer<typeof localOperationSchema>;
 
 export const localYoutubeUrlSchema = z.string().length(43)
   .regex(/^https:\/\/www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}$/);
+
+/** Upper bound of one playlist read, independent of the bot's own queue size. */
+export const LOCAL_PLAYLIST_MAX_TRACKS = 500;
+export const LOCAL_YOUTUBE_PLAYLIST_URL_PREFIX = 'https://www.youtube.com/playlist?list=';
+/** Mixes (RD…) are endless and personalized; WL, LL and LM belong to a signed-in account. */
+export function isLocalYoutubePlaylistId(id: string): boolean {
+  return /^[A-Za-z0-9_-]{2,64}$/.test(id) && !id.startsWith('RD') && id !== 'WL' && id !== 'LL' && id !== 'LM';
+}
+export const localYoutubePlaylistUrlSchema = z.string().max(LOCAL_YOUTUBE_PLAYLIST_URL_PREFIX.length + 64)
+  .refine((url) => url.startsWith(LOCAL_YOUTUBE_PLAYLIST_URL_PREFIX) &&
+    isLocalYoutubePlaylistId(url.slice(LOCAL_YOUTUBE_PLAYLIST_URL_PREFIX.length)));
 
 export const localMediaTrackSchema = z.object({
   id: z.string().length(11).regex(/^[A-Za-z0-9_-]+$/),
@@ -75,6 +87,19 @@ export const localMediaTrackSchema = z.object({
 }).strict().refine((track) => track.url.endsWith(`v=${track.id}`));
 export type LocalMediaTrack = z.infer<typeof localMediaTrackSchema>;
 
+/**
+ * Flat playlist metadata in provider order (duplicates included). Entries outside the
+ * single-video policy are only counted in `skipped`; `total` is the provider's own count, when known.
+ */
+export const localPlaylistResultSchema = z.object({
+  operation: z.literal('youtube.playlist'),
+  title: z.string().min(1).max(512).nullable(),
+  total: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(),
+  tracks: z.array(localMediaTrackSchema).max(LOCAL_PLAYLIST_MAX_TRACKS),
+  skipped: z.number().int().nonnegative().max(LOCAL_PLAYLIST_MAX_TRACKS),
+}).strict();
+export type LocalPlaylistResult = z.infer<typeof localPlaylistResultSchema>;
+
 export const localTaskSpecSchema = z.discriminatedUnion('operation', [
   z.object({
     operation: z.literal('youtube.search'),
@@ -83,8 +108,18 @@ export const localTaskSpecSchema = z.discriminatedUnion('operation', [
   z.object({ operation: z.literal('youtube.resolve'), url: localYoutubeUrlSchema }).strict(),
   z.object({ operation: z.literal('youtube.preview'), url: localYoutubeUrlSchema }).strict(),
   z.object({ operation: z.literal('youtube.stream'), url: localYoutubeUrlSchema }).strict(),
+  z.object({
+    operation: z.literal('youtube.playlist'),
+    url: localYoutubePlaylistUrlSchema,
+    limit: z.number().int().min(1).max(LOCAL_PLAYLIST_MAX_TRACKS),
+  }).strict(),
 ]);
 export type LocalTaskSpec = z.infer<typeof localTaskSpecSchema>;
+
+/** A playlist reply never describes more entries than the request allowed. */
+export function localPlaylistResultFitsSpec(spec: LocalTaskSpec, result: LocalPlaylistResult): boolean {
+  return spec.operation === 'youtube.playlist' && result.tracks.length + result.skipped <= spec.limit;
+}
 
 export const localTaskResultSchema = z.discriminatedUnion('operation', [
   z.object({
@@ -99,6 +134,7 @@ export const localTaskResultSchema = z.discriminatedUnion('operation', [
       .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
   }).strict(),
   z.object({ operation: z.literal('youtube.stream'), track: localMediaTrackSchema }).strict(),
+  localPlaylistResultSchema,
 ]);
 export type LocalTaskResult = z.infer<typeof localTaskResultSchema>;
 

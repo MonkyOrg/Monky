@@ -1,6 +1,7 @@
 import { localTaskCancellationCauseSchema, localTaskEventSchema, localTaskFailureReasonSchema, ProtocolErrorCode } from '@monky/shared';
 import type {
   LocalMediaTrack,
+  LocalOperation,
   LocalRequestContext,
   LocalSourceContext,
   LocalTaskCancellationCause,
@@ -87,6 +88,14 @@ export interface LocalExecutor {
   execute(
     spec: Extract<LocalTaskSpec, { operation: 'youtube.preview' }>, options?: LocalExecutionTaskOptions,
   ): Promise<LocalWirePreviewResult>;
+  /**
+   * Bounded flat metadata (`spec.limit` ≤ 500); each track still needs its own resolve/stream.
+   * Rejects with FEATURE_REQUIRES_UPDATE: reason `invalid_request` when the server lacks the
+   * operation, `executor_unavailable` when the invoker's client does.
+   */
+  execute(
+    spec: Extract<LocalTaskSpec, { operation: 'youtube.playlist' }>, options?: LocalExecutionTaskOptions,
+  ): Promise<Extract<LocalWireTaskResult, { operation: 'youtube.playlist' }>>;
   execute(spec: LocalMetadataTaskSpec, options?: LocalExecutionTaskOptions): Promise<LocalMetadataTaskResult>;
   /** Resolve only after the private peer and reliable data channel are ready. */
   stream(
@@ -95,6 +104,11 @@ export interface LocalExecutor {
 }
 
 export interface LocalExecutionClient {
+  /**
+   * Whether the connected server negotiated this operation (false while disconnected).
+   * The invoker's client is checked per task and rejects with FEATURE_REQUIRES_UPDATE.
+   */
+  supports(operation: LocalOperation): boolean;
   /** Interaction contexts capture their original lifetime; source tasks acquire a fresh bot connection. */
   executor(context: LocalRequestContext): LocalExecutor;
   /** Retained metadata outlives this invocation/signal, but never authorizes a replacement human socket. */

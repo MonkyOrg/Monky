@@ -228,10 +228,15 @@ export type LocalCapabilityId = "youtube-audio";
 
 ## `LocalExecutionClient` {#localexecutionclient}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L97)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L106)
 
 ```ts
 export interface LocalExecutionClient {
+    /**
+     * Whether the connected server negotiated this operation (false while disconnected).
+     * The invoker's client is checked per task and rejects with FEATURE_REQUIRES_UPDATE.
+     */
+    supports(operation: LocalOperation): boolean;
     /** Interaction contexts capture their original lifetime; source tasks acquire a fresh bot connection. */
     executor(context: LocalRequestContext): LocalExecutor;
     /** Retained metadata outlives this invocation/signal, but never authorizes a replacement human socket. */
@@ -248,7 +253,7 @@ export interface LocalExecutionClient {
 
 ## `LocalExecutionError` {#localexecutionerror}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L27)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L28)
 
 ```ts
 export class LocalExecutionError extends Error {
@@ -259,7 +264,7 @@ export class LocalExecutionError extends Error {
 
 ## `LocalExecutionProvider` {#localexecutionprovider}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L116)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L130)
 
 ```ts
 export interface LocalExecutionProvider {
@@ -269,7 +274,7 @@ export interface LocalExecutionProvider {
 
 ## `LocalExecutionRpcError` {#localexecutionrpcerror}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L45)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L46)
 
 ```ts
 export class LocalExecutionRpcError extends Error {
@@ -282,7 +287,7 @@ export class LocalExecutionRpcError extends Error {
 
 ## `LocalExecutionTaskOptions` {#localexecutiontaskoptions}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L14)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L15)
 
 ```ts
 export interface LocalExecutionTaskOptions {
@@ -292,7 +297,7 @@ export interface LocalExecutionTaskOptions {
 
 ## `LocalExecutionTerminalEvent` {#localexecutionterminalevent}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L24)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L25)
 
 ```ts
 export type LocalExecutionTerminalEvent = {
@@ -314,7 +319,7 @@ export type LocalExecutionTerminalEvent = {
 
 ## `LocalExecutor` {#localexecutor}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L80)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L81)
 
 ```ts
 export interface LocalExecutor {
@@ -331,6 +336,16 @@ export interface LocalExecutor {
     execute(spec: Extract<LocalTaskSpec, {
         operation: 'youtube.preview';
     }>, options?: LocalExecutionTaskOptions): Promise<LocalWirePreviewResult>;
+    /**
+     * Bounded flat metadata (`spec.limit` ≤ 500); each track still needs its own resolve/stream.
+     * Rejects with FEATURE_REQUIRES_UPDATE: reason `invalid_request` when the server lacks the
+     * operation, `executor_unavailable` when the invoker's client does.
+     */
+    execute(spec: Extract<LocalTaskSpec, {
+        operation: 'youtube.playlist';
+    }>, options?: LocalExecutionTaskOptions): Promise<Extract<LocalWireTaskResult, {
+        operation: 'youtube.playlist';
+    }>>;
     execute(spec: LocalMetadataTaskSpec, options?: LocalExecutionTaskOptions): Promise<LocalMetadataTaskResult>;
     /** Resolve only after the private peer and reliable data channel are ready. */
     stream(spec: Extract<LocalTaskSpec, {
@@ -341,7 +356,7 @@ export interface LocalExecutor {
 
 ## `LocalMediaTrack` {#localmediatrack}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecution.ts#L76)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecution.ts#L88)
 
 ```ts
 export type LocalMediaTrack = {
@@ -354,10 +369,21 @@ export type LocalMediaTrack = {
 
 ## `LocalMetadataTaskResult` {#localmetadatataskresult}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L23)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L24)
 
 ```ts
 export type LocalMetadataTaskResult = {
+    title: string | null;
+    operation: "youtube.playlist";
+    total: number | null;
+    tracks: {
+        title: string;
+        url: string;
+        id: string;
+        duration: number;
+    }[];
+    skipped: number;
+} | {
     operation: "youtube.search";
     tracks: {
         title: string;
@@ -374,17 +400,17 @@ export type LocalMetadataTaskResult = {
         duration: number;
     };
 } | {
+    operation: "youtube.preview";
     localPreviewId: string;
     taskId: string;
     requestId: string;
     executorSessionId: string;
-    operation: "youtube.preview";
 };
 ```
 
 ## `LocalMetadataTaskSpec` {#localmetadatataskspec}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L22)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L23)
 
 ```ts
 export type LocalMetadataTaskSpec = {
@@ -396,12 +422,24 @@ export type LocalMetadataTaskSpec = {
 } | {
     url: string;
     operation: "youtube.preview";
+} | {
+    url: string;
+    operation: "youtube.playlist";
+    limit: number;
 };
+```
+
+## `LocalOperation` {#localoperation}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecution.ts#L66)
+
+```ts
+export type LocalOperation = "youtube.search" | "youtube.resolve" | "youtube.preview" | "youtube.stream" | "youtube.playlist";
 ```
 
 ## `LocalOpusStream` {#localopusstream}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L59)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L60)
 
 ```ts
 export interface LocalOpusStream {
@@ -426,9 +464,28 @@ export interface LocalOpusStream {
 }
 ```
 
+## `LocalPlaylistResult` {#localplaylistresult}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecution.ts#L101)
+
+```ts
+export type LocalPlaylistResult = {
+    title: string | null;
+    operation: "youtube.playlist";
+    total: number | null;
+    tracks: {
+        title: string;
+        url: string;
+        id: string;
+        duration: number;
+    }[];
+    skipped: number;
+};
+```
+
 ## `LocalPreviewReference` {#localpreviewreference}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L141)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L156)
 
 ```ts
 export type LocalPreviewReference = {
@@ -441,7 +498,7 @@ export type LocalPreviewReference = {
 
 ## `LocalRequestContext` {#localrequestcontext}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L98)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L112)
 
 ```ts
 export type LocalRequestContext = {
@@ -461,7 +518,7 @@ export type LocalRequestContext = {
 
 ## `LocalSourceContext` {#localsourcecontext}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L120)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L134)
 
 ```ts
 export type LocalSourceContext = {
@@ -480,7 +537,7 @@ export type LocalSourceContext = {
 
 ## `LocalSourceFailure` {#localsourcefailure}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L280)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L308)
 
 ```ts
 export type LocalSourceFailure = {
@@ -493,7 +550,7 @@ export type LocalSourceFailure = {
 
 ## `LocalStreamOptions` {#localstreamoptions}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L18)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/localExecution/contracts.ts#L19)
 
 ```ts
 export interface LocalStreamOptions {
@@ -504,7 +561,7 @@ export interface LocalStreamOptions {
 
 ## `LocalTaskCancellationCause` {#localtaskcancellationcause}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L275)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L303)
 
 ```ts
 export type LocalTaskCancellationCause = "requested" | "requester_left_voice" | "requester_disconnected" | "bot_left_voice" | "bot_disconnected" | "permission_revoked" | "source_released" | "voice_mode_changed" | "expired" | "server_shutdown";
@@ -512,13 +569,24 @@ export type LocalTaskCancellationCause = "requested" | "requester_left_voice" | 
 
 ## `LocalTaskEvent` {#localtaskevent}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L318)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L346)
 
 ```ts
 export type LocalTaskEvent = {
     taskId: string;
     state: "accepted";
     result: {
+        title: string | null;
+        operation: "youtube.playlist";
+        total: number | null;
+        tracks: {
+            title: string;
+            url: string;
+            id: string;
+            duration: number;
+        }[];
+        skipped: number;
+    } | {
         operation: "youtube.search";
         tracks: {
             title: string;
@@ -535,11 +603,11 @@ export type LocalTaskEvent = {
             duration: number;
         };
     } | {
+        operation: "youtube.preview";
         localPreviewId: string;
         taskId: string;
         requestId: string;
         executorSessionId: string;
-        operation: "youtube.preview";
     } | {
         operation: "youtube.stream";
         track: {
@@ -594,7 +662,7 @@ export type LocalTaskEvent = {
 
 ## `LocalTaskFailureReason` {#localtaskfailurereason}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L277)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L305)
 
 ```ts
 export type LocalTaskFailureReason = "timeout" | "busy" | "invalid_request" | "permission_denied" | "executor_unavailable" | "unsupported_platform" | "tools_missing" | "tool_install_failed" | "integrity_failed" | "storage_failed" | "provider_unavailable" | "transport_failed" | "worker_failed";
@@ -602,7 +670,7 @@ export type LocalTaskFailureReason = "timeout" | "busy" | "invalid_request" | "p
 
 ## `LocalTaskSpec` {#localtaskspec}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecution.ts#L87)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecution.ts#L117)
 
 ```ts
 export type LocalTaskSpec = {
@@ -617,29 +685,44 @@ export type LocalTaskSpec = {
 } | {
     url: string;
     operation: "youtube.stream";
+} | {
+    url: string;
+    operation: "youtube.playlist";
+    limit: number;
 };
 ```
 
 ## `LocalWirePreviewResult` {#localwirepreviewresult}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L154)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L170)
 
 ```ts
 export type LocalWirePreviewResult = {
+    operation: "youtube.preview";
     localPreviewId: string;
     taskId: string;
     requestId: string;
     executorSessionId: string;
-    operation: "youtube.preview";
 };
 ```
 
 ## `LocalWireTaskResult` {#localwiretaskresult}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L153)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/localExecutionProtocol.ts#L169)
 
 ```ts
 export type LocalWireTaskResult = {
+    title: string | null;
+    operation: "youtube.playlist";
+    total: number | null;
+    tracks: {
+        title: string;
+        url: string;
+        id: string;
+        duration: number;
+    }[];
+    skipped: number;
+} | {
     operation: "youtube.search";
     tracks: {
         title: string;
@@ -656,11 +739,11 @@ export type LocalWireTaskResult = {
         duration: number;
     };
 } | {
+    operation: "youtube.preview";
     localPreviewId: string;
     taskId: string;
     requestId: string;
     executorSessionId: string;
-    operation: "youtube.preview";
 } | {
     operation: "youtube.stream";
     track: {

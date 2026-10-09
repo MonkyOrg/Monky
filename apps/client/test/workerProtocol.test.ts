@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { test } from 'node:test';
 import { MediaError, SourceRecoveryError } from '@monky/bot-sdk/dist/localRuntime';
+import { LOCAL_PLAYLIST_MAX_TRACKS } from '@monky/shared';
 import {
   parseWorkerCommand, parseWorkerReply, workerBase64, workerError, workerResult, workerVersion, WORKER_LIMITS,
 } from '../src/main/localExecution/workerProtocol';
@@ -57,6 +58,27 @@ test('worker replies exclude signed media URLs and non-JSON binary transport', (
   const cyclic: Record<string, unknown> = { type: 'result', id: start.id };
   cyclic.result = cyclic;
   assert.throws(() => parseWorkerReply(cyclic));
+});
+
+test('the largest playlist reply fits the private worker message budget without loosening frames', () => {
+  // parseTrack keeps at most 150 UTF-16 units; three-byte characters are the largest UTF-8 form of that bound.
+  const widest = { ...track, title: '語'.repeat(150) };
+  const result = { operation: 'youtube.playlist', title: '語'.repeat(150), total: Number.MAX_SAFE_INTEGER,
+    tracks: Array.from({ length: LOCAL_PLAYLIST_MAX_TRACKS }, () => widest), skipped: 0 };
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) < WORKER_LIMITS.messageBytes);
+  assert.deepEqual(parseWorkerReply({ type: 'result', id: start.id, result }), { type: 'result', id: start.id, result });
+  assert.throws(() => parseWorkerReply({ type: 'result', id: start.id,
+    result: { ...result, tracks: [...result.tracks, widest] } }));
+  assert.throws(() => parseWorkerReply({ type: 'result', id: start.id,
+    result: { ...result, tracks: [{ ...track, audioUrl: 'https://rr1.googlevideo.com/videoplayback?signature=private' }] } }));
+  assert.throws(() => parseWorkerReply({ type: 'frames', id: start.id, requestId: 1,
+    frames: Array.from({ length: 9 }, () => '+P/+'), done: false }));
+  const playlist = { ...start, spec: { operation: 'youtube.playlist', url: 'https://www.youtube.com/playlist?list=PLfixture123', limit: 500 } };
+  assert.deepEqual(parseWorkerCommand(playlist), playlist);
+  for (const spec of [
+    { ...playlist.spec, limit: 501 }, { ...playlist.spec, url: 'https://www.youtube.com/playlist?list=RDfixture' },
+    { ...playlist.spec, cookies: 'browser' },
+  ]) assert.throws(() => parseWorkerCommand({ ...playlist, spec }));
 });
 
 test('bounded frame base64 is canonical and compact receipt versions contain no controls', () => {

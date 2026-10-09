@@ -22,6 +22,7 @@ import {
   commandAutocompleteResultSchema,
   commandAudioPreviewResultSchema,
   commandFinishedSchema,
+  createProtocolOffer,
   localTaskOfferSchema,
   localTaskEventSchema,
   localTaskControlSchema,
@@ -482,3 +483,81 @@ test('local execution SDK and real server pair private Opus with retained source
       'Private media did not use or fabricate the room audio signaling path');
     assert.deepEqual(unexpected, []);
   });
+
+test('real server relays bounded playlist reads only to executors that negotiated them', { timeout: 30000 }, async (t) => {
+  const f = await createFixture();
+  let sdk: BotClient | undefined;
+  t.after(async () => {
+    try { await sdk?.close(); }
+    finally { await f.dispose(); }
+  });
+  const playlistUrl = 'https://www.youtube.com/playlist?list=PLauthoredFixture';
+  const owner = await f.human('Playlist owner');
+  const current = await f.human('Current playlist caller');
+  const offer = createProtocolOffer('client');
+  const pinned = await f.human('Pinned 37 caller', identity(), randomUUID(), false, 37,
+    { ...offer, features: offer.features.filter((feature) => feature !== 'local-youtube-playlist') });
+  const server = record(owner.auth.payload.server);
+  const serverId = text(server.id);
+  const textId = text(records(server.channels).find((channel) => channel.type === 'TEXT')?.id);
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const botId = text(record(created.payload.bot).id);
+  const declaration = f.botPermissions.declare(botId, [...BOT_CAPABILITIES]);
+  f.botPermissions.approve(owner.id, { botId, expectedRevision: declaration.permissions.revision, granted: [...BOT_CAPABILITIES] });
+  const bot = new BotClient({
+    requestedCapabilities: [...BOT_CAPABILITIES], serverUrl: f.url, token: text(created.payload.token),
+    publicKey: identity().publicKey, name: 'Playlist fixture', autoReconnect: false,
+  });
+  sdk = bot;
+  const outcomes: ({ ok: true; value: unknown } | { ok: false; error: unknown })[] = [];
+  bot.command({
+    name: 'playlist-local', description: 'Real SDK playlist fixture', localCapabilities: ['youtube-audio'],
+    handler: async (ctx) => {
+      outcomes.push(await bot.localExecution(ctx.serverId).executor({ kind: 'invocation', invocationId: ctx.invocationId })
+        .execute({ operation: 'youtube.playlist', url: playlistUrl, limit: 2 })
+        .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error })));
+    },
+  });
+  const registrationSince = current.peer.messages.length;
+  bot.connect({ serverId });
+  await current.peer.wait((message) => message.type === MessageType.COMMANDS_LIST_RESPONSE &&
+    Array.isArray(message.payload.commands) && message.payload.commands.some((command: unknown) =>
+      isRecord(command) && command.botId === botId && command.name === 'playlist-local'), registrationSince);
+  assert.equal(bot.localExecution(serverId).supports('youtube.playlist'), true, 'A current server negotiates playlists with the bot');
+
+  const invoke = async (caller: typeof current): Promise<string> => {
+    const requestId = randomUUID();
+    caller.peer.send(MessageType.COMMAND_INVOKE, {
+      botId, channelId: textId, commandName: 'playlist-local', localPreparation: { capability: 'youtube-audio' },
+    }, requestId);
+    const invoked = await caller.peer.wait((message) => message.requestId === requestId);
+    assert.equal(invoked.type, MessageType.COMMAND_INVOKED);
+    return text(invoked.payload.invocationId);
+  };
+  const finished = (caller: typeof current, invocationId: string) => caller.peer.wait((message) =>
+    message.type === MessageType.COMMAND_FINISHED && message.payload.invocationId === invocationId);
+
+  const since = current.peer.messages.length;
+  const invocationId = await invoke(current);
+  const offered = localTaskOfferSchema.parse((await current.peer.wait((message) =>
+    message.type === MessageType.BOT_LOCAL_TASK_OFFER, since)).payload);
+  assert.deepEqual(offered.spec, { operation: 'youtube.playlist', url: playlistUrl, limit: 2 });
+  assert.deepEqual(offered.context, { kind: 'invocation', invocationId });
+  assert.equal(offered.media, undefined);
+  const result = { operation: 'youtube.playlist', title: 'Authored list', total: 7, tracks: [LOCAL_TEST_TRACK], skipped: 1 };
+  current.peer.send(MessageType.BOT_LOCAL_TASK_ACCEPT, { taskId: offered.taskId, result });
+  await finished(current, invocationId);
+  assert.deepEqual(outcomes.shift(), { ok: true, value: result });
+
+  const pinnedSince = pinned.peer.messages.length;
+  const pinnedInvocation = await invoke(pinned);
+  await finished(pinned, pinnedInvocation);
+  const refused = outcomes.shift();
+  assert.ok(refused && !refused.ok);
+  assert.ok(refused.error instanceof LocalExecutionRpcError);
+  assert.equal(refused.error.code, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+  assert.equal(refused.error.reason, 'executor_unavailable');
+  await pinned.peer.barrier();
+  assert.equal(pinned.peer.messages.slice(pinnedSince).some((message) => message.type === MessageType.BOT_LOCAL_TASK_OFFER), false,
+    'A pinned client is refused before it can silently drop an offer it cannot parse');
+});

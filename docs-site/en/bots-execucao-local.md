@@ -93,8 +93,9 @@ Transmission requires a private WebRTC channel between client and bot, even when
 | Operation | Responsibility |
 |-----------|----------------|
 | `bot.localExecution(serverId)` | Select the server connection without selecting another user |
+| `client.supports(operation)` | Report whether the connected server negotiated the operation (`false` while disconnected or on an older server) |
 | `client.executor(context)` | Use an authorized invocation, autocomplete, preview, or source reference |
-| `executor.execute(spec, { signal })` | Execute `youtube.search`, `youtube.resolve`, or `youtube.preview` |
+| `executor.execute(spec, { signal })` | Execute `youtube.search`, `youtube.resolve`, `youtube.preview`, or `youtube.playlist` |
 | `client.retainSource(invocationId, url, { signal })` | Retain an item's origin and canonical URL from a real invocation |
 | `client.checkSourceAvailability(sourceContextId, voiceChannelId, { signal })` | Confirm the original connection's presence and access without starting a client task |
 | `executor.stream(spec, { voiceChannelId, signal })` | Open a new `youtube.stream` task for the current room |
@@ -110,9 +111,28 @@ The stream provides Opus packets through `frames`. The bot maintains a 20 ms cad
 
 A rejection before task admission, or during a source-reference/control operation, uses `LocalExecutionRpcError`. Inspect `code` and, when present, `reason` or `cancellationCause`; this error does not invent a task event. Do not classify a consent refusal or transport failure as provider authentication failure.
 
+### Playlists
+
+`youtube.playlist` reads the metadata of a public YouTube playlist or YouTube Music album, only during a command or its autocomplete. `playlistLink()`, from `@monky/bot-sdk/dist/localRuntime`, recognizes `/playlist?list=` and video links that carry a `list` (`watch?v=…&list=…`, `youtu.be/…?list=…`, `music.youtube.com`) and returns the canonical `https://www.youtube.com/playlist?list=<id>`. Mixes and radios (`list=RD…`) come back as `{ kind: 'mix' }` and are never read, because they are endless and personalized per account; account lists (`WL`, `LL`, `LM`) are not public. `musicInput()` is unchanged: a `watch?v=…&list=…` link still means the individual video.
+
+```ts
+const link = playlistLink(query);
+if (link?.kind === 'playlist' && client.supports('youtube.playlist')) {
+  const playlist = await executor.execute(
+    { operation: 'youtube.playlist', url: link.url, limit: freeSlots },
+    { signal: ctx.signal },
+  );
+  // playlist.title, playlist.total (provider count or null), playlist.tracks, playlist.skipped
+}
+```
+
+`limit` (1 to 500) also bounds the provider requests. Tracks keep the playlist order, duplicates included; entries over one hour, live, private, or otherwise outside the individual-video policy only increase `skipped`. Playlist metadata does not show age restrictions, so each track still needs `retainSource()` and `youtube.stream`, which revalidates it before playback. A playlist URL is never a retained source.
+
+Playlists are a negotiated protocol feature. On an older server, `client.supports('youtube.playlist')` is `false` and `execute()` rejects with `FEATURE_REQUIRES_UPDATE` and `reason: 'invalid_request'`. When the requester's Monky client is older, the server rejects with the same code and `reason: 'executor_unavailable'` instead of sending a task that client would ignore.
+
 Decoder EOF does not mean the last frame has been consumed. Preserve the tail through final acknowledgments: `stream.closed` resolves only after playback drain and server-confirmed completion, and rejects on failure or cancellation. Await `stream.close()` to cancel active work or await completion of an already-drained stream; rejection of `closed` alone does not replace teardown. Closing a stream does not automatically release its source reference. On the client, the native process may finish before playback acknowledgments without losing cancellation or revocation of the remaining task.
 
-Using the requester's computer does not guarantee provider acceptance. The initial capability accepts eligible individual public YouTube videos only, without accounts, cookies, or bypassing restrictions. Provider refusals remain explicit errors.
+Using the requester's computer does not guarantee provider acceptance. The initial capability accepts eligible individual public YouTube videos and reading public playlists and YouTube Music albums only, without mixes, accounts, cookies, or bypassing restrictions. Provider refusals remain explicit errors.
 
 ### Integrated checkout validation
 

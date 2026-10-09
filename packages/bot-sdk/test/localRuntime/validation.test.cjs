@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const { LIMITS } = require('@monky/shared');
 const {
   YouTubeSource, MediaError, MediaToolError, SourceRecoveryError, IncompleteAudioError,
-  OggOpusParser, musicInput, videoUrl, audioUrl, parseTrack, checkMediaTool, checkMediaTools,
+  OggOpusParser, musicInput, videoUrl, playlistLink, playlistUrl, audioUrl, parseTrack, checkMediaTool, checkMediaTools,
   youtubeExtractorArgs, MUSIC_PREVIEW_DURATION_MS, SOURCE_RECOVERY_FAILURE_LIMIT,
 } = require('../../dist/localRuntime');
 const { tools, signal, track, page, headers, ogg } = require('./fixtures.cjs');
@@ -52,6 +52,47 @@ test('URL validation rejects other providers, ambiguous videos, credentials and 
     assert.throws(() => musicInput(input), MediaError);
   }
   assert.equal(musicInput('a'.repeat(200)).value.length, LIMITS.MAX_BOT_AUTOCOMPLETE_QUERY_LENGTH);
+});
+
+test('playlist links canonicalize lists and albums, report mixes and ignore everything else', () => {
+  const list = 'https://www.youtube.com/playlist?list=PLfixture123';
+  const album = 'https://www.youtube.com/playlist?list=OLAK5uy_fixtureAlbum';
+  for (const [input, expected] of [
+    ['https://www.youtube.com/playlist?list=PLfixture123', list],
+    [' https://music.youtube.com/playlist?list=PLfixture123&si=share ', list],
+    ['http://m.youtube.com/playlist?list=PLfixture123', list],
+    ['https://www.youtube.com/watch?v=abcdefghijk&list=PLfixture123&index=7', list],
+    ['https://youtu.be/abcdefghijk?list=PLfixture123&t=2', list],
+    ['https://music.youtube.com/watch?v=abcdefghijk&list=OLAK5uy_fixtureAlbum', album],
+    ['https://music.youtube.com/playlist?list=OLAK5uy_fixtureAlbum', album],
+  ]) {
+    assert.deepEqual(playlistLink(input), { kind: 'playlist', url: expected }, input);
+    assert.equal(playlistUrl(input), expected, input);
+  }
+  for (const input of [
+    'https://www.youtube.com/watch?v=abcdefghijk&list=RDabcdefghijk&start_radio=1',
+    'https://youtu.be/abcdefghijk?list=RDMMabcdefghijk', 'https://www.youtube.com/playlist?list=RDCLAK5uy_fixture',
+  ]) {
+    assert.deepEqual(playlistLink(input), { kind: 'mix' }, input);
+    assert.throws(() => playlistUrl(input), { code: 'unsupported', detail: 'YouTube mixes are not supported.' });
+  }
+  for (const input of [
+    'https://www.youtube.com/watch?v=abcdefghijk', 'original fixture', '', null, 42,
+    'https://www.youtube.com/playlist', 'https://www.youtube.com/playlist?list=WL', 'https://www.youtube.com/playlist?list=LL',
+    'https://www.youtube.com/playlist?list=LM', 'https://www.youtube.com/playlist?list=P',
+    'https://www.youtube.com/playlist?list=PLone&list=PLtwo', 'https://www.youtube.com/playlist?list=PL%2Fescape',
+    `https://www.youtube.com/playlist?list=${'a'.repeat(65)}`, 'https://youtube.com.evil.test/playlist?list=PLfixture123',
+    'https://fixture-user@youtube.com/playlist?list=PLfixture123', 'https://youtube.com:444/playlist?list=PLfixture123',
+    'https://youtu.be/playlist?list=PLfixture123', 'https://www.youtube.com/watch?list=PLfixture123',
+    'https://www.youtube.com/watch?v=abcdefghij&list=PLfixture123', 'https://www.youtube.com/channel/UCfixture?list=PLfixture123',
+    'https://open.spotify.com/playlist/fixture', 'https://www.youtube.com/playlist?list=PLfixture123\n',
+  ]) {
+    assert.equal(playlistLink(input), null, String(input));
+    assert.throws(() => playlistUrl(input), { code: 'unsupported' }, String(input));
+  }
+  // Individual video handling stays unchanged by the list context.
+  assert.deepEqual(musicInput('https://www.youtube.com/watch?v=abcdefghijk&list=PLfixture123'), { kind: 'url', value: track().url });
+  assert.throws(() => musicInput(list), { code: 'unsupported' });
 });
 
 test('audio resources stay restricted to HTTPS googlevideo videoplayback endpoints', () => {
@@ -253,6 +294,57 @@ test('search filters unsupported and duplicate results without concealing malfor
     body = invalid;
     await assert.rejects(source.search('fixture', signal()), { code: 'unavailable' });
   }
+});
+
+test('playlists read bounded flat metadata in provider order and count policy skips', async () => {
+  const calls = [];
+  const valid = { id: 'abcdefghijk', title: 'Original fixture', duration: 60 };
+  const playlist = {
+    _type: 'playlist', id: 'PLfixture123', title: ' Fixture\u0007 list ', playlist_count: 40,
+    entries: [valid, { ...valid, id: 'abcdefghijl', title: '[Private video]', duration: null },
+      { ...valid, id: 'abcdefghijm', live_status: 'is_live' }, { ...valid, id: 'abcdefghijn', duration: 3601 },
+      { ...valid, id: 'abcdefghijo', availability: 'needs_auth' }, valid, { ...valid, id: 'abcdefghijp' }],
+  };
+  let body = JSON.stringify(playlist);
+  const source = new YouTubeSource(tools, { capture: async (executable, args, _signal, timeoutMs, limit) => {
+    calls.push({ executable, args, timeoutMs, limit });
+    return body;
+  } });
+  const watch = 'https://www.youtube.com/watch?v=abcdefghijk&list=PLfixture123&index=3';
+  assert.deepEqual(await source.playlist(watch, 6, signal()),
+    { title: 'Fixture list', total: 40, tracks: [parseTrack(valid), parseTrack(valid)], skipped: 4 });
+  const [{ executable, args, timeoutMs, limit }] = calls;
+  assert.equal(executable, tools.ytDlp);
+  for (const flag of ['--ignore-config', '--no-cache-dir', '--skip-download', '--flat-playlist', '--dump-single-json']) {
+    assert.ok(args.includes(flag), flag);
+  }
+  assert.equal(args[args.indexOf('--playlist-end') + 1], '6');
+  assert.equal(args.includes('--no-playlist'), false);
+  assert.equal(args.some(arg => /cookie|netrc|username|password|browser|proxy/.test(arg)), false);
+  assert.deepEqual(args.slice(-2), ['--', 'https://www.youtube.com/playlist?list=PLfixture123']);
+  assert.ok(timeoutMs < 45_000, 'The read must finish inside the local task deadline');
+  assert.ok(limit > 1024 * 1024, 'Flat metadata for 500 entries exceeds the default capture bound');
+
+  body = JSON.stringify({ ...playlist, title: '\u0000', playlist_count: 1.5, entries: [valid] });
+  assert.deepEqual(await source.playlist(watch, 500, signal()), { title: null, total: null, tracks: [parseTrack(valid)], skipped: 0 });
+  for (const invalid of [
+    { ...playlist, id: 'PLanother' }, { ...playlist, entries: undefined }, { ...playlist, entries: [valid, null] }, [],
+  ]) {
+    body = JSON.stringify(invalid);
+    await assert.rejects(source.playlist(watch, 6, signal()), { code: 'unavailable' });
+  }
+  body = '{"entries":';
+  await assert.rejects(source.playlist(watch, 6, signal()), { code: 'unavailable' });
+  const before = calls.length;
+  for (const bad of [0, 501, 1.5, '6']) await assert.rejects(source.playlist(watch, bad, signal()), { code: 'input' });
+  for (const url of ['https://www.youtube.com/watch?v=abcdefghijk&list=RDabcdefghijk', 'https://www.youtube.com/watch?v=abcdefghijk']) {
+    await assert.rejects(source.playlist(url, 6, signal()), { code: 'unsupported' });
+  }
+  const controller = new AbortController();
+  const cancelling = new YouTubeSource(tools, { capture: async () => { controller.abort(); return JSON.stringify(playlist); } });
+  await assert.rejects(cancelling.playlist(watch, 6, controller.signal), { code: 'cancelled' });
+  await assert.rejects(source.playlist(watch, 6, controller.signal), { code: 'cancelled' });
+  assert.equal(calls.length, before, 'Invalid, mixed or cancelled requests never reach yt-dlp');
 });
 
 test('resolution never exposes malformed metadata or accepts a different selected video', async () => {

@@ -1,6 +1,6 @@
 import path from 'node:path';
 import {
-  LIMITS, LOCAL_EXECUTION_RUNTIME_LIMITS, localExecutionFailureSchema,
+  LIMITS, LOCAL_EXECUTION_RUNTIME_LIMITS, LOCAL_PLAYLIST_MAX_TRACKS, localExecutionFailureSchema,
   localRuntimeSourceFailureSchema, localTaskResultSchema, localTaskSpecSchema, localToolIdSchema,
   type LocalExecutionFailure, type LocalRuntimeSourceFailure, type LocalTaskResult, type LocalTaskSpec, type LocalToolId,
 } from '@monky/shared';
@@ -84,7 +84,8 @@ function jsonBytes(value: unknown, budget = WORKER_LIMITS.messageBytes, depth = 
   }
   if (value === null || typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value)) return 24;
   if (Array.isArray(value)) {
-    if (value.length > Math.max(LOCAL_EXECUTION_RUNTIME_LIMITS.frameBatch, LIMITS.MAX_BOT_AUTOCOMPLETE_CHOICES)) invalid();
+    if (value.length > Math.max(LOCAL_EXECUTION_RUNTIME_LIMITS.frameBatch, LIMITS.MAX_BOT_AUTOCOMPLETE_CHOICES,
+      LOCAL_PLAYLIST_MAX_TRACKS)) invalid();
     let size = 2;
     for (const entry of value) size += jsonBytes(entry, budget - size, depth + 1) + 1;
     if (size > budget) invalid();

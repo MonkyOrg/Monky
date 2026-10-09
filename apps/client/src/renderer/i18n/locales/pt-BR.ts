@@ -1702,6 +1702,7 @@ export const ptBR = {
   'localExecution.operation.youtube.resolve': 'Consultar mídia',
   'localExecution.operation.youtube.preview': 'Preparar prévia',
   'localExecution.operation.youtube.stream': 'Transmitir áudio',
+  'localExecution.operation.youtube.playlist': 'Ler playlist',
   'localExecution.phase.consent': 'Aguardando autorização',
   'localExecution.phase.installing': 'Preparando ferramentas',
   'localExecution.phase.running': 'Executando',

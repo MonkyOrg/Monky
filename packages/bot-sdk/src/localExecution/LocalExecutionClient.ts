@@ -3,10 +3,10 @@ import { isDeepStrictEqual } from 'util';
 import type WebSocket from 'ws';
 import {
   LOCAL_EXECUTION_PROTOCOL_LIMITS, LOCAL_OPERATION_CAPABILITY, MessageType, ProtocolErrorCode,
-  localMediaSignalSchema, localRequestContextSchema, localSourceRequestSchema, localSourceResultSchema,
+  localMediaSignalSchema, localOperationNegotiated, localRequestContextSchema, localSourceRequestSchema, localSourceResultSchema,
   localTaskAcceptMatchesOffer, localTaskEventSchema, localTaskMatchesSource, localTaskOfferSchema,
   localTaskRequestSchema,
-  type CommandCallerContext, type LocalMediaSignal, type LocalRequestContext, type LocalSourceContext,
+  type CommandCallerContext, type LocalMediaSignal, type LocalOperation, type LocalRequestContext, type LocalSourceContext,
   type LocalSourceRequest, type LocalSourceResult, type LocalTaskControl, type LocalTaskEvent,
   type LocalTaskOffer, type LocalTaskRequest, type LocalTaskSpec, type LocalWirePreviewResult,
   type LocalWireTaskResult,
@@ -46,6 +46,8 @@ type OutgoingMessage =
 export interface LocalExecutionTransport {
   connection(): LocalExecutionConnection;
   isCurrent(connection: LocalExecutionConnection): boolean;
+  /** Features the current server connection negotiated, or undefined while disconnected. */
+  features(): readonly string[] | undefined;
   captureContext(connection: LocalExecutionConnection, context: InteractionContext): LocalExecutionContextLifetime;
   send(connection: LocalExecutionConnection, message: OutgoingMessage): void;
   reportError(error: unknown): void;
@@ -168,6 +170,10 @@ export class BotLocalExecutionClient implements LocalExecutionClient {
 
   constructor(private readonly transport: LocalExecutionTransport) {}
 
+  supports(operation: LocalOperation): boolean {
+    return !this.disposed && localOperationNegotiated(operation, this.transport.features());
+  }
+
   executor(input: LocalRequestContext): LocalExecutor {
     this.assertOpen();
     const context = localRequestContextSchema.parse(input);
@@ -219,8 +225,14 @@ export class BotLocalExecutionClient implements LocalExecutionClient {
   async execute(
     binding: ExecutorBinding, spec: LocalMetadataTaskSpec, options: LocalExecutionTaskOptions = {},
   ): Promise<LocalMetadataTaskResult> {
-    if (spec.operation !== 'youtube.search' && spec.operation !== 'youtube.resolve' && spec.operation !== 'youtube.preview') {
+    if (spec.operation !== 'youtube.search' && spec.operation !== 'youtube.resolve' &&
+        spec.operation !== 'youtube.preview' && spec.operation !== 'youtube.playlist') {
       throw new TypeError('Streams require executor.stream().');
+    }
+    // An outdated server would only answer BAD_REQUEST; name the update it needs instead.
+    this.assertOpen();
+    if (!this.supports(spec.operation)) {
+      throw new LocalExecutionRpcError(ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'invalid_request');
     }
     const result = await this.requestTask(binding, spec, options);
     if (result.kind !== 'metadata') throw new Error('Expected a local metadata result.');
@@ -838,6 +850,9 @@ class ContextLocalExecutor implements LocalExecutor {
   execute(
     spec: Extract<LocalTaskSpec, { operation: 'youtube.preview' }>, options?: LocalExecutionTaskOptions,
   ): Promise<LocalWirePreviewResult>;
+  execute(
+    spec: Extract<LocalTaskSpec, { operation: 'youtube.playlist' }>, options?: LocalExecutionTaskOptions,
+  ): Promise<Extract<LocalWireTaskResult, { operation: 'youtube.playlist' }>>;
   execute(spec: LocalMetadataTaskSpec, options?: LocalExecutionTaskOptions): Promise<LocalMetadataTaskResult>;
   execute(spec: LocalMetadataTaskSpec, options?: LocalExecutionTaskOptions): Promise<LocalMetadataTaskResult> {
     return this.client.execute(this.binding, spec, options);

@@ -53,7 +53,7 @@ async function remainsPending(promise) {
   assert.equal(settled, false);
 }
 
-async function fixture(t, options = {}) {
+async function fixture(t, options = {}, auth = AUTH) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await once(server, 'listening');
   const events = new EventEmitter();
@@ -76,7 +76,7 @@ async function fixture(t, options = {}) {
       allFrames.push(message);
       events.emit('frame', message);
       if (message.type === MessageType.AUTH_CONNECT) {
-        ws.send(JSON.stringify({ type: MessageType.AUTH_SUCCESS, payload: AUTH }));
+        ws.send(JSON.stringify({ type: MessageType.AUTH_SUCCESS, payload: auth }));
       }
     });
   });
@@ -568,6 +568,56 @@ test('metadata accepts must match the reserved operation, canonical URL and meta
     f.accept(request, offer, result);
     await assert.rejects(pending, isTerminal('failed', 'invalid_request'));
   }
+});
+
+test('playlists run only on servers that negotiated them and name which side needs an update', async t => {
+  const PLAYLIST = { operation: 'youtube.playlist', url: 'https://www.youtube.com/playlist?list=PLabcdefghijklmnop', limit: 2 };
+  const legacy = await fixture(t);
+  assert.equal(legacy.client.supports('youtube.playlist'), false);
+  assert.equal(legacy.client.supports('youtube.resolve'), true);
+  const old = await legacy.interaction();
+  const sent = legacy.allFrames.length;
+  await assert.rejects(legacy.client.executor(old.context).execute(PLAYLIST), error => {
+    assert.ok(error instanceof LocalExecutionRpcError);
+    assert.equal(error.code, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+    assert.equal(error.reason, 'invalid_request');
+    return true;
+  });
+  assert.equal(legacy.allFrames.length, sent, 'An outdated server never receives the playlist request');
+
+  const f = await fixture(t, {}, { ...AUTH, server: { ...AUTH.server, protocol: {
+    version: 38, minimumVersion: 24, features: ['message-length-setting', 'local-youtube-playlist'],
+  } } });
+  assert.equal(f.client.supports('youtube.playlist'), true);
+  const interaction = await f.interaction();
+  const executor = f.client.executor(interaction.context);
+  const result = { operation: 'youtube.playlist', title: 'Fixture list', total: 9, tracks: [TRACK, TRACK], skipped: 0 };
+  const pending = observe(executor.execute(PLAYLIST));
+  const request = await f.next(MessageType.BOT_LOCAL_TASK_REQUEST);
+  assert.deepEqual(request.payload, { context: interaction.context, spec: PLAYLIST });
+  const offer = f.reserve(request);
+  assert.equal(offer.media, undefined);
+  f.accept(request, offer, result);
+  assert.deepEqual(await pending, result);
+
+  const oversized = observe(executor.execute(PLAYLIST));
+  const second = await f.next(MessageType.BOT_LOCAL_TASK_REQUEST);
+  f.accept(second, f.reserve(second), { ...result, skipped: 1 });
+  await assert.rejects(oversized, isTerminal('failed', 'invalid_request'));
+
+  const outdatedExecutor = observe(executor.execute(PLAYLIST));
+  const third = await f.next(MessageType.BOT_LOCAL_TASK_REQUEST);
+  f.send(MessageType.SERVER_ERROR, { code: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, message: 'executor_unavailable' }, third.requestId);
+  await assert.rejects(outdatedExecutor, error => {
+    assert.ok(error instanceof LocalExecutionRpcError);
+    assert.equal(error.code, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+    assert.equal(error.reason, 'executor_unavailable');
+    return true;
+  });
+  await interaction.finish();
+  await f.bot.close();
+  assert.equal(f.client.supports('youtube.playlist'), false);
+  assert.deepEqual(f.errors, []);
 });
 
 test('reconnect on the same ServerConnection cannot revive an old task/context, even with the same session ID', async t => {

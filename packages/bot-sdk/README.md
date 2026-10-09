@@ -4,8 +4,9 @@
 
 `BotClient.localExecution(serverId)` returns the reusable local-execution client
 for an authenticated server connection. The current fixed capability is
-`youtube-audio`, with `youtube.search`, `youtube.resolve`, `youtube.preview` and
-`youtube.stream` operations. Commands declare `localCapabilities: ['youtube-audio']`.
+`youtube-audio`, with `youtube.search`, `youtube.resolve`, `youtube.preview`,
+`youtube.playlist` and `youtube.stream` operations. Commands declare
+`localCapabilities: ['youtube-audio']`.
 
 The requesting Monky client obtains consent and runs its managed tools. The SDK
 does not resolve media on the bot host, accept arbitrary programs, forward browser
@@ -46,6 +47,47 @@ metadata. Preview returns `LocalWirePreviewResult`; an audio-preview callback ca
 return that result directly. Its `localPreviewId`, `taskId`, original `requestId`
 and `executorSessionId` are bound to that exact preview. There are no preview
 bytes, MIME payloads, base64 audio or resolved media URLs on this path.
+
+### Playlists
+
+`youtube.playlist` reads flat metadata for a public YouTube playlist or YouTube
+Music album during a command or its autocomplete (`invocation` or `autocomplete`
+contexts only):
+
+```ts
+import { playlistLink } from '@monky/bot-sdk/dist/localRuntime';
+
+const link = playlistLink(ctx.args.query); // { kind: 'playlist', url } | { kind: 'mix' } | null
+if (link?.kind === 'playlist' && local.supports('youtube.playlist')) {
+  const playlist = await executor.execute(
+    { operation: 'youtube.playlist', url: link.url, limit: freeQueueSlots },
+    { signal: ctx.signal },
+  );
+  // playlist.title, playlist.total (provider count or null), playlist.tracks, playlist.skipped
+}
+```
+
+`playlistLink()` accepts `/playlist?list=` and video links that carry a `list`
+(`watch?v=…&list=…`, `youtu.be/…?list=…`, `music.youtube.com`) and returns the
+canonical `https://www.youtube.com/playlist?list=<id>`; `playlistUrl()` returns
+that URL or throws `MediaError('unsupported')`. Mixes and radios (`list=RD…`) are
+reported as `{ kind: 'mix' }` and never read: they are endless and personalized.
+Account lists (`WL`, `LL`, `LM`) are not public. `musicInput()` and `videoUrl()`
+are unchanged, so a `watch?v=…&list=…` link still means the individual video.
+
+`limit` (1–500) bounds the provider requests. Tracks keep the provider order,
+duplicates included; entries over one hour, live, private or otherwise outside
+the single-video policy only increase `skipped`. Flat metadata cannot show age
+restrictions, so each track still needs its own `retainSource()` and
+`youtube.stream`, which revalidate it before playback. A playlist URL is never a
+retained source.
+
+Playlists are a negotiated protocol feature. `local.supports('youtube.playlist')`
+is `false` while disconnected or when the server predates it; calling `execute()`
+anyway rejects with `LocalExecutionRpcError` code `FEATURE_REQUIRES_UPDATE` and
+reason `invalid_request`. When the invoker's Monky client is older, the server
+rejects the same code with reason `executor_unavailable` instead of sending an
+offer that client would ignore.
 
 ### Queue-item ownership
 
