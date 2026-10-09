@@ -1,5 +1,6 @@
 import type { TranslationMap } from '../index';
 import { communityEn } from './community';
+import { serverAuditEn } from './serverAudit';
 import { messageSearchEn } from '../messageSearch';
 
 /**
@@ -94,6 +95,7 @@ export const en: TranslationMap = {
   'poll.moveImageForward': 'Move image forward',
   'poll.imageUploadFailed': 'Could not upload the image.',
   ...communityEn,
+  ...serverAuditEn,
   ...messageSearchEn,
   'categories.category': 'Category',
   'categories.create': 'Create category',

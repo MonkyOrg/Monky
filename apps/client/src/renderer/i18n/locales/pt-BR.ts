@@ -6,6 +6,7 @@
  * idiomas. Chaves terminadas em `.one` / `.other` são usadas via `tCount()`.
  */
 import { communityPtBR } from './community';
+import { serverAuditPtBR } from './serverAudit';
 import { messageSearchPtBR } from '../messageSearch';
 
 export const ptBR = {
@@ -96,6 +97,7 @@ export const ptBR = {
   'poll.moveImageForward': 'Mover imagem para frente',
   'poll.imageUploadFailed': 'Não foi possível enviar a imagem.',
   ...communityPtBR,
+  ...serverAuditPtBR,
   ...messageSearchPtBR,
   'categories.category': 'Categoria',
   'categories.create': 'Criar categoria',

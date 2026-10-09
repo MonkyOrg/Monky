@@ -36,6 +36,8 @@ export interface AuthResult {
   serverDetails?: ServerDetails;
   /** Whether this connection should be invisible to other users (#561). */
   appearOffline?: boolean;
+  /** True on the first connection of a member, which registers them on the server. */
+  newMember?: boolean;
 }
 
 interface PendingAuthChallenge {
@@ -330,6 +332,7 @@ export class AuthService {
     }
 
     const now = Date.now();
+    const newMember = !userRecord;
     if (!userRecord) {
       userRecord = {
         id: uuidv4(),
@@ -469,6 +472,7 @@ export class AuthService {
       user: userSummary,
       serverDetails,
       appearOffline: pending.appearOffline,
+      newMember,
     };
   }
 

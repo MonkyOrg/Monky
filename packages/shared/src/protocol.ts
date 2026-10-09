@@ -301,6 +301,9 @@ export enum MessageType {
   SERVER_SETTINGS_UPDATED = 'SERVER_SETTINGS_UPDATED',
   SERVER_MONITOR_GET = 'SERVER_MONITOR_GET',
   SERVER_MONITOR_SNAPSHOT = 'SERVER_MONITOR_SNAPSHOT',
+  /** Client -> server (`server-audit`): one page of the server audit log. */
+  SERVER_AUDIT_GET = 'SERVER_AUDIT_GET',
+  SERVER_AUDIT_PAGE = 'SERVER_AUDIT_PAGE',
   /**
    * Server -> client, while coturn is being installed (#438). Purely
    * informational: a client that does not know it simply ignores it.
