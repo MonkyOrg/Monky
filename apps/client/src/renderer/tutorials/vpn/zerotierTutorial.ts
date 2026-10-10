@@ -4,6 +4,7 @@ export const zerotierTutorial: TutorialDefinition = {
   id: 'zerotier',
   name: 'tutorial.zerotier.name',
   icon: 'vpn_lock',
+  skill: 'zerotier',
   steps: [
     {
       title: 'tutorial.zerotier.step1.title',

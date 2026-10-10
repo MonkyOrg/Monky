@@ -34,6 +34,7 @@ import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnve
 import { HostServerOptions, ServerManager } from './serverManager';
 import { mt, setMainLanguage } from './i18n';
 import { setupEventCalendarIpc } from './serverEventCalendarIpc';
+import { setupHostingSkillIpc } from './hostingSkills';
 import { setupRecentSoundSaveIpc } from './recentSoundSaveIpc';
 import { fetchLinkPreview } from './linkPreview';
 import { TrayManager, VoiceStatus } from './trayManager';
@@ -394,6 +395,7 @@ export function setupIpcHandlers(
   const disposeSoundboardFiles = setupSoundboardFilesIpc(mainWindow, new SoundboardFiles(soundDownloads, soundboardEncoder));
   const disposeEditorCommands = setupEditorCommands(mainWindow);
   const disposeEventCalendar = setupEventCalendarIpc(mainWindow, sanitizeDownloadFileName);
+  const disposeHostingSkill = setupHostingSkillIpc(mainWindow);
   const disposeRecentSoundSave = setupRecentSoundSaveIpc(mainWindow, sanitizeDownloadFileName);
   const disposeDirectMessages = setupDmIpc(mainWindow, sanitizeDownloadFileName);
   ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, async (event): Promise<string | null> => {
@@ -1589,6 +1591,7 @@ export function setupIpcHandlers(
     disposeSoundboardFiles();
     disposeEditorCommands();
     disposeEventCalendar();
+    disposeHostingSkill();
     disposeRecentSoundSave();
     disposeDirectMessages();
     for (const channel of Object.values(AUDIO_PREVIEW_IPC)) ipcMain.removeHandler(channel);

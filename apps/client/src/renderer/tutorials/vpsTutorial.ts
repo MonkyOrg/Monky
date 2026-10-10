@@ -4,6 +4,7 @@ export const vpsOracleFreeTutorial: TutorialDefinition = {
   id: 'vps-oracle-free',
   name: 'tutorial.vpsOracle.name',
   icon: 'cloud',
+  skill: 'vps-oracle',
   steps: [
     {
       title: 'tutorial.vpsOracle.step1.title',
@@ -39,6 +40,7 @@ export const vpsGenericTutorial: TutorialDefinition = {
   id: 'vps-generic',
   name: 'tutorial.vpsGeneric.name',
   icon: 'cloud',
+  skill: 'vps-generic',
   steps: [
     {
       title: 'tutorial.vpsGeneric.step1.title',

@@ -1,7 +1,9 @@
+import type { HostingSkillId } from '@monky/shared';
 import type { TutorialDefinition } from './TutorialDefinition';
 import { t } from '../i18n';
 import type { OnboardingShot } from '../views/onboardingShots';
 import { renderOnboardingShot } from '../views/onboardingShots';
+import { showErrorToast, showSuccessToast } from '../views/CopyToast';
 
 /** What the buttons of a tutorial step do; the onboarding wizard owns the navigation. */
 export interface TutorialStepActions {
@@ -43,6 +45,18 @@ export function renderTutorialStep(definition: TutorialDefinition, index: number
         <div class="tutorial-progress-fill" style="width: ${((index + 1) / total) * 100}%;"></div>
       </div>
 
+      <button type="button" class="tutorial-ai-skill" id="tutorial-ai-skill">
+        <span class="material-symbols-outlined tutorial-ai-skill-icon" aria-hidden="true">smart_toy</span>
+        <span class="tutorial-ai-skill-text">
+          <strong>${t('tutorial.aiSkillTitle')}</strong>
+          <span>${t('tutorial.aiSkillDesc')}</span>
+        </span>
+        <span class="tutorial-ai-skill-cta">
+          <span class="material-symbols-outlined md-16" aria-hidden="true">download</span>
+          ${t('tutorial.aiSkillAction')}
+        </span>
+      </button>
+
       <div class="tutorial-step-body">
         <h3 class="tutorial-step-title" id="tutorial-step-title">${t(step.title)}</h3>
         ${shots}
@@ -80,11 +94,13 @@ export function tutorialStepShots(definition: TutorialDefinition, index: number)
   return (definition.steps[index]?.images ?? []).map((image) => image.shot);
 }
 
-export function attachTutorialStep(content: HTMLElement, actions: TutorialStepActions): void {
+export function attachTutorialStep(content: HTMLElement, definition: TutorialDefinition, actions: TutorialStepActions): void {
   content.querySelector('#tutorial-close')?.addEventListener('click', () => actions.close());
   content.querySelector('#tutorial-prev')?.addEventListener('click', () => actions.previous());
   content.querySelector('#tutorial-next')?.addEventListener('click', () => actions.next());
   content.querySelector('#tutorial-finish')?.addEventListener('click', () => actions.finish());
+  const skillButton = content.querySelector<HTMLButtonElement>('#tutorial-ai-skill');
+  skillButton?.addEventListener('click', () => void saveSkill(skillButton, definition.skill));
 
   // Links inside the tutorial text open in the system browser.
   content.querySelectorAll<HTMLAnchorElement>('.tutorial-content a').forEach((link) => {
@@ -117,6 +133,25 @@ export function attachTutorialStep(content: HTMLElement, actions: TutorialStepAc
     });
     block.appendChild(copyButton);
   });
+}
+
+/**
+ * The main process picks where the zip goes. The button stays focusable while
+ * saving (disabling it would drop keyboard focus) and ignores repeated clicks.
+ */
+async function saveSkill(button: HTMLButtonElement, skill: HostingSkillId): Promise<void> {
+  if (button.getAttribute('aria-busy') === 'true') return;
+  button.setAttribute('aria-busy', 'true');
+  try {
+    const result = await window.api.saveHostingSkill(skill);
+    if (result.status === 'saved') showSuccessToast(t('tutorial.aiSkillSaved'), 6000);
+    else if (result.status === 'failed') showErrorToast(result.error);
+  } catch (error) {
+    console.warn('[Onboarding] Could not save the hosting skill.', error);
+    showErrorToast(t('tutorial.aiSkillFailed'));
+  } finally {
+    button.removeAttribute('aria-busy');
+  }
 }
 
 /**

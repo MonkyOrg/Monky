@@ -4,6 +4,7 @@ export const radminTutorial: TutorialDefinition = {
   id: 'radmin-vpn',
   name: 'tutorial.radmin.name',
   icon: 'vpn_lock',
+  skill: 'radmin',
   steps: [
     {
       title: 'tutorial.radmin.step1.title',

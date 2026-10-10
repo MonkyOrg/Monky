@@ -4,6 +4,7 @@ export const lanTutorial: TutorialDefinition = {
   id: 'lan',
   name: 'tutorial.lan.name',
   icon: 'wifi',
+  skill: 'lan',
   steps: [
     {
       title: 'tutorial.lan.step1.title',

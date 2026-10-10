@@ -326,7 +326,7 @@ export class OnboardingWizard {
 
     const tutorial = this.tutorial;
     if (tutorial) {
-      attachTutorialStep(content, {
+      attachTutorialStep(content, tutorial.definition, {
         previous: () => {
           if (tutorial.step === 0) {
             this.go(tutorial.from, -1);

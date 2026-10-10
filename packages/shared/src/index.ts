@@ -22,6 +22,7 @@ export type { QualityPresetType, QualityProfile } from './constants.js';
 export * from './models.js';
 export * from './serverCommunity.js';
 export * from './serverEventCalendar.js';
+export * from './hostingSkills.js';
 export * from './messageSearch.js';
 export * from './forum.js';
 export * from './voiceHealth.js';
