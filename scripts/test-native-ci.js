@@ -700,6 +700,7 @@ test('the extracted DOM lane preserves every existing test command and its order
     'node apps/client/test/cameraEffectsSmoke.cjs --packaged --cpu-compositor --chroma-only --transitions-only',
     'node apps/client/test/cameraPublicationSmoke.cjs',
     'node apps/client/test/footerControlsSmoke.cjs',
+    'node apps/client/test/compositorRefreshSmoke.cjs',
     'npm run test:transport --workspace=apps/client',
     'npm run test:bot-marketplace --workspace=apps/client',
     'npm run test:soundboard --workspace=apps/client',

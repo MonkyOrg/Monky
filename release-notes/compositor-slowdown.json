@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O Monky não fica mais lento depois de horas aberto, a ponto de até passar o mouse travar. Um defeito do Chromium acumulava trabalho de animação; agora o Monky limpa esse acúmulo quando fica minimizado ou atrás de um jogo, sem afetar chamadas.",
+  "en": "Monky no longer slows down after hours open, to the point where even hovering lagged. A Chromium defect piled up animation work; Monky now clears it whenever it is minimized or behind a game, without affecting calls."
+}

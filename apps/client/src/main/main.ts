@@ -25,6 +25,7 @@ import { bindBotScreenDocuments, registerBotScreenScheme } from './botScreenDocu
 import { resolveDevelopmentProfile } from './developmentProfile';
 import { bindDevelopmentQa, configureDevelopmentQaMedia, loadDevelopmentQa } from './developmentQa';
 import { CrashRecovery } from './crashRecovery';
+import { bindCompositorRefresh } from './compositorRefresh';
 import { hasIdentity } from './identityService';
 import { initializeMainLanguage, mt } from './i18n';
 import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
@@ -376,6 +377,8 @@ function createWindow(deferShow = false): void {
   getCrashRecovery().watch(mainWindow);
   const disposeQa = bindDevelopmentQa(mainWindow, developmentQa, quitApplication);
   mainWindow.once('closed', disposeQa);
+  // backgroundThrottling: false never lets Chromium reset its frame metrics; see compositorRefresh.ts.
+  mainWindow.once('closed', bindCompositorRefresh(mainWindow));
 
   if (developmentProfile) {
     const window = mainWindow;
