@@ -4,7 +4,7 @@ import {
   createNativeScreenPresentation, registerNativeAudioPortReceiver, type NativeScreenPresentationController,
 } from '@monky/screen-share';
 import * as nativeAudioProtocol from '@monky/shared';
-import { BOT_SCREEN_DOCUMENT_IPC, SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, DESKTOP_SOURCES_IPC, EVENT_CALENDAR_IPC, type BotScreenDocumentConsent, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
+import { BOT_SCREEN_DOCUMENT_IPC, SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, DESKTOP_SOURCES_IPC, EVENT_CALENDAR_IPC, HOSTING_SKILL_IPC, type BotScreenDocumentConsent, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
 import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenEventSchema } from '@monky/shared';
 import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
 import { DM_EVENT, DM_IPC, type DmApi, type DmEvent, type DmExportMode } from '@monky/shared';
@@ -211,6 +211,7 @@ export interface ElectronApi {
   saveRecentSound: (input: IpcInvokeChannels['app:save-recent-sound']['args'][0]) => Promise<IpcInvokeChannels['app:save-recent-sound']['returnType']>;
   saveCsvFile: (content: string, fileName: string) => Promise<{ success: boolean; error?: string }>;
   saveEventCalendar: (input: IpcInvokeChannels['community:save-event-calendar']['args'][0]) => Promise<IpcInvokeChannels['community:save-event-calendar']['returnType']>;
+  saveHostingSkill: (id: IpcInvokeChannels['onboarding:save-hosting-skill']['args'][0]) => Promise<IpcInvokeChannels['onboarding:save-hosting-skill']['returnType']>;
   probeServer: (host: string, port: number) => Promise<ServerProbeResult>;
   screenAudioSupported: () => Promise<boolean>;
   screenAudioDiagnose: () => Promise<ScreenAudioDiagnostics>;
@@ -558,6 +559,7 @@ const api: ElectronApi = {
   saveRecentSound: (input) => ipcRenderer.invoke('app:save-recent-sound', input),
   saveCsvFile: (content, fileName) => ipcRenderer.invoke('app:save-csv-file', content, fileName),
   saveEventCalendar: (input) => ipcRenderer.invoke(EVENT_CALENDAR_IPC, input),
+  saveHostingSkill: (id) => ipcRenderer.invoke(HOSTING_SKILL_IPC, id),
   probeServer: (host, port) => ipcRenderer.invoke('net:probe-server', host, port),
   screenAudioSupported: () => ipcRenderer.invoke('screen-audio:is-supported'),
   screenAudioDiagnose: () => ipcRenderer.invoke('screen-audio:diagnose'),

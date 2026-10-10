@@ -4,6 +4,7 @@ export const hamachiTutorial: TutorialDefinition = {
   id: 'hamachi',
   name: 'tutorial.hamachi.name',
   icon: 'vpn_lock',
+  skill: 'hamachi',
   steps: [
     {
       title: 'tutorial.hamachi.step1.title',

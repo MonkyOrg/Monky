@@ -12491,6 +12491,66 @@ button:hover .role-option-check:not(.checked) {
   height: 100%;
   background: var(--accent-primary);
 }
+/* Pinned above the step body, so it stays in view on every step. */
+.tutorial-ai-skill {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  background: rgba(88, 101, 242, 0.06);
+  border: 1px solid rgba(88, 101, 242, 0.2);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.tutorial-ai-skill:hover {
+  background: rgba(88, 101, 242, 0.12);
+  border-color: var(--accent-primary);
+}
+.tutorial-ai-skill:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+.tutorial-ai-skill[aria-busy='true'] {
+  cursor: progress;
+  opacity: 0.7;
+}
+.tutorial-ai-skill-icon {
+  flex-shrink: 0;
+  font-size: 22px;
+  color: var(--accent-primary);
+}
+.tutorial-ai-skill-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.tutorial-ai-skill-text strong {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.tutorial-ai-skill-text span {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+.tutorial-ai-skill-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--accent-primary);
+}
 .tutorial-step-body {
   flex: 1 1 auto;
   min-height: 0;
