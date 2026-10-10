@@ -391,6 +391,54 @@ desfaz o segundo. Os ícones vermelhos de restrição indicam o bloqueio
 administrativo; a pessoa ainda pode manter seu próprio microfone mutado
 depois de ser liberada.
 
+## Auditoria
+
+Abra **nome do servidor › Auditoria** para ver o que foi feito no servidor, do
+mais recente ao mais antigo. Administradores têm acesso; outros membros precisam
+da permissão **Visualizar auditoria** em um cargo. **Gerenciar servidor**,
+sozinho, não concede esse acesso, e bots nunca leem a auditoria. A auditoria
+mostra o que acontece em todos os canais, inclusive os privados, então conceda a
+permissão apenas a quem pode ver isso.
+
+Cada registro mostra quem agiu, sobre o quê, quando e o que mudou, com o valor
+anterior e o novo:
+
+- **Canais**: criação, exclusão e mudanças de nome, limite de pessoas,
+  categoria, privacidade, comandos de bots, permissões e posição, inclusive de
+  categorias. Ao arrastar um canal, só ele é registrado, não os que se deslocaram.
+- **Cargos**: criação, exclusão, nome, cor, permissões concedidas e removidas,
+  inclusive as de Todos, e quem recebeu ou perdeu cada cargo.
+- **Membros**: primeira entrada no servidor, expulsões e troca de apelido.
+- **Voz**: silenciar e ensurdecer pelo servidor, desconectar da sala e mover
+  alguém, com a sala de origem e a de destino.
+- **Servidor**: alterações em **Geral**, como nome, limites, modo de voz e relay.
+  Senha e ícone aparecem apenas como alterados.
+- **Eventos e ao vivo**: criar, editar, iniciar, encerrar, cancelar e excluir
+  eventos; publicar, atualizar e encerrar ações ao vivo, formulários e enquetes
+  em destaque. Enquetes comuns só entram quando alguém altera a de outra pessoa.
+- **Bots**: vínculos, instalação, remoção, acessos concedidos ou removidos,
+  configurações alteradas e comandos usados.
+- **Moderação**: mensagens de outras pessoas apagadas ou restauradas e
+  publicações de fórum fixadas, trancadas, renomeadas ou excluídas por quem modera.
+
+Os filtros por tipo e a busca por pessoa, canal, cargo ou bot podem ser
+combinados. Novos registros aparecem no topo enquanto a janela está aberta, e
+**Carregar mais** busca os mais antigos.
+
+Cada registro guarda o nome que o item tinha no momento da ação, então continua
+legível depois que o canal, o cargo ou o membro deixa de existir. A auditoria não
+copia o texto das mensagens apagadas nem o que foi digitado em comandos e
+configurações de bots, apenas o nome das opções. Os registros ficam guardados por
+90 dias, até 50.000 entradas, e os mais antigos são descartados automaticamente.
+Comandos de bots, entradas e trocas de apelido, que qualquer membro pode repetir,
+usam uma cota própria de 20.000 entradas e no máximo 30 por pessoa a cada minuto,
+para que uma enxurrada deles nunca apague o histórico de moderação.
+Ninguém consegue editar ou apagar registros pelo aplicativo.
+
+Perder a permissão, desconectar ou trocar de servidor fecha a auditoria na hora.
+Servidores que ainda não têm auditoria não mostram o menu nem a permissão:
+atualize o servidor para usá-la.
+
 ## Escolher P2P ou SFU
 
 | Modo | Caminho da mídia | Principal cuidado |

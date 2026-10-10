@@ -81,7 +81,7 @@ function fixture(language = 'en') {
   const modules = new Map();
   const allowed = new Set([
     'views/settings/tabs/LocalToolsTab', 'i18n/index', 'i18n/locales/en',
-    'i18n/locales/pt-BR', 'i18n/locales/community', 'i18n/messageSearch',
+    'i18n/locales/pt-BR', 'i18n/locales/community', 'i18n/locales/serverAudit', 'i18n/messageSearch',
     'utils/html', 'utils/attachment', 'utils/loadingIndicator',
   ]);
   function load(name) {

@@ -7,13 +7,28 @@ import {
   nativeLiveFormCreateSchema, nativeLiveFormIdSchema, nativeLiveFormResultsRequestSchema,
   nativeLiveFormSubmitSchema,
   type ProtocolMessage, type ServerEvent, type LiveActionSubmission,
+  type EventControl, type ServerAuditAction, type ServerAuditChange, type ServerAuditRef,
 } from '@monky/shared';
 import { ZodError } from 'zod';
 import { CommunityService, CommunityError } from '../../application/services/CommunityService';
 import type { ChannelService } from '../../application/services/ChannelService';
+import { auditDiff, auditRef } from '../../application/services/ServerAuditService';
+import { eventChanges } from '../../application/services/serverAuditChanges';
 import type { BotInteractionSession, SelectorInvocationAuthorization } from './BotInteractionHandler';
 import { RateLimiter } from '../security/RateLimiter';
 import { Logger } from '../logger/Logger';
+
+/** A community change; the server resolves the channel and the member a bot acted for. */
+export interface CommunityAuditInput {
+  target: ServerAuditRef | null;
+  channelId?: string | null;
+  invokerId?: string;
+  changes?: ServerAuditChange[];
+}
+
+const EVENT_CONTROL_ACTIONS = {
+  start: 'event.start', end: 'event.end', cancel: 'event.cancel', delete: 'event.delete',
+} as const satisfies Record<EventControl['action'], ServerAuditAction>;
 
 interface CommunityTransport {
   sessions(): Iterable<BotInteractionSession>;
@@ -23,6 +38,7 @@ interface CommunityTransport {
   authorizeInvocation(session: BotInteractionSession, invocationId: string, channelId: string): Promise<SelectorInvocationAuthorization | undefined>;
   send(session: BotInteractionSession, message: ProtocolMessage): void;
   pollUpdated(poll: import('@monky/shared').NativePoll): Promise<void>;
+  audit?(session: BotInteractionSession, action: ServerAuditAction, input: CommunityAuditInput): Promise<void>;
 }
 
 export class CommunityHandler {
@@ -121,21 +137,41 @@ export class CommunityHandler {
         }
         if (type === MessageType.COMMUNITY_UPDATE_SETTINGS) {
           this.requireHuman(session);
+          const previous = this.service.settings();
           const closedPolls = await this.service.updateSettings(
             userId,
             communitySettingsUpdateSchema.parse(payload),
             assertCurrent,
           );
+          const next = this.service.settings();
+          const changes = [
+            ...auditDiff([['eventsEnabled', previous.eventsEnabled, next.eventsEnabled]]),
+            ...(previous.bannerUrl !== next.bannerUrl ? [{ field: 'banner' }] : []),
+          ];
+          if (changes.length) await this.recordAudit(session, 'community.update', { target: null, changes });
           for (const poll of closedPolls) await this.transport.pollUpdated(poll);
         } else if (type === MessageType.EVENT_SAVE) {
           this.requireHuman(session);
-          const event = await this.service.saveEvent(userId, eventSaveSchema.parse(payload), Date.now(), assertCurrent);
+          const input = eventSaveSchema.parse(payload);
+          const previous = input.id ? this.service.repository.event(input.id) : undefined;
+          const event = await this.service.saveEvent(userId, input, Date.now(), assertCurrent);
           this.send(session, MessageType.EVENT_SAVED, { event: await this.service.publicEvent(event, userId) }, requestId);
+          await this.recordAudit(session, previous ? 'event.update' : 'event.create', {
+            target: auditRef.of('event', event.id, event.title),
+            changes: eventChanges(previous, event, await this.channelNames(previous, event)),
+          });
           await this.refreshNow();
           return;
         } else if (type === MessageType.EVENT_CONTROL) {
           this.requireHuman(session);
-          const event = await this.service.controlEvent(userId, eventControlSchema.parse(payload), Date.now(), assertCurrent);
+          const input = eventControlSchema.parse(payload);
+          const previous = this.service.repository.event(input.id);
+          const event = await this.service.controlEvent(userId, input, Date.now(), assertCurrent);
+          if (previous) {
+            await this.recordAudit(session, EVENT_CONTROL_ACTIONS[input.action], {
+              target: auditRef.of('event', previous.id, previous.title),
+            });
+          }
           if (event?.status === 'active') { this.queueStarted(event); await this.flushStarted(); }
         } else if (type === MessageType.EVENT_INTEREST) {
           this.requireHuman(session);
@@ -151,6 +187,9 @@ export class CommunityHandler {
             assertCurrent,
           );
           this.send(session, MessageType.NATIVE_FORM_SNAPSHOT, form, requestId);
+          await this.recordAudit(session, 'form.create', {
+            target: auditRef.of('form', form.id, form.form.title), channelId: form.channelId,
+          });
           await this.refreshNow();
           return;
         } else if (type === MessageType.NATIVE_FORM_SUBMIT) {
@@ -168,12 +207,19 @@ export class CommunityHandler {
         } else if (type === MessageType.NATIVE_FORM_CLOSE) {
           this.requireNativeForms(session);
           this.requireHuman(session);
+          const { id } = nativeLiveFormIdSchema.parse(payload);
+          const previous = this.service.repository.nativeForm(id);
           await this.service.closeNativeForm(
             userId,
-            nativeLiveFormIdSchema.parse(payload).id,
+            id,
             Date.now(),
             assertCurrent,
           );
+          if (previous) {
+            await this.recordAudit(session, 'form.close', {
+              target: auditRef.of('form', previous.id, previous.form.title), channelId: previous.channelId,
+            });
+          }
         } else if (type === MessageType.NATIVE_FORM_RESULTS) {
           this.requireNativeForms(session);
           this.requireHuman(session);
@@ -195,8 +241,14 @@ export class CommunityHandler {
             throw new CommunityError('The invocation has ended.', ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
           }
           assertCurrent();
+          const existed = input.id ? this.service.repository.liveAction(input.id) : undefined;
           const action = this.service.createLiveAction(botId, authorization.creatorUserId, input);
           this.send(session, MessageType.LIVE_ACTION_SNAPSHOT, action, requestId);
+          if (!existed) {
+            await this.recordAudit(session, 'live.create', {
+              target: auditRef.of('live', action.id, action.title), channelId: action.channelId, invokerId: action.creatorUserId,
+            });
+          }
           await this.refreshNow();
           return;
         } else if (type === MessageType.LIVE_ACTION_UPDATE) {
@@ -208,14 +260,32 @@ export class CommunityHandler {
           assertCurrent();
           const action = this.service.updateLiveAction(botId, input);
           this.send(session, MessageType.LIVE_ACTION_SNAPSHOT, action, requestId);
+          // Bots refresh content often; only what members would notice is recorded.
+          const changes = [
+            ...auditDiff([['title', existing.title, action.title], ['expiresAt', existing.expiresAt, action.expiresAt]]),
+            ...(existing.description !== action.description ? [{ field: 'description' }] : []),
+            ...(JSON.stringify(existing.audience) !== JSON.stringify(action.audience) ? [{ field: 'audience' }] : []),
+          ];
+          if (changes.length) {
+            await this.recordAudit(session, 'live.update', {
+              target: auditRef.of('live', action.id, action.title), channelId: action.channelId, invokerId: action.creatorUserId, changes,
+            });
+          }
           await this.refreshNow();
           return;
         } else if (type === MessageType.LIVE_ACTION_CLOSE) {
           const { id } = liveActionIdSchema.parse(payload);
+          const previous = this.service.repository.liveAction(id);
           if (session.isBot) this.service.closeLiveAction(this.requireBot(session), id);
           else {
             this.requireHuman(session);
             await this.service.closeLiveActionForUser(userId, id, assertCurrent);
+          }
+          if (previous) {
+            await this.recordAudit(session, 'live.close', {
+              target: auditRef.of('live', previous.id, previous.title), channelId: previous.channelId,
+              invokerId: session.isBot ? previous.creatorUserId : undefined,
+            });
           }
         } else if (type === MessageType.LIVE_ACTION_LIST) {
           const botId = this.requireBot(session);
@@ -270,6 +340,25 @@ export class CommunityHandler {
         }, requestId);
       }
     });
+  }
+
+  /** Recording never undoes or fails a change that already happened. */
+  private async recordAudit(session: BotInteractionSession, action: ServerAuditAction, input: CommunityAuditInput): Promise<void> {
+    try {
+      await this.transport.audit?.(session, action, input);
+    } catch (error) {
+      Logger.error('NETWORK', `Could not record ${action} in the audit log.`, error);
+    }
+  }
+
+  private async channelNames(...events: Array<ServerEvent | undefined>): Promise<(id: string) => string> {
+    const names = new Map<string, string>();
+    for (const event of events) {
+      if (!event || event.location.kind === 'external' || names.has(event.location.channelId)) continue;
+      const channel = await this.channels.getChannelSummary(event.location.channelId);
+      if (channel) names.set(channel.id, channel.name);
+    }
+    return (id) => names.get(id) ?? id;
   }
 
   private async requireChannel(session: BotInteractionSession, channelId: string, accessUserId: string): Promise<void> {

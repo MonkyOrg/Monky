@@ -181,6 +181,9 @@ export class ServerRolesTab {
   }
 
   private permissionItems(): Array<{ key: Permission; label: string; description: string }> {
+    const store = this.context?.store ?? serverStore;
+    // Older servers have no audit log, so the switch would grant nothing there.
+    const hasAudit = store.serverDetails?.protocol?.features.includes('server-audit') === true;
     return [
       { key: Permission.VIEW_CHANNEL, label: t('permissions.viewChannel'), description: t('permissions.viewChannelDesc') },
       { key: Permission.MANAGE_CHANNELS, label: t('permissions.manageChannels'), description: t('permissions.manageChannelsDesc') },
@@ -188,6 +191,7 @@ export class ServerRolesTab {
       { key: Permission.MANAGE_EVENTS, label: t('permissions.manageEvents'), description: t('permissions.manageEventsDesc') },
       { key: Permission.EMIT_LIVE_ACTIONS, label: t('permissions.emitLiveActions'), description: t('permissions.emitLiveActionsDesc') },
       { key: Permission.VIEW_SERVER_MONITOR, label: t('permissions.viewServerMonitor'), description: t('permissions.viewServerMonitorDesc') },
+      ...(hasAudit ? [{ key: Permission.VIEW_AUDIT_LOG, label: t('permissions.viewAuditLog'), description: t('permissions.viewAuditLogDesc') }] : []),
       { key: Permission.MANAGE_ROLES, label: t('permissions.manageRoles'), description: t('permissions.manageRolesDesc') },
       { key: Permission.KICK_MEMBERS, label: t('permissions.kickMembers'), description: t('permissions.kickMembersDesc') },
       { key: Permission.SPEAK, label: t('permissions.speak'), description: t('permissions.speakDesc') },

@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Servidores ganharam uma Auditoria: quem tem permissão vê quem mexeu em canais, cargos, eventos e bots, quem expulsou, silenciou ou moveu alguém de uma sala para outra, e os comandos usados. Atualize o servidor para usar.",
+  "en": "Servers now have an Audit log: people with permission can see who changed channels, roles, events and bots, who kicked, muted or moved someone between rooms, and which commands were used. Update the server to use it."
+}

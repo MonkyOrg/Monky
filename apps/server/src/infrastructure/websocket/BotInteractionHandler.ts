@@ -54,6 +54,7 @@ import {
   type LocalRequestContext,
   type LocalTaskCancellationCause,
   type BotMessageComponent,
+  type CommandValues,
 } from '@monky/shared';
 import { ChannelAccessContext, ChannelService } from '../../application/services/ChannelService';
 import { CommandRegistry } from '../../application/services/CommandRegistry';
@@ -96,6 +97,8 @@ interface InteractionTransport {
   consumeLocalPreview?(
     bot: BotInteractionSession, origin: BotInteractionSession, contextId: string, requestId: string, result: LocalPreviewReference,
   ): Promise<boolean>;
+  /** Told once an invocation reached its bot, so the server can record who ran what. */
+  commandInvoked?(session: BotInteractionSession, command: SlashCommand, channelId: string, options: CommandValues): Promise<void>;
 }
 
 interface Invocation {
@@ -622,6 +625,11 @@ export class BotInteractionHandler {
       invokerVoiceChannelId: this.transport.getVoiceChannelId?.(session.sessionId) ?? null,
     };
     this.transport.send(bot.ws, { type: MessageType.COMMAND_INVOKE, payload: execution });
+    try {
+      await this.transport.commandInvoked?.(session, command, input.channelId, options.values);
+    } catch (error) {
+      Logger.error('BOT', 'Could not record a command invocation.', error);
+    }
   }
 
   async getVoiceContext(session: BotInteractionSession, payload: unknown, requestId?: string): Promise<void> {

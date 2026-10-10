@@ -19,6 +19,12 @@ export class UserService {
     return (await this.userRepo.findById(userId)) !== null;
   }
 
+  /** Current nicknames by id; unknown ids are left out. */
+  public async nicknames(userIds: readonly string[]): Promise<Map<string, string>> {
+    if (userIds.length === 0) return new Map();
+    return new Map((await this.userRepo.findByIds([...new Set(userIds)])).map((user) => [user.id, user.nickname]));
+  }
+
   public async changeNickname(
     userId: string,
     newNickname: string

@@ -35,6 +35,9 @@ import { settingsModal } from './SettingsModal';
 import { noiseSuppressionToggleTitle } from './settings/NoiseSuppressionControl';
 import { serverSettingsModal } from './ServerSettingsModal';
 import { serverMonitorModal } from './ServerMonitorModal';
+import { serverAuditModal } from './ServerAuditModal';
+import { canOpenServerAudit } from '../core/ServerAuditSource';
+import { showErrorToast } from './CopyToast';
 import { recentSoundsModal } from './RecentSoundsModal';
 import '../styles/connectionTransition.css';
 import { inviteModal } from './InviteModal';
@@ -190,6 +193,10 @@ export class MainView {
               <button id="btn-server-monitor" class="server-dropdown-item" title="${t('serverMonitor.title')}" style="display: none;">
                 <span class="material-symbols-outlined md-18">monitoring</span>
                 <span>${t('serverMonitor.title')}</span>
+              </button>
+              <button id="btn-server-audit" class="server-dropdown-item" title="${t('serverAudit.title')}" style="display: none;">
+                <span class="material-symbols-outlined md-18">policy</span>
+                <span>${t('serverAudit.title')}</span>
               </button>
               <button id="btn-recent-sounds" class="server-dropdown-item" title="${t('recentSounds.title')}"
                 style="${s.recentSoundCacheEnabled && s.protocol?.features.includes('recent-sounds') ? '' : 'display: none;'}">
@@ -2480,10 +2487,13 @@ export class MainView {
 
   private refreshServerMonitorVisibility(): void {
     const btn = this.container.querySelector<HTMLElement>('#btn-server-monitor');
-    if (!btn) return;
+    const auditButton = this.container.querySelector<HTMLElement>('#btn-server-audit');
     const session = sessionManager.getActive();
+    const connected = session?.client.getStatus() === 'CONNECTED';
+    if (auditButton) auditButton.style.display = session && canOpenServerAudit(session.serverStore, connected) ? '' : 'none';
+    if (!btn) return;
     const user = session?.serverStore.currentUser;
-    const allowed = session?.client.getStatus() === 'CONNECTED' && user && !user.isBot
+    const allowed = connected && user && !user.isBot
       && session.serverStore.hasPermission(Permission.VIEW_SERVER_MONITOR);
     btn.style.display = allowed ? '' : 'none';
   }
@@ -2535,6 +2545,14 @@ export class MainView {
       withButtonLoading(e.currentTarget as HTMLElement, () => session
         ? serverMonitorModal.openRemote(session)
         : showAlert({ title: t('serverMonitor.title'), message: t('serverMonitor.disconnected'), variant: 'warning' }));
+    });
+    document.getElementById('btn-server-audit')?.addEventListener('click', (event) => {
+      this.closeServerDropdown();
+      const session = sessionManager.getActive();
+      withButtonLoading(event.currentTarget as HTMLElement, async () => {
+        if (session) await serverAuditModal.open(session);
+        else showErrorToast(t('serverAudit.disconnected'));
+      });
     });
     btnRecentSounds?.addEventListener('click', (event) => {
       this.closeServerDropdown();

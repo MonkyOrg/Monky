@@ -412,6 +412,7 @@ export const ptBR = {
   'permission.VIEW_SERVER_MONITOR': 'Visualizar monitor do servidor',
   'permission.MANAGE_EVENTS': 'Gerenciar eventos',
   'permission.EMIT_LIVE_ACTIONS': 'Emitir live actions',
+  'permission.VIEW_AUDIT_LOG': 'Visualizar auditoria',
 
   // ── Voice mode comparison ──────────────────────────────────────────────
   'voice.data': 'Dado',

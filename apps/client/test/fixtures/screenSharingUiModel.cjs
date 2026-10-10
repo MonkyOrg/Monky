@@ -427,7 +427,7 @@ function fixture(language = 'en') {
     'views/ScreenSharePickerModal', 'views/GameCaptureGuideModal', 'views/CopyToast', 'views/settings/tabs/QualityTab', 'views/settings/qualityOptions',
     'views/ScreenEncodingControls', 'core/screenEncoding',
     'views/settings/SettingsSectionNavigation', 'i18n/index', 'i18n/locales/en', 'i18n/locales/pt-BR',
-    'i18n/locales/community', 'i18n/messageSearch',
+    'i18n/locales/community', 'i18n/locales/serverAudit', 'i18n/messageSearch',
     'utils/html', 'utils/buttonLoading', 'utils/loadingSkeleton', 'utils/qualityProfileLimits', 'utils/avatar', 'utils/colors',
   ]);
   function load(name) {
