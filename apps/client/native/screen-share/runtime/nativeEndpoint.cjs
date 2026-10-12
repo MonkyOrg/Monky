@@ -741,10 +741,15 @@ class NativeScreenEndpoint {
       'Native screen operations retained ownership after engine closure.').then(() => { operationsRetired = true; }));
     if (this.host) {
       await collect(this.stopCaptureHost(this.host));
-      if (this.host.snapshot().nativeClosed !== true) {
-        errors.push(Object.assign(new Error('The native capture host did not prove retirement.'),
-          { code: 'ERR_SCREEN_CAPTURE_RETIREMENT' }));
-        throw new AggregateError([...new Set(errors)], 'The native capture host did not prove retirement.');
+      const host = this.host.snapshot();
+      if (host.nativeClosed !== true) {
+        const unproven = Object.assign(new Error('The native capture host did not prove retirement.'),
+          { code: 'ERR_SCREEN_CAPTURE_RETIREMENT' });
+        errors.push(unproven);
+        // Only a host the OS has not yet reported as exited can still own capture, encoder or hook
+        // resources. Once it exited (e.g. it crashed while retiring a hung encoder), the missing
+        // evidence is reported, but pinning the share would block Stop and every new share.
+        if (host.closed !== true || !host.processExit) throw new AggregateError([...new Set(errors)], unproven.message);
       }
     }
     assert.equal(this.flow?.inFlight.size ?? 0, 0, 'Encoded native copies survived engine closure.');

@@ -695,8 +695,8 @@ test('public snapshots and a borrowed closed engine cannot forge local endpoint 
 });
 
 for (const mode of ['p2p', 'sfu']) {
-  for (const missing of [null, 'cancel-first', 'encoderReleased', 'exit', 'processExit', 'eof', 'liveEof', 'forcedTermination', 'closed']) {
-    test(`${mode}: source loss retires cleanly only with complete host proof (${missing ?? 'complete'})`, async () => {
+  for (const missing of [null, 'cancel-first', 'encoderReleased', 'exit', 'processExit', 'eof', 'liveEof', 'forcedTermination', 'closed', 'unexited']) {
+    test(`${mode}: source loss retires cleanly with complete host proof and releases an exited host otherwise (${missing ?? 'complete'})`, async () => {
       const f = fixture({ role: 'publish', mode });
       await f.endpoint.ready;
       const directory = path.resolve(__dirname, 'modeled-capture'), runId = 'a'.repeat(32);
@@ -728,11 +728,23 @@ for (const mode of ['p2p', 'sfu']) {
       else if (missing === 'liveEof') host.liveEof = false;
       else if (missing === 'forcedTermination') host.forcedTermination = true;
       else if (missing === 'closed') host.closed = false;
+      else if (missing === 'unexited') host.processExit = undefined;
       f.finish({ closed: true });
-      if (missing && missing !== 'cancel-first') {
+      if (missing === 'closed' || missing === 'unexited') {
+        // Without an OS-reported exit, the host may still be capturing: ownership stays retained.
         await assert.rejects(f.endpoint.close(), /host did not prove retirement/);
         assert.equal(host.snapshot().nativeClosed, false);
         assert.throws(() => assertNativeScreenEndpointLocallyClosed(f.endpoint), /retains local media/);
+      } else if (missing && missing !== 'cancel-first') {
+        // The process exited, so its capture is gone even though its evidence is incomplete: the host
+        // stays unproven and both failures are reported, but the endpoint no longer blocks Stop or a new share.
+        await assert.rejects(f.endpoint.close(), error => /retirement reported failures/.test(error.message)
+          && error.errors.some(cause => cause.code === 'ERR_SCREEN_CAPTURE_RETIREMENT'));
+        assert.equal(host.snapshot().nativeClosed, false);
+        assert.equal(f.endpoint.snapshot().closed, true);
+        assert.doesNotThrow(() => assertNativeScreenEndpointLocallyClosed(f.endpoint));
+        await f.endpoint.close();
+        assert.ok(f.errors.some(error => error.code === failure.code), 'The source loss is still reported.');
       } else {
         await f.endpoint.close();
         assert.equal(host.snapshot().nativeClosed, true);
@@ -745,6 +757,38 @@ for (const mode of ['p2p', 'sfu']) {
     });
   }
 }
+
+test('a capture host that crashes while retiring a hung AMF encoder no longer pins its endpoint', async () => {
+  // Field log (38.1.0-beta): the encoder failed through the media pipe, then the host exited with
+  // STATUS_HEAP_CORRUPTION before its terminal record. The share could neither stop nor restart.
+  const f = fixture({ role: 'publish', mode: 'sfu' });
+  await f.endpoint.ready;
+  const directory = path.resolve(__dirname, 'modeled-capture'), runId = 'b'.repeat(32);
+  const host = new CaptureBridge({
+    host: { kind: 'verified-native-screen-capture-host', executable: path.join(directory, 'host.exe'), sha256: 'a'.repeat(64) },
+    runtime: { kind: 'verified-stock-obs-runtime', version: '32.1.1', stockDirectory: directory, binaryDirectory: directory },
+    runId, runDirectory: path.join(directory, `monky-screen-capture-${runId}`),
+    video: { width: 1920, height: 1080, fps: 60, bitrateKbps: 8000 },
+    onPacket() {}, onNotice() {}, onError: error => f.endpoint.report(error),
+  });
+  f.endpoint.host = host;
+  const failure = { code: 'ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION',
+    message: "[texture-amf-av1: 'Monky explicitly selected screen encoder'] amf_encode_tex: SubmitInput timed out: AMF_INPUT_FULL" };
+  host.receiveLive({ type: 'closed', value: { kind: 'closed', runId, failure } });
+  Object.assign(host, {
+    prepareStarted: true, closed: true, exit: { code: 0xC0000374, signal: null }, processExit: { code: 0xC0000374, signal: null },
+    eof: { stdout: true, stderr: true }, liveEof: true, exited: Promise.resolve(),
+  });
+  host.liveFrames.closed = { packets: 0, failure };
+  f.finish({ closed: true });
+  await assert.rejects(f.endpoint.close(), error => error instanceof AggregateError
+    && /retirement reported failures/.test(error.message));
+  assert.equal(host.snapshot().nativeClosed, false, 'A crash is never recorded as proven native retirement.');
+  assert.deepEqual(host.snapshot().processExit, { code: 0xC0000374, signal: null });
+  assert.equal(f.endpoint.snapshot().closed, true);
+  assert.doesNotThrow(() => assertNativeScreenEndpointLocallyClosed(f.endpoint));
+  assert.ok(f.errors.some(error => error.code === failure.code), 'The encoder failure stays visible in diagnostics.');
+});
 
 test('owned-directory cleanup failure retains the endpoint and Retry drains it using the original engine proof', async t => {
   const f = fixture();
