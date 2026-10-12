@@ -73,6 +73,7 @@ import { translateProtocolError } from './i18n/protocolErrors';
 import { toAbsoluteServerIconUrl } from './utils/avatar';
 import { installImageFallback } from './utils/imageFallback';
 import { clientLog } from './core/ClientLogService';
+import { startResponsivenessMonitor } from './core/ResponsivenessMonitor';
 import { overlayBridgeService } from './core/OverlayBridgeService';
 import { OverlayStageView } from './views/OverlayStageView';
 import { bindBotChatEvents } from './core/botChatEvents';
@@ -178,6 +179,7 @@ class App {
     // place before any connection exists, otherwise the first events would be
     // applied to whatever store happens to be active (#400).
     sessionManager.install();
+    const stopResponsivenessMonitor = startResponsivenessMonitor();
     appEvents.on<CommunityStartNotice>('community.event_started', notice => {
       soundEffects.play('chat_message');
       showInfoToast(t('community.started', { event: notice.title, server: notice.serverName }), 7000);
@@ -191,6 +193,7 @@ class App {
       if (!sessionManager.isHome()) showHome();
     });
     window.addEventListener('pagehide', () => {
+      stopResponsivenessMonitor();
       this.autoEntryService.dispose();
       gamePresence.dispose();
       this.homeView.destroy();
