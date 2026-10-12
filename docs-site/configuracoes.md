@@ -779,6 +779,28 @@ novos eventos não são persistidos nem recuperados retroativamente. A gravaçã
 continua enquanto o diálogo de exportação está aberto; o arquivo exportado
 inclui os eventos gravados até a confirmação.
 
+### Diagnosticar lentidão
+
+Se o Monky ficar lento (passar o mouse, abrir menus ou rolar demora a
+responder), mantenha **Gravar logs** ativado, anote o horário e exporte os logs
+antes de reiniciar o aplicativo.
+
+- `UI` / `Slow rendering detected`: no máximo uma linha por minuto com eventos
+  lentos (200 ms ou mais) e quadros longos. `inputDelayMs` e `processingMs`
+  medem o trabalho do aplicativo; `presentationDelayMs` alto com
+  processamento baixo indica atraso na composição ou na GPU.
+- `APP` / `Sustained renderer CPU` e `Renderer CPU recovered`: a interface
+  ficou acima de 70% de um núcleo por 2 minutos, e quando voltou ao normal.
+- `APP` / `Process usage summary`: média de CPU e memória por processo a cada
+  10 minutos, para comparar com o período lento.
+- `APP` / mudanças de monitor (com a taxa de atualização), estado da GPU (com
+  aviso quando a composição passa a ser feita por software), suspensão e
+  retomada, minimizar/restaurar a janela e processos do Chromium que
+  terminaram com erro, como a GPU.
+
+Esses registros não incluem conteúdo de mensagens, títulos de janelas nem
+caminhos do seu usuário.
+
 ## Sobre e Updates
 
 Consulte a versão, procure atualizações e reveja as notas da versão instalada.
