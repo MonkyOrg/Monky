@@ -59,7 +59,11 @@ async function receive(bytes) {
     return;
   }
   assert.equal(message.type, 'call');
-  assert.ok(engine && Number.isSafeInteger(message.id) && message.id > 0 && !pending.has(message.id));
+  // Separate checks: a field failure (exit 74) must name which call contract broke.
+  assert.ok(engine, `RTC call ${message.id} (${message.method}) arrived before the native engine was initialized.`);
+  assert.ok(Number.isSafeInteger(message.id) && message.id > 0,
+    `RTC call identifier ${message.id} (${message.method}) is invalid.`);
+  assert.ok(!pending.has(message.id), `RTC call identifier ${message.id} (${message.method}) is already in flight.`);
   assert.ok(METHODS.has(message.method) && Array.isArray(message.args)
     && pending.size < MAX_ORDINARY_CALLS + MAX_RETIREMENT_CALLS);
   pending.add(message.id);

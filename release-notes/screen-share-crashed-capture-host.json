@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Se o processo de captura fechar sozinho durante uma transmissão de tela (por exemplo, quando o codificador de vídeo da placa trava), o Monky encerra a transmissão em vez de mantê-la presa: dá para parar e compartilhar de novo sem reiniciar o aplicativo.",
+  "en": "If the capture process closes unexpectedly during a screen share (for example, when the graphics card's video encoder hangs), Monky now ends the share instead of leaving it stuck, so you can stop and share again without restarting the app."
+}
