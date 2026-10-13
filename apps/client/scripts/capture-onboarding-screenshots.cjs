@@ -7,12 +7,30 @@
  *   npm run screenshots:onboarding
  *
  * Terminal shots are drawn here with sample addresses (documentation ranges and
- * private IPs, never this machine's) and the real `monky create` prompts.
+ * private IPs, never this machine's) and the real `monky create` prompts;
+ * steps outside Monky (home network, router, cloud console) are illustrations
+ * from onboarding-illustrations.cjs.
+ *
+ * The download pages of the VPNs and of Oracle Cloud come from the live sites,
+ * so they need the internet and only run on request (onboarding-sites.cjs):
+ *   npm run screenshots:onboarding -- --sites        everything
+ *   npm run screenshots:onboarding -- --sites-only   only the sites
+ *
+ * The VPN apps themselves were photographed once in Windows Sandbox, with
+ * throwaway networks and account data redacted (onboarding-app-shots/); this
+ * script only frames them (onboarding-app-shots.cjs). Retake them by hand if
+ * an app's interface changes.
  */
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const illustrations = require('./onboarding-illustrations.cjs');
+const sites = require('./onboarding-sites.cjs');
+const appShots = require('./onboarding-app-shots.cjs');
+
+const SITES_ONLY = process.argv.includes('--sites-only');
+const WITH_SITES = SITES_ONLY || process.argv.includes('--sites');
 
 const clientRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(clientRoot, '..', '..');
@@ -26,7 +44,7 @@ if (!process.versions.electron) {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-onboarding-shots-'));
   const env = { ...process.env, MONKY_ONBOARDING_SHOTS_PROFILE: profile };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(require('electron'), [__filename], { cwd: clientRoot, env, stdio: 'inherit' });
+  const child = spawn(require('electron'), [__filename, ...process.argv.slice(2)], { cwd: clientRoot, env, stdio: 'inherit' });
   child.once('exit', (code) => {
     fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     process.exit(code ?? 1);
@@ -47,7 +65,7 @@ if (!process.versions.electron) {
   const timer = setTimeout(() => {
     console.error(`Onboarding screenshots timed out during ${phase}`);
     void finish(1);
-  }, 180_000);
+  }, 360_000);
 
   app.whenReady().then(async () => {
     const { createServer } = await import('vite');
@@ -124,6 +142,24 @@ if (!process.versions.electron) {
       return { x: left, y: top, width: Math.floor(box.right) - left, height: bottom - top };
     })()`);
     const click = (selector) => evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+    /** Opens a public site in its own window (no Monky fixture, no bridge) and returns the page picture. */
+    const captureSitePage = async (url, language, target) => {
+      const page = new BrowserWindow({
+        show: false, width: sites.PAGE.width, height: sites.PAGE.height, useContentSize: true,
+        webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true },
+      });
+      try {
+        page.webContents.setUserAgent(page.webContents.getUserAgent().replace(/ \S*monky\S*/gi, '').replace(/ Electron\/\S+/, ''));
+        await page.loadURL(url, { extraHeaders: `Accept-Language: ${language === 'pt-BR' ? 'pt-BR,pt' : 'en-US,en'}\n` });
+        await settle(4000);
+        const box = await page.webContents.executeJavaScript(`(${sites.prepareSitePage.toString()})(${JSON.stringify(target)})`, true);
+        await settle(800);
+        const image = await page.webContents.capturePage();
+        return { image: image.toDataURL(), target: box };
+      } finally {
+        page.destroy();
+      }
+    };
     const waitFor = (selector) => evaluate(`new Promise((resolve, reject) => {
       let attempts = 0;
       const poll = () => {
@@ -135,7 +171,7 @@ if (!process.versions.electron) {
     })`);
 
     fs.mkdirSync(outputDir, { recursive: true });
-    for (const language of LANGUAGES) {
+    for (const language of SITES_ONLY ? [] : LANGUAGES) {
       phase = `${language} setup`;
       console.log(`Onboarding screenshots (${language})`);
       await window.webContents.session.clearStorageData({ storages: ['localstorage'] });
@@ -184,7 +220,38 @@ if (!process.versions.electron) {
         await capture(`${name}-${language}.png`, rect);
         await evaluate(`document.querySelector('#terminal-shot')?.remove()`);
       }
+
+      for (const [name, html] of Object.entries(illustrations.illustrationSpecs(language))) {
+        phase = `${language} ${name}`;
+        const rect = await evaluate(`(${illustrations.renderIllustrationShot.toString()})(${JSON.stringify(illustrations.STYLE)}, ${JSON.stringify(html)})`);
+        await capture(`${name}-${language}.png`, rect);
+        await evaluate(`document.querySelector('#illustration-backdrop')?.remove()`);
+      }
+
+      for (const shot of appShots.APP_SHOTS) {
+        phase = `${language} ${shot.name}`;
+        const html = appShots.appShotHtml(shot, language);
+        const rect = await evaluate(`(${illustrations.renderIllustrationShot.toString()})(${JSON.stringify(illustrations.STYLE)}, ${JSON.stringify(html)})`);
+        await capture(`${shot.name}-${language}.png`, rect);
+        await evaluate(`document.querySelector('#illustration-backdrop')?.remove()`);
+      }
     }
+
+    if (WITH_SITES) {
+      await window.loadURL(`http://127.0.0.1:${address.port}/__onboarding_shots__`);
+      for (const shot of sites.SITE_SHOTS) {
+        for (const language of LANGUAGES) {
+          phase = `${language} ${shot.name}`;
+          const page = await captureSitePage(sites.siteUrl(shot, language), language, shot.target);
+          const html = sites.siteShotHtml(shot, language, page.image, page.target);
+          const rect = await evaluate(`(${illustrations.renderIllustrationShot.toString()})(${JSON.stringify(illustrations.STYLE)}, ${JSON.stringify(html)})`);
+          await capture(`${shot.name}-${language}.png`, rect);
+          await evaluate(`document.querySelector('#illustration-backdrop')?.remove()`);
+        }
+      }
+    }
+    const sizes = require('./onboarding-shot-sizes.cjs');
+    fs.writeFileSync(sizes.target, sizes.renderShotSizes());
     clearTimeout(timer);
     await finish(0);
   }).catch(async (error) => {

@@ -412,6 +412,7 @@ export const en: CliTranslationMap = {
   'permission.VIEW_SERVER_MONITOR': 'View Server Monitor',
   'permission.MANAGE_EVENTS': 'Manage Events',
   'permission.EMIT_LIVE_ACTIONS': 'Emit Live Actions',
+  'permission.VIEW_AUDIT_LOG': 'View Audit Log',
 
   // ── Voice mode comparison ──────────────────────────────────────────────
   'voice.data': 'Data',

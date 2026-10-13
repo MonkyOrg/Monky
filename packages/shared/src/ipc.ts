@@ -11,6 +11,7 @@ import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } fr
 import type { ReleaseCompatibilityResult } from './releaseCompatibility.js';
 import type { ServerInviteResult } from './serverInvites.js';
 import type { EventCalendarExport, EventCalendarSaveResult } from './serverEventCalendar.js';
+import type { HostingSkillId, HostingSkillSaveResult } from './hostingSkills.js';
 import type { NativeScreenCommand, NativeScreenCommandResult, NativeScreenEvent, NativeScreenReply, BrowserOcclusionEngine } from './nativeScreenIpc.js';
 import type { NativeScreenCaptureMode } from './screenSharing.js';
 import type {
@@ -815,6 +816,7 @@ export interface IpcInvokeChannels {
   'app:download-file': { args: [url: string, fileName: string]; returnType: { success: boolean; error?: string } };
   'app:save-recent-sound': { args: [input: RecentSoundSaveInput]; returnType: RecentSoundSaveResult };
   'community:save-event-calendar': { args: [input: EventCalendarExport]; returnType: EventCalendarSaveResult };
+  'onboarding:save-hosting-skill': { args: [id: HostingSkillId]; returnType: HostingSkillSaveResult };
   // Ack do renderer ao 'app:before-quit': confirma que ja saiu das chamadas (#458)
   'app:leave-complete': { args: [request: AppShutdownRequest]; returnType: void };
 

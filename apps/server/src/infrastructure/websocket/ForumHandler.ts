@@ -1,4 +1,7 @@
-import { MessageType, ProtocolErrorCode, type ProtocolMessage, type ForumPostSaved } from '@monky/shared';
+import {
+  MessageType, ProtocolErrorCode, forumUpdatePostSchema,
+  type ForumPost, type ProtocolMessage, type ForumPostSaved, type ServerAuditChange,
+} from '@monky/shared';
 import { ForumError, type ForumService } from '../../application/services/ForumService';
 import type { BotInteractionSession } from './BotInteractionHandler';
 import type { RateLimiter } from '../security/RateLimiter';
@@ -9,6 +12,8 @@ interface ForumTransport {
   version(): number | null;
   send(session: BotInteractionSession, message: ProtocolMessage): void;
   changed(result: ForumPostSaved): Promise<void>;
+  /** Moderation of someone else's post, or pinning and locking, which only managers do. */
+  audit?(session: BotInteractionSession, action: 'forum.update' | 'forum.delete', post: ForumPost, changes: ServerAuditChange[]): Promise<void>;
 }
 
 export class ForumHandler {
@@ -36,6 +41,7 @@ export class ForumHandler {
           ? await this.service.delete(session.user.id, payload, current)
           : await this.service.update(session.user.id, payload, current);
       await this.transport.changed(result);
+      if (type !== MessageType.FORUM_CREATE_POST) await this.recordModeration(session, type, payload, result);
       const accessVersion = this.transport.version();
       await this.service.requireAccess(session.user.id, result.deleted ? result.post.forumId : result.post.channelId);
       if (accessVersion === null || accessVersion !== this.transport.version()) {
@@ -50,6 +56,26 @@ export class ForumHandler {
           message: error instanceof ForumError ? error.message : 'Forum operation failed.',
         },
       });
+    }
+  }
+
+  private async recordModeration(session: BotInteractionSession, type: MessageType, payload: unknown, result: ForumPostSaved): Promise<void> {
+    const ownPost = result.post.authorId === session.user?.id;
+    try {
+      if (type === MessageType.FORUM_DELETE_POST) {
+        if (!ownPost) await this.transport.audit?.(session, 'forum.delete', result.post, []);
+        return;
+      }
+      const update = forumUpdatePostSchema.safeParse(payload);
+      if (!update.success || (ownPost && update.data.pinned === undefined && update.data.locked === undefined)) return;
+      const changes: ServerAuditChange[] = [];
+      if (update.data.title !== undefined) changes.push({ field: 'title', after: update.data.title });
+      if (update.data.pinned !== undefined) changes.push({ field: 'pinned', after: update.data.pinned });
+      if (update.data.locked !== undefined) changes.push({ field: 'locked', after: update.data.locked });
+      if (update.data.closed !== undefined) changes.push({ field: 'closed', after: update.data.closed });
+      await this.transport.audit?.(session, 'forum.update', result.post, changes);
+    } catch (error) {
+      Logger.error('NETWORK', 'Could not record forum moderation in the audit log.', error);
     }
   }
 }

@@ -81,8 +81,9 @@ Right-click an empty area of the channel list to **Create Channel**,
 
 Use the **+** beside a category. Choose any channel type,
 enter a name and review the switches before creating it. Categories can mix
-text, voice and forums; uncategorized channels appear directly in the list
-without an artificial category heading.
+text, voice and forums. Uncategorized channels appear directly in the list
+without an artificial category heading, and can sit anywhere: above, below or
+between categories.
 
 To edit or delete, open the channel's **More options** menu. Deletion is
 destructive: check the name and its effect on history before confirming.
@@ -183,6 +184,12 @@ message, history, replies, search results, totals, and pagination do not reveal
 that it exists. The creator and **Manage server** moderators retain access,
 always subject to current channel read permission.
 
+While a poll is open, its creator and people with **Manage server** can edit
+all of it, including audience, duration, voter limit, and anonymous votes.
+Turning the live action on during an edit still requires **Emit live actions**.
+Members who lose access to a private poll after an edit stop seeing it once the
+channel reloads.
+
 ## Search messages
 
 Use top-right search or `Ctrl+F` inside a chat to start with its current channel.
@@ -207,9 +214,13 @@ features, but live actions require a compatible server.
 
 **Create category** is in the empty channel area's right-click menu.
 Right-click a category name to edit its name and access, move it up/down, or delete it.
-Use **Move to category** in a channel's menu to move it, or drag channels to
-move and reorder them. Category arrows collapse their lists; the choice is
-remembered per server and identity on this device.
+Use **Move to category** in a channel's menu to move it, or drag channels and
+categories to move and reorder them. Channels and categories share one order in
+the list: while dragging, slots open above the categories and at the end of the
+list to keep a channel outside every category; dropping on a category's name
+puts the channel inside it. **Move up/down** in the menus follows the same order. Category arrows
+collapse their lists; the choice is remembered per server and identity on this
+device.
 
 New servers start with **Text channels** and **Voice channels** (named in the
 app's selected language). Existing servers migrate to these two groups;
@@ -228,9 +239,9 @@ category synchronization, including when reverting an edit.
 Moving a synchronized channel adopts the
 destination's access; moving to **Uncategorized** preserves current effective
 access. Deleting a category **does not delete channels or history**: channels
-become uncategorized and retain their permissions. Revoking access also hides
-channels and disconnects voice participants; chat, attachment uploads and bots all
-enforce the same access.
+become uncategorized, in its place, and retain their permissions. Revoking
+access also hides channels; whoever is already in the call stays until they
+leave. Chat, attachment uploads and bots all enforce the same access.
 
 Each permission for **Everyone**, a role or an individual member has three states:
 **X — Deny**, **— — Inherit**, and **✓ — Allow**. Inherit neither grants nor
@@ -257,7 +268,15 @@ category permission editor and cannot be granted or denied by local rules.
 Older rules containing them are ignored. **Speak** no longer blocks joining a voice
 channel; anyone with **View channel** can enter, but without **Speak** they are
 muted for microphone, soundboard and screen-share audio until that permission
-applies in the channel.
+applies in the channel. **Use soundboard** can also be denied for a single
+channel; the soundboard then says the block comes from that channel.
+
+**View channel** decides who finds a voice channel and joins it on their own.
+Someone with **Move members** who can reach a channel may still bring any member
+into it, even if that member cannot see it; bots are the exception and never
+enter private channels this way. Anyone inside a voice channel keeps seeing it,
+with its chat, until they leave, even after losing **View channel** meanwhile.
+Once they leave, they can only come back on their own if they can view it.
 
 ### Private channel
 
@@ -360,6 +379,52 @@ Personal mute and administrative restrictions are different. The former
 does not override the latter. Red restriction icons indicate administrative
 blocks; a person may still keep their own microphone muted after being
 unblocked.
+
+## Audit log
+
+Open **server name › Audit log** to see what was done on the server, newest
+first. Administrators have access; other members need the **View audit log**
+permission in a role. **Manage server** alone does not grant access, and bots
+never read the audit log. The audit log shows what happens in every channel,
+private ones included, so only grant the permission to people who may see that.
+
+Each entry shows who acted, on what, when, and what changed, with the previous
+and the new value:
+
+- **Channels**: creation, deletion and changes to name, user limit, category,
+  privacy, bot commands, permissions and position, categories included. Dragging
+  a channel records only that channel, not the ones it shifted.
+- **Roles**: creation, deletion, name, color, permissions granted and removed,
+  Everyone's included, and who received or lost each role.
+- **Members**: first join, kicks and nickname changes.
+- **Voice**: server mute and deafen, disconnecting from a room and moving
+  someone, with the room they left and the one they entered.
+- **Server**: changes under **General**, such as name, limits, voice mode and
+  relay. Password and icon only show that they changed.
+- **Events and live**: creating, editing, starting, ending, cancelling and
+  deleting events; posting, updating and ending live actions, forms and featured
+  polls. Ordinary polls only appear when someone changes another person's poll.
+- **Bots**: links, installation, removal, access granted or removed, changed
+  settings and commands used.
+- **Moderation**: other people's messages deleted or restored, and forum posts
+  pinned, locked, renamed or deleted by a moderator.
+
+Type filters and the search by person, channel, role or bot can be combined.
+New entries appear at the top while the window is open, and **Load more** fetches
+older ones.
+
+Each entry keeps the name the item had when the action happened, so it stays
+readable after the channel, role or member is gone. The audit log does not copy
+the text of deleted messages or what was typed into bot commands and settings,
+only the option names. Entries are kept for 90 days, up to 50,000 of them, and
+the oldest are discarded automatically. Bot commands, joins and nickname changes,
+which any member can repeat, use their own quota of 20,000 entries and at most 30
+per person each minute, so a flood of them never erases the moderation history.
+Nobody can edit or delete entries from the app.
+
+Losing the permission, disconnecting or switching servers closes the audit log
+at once. Servers that do not have the audit log yet show neither the menu nor
+the permission: update the server to use it.
 
 ## Choose P2P or SFU
 

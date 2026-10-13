@@ -25,6 +25,8 @@ import { ChannelService } from './application/services/ChannelService';
 import { ChatService } from './application/services/ChatService';
 import { PermissionService } from './application/services/PermissionService';
 import { ServerMonitorService } from './application/services/ServerMonitorService';
+import { ServerAuditService } from './application/services/ServerAuditService';
+import { SqliteServerAuditRepository } from './infrastructure/database/SqliteServerAuditRepository';
 import { RecentSoundCacheService } from './application/services/RecentSoundCacheService';
 import { RoleService } from './application/services/RoleService';
 import { SignalingService } from './application/services/SignalingService';
@@ -288,7 +290,7 @@ export class MonkyServer {
         await channelService.canUserAccessChannel(userId, poll.channelId, Permission.READ_MESSAGES) &&
         await permissionService.canAccessAudience(userId, poll.creatorUserId, poll.audience),
       canRevealAudience: (userId, poll) => permissionService.canRevealAudience(userId, poll.creatorUserId),
-    });
+    }, avatarPath => avatarStorage.getPublicUrl(avatarPath));
     const chatService = new ChatService(
       messageRepo,
       channelRepo,
@@ -548,6 +550,7 @@ export class MonkyServer {
       ),
       pollService,
       recentSoundCache,
+      new ServerAuditService(serverRecord.id, new SqliteServerAuditRepository(db), rateLimiter),
     );
     resources.defer('WebSocket server', () => wsServer.close(instance?.shutdownReason ?? 'stopped'));
 

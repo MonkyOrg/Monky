@@ -84,8 +84,9 @@ exigem **Gerenciar canais**; não há um botão fixo de criar categoria na lista
 
 Use o **+** ao lado de uma categoria. Escolha qualquer tipo de canal,
 informe o nome e revise os switches antes de criar. Uma categoria pode misturar
-texto, voz e fóruns; canais sem categoria aparecem diretamente na lista, sem
-um cabeçalho de categoria artificial.
+texto, voz e fóruns. Canais sem categoria aparecem diretamente na lista, sem
+um cabeçalho de categoria artificial, e podem ficar em qualquer posição: acima,
+abaixo ou entre as categorias.
 
 Para editar ou excluir, abra **Mais opções** no canal. A exclusão é uma ação
 destrutiva: confira o nome e o impacto no histórico antes de confirmar.
@@ -189,6 +190,12 @@ pertence ao público: mensagem, histórico, respostas, busca, totais e paginaç�
 não revelam sua existência. O criador e gestores com **Gerenciar servidor**
 mantêm acesso, sempre respeitando a permissão atual de leitura do canal.
 
+Enquanto uma enquete está aberta, quem a criou e quem tem **Gerenciar servidor**
+podem editá-la por completo, inclusive público, duração, limite e votos
+anônimos. Ligar a ação ao vivo numa edição continua exigindo **Emitir ações ao
+vivo**. Quem perde acesso a uma enquete privada após a edição deixa de vê-la ao
+recarregar o canal.
+
 ## Buscar mensagens
 
 Use a busca no topo à direita ou `Ctrl+F` dentro de um chat para começar no
@@ -215,7 +222,12 @@ anteriores, mas ações ao vivo precisam de servidor compatível.
 Clique com o botão direito no nome de uma categoria para editar nome e acesso,
 mover para cima/baixo ou excluir.
 No menu de um canal, **Mover para categoria** muda seu agrupamento;
-arrastar também move e reordena canais. As setas das categorias recolhem
+arrastar também move e reordena canais e categorias. Canais e categorias
+dividem a mesma ordem na lista: durante o arraste, abrem-se faixas acima das
+categorias e no fim da lista para deixar o canal fora de qualquer categoria;
+soltar sobre o nome de uma categoria coloca o canal dentro dela. **Mover para
+cima/baixo**, nos menus, segue
+a mesma ordem. As setas das categorias recolhem
 suas listas, lembrando a escolha por servidor e identidade neste dispositivo.
 
 Novos servidores começam com **Canais de texto** e **Canais de voz** (nomes no
@@ -234,9 +246,10 @@ que diferem da categoria viram regras próprias ao salvar e exibem
 o rascunho. Regras iguais às da categoria usam a sincronização, inclusive ao
 desfazer uma alteração. Mover um canal sincronizado adota o acesso do destino;
 mover para **Sem categoria** preserva o acesso efetivo atual. Excluir uma
-categoria **não exclui canais nem histórico**: eles ficam sem categoria e
-mantêm suas permissões. Revogar acesso também remove o canal da lista e
-desconecta quem estava na voz; chat, envio de anexos e bots respeitam o mesmo acesso.
+categoria **não exclui canais nem histórico**: eles ficam sem categoria, no
+lugar dela, e mantêm suas permissões. Revogar acesso também remove o canal da
+lista; quem já está na chamada continua nela até sair. Chat, envio de anexos e
+bots respeitam o mesmo acesso.
 
 Cada permissão de **Todos**, de um cargo ou de uma pessoa possui três estados:
 **X — Negar**, **— — Herdar** e **✓ — Permitir**. Herdar não concede nem nega;
@@ -264,7 +277,16 @@ ao vivo** também são permissões gerais do servidor: elas não aparecem no edi
 de permissões de canal ou categoria e não podem ser concedidas nem negadas por
 regras locais. Regras antigas com essas permissões são ignoradas. **Falar** não bloqueia a entrada em
 um canal de voz; quem tem **Ver canal** entra, mas fica sem microfone,
-soundboard e áudio da tela até receber **Falar** naquele canal.
+soundboard e áudio da tela até receber **Falar** naquele canal. **Usar
+soundboard** também pode ser negado só em um canal; nesse caso, a soundboard
+avisa que o bloqueio vem daquele canal.
+
+**Ver canal** decide quem encontra um canal de voz e entra nele por conta
+própria. Quem tem **Mover membros** e consegue acessar o canal ainda pode trazer
+qualquer pessoa para ele, mesmo que ela não veja o canal; bots são a exceção e
+nunca entram assim em canais privados. Quem está dentro de um canal de voz
+continua vendo o canal, com o chat dele, até sair, mesmo que perca **Ver canal**
+nesse meio-tempo. Depois de sair, só volta sozinho se puder ver o canal.
 
 ### Canal privado
 
@@ -368,6 +390,54 @@ O mute pessoal e o bloqueio administrativo são distintos. O primeiro não
 desfaz o segundo. Os ícones vermelhos de restrição indicam o bloqueio
 administrativo; a pessoa ainda pode manter seu próprio microfone mutado
 depois de ser liberada.
+
+## Auditoria
+
+Abra **nome do servidor › Auditoria** para ver o que foi feito no servidor, do
+mais recente ao mais antigo. Administradores têm acesso; outros membros precisam
+da permissão **Visualizar auditoria** em um cargo. **Gerenciar servidor**,
+sozinho, não concede esse acesso, e bots nunca leem a auditoria. A auditoria
+mostra o que acontece em todos os canais, inclusive os privados, então conceda a
+permissão apenas a quem pode ver isso.
+
+Cada registro mostra quem agiu, sobre o quê, quando e o que mudou, com o valor
+anterior e o novo:
+
+- **Canais**: criação, exclusão e mudanças de nome, limite de pessoas,
+  categoria, privacidade, comandos de bots, permissões e posição, inclusive de
+  categorias. Ao arrastar um canal, só ele é registrado, não os que se deslocaram.
+- **Cargos**: criação, exclusão, nome, cor, permissões concedidas e removidas,
+  inclusive as de Todos, e quem recebeu ou perdeu cada cargo.
+- **Membros**: primeira entrada no servidor, expulsões e troca de apelido.
+- **Voz**: silenciar e ensurdecer pelo servidor, desconectar da sala e mover
+  alguém, com a sala de origem e a de destino.
+- **Servidor**: alterações em **Geral**, como nome, limites, modo de voz e relay.
+  Senha e ícone aparecem apenas como alterados.
+- **Eventos e ao vivo**: criar, editar, iniciar, encerrar, cancelar e excluir
+  eventos; publicar, atualizar e encerrar ações ao vivo, formulários e enquetes
+  em destaque. Enquetes comuns só entram quando alguém altera a de outra pessoa.
+- **Bots**: vínculos, instalação, remoção, acessos concedidos ou removidos,
+  configurações alteradas e comandos usados.
+- **Moderação**: mensagens de outras pessoas apagadas ou restauradas e
+  publicações de fórum fixadas, trancadas, renomeadas ou excluídas por quem modera.
+
+Os filtros por tipo e a busca por pessoa, canal, cargo ou bot podem ser
+combinados. Novos registros aparecem no topo enquanto a janela está aberta, e
+**Carregar mais** busca os mais antigos.
+
+Cada registro guarda o nome que o item tinha no momento da ação, então continua
+legível depois que o canal, o cargo ou o membro deixa de existir. A auditoria não
+copia o texto das mensagens apagadas nem o que foi digitado em comandos e
+configurações de bots, apenas o nome das opções. Os registros ficam guardados por
+90 dias, até 50.000 entradas, e os mais antigos são descartados automaticamente.
+Comandos de bots, entradas e trocas de apelido, que qualquer membro pode repetir,
+usam uma cota própria de 20.000 entradas e no máximo 30 por pessoa a cada minuto,
+para que uma enxurrada deles nunca apague o histórico de moderação.
+Ninguém consegue editar ou apagar registros pelo aplicativo.
+
+Perder a permissão, desconectar ou trocar de servidor fecha a auditoria na hora.
+Servidores que ainda não têm auditoria não mostram o menu nem a permissão:
+atualize o servidor para usá-la.
 
 ## Escolher P2P ou SFU
 

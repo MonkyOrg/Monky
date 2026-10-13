@@ -14,12 +14,24 @@ or download Monky. Your browser may ask for confirmation. For development or
 portable runs, paste the link into the app; local testing does not register a
 global protocol handler on your system.
 
-The short link uses the homepage itself, in the form
-`https://monkyorg.github.io/Monky/#~...`; direct app opening uses
+The link uses the invitation page, in the form
+`https://monkyorg.github.io/Monky/convite/#~...` (or `/Monky/en/convite/` when
+the app is in English); direct app opening uses
 `monky://#~...`. The part after `#~` contains the complete connection data in
 binary form, with lossless compression when it reduces the size. There is no
 shortener, registered code or central service needed to resolve the invitation:
-the app reads the link itself, even without loading the website.
+the app reads the link itself, even without loading the website. Links created
+before the invitation page, in the form `https://monkyorg.github.io/Monky/#~...`,
+keep working. Earlier versions of the app do not recognize the new format when
+the link is pasted; there, open the invitation in the browser or update Monky.
+
+When you share the link on WhatsApp, Discord or Telegram, the preview shows a
+Monky invitation card. It is the same for every server: those apps never
+receive the part after `#`, so they do not know which server it is. In Monky's
+own chat, in channels and direct messages, the app reads the link and shows a
+card with the server name and address and a **Join** button. The button and the
+link itself open the same confirmation below, without going through the
+browser.
 
 Review the name, address and port, then click **Join**. Monky automatically
 uses your current identity name, without asking you to enter it again.

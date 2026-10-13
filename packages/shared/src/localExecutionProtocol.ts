@@ -16,6 +16,7 @@
 import { z } from 'zod';
 import { LIMITS } from './constants.js';
 import { botVoiceAuthSchema, botVoiceSignalSchema } from './botVoice.js';
+import type { ProtocolFeature } from './protocolCompatibility.js';
 import {
   LOCAL_CAPABILITY_IDS,
   LOCAL_EXECUTION_RUNTIME_LIMITS,
@@ -23,6 +24,8 @@ import {
   localCapabilityIdSchema,
   localExecutionFailureSchema,
   localMediaTrackSchema,
+  localPlaylistResultFitsSpec,
+  localPlaylistResultSchema,
   localRuntimeSourceFailureSchema,
   localTaskSpecSchema,
   localYoutubeUrlSchema,
@@ -53,7 +56,18 @@ export const LOCAL_OPERATION_CAPABILITY: Readonly<Record<LocalOperation, LocalCa
   'youtube.resolve': 'youtube-audio',
   'youtube.preview': 'youtube-audio',
   'youtube.stream': 'youtube-audio',
+  'youtube.playlist': 'youtube-audio',
 };
+
+/** Operations newer than the local execution baseline; both bot and executor must have negotiated them. */
+export const LOCAL_OPERATION_FEATURE: Readonly<Partial<Record<LocalOperation, ProtocolFeature>>> = {
+  'youtube.playlist': 'local-youtube-playlist',
+};
+
+export function localOperationNegotiated(operation: LocalOperation, features: readonly string[] | undefined): boolean {
+  const feature = LOCAL_OPERATION_FEATURE[operation];
+  return feature === undefined || features?.includes(feature) === true;
+}
 
 export const localCapabilitiesSchema = z.array(localCapabilityIdSchema).max(LOCAL_CAPABILITY_IDS.length)
   .refine((capabilities) => new Set(capabilities).size === capabilities.length, 'Duplicate local capability');
@@ -127,8 +141,9 @@ export const localSourceResultSchema = z.discriminatedUnion('status', [
 export type LocalSourceResult = z.infer<typeof localSourceResultSchema>;
 
 export function localTaskMatchesSource(source: LocalSourceContext, spec: LocalTaskSpec): boolean {
+  // A retained source is one video; playlists are read during the invocation, never through a source.
   return LOCAL_OPERATION_CAPABILITY[spec.operation] === source.capability &&
-    spec.operation !== 'youtube.search' && spec.url === source.url;
+    spec.operation !== 'youtube.search' && spec.operation !== 'youtube.playlist' && spec.url === source.url;
 }
 
 /** requestId is the original executor-side request correlation, not a bot-chosen identity. */
@@ -149,6 +164,7 @@ export const localWireTaskResultSchema = z.discriminatedUnion('operation', [
   z.object({ operation: z.literal('youtube.resolve'), track: localMediaTrackSchema }).strict(),
   localPreviewReferenceSchema.extend({ operation: z.literal('youtube.preview') }).strict(),
   z.object({ operation: z.literal('youtube.stream'), track: localMediaTrackSchema }).strict(),
+  localPlaylistResultSchema,
 ]);
 export type LocalWireTaskResult = z.infer<typeof localWireTaskResultSchema>;
 export type LocalWirePreviewResult = Extract<LocalWireTaskResult, { operation: 'youtube.preview' }>;
@@ -186,11 +202,20 @@ function checkVoiceScope(spec: LocalTaskSpec, voiceChannelId: string | undefined
   }
 }
 
+function checkPlaylistContext(spec: LocalTaskSpec, context: LocalRequestContext, ctx: z.RefinementCtx): void {
+  if (spec.operation === 'youtube.playlist' && context.kind !== 'invocation' && context.kind !== 'autocomplete') {
+    ctx.addIssue({ code: 'custom', path: ['context'], message: 'Playlists are read only for a command or its autocomplete' });
+  }
+}
+
 export const localTaskRequestSchema = z.object({
   context: localRequestContextSchema,
   spec: localTaskSpecSchema,
   voiceChannelId: identifier.optional(),
-}).strict().superRefine((request, ctx) => checkVoiceScope(request.spec, request.voiceChannelId, ctx));
+}).strict().superRefine((request, ctx) => {
+  checkVoiceScope(request.spec, request.voiceChannelId, ctx);
+  checkPlaylistContext(request.spec, request.context, ctx);
+});
 export type LocalTaskRequest = z.infer<typeof localTaskRequestSchema>;
 
 /**
@@ -221,6 +246,7 @@ export const localTaskOfferSchema = z.object({
   media: localMediaGenerationSchema.optional(),
 }).strict().superRefine((offer, ctx) => {
   checkVoiceScope(offer.spec, offer.voiceChannelId, ctx);
+  checkPlaylistContext(offer.spec, offer.context, ctx);
   if (offer.capability !== LOCAL_OPERATION_CAPABILITY[offer.spec.operation]) {
     ctx.addIssue({ code: 'custom', path: ['capability'], message: 'Capability does not authorize the operation' });
   }
@@ -250,7 +276,9 @@ export function localTaskAcceptMatchesOffer(offer: LocalTaskOffer, accept: Local
       accept.result.executorSessionId === offer.invokerSessionId;
   }
   if (accept.result.operation === 'youtube.search') return true;
-  return offer.spec.operation !== 'youtube.search' && accept.result.track.url === offer.spec.url;
+  if (accept.result.operation === 'youtube.playlist') return localPlaylistResultFitsSpec(offer.spec, accept.result);
+  return offer.spec.operation !== 'youtube.search' && offer.spec.operation !== 'youtube.playlist' &&
+    accept.result.track.url === offer.spec.url;
 }
 
 export const localTaskControlSchema = z.object({

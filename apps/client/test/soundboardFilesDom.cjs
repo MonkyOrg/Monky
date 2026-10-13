@@ -500,6 +500,23 @@ async function runDom(fixture) {
     soundboardService.stopRecentPreview();
     check(!soundboardService.getActivePlaybacks().some(entry => entry.userId === 'recent-preview'),
       'Recent sound preview stop releases its local playback');
+    const allowSoundboard = session.serverStore.hasPermission;
+    const reopen = async () => { modal.close(); await wait(50); await modal.open(); };
+    const restriction = () => document.querySelector('.modal-backdrop:not([data-ui-closing]) .sb-modal-notice--danger > span:last-child')?.textContent.trim();
+    session.serverStore.hasPermission = (permission, channelId) => permission !== shared.Permission.USE_SOUNDBOARD || !channelId;
+    await reopen();
+    check(restriction() === t('soundboard.noChannelPermission'),
+      'A soundboard denial set only on the voice channel names the channel, not the server');
+    session.serverStore.hasPermission = () => false;
+    await reopen();
+    check(restriction() === t('soundboard.noPermission'), 'A server-wide soundboard denial keeps naming the server');
+    session.serverStore.hasPermission = allowSoundboard;
+    voiceStore.setPermissionMuted(true);
+    await reopen();
+    check(restriction() === t('soundboard.noSpeakPermission'), 'Missing SPEAK explains why sounds do not reach the call');
+    voiceStore.setPermissionMuted(false);
+    await reopen();
+    check(!restriction(), 'Allowed playback shows no restriction');
     const before = sent.length;
     const preview = shared.encodeSoundboardEdit(originalChannels, 48000, { start: 0, end: 1, fadeIn: 0.1, fadeOut: 0.1 });
     await soundboardService.previewEditedSound(preview.bytes, 'private');

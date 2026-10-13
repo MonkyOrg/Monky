@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Enquete com erro de digitação? Quem criou e os administradores podem editá-la enquanto está aberta. Se a mudança for zerar votos, o Monky avisa antes de salvar.",
+  "en": "Typo in a poll? Its creator and admins can edit it while it is open. If a change would reset votes, Monky tells you before saving."
+}

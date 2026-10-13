@@ -38,7 +38,7 @@ export class BotScreenHandler {
 
   constructor(
     private screens: BotScreenService,
-    private channels: Pick<ChannelService, 'getChannelSummary' | 'getAccessContext' | 'getRoleAccessVersion'>,
+    private channels: Pick<ChannelService, 'getChannelSummary' | 'getAccessContext' | 'getRoleAccessVersion' | 'rulesFor'>,
     private users: Pick<UserService, 'isMember'>,
     private transport: BotScreenTransport,
   ) {
@@ -226,7 +226,7 @@ export class BotScreenHandler {
   private async requirePrincipal(userId: string, channelId: string, human: boolean, interact: boolean): Promise<void> {
     const [channel, context] = await Promise.all([this.channels.getChannelSummary(channelId), this.channels.getAccessContext(userId, channelId)]);
     if (!channel || channel.type !== 'VOICE' ||
-        !canAccessChannel(channel, context.permissions, context.roleIds, context.isBot, context.userId)) {
+        !canAccessChannel(this.channels.rulesFor(channel, context), context.permissions, context.roleIds, context.isBot, context.userId)) {
       throw new ScreenAccessError('Channel is unavailable.', ProtocolErrorCode.CHANNEL_NOT_FOUND);
     }
     if (human && !(await this.users.isMember(userId))) throw new ScreenAccessError('Membership is required.');

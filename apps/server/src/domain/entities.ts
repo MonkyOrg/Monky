@@ -103,6 +103,8 @@ export interface NativePollRecord {
   creatorUserId: string;
   question: string;
   allowMultiple: boolean;
+  /** Voters stay hidden from every member, including the creator. */
+  anonymousVotes: boolean;
   imagePaths: string[];
   options: Array<{ id: string; label: string; emoji: string | null }>;
   allowChange: boolean;
@@ -113,6 +115,12 @@ export interface NativePollRecord {
   createdAt: number;
   revision: number;
   audience: import('@monky/shared').ResourceAudience;
+}
+
+export interface NativePollVoterRecord {
+  userId: string;
+  nickname: string;
+  avatarPath: string | null;
 }
 
 export interface MentionRecord {

@@ -3,7 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_PERMISSIONS, MessageType, Permission, ProtocolErrorCode, eventTimeInZone, eventOccurrenceStart, eventSaveSchema, eventInterestedListResultSchema, eventResultSchema, type EventSave } from '@monky/shared';
+import { DEFAULT_PERMISSIONS, MessageType, NATIVE_POLL_VOTER_PREVIEW_LIMIT, PROTOCOL_VERSION, Permission, ProtocolErrorCode, createProtocolOffer, eventTimeInZone, eventOccurrenceStart, eventSaveSchema, eventInterestedListResultSchema, eventResultSchema, type EventSave, type NativePollEdit } from '@monky/shared';
 import { CommunityService, CommunityError } from './application/services/CommunityService';
 import { BotSelectorService } from './application/services/BotSelectorService';
 import { SqliteBotSelectorRepository } from './infrastructure/database/SqliteBotSelectorRepository';
@@ -1007,6 +1007,8 @@ test('native poll votes and automatic closing survive a database restart', async
   service = new NativePollService(new SqliteNativePollRepository(database.getDb()));
   const restored = service.publicPoll(service.get(created.poll.id), 'member');
   assert.deepEqual(restored.myVoteOptionIds, [optionId]);
+  assert.equal(restored.anonymousVotes, false, 'polls default to public votes');
+  assert.deepEqual(restored.options[0].voters?.map(voter => voter.userNickname), ['Member']);
   assert.equal(restored.options[0].emoji, '👍');
   assert.equal(restored.totalVotes, 1);
   assert.equal(service.activeLiveActions('member', 60_999).length, 1);
@@ -1048,6 +1050,341 @@ test('native polls accept several answers atomically and retain staged carousel 
   assert.equal(voted.payload.totalVotes, 1);
   assert.deepEqual(records(voted.payload.options).map(option => option.votes), [1, 1]);
   assert.ok(voted.payload.closedAt);
+});
+
+test('poll votes toggle per answer, keep voter order and never reveal anonymous voters', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-poll-voters-'));
+  const database = await DatabaseConnection.create(path.join(root, 'server.db'));
+  t.after(() => {
+    database.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const voterIds = Array.from({ length: NATIVE_POLL_VOTER_PREVIEW_LIMIT + 2 }, (_, index) => `voter-${String(index).padStart(2, '0')}`);
+  database.getDb().exec(`
+    INSERT INTO server_meta (id,name,password_hash,created_at) VALUES ('server','Test','',1);
+    INSERT INTO users (id,client_id,nickname,avatar_path,created_at,last_seen_at) VALUES
+      ('owner','owner-device','Owner','nested/owner.png',1,1), ('member','member-device','Member',NULL,1,1)
+      ${voterIds.map(id => `, ('${id}','${id}-device','${id}',NULL,1,1)`).join('')};
+    INSERT INTO channels (id,server_id,name,type,created_at) VALUES ('chat','server','chat','TEXT',1);
+  `);
+  const service = new NativePollService(new SqliteNativePollRepository(database.getDb()));
+  const created = service.create('owner', {
+    channelId: 'chat', clientMessageId: 'days', question: 'Which days?', allowMultiple: true, durationMinutes: 60,
+    options: [{ label: 'Friday', emoji: null }, { label: 'Saturday', emoji: null }, { label: 'Sunday', emoji: null }],
+  }, 1_000);
+  const [friday, saturday, sunday] = created.poll.options.map(option => option.id);
+  service.vote('member', created.poll.id, [friday], 2_000);
+  service.vote('owner', created.poll.id, [saturday, friday], 3_000);
+  service.vote('member', created.poll.id, [friday, saturday], 4_000);
+  let poll = service.publicPoll(service.get(created.poll.id), 'member');
+  assert.equal(poll.anonymousVotes, false);
+  assert.deepEqual(poll.myVoteOptionIds, [friday, saturday]);
+  assert.deepEqual(poll.options.map(option => option.voters?.map(voter => voter.userId)),
+    [['member', 'owner'], ['owner', 'member'], []], 'kept answers keep their place while another one is added');
+  assert.deepEqual(poll.options[0].voters?.[1], { userId: 'owner', userNickname: 'Owner', userAvatarUrl: '/avatars/owner.png' });
+
+  service.vote('member', created.poll.id, [saturday], 5_000);
+  service.vote('member', created.poll.id, [saturday, friday], 6_000);
+  poll = service.publicPoll(service.get(created.poll.id), 'member');
+  assert.deepEqual(poll.options[0].voters?.map(voter => voter.userId), ['owner', 'member'],
+    'removing and adding an answer again moves the member to the end');
+  service.vote('member', created.poll.id, [], 7_000);
+  poll = service.publicPoll(service.get(created.poll.id), 'member');
+  assert.deepEqual(poll.myVoteOptionIds, []);
+  assert.equal(poll.totalVotes, 1, 'withdrawing every answer removes the voter');
+  assert.deepEqual(poll.options.map(option => option.votes), [1, 1, 0]);
+  const revision = poll.revision;
+  service.vote('member', created.poll.id, [], 8_000);
+  assert.equal(service.get(created.poll.id).revision, revision, 'withdrawing without a vote changes nothing');
+  assert.throws(() => service.vote('member', created.poll.id, [sunday, sunday], 8_000), /Poll option not found/);
+
+  voterIds.forEach((id, index) => service.vote(id, created.poll.id, [sunday], 10_000 + index));
+  poll = service.publicPoll(service.get(created.poll.id));
+  assert.equal(poll.options[2].votes, voterIds.length);
+  assert.deepEqual(poll.options[2].voters?.map(voter => voter.userId), voterIds.slice(0, NATIVE_POLL_VOTER_PREVIEW_LIMIT),
+    'the preview is bounded and starts with the earliest voters');
+  const everyone = service.voters(service.get(created.poll.id));
+  assert.deepEqual(everyone.options.map(option => option.id), [friday, saturday, sunday]);
+  assert.deepEqual(everyone.options[2].voters.map(voter => voter.userId), voterIds);
+
+  const single = service.create('owner', {
+    channelId: 'chat', clientMessageId: 'secret', question: 'Secret?', anonymousVotes: true, durationMinutes: 60,
+    options: [{ label: 'Yes', emoji: null }, { label: 'No', emoji: null }],
+  }, 20_000);
+  const [yes, no] = single.poll.options.map(option => option.id);
+  assert.throws(() => service.vote('member', single.poll.id, [yes, no], 21_000), /accepts one answer/);
+  service.vote('member', single.poll.id, [yes], 21_000);
+  service.vote('member', single.poll.id, [no], 22_000);
+  const secret = service.publicPoll(service.get(single.poll.id), 'member');
+  assert.equal(secret.anonymousVotes, true);
+  assert.deepEqual(secret.myVoteOptionIds, [no]);
+  assert.deepEqual(secret.options.map(option => option.votes), [0, 1]);
+  assert.ok(secret.options.every(option => option.voters === undefined));
+  assert.throws(() => service.voters(service.get(single.poll.id)), /anonymous/);
+  assert.throws(() => service.create('owner', {
+    channelId: 'chat', clientMessageId: 'secret', question: 'Secret?', durationMinutes: 60,
+    options: [{ label: 'Yes', emoji: null }, { label: 'No', emoji: null }],
+  }, 20_000), /already used/, 'a retry cannot turn an anonymous poll public');
+});
+
+test('poll voters travel only to updated clients, which can list them and withdraw votes', async t => {
+  const f = await createApprovedBotFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Poll owner');
+  const member = await f.human('Poll member');
+  const offer = createProtocolOffer('client');
+  const legacy = await f.human('Older client', undefined, undefined, false, PROTOCOL_VERSION,
+    { ...offer, features: offer.features.filter(feature => feature !== 'poll-voters') });
+  const assertLegacy = (value: unknown) => {
+    const poll = record(value);
+    assert.equal('anonymousVotes' in poll, false);
+    assert.ok(records(poll.options).every(option => !('voters' in option)));
+  };
+  await owner.peer.request(MessageType.COMMUNITY_UPDATE_SETTINGS, { eventsEnabled: true });
+  const channelId = text(records(record(owner.auth.payload.server).channels).find(channel => channel.type === 'TEXT')?.id);
+  const legacyStart = legacy.peer.messages.length;
+  const created = await owner.peer.request(MessageType.POLL_CREATE, {
+    channelId, clientMessageId: 'public-poll', question: 'Which days?', allowMultiple: true,
+    options: [{ label: 'Friday', emoji: null }, { label: 'Saturday', emoji: null }],
+    durationMinutes: 60, liveAction: true,
+  });
+  const poll = record(created.payload.poll);
+  const pollId = text(poll.id);
+  const [friday, saturday] = records(poll.options).map(option => text(option.id));
+  assert.equal(poll.anonymousVotes, false);
+  assert.deepEqual(records(poll.options).map(option => option.voters), [[], []]);
+  assertLegacy((await legacy.peer.wait(message => message.type === MessageType.CHAT_MESSAGE &&
+    message.payload.id === 'public-poll', legacyStart)).payload.poll);
+
+  const legacyVoteStart = legacy.peer.messages.length;
+  const both = await member.peer.request(MessageType.POLL_VOTE, { id: pollId, optionIds: [friday, saturday] });
+  assert.deepEqual(records(both.payload.options).map(option => records(option.voters).map(voter => voter.userId)),
+    [[member.id], [member.id]]);
+  assert.equal(records(record(records(both.payload.options)[0]).voters)[0].userNickname, 'Poll member');
+  assertLegacy((await legacy.peer.wait(message => message.type === MessageType.POLL_UPDATED, legacyVoteStart)).payload);
+
+  const listed = await owner.peer.request(MessageType.POLL_VOTERS, { id: pollId });
+  assert.equal(listed.type, MessageType.POLL_VOTERS_RESULT);
+  assert.deepEqual(records(listed.payload.options).map(option => records(option.voters).map(voter => voter.userId)),
+    [[member.id], [member.id]]);
+  await legacy.peer.error(MessageType.POLL_VOTERS, { id: pollId }, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+
+  const withdrawn = await member.peer.request(MessageType.POLL_VOTE, { id: pollId, optionIds: [] });
+  assert.deepEqual(withdrawn.payload.myVoteOptionIds, []);
+  assert.equal(withdrawn.payload.totalVotes, 0);
+  assert.deepEqual(records(withdrawn.payload.options).map(option => option.votes), [0, 0]);
+
+  const history = await legacy.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId });
+  assertLegacy(records(history.payload.messages).find(message => message.id === 'public-poll')?.poll);
+  const legacyCommunity = await legacy.peer.request(MessageType.COMMUNITY_GET);
+  assert.equal(records(legacyCommunity.payload.polls).length, 1);
+  records(legacyCommunity.payload.polls).forEach(assertLegacy);
+  const community = await member.peer.request(MessageType.COMMUNITY_GET);
+  assert.equal(record(records(community.payload.polls)[0]).anonymousVotes, false);
+
+  const anonymous = await owner.peer.request(MessageType.POLL_CREATE, {
+    channelId, clientMessageId: 'anonymous-poll', question: 'Secret?', anonymousVotes: true,
+    options: [{ label: 'Yes', emoji: null }, { label: 'No', emoji: null }], durationMinutes: 60,
+  });
+  const secret = record(anonymous.payload.poll);
+  const secretVote = await member.peer.request(MessageType.POLL_VOTE, {
+    id: text(secret.id), optionIds: [text(records(secret.options)[0].id)],
+  });
+  assert.equal(secretVote.payload.anonymousVotes, true);
+  assert.ok(records(secretVote.payload.options).every(option => !('voters' in option)));
+  await owner.peer.error(MessageType.POLL_VOTERS, { id: text(secret.id) }, ProtocolErrorCode.PERMISSION_DENIED);
+});
+
+test('poll edits reset only the votes whose meaning changed and keep every setting editable', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-poll-edit-'));
+  const database = await DatabaseConnection.create(path.join(root, 'server.db'));
+  t.after(() => {
+    database.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  database.getDb().exec(`
+    INSERT INTO server_meta (id,name,password_hash,created_at) VALUES ('server','Test','',1);
+    INSERT INTO users (id,client_id,nickname,created_at,last_seen_at) VALUES
+      ('owner','owner-device','Owner',1,1), ('member','member-device','Member',1,1), ('guest','guest-device','Guest',1,1);
+    INSERT INTO channels (id,server_id,name,type,created_at) VALUES ('chat','server','chat','TEXT',1);
+  `);
+  const deleted: string[] = [];
+  const service = new NativePollService(new SqliteNativePollRepository(database.getDb()), {
+    consume: refs => refs.map(ref => `${ref}.png`),
+    delete: paths => deleted.push(...paths),
+  });
+  const created = service.create('owner', {
+    channelId: 'chat', clientMessageId: 'editable', question: 'Which days?', allowMultiple: true, durationMinutes: 60,
+    options: [{ label: 'Friday', emoji: null }, { label: 'Saturday', emoji: null }, { label: 'Sunday', emoji: null }],
+  }, 1_000);
+  const id = created.poll.id;
+  const [friday, saturday, sunday] = created.poll.options.map(option => option.id);
+  service.vote('member', id, [friday, saturday], 2_000);
+  service.vote('owner', id, [saturday], 3_000);
+  service.vote('guest', id, [sunday], 4_000);
+  const base = {
+    id, question: 'Which days?', allowMultiple: true, anonymousVotes: false, images: [] as string[],
+    maxVoters: null, liveAction: false, audience: { visibility: 'public' as const },
+  };
+  // Each edit reviews the current poll, as the client does before saving.
+  const edit = (input: Omit<NativePollEdit, 'expectedRevision'>, now: number) =>
+    service.edit('owner', { ...input, expectedRevision: service.get(id).revision }, now);
+  const original = created.poll.options.map(({ id: optionId, label, emoji }) => ({ id: optionId, label, emoji }));
+  assert.throws(() => service.edit('owner', { ...base, question: 'Changed?', options: original, expectedRevision: 0 }, 4_500),
+    /Votes changed/, 'a stale review cannot discard votes cast since');
+  service.edit('owner', {
+    ...base, expectedRevision: 0, options: original.map(option => option.id === sunday ? { ...option, emoji: '🌞' } : option),
+  }, 4_600);
+  assert.equal(service.publicPoll(service.get(id)).totalVotes, 3, 'a stale review that discards nothing is applied');
+
+  let edited = edit({
+    ...base,
+    options: [
+      { id: friday, label: 'Friday', emoji: '🎮' },
+      { id: saturday, label: 'Saturday night', emoji: null },
+      { label: 'Monday', emoji: null },
+    ],
+  }, 5_000);
+  let poll = service.publicPoll(edited, 'member');
+  assert.equal(poll.options[0].id, friday, 'an emoji-only change keeps the answer');
+  assert.notEqual(poll.options[1].id, saturday, 'a changed answer gets a new identity');
+  assert.deepEqual(poll.options.map(option => option.votes), [1, 0, 0]);
+  assert.deepEqual(poll.myVoteOptionIds, [friday]);
+  assert.equal(poll.totalVotes, 1, 'members whose only answers were changed or removed stop counting as voters');
+  assert.equal(poll.closesAt, 1_000 + 60 * 60_000, 'an omitted duration keeps the deadline');
+  assert.equal((database.getDb().prepare('SELECT content FROM messages WHERE id = ?').get('editable') as { content: string }).content,
+    'Which days?');
+
+  const [, saturdayNight, monday] = poll.options.map(option => option.id);
+  service.vote('member', id, [friday, monday], 6_000);
+  service.vote('owner', id, [saturdayNight], 6_000);
+  edited = edit({
+    ...base, allowMultiple: false, durationMinutes: 5,
+    options: poll.options.map(option => ({ id: option.id, label: option.label, emoji: option.emoji })),
+  }, 7_000);
+  poll = service.publicPoll(edited, 'member');
+  assert.deepEqual(poll.myVoteOptionIds, [], 'a member with several answers loses the vote when only one is accepted');
+  assert.deepEqual(service.publicPoll(edited, 'owner').myVoteOptionIds, [saturdayNight]);
+  assert.equal(poll.closesAt, 7_000 + 5 * 60_000, 'a new duration counts from the edit');
+
+  edited = edit({
+    ...base, question: 'Which evening?', allowMultiple: false, durationMinutes: 5,
+    options: poll.options.map(option => ({ id: option.id, label: option.label, emoji: option.emoji })),
+  }, 8_000);
+  poll = service.publicPoll(edited, 'owner');
+  assert.equal(poll.totalVotes, 0, 'a new question discards every vote');
+  assert.ok(poll.options.every(option => ![friday, saturdayNight, monday].includes(option.id)));
+  assert.equal((database.getDb().prepare('SELECT content FROM messages WHERE id = ?').get('editable') as { content: string }).content,
+    'Which evening?');
+
+  const kept = poll.options.map(option => ({ id: option.id, label: option.label, emoji: option.emoji }));
+  service.vote('member', id, [kept[0].id], 9_000);
+  service.vote('guest', id, [kept[1].id], 9_000);
+  edited = edit({ ...base, question: 'Which evening?', options: kept, anonymousVotes: true }, 10_000);
+  assert.equal(service.publicPoll(edited).totalVotes, 2, 'hiding voters keeps every vote');
+  assert.ok(service.publicPoll(edited).options.every(option => option.voters === undefined));
+  edited = edit({ ...base, question: 'Which evening?', options: kept, anonymousVotes: false }, 11_000);
+  assert.equal(service.publicPoll(edited).totalVotes, 0, 'secret votes are discarded instead of being revealed');
+
+  assert.throws(() => edit({
+    ...base, question: 'Which evening?', durationMinutes: null, options: service.publicPoll(edited).options
+      .map(option => ({ id: option.id, label: option.label, emoji: option.emoji })),
+  }, 12_000), /duration or voter limit/);
+  assert.throws(() => edit({
+    ...base, question: 'Which evening?', options: [{ id: friday, label: 'Friday', emoji: null }, { label: 'Other', emoji: null }],
+  }, 12_000), /Reload before editing/, 'a stale answer list is refused');
+  assert.throws(() => edit({
+    ...base, question: 'Which evening?', images: ['/avatars/foreign.png'],
+    options: service.publicPoll(edited).options.map(option => ({ id: option.id, label: option.label, emoji: option.emoji })),
+  }, 12_000), /image is unavailable/);
+
+  const current = service.publicPoll(edited).options.map(option => ({ id: option.id, label: option.label, emoji: option.emoji }));
+  const ref = '00000000-0000-4000-8000-000000000001';
+  edited = edit({ ...base, question: 'Which evening?', options: current, images: [ref] }, 13_000);
+  assert.deepEqual(edited.imagePaths, [`${ref}.png`]);
+  edited = edit({ ...base, question: 'Which evening?', options: current, images: [] }, 14_000);
+  assert.deepEqual(deleted, [`${ref}.png`], 'images left out of an edit are deleted');
+
+  service.vote('member', id, [current[0].id], 15_000);
+  service.vote('guest', id, [current[1].id], 15_000);
+  edited = edit({ ...base, question: 'Which evening?', options: current, maxVoters: 2 }, 16_000);
+  assert.equal(edited.closedAt, 16_000, 'a limit already reached closes the poll');
+  assert.throws(() => edit({ ...base, question: 'Closed?', options: current }, 17_000), /closed/);
+});
+
+test('only the creator and server managers edit polls, through updated clients', async t => {
+  const f = await createApprovedBotFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Poll owner');
+  const member = await f.human('Poll member');
+  const other = await f.human('Other member');
+  const offer = createProtocolOffer('client');
+  const legacy = await f.human('Older client', undefined, undefined, false, PROTOCOL_VERSION,
+    { ...offer, features: offer.features.filter(feature => feature !== 'poll-edit') });
+  const channelId = text(records(record(owner.auth.payload.server).channels).find(channel => channel.type === 'TEXT')?.id);
+  const created = await member.peer.request(MessageType.POLL_CREATE, {
+    channelId, clientMessageId: 'member-poll', question: 'Pizza?',
+    options: [{ label: 'Yes', emoji: null }, { label: 'No', emoji: null }], durationMinutes: 60,
+  });
+  const poll = record(created.payload.poll);
+  const [yes, no] = records(poll.options).map(option => text(option.id));
+  const voted = await other.peer.request(MessageType.POLL_VOTE, { id: text(poll.id), optionIds: [yes] });
+  const edit = {
+    id: text(poll.id), expectedRevision: Number(voted.payload.revision), question: 'Pizza tonight?',
+    allowMultiple: false, anonymousVotes: false, images: [],
+    maxVoters: null, liveAction: false, audience: { visibility: 'public' },
+    options: [{ id: yes, label: 'Yes', emoji: null }, { id: no, label: 'No', emoji: null }],
+  };
+  await other.peer.error(MessageType.POLL_EDIT, edit, ProtocolErrorCode.PERMISSION_DENIED);
+  await legacy.peer.error(MessageType.POLL_EDIT, edit, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+  await legacy.peer.error(MessageType.POLL_GET, { id: text(poll.id) }, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+  await member.peer.error(MessageType.POLL_EDIT, { ...edit, liveAction: true }, ProtocolErrorCode.PERMISSION_DENIED);
+  await member.peer.error(MessageType.POLL_EDIT, { ...edit, expectedRevision: Number(poll.revision) },
+    ProtocolErrorCode.COMMUNITY_CONFLICT);
+  const reviewed = await member.peer.request(MessageType.POLL_GET, { id: text(poll.id) });
+  assert.equal(reviewed.type, MessageType.POLL_UPDATED);
+  assert.equal(reviewed.payload.revision, voted.payload.revision, 'the editor reloads the poll it must review');
+  assert.equal(reviewed.payload.totalVotes, 1);
+
+  const otherStart = other.peer.messages.length;
+  const byCreator = await member.peer.request(MessageType.POLL_EDIT, edit);
+  assert.equal(byCreator.type, MessageType.POLL_UPDATED);
+  assert.equal(byCreator.payload.question, 'Pizza tonight?');
+  assert.equal(byCreator.payload.totalVotes, 0);
+  const seen = await other.peer.wait(message => message.type === MessageType.POLL_UPDATED &&
+    message.payload.question === 'Pizza tonight?', otherStart);
+  assert.equal(seen.payload.myVoteOptionIds, null);
+  assert.ok(records(seen.payload.options).every(option => option.id !== yes), 'reset answers arrive with new ids');
+
+  const current = records(byCreator.payload.options).map(option => ({ id: text(option.id), label: text(option.label), emoji: null }));
+  const byManager = await owner.peer.request(MessageType.POLL_EDIT, {
+    ...edit, expectedRevision: Number(byCreator.payload.revision), question: 'Pizza tonight?',
+    options: [...current, { label: 'Maybe', emoji: null }],
+  });
+  assert.deepEqual(records(byManager.payload.options).map(option => option.label), ['Yes', 'No', 'Maybe']);
+});
+
+test('restoring a poll message never shares the restorer\'s vote or revealed audience', async t => {
+  const f = await createApprovedBotFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Poll owner');
+  const member = await f.human('Poll member');
+  const channelId = text(records(record(owner.auth.payload.server).channels).find(channel => channel.type === 'TEXT')?.id);
+  const created = await owner.peer.request(MessageType.POLL_CREATE, {
+    channelId, clientMessageId: 'restored-poll', question: 'Secret restore?', anonymousVotes: true,
+    options: [{ label: 'Yes', emoji: null }, { label: 'No', emoji: null }], durationMinutes: 60,
+  });
+  const poll = record(created.payload.poll);
+  await owner.peer.request(MessageType.POLL_VOTE, { id: text(poll.id), optionIds: [text(records(poll.options)[0].id)] });
+  const deleted = await owner.peer.request(MessageType.CHAT_DELETE, { channelId, messageId: 'restored-poll' });
+  const deletedMessage = record(deleted.payload.message);
+  const memberStart = member.peer.messages.length;
+  await owner.peer.request(MessageType.CHAT_RESTORE, {
+    channelId, messageId: 'restored-poll', deletedAt: deletedMessage.deletedAt, revision: deletedMessage.revision,
+  });
+  const restored = await member.peer.wait(message => message.type === MessageType.CHAT_MESSAGE_UPDATED &&
+    record(message.payload.message).id === 'restored-poll' && !record(message.payload.message).deletedAt, memberStart);
+  assert.equal(record(record(restored.payload.message).poll).myVoteOptionIds, null);
 });
 
 test('interested members receive a start notice once, including manual starts, and never before start', async t => {

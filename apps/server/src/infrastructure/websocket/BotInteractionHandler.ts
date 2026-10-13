@@ -54,6 +54,7 @@ import {
   type LocalRequestContext,
   type LocalTaskCancellationCause,
   type BotMessageComponent,
+  type CommandValues,
 } from '@monky/shared';
 import { ChannelAccessContext, ChannelService } from '../../application/services/ChannelService';
 import { CommandRegistry } from '../../application/services/CommandRegistry';
@@ -96,6 +97,8 @@ interface InteractionTransport {
   consumeLocalPreview?(
     bot: BotInteractionSession, origin: BotInteractionSession, contextId: string, requestId: string, result: LocalPreviewReference,
   ): Promise<boolean>;
+  /** Told once an invocation reached its bot, so the server can record who ran what. */
+  commandInvoked?(session: BotInteractionSession, command: SlashCommand, channelId: string, options: CommandValues): Promise<void>;
 }
 
 interface Invocation {
@@ -622,6 +625,11 @@ export class BotInteractionHandler {
       invokerVoiceChannelId: this.transport.getVoiceChannelId?.(session.sessionId) ?? null,
     };
     this.transport.send(bot.ws, { type: MessageType.COMMAND_INVOKE, payload: execution });
+    try {
+      await this.transport.commandInvoked?.(session, command, input.channelId, options.values);
+    } catch (error) {
+      Logger.error('BOT', 'Could not record a command invocation.', error);
+    }
   }
 
   async getVoiceContext(session: BotInteractionSession, payload: unknown, requestId?: string): Promise<void> {
@@ -888,11 +896,11 @@ export class BotInteractionHandler {
     const canContinue = (invokerId: string, channelId: string): boolean => {
       const channel = channels.get(channelId);
       const context = contexts.get(invokerId);
-      return !!channel && (channel.type === 'TEXT' || channel.type === 'VOICE') && !!context &&
-        channel.botCommandsEnabled &&
-        hasChannelPermission(channel, context.permissions, context.roleIds, Permission.USE_BOT_COMMANDS, false, context.userId) &&
-        hasChannelPermission(channel, context.permissions, context.roleIds, Permission.SEND_MESSAGES, false, context.userId) &&
-        canAccessChannel(channel, context.permissions, context.roleIds, false, context.userId);
+      if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE') || !context || !channel.botCommandsEnabled) return false;
+      const rules = this.channelService.rulesFor(channel, context);
+      return hasChannelPermission(rules, context.permissions, context.roleIds, Permission.USE_BOT_COMMANDS, false, context.userId) &&
+        hasChannelPermission(rules, context.permissions, context.roleIds, Permission.SEND_MESSAGES, false, context.userId) &&
+        canAccessChannel(rules, context.permissions, context.roleIds, false, context.userId);
     };
     for (const pending of this.autocompletes.values()) {
       if (!canContinue(pending.invokerId, pending.channelId)) {
@@ -1005,7 +1013,7 @@ export class BotInteractionHandler {
       this.channelService.getAccessContext(invocation.invokerId, channelId),
     ]);
     if (!channel || channel.type !== 'VOICE' || (requireSpeak && !hasPermission(context.permissions, Permission.SPEAK)) ||
-        !canAccessChannel(channel, context.permissions, context.roleIds, false, context.userId)) return undefined;
+        !canAccessChannel(this.channelService.rulesFor(channel, context), context.permissions, context.roleIds, false, context.userId)) return undefined;
     const isCurrent = () => this.isActive(invocation) &&
       this.transport.getVoiceChannelId?.(originSessionId) === channelId;
     return isCurrent() ? { creatorUserId: invocation.invokerId, originChannelId: invocation.channelId, isCurrent } : undefined;
@@ -1253,7 +1261,7 @@ export class BotInteractionHandler {
     ]);
     if (!isMember) return ProtocolErrorCode.UNAUTHORIZED;
     if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE') ||
-        !canAccessChannel(channel, context.permissions, context.roleIds, false, context.userId)) {
+        !canAccessChannel(this.channelService.rulesFor(channel, context), context.permissions, context.roleIds, false, context.userId)) {
       return ProtocolErrorCode.CHANNEL_NOT_FOUND;
     }
     if (!hasPermission(context.permissions, Permission.SEND_MESSAGES)) return ProtocolErrorCode.PERMISSION_DENIED;

@@ -25,6 +25,76 @@ export type AudioPreviewSource = {
 };
 ```
 
+## `BotCarouselComponent` {#botcarouselcomponent}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botCarousels.ts#L39)
+
+```ts
+export type BotCarouselComponent = {
+    type: "carousel";
+    imageUrls: string[];
+    label?: string | undefined;
+    presentation?: {
+        format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+        fit?: "cover" | "contain" | undefined;
+        size?: "compact" | "regular" | "wide" | undefined;
+    } | undefined;
+};
+```
+
+## `BotCarouselFit` {#botcarouselfit}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botCarousels.ts#L35)
+
+```ts
+export type BotCarouselFit = "cover" | "contain";
+```
+
+## `BotCarouselFormat` {#botcarouselformat}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botCarousels.ts#L34)
+
+```ts
+export type BotCarouselFormat = "banner" | "landscape" | "square" | "portrait";
+```
+
+## `BotCarouselInput` {#botcarouselinput}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botCarousels.ts#L38)
+
+```ts
+export type BotCarouselInput = {
+    type: "carousel";
+    imageAssetRefs: string[];
+    label?: string | undefined;
+    presentation?: {
+        format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+        fit?: "cover" | "contain" | undefined;
+        size?: "compact" | "regular" | "wide" | undefined;
+    } | undefined;
+};
+```
+
+## `BotCarouselPresentation` {#botcarouselpresentation}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botCarousels.ts#L37)
+
+```ts
+export type BotCarouselPresentation = {
+    format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+    fit?: "cover" | "contain" | undefined;
+    size?: "compact" | "regular" | "wide" | undefined;
+};
+```
+
+## `BotCarouselSize` {#botcarouselsize}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botCarousels.ts#L36)
+
+```ts
+export type BotCarouselSize = "compact" | "regular" | "wide";
+```
+
 ## `BotFieldLocalization` {#botfieldlocalization}
 
 [Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botLocales.ts#L54)
@@ -43,7 +113,7 @@ export type BotFieldLocalization = {
 
 ## `BotForm` {#botform}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L311)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L322)
 
 ```ts
 export type BotForm = {
@@ -116,9 +186,13 @@ export type BotForm = {
         label: string;
         description?: string | undefined;
         required?: boolean | undefined;
+        presentation?: {
+            format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+            fit?: "cover" | "contain" | undefined;
+            size?: "compact" | "regular" | "wide" | undefined;
+        } | undefined;
         minItems?: number | undefined;
         maxItems?: number | undefined;
-        presentation?: BotCarouselPresentation | undefined;
     })[];
     description?: string | undefined;
     submitLabel?: string | undefined;
@@ -127,7 +201,7 @@ export type BotForm = {
 
 ## `BotFormField` {#botformfield}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L286)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L295)
 
 ```ts
 export type BotFormField = {
@@ -198,15 +272,19 @@ export type BotFormField = {
     label: string;
     description?: string | undefined;
     required?: boolean | undefined;
+    presentation?: {
+        format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+        fit?: "cover" | "contain" | undefined;
+        size?: "compact" | "regular" | "wide" | undefined;
+    } | undefined;
     minItems?: number | undefined;
     maxItems?: number | undefined;
-    presentation?: BotCarouselPresentation | undefined;
 };
 ```
 
 ## `BotFormValues` {#botformvalues}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L40)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L42)
 
 ```ts
 export type BotFormValues = {
@@ -216,7 +294,7 @@ export type BotFormValues = {
 
 ## `BotInputResult` {#botinputresult}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L577)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L594)
 
 ```ts
 export type BotInputResult<T> = {
@@ -250,7 +328,7 @@ type Output = "pt-BR" | "en";
 
 ## `BotLocalizedMessage` {#botlocalizedmessage}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botMessages.ts#L16)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botMessages.ts#L18)
 
 ```ts
 export type BotLocalizedMessage = {
@@ -259,13 +337,56 @@ export type BotLocalizedMessage = {
         'pt-BR'?: string | undefined;
         en?: string | undefined;
     } | undefined;
-    components?: BotMessageComponentInput[] | undefined;
+    components?: {
+        type: "carousel";
+        imageAssetRefs: string[];
+        label?: string | undefined;
+        presentation?: {
+            format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+            fit?: "cover" | "contain" | undefined;
+            size?: "compact" | "regular" | "wide" | undefined;
+        } | undefined;
+    }[] | undefined;
+};
+```
+
+## `BotMessageComponent` {#botmessagecomponent}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botCarousels.ts#L41)
+
+```ts
+export type BotMessageComponent = {
+    type: "carousel";
+    imageUrls: string[];
+    label?: string | undefined;
+    presentation?: {
+        format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+        fit?: "cover" | "contain" | undefined;
+        size?: "compact" | "regular" | "wide" | undefined;
+    } | undefined;
+};
+```
+
+## `BotMessageComponentInput` {#botmessagecomponentinput}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botCarousels.ts#L40)
+
+```ts
+export type BotMessageComponentInput = {
+    type: "carousel";
+    imageAssetRefs: string[];
+    label?: string | undefined;
+    presentation?: {
+        format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+        fit?: "cover" | "contain" | undefined;
+        size?: "compact" | "regular" | "wide" | undefined;
+    } | undefined;
 };
 ```
 
 ## `BotMessageContent` {#botmessagecontent}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botMessages.ts#L17)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botMessages.ts#L19)
 
 ```ts
 export type BotMessageContent = string | {
@@ -274,58 +395,54 @@ export type BotMessageContent = string | {
         'pt-BR'?: string | undefined;
         en?: string | undefined;
     } | undefined;
-    components?: BotMessageComponentInput[] | undefined;
+    components?: {
+        type: "carousel";
+        imageAssetRefs: string[];
+        label?: string | undefined;
+        presentation?: {
+            format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+            fit?: "cover" | "contain" | undefined;
+            size?: "compact" | "regular" | "wide" | undefined;
+        } | undefined;
+    }[] | undefined;
 };
-```
-
-## `BotPublishedMessageContent` {#botpublishedmessagecontent}
-
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botMessages.ts)
-
-```ts
-export type BotPublishedMessageContent = string | {
-    content: string;
-    localizations?: BotMessageLocalizations | undefined;
-    components?: never;
-};
-```
-
-## `BotCarouselPresentation` {#botcarouselpresentation}
-
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botCarousels.ts)
-
-```ts
-export type BotCarouselPresentation = {
-    format?: "banner" | "landscape" | "square" | "portrait" | undefined;
-    fit?: "cover" | "contain" | undefined;
-    size?: "compact" | "regular" | "wide" | undefined;
-};
-```
-
-## `BotCarouselInput` {#botcarouselinput}
-
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botCarousels.ts)
-
-```ts
-export type BotCarouselInput = {
-    type: "carousel";
-    imageAssetRefs: string[];
-    label?: string | undefined;
-    presentation?: BotCarouselPresentation | undefined;
-};
-
-export type BotMessageComponentInput = BotCarouselInput;
 ```
 
 ## `BotMessageLocalizations` {#botmessagelocalizations}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botMessages.ts#L10)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botMessages.ts#L11)
 
 ```ts
 export type BotMessageLocalizations = {
     'pt-BR'?: string | undefined;
     en?: string | undefined;
 };
+```
+
+## `BotPublishedMessageContent` {#botpublishedmessagecontent}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botMessages.ts#L20)
+
+```ts
+export type BotPublishedMessageContent = string | (Omit<{
+    content: string;
+    localizations?: {
+        'pt-BR'?: string | undefined;
+        en?: string | undefined;
+    } | undefined;
+    components?: {
+        type: "carousel";
+        imageAssetRefs: string[];
+        label?: string | undefined;
+        presentation?: {
+            format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+            fit?: "cover" | "contain" | undefined;
+            size?: "compact" | "regular" | "wide" | undefined;
+        } | undefined;
+    }[] | undefined;
+}, "components"> & {
+    components?: never;
+});
 ```
 
 ## `BotSelector` {#botselector}
@@ -511,7 +628,7 @@ type Output = {
 
 ## `BotServerSettingsSnapshot` {#botserversettingssnapshot}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L56)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L58)
 
 ```ts
 export type BotServerSettingsSnapshot = {
@@ -523,7 +640,7 @@ export type BotServerSettingsSnapshot = {
 
 ## `botServerSettingsSnapshotSchema` {#botserversettingssnapshotschema}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L51)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L53)
 
 Este é um validador Zod. `parse(valor)` retorna `Output` ou lança erro; `safeParse(valor)` retorna um resultado discriminado de sucesso/erro. `Input` descreve a estrutura aceita; a origem também aplica refinamentos e limites de tamanho.
 
@@ -542,7 +659,7 @@ type Output = {
 
 ## `BotSettingsContext` {#botsettingscontext}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L64)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L66)
 
 ```ts
 export type BotSettingsContext = {
@@ -555,7 +672,7 @@ export type BotSettingsContext = {
 
 ## `botSettingsContextSchema` {#botsettingscontextschema}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L58)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L60)
 
 Este é um validador Zod. `parse(valor)` retorna `Output` ou lança erro; `safeParse(valor)` retorna um resultado discriminado de sucesso/erro. `Input` descreve a estrutura aceita; a origem também aplica refinamentos e limites de tamanho.
 
@@ -576,7 +693,7 @@ type Output = {
 
 ## `BotSettingsDefinition` {#botsettingsdefinition}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L372)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L387)
 
 ```ts
 export type BotSettingsDefinition = {
@@ -642,6 +759,19 @@ export type BotSettingsDefinition = {
             maxLength?: number | undefined;
             defaultValue?: string[] | undefined;
             required?: boolean | undefined;
+            minItems?: number | undefined;
+            maxItems?: number | undefined;
+        } | {
+            type: "image-list";
+            name: string;
+            label: string;
+            description?: string | undefined;
+            required?: boolean | undefined;
+            presentation?: {
+                format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+                fit?: "cover" | "contain" | undefined;
+                size?: "compact" | "regular" | "wide" | undefined;
+            } | undefined;
             minItems?: number | undefined;
             maxItems?: number | undefined;
         })[];
@@ -710,6 +840,19 @@ export type BotSettingsDefinition = {
             maxLength?: number | undefined;
             defaultValue?: string[] | undefined;
             required?: boolean | undefined;
+            minItems?: number | undefined;
+            maxItems?: number | undefined;
+        } | {
+            type: "image-list";
+            name: string;
+            label: string;
+            description?: string | undefined;
+            required?: boolean | undefined;
+            presentation?: {
+                format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+                fit?: "cover" | "contain" | undefined;
+                size?: "compact" | "regular" | "wide" | undefined;
+            } | undefined;
             minItems?: number | undefined;
             maxItems?: number | undefined;
         })[];
@@ -783,7 +926,7 @@ export type BotSettingsDefinition = {
 
 ## `botSettingsDefinitionSchema` {#botsettingsdefinitionschema}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L324)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L335)
 
 Este é um validador Zod. `parse(valor)` retorna `Output` ou lança erro; `safeParse(valor)` retorna um resultado discriminado de sucesso/erro. `Input` descreve a estrutura aceita; a origem também aplica refinamentos e limites de tamanho.
 
@@ -853,6 +996,19 @@ type Input = {
             required?: boolean | undefined;
             minItems?: number | undefined;
             maxItems?: number | undefined;
+        } | {
+            type: "image-list";
+            name: string;
+            label: string;
+            description?: string | undefined;
+            required?: boolean | undefined;
+            presentation?: {
+                format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+                fit?: "cover" | "contain" | undefined;
+                size?: "compact" | "regular" | "wide" | undefined;
+            } | undefined;
+            minItems?: number | undefined;
+            maxItems?: number | undefined;
         })[];
         description?: string | undefined;
         submitLabel?: string | undefined;
@@ -919,6 +1075,19 @@ type Input = {
             maxLength?: number | undefined;
             defaultValue?: string[] | undefined;
             required?: boolean | undefined;
+            minItems?: number | undefined;
+            maxItems?: number | undefined;
+        } | {
+            type: "image-list";
+            name: string;
+            label: string;
+            description?: string | undefined;
+            required?: boolean | undefined;
+            presentation?: {
+                format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+                fit?: "cover" | "contain" | undefined;
+                size?: "compact" | "regular" | "wide" | undefined;
+            } | undefined;
             minItems?: number | undefined;
             maxItems?: number | undefined;
         })[];
@@ -1053,6 +1222,19 @@ type Output = {
             required?: boolean | undefined;
             minItems?: number | undefined;
             maxItems?: number | undefined;
+        } | {
+            type: "image-list";
+            name: string;
+            label: string;
+            description?: string | undefined;
+            required?: boolean | undefined;
+            presentation?: {
+                format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+                fit?: "cover" | "contain" | undefined;
+                size?: "compact" | "regular" | "wide" | undefined;
+            } | undefined;
+            minItems?: number | undefined;
+            maxItems?: number | undefined;
         })[];
         description?: string | undefined;
         submitLabel?: string | undefined;
@@ -1119,6 +1301,19 @@ type Output = {
             maxLength?: number | undefined;
             defaultValue?: string[] | undefined;
             required?: boolean | undefined;
+            minItems?: number | undefined;
+            maxItems?: number | undefined;
+        } | {
+            type: "image-list";
+            name: string;
+            label: string;
+            description?: string | undefined;
+            required?: boolean | undefined;
+            presentation?: {
+                format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+                fit?: "cover" | "contain" | undefined;
+                size?: "compact" | "regular" | "wide" | undefined;
+            } | undefined;
             minItems?: number | undefined;
             maxItems?: number | undefined;
         })[];
@@ -1192,7 +1387,7 @@ type Output = {
 
 ## `BotSettingsSnapshot` {#botsettingssnapshot}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L557)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L574)
 
 ```ts
 export type BotSettingsSnapshot = {
@@ -1284,6 +1479,19 @@ export type BotSettingsSnapshot = {
                 required?: boolean | undefined;
                 minItems?: number | undefined;
                 maxItems?: number | undefined;
+            } | {
+                type: "image-list";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                required?: boolean | undefined;
+                presentation?: {
+                    format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+                    fit?: "cover" | "contain" | undefined;
+                    size?: "compact" | "regular" | "wide" | undefined;
+                } | undefined;
+                minItems?: number | undefined;
+                maxItems?: number | undefined;
             })[];
             description?: string | undefined;
             submitLabel?: string | undefined;
@@ -1350,6 +1558,19 @@ export type BotSettingsSnapshot = {
                 maxLength?: number | undefined;
                 defaultValue?: string[] | undefined;
                 required?: boolean | undefined;
+                minItems?: number | undefined;
+                maxItems?: number | undefined;
+            } | {
+                type: "image-list";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                required?: boolean | undefined;
+                presentation?: {
+                    format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+                    fit?: "cover" | "contain" | undefined;
+                    size?: "compact" | "regular" | "wide" | undefined;
+                } | undefined;
                 minItems?: number | undefined;
                 maxItems?: number | undefined;
             })[];
@@ -1429,7 +1650,7 @@ export type BotSettingsSnapshot = {
 
 ## `botSettingsSnapshotSchema` {#botsettingssnapshotschema}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L535)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L552)
 
 Este é um validador Zod. `parse(valor)` retorna `Output` ou lança erro; `safeParse(valor)` retorna um resultado discriminado de sucesso/erro. `Input` descreve a estrutura aceita; a origem também aplica refinamentos e limites de tamanho.
 
@@ -1523,6 +1744,19 @@ type Input = {
                 required?: boolean | undefined;
                 minItems?: number | undefined;
                 maxItems?: number | undefined;
+            } | {
+                type: "image-list";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                required?: boolean | undefined;
+                presentation?: {
+                    format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+                    fit?: "cover" | "contain" | undefined;
+                    size?: "compact" | "regular" | "wide" | undefined;
+                } | undefined;
+                minItems?: number | undefined;
+                maxItems?: number | undefined;
             })[];
             description?: string | undefined;
             submitLabel?: string | undefined;
@@ -1589,6 +1823,19 @@ type Input = {
                 maxLength?: number | undefined;
                 defaultValue?: string[] | undefined;
                 required?: boolean | undefined;
+                minItems?: number | undefined;
+                maxItems?: number | undefined;
+            } | {
+                type: "image-list";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                required?: boolean | undefined;
+                presentation?: {
+                    format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+                    fit?: "cover" | "contain" | undefined;
+                    size?: "compact" | "regular" | "wide" | undefined;
+                } | undefined;
                 minItems?: number | undefined;
                 maxItems?: number | undefined;
             })[];
@@ -1753,6 +2000,19 @@ type Output = {
                 required?: boolean | undefined;
                 minItems?: number | undefined;
                 maxItems?: number | undefined;
+            } | {
+                type: "image-list";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                required?: boolean | undefined;
+                presentation?: {
+                    format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+                    fit?: "cover" | "contain" | undefined;
+                    size?: "compact" | "regular" | "wide" | undefined;
+                } | undefined;
+                minItems?: number | undefined;
+                maxItems?: number | undefined;
             })[];
             description?: string | undefined;
             submitLabel?: string | undefined;
@@ -1819,6 +2079,19 @@ type Output = {
                 maxLength?: number | undefined;
                 defaultValue?: string[] | undefined;
                 required?: boolean | undefined;
+                minItems?: number | undefined;
+                maxItems?: number | undefined;
+            } | {
+                type: "image-list";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                required?: boolean | undefined;
+                presentation?: {
+                    format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+                    fit?: "cover" | "contain" | undefined;
+                    size?: "compact" | "regular" | "wide" | undefined;
+                } | undefined;
                 minItems?: number | undefined;
                 maxItems?: number | undefined;
             })[];
@@ -1898,7 +2171,7 @@ type Output = {
 
 ## `BotSettingsSummary` {#botsettingssummary}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L533)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L550)
 
 ```ts
 export type BotSettingsSummary = {
@@ -1928,7 +2201,7 @@ export type BotSettingsSummary = {
 
 ## `botSettingsValuesSchema` {#botsettingsvaluesschema}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L46)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L48)
 
 Este é um validador Zod. `parse(valor)` retorna `Output` ou lança erro; `safeParse(valor)` retorna um resultado discriminado de sucesso/erro. `Input` descreve a estrutura aceita; a origem também aplica refinamentos e limites de tamanho.
 
@@ -1943,10 +2216,11 @@ type Output = {
 
 ## `ChatMessage` {#chatmessage}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L156)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L200)
 
 ```ts
 export interface ChatMessage {
+    botComponents?: import('./botCarousels.js').BotMessageComponent[];
     blocks?: import('./messageBlocks.js').ResolvedMessageBlock[];
     localizations?: import('./botMessages.js').BotMessageLocalizations;
     reply?: MessageReply;
@@ -1982,6 +2256,8 @@ export interface ChatMessage {
     isBot?: boolean;
     /** Server-authenticated attribution; private argument values are never included. */
     botCommand?: BotCommandContext;
+    /** Native poll attached to this message, personalized with the current member's vote. */
+    poll?: import('./nativePolls.js').NativePoll;
 }
 ```
 
@@ -2001,7 +2277,7 @@ export type ChatReactionEventPayload = {
 
 ## `CommandAudioPreviewMimeType` {#commandaudiopreviewmimetype}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L209)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L211)
 
 ```ts
 export type CommandAudioPreviewMimeType = "audio/ogg" | "audio/mpeg" | "audio/wav";
@@ -2009,7 +2285,7 @@ export type CommandAudioPreviewMimeType = "audio/ogg" | "audio/mpeg" | "audio/wa
 
 ## `CommandAutocompleteChoice` {#commandautocompletechoice}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L137)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L139)
 
 ```ts
 export type CommandAutocompleteChoice = {
@@ -2030,7 +2306,7 @@ export type CommandAutocompleteChoice = {
 
 ## `CommandAutocompletePage` {#commandautocompletepage}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L150)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L152)
 
 ```ts
 export type CommandAutocompletePage = {
@@ -2113,7 +2389,7 @@ export type CommandLocalizations = {
 
 ## `CommandOption` {#commandoption}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L266)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L317)
 
 ```ts
 export interface CommandOption {
@@ -2146,11 +2422,12 @@ export interface CommandPresentation {
 
 ## `CommandResponsePayload` {#commandresponsepayload}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1106)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1215)
 
 ```ts
 export interface CommandResponsePayload {
     localizations?: import('./botMessages.js').BotMessageLocalizations;
+    components?: import('./botCarousels.js').BotMessageComponentInput[];
     invocationId: string;
     content: string;
     /** Private by default. Public output must be explicitly requested. */
@@ -2160,7 +2437,7 @@ export interface CommandResponsePayload {
 
 ## `CommandValue` {#commandvalue}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L38)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L40)
 
 ```ts
 export type CommandValue = string | number | boolean;
@@ -2168,7 +2445,7 @@ export type CommandValue = string | number | boolean;
 
 ## `CommandValues` {#commandvalues}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L39)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L41)
 
 ```ts
 export type CommandValues = {
@@ -2178,7 +2455,7 @@ export type CommandValues = {
 
 ## `CommandVoiceRequirement` {#commandvoicerequirement}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L281)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L332)
 
 ```ts
 export type CommandVoiceRequirement = "joined" | "same-bot-channel";
@@ -2197,7 +2474,7 @@ export function getCommandPresentation(command: {
 
 ## `LiveAction` {#liveaction}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L116)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L171)
 
 ```ts
 export type LiveAction = {
@@ -2272,24 +2549,50 @@ export type LiveAction = {
                 required?: boolean | undefined;
                 minItems?: number | undefined;
                 maxItems?: number | undefined;
+            } | {
+                type: "image-list";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                required?: boolean | undefined;
+                presentation?: {
+                    format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+                    fit?: "cover" | "contain" | undefined;
+                    size?: "compact" | "regular" | "wide" | undefined;
+                } | undefined;
+                minItems?: number | undefined;
+                maxItems?: number | undefined;
             })[];
             description?: string | undefined;
             submitLabel?: string | undefined;
         };
     };
     expiresAt: number;
+    audience: {
+        visibility: "public";
+    } | {
+        visibility: "private";
+        userIds?: string[] | undefined;
+        roleIds?: string[] | undefined;
+    };
     id: string;
     channelId: string;
     botId: string;
     creatorUserId: string;
+    imageUrls: string[];
     createdAt: number;
     revision: number;
+    imagePresentation?: {
+        format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+        fit?: "cover" | "contain" | undefined;
+        size?: "compact" | "regular" | "wide" | undefined;
+    } | undefined;
 };
 ```
 
 ## `LiveActionCreate` {#liveactioncreate}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L117)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L173)
 
 ```ts
 export type LiveActionCreate = {
@@ -2364,15 +2667,39 @@ export type LiveActionCreate = {
                 required?: boolean | undefined;
                 minItems?: number | undefined;
                 maxItems?: number | undefined;
+            } | {
+                type: "image-list";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                required?: boolean | undefined;
+                presentation?: {
+                    format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+                    fit?: "cover" | "contain" | undefined;
+                    size?: "compact" | "regular" | "wide" | undefined;
+                } | undefined;
+                minItems?: number | undefined;
+                maxItems?: number | undefined;
             })[];
             description?: string | undefined;
             submitLabel?: string | undefined;
         };
     };
     expiresAt: number;
-    imagePresentation?: BotCarouselPresentation | undefined;
     channelId: string;
     invocationId: string;
+    imagePresentation?: {
+        format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+        fit?: "cover" | "contain" | undefined;
+        size?: "compact" | "regular" | "wide" | undefined;
+    } | undefined;
+    audience?: {
+        visibility: "public";
+    } | {
+        visibility: "private";
+        userIds: string[];
+        roleIds: string[];
+    } | undefined;
     id?: string | undefined;
     imageAssetRefs?: string[] | undefined;
 };
@@ -2380,7 +2707,7 @@ export type LiveActionCreate = {
 
 ## `LiveActionSubmission` {#liveactionsubmission}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L119)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L175)
 
 ```ts
 export type LiveActionSubmission = {
@@ -2397,7 +2724,7 @@ export type LiveActionSubmission = {
 
 ## `LiveActionUpdate` {#liveactionupdate}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L118)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L174)
 
 ```ts
 export type LiveActionUpdate = {
@@ -2474,12 +2801,33 @@ export type LiveActionUpdate = {
                 required?: boolean | undefined;
                 minItems?: number | undefined;
                 maxItems?: number | undefined;
+            } | {
+                type: "image-list";
+                name: string;
+                label: string;
+                description?: string | undefined;
+                required?: boolean | undefined;
+                presentation?: {
+                    format?: "banner" | "landscape" | "square" | "portrait" | undefined;
+                    fit?: "cover" | "contain" | undefined;
+                    size?: "compact" | "regular" | "wide" | undefined;
+                } | undefined;
+                minItems?: number | undefined;
+                maxItems?: number | undefined;
             })[];
             description?: string | undefined;
             submitLabel?: string | undefined;
         };
     } | undefined;
     expiresAt?: number | undefined;
+    audience?: {
+        visibility: "public";
+    } | {
+        visibility: "private";
+        userIds: string[];
+        roleIds: string[];
+    } | undefined;
+    imageAssetRefs?: string[] | undefined;
 };
 ```
 
@@ -2524,7 +2872,7 @@ export function resolveBotLocale(requested: unknown, supported?: readonly BotLoc
 
 ## `resolveBotSettingsValues` {#resolvebotsettingsvalues}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L586)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L603)
 
 ```ts
 export function resolveBotSettingsValues(form: BotForm | undefined, input: unknown): BotInputResult<BotFormValues>;
@@ -2553,7 +2901,7 @@ export type SelectionChoice = {
 
 ## `SlashCommand` {#slashcommand}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L284)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L335)
 
 ```ts
 export interface SlashCommand {

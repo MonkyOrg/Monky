@@ -17,7 +17,8 @@ import {
 import type { LocalExecutionClient } from './localExecution/contracts';
 import { botVoiceAuthSchema, botVoiceContextResultSchema, botVoiceJoinOptionsSchema, type BotVoiceAuth, type BotVoiceJoinOptions } from '@monky/shared';
 export type {
-  BotCapability, BotPermissions, BotVoiceJoinOptions, LocalCapabilityId, LocalMediaTrack, LocalPreviewReference, LocalRequestContext,
+  BotCapability, BotPermissions, BotVoiceJoinOptions, LocalCapabilityId, LocalMediaTrack, LocalOperation, LocalPlaylistResult,
+  LocalPreviewReference, LocalRequestContext,
   LocalSourceContext, LocalSourceFailure, LocalTaskCancellationCause, LocalTaskEvent, LocalTaskFailureReason,
   LocalTaskSpec, LocalWirePreviewResult, LocalWireTaskResult,
 } from '@monky/shared';
@@ -26,12 +27,15 @@ export type { BotVoicePacket, BotVoiceAudioReceiver } from './voice/VoiceAudioRe
 export { BotScreenClient } from './BotScreenClient';
 export * from './managedTools';
 export * from './localExecution/contracts';
+import { handleReachabilityProbe } from './reachability';
+export { handleReachabilityProbe } from './reachability';
 import {
   LIMITS,
   MessageType,
   PROTOCOL_VERSION,
   createProtocolOffer,
   legacyProtocolFallback,
+  protocolOfferSchema,
   ProtocolErrorCode,
   botFormSchema,
   botManifestSchema,
@@ -286,6 +290,8 @@ interface PendingRegistration {
 
 interface ServerConnection {
   retriedProtocol?: boolean;
+  /** Features the server agreed to in AUTH_SUCCESS; empty for servers older than negotiation. */
+  protocolFeatures?: readonly string[];
   voiceAuth?: BotVoiceAuth;
   voice?: BotVoiceConnection;
   voiceJoin?: Promise<BotVoiceConnection>;
@@ -442,6 +448,10 @@ export class BotClient extends EventEmitter {
         };
       },
       isCurrent,
+      features: () => {
+        const conn = this.connections.get(serverId);
+        return !this.closing && conn?.connected && !conn.disposed ? conn.protocolFeatures : undefined;
+      },
       captureContext: (connection, context) => this.captureLocalExecutionContext(serverId, connection, context),
       send: (connection, message) => {
         if (!isCurrent(connection)) throw new Error('Local execution signaling disconnected.');
@@ -1176,6 +1186,9 @@ export class BotClient extends EventEmitter {
         if (conn.connected) this.disposeLocalExecution(conn);
         const voiceAuth = botVoiceAuthSchema.safeParse(msg.payload);
         conn.voiceAuth = voiceAuth.success ? voiceAuth.data : undefined;
+        const agreement = protocolOfferSchema.safeParse(isRecord(msg.payload) && isRecord(msg.payload.server)
+          ? msg.payload.server.protocol : undefined);
+        conn.protocolFeatures = agreement.success ? agreement.data.features : [];
         const currentUser = isRecord(msg.payload) ? msg.payload.currentUser : undefined;
         if (currentUser !== undefined) {
           const botId = commandRequestIdSchema.safeParse(isRecord(currentUser) ? currentUser.id : undefined);
@@ -1906,8 +1919,9 @@ export class BotClient extends EventEmitter {
         res.end();
         return;
       }
+      if (handleReachabilityProbe(req, res, this.options.publicKey)) return;
       if (req.method === 'GET' && req.url === '/manifest') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, { 'Content-Type': 'application/json', 'X-Monky-Bot-Public-Key': this.options.publicKey.toLowerCase() });
         res.end(JSON.stringify(getManifest()));
         return;
       }
@@ -2047,6 +2061,10 @@ export { askCliChoice, askCliText, askCliValue, CliPromptCancelled, type CliChoi
 export type {
   BotPackageDefinition, GitHubReleaseSource, BotUpdateSource, HttpsUpdateSource, FileUpdateSource,
 } from './tooling/config';
+export type {
+  BotRequirements, BotPortRequirement, BotSettingRequirement, BotLocalizedText,
+  BotPortProtocol, BotPortExposure, BotPortActivation,
+} from './tooling/requirements';
 export type {
   BotSelector, BotSelectorCreate, BotSelectorPatch, BotSelectorPublic, BotSelectorRespondedPayload,
   BotScreen, BotScreenRef, BotScreenCreate, BotScreenPatch, BotScreenActionEvent, BotScreenJson, BotScreenRemoved,

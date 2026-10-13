@@ -685,6 +685,7 @@ test('the extracted DOM lane preserves every existing test command and its order
     'node apps/client/test/dropdownSmoke.cjs',
     'node apps/client/test/tooltipSmoke.cjs',
     'node apps/client/test/tooltipSmoke.cjs --delayed-native-input',
+    'node apps/client/test/serverInviteCardDom.cjs',
     'node apps/client/test/microphoneStateSmoke.cjs',
     'node apps/client/test/microphoneTestSmoke.cjs',
     'node apps/client/test/settingsNavigationSmoke.cjs',

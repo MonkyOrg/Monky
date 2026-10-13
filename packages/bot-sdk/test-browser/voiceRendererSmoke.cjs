@@ -22,6 +22,13 @@ if (!process.versions.electron) {
   app.setPath('userData', process.env.MONKY_VOICE_RENDERER_PROFILE);
   app.commandLine.appendSwitch('allow-loopback-in-peer-connection');
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+  // The listener window is created hidden and captures nothing, so Chromium
+  // gives its renderer best-effort priority. On macOS that also applies an
+  // App Nap-like suppression (low-priority CPU, coalesced timers): WebRTC's
+  // network thread can stall for most of a second while the real-time audio
+  // thread keeps pulling and concealing. The client's visible call window never
+  // gets there, and backgroundThrottling cannot undo a window born hidden.
+  app.commandLine.appendSwitch('disable-renderer-backgrounding');
   app.on('window-all-closed', () => {});
   let vite, window, worker, router, p2p, sfu, botProducer, timeout, rosterVoice, rosterJoin, retiredPeer;
   let p2pTimer;

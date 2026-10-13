@@ -60,6 +60,8 @@ export interface VerifiedTarballManifest {
   name: string;
   version: string;
   cliName?: string;
+  /** Raw package declaration, used to compare the host access of a candidate. */
+  monkyBot?: Record<string, unknown>;
 }
 
 interface HttpJsonResponse {
@@ -499,7 +501,10 @@ function inspectPackageManifest(file: string): VerifiedTarballManifest {
   const cliName = isRecord(parsed.monkyBot) && typeof parsed.monkyBot.cliName === 'string'
     ? parsed.monkyBot.cliName
     : undefined;
-  return { name: parsed.name, version: parsed.version, ...(cliName ? { cliName } : {}) };
+  return {
+    name: parsed.name, version: parsed.version, ...(cliName ? { cliName } : {}),
+    ...(isRecord(parsed.monkyBot) ? { monkyBot: parsed.monkyBot } : {}),
+  };
 }
 
 export function readPackageManifestFromTarball(file: string): VerifiedTarballManifest {

@@ -762,6 +762,28 @@ neither persisted nor recovered retroactively. Logging continues while the
 export dialog is open; the exported file includes events written up to
 confirmation.
 
+### Diagnose slowness
+
+If Monky becomes slow (hovering, opening menus or scrolling responds late),
+keep **Record logs** enabled, note the time and export the logs before
+restarting the app.
+
+- `UI` / `Slow rendering detected`: at most one line per minute with slow
+  events (200 ms or more) and long frames. `inputDelayMs` and `processingMs`
+  measure the app's own work; a high `presentationDelayMs` with low processing
+  points at compositing or the GPU.
+- `APP` / `Sustained renderer CPU` and `Renderer CPU recovered`: the interface
+  stayed above 70% of one core for 2 minutes, and when it returned to normal.
+- `APP` / `Process usage summary`: average CPU and memory per process every
+  10 minutes, to compare against the slow period.
+- `APP` / display changes (including refresh rate), GPU status (with a warning
+  when compositing falls back to software), sleep and resume,
+  minimizing/restoring the window, and Chromium processes that ended with an
+  error, such as the GPU.
+
+These entries do not include message content, window titles or paths from your
+user profile.
+
 ## About and Updates
 
 Check the version, look for updates and revisit the installed release's notes.

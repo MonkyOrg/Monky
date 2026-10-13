@@ -1,4 +1,11 @@
-import { bumpVersion, determineBumpType, calculateNextVersion, promoteBetaTag, BETA_SUFFIX, parseVersionTag, compareVersionTags, getLatestReleaseTag, getLatestSemverTag, splitCommitEntries, bumpTypeForEntry, collectBumps, applyBumps } from './calculate-version.js';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { bumpVersion, determineBumpType, calculateNextVersion, promoteBetaTag, BETA_SUFFIX, parseVersionTag, compareVersionTags, getLatestReleaseTag, getLatestSemverTag, splitCommitEntries, bumpTypeForEntry, collectBumps, applyBumps, isReleasableCommit, getGitCommitsSinceTag } from './calculate-version.js';
+import { requiresClientNote } from './check-client-release-notes.js';
+import { isClientNoteFile } from './generate-changelog.js';
 
 console.log('=== Início dos Testes de Versionamento SemVer (#122) ===');
 
@@ -372,6 +379,150 @@ console.assert(
 );
 
 console.log('✔ Bump por commit validado com sucesso! (#465)');
+
+// 7. Só gera versão o que chega ao usuário
+//
+// Todo commit contava, então um PR só de testes ou de CI publicava uma beta
+// sem nada novo para quem usa o Monky (o #764 virou a v36.8.12-beta). A regra
+// agora é a das notas de release: conta o commit que muda arquivo de aplicação
+// ou de dependência, ou que traz uma nota nova. O resto não publica e também
+// não soma no número da próxima versão.
+const arquivos = (...changes) => changes.map(([status, path]) => ({ status, path }));
+const somenteTestes = {
+  hash: 'aaa0767',
+  message: 'test: estabilizar testes DOM (#767)\n\n* test: esperar o vídeo recriado\n\n* test: falhar quando a rota troca',
+  files: arquivos(['M', 'apps/client/test/automaticScreenPipSmoke.cjs'],
+    ['M', 'packages/bot-sdk/test-browser/voiceRendererSmoke.cjs']),
+};
+const somenteCi = {
+  hash: 'bbb0764',
+  message: 'fix(ci): não travar a suíte nativa (#764)',
+  files: arquivos(['M', '.github/workflows/ci.yml'], ['M', 'scripts/test-native-ci.js'],
+    ['M', 'apps/client/native/screen-share/test/nativeRtcProcess.test.cjs']),
+};
+const correcao = {
+  hash: 'ccc0790',
+  message: 'fix(voz): corrige o eco',
+  files: arquivos(['M', 'apps/client/src/renderer/core/webrtc/RemoteMediaRouter.ts'], ['A', 'release-notes/790-eco.json']),
+};
+console.assert(!isReleasableCommit(somenteTestes), 'PR só de testes não gera versão');
+console.assert(!isReleasableCommit(somenteCi), 'PR só de CI e scripts não gera versão');
+console.assert(isReleasableCommit(correcao), 'mudança no app gera versão');
+console.assert(
+  !isReleasableCommit({ files: arquivos(['M', 'docs-site/guia.md'], ['M', 'apps/light/README.md'], ['M', 'AGENTS.md']) }),
+  'documentação, mesmo dentro de apps/, não gera versão'
+);
+console.assert(isReleasableCommit({ files: arquivos(['M', 'package-lock.json']) }), 'dependência gera versão');
+console.assert(
+  isReleasableCommit({ files: arquivos(['M', 'patches/h264-profile-level-id+2.3.3.patch']) }),
+  'patch de dependência gera versão'
+);
+console.assert(isReleasableCommit({ files: arquivos(['D', 'apps/server/src/antigo.ts']) }), 'apagar arquivo do app gera versão');
+// A nota nova é o jeito de publicar uma mudança de build ou CI que o usuário precisa.
+console.assert(
+  isReleasableCommit({ files: arquivos(['M', '.github/workflows/release.yml'], ['A', 'release-notes/791-assinatura.json']) }),
+  'nota nova gera versão mesmo sem arquivo do app'
+);
+console.assert(!isReleasableCommit({ files: arquivos(['M', 'release-notes/790-eco.json']) }), 'editar nota antiga não gera versão');
+console.assert(!isReleasableCommit({ files: [] }), 'commit sem mudança não gera versão');
+// Sem a lista de arquivos, o commit continua contando, como todos contavam.
+console.assert(isReleasableCommit('fix: só a mensagem'), 'mensagem sem arquivos continua contando');
+console.assert(isReleasableCommit({ message: 'fix: arquivos desconhecidos' }), 'commit sem lista de arquivos continua contando');
+
+const semRelease = calculateNextVersion({ prevTag: 'v38.4.0', commits: [somenteTestes, somenteCi], channel: 'beta' });
+console.assert(semRelease.shouldRelease === false, 'só testes e CI: nenhuma release');
+console.assert(semRelease.skippedCommits.length === 2, 'os dois commits ficam de fora da conta');
+console.assert(calculateNextVersion({ prevTag: 'v38.4.0', commits: [] }).shouldRelease === false, 'sem commits desde a tag, nenhuma release');
+console.assert(calculateNextVersion({ prevTag: 'v1.0.0', commits: ['fix: x'] }).shouldRelease === true, 'mensagens simples continuam gerando release');
+
+// Quando a próxima mudança do app sai, o que não publicou não soma. Antes, os
+// dois itens do squash de testes e o commit de CI empurravam mais 3 patches.
+const proxima = calculateNextVersion({ prevTag: 'v38.4.0', commits: [somenteTestes, somenteCi, correcao], channel: 'beta' });
+console.assert(proxima.shouldRelease === true, 'a correção do app gera a release');
+console.assert(proxima.nextVersion === '38.4.1-beta', `só a correção conta: 38.4.1-beta, não 38.4.4-beta (veio ${proxima.nextVersion})`);
+
+// A leitura do git: os arquivos de cada commit, inclusive merge e nomes incomuns.
+const repo = mkdtempSync(join(tmpdir(), 'monky-versioning-'));
+try {
+  let segundo = 0;
+  const git = (...args) => {
+    segundo += 1;
+    const date = `2026-01-01T00:${String(Math.floor(segundo / 60)).padStart(2, '0')}:${String(segundo % 60).padStart(2, '0')}Z`;
+    return execFileSync('git', [
+      '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false', '-c', 'core.autocrlf=false',
+      '-c', `core.hooksPath=${join(repo, 'sem-hooks')}`, ...args,
+    ], {
+      cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env, GIT_AUTHOR_NAME: 'Teste', GIT_AUTHOR_EMAIL: 'teste@example.com',
+        GIT_COMMITTER_NAME: 'Teste', GIT_COMMITTER_EMAIL: 'teste@example.com',
+        GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date,
+      },
+    });
+  };
+  const commit = (message, file, content) => {
+    mkdirSync(dirname(join(repo, file)), { recursive: true });
+    writeFileSync(join(repo, file), content);
+    git('add', '-A');
+    git('commit', '-q', '-m', message);
+  };
+  git('init', '-q', '-b', 'main');
+  commit('chore: início', 'README.md', 'oi');
+  git('tag', 'v1.0.0');
+  commit('test: estabilizar smoke\n\nCorpo com linha em branco.\n\n* fix: item de squash que não conta', 'apps/client/test/smoke.cjs', '1');
+  commit('fix(ci): workflow', '.github/workflows/ci.yml', 'on: push');
+  commit('fix: nome com acento e espaço', 'apps/client/src/ação com espaço.ts', 'export {};');
+  git('checkout', '-q', '-b', 'ramo');
+  commit('feat: no ramo', 'packages/shared/src/novo.ts', 'export {};');
+  git('checkout', '-q', 'main');
+  git('merge', '-q', '--no-ff', 'ramo', '-m', 'Merge branch ramo');
+  commit('docs: nota nova', 'release-notes/1-nota.json', '{}');
+  commit('docs: corrige a nota', 'release-notes/1-nota.json', '{"x":1}');
+
+  const lidos = getGitCommitsSinceTag('v1.0.0', { cwd: repo });
+  const assunto = (lido) => lido.message.split('\n')[0];
+  console.assert(
+    lidos.map(assunto).join(' | ') === 'test: estabilizar smoke | fix(ci): workflow | fix: nome com acento e espaço | ' +
+      'feat: no ramo | Merge branch ramo | docs: nota nova | docs: corrige a nota',
+    `commits lidos do mais antigo ao mais novo: ${lidos.map(assunto).join(' | ')}`
+  );
+  console.assert(lidos[0]?.message.includes('Corpo com linha em branco.\n\n* fix:'), 'o corpo inteiro fica no mesmo commit');
+  console.assert(lidos.every((lido) => /^[0-9a-f]{7,}$/.test(lido.hash)), 'cada commit traz o hash para o log');
+  const mudancas = (lido) => (lido?.files ?? []).map(({ status, path }) => `${status} ${path}`).join(', ');
+  console.assert(mudancas(lidos[0]) === 'A apps/client/test/smoke.cjs', `arquivos do commit de teste: ${mudancas(lidos[0])}`);
+  console.assert(mudancas(lidos[2]) === 'A apps/client/src/ação com espaço.ts', `nome com acento e espaço: ${mudancas(lidos[2])}`);
+  console.assert(mudancas(lidos[4]) === 'A packages/shared/src/novo.ts', `o merge traz o que mudou no ramo: ${mudancas(lidos[4])}`);
+  console.assert(mudancas(lidos[6]) === 'M release-notes/1-nota.json', `nota editada: ${mudancas(lidos[6])}`);
+  console.assert(
+    lidos.map((lido) => (isReleasableCommit(lido) ? 'sim' : 'não')).join(',') === 'não,não,sim,sim,sim,sim,não',
+    `quais commits geram versão: ${lidos.map((lido) => isReleasableCommit(lido)).join(',')}`
+  );
+} finally {
+  rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
+// O filtro do release.yml só evita execuções sem efeito. Ele precisa cobrir todo
+// arquivo que a regra conta, senão uma mudança do app ficaria sem release.
+const raiz = fileURLToPath(new URL('..', import.meta.url));
+const workflow = readFileSync(join(raiz, '.github', 'workflows', 'release.yml'), 'utf8');
+const bloco = /^ {4}paths:\r?\n((?: {6}- '[^']+'\r?\n)+)/m.exec(workflow);
+console.assert(bloco, 'o push do release.yml declara o filtro paths');
+// Os filtros usam só ** (qualquer coisa) e * (dentro de um diretório).
+const globParaRegex = (glob) => {
+  const pattern = glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, '\0').replace(/\*/g, '[^/]*').replace(/\0/g, '.*');
+  return new RegExp(`^${pattern}$`);
+};
+const filtros = bloco ? [...bloco[1].matchAll(/'([^']+)'/g)].map(([, glob]) => globParaRegex(glob)) : [];
+const contados = execFileSync('git', ['ls-files', '-z'], { cwd: raiz, encoding: 'utf8' }).split('\0')
+  .filter((file) => file && (requiresClientNote(file) || isClientNoteFile(file)));
+const descobertos = contados.filter((file) => !filtros.some((filtro) => filtro.test(file)));
+console.assert(
+  contados.length > 0 && descobertos.length === 0,
+  `arquivos que geram versão fora do filtro do release.yml: ${descobertos.slice(0, 5).join(', ')}`
+);
+
+console.log('✔ Só o que chega ao usuário gera versão');
 
 if (failures > 0) {
   console.error(`=== ${failures} asserção(ões) de versionamento falharam ===`);

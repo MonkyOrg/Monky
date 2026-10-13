@@ -114,9 +114,10 @@ novamente exibe o aviso. Confirmar a abertura não ignora permissões negadas pe
 administrador, nem confirma em nome de outros participantes. Execução local de
 ferramentas continua com suas próprias confirmações no computador executor.
 
-Quem hospeda o MonkyBot confirma separadamente a execução na máquina/VPS.
-Esse consentimento não concede capacidades em servidores Monky e não cria uma
-sandbox do sistema operacional.
+Quem hospeda um bot com o CLI do SDK
+[confirma separadamente a execução](/bots-distribuicao#consentimento-de-quem-hospeda)
+na máquina/VPS. Esse consentimento não concede capacidades em servidores Monky e
+não cria uma sandbox do sistema operacional.
 
 Páginas externas dentro do miniapp podem
 registrar Service Workers que continuam executando depois de fechar a visualização.
@@ -139,5 +140,11 @@ no documento ou um iframe filho. Popups e navegação da janela do Monky continu
 bloqueados. O armazenamento da origem é descartado ao fechar a visualização.
 
 Autentique conexões externas a partir de uma ação recebida pelo bot, sem confiar em um `userId` enviado pelo browser e sem publicar tokens no estado compartilhado. Encerre conexões, Workers, áudio e timers ao sair da visualização. Se o app utiliza um serviço externo, verifique sua disponibilidade e mostre um erro claro antes de iniciar a atividade.
+
+Quando o próprio bot serve os recursos do miniapp numa porta dele, declare-a em
+[`monkyBot.requirements`](/bots-distribuicao#portas-configuracoes-e-verificacao)
+(em geral `exposure: "public"` e `when: "on-demand"`) e chame
+`handleReachabilityProbe(request, response)` no início do handler HTTP. Assim,
+quem hospeda vê qual porta abrir, e o `doctor` consegue comprovar o acesso.
 
 Os limites do envelope de controle são 128 KiB de HTML inicial, 64 KiB de estado e 8 KiB por ação; JSON aceita até 12 níveis e 8.192 nós. Há até quatro miniapps por sala de voz, 16 por bot e 64 por servidor, com limites de frequência e deduplicação de ações. Eles vivem em memória e são removidos ao reiniciar/desconectar o bot, perder a autorização de acesso à sala ou receber um encerramento autorizado. Sair da sala, inclusive deixá-la vazia, não apaga automaticamente o estado. A expiração do jogo é responsabilidade do bot. Se persistir partidas, persista também seu encerramento: reiniciar o bot não deve recuperar uma partida explicitamente encerrada.

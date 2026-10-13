@@ -69,7 +69,7 @@ async function copyInvite(): Promise<void> {
   if (!invite.value) return;
   const current = generation;
   try {
-    await navigator.clipboard.writeText(createServerInviteLink(invite.value));
+    await navigator.clipboard.writeText(createServerInviteLink(invite.value, english.value ? 'en' : 'pt-BR'));
     if (current === generation) copyState.value = 'copied';
   } catch {
     if (current === generation) copyState.value = 'failed';

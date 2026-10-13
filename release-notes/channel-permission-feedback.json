@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Canal sem permissão de leitura agora mostra um aviso claro, sem erros soltos na tela. A soundboard diz quando o bloqueio é só do canal, e o chat de um canal de voz apagado fecha sozinho.",
+  "en": "Channels you cannot read now show a clear notice, without stray errors on screen. The soundboard says when only the channel blocks it, and the chat of a deleted voice channel closes on its own."
+}

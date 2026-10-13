@@ -46,7 +46,13 @@ export class ServerRailView {
    */
   private connectingKey: string | null = null;
   private draggedRailItem: DraggedRailItem | null = null;
-  private skipNextFolderToggle = false;
+  /**
+   * Rail reordering follows the pointer instead of native drag-and-drop: a
+   * native drag started on a server icon carries the image itself, so the
+   * connected server (the one that always has an icon) could not be moved.
+   */
+  private pointerDrag: { item: DraggedRailItem; startX: number; startY: number; active: boolean } | null = null;
+  private suppressRailClick = false;
   private lastProbeTime = 0;
   private probeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private homeBadgeCount = 0;
@@ -108,6 +114,8 @@ export class ServerRailView {
     this.bindFolderToggles();
     this.bindDragAndDrop();
     this.bindContextMenus();
+    // Background events may repaint the rail while something is being dragged.
+    if (this.pointerDrag?.active) this.markDragging(this.pointerDrag.item);
 
     this.scheduleStatusRefresh();
   }
@@ -218,7 +226,8 @@ export class ServerRailView {
           data-node-type="folder"
           data-folder-id="${escapeHtml(folder.id)}"
           data-root-index="${rootIndex}"
-          draggable="${busy ? 'false' : 'true'}"
+          draggable="false"
+          data-rail-draggable="${busy ? 'false' : 'true'}"
           title="${escapeHtml(folder.name)}"
         >
           <button
@@ -294,7 +303,8 @@ export class ServerRailView {
         data-host="${escapeHtml(srv.host)}"
         data-port="${srv.port}"
         ${folderId ? `data-folder-id="${escapeHtml(folderId)}"` : ''}
-        draggable="${busy ? 'false' : 'true'}"
+        draggable="false"
+        data-rail-draggable="${busy ? 'false' : 'true'}"
       >
         <span class="server-rail-pill" aria-hidden="true"></span>
         <button
@@ -307,7 +317,7 @@ export class ServerRailView {
           ${busy ? 'disabled' : ''}
           style="padding: 0;"
         >
-          ${iconUrl ? `<img src="${escapeHtml(iconUrl)}" data-fallback="initial" data-fallback-initial="${escapeHtml(initial)}" style="width: 100%; height: 100%; object-fit: cover; border-radius: inherit; display: block;">` : `<span>${escapeHtml(initial)}</span>`}
+          ${iconUrl ? `<img src="${escapeHtml(iconUrl)}" alt="" draggable="false" data-fallback="initial" data-fallback-initial="${escapeHtml(initial)}" style="width: 100%; height: 100%; object-fit: cover; border-radius: inherit; display: block;">` : `<span>${escapeHtml(initial)}</span>`}
           <span class="server-rail-status-dot" data-status="${isCurrent || background ? 'online' : 'checking'}"></span>
           ${badge}
         </button>
@@ -354,7 +364,7 @@ export class ServerRailView {
 
     railEl.querySelectorAll('.server-rail-avatar').forEach((btn) => {
       btn.addEventListener('click', () => {
-        if (this.connectingKey) return;
+        if (this.connectingKey || this.suppressRailClick) return;
         const host = btn.getAttribute('data-host');
         const port = parseInt(btn.getAttribute('data-port') || '0', 10);
         if (!host || !port) return;
@@ -379,7 +389,7 @@ export class ServerRailView {
 
     railEl.querySelectorAll('.server-rail-folder-header').forEach((header) => {
       header.addEventListener('click', () => {
-        if (this.skipNextFolderToggle) return;
+        if (this.suppressRailClick) return;
         const folderId = header.getAttribute('data-folder-id');
         if (folderId) connectionStore.toggleFolderCollapsed(folderId);
       });
@@ -635,115 +645,124 @@ export class ServerRailView {
       railEl.querySelectorAll('.server-rail-item[data-node-type="server"], .server-rail-folder-header[data-node-type="folder"]')
     ) as HTMLElement[];
 
-    draggableNodes.forEach((element) => {
-      element.addEventListener('dragstart', (event) => {
-        if (this.connectingKey) {
-          event.preventDefault();
-          return;
-        }
-
-        if (element.getAttribute('data-node-type') === 'folder') {
-          const folderId = element.getAttribute('data-folder-id');
-          if (!folderId) {
-            event.preventDefault();
-            return;
-          }
-          this.draggedRailItem = { type: 'folder', folderId };
-          const transfer = (event as DragEvent).dataTransfer;
-          if (transfer) {
-            transfer.effectAllowed = 'move';
-            transfer.setData('text/monky-rail-folder-id', folderId);
-          }
-        } else {
-          const host = element.getAttribute('data-host');
-          const port = parseInt(element.getAttribute('data-port') || '0', 10);
-          if (!host || !port) {
-            event.preventDefault();
-            return;
-          }
-          this.draggedRailItem = { type: 'server', host, port };
-          const transfer = (event as DragEvent).dataTransfer;
-          if (transfer) {
-            transfer.effectAllowed = 'move';
-            transfer.setData('text/monky-rail-server', `${host}:${port}`);
-          }
-        }
-
-        setTimeout(() => element.classList.add('dragging'), 0);
+    for (const element of draggableNodes) {
+      element.addEventListener('mousedown', (event) => {
+        if (event.button !== 0 || this.connectingKey || this.pointerDrag) return;
+        if ((event.target as Element | null)?.closest('.server-rail-folder-toggle')) return;
+        const item = this.railItemOf(element);
+        if (!item) return;
+        this.pointerDrag = { item, startX: event.clientX, startY: event.clientY, active: false };
+        window.addEventListener('mousemove', this.movePointer);
+        window.addEventListener('mouseup', this.releasePointer);
+        window.addEventListener('blur', this.cancelPointer);
       });
-
-      element.addEventListener('dragend', () => {
-        element.classList.remove('dragging');
-        if (element.getAttribute('data-node-type') === 'folder') {
-          this.skipNextFolderToggle = true;
-          setTimeout(() => { this.skipNextFolderToggle = false; }, 0);
-        }
-        this.clearDragState();
-      });
-    });
-
-    const dropZones = Array.from(railEl.querySelectorAll('.server-rail-drop-zone')) as HTMLElement[];
-    dropZones.forEach((zone) => {
-      zone.addEventListener('dragover', (event) => {
-        if (!this.draggedRailItem || !this.canDropOnZone(zone)) return;
-        event.preventDefault();
-        const transfer = (event as DragEvent).dataTransfer;
-        if (transfer) transfer.dropEffect = 'move';
-        this.activateDropZone(zone);
-      });
-
-      zone.addEventListener('drop', (event) => {
-        if (!this.draggedRailItem || !this.canDropOnZone(zone)) return;
-        event.preventDefault();
-        const dragged = this.draggedRailItem;
-        const dropKind = zone.getAttribute('data-drop-kind');
-        if (dropKind === 'root') {
-          const rootIndex = parseInt(zone.getAttribute('data-root-index') || '-1', 10);
-          if (rootIndex >= 0) this.applyRootDrop(dragged, rootIndex);
-        } else if (dropKind === 'folder-child' && dragged.type === 'server') {
-          const folderId = zone.getAttribute('data-folder-id');
-          const childIndex = parseInt(zone.getAttribute('data-child-index') || '-1', 10);
-          if (folderId && childIndex >= 0) {
-            connectionStore.moveServerToFolder(dragged.host, dragged.port, folderId, childIndex);
-          }
-        }
-        this.clearDragState();
-      });
-    });
-
-    const folderHeaders = Array.from(railEl.querySelectorAll('.server-rail-folder-header')) as HTMLElement[];
-    folderHeaders.forEach((header) => {
-      header.addEventListener('dragover', (event) => {
-        if (!this.draggedRailItem || this.draggedRailItem.type !== 'server') return;
-        const folderId = header.getAttribute('data-folder-id');
-        if (!folderId) return;
-        event.preventDefault();
-        const transfer = (event as DragEvent).dataTransfer;
-        if (transfer) transfer.dropEffect = 'move';
-        this.activateFolderHeader(header);
-      });
-
-      header.addEventListener('dragleave', (event) => {
-        const next = (event as DragEvent).relatedTarget as Node | null;
-        if (next && header.contains(next)) return;
-        header.classList.remove('drag-over');
-      });
-
-      header.addEventListener('drop', (event) => {
-        if (!this.draggedRailItem || this.draggedRailItem.type !== 'server') return;
-        const folderId = header.getAttribute('data-folder-id');
-        if (!folderId) return;
-        event.preventDefault();
-        connectionStore.moveServerToFolder(
-          this.draggedRailItem.host,
-          this.draggedRailItem.port,
-          folderId
-        );
-        this.clearDragState();
-      });
-    });
+    }
   }
 
+  private railItemOf(element: HTMLElement): DraggedRailItem | null {
+    if (element.dataset.nodeType === 'folder') {
+      const folderId = element.dataset.folderId;
+      return folderId ? { type: 'folder', folderId } : null;
+    }
+    const host = element.dataset.host;
+    const port = parseInt(element.dataset.port || '0', 10);
+    return host && port ? { type: 'server', host, port } : null;
+  }
+
+  private markDragging(item: DraggedRailItem): void {
+    const railEl = document.getElementById('server-rail');
+    railEl?.classList.add('server-rail--dragging');
+    const element = Array.from(railEl?.querySelectorAll<HTMLElement>('[data-node-type]') ?? []).find((node) => {
+      const candidate = this.railItemOf(node);
+      return candidate?.type === item.type && (candidate.type === 'folder'
+        ? item.type === 'folder' && candidate.folderId === item.folderId
+        : item.type === 'server' && candidate.host === item.host && candidate.port === item.port);
+    });
+    element?.classList.add('dragging');
+  }
+
+  private readonly movePointer = (event: MouseEvent): void => {
+    const drag = this.pointerDrag;
+    if (!drag) return;
+    if (!drag.active) {
+      if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
+      drag.active = true;
+      this.draggedRailItem = drag.item;
+      contextMenu.close();
+      this.markDragging(drag.item);
+    }
+    event.preventDefault();
+    const target = this.pointerTarget(event.clientX, event.clientY);
+    if (target?.zone) this.activateDropZone(target.zone);
+    else if (target?.header) this.activateFolderHeader(target.header);
+    else this.clearDropIndicators();
+  };
+
+  private readonly releasePointer = (event: MouseEvent): void => this.finishPointer(event, true);
+
+  private readonly cancelPointer = (): void => this.finishPointer(null, false);
+
+  private finishPointer(event: MouseEvent | null, commit: boolean): void {
+    const drag = this.pointerDrag;
+    if (!drag) return;
+    window.removeEventListener('mousemove', this.movePointer);
+    window.removeEventListener('mouseup', this.releasePointer);
+    window.removeEventListener('blur', this.cancelPointer);
+    const target = commit && drag.active && event ? this.pointerTarget(event.clientX, event.clientY) : null;
+    this.pointerDrag = null;
+    this.clearDragState();
+    if (!drag.active) return;
+    // The release lands on a server or folder, whose click must not connect or toggle.
+    this.suppressRailClick = true;
+    setTimeout(() => { this.suppressRailClick = false; }, 0);
+    if (!target) return;
+    if (target.zone) {
+      const dropKind = target.zone.dataset.dropKind;
+      if (dropKind === 'root') {
+        const rootIndex = parseInt(target.zone.dataset.rootIndex || '-1', 10);
+        if (rootIndex >= 0) this.applyRootDrop(drag.item, rootIndex);
+      } else if (dropKind === 'folder-child' && drag.item.type === 'server') {
+        const folderId = target.zone.dataset.folderId;
+        const childIndex = parseInt(target.zone.dataset.childIndex || '-1', 10);
+        if (folderId && childIndex >= 0) {
+          connectionStore.moveServerToFolder(drag.item.host, drag.item.port, folderId, childIndex);
+        }
+      }
+    } else if (target.header && drag.item.type === 'server') {
+      const folderId = target.header.dataset.folderId;
+      if (folderId) connectionStore.moveServerToFolder(drag.item.host, drag.item.port, folderId);
+    }
+  }
+
+  /**
+   * Where a release would land. The thin drop zones are hard to hit, so
+   * hovering a server or folder also counts, before or after it by half.
+   */
+  private pointerTarget(clientX: number, clientY: number): { zone?: HTMLElement; header?: HTMLElement } | null {
+    const railEl = document.getElementById('server-rail');
+    const element = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+    if (!railEl || !element || !railEl.contains(element) || !this.draggedRailItem) return null;
+    const draggingFolder = this.draggedRailItem.type === 'folder';
+    const around = (node: Element | null) => {
+      if (!node) return null;
+      const rect = node.getBoundingClientRect();
+      const zone = clientY < rect.top + rect.height / 2 ? node.previousElementSibling : node.nextElementSibling;
+      return zone instanceof HTMLElement && zone.matches('.server-rail-drop-zone') && this.canDropOnZone(zone) ? { zone } : null;
+    };
+    const zone = element.closest<HTMLElement>('.server-rail-drop-zone');
+    if (zone) return this.canDropOnZone(zone) ? { zone } : null;
+    const header = element.closest<HTMLElement>('.server-rail-folder-header');
+    if (header) return draggingFolder ? around(header.closest('.server-rail-folder')) : { header };
+    const server = element.closest<HTMLElement>('.server-rail-item');
+    if (!server) return null;
+    return around(draggingFolder ? server.closest('.server-rail-folder') ?? server : server);
+  }
+
+  private clearDropIndicators(): void {
+    const railEl = document.getElementById('server-rail');
+    railEl?.querySelectorAll('.server-rail-drop-zone.active').forEach((item) => item.classList.remove('active'));
+    railEl?.querySelectorAll('.server-rail-folder-header.drag-over').forEach((item) => item.classList.remove('drag-over'));
+  }
   private activateDropZone(zone: HTMLElement): void {
     const railEl = document.getElementById('server-rail');
     if (!railEl) return;
@@ -772,6 +791,7 @@ export class ServerRailView {
     this.draggedRailItem = null;
     const railEl = document.getElementById('server-rail');
     if (!railEl) return;
+    railEl.classList.remove('server-rail--dragging');
     railEl.querySelectorAll('.server-rail-drop-zone.active').forEach((item) => {
       item.classList.remove('active');
     });

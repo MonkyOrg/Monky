@@ -701,6 +701,7 @@ async function* runRegression(language, sharedModule) {
     'Role switches reflect the permissions the role grants');
   check(roleSwitch(Permission.VIEW_SERVER_MONITOR).closest('.permission-switch').getAttribute('aria-label') === t('permissions.viewServerMonitor'),
     'The monitor permission in the actual role dialog has a localized accessible label');
+  check(!roleSwitch(Permission.VIEW_AUDIT_LOG), 'Servers without an audit log do not offer its permission');
   check(field('[data-role-editor] #role-editor-tab-permissions').textContent.includes(t('roles.permissionSwitchesHint')),
     'Normal roles explain that a switch only grants on top of Everyone');
   const managementCopy = roleSwitch(8192).closest('.permission-switch').parentElement.textContent;

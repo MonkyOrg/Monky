@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { parseBotRequirements, type BotRequirements } from './requirements';
 
 export type BotMode = 'manual' | 'marketplace';
 
@@ -32,6 +33,8 @@ export interface BotPackageDefinition {
   modes: BotMode[];
   releases?: GitHubReleaseSource;
   updateSource?: BotUpdateSource;
+  /** Ports and settings the operator must provide; also part of the host consent. */
+  requirements?: BotRequirements;
 }
 
 export interface BotPackageManifest extends Record<string, unknown> {
@@ -193,7 +196,7 @@ export function loadBotProject(packageRoot: string): BotProject {
   const manifest: BotPackageManifest = { ...input, name, version: input.version };
   const raw = input.monkyBot === undefined ? {} : input.monkyBot;
   if (!isRecord(raw)) throw new Error('package.monkyBot must contain an object.');
-  rejectUnknown(raw, ['cliName', 'displayName', 'entry', 'buildScript', 'files', 'modes', 'releases', 'updateSource'], 'monkyBot');
+  rejectUnknown(raw, ['cliName', 'displayName', 'entry', 'buildScript', 'files', 'modes', 'releases', 'updateSource', 'requirements'], 'monkyBot');
   const cliName = stringValue(raw.cliName ?? name.split('/').pop(), 'monkyBot.cliName', 64);
   if (!/^[a-z0-9][a-z0-9_-]*$/.test(cliName)) throw new Error('monkyBot.cliName must be a safe executable name.');
   const displayName = stringValue(raw.displayName ?? cliName, 'monkyBot.displayName', 32);
@@ -224,12 +227,15 @@ export function loadBotProject(packageRoot: string): BotProject {
   }
   const releases = releaseSource(raw.releases, cliName);
   const source = updateSource(raw.updateSource);
+  const requirements = parseBotRequirements(raw.requirements, modes);
+  const declaresRequirements = !!requirements.notice || requirements.ports.length > 0 || requirements.settings.length > 0;
   return {
     root, manifest,
     definition: {
       cliName, displayName, entry, buildScript, files, modes,
       ...(releases ? { releases } : {}),
       ...(source ? { updateSource: source } : {}),
+      ...(declaresRequirements ? { requirements } : {}),
     },
   };
 }

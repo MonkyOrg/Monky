@@ -250,7 +250,7 @@ export class BotSelectorHandler {
     ]);
     if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE') ||
         (human && !hasPermission(context.permissions, Permission.READ_MESSAGES)) ||
-        !canAccessChannel(channel, context.permissions, context.roleIds, context.isBot, context.userId)) {
+        !canAccessChannel(this.channels.rulesFor(channel, context), context.permissions, context.roleIds, context.isBot, context.userId)) {
       throw new SelectorAccessError('Channel is unavailable.', ProtocolErrorCode.CHANNEL_NOT_FOUND);
     }
     if ((requireEnabled && channel.botCommandsEnabled === false) ||

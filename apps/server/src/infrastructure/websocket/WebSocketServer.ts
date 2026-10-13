@@ -5,6 +5,8 @@ import { WebSocket, WebSocketServer as WSServer } from 'ws';
 import {
   hasChannelPermission,
   type ChannelAccessRules,
+  type ChannelCategory,
+  type ChannelSummary,
   AdminDeafenUserPayload,
   AdminKickVoicePayload,
   AdminMoveUserPayload,
@@ -140,6 +142,7 @@ import {
   adminDeafenUserSchema,
   hasPermission,
   localBotIdentitySchema,
+  localOperationNegotiated,
   botInstallPreviewRequestSchema,
   botInstallSchema,
   botPermissionsGetSchema,
@@ -163,10 +166,12 @@ import {
   isReceivingBotVoice,
   botVoiceStateUpdateSchema,
   nativePollCreateSchema,
+  nativePollEditSchema,
   nativePollIdSchema,
   nativePollVoteSchema,
   type NativePollCreate,
   type NativePollVote,
+  EVERYONE_ROLE_ID,
 } from '@monky/shared';
 import { AuthService } from '../../application/services/AuthService';
 import { AttachmentService } from '../../application/services/AttachmentService';
@@ -175,6 +180,7 @@ import { ChatService } from '../../application/services/ChatService';
 import { PermissionService } from '../../application/services/PermissionService';
 import { RoleService } from '../../application/services/RoleService';
 import { BotService } from '../../application/services/BotService';
+import { BotDiagnosticService } from '../../application/services/BotDiagnosticService';
 import { BotPermissionError } from '../../application/services/BotPermissionService';
 import { BOT_CHAT_EVENTS, botMessageCapabilities } from './botCapabilityPolicy';
 import { BotSettingsError, BotSettingsService } from '../../application/services/BotSettingsService';
@@ -184,13 +190,24 @@ import { BotScreenHandler } from './BotScreenHandler';
 import { BotScreenService } from '../../application/services/BotScreenService';
 import type { ServerMonitorService } from '../../application/services/ServerMonitorService';
 import { ServerMonitorHandler } from './ServerMonitorHandler';
+import { auditDiff, auditRef, type ServerAuditInput, type ServerAuditService } from '../../application/services/ServerAuditService';
+import {
+  categoryChanges, channelChanges, channelCreationChanges, channelTreeMoves, permissionChanges, pollChanges,
+  serverSettingsChanges, type AuditNames,
+} from '../../application/services/serverAuditChanges';
+import { ServerAuditHandler } from './ServerAuditHandler';
+import type {
+  ServerAuditAction, ServerAuditChange, ServerAuditRef, ChannelPermissionOverwrite, CommandValues, SlashCommand,
+} from '@monky/shared';
 import { CommandRegistry } from '../../application/services/CommandRegistry';
 import { BotLocalExecutionService } from '../../application/services/BotLocalExecutionService';
 import { SignalingService } from '../../application/services/SignalingService';
 import { UserService } from '../../application/services/UserService';
 import { DmRelayService } from '../../application/services/DmRelayService';
 import { NativePollError, NativePollService } from '../../application/services/NativePollService';
+import { projectLegacyPolls } from './pollProjection';
 import { IServerRepository } from '../../domain/repositories';
+import type { NativePollRecord } from '../../domain/entities';
 import { scanServerNetworkInterfaces } from '../discovery/ServerIpScanner';
 import { CoturnManager } from '../turn/CoturnManager';
 import { describeSfuPortProblem, SfuManager, SfuProducerClosedError } from '../sfu/SfuManager';
@@ -210,6 +227,8 @@ const BOT_LOCAL_ALLOWED_MESSAGES = new Set<MessageType>([
   MessageType.BOT_LOCAL_MEDIA_SIGNAL,
 ]);
 const MAX_RETIRED_SFU_PRODUCERS = 256;
+/** A reorder from an outdated client can shuffle a whole list; past this, the rest is not itemized. */
+const MAX_AUDITED_MOVES = 10;
 
 interface ClientSession {
   protocol?: ProtocolAgreement;
@@ -251,6 +270,8 @@ interface ClientSession {
    * changes.
    */
   visibleChannelIds?: Set<string>;
+  /** Voice rooms this connection was last shown because its person is inside them. */
+  voicePresenceKey?: string;
   /**
    * Hostname this client used to reach the server, from the upgrade request's
    * `Host` header (#425).
@@ -290,12 +311,21 @@ export class WebSocketServer {
     expiresAt: number;
     inFlight: boolean;
   }>();
+  /**
+   * The room a dropped connection was in, kept through the reconnection grace
+   * period: a member moved into a room they cannot see must still find it to
+   * rejoin by themselves after a network blip.
+   */
+  private voiceReturnGrants = new Map<string, { userId: string; channelId: string; timer: NodeJS.Timeout }>();
+  private voicePresenceSync: Promise<void> = Promise.resolve();
   /** Last "ask to join" per requester/host pair, for the spam guard (#675). */
   private botInteractions: BotInteractionHandler;
+  private readonly botDiagnostics?: BotDiagnosticService;
   private botLocalExecution: BotLocalExecutionService<BotInteractionSession>;
   private botSelectors?: BotSelectorHandler;
   private botScreens?: BotScreenHandler;
   private readonly serverMonitor?: ServerMonitorHandler;
+  private readonly serverAudit?: ServerAuditHandler;
   private readonly community?: CommunityHandler;
   private readonly messageSearch?: MessageSearchHandler;
   private readonly forum?: ForumHandler;
@@ -334,7 +364,13 @@ export class WebSocketServer {
     private readonly forumService?: ForumService,
     private readonly pollService?: NativePollService,
     private readonly recentSoundCache?: RecentSoundCacheService,
+    private readonly audit?: ServerAuditService,
   ) {
+    if (botService) this.botDiagnostics = new BotDiagnosticService(botService, rateLimiter);
+    if (audit) this.serverAudit = new ServerAuditHandler(audit, this.permissionService, {
+      isCurrent: (session) => this.isCurrentSession(session),
+      send: (session, message) => this.send(session.ws, message),
+    });
     this.dmRelay = new DmRelayService<ClientSession>({
       isCurrent: (session) => this.isCurrentSession(session),
       send: (session, message) => this.send(session.ws, message),
@@ -354,6 +390,17 @@ export class WebSocketServer {
         type: MessageType.POLL_UPDATED,
         payload: poll,
       }),
+      audit: async (session, action, input) => {
+        if (!this.audit) return;
+        this.recordAudit(session, action, {
+          target: input.target,
+          related: {
+            channel: await this.auditChannel(input.channelId),
+            invoker: input.invokerId ? await this.auditIdentity(input.invokerId) : null,
+          },
+          changes: input.changes,
+        });
+      },
     });
     if (messageSearchService) this.messageSearch = new MessageSearchHandler(messageSearchService, {
       isCurrent: session => this.isCurrentSession(session),
@@ -377,6 +424,14 @@ export class WebSocketServer {
           { type: MessageType.FORUM_POST_SAVED, payload: result },
           ...(result.message ? [{ type: MessageType.CHAT_MESSAGE, payload: result.message }] : []),
         ]);
+      },
+      audit: async (session, action, post, changes) => {
+        if (!this.audit) return;
+        this.recordAudit(session, action, {
+          target: auditRef.of('post', post.channelId, post.title),
+          related: { channel: await this.auditChannel(post.forumId), author: await this.auditIdentity(post.authorId) },
+          changes,
+        });
       },
     });
     this.signalingService.configureScreenAccess(
@@ -456,10 +511,12 @@ export class WebSocketServer {
       localContextEnded: (context, cause) => this.botLocalExecution.contextEnded(context, cause),
       consumeLocalPreview: (bot, origin, contextId, requestId, result) =>
         this.botLocalExecution.consumePreview(bot, origin, contextId, requestId, result),
+      commandInvoked: (session, command, channelId, options) => this.auditCommand(session, command, channelId, options),
     }, this.channelService, this.userService, this.commandRegistry, this.botSettings,
       async () => (await this.serverRepo.getServer())?.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH);
     this.botLocalExecution = new BotLocalExecutionService({
       isCurrent: (session) => this.isCurrentBotOperation(session, 'local_execution'),
+      negotiated: (session, operation) => localOperationNegotiated(operation, session.protocol?.features),
       accessVersion: () => {
         const roles = this.channelService.getRoleAccessVersion();
         return roles === null || this.pendingLocalAccessMutations > 0
@@ -524,6 +581,7 @@ export class WebSocketServer {
       });
     }
     this.signalingService.setVoiceMembershipListener(() => this.voiceMembershipChanged());
+    this.channelService.setVoicePresence((userId, channelId) => this.voicePresenceChannelIds(userId).has(channelId));
     this.wss = new WSServer({ server: this.server, maxPayload: LIMITS.WS_MAX_PAYLOAD_BYTES });
     this.setupWss();
     this.startHeartbeat();
@@ -780,6 +838,13 @@ export class WebSocketServer {
       return;
     }
 
+    // Pre-authentication: a separate connection used by `<bot> doctor`, so it
+    // never creates, replaces or binds a bot session.
+    if (type === MessageType.BOT_DIAGNOSTIC) {
+      await this.handleBotDiagnostic(session, payload, requestId);
+      return;
+    }
+
     // Require authentication for all subsequent messages
     if (!session.user) {
       this.sendError(session.ws, ProtocolErrorCode.UNAUTHORIZED, 'Não autenticado no servidor', requestId);
@@ -860,6 +925,18 @@ export class WebSocketServer {
 
       case MessageType.POLL_CLOSE:
         await this.handlePollClose(session, payload, requestId);
+        break;
+
+      case MessageType.POLL_VOTERS:
+        await this.handlePollVoters(session, payload, requestId);
+        break;
+
+      case MessageType.POLL_EDIT:
+        await this.handlePollEdit(session, payload, requestId);
+        break;
+
+      case MessageType.POLL_GET:
+        await this.handlePollGet(session, payload, requestId);
         break;
 
       case MessageType.FORUM_LIST:
@@ -1006,6 +1083,8 @@ export class WebSocketServer {
         }
         this.voiceReconnectGrants?.delete(session);
         await this.handleVoiceJoin(session, payload as VoiceJoinPayload, requestId);
+        if (session.sessionId) this.clearVoiceReturn(session.sessionId);
+        void this.syncVoicePresenceVisibility();
         break;
 
       case MessageType.VOICE_RECONNECT: {
@@ -1024,7 +1103,9 @@ export class WebSocketServer {
           return;
         }
         this.voiceReconnectGrants?.delete(session);
+        if (session.sessionId) this.clearVoiceReturn(session.sessionId);
         await this.handleVoiceLeave(session, payload as VoiceLeavePayload, requestId);
+        void this.syncVoicePresenceVisibility();
         break;
 
       case MessageType.VOICE_STATE_UPDATE:
@@ -1140,10 +1221,21 @@ export class WebSocketServer {
 
       case MessageType.ADMIN_KICK_VOICE:
         if (!(await this.requirePermission(session, Permission.KICK_MEMBERS, requestId))) return;
-        if (this.cancelVoiceReconnect((payload as AdminKickVoicePayload).targetSessionId)
-          && !this.signalingService.getVoiceState((payload as AdminKickVoicePayload).targetSessionId)) {
-          this.broadcast({ type: MessageType.ADMIN_KICK_VOICE, requestId, payload });
-          break;
+        this.clearVoiceReturn((payload as AdminKickVoicePayload).targetSessionId);
+        {
+          const reconnecting = [...this.voiceReconnectGrants.entries()]
+            .find(([grantSession]) => grantSession.sessionId === (payload as AdminKickVoicePayload).targetSessionId);
+          if (this.cancelVoiceReconnect((payload as AdminKickVoicePayload).targetSessionId)
+            && !this.signalingService.getVoiceState((payload as AdminKickVoicePayload).targetSessionId)) {
+            this.broadcast({ type: MessageType.ADMIN_KICK_VOICE, requestId, payload });
+            const [kicked, grant] = reconnecting ?? [];
+            if (this.audit && kicked?.user) {
+              this.recordAudit(session, 'voice.disconnect', {
+                target: auditRef.member(kicked.user), related: { from: await this.auditChannel(grant?.channelId) },
+              });
+            }
+            break;
+          }
         }
         await this.handleAdminKickVoice(session, payload as AdminKickVoicePayload, requestId);
         break;
@@ -1166,6 +1258,7 @@ export class WebSocketServer {
         // as an intentional leave (immediate USER_LEFT, no reconnecting grace).
         session.intentionalLogout = true;
         this.voiceReconnectGrants?.delete(session);
+        void this.syncVoicePresenceVisibility();
         this.botLocalExecution.disconnect(session);
         this.botInteractions.disconnect(session);
         this.disconnectBotScreens(session);
@@ -1177,6 +1270,11 @@ export class WebSocketServer {
         } else {
           this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, 'Server monitoring is unavailable.', requestId);
         }
+        break;
+
+      case MessageType.SERVER_AUDIT_GET:
+        if (this.serverAudit) await this.serverAudit.handle(session, payload, requestId);
+        else this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'The audit log is unavailable.', requestId);
         break;
 
       // ── Bot management (#569) ────────────────────────────────────────
@@ -1404,6 +1502,7 @@ export class WebSocketServer {
     const sessionId = result.user.sessionId!;
     session.sessionId = sessionId;
     session.invisible = result.appearOffline === true;
+    if (result.newMember) this.recordAudit(session, 'member.join', { target: auditRef.member(result.user) });
 
     // Prevent duplicate sessions for the *same device*. A lingering/zombie socket
     // (e.g. after a reconnect where the old TCP connection was not yet cleaned
@@ -1456,7 +1555,10 @@ export class WebSocketServer {
 
     // Remember exactly which channels this client was told about, so later role
     // or privacy changes can be reconciled into deltas (#384).
+    const voicePresenceKey = this.voicePresenceKey(result.user.id);
+    await this.includeVoicePresenceChannels(result.user.id, result.serverDetails);
     session.visibleChannelIds = new Set(result.serverDetails.channels.map((c) => c.id));
+    session.voicePresenceKey = voicePresenceKey;
     result.serverDetails.voiceStates = Object.fromEntries(
       Object.entries(this.signalingService.getAllVoiceStates())
         .filter(([, state]) => session.visibleChannelIds?.has(state.channelId))
@@ -1599,6 +1701,27 @@ export class WebSocketServer {
   }
 
   // ── Bot authentication (token-based, no challenge) ───────────────────────
+  private async handleBotDiagnostic(session: ClientSession, payload: unknown, requestId?: string): Promise<void> {
+    if (session.user) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Use uma conexão própria, sem autenticação, para o diagnóstico.', requestId);
+      return;
+    }
+    if (!this.botDiagnostics) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'Este servidor não aceita bots.', requestId);
+      return;
+    }
+    const outcome = await this.botDiagnostics.diagnose(payload, session.ip);
+    if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
+    if (outcome.kind === 'invalid') {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Diagnóstico de bot inválido.', requestId);
+    } else if (outcome.kind === 'rate_limited') {
+      Logger.security(`Bot diagnostic rate limit reached for ${session.ip}`);
+      this.sendError(session.ws, ProtocolErrorCode.AUTH_RATE_LIMITED, 'Muitas tentativas de conexão. Aguarde um minuto.', requestId);
+    } else {
+      this.send(session.ws, { type: MessageType.BOT_DIAGNOSTIC_RESULT, requestId, payload: outcome.result });
+    }
+  }
+
   private async handleBotAuth(
     session: ClientSession,
     payload: AuthConnectPayload,
@@ -1828,6 +1951,7 @@ export class WebSocketServer {
       token: result.token,
     };
     this.send(session.ws, { type: MessageType.BOT_CREATED, requestId, payload: createdPayload });
+    this.recordAudit(session, 'bot.create', { target: auditRef.bot(result.bot.id, result.bot.name) });
     await this.broadcastBotSettings();
   }
 
@@ -1882,11 +2006,25 @@ export class WebSocketServer {
         if (!authorized || !authorized()) return;
       }
       if (type === MessageType.BOT_PERMISSIONS_UPDATE) {
+        const previous = [...(permissions.get(botId)?.granted ?? [])];
         permissions.approve(session.user.id, botPermissionsUpdateSchema.parse(parsed.data));
         // Invalidate the old socket synchronously with persistence. Work resumed
         // after any await cannot reuse a grant, even if it is quickly re-enabled.
         this.disconnectBot(botId);
         await this.botSelectors?.revokeBot(botId);
+        const granted = permissions.get(botId)?.granted ?? [];
+        const added = granted.filter((capability) => !previous.includes(capability));
+        const removed = previous.filter((capability) => !granted.includes(capability));
+        if (this.audit && (added.length || removed.length)) {
+          const bot = await this.botService?.findById(botId);
+          this.recordAudit(session, 'bot.permissions', {
+            target: auditRef.bot(botId, bot?.name ?? botId),
+            changes: [
+              ...(added.length ? [{ field: 'capabilitiesGranted', after: added }] : []),
+              ...(removed.length ? [{ field: 'capabilitiesRevoked', after: removed }] : []),
+            ],
+          });
+        }
       }
       const state = permissions.get(botId);
       if (!state) throw new BotPermissionError(ProtocolErrorCode.BAD_REQUEST, 'Bot not found.');
@@ -1933,10 +2071,16 @@ export class WebSocketServer {
       return;
     }
     if (!this.isCurrentSession(session)) return;
+    const previous = this.audit ? await this.botService.findById(botId) : null;
     const result = await this.botService.updateProfile(botId, parsed.data);
     if (!result.success) {
       this.sendError(session.ws, result.errorCode, result.errorMessage, requestId);
       return;
+    }
+    if (previous) {
+      // Bots resend their avatar on every start, so only a new name is worth recording.
+      const changes = auditDiff([['name', previous.name, result.bot.name]]);
+      if (changes.length) this.recordAudit(session, 'bot.profile', { changes });
     }
 
     this.commandRegistry.updateBotIdentity(botId, result.bot.name, result.bot.avatarUrl);
@@ -1968,12 +2112,14 @@ export class WebSocketServer {
       return;
     }
     const cleanupCommunityMedia = this.communityService?.prepareBotDeletion(payload.botId);
+    const revoked = this.audit ? await botService.findById(payload.botId) : null;
     const result = await this.mutateLocalAccess(() => botService.revoke(payload.botId));
     if (!result.success) {
       this.sendError(session.ws, result.errorCode, result.errorMessage, requestId);
       return;
     }
     cleanupCommunityMedia?.();
+    if (revoked) this.recordAudit(session, 'bot.revoke', { target: auditRef.bot(revoked.id, revoked.name) });
 
     this.disconnectBot(payload.botId, 'revoked');
     const revokedPayload: BotRevokedPayload = { botId: payload.botId };
@@ -2053,6 +2199,11 @@ export class WebSocketServer {
 
     const installedPayload: BotInstalledPayload = { bot: result.bot };
     this.send(session.ws, { type: MessageType.BOT_INSTALLED, requestId, payload: installedPayload });
+    this.recordAudit(session, 'bot.install', {
+      target: auditRef.bot(result.bot.id, result.bot.name),
+      changes: result.bot.permissions?.granted.length
+        ? [{ field: 'capabilitiesGranted', after: [...result.bot.permissions.granted] }] : [],
+    });
     this.broadcastCommands();
     await this.broadcastBotSettings(result.bot.id);
   }
@@ -2156,6 +2307,10 @@ export class WebSocketServer {
           if (changed.revision !== update.expectedRevision) {
             this.botLocalExecution.settingsChanged(botId);
             this.botInteractions.settingsChanged(botId);
+            // Setting values can hold secrets such as API keys, so only their names are kept.
+            this.recordAudit(session, 'bot.settings', {
+              target: auditRef.bot(bot.id, bot.name), changes: [{ field: 'settings', after: Object.keys(update.patch) }],
+            });
           }
           // Cache updates precede new-revision executions on the owning socket.
           const owner = this.findSessionById(`bot:${botId}`);
@@ -2426,7 +2581,10 @@ export class WebSocketServer {
         requestId,
         payload: message,
       });
-      if (result.poll.liveAction) await this.community?.refresh();
+      if (result.poll.liveAction) {
+        await this.auditPoll(session, 'poll.create', undefined, result.poll);
+        await this.community?.refresh();
+      }
     } catch (error: unknown) {
       this.sendError(
         session.ws,
@@ -2435,6 +2593,21 @@ export class WebSocketServer {
         requestId,
       );
     }
+  }
+
+  /** Polls run as live actions are always recorded; ordinary polls only when someone else's is changed. */
+  private async auditPoll(
+    session: ClientSession, action: 'poll.create' | 'poll.edit' | 'poll.close', before: NativePollRecord | undefined, after: NativePollRecord,
+  ): Promise<void> {
+    if (!this.audit || !session.user) return;
+    this.recordAudit(session, action, {
+      target: auditRef.of('poll', after.id, after.question),
+      related: {
+        channel: await this.auditChannel(after.channelId),
+        author: after.creatorUserId !== session.user.id ? await this.auditIdentity(after.creatorUserId) : null,
+      },
+      changes: action === 'poll.close' ? [] : pollChanges(before, after),
+    });
   }
 
   private async handlePollVote(
@@ -2512,12 +2685,142 @@ export class WebSocketServer {
         type: MessageType.POLL_UPDATED,
         payload: this.pollService.publicPoll(closed),
       });
+      if (existing.liveAction || existing.creatorUserId !== session.user.id) {
+        await this.auditPoll(session, 'poll.close', existing, closed);
+      }
       if (existing.liveAction) await this.community?.refresh();
     } catch (error: unknown) {
       this.sendError(
         session.ws,
         error instanceof NativePollError ? error.code : ProtocolErrorCode.INTERNAL_ERROR,
         error instanceof NativePollError ? error.message : 'Could not close poll.',
+        requestId,
+      );
+    }
+  }
+
+  private async handlePollVoters(
+    session: ClientSession,
+    payload: unknown,
+    requestId?: string,
+  ): Promise<void> {
+    if (!this.pollService || !session.user || session.isBot || !session.protocol?.features.includes('poll-voters')) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'Poll voters unavailable.', requestId);
+      return;
+    }
+    const parsed = nativePollIdSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Invalid poll.', requestId);
+      return;
+    }
+    try {
+      const poll = this.pollService.get(parsed.data.id);
+      if (!(await this.requirePermission(session, Permission.READ_MESSAGES, requestId, poll.channelId)) ||
+          !(await this.requireChannelAccess(session, poll.channelId, requestId))) return;
+      if (!await this.pollService.canView(session.user.id, poll)) {
+        throw new NativePollError('Poll not found.', ProtocolErrorCode.PERMISSION_DENIED);
+      }
+      this.send(session.ws, {
+        type: MessageType.POLL_VOTERS_RESULT,
+        requestId,
+        payload: this.pollService.voters(poll),
+      });
+    } catch (error: unknown) {
+      this.sendError(
+        session.ws,
+        error instanceof NativePollError ? error.code : ProtocolErrorCode.INTERNAL_ERROR,
+        error instanceof NativePollError ? error.message : 'Could not load poll voters.',
+        requestId,
+      );
+    }
+  }
+
+  /** The creator and server managers may change an open poll. */
+  private async handlePollEdit(
+    session: ClientSession,
+    payload: unknown,
+    requestId?: string,
+  ): Promise<void> {
+    if (!this.pollService || !session.user || session.isBot || !session.protocol?.features.includes('poll-edit')) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'Poll editing unavailable.', requestId);
+      return;
+    }
+    const parsed = nativePollEditSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Invalid poll.', requestId);
+      return;
+    }
+    try {
+      const existing = this.pollService.get(parsed.data.id);
+      if (!(await this.requireChannelAccess(session, existing.channelId, requestId))) return;
+      if (!await this.pollService.canView(session.user.id, existing)) {
+        throw new NativePollError('Poll not found.', ProtocolErrorCode.PERMISSION_DENIED);
+      }
+      if (existing.creatorUserId !== session.user.id &&
+          !await this.permissionService.checkPermission(session.user.id, Permission.MANAGE_SERVER)) {
+        this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Poll unavailable.', requestId);
+        return;
+      }
+      if (parsed.data.liveAction && !existing.liveAction) {
+        if (!(await this.requirePermission(session, Permission.EMIT_LIVE_ACTIONS, requestId, existing.channelId))) return;
+        if (this.communityService && !this.communityService.settings().eventsEnabled) {
+          this.sendError(session.ws, ProtocolErrorCode.COMMUNITY_INVALID, 'Live actions are disabled.', requestId);
+          return;
+        }
+      }
+      const updated = this.pollService.edit(session.user.id, parsed.data);
+      const personalized = await this.pollService.publicPollForUser(updated, session.user.id);
+      this.send(session.ws, { type: MessageType.POLL_UPDATED, requestId, payload: personalized });
+      await this.broadcastToChannel(updated.channelId, {
+        type: MessageType.POLL_UPDATED,
+        payload: this.pollService.publicPoll(updated),
+      });
+      if (existing.liveAction || updated.liveAction || existing.creatorUserId !== session.user.id) {
+        await this.auditPoll(session, 'poll.edit', existing, updated);
+      }
+      if (existing.liveAction || updated.liveAction) await this.community?.refresh();
+    } catch (error: unknown) {
+      this.sendError(
+        session.ws,
+        error instanceof NativePollError ? error.code : ProtocolErrorCode.INTERNAL_ERROR,
+        error instanceof NativePollError ? error.message : 'Could not edit poll.',
+        requestId,
+      );
+    }
+  }
+
+  /** Broadcast polls carry no personal vote or revealed audience; an editor starts from its own view. */
+  private async handlePollGet(
+    session: ClientSession,
+    payload: unknown,
+    requestId?: string,
+  ): Promise<void> {
+    if (!this.pollService || !session.user || session.isBot || !session.protocol?.features.includes('poll-edit')) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'Poll editing unavailable.', requestId);
+      return;
+    }
+    const parsed = nativePollIdSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Invalid poll.', requestId);
+      return;
+    }
+    try {
+      const poll = this.pollService.get(parsed.data.id);
+      if (!(await this.requirePermission(session, Permission.READ_MESSAGES, requestId, poll.channelId)) ||
+          !(await this.requireChannelAccess(session, poll.channelId, requestId))) return;
+      if (!await this.pollService.canView(session.user.id, poll)) {
+        throw new NativePollError('Poll not found.', ProtocolErrorCode.PERMISSION_DENIED);
+      }
+      this.send(session.ws, {
+        type: MessageType.POLL_UPDATED,
+        requestId,
+        payload: await this.pollService.publicPollForUser(poll, session.user.id),
+      });
+    } catch (error: unknown) {
+      this.sendError(
+        session.ws,
+        error instanceof NativePollError ? error.code : ProtocolErrorCode.INTERNAL_ERROR,
+        error instanceof NativePollError ? error.message : 'Could not load poll.',
         requestId,
       );
     }
@@ -2610,6 +2913,12 @@ export class WebSocketServer {
     }
 
     await this.broadcastChatMessageUpdated(result.message, requestId);
+    if (this.audit && result.message.userId !== session.user.id) {
+      this.recordAudit(session, 'message.delete', {
+        target: auditRef.member({ id: result.message.userId, nickname: result.message.userNickname, isBot: result.message.isBot }),
+        related: { channel: await this.auditChannel(result.message.channelId) },
+      });
+    }
     const poll = this.pollService?.repository.findByMessageId(payload.messageId);
     if (poll) {
       await this.broadcastToChannel(poll.channelId, {
@@ -2632,10 +2941,21 @@ export class WebSocketServer {
       return;
     }
     await this.broadcastChatMessageUpdated(result.message, requestId);
+    if (this.audit && result.message.userId !== session.user.id) {
+      this.recordAudit(session, 'message.restore', {
+        target: auditRef.member({ id: result.message.userId, nickname: result.message.userNickname, isBot: result.message.isBot }),
+        related: { channel: await this.auditChannel(result.message.channelId) },
+      });
+    }
   }
 
   private async broadcastChatMessageUpdated(message: ChatMessage, requestId?: string): Promise<void> {
-    const updatedPayload: ChatMessageUpdatedPayload = { message };
+    // The message was loaded for the actor: its poll must not carry their vote or revealed audience to everyone.
+    const polls = this.pollService;
+    const poll = message.poll && polls ? polls.repository.findById(message.poll.id) : undefined;
+    const updatedPayload: ChatMessageUpdatedPayload = {
+      message: poll && polls ? { ...message, poll: polls.publicPoll(poll) } : message,
+    };
     await this.broadcastToChannel(message.channelId, {
       type: MessageType.CHAT_MESSAGE_UPDATED,
       requestId,
@@ -2734,6 +3054,12 @@ export class WebSocketServer {
       payload: channelPayload,
     });
     session.visibleChannelIds?.add(result.channel.id);
+    if (this.audit) {
+      this.recordAudit(session, 'channel.create', {
+        target: auditRef.channel(result.channel),
+        changes: channelCreationChanges(result.channel, await this.auditNames()),
+      });
+    }
 
     await this.reconcileChannelVisibility();
     await this.broadcastBotSettings();
@@ -2745,11 +3071,13 @@ export class WebSocketServer {
     payload: CategoryCreatePayload | CategoryUpdatePayload | CategoryDeletePayload | CategoryReorderPayload,
     requestId?: string,
   ): Promise<void> {
+    const before = this.audit ? await this.channelTreeSnapshot() : undefined;
     const result = await this.mutateLocalAccess(() => this.channelService.mutateCategory(operation, payload, session.user?.id));
     if (!result.success) {
       this.sendError(session.ws, result.errorCode ?? ProtocolErrorCode.BAD_REQUEST, result.errorMessage ?? 'Categoria inválida', requestId);
       return;
     }
+    if (before) await this.auditCategoryMutation(session, operation, payload, before);
     await this.reconcileChannelVisibility(true);
     if (!session.user || !this.isCurrentSession(session)) return;
     const canDeliver = this.captureChannelOperation(session);
@@ -2767,8 +3095,41 @@ export class WebSocketServer {
       payload: { categories: categories.filter(category =>
         canAccessChannel(category, context.permissions, context.roleIds, context.isBot, context.userId) ||
         channels.some(channel => channel.categoryId === category.id &&
-          canAccessChannel(channel, context.permissions, context.roleIds, context.isBot, context.userId))) },
+          canAccessChannel(this.channelService.rulesFor(channel, context), context.permissions, context.roleIds, context.isBot, context.userId))) },
     });
+  }
+
+  private async auditCategoryMutation(
+    session: ClientSession,
+    operation: 'create' | 'update' | 'delete' | 'reorder',
+    payload: CategoryCreatePayload | CategoryUpdatePayload | CategoryDeletePayload | CategoryReorderPayload,
+    before: { channels: ChannelSummary[]; categories: ChannelCategory[] },
+  ): Promise<void> {
+    const after = await this.channelTreeSnapshot();
+    if (operation === 'reorder') {
+      this.recordTreeMoves(session, before, after);
+      return;
+    }
+    const known = new Set(before.categories.map((category) => category.id));
+    const id = operation === 'create'
+      ? after.categories.filter((category) => !known.has(category.id)).at(-1)?.id
+      : 'categoryId' in payload ? payload.categoryId : undefined;
+    const previous = before.categories.find((category) => category.id === id);
+    const next = after.categories.find((category) => category.id === id);
+    if (operation === 'delete') {
+      if (previous) this.recordAudit(session, 'category.delete', { target: auditRef.category(previous) });
+      return;
+    }
+    if (!next) return;
+    if (operation === 'create') {
+      this.recordAudit(session, 'category.create', {
+        target: auditRef.category(next), changes: next.isPrivate ? [{ field: 'private', after: true }] : [],
+      });
+      return;
+    }
+    if (!previous) return;
+    const changes = categoryChanges(previous, next, await this.auditNames(previous, next));
+    if (changes.length) this.recordAudit(session, 'category.update', { target: auditRef.category(next), changes });
   }
 
   private async handleChannelUpdate(
@@ -2776,9 +3137,9 @@ export class WebSocketServer {
     payload: ChannelUpdatePayload,
     requestId?: string
   ): Promise<void> {
+    const before = payload?.channelId ? await this.channelService.getChannelSummary(payload.channelId) : null;
     if (payload?.categoryId !== undefined) {
-      const previous = await this.channelService.getChannelSummary(payload.channelId);
-      if (previous && payload.categoryId !== (previous.categoryId ?? null)) {
+      if (before && payload.categoryId !== (before.categoryId ?? null)) {
         if (payload.categoryId
           ? !(await this.requireCategoryManagement(session, payload.categoryId, requestId))
           : !(await this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId))) return;
@@ -2796,6 +3157,10 @@ export class WebSocketServer {
     }
 
     const channel = result.channel;
+    if (this.audit && before) {
+      const changes = channelChanges(before, channel, await this.auditNames(before, channel));
+      if (changes.length) this.recordAudit(session, 'channel.update', { target: auditRef.channel(channel), changes });
+    }
     const updatedPayload: ChannelUpdatedPayload = { channel };
     this.send(session.ws, {
       type: MessageType.CHANNEL_UPDATED,
@@ -2833,6 +3198,7 @@ export class WebSocketServer {
     payload: ChannelReorderPayload,
     requestId?: string
   ): Promise<void> {
+    const before = this.audit ? await this.channelTreeSnapshot() : undefined;
     const result = await this.channelService.reorderChannels(payload, session.user?.id);
     if (!result.success || !result.positions) {
       this.sendError(
@@ -2843,6 +3209,10 @@ export class WebSocketServer {
       );
       return;
     }
+    if (before) this.recordTreeMoves(session, before, await this.channelTreeSnapshot());
+    // Categories share the root with loose channels: when they move, everyone
+    // receives their new positions before the channel positions land.
+    if (result.categoriesChanged) await this.reconcileChannelVisibility();
 
     const positions = result.positions;
     const visibleTo = (peer: ClientSession) =>
@@ -2871,6 +3241,7 @@ export class WebSocketServer {
     requestId?: string
   ): Promise<void> {
     const cleanupCommunityMedia = this.communityService?.prepareChannelDeletion(payload.channelId);
+    const deleted = this.audit ? await this.channelService.getChannelSummary(payload.channelId) : null;
     const result = await this.mutateLocalAccess(() => this.channelService.deleteChannel(payload.channelId));
     if (!result.success) {
       this.sendError(
@@ -2882,6 +3253,7 @@ export class WebSocketServer {
       return;
     }
     cleanupCommunityMedia?.();
+    if (deleted) this.recordAudit(session, 'channel.delete', { target: auditRef.channel(deleted) });
 
     this.botLocalExecution.deleteChannel(payload.channelId);
     this.botInteractions.deleteChannel(payload.channelId);
@@ -2923,6 +3295,7 @@ export class WebSocketServer {
   ): Promise<void> {
     if (!session.user) return;
 
+    const previousNickname = session.user.nickname;
     const result = await this.userService.changeNickname(session.user.id, payload.newNickname);
     if (!result.success || !result.updatedUser) {
       this.sendError(
@@ -2934,6 +3307,11 @@ export class WebSocketServer {
       return;
     }
 
+    if (previousNickname !== result.updatedUser.nickname) {
+      this.recordAudit(session, 'member.nickname', {
+        changes: [{ field: 'nickname', before: previousNickname, after: result.updatedUser.nickname }],
+      });
+    }
     this.applyUserUpdate(result.updatedUser);
     this.broadcastUserUpdate(result.updatedUser, requestId);
   }
@@ -3229,6 +3607,7 @@ export class WebSocketServer {
     if (changedMode) {
       this.botLocalExecution.voiceModeChanged();
       this.voiceReconnectGrants.clear();
+      void this.syncVoicePresenceVisibility();
       for (const session of this.sessions.values()) {
         if (!session.isBot) continue;
         session.botVoiceJoinAttempt = undefined;
@@ -3243,13 +3622,14 @@ export class WebSocketServer {
       // each exact connection, never to a user ID shared by several devices.
       this.sfuManager.close();
       const evictedStates = this.signalingService.clearAllVoiceStates();
+      const grantMs = 30000;
       for (const vs of evictedStates) {
         const participant = this.findSessionById(vs.sessionId);
         if (participant) {
           this.voiceReconnectGrants.set(participant, {
             transitionId: voiceTransition.id,
             channelId: vs.channelId,
-            expiresAt: Date.now() + 30000,
+            expiresAt: Date.now() + grantMs,
             inFlight: false,
           });
         }
@@ -3263,6 +3643,8 @@ export class WebSocketServer {
           },
         });
       }
+      // Unused grants lapse silently; withdraw rooms only they kept listed.
+      if (evictedStates.length > 0) setTimeout(() => void this.syncVoicePresenceVisibility(), grantMs + 50).unref();
     }
 
     let relayError: string | undefined;
@@ -3286,6 +3668,12 @@ export class WebSocketServer {
           result = reconciled;
         }
       }
+    }
+
+    if (this.audit && previousServer) {
+      const current = await this.serverRepo.getServer();
+      const changes = current ? serverSettingsChanges(previousServer, current) : [];
+      if (changes.length) this.recordAudit(session, 'server.update', { changes });
     }
 
     const broadcastPayload: ServerSettingsUpdatedPayload = {
@@ -3337,6 +3725,7 @@ export class WebSocketServer {
         cancelled = true;
       }
     }
+    if (cancelled) void this.syncVoicePresenceVisibility();
     return cancelled;
   }
 
@@ -3408,6 +3797,7 @@ export class WebSocketServer {
       if (admitted && this.signalingService.getVoiceState(session.sessionId)?.channelId === payload.channelId) {
         await this.handleVoiceLeave(session, { channelId: payload.channelId });
       }
+      void this.syncVoicePresenceVisibility();
     }
   }
 
@@ -4783,6 +5173,76 @@ export class WebSocketServer {
       this.sessionSockets.get(session.sessionId) === session.ws;
   }
 
+  /** Records what a member or bot did; servers without the audit log ignore it. */
+  private recordAudit(session: BotInteractionSession, action: ServerAuditAction, input: Omit<ServerAuditInput, 'actor'> = {}): void {
+    if (!this.audit || !session.user) return;
+    this.audit.record(action, {
+      ...input,
+      actor: auditRef.member({ ...session.user, isBot: session.isBot === true || session.user.isBot === true }),
+    });
+  }
+
+  /** A member or bot by id, with the name it has now. */
+  private async auditIdentity(id: string): Promise<ServerAuditRef> {
+    const nickname = (await this.userService.nicknames([id])).get(id);
+    if (nickname !== undefined) return auditRef.user(id, nickname);
+    const bot = await this.botService?.findById(id);
+    return bot ? auditRef.bot(bot.id, bot.name) : auditRef.user(id, id);
+  }
+
+  private async auditChannel(channelId: string | null | undefined): Promise<ServerAuditRef | null> {
+    if (!channelId) return null;
+    const channel = await this.channelService.getChannelSummary(channelId);
+    return channel ? auditRef.channel(channel) : null;
+  }
+
+  private async auditNames(...withOverwrites: Array<{ permissionOverwrites?: readonly ChannelPermissionOverwrite[] } | null | undefined>): Promise<AuditNames> {
+    const userIds = withOverwrites.flatMap((item) =>
+      (item?.permissionOverwrites ?? []).flatMap((overwrite) => overwrite.userId !== undefined ? [overwrite.userId] : []));
+    const [roles, categories, users] = await Promise.all([
+      this.roleService.listRoles(), this.channelService.listCategories(), this.userService.nicknames(userIds),
+    ]);
+    const roleNames = new Map(roles.map((role) => [role.id, role.name]));
+    const categoryNames = new Map(categories.map((category) => [category.id, category.name]));
+    return {
+      category: (id) => id ? categoryNames.get(id) ?? null : null,
+      role: (id) => roleNames.get(id) ?? id,
+      user: (id) => users.get(id) ?? id,
+    };
+  }
+
+  /** A command and the options it was given; values stay out, since members type anything into them. */
+  private async auditCommand(session: BotInteractionSession, command: SlashCommand, channelId: string, options: CommandValues): Promise<void> {
+    if (!this.audit) return;
+    const provided = Object.keys(options);
+    this.recordAudit(session, 'bot.command', {
+      target: auditRef.bot(command.botId, command.botName),
+      related: { channel: await this.auditChannel(channelId) },
+      detail: `/${command.name}`,
+      changes: provided.length ? [{ field: 'commandOptions', after: provided }] : [],
+    });
+  }
+
+  private async channelTreeSnapshot(): Promise<{ channels: ChannelSummary[]; categories: ChannelCategory[] }> {
+    const [channels, categories] = await Promise.all([this.channelService.listChannels(), this.channelService.listCategories()]);
+    return { channels, categories };
+  }
+
+  /** One entry per item that changed place; a drag records the dragged item, not everything it shifted. */
+  private recordTreeMoves(
+    session: ClientSession,
+    before: { channels: ChannelSummary[]; categories: ChannelCategory[] },
+    after: { channels: ChannelSummary[]; categories: ChannelCategory[] },
+  ): void {
+    for (const move of channelTreeMoves(before, after).slice(0, MAX_AUDITED_MOVES)) {
+      this.recordAudit(session, move.target.type === 'category' ? 'category.move' : 'channel.move', {
+        target: move.target,
+        related: { category: move.container },
+        changes: [{ field: 'position', before: move.from, after: move.to }],
+      });
+    }
+  }
+
   private async requirePermission(
     session: ClientSession,
     permission: Permission,
@@ -4980,45 +5440,98 @@ export class WebSocketServer {
       this.sendError(session.ws, result.errorCode || ProtocolErrorCode.BAD_REQUEST, result.errorMessage || 'Erro ao criar cargo.', requestId);
       return;
     }
+    if (result.role) {
+      this.recordAudit(session, 'role.create', {
+        target: auditRef.role(result.role),
+        changes: [
+          ...(result.role.color ? [{ field: 'color', after: result.role.color }] : []),
+          ...(result.role.isDefault ? [{ field: 'isDefault', after: true }] : []),
+          ...permissionChanges(0, result.role.permissions),
+        ],
+      });
+    }
     await this.broadcastRolesState(requestId);
+  }
+
+  /** A role as the audit compares it; Everyone is the base every member has. */
+  private async auditRoleState(roleId: string): Promise<{ id: string; name: string; color: string | null; isDefault: boolean; permissions: number } | undefined> {
+    if (roleId === EVERYONE_ROLE_ID) {
+      return { id: EVERYONE_ROLE_ID, name: '@everyone', color: null, isDefault: false, permissions: await this.permissionService.getEveryonePermissions() };
+    }
+    return (await this.roleService.listRoles()).find((role) => role.id === roleId);
   }
 
   private async handleRoleUpdate(session: ClientSession, payload: RoleUpdatePayload, requestId?: string): Promise<void> {
     if (!session.user) return;
+    const roleId = typeof payload?.roleId === 'string' ? payload.roleId : undefined;
+    const before = this.audit && roleId ? await this.auditRoleState(roleId) : undefined;
     const result = await this.roleService.updateRole(session.user.id, payload, roleModelFor(session.protocol?.features));
     if (!result.success) {
       this.sendError(session.ws, result.errorCode || ProtocolErrorCode.BAD_REQUEST, result.errorMessage || 'Erro ao atualizar cargo.', requestId);
       return;
+    }
+    const after = before && roleId ? await this.auditRoleState(roleId) : undefined;
+    if (before && after) {
+      const changes = [
+        ...auditDiff([
+          ['name', before.name, after.name],
+          ['color', before.color, after.color],
+          ['isDefault', before.isDefault, after.isDefault],
+        ]),
+        ...permissionChanges(before.permissions, after.permissions),
+      ];
+      if (changes.length) this.recordAudit(session, 'role.update', { target: auditRef.role(after), changes });
     }
     await this.broadcastRolesState(requestId);
   }
 
   private async handleRoleDelete(session: ClientSession, payload: RoleDeletePayload, requestId?: string): Promise<void> {
     if (!session.user) return;
+    const deleted = this.audit && typeof payload?.roleId === 'string' ? await this.auditRoleState(payload.roleId) : undefined;
     const result = await this.roleService.deleteRole(session.user.id, payload.roleId);
     if (!result.success) {
       this.sendError(session.ws, result.errorCode || ProtocolErrorCode.BAD_REQUEST, result.errorMessage || 'Erro ao excluir cargo.', requestId);
       return;
     }
+    if (deleted) this.recordAudit(session, 'role.delete', { target: auditRef.role(deleted) });
     await this.broadcastRolesState(requestId);
+  }
+
+  /** Assigning a role someone already has, or removing one they lack, changes nothing and is not recorded. */
+  private async auditRoleAssignment(payload: RoleAssignPayload): Promise<{ held: boolean; role?: ServerAuditRef } | undefined> {
+    if (!this.audit || typeof payload?.userId !== 'string' || typeof payload.roleId !== 'string') return undefined;
+    const [roles, userRoles] = await Promise.all([this.roleService.listRoles(), this.roleService.listUserRoles()]);
+    const role = roles.find((entry) => entry.id === payload.roleId);
+    return {
+      held: userRoles.some((entry) => entry.userId === payload.userId && entry.roleIds.includes(payload.roleId)),
+      role: role ? auditRef.role(role) : undefined,
+    };
   }
 
   private async handleRoleAssign(session: ClientSession, payload: RoleAssignPayload, requestId?: string): Promise<void> {
     if (!session.user) return;
+    const before = await this.auditRoleAssignment(payload);
     const result = await this.roleService.assignRole(session.user.id, payload);
     if (!result.success) {
       this.sendError(session.ws, result.errorCode || ProtocolErrorCode.BAD_REQUEST, result.errorMessage || 'Erro ao atribuir cargo.', requestId);
       return;
+    }
+    if (before && !before.held && before.role) {
+      this.recordAudit(session, 'role.assign', { target: await this.auditIdentity(payload.userId), related: { role: before.role } });
     }
     await this.broadcastRolesState(requestId);
   }
 
   private async handleRoleUnassign(session: ClientSession, payload: RoleAssignPayload, requestId?: string): Promise<void> {
     if (!session.user) return;
+    const before = await this.auditRoleAssignment(payload);
     const result = await this.roleService.unassignRole(session.user.id, payload);
     if (!result.success) {
       this.sendError(session.ws, result.errorCode || ProtocolErrorCode.BAD_REQUEST, result.errorMessage || 'Erro ao remover cargo.', requestId);
       return;
+    }
+    if (before?.held && before.role) {
+      this.recordAudit(session, 'role.unassign', { target: await this.auditIdentity(payload.userId), related: { role: before.role } });
     }
     await this.broadcastRolesState(requestId);
   }
@@ -5079,10 +5592,12 @@ export class WebSocketServer {
     const permission = restriction === 'serverMuted' ? Permission.MUTE_MEMBERS : Permission.DEAFEN_MEMBERS;
     if (!(await this.requirePermission(session, permission, requestId))) return;
     if (!this.isCurrentSession(session)) return;
+    const previous = this.signalingService.getVoiceRestrictions(userId)[restriction];
     const states = restriction === 'serverMuted'
       ? this.signalingService.setServerMuted(userId, value)
       : this.signalingService.setServerDeafened(userId, value);
     const updated: VoiceRestrictionsUpdatedPayload = { userId, ...this.signalingService.getVoiceRestrictions(userId) };
+    const channelId = states[0]?.channelId;
     for (const state of states) {
       const target = this.findSessionById(state.sessionId);
       if (target?.isBot && !isReceivingBotVoice(state)) this.closeBotVoiceReception(target, state.channelId);
@@ -5095,6 +5610,14 @@ export class WebSocketServer {
       payload: { voiceState } satisfies VoiceStateChangedPayload,
     }, undefined, () => this.signalingService.getVoiceState(voiceState.sessionId) === voiceState)));
     this.send(session.ws, { type: MessageType.VOICE_RESTRICTIONS_UPDATED, requestId, payload: updated });
+    if (this.audit && previous !== value) {
+      this.recordAudit(session, restriction === 'serverMuted'
+        ? value ? 'voice.mute' : 'voice.unmute'
+        : value ? 'voice.deafen' : 'voice.undeafen', {
+        target: await this.auditIdentity(userId),
+        related: { channel: await this.auditChannel(channelId) },
+      });
+    }
   }
 
   private async isVoiceIdentity(userId: string): Promise<boolean> {
@@ -5128,6 +5651,11 @@ export class WebSocketServer {
       requestId,
       payload: { channelId: previous.channelId, userId: previous.userId, sessionId: previous.sessionId },
     });
+    if (this.audit) {
+      this.recordAudit(session, 'voice.disconnect', {
+        target: await this.auditIdentity(previous.userId), related: { from: await this.auditChannel(previous.channelId) },
+      });
+    }
   }
 
   private async handleAdminMoveUser(session: ClientSession, payload: AdminMoveUserPayload, requestId?: string): Promise<void> {
@@ -5141,13 +5669,14 @@ export class WebSocketServer {
       return;
     }
     if (!(await this.requirePermission(session, Permission.MOVE_MEMBERS, requestId))) return;
+    // Whoever moves must be able to reach the room themselves. The member being
+    // moved does not need to see it: VIEW_CHANNEL only gates seeing a room and
+    // joining it by oneself, so being brought in by someone allowed is fine.
+    if (!(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
 
-    const targetCanView = await this.channelService.canUserAccessChannel(previous.userId, payload.channelId, Permission.VIEW_CHANNEL);
-    const targetCanSpeak = await this.channelService.canUserAccessChannel(previous.userId, payload.channelId, Permission.SPEAK);
-    // Moving someone into a private channel they cannot access would drop them
-    // into a room that is not even in their channel list (#384). Bots still
-    // need voice publish permission; humans without it enter permission-muted.
-    if (!targetCanView || (target.isBot && !targetCanSpeak)) {
+    // Bots never enter private rooms through someone else, and still need voice
+    // publish permission. Humans without SPEAK enter permission-muted.
+    if (target.isBot && !(await this.channelService.canUserAccessChannel(previous.userId, payload.channelId, Permission.SPEAK))) {
       this.sendError(
         session.ws,
         ProtocolErrorCode.PERMISSION_DENIED,
@@ -5162,9 +5691,13 @@ export class WebSocketServer {
       this.sendError(session.ws, joinResult.errorCode || ProtocolErrorCode.BAD_REQUEST, joinResult.errorMessage || 'Não foi possível mover o usuário.', requestId);
       return;
     }
+    const targetCanSpeak = await this.channelService.canUserAccessChannel(previous.userId, payload.channelId, Permission.SPEAK);
     joinResult.voiceState = await this.applyPermissionMuted(payload.targetSessionId, !target.isBot && !targetCanSpeak) ?? joinResult.voiceState;
 
     this.closeSfuSession(previous.sessionId, previous.channelId);
+    // The destination has to be in the member's list before they are told to
+    // follow the move, or their client would have no room to join.
+    await this.syncVoicePresenceVisibility();
     this.broadcast({ type: MessageType.ADMIN_MOVE_USER, requestId, payload });
     this.broadcast({
       type: MessageType.VOICE_USER_LEFT,
@@ -5184,6 +5717,12 @@ export class WebSocketServer {
         user: this.voiceRosterUser(target.user),
       } satisfies VoiceUserJoinedPayload,
     });
+    if (this.audit) {
+      this.recordAudit(session, 'voice.move', {
+        target: auditRef.member({ ...target.user, isBot: target.isBot === true || target.user.isBot === true }),
+        related: { from: await this.auditChannel(previous.channelId), to: await this.auditChannel(payload.channelId) },
+      });
+    }
   }
 
   private async handleMemberKick(session: ClientSession, payload: MemberKickPayload, requestId?: string): Promise<void> {
@@ -5208,6 +5747,7 @@ export class WebSocketServer {
       this.sendError(session.ws, result.errorCode ?? ProtocolErrorCode.BAD_REQUEST, result.errorMessage ?? 'Não foi possível expulsar o membro.', requestId);
       return;
     }
+    this.recordAudit(session, 'member.kick', { target: auditRef.user(targetUserId, result.nickname ?? targetUserId) });
 
     // Kicking removes the person, so every device they are signed in from has to
     // go — not just the most recent one (#309). Marked before any further await
@@ -5282,6 +5822,8 @@ export class WebSocketServer {
     session.botVoiceJoinAttempt = undefined;
     session.botVoiceGrant = undefined;
     this.voiceReconnectGrants?.delete(session);
+    // Runs after this synchronous teardown, so it sees any return grant below.
+    void this.syncVoicePresenceVisibility();
     const wasConnected = this.sessions.delete(session.ws);
     this.authService.clearChallenge(session.ws);
     this.botLocalExecution.disconnect(session);
@@ -5327,6 +5869,7 @@ export class WebSocketServer {
     // Presence in the member list keeps that grace period (#44): the person is
     // still shown as "reconnecting", and the client rejoins the voice channel by
     // itself as soon as it reconnects.
+    if (!session.intentionalLogout && !session.isBot) this.grantVoiceReturn(user.id, sessionId);
     this.announceVoiceLeave(user, sessionId);
 
     // Graceful logout (user clicked disconnect / switched servers): remove them
@@ -5424,6 +5967,7 @@ export class WebSocketServer {
   private finalizeSessionLeave(user: UserSummary, sessionId: string, invisible?: boolean): void {
     // Normally already done by handleDisconnect; kept for the paths that
     // finalize a session without going through it.
+    this.clearVoiceReturn(sessionId);
     this.announceVoiceLeave(user, sessionId);
 
     // Invisible users were never announced as online, so don't announce
@@ -5466,7 +6010,9 @@ export class WebSocketServer {
     const session = this.sessions.get(ws);
     if (ws.readyState === WebSocket.OPEN && (!session || this.canDeliverBotEvent(session, message))) {
       const projected = session?.user ? this.projectScreenMessage(session, message) : message;
-      if (projected) ws.send(JSON.stringify(projected));
+      if (!projected) return;
+      ws.send(JSON.stringify(session && !session.protocol?.features.includes('poll-voters')
+        ? projectLegacyPolls(projected) : projected));
     }
   }
 
@@ -5499,7 +6045,7 @@ export class WebSocketServer {
    * allowed to see its content. Even public channels may deny message reading.
    */
   private async broadcastToChannelAudience(
-    channel: ChannelAccessRules,
+    channel: ChannelAccessRules & { id: string },
     message: ProtocolMessage,
     ignoreWs?: WebSocket,
     canSend?: () => boolean,
@@ -5528,7 +6074,9 @@ export class WebSocketServer {
    * connections (#309), and the whole set is settled before anything is sent so
    * the delivery loop itself stays synchronous.
    */
-  private async resolveChannelAudience(channel: ChannelAccessRules, permission: Permission = Permission.VIEW_CHANNEL): Promise<Set<string>> {
+  private async resolveChannelAudience(
+    channel: ChannelAccessRules & { id: string }, permission: Permission = Permission.VIEW_CHANNEL,
+  ): Promise<Set<string>> {
     const userIds = new Set<string>();
     for (const session of this.sessions.values()) {
       if (session.user) userIds.add(session.user.id);
@@ -5538,8 +6086,9 @@ export class WebSocketServer {
     await Promise.all(
       Array.from(userIds).map(async (userId) => {
         const context = await this.channelService.getAccessContext(userId);
-        if (canAccessChannel(channel, context.permissions, context.roleIds, context.isBot, context.userId) &&
-            hasChannelPermission(channel, context.permissions, context.roleIds, permission, context.isBot, context.userId)) {
+        const rules = this.channelService.rulesFor(channel, context);
+        if (canAccessChannel(rules, context.permissions, context.roleIds, context.isBot, context.userId) &&
+            hasChannelPermission(rules, context.permissions, context.roleIds, permission, context.isBot, context.userId)) {
           allowed.add(userId);
         }
       })
@@ -5692,8 +6241,9 @@ export class WebSocketServer {
    * see (#384), pushing only the difference: channels that just became visible
    * arrive as CHANNEL_CREATED, ones that no longer are leave as CHANNEL_DELETED.
    *
-   * Anyone who loses access while sitting in that voice channel is disconnected
-   * from it, otherwise they would keep talking in a room they can no longer see.
+   * A bot that loses access while sitting in a voice channel is disconnected
+   * from it. A person stays: VIEW_CHANNEL only gates finding a room and joining
+   * it by oneself, so they keep seeing the room until they leave.
    */
   private async reconcileChannelVisibility(refreshChannels = false): Promise<void> {
     this.botSettingsPermissionVersion++;
@@ -5750,45 +6300,18 @@ export class WebSocketServer {
       const context = contexts.get(session.user.id);
       if (!context) continue;
 
-      const previouslyVisible = session.visibleChannelIds ?? new Set<string>();
-      const nowVisible = new Set(
-        channels
-          .filter((channel) => canAccessChannel(channel, context.permissions, context.roleIds, context.isBot, context.userId))
-          .map((channel) => channel.id)
-      );
-
-      this.send(ws, {
-        type: MessageType.CATEGORIES_UPDATED,
-        payload: { categories: categories.filter((category) =>
-          canAccessChannel(category, context.permissions, context.roleIds, context.isBot, context.userId) ||
-          channels.some((channel) => channel.categoryId === category.id && nowVisible.has(channel.id))) },
+      const nowVisible = this.visibleChannelIdsFor(channels, context);
+      if (!session.isBot) session.voicePresenceKey = this.voicePresenceKey(session.user.id);
+      this.sendChannelVisibility(session, nowVisible, channels, categories, context, refreshChannels, (channelId) => {
+        if (session.sessionId && !this.hasBotVoiceGrant(session, channelId)) this.evictFromVoiceChannel(session.sessionId, channelId);
       });
 
-      for (const channelId of nowVisible) {
-        if (previouslyVisible.has(channelId) && !refreshChannels) continue;
-        const channel = channelsById.get(channelId);
-        if (!channel) continue;
-        this.send(ws, {
-          type: previouslyVisible.has(channelId) ? MessageType.CHANNEL_UPDATED : MessageType.CHANNEL_CREATED,
-          payload: { channel } as ChannelCreatedPayload,
-        });
-      }
-
-      for (const channelId of previouslyVisible) {
-        if (nowVisible.has(channelId)) continue;
-        if (session.sessionId && !this.hasBotVoiceGrant(session, channelId)) this.evictFromVoiceChannel(session.sessionId, channelId);
-        this.send(ws, {
-          type: MessageType.CHANNEL_DELETED,
-          payload: { channelId } as ChannelDeletedPayload,
-        });
-      }
-
-      session.visibleChannelIds = nowVisible;
       const voiceState = session.sessionId && this.signalingService.getVoiceState(session.sessionId);
       const voiceChannel = voiceState && channelsById.get(voiceState.channelId);
       if (voiceState && voiceChannel && !this.hasBotVoiceGrant(session, voiceState.channelId)) {
-        const canView = hasChannelPermission(voiceChannel, context.permissions, context.roleIds, Permission.VIEW_CHANNEL, context.isBot, context.userId);
-        const canSpeak = hasChannelPermission(voiceChannel, context.permissions, context.roleIds, Permission.SPEAK, context.isBot, context.userId);
+        const rules = this.channelService.rulesFor(voiceChannel, context);
+        const canView = hasChannelPermission(rules, context.permissions, context.roleIds, Permission.VIEW_CHANNEL, context.isBot, context.userId);
+        const canSpeak = hasChannelPermission(rules, context.permissions, context.roleIds, Permission.SPEAK, context.isBot, context.userId);
         if (!canView || (session.isBot && !canSpeak)) {
           this.evictFromVoiceChannel(voiceState.sessionId, voiceState.channelId);
         } else {
@@ -5812,6 +6335,140 @@ export class WebSocketServer {
     this.botInteractions.voiceChanged();
     void this.botScreens?.revokeInvalid()
       .catch((error: unknown) => Logger.error('BOT', 'Failed to reconcile voice miniapp access.', error));
+    void this.syncVoicePresenceVisibility();
+  }
+
+  /**
+   * Voice rooms a person is inside, or is returning to after a dropped socket
+   * or a voice mode switch. They see those rooms even without VIEW_CHANNEL.
+   */
+  private voicePresenceChannelIds(userId: string): Set<string> {
+    const rooms = new Set(this.signalingService.getSessionsOfUser(userId).map((state) => state.channelId));
+    const now = Date.now();
+    for (const [session, grant] of this.voiceReconnectGrants ?? []) {
+      if (session.user?.id === userId && grant.expiresAt > now) rooms.add(grant.channelId);
+    }
+    for (const grant of this.voiceReturnGrants?.values() ?? []) {
+      if (grant.userId === userId) rooms.add(grant.channelId);
+    }
+    return rooms;
+  }
+
+  private voicePresenceKey(userId: string): string {
+    return [...this.voicePresenceChannelIds(userId)].sort().join('\n');
+  }
+
+  private grantVoiceReturn(userId: string, sessionId: string): void {
+    const state = this.signalingService.getVoiceState(sessionId);
+    if (!state || !this.voiceReturnGrants) return;
+    const previous = this.voiceReturnGrants.get(sessionId);
+    if (previous) clearTimeout(previous.timer);
+    const timer = setTimeout(() => this.clearVoiceReturn(sessionId), LIMITS.RECONNECT_GRACE_MS);
+    this.voiceReturnGrants.set(sessionId, { userId, channelId: state.channelId, timer });
+  }
+
+  private clearVoiceReturn(sessionId: string): void {
+    const grant = this.voiceReturnGrants?.get(sessionId);
+    if (!grant) return;
+    clearTimeout(grant.timer);
+    this.voiceReturnGrants.delete(sessionId);
+    void this.syncVoicePresenceVisibility();
+  }
+
+  private visibleChannelIdsFor(channels: readonly ChannelSummary[], context: ChannelAccessContext): Set<string> {
+    return new Set(channels
+      .filter((channel) => canAccessChannel(this.channelService.rulesFor(channel, context),
+        context.permissions, context.roleIds, context.isBot, context.userId))
+      .map((channel) => channel.id));
+  }
+
+  /**
+   * Sends one connection the difference between the channels it was told about
+   * and `nowVisible` (#384). `beforeRemoval` runs before a channel is withdrawn,
+   * so a voice eviction still reaches the client while it knows the room.
+   */
+  private sendChannelVisibility(
+    session: ClientSession,
+    nowVisible: Set<string>,
+    channels: readonly ChannelSummary[],
+    categories: readonly ChannelCategory[],
+    context: ChannelAccessContext,
+    refreshChannels: boolean,
+    beforeRemoval?: (channelId: string) => void,
+  ): void {
+    const previouslyVisible = session.visibleChannelIds ?? new Set<string>();
+    this.send(session.ws, {
+      type: MessageType.CATEGORIES_UPDATED,
+      payload: { categories: categories.filter((category) =>
+        canAccessChannel(category, context.permissions, context.roleIds, context.isBot, context.userId) ||
+        channels.some((channel) => channel.categoryId === category.id && nowVisible.has(channel.id))) },
+    });
+
+    for (const channel of channels) {
+      if (!nowVisible.has(channel.id) || (previouslyVisible.has(channel.id) && !refreshChannels)) continue;
+      this.send(session.ws, {
+        type: previouslyVisible.has(channel.id) ? MessageType.CHANNEL_UPDATED : MessageType.CHANNEL_CREATED,
+        payload: { channel } as ChannelCreatedPayload,
+      });
+    }
+
+    for (const channelId of previouslyVisible) {
+      if (nowVisible.has(channelId)) continue;
+      beforeRemoval?.(channelId);
+      this.send(session.ws, {
+        type: MessageType.CHANNEL_DELETED,
+        payload: { channelId } as ChannelDeletedPayload,
+      });
+    }
+    session.visibleChannelIds = nowVisible;
+  }
+
+  /**
+   * Lists the voice room a person is inside even when their own access would
+   * not, and withdraws it once they leave. One pass runs at a time, so the
+   * deltas sent to a connection never interleave.
+   */
+  private syncVoicePresenceVisibility(): Promise<void> {
+    const run = (this.voicePresenceSync ?? Promise.resolve()).then(() => this.applyVoicePresenceVisibility());
+    this.voicePresenceSync = run.catch((error: unknown) => Logger.error('NETWORK', 'Failed to sync voice room visibility.', error));
+    return this.voicePresenceSync;
+  }
+
+  private async applyVoicePresenceVisibility(): Promise<void> {
+    const stale = [...this.sessions.values()].filter((session) => !!session.user && !session.isBot &&
+      !!session.visibleChannelIds && session.voicePresenceKey !== this.voicePresenceKey(session.user.id));
+    if (this.closing || stale.length === 0) return;
+    const [channels, categories] = await Promise.all([this.channelService.listChannels(), this.channelService.listCategories()]);
+    const contexts = new Map<string, ChannelAccessContext>();
+    for (const session of stale) {
+      const userId = session.user?.id;
+      if (!userId || !this.isCurrentSession(session)) continue;
+      const context = contexts.get(userId) ?? await this.channelService.getAccessContext(userId);
+      contexts.set(userId, context);
+      if (!this.isCurrentSession(session)) continue;
+      const previouslyVisible = session.visibleChannelIds ?? new Set<string>();
+      const nowVisible = this.visibleChannelIdsFor(channels, context);
+      session.voicePresenceKey = this.voicePresenceKey(userId);
+      if (nowVisible.size === previouslyVisible.size && [...nowVisible].every((id) => previouslyVisible.has(id))) continue;
+      this.sendChannelVisibility(session, nowVisible, channels, categories, context, false);
+    }
+  }
+
+  /** A person signing in while inside a room they cannot see by themselves still gets it listed. */
+  private async includeVoicePresenceChannels(
+    userId: string, details: { channels: ChannelSummary[]; categories?: ChannelCategory[] },
+  ): Promise<void> {
+    const missing = [...this.voicePresenceChannelIds(userId)].filter((id) => !details.channels.some((channel) => channel.id === id));
+    if (missing.length === 0) return;
+    const [channels, categories] = await Promise.all([this.channelService.listChannels(), this.channelService.listCategories()]);
+    for (const channel of channels) {
+      if (!missing.includes(channel.id)) continue;
+      details.channels.push(channel);
+      const category = categories.find((entry) => entry.id === channel.categoryId);
+      if (category && !details.categories?.some((entry) => entry.id === category.id)) {
+        details.categories = [...(details.categories ?? []), category];
+      }
+    }
   }
 
   private disconnectBotScreens(session: BotInteractionSession): void {
@@ -5895,9 +6552,11 @@ export class WebSocketServer {
       this.shutdownReason = reason;
       this.botLocalExecution.close();
       this.serverMonitor?.close();
+      this.serverAudit?.close();
       this.messageSearch?.close();
       this.shutdownResources.defer('server community', () => this.community?.close());
       this.signalingService.setVoiceMembershipListener(undefined);
+      this.channelService.setVoicePresence(() => false);
       this.signalingService.configureScreenAccess(() => null, undefined);
       this.permissionService.setRoleMutationListener(undefined);
       for (const session of this.sessions.values()) {
@@ -5918,6 +6577,8 @@ export class WebSocketServer {
       this.shutdownResources.defer('bot interactions', () => this.botInteractions.close());
       this.shutdownResources.defer('WebSocket timers', () => {
         this.voiceReconnectGrants.clear();
+        for (const grant of this.voiceReturnGrants.values()) clearTimeout(grant.timer);
+        this.voiceReturnGrants.clear();
         if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
         this.heartbeatTimer = undefined;
         for (const timer of this.reconnectTimers.values()) clearTimeout(timer);

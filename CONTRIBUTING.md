@@ -294,14 +294,20 @@ Com escopo, prefira a forma convencional `feat(chat)!:`. O cálculo também acei
 o marcador antes do escopo (`feat!(chat):`) em mensagens existentes, inclusive nos
 itens de squash, para não perder uma mudança incompatível nem seu `BREAKING CHANGE`.
 
-Repare que **patch é o padrão**: todo merge na `main` publica alguma versão, nem
-que seja um commit de documentação.
+Repare que **patch é o padrão**: um commit sem tipo, `docs:` ou `chore:` também
+soma um patch. Mas o tipo só decide o tamanho do salto; **quem decide se há
+salto são os arquivos**. Um commit gera versão quando muda arquivo de aplicação
+ou de dependência — os mesmos que exigem nota de release — ou quando traz uma
+nota nova em `release-notes/`. Um commit só de CI, scripts, testes ou
+documentação não publica nada e também não conta no número da próxima versão.
+Se uma mudança de build ou de CI precisa chegar a quem usa o Monky, inclua uma
+nota de release: é ela que gera a versão.
 
-**Cada commit move o número, um de cada vez.** A conta não pega só o tipo mais
-alto do intervalo: um PR com três `fix:` leva `1.0.0` a `1.0.3`, e um com duas
-`feat:` seguidas de três `fix:` leva a `1.2.3`. Como os saltos são aplicados na
-ordem em que os commits foram feitos, a ordem importa — uma `feat:` depois de um
-`fix:` zera o patch que ele tinha acabado de somar.
+**Cada commit que gera versão move o número, um de cada vez.** A conta não
+pega só o tipo mais alto do intervalo: um PR com três `fix:` leva `1.0.0` a
+`1.0.3`, e um com duas `feat:` seguidas de três `fix:` leva a `1.2.3`. Como os
+saltos são aplicados na ordem em que os commits foram feitos, a ordem importa —
+uma `feat:` depois de um `fix:` zera o patch que ele tinha acabado de somar.
 
 Isso vale mesmo com **squash**, que é como a `main` recebe todo PR. O merge
 colapsa o PR num commit só, mas o GitHub mantém a lista dos commits originais no

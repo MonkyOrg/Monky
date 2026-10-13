@@ -457,12 +457,19 @@ async function* regression(locale, inviteModule) {
   const poll = {
     id: 'poll', messageId: 'poll-message', channelId: 'text', creatorUserId: 'owner',
     question: 'Native poll', options: [
-      { id: 'yes', label: 'Yes', emoji: '👍', votes: 1 }, { id: 'no', label: 'No', emoji: null, votes: 0 },
+      { id: 'yes', label: 'Yes', emoji: '👍', votes: 2, voters: [
+        { userId: 'owner', userNickname: 'Owner', userAvatarUrl: null },
+        { userId: 'member', userNickname: 'Former nickname', userAvatarUrl: null },
+      ] },
+      { id: 'no', label: 'No', emoji: null, votes: 0, voters: [] },
     ],
-    totalVotes: 1, maxVoters: 5, closesAt: now + 60_000, revision: 0,
+    totalVotes: 2, maxVoters: 5, closesAt: now + 60_000, revision: 0, anonymousVotes: false,
     allowMultiple: true, imageUrls: ['/avatars/cover.png', '/avatars/cover.png'], allowChange: true, liveAction: true,
     closedAt: null, createdAt: now, myVoteOptionIds: ['yes'],
   };
+  let pollRevision = 0;
+  let pollVoteGate = null;
+  let pollEditState = 'conflict';
   const nativeForm = {
     id: 'native-form', channelId: 'text', creatorUserId: 'owner',
     form: {
@@ -507,7 +514,7 @@ async function* regression(locale, inviteModule) {
     }]]),
     roles: [{ id: 'audience-role', name: 'Audience Team', color: '#336699' }],
     serverDetails: { id: 'community-test', name: 'Community',
-      protocol: { version: 33, minimumVersion: 31, features: ['native-polls', 'native-live-forms'] }, channels: [
+      protocol: { version: 33, minimumVersion: 31, features: ['native-polls', 'native-live-forms', 'poll-voters', 'poll-edit'] }, channels: [
       { id: 'voice', name: 'Voice', type: 'VOICE' }, { id: 'text', name: 'Text', type: 'TEXT' },
       { id: 'forum', name: 'Forum', type: 'FORUM' },
       { id: 'event-thread', name: 'Forum thread', type: 'TEXT', forumId: 'forum' },
@@ -588,10 +595,39 @@ async function* regression(locale, inviteModule) {
         queueMicrotask(() => emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot)));
         return { ...poll, closedAt: now, liveAction: false, revision: poll.revision + 1 };
       }
-      if (type === 'POLL_VOTE') return {
-        ...poll, totalVotes: 2, revision: 1, myVoteOptionIds: payload.optionIds,
-        options: poll.options.map(option => ({ ...option, votes: payload.optionIds.includes(option.id) ? option.votes + 1 : option.votes })),
+      if (type === 'POLL_VOTE') {
+        if (pollVoteGate) await pollVoteGate;
+        const owner = { userId: 'owner', userNickname: 'Owner', userAvatarUrl: null };
+        return {
+          ...poll, revision: ++pollRevision, myVoteOptionIds: payload.optionIds,
+          totalVotes: payload.optionIds.length ? 2 : 1,
+          options: poll.options.map(option => {
+            const others = option.voters.filter(voter => voter.userId !== 'owner');
+            const voters = payload.optionIds.includes(option.id) ? [owner, ...others] : others;
+            return { ...option, voters, votes: voters.length };
+          }),
+        };
+      }
+      if (type === 'POLL_VOTERS') return {
+        id: payload.id,
+        options: poll.options.map(option => ({ id: option.id, voters: option.voters })),
       };
+      if (type === 'POLL_GET') return pollEditState === 'refreshed'
+        ? { ...structuredClone(poll), revision: 7, totalVotes: 3,
+          options: poll.options.map(option => option.id === 'yes' ? { ...option, votes: 3 } : option) }
+        : structuredClone(poll);
+      if (type === 'POLL_EDIT') {
+        if (pollEditState === 'conflict') {
+          pollEditState = 'refreshed';
+          throw Object.assign(new Error('Votes changed while the poll was being edited.'), { code: 'COMMUNITY_CONFLICT' });
+        }
+        return {
+          ...poll, question: payload.question, revision: 50, totalVotes: 0, myVoteOptionIds: [],
+          options: payload.options.map((option, index) => ({
+            id: option.id ?? `edited-${index}`, label: option.label, emoji: option.emoji, votes: 0, voters: [],
+          })),
+        };
+      }
       if (type === 'COMMUNITY_IMAGE_UPLOAD') {
         uploadedCommunityImages++;
         return {
@@ -984,17 +1020,169 @@ async function* regression(locale, inviteModule) {
     && livePollModal.querySelectorAll('.image-carousel-dot').length === 2
     && !livePollModal.querySelector('[data-live-poll-close]'),
   'Live-action poll details fill the modal without duplicating management controls');
-  document.querySelector('[data-native-poll-option=no]').click();
-  check(calls.filter(call => call.type === 'POLL_VOTE').length === 0
-    && !document.querySelector('[data-native-poll-confirm]').disabled,
-  'Multiple answers are staged locally until the person confirms the set');
-  document.querySelector('[data-native-poll-confirm]').click();
+  const yesVoters = livePollModal.querySelector('[data-native-poll-voters-option=yes]');
+  const yesOption = livePollModal.querySelector('[data-native-poll-option=yes]');
+  const noTally = livePollModal.querySelector('[data-native-poll-option=no]').nextElementSibling;
+  const avatarsBox = yesVoters?.querySelector('.native-poll-voter-avatars')?.getBoundingClientRect();
+  const yesCount = yesVoters?.querySelector('[data-native-poll-count]');
+  check(!livePollModal.querySelector('[data-native-poll-confirm]')
+    && yesVoters?.querySelectorAll('.native-poll-voter-avatar').length === 2
+    && yesVoters.dataset.tooltip === `Yes\nOwner, Audience Member`
+    && yesCount?.textContent === '2' && yesCount.getBoundingClientRect().left >= avatarsBox.right
+    && Math.abs(yesCount.getBoundingClientRect().top + yesCount.offsetHeight / 2 - (avatarsBox.top + avatarsBox.height / 2)) <= 2
+    && !livePollModal.querySelector('[data-native-poll-voters-option=no]')
+    && noTally?.querySelector('[data-native-poll-count]')?.textContent === '0'
+    && noTally.getBoundingClientRect().right === yesVoters.getBoundingClientRect().right
+    && yesVoters.getBoundingClientRect().left >= yesOption.getBoundingClientRect().right
+    && livePollModal.querySelector('[data-native-poll-option=no]').getBoundingClientRect().width
+      === yesOption.getBoundingClientRect().width
+    && !livePollModal.querySelector('.native-poll-options').textContent.includes('%')
+    && !livePollModal.querySelector('.native-poll-option-check, .native-poll-option .material-symbols-outlined')
+    && livePollModal.querySelector('.native-poll-view-votes')?.textContent.includes(t('poll.viewVotes')),
+  'Like WhatsApp, each answer shows its voters\' avatars beside the vote count on the right, with no check or percentage');
+  const voteCallsBefore = calls.filter(call => call.type === 'POLL_VOTE').length;
+  let releaseVote;
+  pollVoteGate = new Promise(resolve => { releaseVote = resolve; });
+  livePollModal.querySelector('[data-native-poll-option=no]').focus();
+  livePollModal.querySelector('[data-native-poll-option=no]').click();
+  livePollModal.querySelector('[data-native-poll-option=yes]').click();
+  check(calls.filter(call => call.type === 'POLL_VOTE').length === voteCallsBefore + 1
+    && calls.filter(call => call.type === 'POLL_VOTE').at(-1).payload.optionIds.join(',') === 'yes,no'
+    && livePollModal.querySelector('.native-poll').getAttribute('aria-busy') === 'true'
+    && livePollModal.querySelector('[data-native-poll-option=no]').getAttribute('aria-pressed') === 'true'
+    && livePollModal.querySelector('[data-native-poll-option=no]').getAttribute('aria-disabled') === 'true'
+    && !livePollModal.querySelector('[data-native-poll-confirm]')
+    && document.activeElement === livePollModal.querySelector('[data-native-poll-option=no]'),
+  'A click immediately adds the answer to the vote and ignores further clicks until the server confirms it');
+  pollVoteGate = null;
+  releaseVote();
+  await until(() => !livePollModal.querySelector('.native-poll').hasAttribute('aria-busy'));
+  const noFill = livePollModal.querySelector('[data-native-poll-fill=no]');
+  const growth = noFill.getAnimations()[0]?.effect.getKeyframes().map(frame => frame.transform);
+  check(growth?.[0] === 'scaleX(0)' && growth?.[1] === 'scaleX(0.5)'
+    && livePollModal.querySelector('[data-native-poll-fill=yes]').getAnimations().length === 0,
+  'A new vote grows its bar from the previous fill, and unchanged bars stay still');
   await flush();
-  check(calls.filter(call => call.type === 'POLL_VOTE').at(-1).payload.optionIds.join(',') === 'yes,no'
-    && document.querySelector('[data-native-poll-option=no]').classList.contains('native-poll-option--selected'),
-  'A live-action vote atomically sends every selected answer and renders the personalized response');
+  check(!livePollModal.querySelector('.native-poll').hasAttribute('aria-busy')
+    && livePollModal.querySelector('[data-native-poll-option=no]').classList.contains('native-poll-option--selected')
+    && livePollModal.querySelector('[data-native-poll-voters-option=no]')
+    && document.activeElement === livePollModal.querySelector('[data-native-poll-option=no]'),
+  'The confirmed vote renders the personalized response and keeps keyboard focus on the answer');
+  livePollModal.querySelector('[data-native-poll-option=yes]').click();
+  await until(() => livePollModal.querySelector('[data-native-poll-option=yes]').getAttribute('aria-pressed') === 'false'
+    && !livePollModal.querySelector('.native-poll').hasAttribute('aria-busy'));
+  const shrink = livePollModal.querySelector('[data-native-poll-fill=yes]').getAnimations()[0]?.effect.getKeyframes()
+    .map(frame => frame.transform);
+  check(shrink?.[0] === 'scaleX(1)' && shrink?.[1] === 'scaleX(0.5)',
+    'Removing a vote shrinks its bar from the previous fill');
+  await flush();
+  check(calls.filter(call => call.type === 'POLL_VOTE').at(-1).payload.optionIds.join(',') === 'no'
+    && livePollModal.querySelector('[data-native-poll-option=yes]').getAttribute('aria-pressed') === 'false'
+    && livePollModal.querySelector('[data-native-poll-voters-option=yes]')?.dataset.tooltip === 'Yes\nAudience Member',
+  'Clicking a chosen answer again removes it from the vote');
+  livePollModal.querySelector('[data-native-poll-option=no]').click();
+  await flush();
+  check(calls.filter(call => call.type === 'POLL_VOTE').at(-1).payload.optionIds.length === 0
+    && livePollModal.querySelectorAll('[data-native-poll-option][aria-pressed=true]').length === 0,
+  'Removing the last answer withdraws the vote');
+  server.serverDetails.protocol.features = server.serverDetails.protocol.features.filter(feature => feature !== 'poll-voters');
+  livePollModal.querySelector('[data-native-poll-option=yes]').click();
+  await flush();
+  document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
+  const votesBeforeLegacyWithdraw = calls.filter(call => call.type === 'POLL_VOTE').length;
+  livePollModal.querySelector('[data-native-poll-option=yes]').click();
+  await flush();
+  check(calls.filter(call => call.type === 'POLL_VOTE').length === votesBeforeLegacyWithdraw
+    && document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label')?.textContent
+      === t('poll.withdrawRequiresUpdate'),
+  'Servers without vote withdrawal keep the last answer and explain why');
+  server.serverDetails.protocol.features.push('poll-voters');
+  document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
+  livePollModal.querySelector('[data-native-poll-voters-option=yes]').click();
+  await until(() => document.querySelector('.native-poll-voters-modal [data-native-poll-voter]'));
+  const votersModal = document.querySelector('.native-poll-voters-modal');
+  check(calls.filter(call => call.type === 'POLL_VOTERS').at(-1).payload.id === 'poll'
+    && [...votersModal.querySelectorAll('[data-native-poll-voters-group=yes] [data-native-poll-voter]')]
+      .map(item => item.textContent.trim()).join(',') === 'Owner,Audience Member'
+    && votersModal.querySelector('[data-native-poll-voters-group=no] .native-poll-voters-empty')?.textContent === t('poll.noVotersForOption'),
+  'The votes list shows every voter per answer with current member names');
+  votersModal.closest('.modal-backdrop').querySelector('[data-community-close]').click();
+  await flush();
   document.querySelector('.live-action-detail-modal [data-community-close]').click();
   await flush();
+  document.querySelector('[data-live-poll-card=poll] [data-live-action-menu=poll]').click();
+  await flush();
+  pollEditState = 'conflict';
+  const editPollItem = [...document.querySelectorAll('[role=menuitem]')]
+    .find(item => item.textContent.includes(t('poll.edit')));
+  check(editPollItem, 'The poll creator finds Edit poll in the live poll menu');
+  editPollItem.click();
+  await flush();
+  await until(() => document.querySelector('.native-poll-wizard'));
+  check(calls.filter(call => call.type === 'POLL_GET').at(-1)?.payload.id === 'poll',
+    'Editing starts from the requester\'s current view of the poll');
+  const editWizard = document.querySelector('.native-poll-wizard');
+  const editField = (selector, value) => {
+    const node = editWizard.querySelector(selector);
+    node.value = value;
+    node.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const shown = key => !editWizard.querySelector(`[data-poll-warning="${key}"]`).hidden
+    && !editWizard.querySelector(`[data-poll-warning="${key}"]`).hasAttribute('data-ui-closing');
+  check(editWizard.querySelector('.modal-title').textContent === t('poll.editTitle')
+    && editWizard.querySelector('[data-poll-question]').value === 'Native poll'
+    && [...editWizard.querySelectorAll('[data-poll-option]')].map(node => node.value).join(',') === 'Yes,No'
+    && editWizard.querySelector('[data-poll-multiple]').checked
+    && editWizard.querySelector('.native-poll-edit-notice')?.textContent.includes(t('poll.editRules'))
+    && !shown('question') && !shown('option-0'),
+  'Editing opens the same steps prefilled and states up front which changes reset votes');
+  editField('[data-poll-option][data-option-index="0"]', 'Yes please');
+  check(shown('option-0') && !shown('option-1')
+    && editWizard.querySelector('[data-poll-warning="option-0"]').textContent.includes(t('poll.editWarnOption', { count: 2 })),
+  'Changing an answer warns that only its votes will be reset');
+  editField('[data-poll-question]', 'Native poll, edited');
+  check(shown('question') && !shown('option-0'),
+    'Changing the question warns that every vote resets, which supersedes the answer warning');
+  editField('[data-poll-question]', 'Native poll');
+  editWizard.querySelector('[data-poll-next]').click();
+  await flush();
+  check(editWizard.querySelector('[data-poll-duration]').value !== ''
+    && editWizard.querySelector('[data-poll-limit]').value === '5'
+    && editWizard.querySelector('.native-poll-edit-duration')?.textContent.length > 0
+    && editWizard.querySelectorAll('.native-poll-image-editor .image-carousel-slide').length === 2,
+  'Settings, deadline and images of the running poll are prefilled');
+  editWizard.querySelector('[data-poll-next]').click();
+  await flush();
+  const lossText = t('poll.editLossChanged', { option: 'Yes', count: 2 });
+  check(editWizard.querySelector('.native-poll-edit-summary--loss')?.textContent.includes(lossText)
+    && editWizard.querySelector('[data-poll-submit]')?.textContent.trim() === t('poll.saveChanges'),
+  'The last step summarizes the votes that saving will reset');
+  editWizard.querySelector('[data-poll-submit]').click();
+  await flush();
+  check(document.querySelector('.dialog-message')?.textContent.includes(lossText)
+    && calls.filter(call => call.type === 'POLL_EDIT').length === 0,
+  'Saving asks for confirmation before resetting votes');
+  document.querySelector('[data-action=confirm]').click();
+  await flush();
+  const refreshedLoss = t('poll.editLossChanged', { option: 'Yes', count: 3 });
+  check(calls.filter(call => call.type === 'POLL_EDIT').at(-1)?.payload.expectedRevision === 0
+    && editWizard.querySelector('[data-community-error]')?.textContent === t('poll.editChanged')
+    && editWizard.querySelector('.native-poll-edit-summary--loss')?.textContent.includes(refreshedLoss)
+    && editWizard.querySelector('[data-poll-option]') === null,
+  'Votes cast while editing are never discarded unseen: the wizard reloads them and shows the new effects');
+  editWizard.querySelector('[data-poll-submit]').click();
+  await flush();
+  check(document.querySelector('.dialog-message')?.textContent.includes(refreshedLoss),
+    'Saving again confirms the updated loss');
+  document.querySelector('[data-action=confirm]').click();
+  await flush();
+  const pollEdit = calls.filter(call => call.type === 'POLL_EDIT').at(-1)?.payload;
+  check(pollEdit?.id === 'poll' && pollEdit.question === 'Native poll' && pollEdit.expectedRevision === 7
+    && pollEdit.options.map(option => `${option.id}:${option.label}`).join(',') === 'yes:Yes please,no:No'
+    && !('durationMinutes' in pollEdit) && pollEdit.maxVoters === 5 && pollEdit.liveAction === true
+    && pollEdit.images.length === 2 && pollEdit.images[0] === '/avatars/cover.png'
+    && !document.querySelector('.native-poll-wizard'),
+  'The edit keeps answer ids, an untouched deadline and the current images');
   const wizard = openNativePollWizard(client, server, 'text');
   check(wizard && document.querySelectorAll('[data-poll-option]').length === 2
     && document.querySelectorAll('[data-poll-stepper]').length === 3
@@ -1009,6 +1197,16 @@ async function* regression(locale, inviteModule) {
   check(getComputedStyle(document.querySelector('.native-poll-option-row')).gridTemplateColumns.split(' ').length === 3
     && getComputedStyle(document.querySelector('[data-add-poll-option]')).justifySelf === 'end',
   'Poll answers keep emoji, text and removal in one compact row with the add action aligned at the end');
+  const multipleRow = document.querySelector('.native-poll-multiple-row');
+  const anonymousRow = document.querySelector('.native-poll-anonymous-row');
+  const multipleTitle = multipleRow.querySelector('label[for]');
+  const fontOf = selector => getComputedStyle(document.querySelector(selector)).font;
+  check(Math.abs(anonymousRow.getBoundingClientRect().top - multipleRow.getBoundingClientRect().bottom) <= 1
+    && Math.abs(multipleTitle.getBoundingClientRect().top - multipleRow.getBoundingClientRect().top
+      - parseFloat(getComputedStyle(multipleRow).paddingTop)) <= 1
+    && fontOf('[data-poll-question]') === fontOf('[data-poll-option][data-option-index="0"]')
+    && fontOf('.native-poll-option-editor legend') === getComputedStyle(document.querySelector('[data-poll-question]').closest('label')).font,
+  'Poll switches stack as one list without extra label spacing, and answers use the same fonts as the question');
   const firstEmojiButton = document.querySelector('[data-poll-emoji="0"]');
   firstEmojiButton.click();
   yield 'native-poll-emoji-picker';
@@ -1063,6 +1261,11 @@ async function* regression(locale, inviteModule) {
   const multiple = document.querySelector('[data-poll-multiple]');
   multiple.checked = true;
   multiple.dispatchEvent(new Event('change', { bubbles: true }));
+  const anonymous = document.querySelector('[data-poll-anonymous][role=switch]');
+  check(anonymous && !anonymous.checked && anonymous.closest('.toggle-switch'),
+    'Servers with poll voters offer an anonymous-votes switch that starts off');
+  anonymous.checked = true;
+  anonymous.dispatchEvent(new Event('change', { bubbles: true }));
   document.querySelector('[data-poll-next]').click();
   check(document.querySelectorAll('.native-poll-number-control > button').length === 4
     && getComputedStyle(document.querySelector('[data-poll-duration]')).appearance === 'textfield'
@@ -1236,8 +1439,10 @@ async function* regression(locale, inviteModule) {
     'A voter limit can replace duration and a selected private audience satisfies publication');
   document.querySelector('[data-poll-next]').click();
   check(document.querySelector('.native-poll-preview-surface .native-poll')
-    && document.querySelector('.native-poll-preview-surface').textContent.includes(t('poll.multipleAllowed')),
-  'The final step previews the poll and its multiple-answer behavior');
+    && document.querySelector('.native-poll-preview-surface').textContent.includes(t('poll.multipleAllowed'))
+    && document.querySelector('.native-poll-preview-surface .native-poll-anonymous')?.textContent.includes(t('poll.anonymousBadge'))
+    && !document.querySelector('.native-poll-preview-surface .native-poll-view-votes'),
+  'The final step previews the poll with its multiple-answer and anonymous behavior');
   const pollPreviewCard = document.querySelector('.native-poll-preview-surface .native-poll').getBoundingClientRect();
   const pollPreviewImage = document.querySelector('.native-poll-preview-surface .image-carousel').getBoundingClientRect();
   check(Math.abs(pollPreviewImage.left - pollPreviewCard.left) <= 3
@@ -1248,6 +1453,7 @@ async function* regression(locale, inviteModule) {
   const creation = calls.filter(call => call.type === 'POLL_CREATE').at(-1);
   check(creation.payload.maxVoters === 2 && creation.payload.durationMinutes === undefined
     && creation.payload.liveAction && creation.payload.allowMultiple && creation.payload.options.length === 3
+    && creation.payload.anonymousVotes === true
     && creation.payload.imageAssetRefs.length === 2
     && creation.payload.audience.visibility === 'private'
     && creation.payload.audience.roleIds[0] === 'audience-role'
@@ -2418,6 +2624,14 @@ async function* regression(locale, inviteModule) {
       mainRoot.querySelector('#chat-edit-composer').hidden &&
       mainRoot.querySelector('#chat-messages-feed').textContent.includes(t('channelPermissions.readDenied')),
     'Read revocation clears the visible compositor as well as the message feed');
+    const deniedComposer = mainRoot.querySelector('.chat-input-container');
+    const deniedState = mainRoot.querySelector('#chat-messages-feed .chat-feed-state');
+    check((deniedComposer.hidden || deniedComposer.hasAttribute('data-ui-closing'))
+      && deniedState?.querySelector('.chat-feed-state-icon')?.textContent === 'lock'
+      && deniedState.querySelector('.chat-feed-state-title')?.textContent === t('channelPermissions.readDeniedTitle')
+      && getComputedStyle(deniedState).alignItems === 'center'
+      && !mainRoot.querySelector('#chat-messages-feed .bot-error'),
+    'Read denial shows the themed locked state alone, without a composer or loose errors repeating it');
     acknowledgeRetiredSend(outgoingMessage);
     await lateSend;
     client.sendRequest = originalSendRequest;
@@ -2429,6 +2643,9 @@ async function* regression(locale, inviteModule) {
     chatServer.myPermissions = oldPermissions;
     check(!mainRoot.querySelector('#chat-messages-feed').textContent.includes(t('channelPermissions.readDenied')),
       'Restoring reading removes the denied state and resumes the normal chat');
+    const restoredComposer = mainRoot.querySelector('.chat-input-container');
+    check(!restoredComposer.hidden && !restoredComposer.hasAttribute('data-ui-closing'),
+      'Restoring reading brings the composer back');
     const stage = mainRoot.querySelector('#main-center-stage');
     main.voiceStageView = new VoiceStageView(stage);
     let voiceJoinRequests = 0;
@@ -2505,6 +2722,19 @@ async function* regression(locale, inviteModule) {
     mainRoot.querySelector('.voice-chat-close').click();
     check(main.voiceChatChannelId === null && voiceJoinRequests === 0,
       'Closing the panel never changes voice admission');
+    main.openVoiceChannelChat('voice');
+    await flush();
+    const voiceIndex = chatServer.serverDetails.channels.findIndex(channel => channel.id === 'voice');
+    const [deletedVoice] = chatServer.serverDetails.channels.splice(voiceIndex, 1);
+    chatServer.serverDetails.channels.push({ ...deletedVoice, id: 'other-voice', name: 'Other voice' });
+    // The stage moved to another room while this room's chat stayed open.
+    main.viewedVoiceChannelId = 'other-voice';
+    main.handleChannelDeleted({ channelId: 'voice' });
+    check(main.voiceChatChannelId === null && voicePanel.hidden && !voicePanel.querySelector('.chat-feed-state'),
+      'Deleting a voice room closes its open chat instead of leaving a denied conversation behind');
+    chatServer.serverDetails.channels = chatServer.serverDetails.channels.filter(channel => channel.id !== 'other-voice');
+    chatServer.serverDetails.channels.splice(voiceIndex, 0, deletedVoice);
+    main.viewedVoiceChannelId = null;
     const sidebar = document.createElement('aside');
     check(main.clampSidebarWidth(100000) === Math.max(280, Math.floor(window.innerWidth * 0.175))
       && main.clampSidebarWidth(1) === 280, 'Sidebar halves its maximum width while preserving the readable minimum');

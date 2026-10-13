@@ -1,4 +1,4 @@
-import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, NativePollRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord, VoiceRestrictions } from './entities';
+import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, NativePollRecord, NativePollVoterRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord, VoiceRestrictions } from './entities';
 import type { BotSelector } from '@monky/shared';
 import type { BotSettingsRecord } from './entities';
 
@@ -30,6 +30,29 @@ export interface IServerRepository {
   getServer(): Promise<ServerRecord | null>;
   createServer(server: ServerRecord): Promise<void>;
   updateServer(server: Partial<ServerRecord>): Promise<void>;
+}
+
+export interface ServerAuditQuery {
+  before?: number;
+  after?: number;
+  category?: string;
+  /** Already normalized like the stored search text. */
+  search?: string;
+  /** Entries created before this instant are past retention and never returned. */
+  createdSince: number;
+  limit: number;
+}
+
+/** Synchronous so recording never yields between an action and its audit entry. */
+export interface IServerAuditRepository {
+  append(entry: Omit<import('@monky/shared').ServerAuditEntry, 'id'>, category: string, searchText: string): void;
+  /** Newest first, at most `limit` entries. */
+  list(query: ServerAuditQuery): import('@monky/shared').ServerAuditEntry[];
+  /**
+   * Deletes entries older than `createdBefore`, then keeps only the newest
+   * `keepActivity` of `activityActions` and the newest `keepOther` of the rest.
+   */
+  prune(createdBefore: number, activityActions: readonly string[], keepActivity: number, keepOther: number): void;
 }
 
 export interface IUserRepository {
@@ -71,6 +94,8 @@ export interface ICategoryRepository {
   /** Detaches children and snapshots inherited ACLs in the same transaction. */
   deletePreservingAccess(id: string): Promise<void>;
   reorder(orderedIds: string[]): Promise<void>;
+  /** Writes root positions shared with loose channels, in one transaction. */
+  updatePositions(positions: Array<{ categoryId: string; position: number }>): Promise<void>;
 }
 
 export interface IMessageRepository {
@@ -104,6 +129,8 @@ export interface INativePollRepository {
   listActiveLiveActions(now: number): NativePollRecord[];
   createWithMessage(poll: NativePollRecord, message: MessageRecord): { poll: NativePollRecord; created: boolean };
   vote(id: string, userId: string, optionIds: string[], now: number): NativePollRecord | undefined;
+  /** Stores an edited open poll; votes for answers outside `poll.options` are discarded. */
+  edit(poll: NativePollRecord, singleAnswer: boolean, now: number): NativePollRecord | undefined;
   closeExpired(now: number): NativePollRecord[];
   closeById(id: string, now: number): NativePollRecord | undefined;
   closeByMessageId(messageId: string, now: number): NativePollRecord | undefined;
@@ -111,6 +138,8 @@ export interface INativePollRepository {
   voteCounts(id: string): Map<string, number>;
   voterCount(id: string): number;
   votesForUser(id: string, userId: string): string[];
+  /** Voters per answer in voting order, at most `limitPerOption` each when given. */
+  votersByOption(id: string, limitPerOption?: number): Map<string, NativePollVoterRecord[]>;
 }
 
 export interface IMentionRepository {

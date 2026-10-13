@@ -1,7 +1,14 @@
 import { z } from 'zod';
 import { deflateSync, Inflate } from 'fflate';
 
-export const SERVER_INVITE_WEB_URL = 'https://monkyorg.github.io/Monky/';
+// A dedicated page, not the docs home: link previews (WhatsApp, Discord…) never
+// receive the fragment, so the page itself must carry the invitation card.
+export const SERVER_INVITE_WEB_URL = 'https://monkyorg.github.io/Monky/convite/';
+const SERVER_INVITE_WEB_URL_EN = 'https://monkyorg.github.io/Monky/en/convite/';
+// Links shared before the dedicated page keep opening from the docs home.
+const SERVER_INVITE_WEB_PATHS = new Set(['/Monky', '/Monky/en', '/Monky/convite', '/Monky/en/convite']
+  .flatMap(base => [base, `${base}/`, `${base}/index.html`]));
+export type ServerInviteLanguage = 'pt-BR' | 'en';
 export const SERVER_INVITE_SCHEME = 'monky';
 export const SERVER_INVITE_FRAGMENT_PREFIX = '~';
 export const MAX_SERVER_INVITE_LENGTH = 16384;
@@ -126,14 +133,15 @@ function inviteToken(value: ServerInvite): string {
     if (host !== 0) keepShorter(encode(0, passwordMode));
   }
   const token = SERVER_INVITE_FRAGMENT_PREFIX + base64Url(bytes) + (invite.eventId ? `.event.${invite.eventId}` : '');
-  if (token.length > MAX_SERVER_INVITE_LENGTH - SERVER_INVITE_WEB_URL.length - 1) {
+  if (token.length > MAX_SERVER_INVITE_LENGTH - SERVER_INVITE_WEB_URL_EN.length - 1) {
     throw new Error('Server invitation is too large');
   }
   return token;
 }
 
-export function createServerInviteLink(invite: ServerInvite): string {
-  return `${SERVER_INVITE_WEB_URL}#${inviteToken(invite)}`;
+/** The language picks the page, and therefore the text of the preview card other apps show. */
+export function createServerInviteLink(invite: ServerInvite, language: ServerInviteLanguage = 'pt-BR'): string {
+  return `${language === 'en' ? SERVER_INVITE_WEB_URL_EN : SERVER_INVITE_WEB_URL}#${inviteToken(invite)}`;
 }
 
 export function createServerInviteAppLink(invite: ServerInvite): string {
@@ -241,8 +249,7 @@ export function parseServerInviteLink(value: unknown): ServerInviteResult {
     if (url.username || url.password || url.search) return { ok: false, reason: 'invalid' };
     const native = url.protocol === `${SERVER_INVITE_SCHEME}:` && url.hostname === ''
       && !url.port && (url.pathname === '' || url.pathname === '/');
-    const web = url.origin === new URL(SERVER_INVITE_WEB_URL).origin
-      && ['/Monky', '/Monky/', '/Monky/index.html', '/Monky/en', '/Monky/en/', '/Monky/en/index.html'].includes(url.pathname);
+    const web = url.origin === new URL(SERVER_INVITE_WEB_URL).origin && SERVER_INVITE_WEB_PATHS.has(url.pathname);
     return native || web ? decodeServerInviteToken(url.hash.slice(1)) : { ok: false, reason: 'invalid' };
   } catch {
     return { ok: false, reason: 'invalid' };

@@ -19,6 +19,7 @@ export enum Permission {
   MANAGE_EVENTS = 1 << 17,
   EMIT_LIVE_ACTIONS = 1 << 18,
   VIEW_CHANNEL = 1 << 19,
+  VIEW_AUDIT_LOG = 1 << 20,
 }
 
 export const DEFAULT_PERMISSIONS =
@@ -235,6 +236,24 @@ export function getChannelPermissions(
   result >>>= 0;
   if (limitToBase) result = (result & permissions) >>> 0;
   return result;
+}
+
+/**
+ * VIEW_CHANNEL decides who finds a voice room and joins it on their own. A
+ * member already inside keeps seeing it until they leave, whether someone with
+ * Move Members brought them in or they lost access meanwhile. Their own rule
+ * gains the view; every other channel rule still applies to them.
+ */
+export function withVoicePresence(rules: ChannelAccessRules, userId: string): ChannelAccessRules {
+  const overwrites = channelOverwrites(rules);
+  const own = overwrites.find(overwrite => overwrite.userId === userId);
+  return {
+    ...rules,
+    permissionOverwrites: [
+      ...overwrites.filter(overwrite => overwrite !== own),
+      { userId, allow: (own?.allow ?? 0) | Permission.VIEW_CHANNEL, deny: (own?.deny ?? 0) & ~Permission.VIEW_CHANNEL },
+    ],
+  };
 }
 
 export function hasChannelPermission(

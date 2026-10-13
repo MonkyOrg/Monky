@@ -197,7 +197,7 @@ export async function createFixture(options: {
       await channelService.canUserAccessChannel(userId, poll.channelId, Permission.READ_MESSAGES) &&
       await permissions.canAccessAudience(userId, poll.creatorUserId, poll.audience),
     canRevealAudience: (userId, poll) => permissions.canRevealAudience(userId, poll.creatorUserId),
-  });
+  }, avatarPath => avatars.getPublicUrl(avatarPath));
   const registry = new CommandRegistry();
   let online: () => Map<string, { user: UserSummary }> = () => new Map();
   const userService = new UserService(userRepo, avatars, () => online());

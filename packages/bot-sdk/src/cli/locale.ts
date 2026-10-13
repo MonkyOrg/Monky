@@ -116,7 +116,8 @@ export function shouldPromptCliLocale(
   return isInteractiveCliAccess(args, env) && !explicitLocale &&
     env.MONKY_BOT_LOCALE === undefined && env.MONKY_LANG === undefined &&
     !(command === 'config' && args[1] === 'language') &&
-    (!command || ['menu', 'setup', 'start', 'stop', 'restart', 'status', 'logs', 'config', 'update', 'autoupdate'].includes(command)) &&
+    (!command || ['menu', 'setup', 'start', 'stop', 'restart', 'status', 'logs', 'config', 'update', 'autoupdate',
+      'doctor', 'requirements', 'consent'].includes(command)) &&
     !readSavedCliLocale(homeDir);
 }
 

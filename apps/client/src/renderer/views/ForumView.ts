@@ -179,7 +179,11 @@ export class ForumView {
     const container = this.root.querySelector('[data-forum-posts]');
     if (!container) return;
     if (!this.server.hasPermission(Permission.READ_MESSAGES, this.channelId)) {
-      container.innerHTML = `<div class="forum-empty" role="status">${t('channelPermissions.readDenied')}</div>`;
+      container.innerHTML = `<div class="forum-empty-state" role="status">
+          <span class="material-symbols-outlined forum-empty-icon" aria-hidden="true">lock</span>
+          <strong>${t('channelPermissions.readDeniedTitle')}</strong>
+          <p>${t('channelPermissions.readDenied')}</p>
+        </div>`;
       return;
     }
     const reorderMotion = animateReorder && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;

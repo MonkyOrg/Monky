@@ -13,9 +13,17 @@ import { PROTOCOL_VERSION } from './constants.js';
 // role-deny: 36.1 roles carry allow/deny over Everyone; clients without it receive legacy full masks.
 // role-grants: roles only grant on top of Everyone and add up; clients with only role-deny receive nothing denied.
 // game-activity: USER_UPDATE_ACTIVITY and UserSummary.activity (#675); peers without it never see the game.
+// channel-tree-order: categories and loose channels share one root order, sent as one CHANNEL_REORDER with categoryId null.
+// poll-voters: polls carry anonymity and voters, votes can be withdrawn; other clients receive the earlier poll shape.
+// poll-edit: the creator or a server manager may change an open poll; reset answers receive new ids.
+// Protocol 37 adds the pre-authentication BOT_DIAGNOSTIC; older servers answer it as a malformed message.
+// Protocol 38 adds local-youtube-playlist: bots learn the server relays youtube.playlist, and the server
+// only offers it to executors that negotiated it, because older clients silently drop unknown offers.
+// server-audit: SERVER_AUDIT_GET reads the audit log; clients without it never show the menu, and older
+// servers would answer the unknown request as malformed.
 export const MIN_CLIENT_PROTOCOL = 35;
 export const MIN_BOT_PROTOCOL = 24;
-export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity'] as const;
+export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];
 export const protocolOfferSchema = z.object({
   minimumVersion: z.number().int().positive(),
@@ -29,7 +37,9 @@ export function createProtocolOffer(kind: 'client' | 'bot'): ProtocolOffer {
       feature !== 'chat-delivery' && feature !== 'message-delete-undo' && feature !== 'screen-viewers' &&
       feature !== 'message-search' && feature !== 'forums' && feature !== 'native-polls' &&
       feature !== 'native-live-forms' && feature !== 'recent-sounds' && feature !== 'dm-relay' &&
-      feature !== 'role-deny' && feature !== 'role-grants' && feature !== 'game-activity')) };
+      feature !== 'role-deny' && feature !== 'role-grants' && feature !== 'game-activity' &&
+      feature !== 'channel-tree-order' && feature !== 'poll-voters' && feature !== 'poll-edit' &&
+      feature !== 'server-audit')) };
 }
 export function negotiateProtocol(version: unknown, offer: unknown, kind: 'client' | 'bot'): ProtocolAgreement | null {
   const minimumVersion = kind === 'bot' ? MIN_BOT_PROTOCOL : MIN_CLIENT_PROTOCOL;

@@ -256,6 +256,7 @@ test('tarball verification reads the packaged name, version and cli metadata', (
       name: '@example/sound-bot',
       version: '1.2.4',
       cliName: 'sound-bot',
+      monkyBot: { cliName: 'sound-bot' },
     });
   } finally {
     fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
@@ -376,7 +377,10 @@ const pm2 = require(${JSON.stringify(require.resolve('../dist/cli/pm2'))});
 const { createCliContext } = require(${JSON.stringify(require.resolve('../dist/cli/config'))});
 const { createRuntimeEnvironment } = require(${JSON.stringify(require.resolve('../dist/cli/runner'))});
 const { restartCommand } = require(${JSON.stringify(require.resolve('../dist/cli/commands/lifecycle'))});
+const readiness = require(${JSON.stringify(require.resolve('../dist/cli/manifestReadiness'))});
 pm2.requirePm2 = () => {};
+pm2.saveProcessList = () => {};
+readiness.confirmRuntimeReady = async () => null;
 pm2.restartBotProcess = async (_context, config, _entry, fresh) => {
   const plan = createRuntimeEnvironment(config, 'fixture-public-key');
   assert.ok(plan.values.MONKY_BOT_TOKEN === ${JSON.stringify(expected)}, 'Required runtime token was not preserved');

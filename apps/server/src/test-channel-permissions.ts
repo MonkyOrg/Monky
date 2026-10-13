@@ -448,10 +448,22 @@ test('voice admission uses visibility and missing speaking applies a live permis
   assert.equal(member.peer.messages.slice(marker).some(message =>
     message.type === MessageType.VOICE_STATE_CHANGED &&
     record(record(message.payload).voiceState).permissionMuted === true), true);
+  const hiddenMarker = member.peer.messages.length;
   await owner.peer.request(MessageType.CHANNEL_UPDATE, {
     channelId, permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.VIEW_CHANNEL }],
   });
-  await member.peer.wait(message => message.type === MessageType.VOICE_USER_LEFT && message.payload.sessionId === memberSessionId);
+  await member.peer.wait(message => message.type === MessageType.VOICE_STATE_CHANGED &&
+    record(record(message.payload).voiceState).sessionId === memberSessionId &&
+    record(record(message.payload).voiceState).permissionMuted === false, hiddenMarker);
+  assert.equal(f.wsServer['signalingService'].getVoiceState(memberSessionId)?.channelId, channelId,
+    'losing the view never drops someone already inside');
+  assert.equal(member.peer.messages.slice(hiddenMarker).some(message => message.type === MessageType.VOICE_USER_LEFT ||
+    (message.type === MessageType.CHANNEL_DELETED && message.payload.channelId === channelId)), false,
+  'the room stays listed while they are inside');
+  assert.equal((await member.peer.request(MessageType.VOICE_JOIN, { channelId })).type, MessageType.VOICE_USER_JOINED);
+  const leaveMarker = member.peer.messages.length;
+  member.peer.send(MessageType.VOICE_LEAVE, { channelId });
+  await member.peer.wait(message => message.type === MessageType.CHANNEL_DELETED && message.payload.channelId === channelId, leaveMarker);
   await member.peer.error(MessageType.VOICE_JOIN, { channelId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
 });
 
@@ -471,30 +483,59 @@ test('global channel management reorders channels at server level', async t => {
   assert.equal(reordered.type, MessageType.CHANNELS_REORDERED);
 });
 
-test('moving voice members requires target visibility and applies speaking mute in destination', async t => {
+test('moving voice members brings them into rooms they cannot see, which they keep until they leave', async t => {
   const f = await createApprovedBotFixture();
   t.after(() => f.dispose());
   const owner = await f.human('Move owner');
   const member = await f.human('Move member');
+  const mover = await f.human('Move helper');
   const memberSessionId = text(record(member.auth.payload.currentUser).sessionId);
   const source = await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'Source voice', type: 'VOICE' });
   const destination = await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'Destination voice', type: 'VOICE' });
   const sourceId = text(record(source.payload.channel).id);
   const destinationId = text(record(destination.payload.channel).id);
+  await f.roleRepo.create({ id: 'mover', name: 'Mover', permissions: Permission.MOVE_MEMBERS, color: null,
+    position: 1, isDefault: false, createdAt: 1 });
+  await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: mover.id, roleId: 'mover' });
   await member.peer.request(MessageType.VOICE_JOIN, { channelId: sourceId });
+  const hidden = [{ roleId: null, allow: 0, deny: Permission.VIEW_CHANNEL | Permission.SPEAK }];
+  await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: destinationId, permissionOverwrites: hidden });
+  await mover.peer.error(MessageType.ADMIN_MOVE_USER, { targetSessionId: memberSessionId, channelId: destinationId },
+    ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  assert.equal(f.wsServer['signalingService'].getVoiceState(memberSessionId)?.channelId, sourceId,
+    'a mover cannot use a room they cannot reach themselves');
+
   await owner.peer.request(MessageType.CHANNEL_UPDATE, {
-    channelId: destinationId, permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.VIEW_CHANNEL }],
+    channelId: destinationId, permissionOverwrites: [...hidden, { userId: mover.id, allow: Permission.VIEW_CHANNEL, deny: 0 }],
   });
-  await owner.peer.error(MessageType.ADMIN_MOVE_USER, { targetSessionId: memberSessionId, channelId: destinationId }, ProtocolErrorCode.PERMISSION_DENIED);
-  assert.equal(f.wsServer['signalingService'].getVoiceState(memberSessionId)?.channelId, sourceId);
-  await owner.peer.request(MessageType.CHANNEL_UPDATE, {
-    channelId: destinationId, permissionOverwrites: [{ roleId: null, allow: 0, deny: Permission.SPEAK }],
-  });
-  const moved = await owner.peer.request(MessageType.ADMIN_MOVE_USER, { targetSessionId: memberSessionId, channelId: destinationId });
+  await member.peer.error(MessageType.VOICE_JOIN, { channelId: destinationId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  const marker = member.peer.messages.length;
+  const moved = await mover.peer.request(MessageType.ADMIN_MOVE_USER, { targetSessionId: memberSessionId, channelId: destinationId });
   assert.equal(moved.type, MessageType.ADMIN_MOVE_USER);
+  await member.peer.wait(message => message.type === MessageType.ADMIN_MOVE_USER, marker);
+  const received = member.peer.messages.slice(marker);
+  const listed = received.findIndex(message => message.type === MessageType.CHANNEL_CREATED &&
+    record(message.payload.channel).id === destinationId);
+  assert.ok(listed >= 0 && listed < received.findIndex(message => message.type === MessageType.ADMIN_MOVE_USER),
+    'the room is listed before the member is told to follow the move');
   const state = f.wsServer['signalingService'].getVoiceState(memberSessionId);
   assert.equal(state?.channelId, destinationId);
-  assert.equal(state?.permissionMuted, true);
+  assert.equal(state?.permissionMuted, true, 'SPEAK still applies to whoever was moved in');
+  assert.equal((await member.peer.request(MessageType.VOICE_JOIN, { channelId: destinationId })).type, MessageType.VOICE_USER_JOINED,
+    'their client can follow the move into a room it cannot join alone');
+  const selectors = await member.peer.request(MessageType.SELECTOR_LIST, { channelId: destinationId });
+  assert.ok(Array.isArray(record(selectors.payload).selectors), 'bot controls in the room follow the same presence rules');
+
+  await member.peer.close();
+  const back = await f.human('Move member', member.keys, member.deviceId);
+  assert.equal(records(record(back.auth.payload.server).channels).some(channel => channel.id === destinationId), true,
+    'a dropped connection still finds the room to rejoin');
+  assert.equal((await back.peer.request(MessageType.VOICE_JOIN, { channelId: destinationId })).type, MessageType.VOICE_USER_JOINED);
+
+  const leaveMarker = back.peer.messages.length;
+  back.peer.send(MessageType.VOICE_LEAVE, { channelId: destinationId });
+  await back.peer.wait(message => message.type === MessageType.CHANNEL_DELETED && message.payload.channelId === destinationId, leaveMarker);
+  await back.peer.error(MessageType.VOICE_JOIN, { channelId: destinationId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
 });
 
 test('live read revocation, scoped reading grants, and direct service sending use the same rules', async t => {

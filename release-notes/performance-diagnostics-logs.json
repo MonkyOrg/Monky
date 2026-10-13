@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "Os logs agora ajudam a investigar lentidão: registram interações e quadros lentos, uso de CPU e memória por processo, mudanças de monitor, suspensão e falhas da GPU. Se a interface ficar lenta, exporte-os em Configurações → Logs antes de reiniciar o Monky.",
+  "en": "Logs now help investigate slowdowns: they record slow interactions and frames, CPU and memory per process, display changes, sleep and GPU failures. If the interface gets slow, export them from Settings → Logs before restarting Monky."
+}
