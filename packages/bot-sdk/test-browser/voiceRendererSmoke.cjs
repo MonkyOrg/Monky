@@ -882,6 +882,10 @@ async function runRenderer(MessageType, roster, humanId) {
       const wallMs = after.timestamp - before.timestamp;
       continuous = { durationMs: wallMs, packetMs, decodedSamples: samples - concealed,
         concealedSamples: concealed, concealmentRatio: samples ? concealed / samples : 1,
+        // One long event with late packets discarded points at a stalled receiver
+        // (#766); many short ones point at jitter in the media path itself.
+        concealmentEvents: after.concealmentEvents - before.concealmentEvents,
+        packetsDiscarded: after.packetsDiscarded - before.packetsDiscarded,
         minOutputRms: Math.min(...levels), silentProbes: levels.filter(level => level <= 0.005).length,
         pacing: { before: pacingBefore, after: pacingAfter },
         ...(checkActivity ? { inactiveSpeakingProbes } : {}) };
