@@ -705,10 +705,12 @@ async function runRenderer(MessageType, roster, humanId) {
     }, `${category}: audio decoder did not play`);
     // Decode counters alone cannot prove audible audio; tap the actual voice
     // GainNode while the isolated fixture's physical output remains muted.
-    // The route is read live on every use (#766): a renegotiation may hand the
-    // bot a new track mid-assertion, which legitimately rebuilds the element or
-    // the graph, and the product applies deafen and volume to the live ones.
-    // Holding the first ones made the checks inspect a retired route.
+    // The route is read live on every use (#766), so deafen and volume checks
+    // inspect what the product actually plays and failures report what was
+    // seen. No scenario here may replace it mid-assertion, though: the element
+    // is reused, the graph only changes with a new track, and a rejoin's new
+    // track arrives before this assertion starts. A swap means the product tore
+    // the call's audio down and rebuilt it, so it fails below instead of passing.
     const liveAudio = () => rtc.mediaRouter.getAudioElement(botId);
     const livePipeline = () => rtc.mediaRouter.voicePipelines.get(botId);
     const route = { audio: audio, pipeline: livePipeline(), replaced: 0 };
@@ -755,6 +757,7 @@ async function runRenderer(MessageType, roster, humanId) {
     const routeState = () => {
       followRoute();
       return { muted: route.audio.muted, gain: route.pipeline.gain.gain.value, replaced: route.replaced,
+        detached: liveAudio() !== route.audio || livePipeline() !== route.pipeline,
         track: route.audio.srcObject?.getAudioTracks()[0]?.id ?? null };
     };
     const disposeProbe = () => {
@@ -891,9 +894,10 @@ async function runRenderer(MessageType, roster, humanId) {
       }
       console.log(`VOICE TEST ${category} continuous: ${JSON.stringify(continuous)}`);
     }
+    check(route.replaced === 0, `${category}: playback route replaced mid-assertion: ${JSON.stringify(routeState())}`);
     disposeProbe();
     return { packets: resumed.packetsReceived, decodedSamples, resumeDelayMs, continuous,
-      trackId: route.audio.srcObject.getAudioTracks()[0].id, routeReplaced: route.replaced };
+      trackId: route.audio.srcObject.getAudioTracks()[0].id };
   }
   const receiveDescription = async (type) => until(async () => {
     const { signals } = await request('fixture.signals');
