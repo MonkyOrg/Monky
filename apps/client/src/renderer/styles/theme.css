@@ -2911,6 +2911,58 @@ input:focus, textarea:focus, select:focus {
   border-radius: var(--radius-sm);
 }
 
+/* The game being played, with a button to stream it, atop the voice panel (#763). */
+.game-share-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  margin-bottom: 2px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+
+.game-share-suggestion-art {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+}
+
+span.game-share-suggestion-art {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--bg-tertiary);
+  color: var(--accent-primary);
+}
+
+.game-share-suggestion-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.game-share-suggestion-stream {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.game-share-suggestion-stream:hover {
+  color: var(--accent-primary);
+}
+
 .voice-conn-info {
   display: flex;
   align-items: center;
@@ -3274,17 +3326,6 @@ input:focus, textarea:focus, select:focus {
 
 .screenshare-notice--self .screenshare-notice-icon {
   color: var(--danger);
-}
-
-/* "Agora não" beside "Compartilhar" on the game suggestion (#763). */
-.screenshare-notice-btn--quiet {
-  background-color: var(--bg-tertiary);
-  color: var(--text-secondary);
-}
-
-.screenshare-notice-btn--quiet:hover {
-  background-color: var(--bg-active);
-  color: var(--text-primary);
 }
 
 /* Two actions do not fit beside the text in the sidebar; they get their own row. */

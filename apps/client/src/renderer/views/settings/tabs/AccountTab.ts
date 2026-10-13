@@ -82,11 +82,11 @@ export class AccountTab {
         ${window.api?.platform === 'win32' ? `
         <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; margin-top: 8px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
           <div style="flex: 1; margin-right: 12px;">
-            <div id="game-share-capture-label" style="font-size: 13px; color: var(--text-primary);">${t('settings.gameShareCaptureLabel')}</div>
-            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('settings.gameShareCaptureHint')}</div>
+            <div id="game-share-suggestion-label" style="font-size: 13px; color: var(--text-primary);">${t('settings.gameShareSuggestionLabel')}</div>
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('settings.gameShareSuggestionHint')}</div>
           </div>
           <label class="toggle-switch">
-            <input type="checkbox" id="toggle-game-share-capture" aria-labelledby="game-share-capture-label" ${settingsStore.gameShareUseGameCapture ? 'checked' : ''}>
+            <input type="checkbox" id="toggle-game-share-suggestion" aria-labelledby="game-share-suggestion-label" ${settingsStore.suggestGameShare ? 'checked' : ''}>
             <span class="toggle-slider"></span>
           </label>
         </div>` : ''}
@@ -209,7 +209,8 @@ export class AccountTab {
       onReloadModal: () => void;
       showError: (msg: string) => void;
       onVisibilityChanged?: (appearOffline: boolean) => void;
-      onGameActivityChanged?: (enabled: boolean) => void;
+      /** Either game setting changed: detection and what servers see follow both. */
+      onGameActivityChanged?: () => void;
     }
   ): void {
     const inputNickname = container.querySelector<HTMLInputElement>('#settings-nickname-input');
@@ -266,13 +267,14 @@ export class AccountTab {
     toggleGameActivity?.addEventListener('change', () => {
       settingsStore.shareGameActivity = toggleGameActivity.checked;
       settingsStore.save();
-      callbacks.onGameActivityChanged?.(toggleGameActivity.checked);
+      callbacks.onGameActivityChanged?.();
     });
 
-    const toggleGameShareCapture = container.querySelector<HTMLInputElement>('#toggle-game-share-capture');
-    toggleGameShareCapture?.addEventListener('change', () => {
-      settingsStore.gameShareUseGameCapture = toggleGameShareCapture.checked;
+    const toggleGameShareSuggestion = container.querySelector<HTMLInputElement>('#toggle-game-share-suggestion');
+    toggleGameShareSuggestion?.addEventListener('change', () => {
+      settingsStore.suggestGameShare = toggleGameShareSuggestion.checked;
       settingsStore.save();
+      callbacks.onGameActivityChanged?.();
     });
 
     const toggleAutoConnect = container.querySelector<HTMLInputElement>('#toggle-auto-connect-servers');

@@ -47,8 +47,8 @@ export class SteamPresence {
   }
 
   /**
-   * Where the game on the card is installed, one folder per library that has
-   * it (#763). "Pedir para ver a partida" matches windows by their executable
+   * Where the running game is installed, one folder per library that has it
+   * (#763). Sharing it from the suggestion matches windows by their executable
    * living under one of these, so no executable catalogue is needed.
    */
   public async currentGameFolders(): Promise<string[]> {

@@ -259,7 +259,7 @@ test('stays quiet when Steam is installed but idle', async () => {
   }
 });
 
-test('locates the install folder of the running game for "Pedir para ver a partida" (#763)', async () => {
+test('locates the install folder of the running game for sharing it from the suggestion (#763)', async () => {
   const { root, cleanup } = steamFixture();
   try {
     const manifest = path.join(root, 'other-disk', 'steamapps', 'appmanifest_548430.acf');

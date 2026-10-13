@@ -36,12 +36,11 @@ const WINDOW_CAPTURE_METHODS = [
 ] as const;
 type WindowCaptureMethod = typeof WINDOW_CAPTURE_METHODS[number]['id'];
 
-/** "Pedir para ver a partida" (#763): the picker limited to the game's own windows. */
-export interface GameShareRequestOptions {
+/** Sharing the game from the suggestion (#763): the picker limited to the game's own windows. */
+export interface GameShareOptions {
   /** Window source ids main matched to the game's install folder. */
   sourceIds: readonly string[];
   shareAudio: boolean;
-  captureKind: WindowCaptureMethod;
 }
 
 export class ScreenSharePickerModal {
@@ -61,8 +60,8 @@ export class ScreenSharePickerModal {
   private audienceOpen = false;
   private audience: ScreenShareAudience = { userIds: [], roleIds: [] };
   private pickerCall: ReturnType<typeof captureScreenShareCall> | null = null;
-  private gameRequest: GameShareRequestOptions | null = null;
-  private nextGameRequest: GameShareRequestOptions | null = null;
+  private gameShare: GameShareOptions | null = null;
+  private nextGameShare: GameShareOptions | null = null;
 
   private audienceIsValid(): boolean {
     return !this.privateShare || this.audience.userIds.length + this.audience.roleIds.length > 0;
@@ -191,8 +190,8 @@ export class ScreenSharePickerModal {
 
   private sourceMatchesTab(source: DesktopSource, tab = this.activeTab): boolean {
     const type = tab === 'screen' ? 'screen' : 'window';
-    // An accepted game request never falls back to a whole screen or another app.
-    if (this.gameRequest && !this.gameRequest.sourceIds.includes(source.id)) return false;
+    // Sharing the game never falls back to a whole screen or another app.
+    if (this.gameShare && !this.gameShare.sourceIds.includes(source.id)) return false;
     return source.type === type && source.id.startsWith(tab === 'screen' ? 'native-monitor:' : 'window:');
   }
 
@@ -391,15 +390,15 @@ export class ScreenSharePickerModal {
    * cancellation and audio replacement behave exactly as in a manual share; with
    * several (launcher and game, say) the person picks one.
    */
-  public async openForGameRequest(options: GameShareRequestOptions): Promise<void> {
-    this.nextGameRequest = options;
+  public async openForGame(options: GameShareOptions): Promise<void> {
+    this.nextGameShare = options;
     await this.open();
   }
 
   public async open(): Promise<void> {
     this.close();
-    this.gameRequest = this.nextGameRequest;
-    this.nextGameRequest = null;
+    this.gameShare = this.nextGameShare;
+    this.nextGameShare = null;
     this.pickerCall = captureScreenShareCall();
 
     const alreadySharing = voiceStore.isScreenSharing;
@@ -410,8 +409,8 @@ export class ScreenSharePickerModal {
     this.audience = { userIds: [...(retained?.userIds ?? [])], roleIds: [...(retained?.roleIds ?? [])] };
     const audioAlreadyCaptured = this.hasScreenAudio() && !this.canReplaceScreenAudio();
     const shareAudio = !audioAlreadyCaptured && !screenAudioService.getIsTestTone();
-    this.shareAudioByTab = { screen: shareAudio, window: shareAudio && (this.gameRequest?.shareAudio ?? true) };
-    if (this.gameRequest) this.activeTab = 'window';
+    this.shareAudioByTab = { screen: shareAudio, window: shareAudio && (this.gameShare?.shareAudio ?? true) };
+    if (this.gameShare) this.activeTab = 'window';
 
     this.modalEl = document.createElement('div');
     this.modalEl.className = 'modal-backdrop';
@@ -557,20 +556,19 @@ export class ScreenSharePickerModal {
     // its loading state (loading should last only until the modal opens) (#48).
     appEvents.emit('modal.screenshare_picker_opened');
     if (this.modalEl === modal) await this.loadSources(modal);
-    if (this.modalEl === modal && this.gameRequest) await this.continueGameRequest(this.gameRequest);
+    if (this.modalEl === modal && this.gameShare) await this.continueGameShare();
   }
 
-  private async continueGameRequest(request: GameShareRequestOptions): Promise<void> {
+  private async continueGameShare(): Promise<void> {
     if (this.sourceState.status !== 'ready') return;
     const windows = this.sourceState.sources.filter(source => this.sourceMatchesTab(source, 'window'));
     if (windows.length === 0) {
-      // The game closed or restarted between the accept and the listing.
+      // The game closed or restarted between the click and the listing.
       showInfoToast(t('gameShare.windowNotFound'), 6000);
       await this.open();
       return;
     }
     if (windows.length > 1 || !this.selectSource(windows[0].id)) return;
-    if (request.captureKind === 'game' && this.supportsCaptureKind('game')) this.windowCaptureMethod = 'game';
     this.updateCaptureInfo();
     await this.startSharing('replace');
   }
@@ -1096,7 +1094,7 @@ export class ScreenSharePickerModal {
       this.windowCaptureMethod = 'window';
       this.isStarting = false;
     }
-    this.gameRequest = null;
+    this.gameShare = null;
     // Let callers (e.g. the screen-share button loading state) know the picker
     // is no longer open, including on cancel (#48). Only emit when something was
     // actually open, otherwise the close() call at the start of open() would

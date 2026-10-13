@@ -1,9 +1,12 @@
 import type { UserActivity } from '@monky/shared';
 import { appEvents } from './EventBus';
 import { gamePresence } from './GamePresenceController';
-import { gameShareRequests } from './GameShareRequests';
 import { gameSessionKey, shouldSuggestGameShare } from './gameShareEligibility';
 import { voiceStore } from '../stores/voiceStore';
+import { settingsStore } from '../stores/settingsStore';
+import { screenSharePickerModal } from '../views/ScreenSharePickerModal';
+import { showInfoToast } from '../views/CopyToast';
+import { activityIconSrc } from '../utils/activityIcon';
 import { escapeHtml } from '../utils/html';
 import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
 import { t } from '../i18n';
@@ -11,14 +14,13 @@ import { t } from '../i18n';
 export const GAME_SHARE_SUGGESTION_SLOT = 'game-share-notice-slot';
 
 /**
- * "Você está jogando X. Compartilhar a partida?" (#763): a card above the
- * user panel, as in Discord, while a detected game runs and the person is in
- * a call without a screen share. Dismissing or sharing settles that launch of
- * the game; the next launch brings the suggestion back.
+ * The game you are playing, at the top of the voice panel with a button to
+ * stream it (#763), as in Discord: shown while a detected game runs and the
+ * person is in a call without a screen share. It never nags — no dismissal to
+ * remember — and the setting turns it off for good.
  */
 export class GameShareSuggestion {
   private activity: UserActivity | null = null;
-  private settled: string | null = null;
   private readonly unbind: Array<() => void> = [];
 
   public start(): void {
@@ -37,9 +39,9 @@ export class GameShareSuggestion {
 
   public dispose(): void {
     for (const off of this.unbind.splice(0)) off();
-    for (const notice of document.querySelectorAll<HTMLElement>(`#${GAME_SHARE_SUGGESTION_SLOT} .game-share-suggestion`)) {
-      cancelSurfaceMotion(notice);
-      notice.remove();
+    for (const row of document.querySelectorAll<HTMLElement>(`#${GAME_SHARE_SUGGESTION_SLOT} .game-share-suggestion`)) {
+      cancelSurfaceMotion(row);
+      row.remove();
     }
   }
 
@@ -50,23 +52,19 @@ export class GameShareSuggestion {
    */
   public render(animate = true): void {
     const slot = document.getElementById(GAME_SHARE_SUGGESTION_SLOT);
-    const key = this.activity ? gameSessionKey(this.activity) : null;
-    // A new launch starts clean — a blink to "no game" (sharing toggled off and
-    // on, say) does not. Sharing by any means settles the current launch.
-    if (this.settled !== null && key !== null && this.settled !== key) this.settled = null;
-    if (key !== null && voiceStore.isScreenSharing) this.settled = key;
-
+    const activity = this.activity;
     const show = shouldSuggestGameShare({
-      activity: this.activity,
+      enabled: settingsStore.suggestGameShare,
+      activity,
       inVoiceChannel: voiceStore.currentVoiceChannelId !== null,
       isScreenSharing: voiceStore.isScreenSharing,
-      settledSession: this.settled,
     });
-    const existing = this.findNotice();
-    if (!show || !slot || !this.activity || key === null) {
+    const existing = this.findRow();
+    if (!show || !slot || !activity) {
       if (existing) removeWithMotion(existing, 'notice');
       return;
     }
+    const key = gameSessionKey(activity);
     if (existing?.dataset.session === key && animate) return;
     if (existing) existing.remove();
     for (const closing of slot.querySelectorAll<HTMLElement>('[data-ui-closing]')) {
@@ -74,35 +72,49 @@ export class GameShareSuggestion {
       closing.remove();
     }
 
-    const notice = document.createElement('div');
-    notice.className = 'screenshare-notice screenshare-notice--stacked game-share-suggestion';
-    notice.setAttribute('role', 'status');
-    notice.dataset.session = key;
-    notice.innerHTML = `
-      <span class="material-symbols-outlined md-16 screenshare-notice-icon" aria-hidden="true">sports_esports</span>
-      <span class="screenshare-notice-text">${escapeHtml(t('gameShare.suggestion', { game: this.activity.name }))}</span>
-      <div class="screenshare-notice-actions">
-        <button type="button" class="screenshare-notice-btn screenshare-notice-btn--quiet" data-game-share-suggestion="dismiss">${escapeHtml(t('gameShare.notNow'))}</button>
-        <button type="button" class="screenshare-notice-btn" data-game-share-suggestion="share">${escapeHtml(t('gameShare.share'))}</button>
-      </div>
+    const art = activityIconSrc(activity.iconBase64);
+    const label = escapeHtml(t('gameShare.stream', { game: activity.name }));
+    const row = document.createElement('div');
+    row.className = 'game-share-suggestion';
+    row.setAttribute('role', 'group');
+    row.setAttribute('aria-label', activity.name);
+    row.dataset.session = key;
+    row.innerHTML = `
+      ${art
+        ? `<img class="game-share-suggestion-art" src="${art}" alt="" width="28" height="28">`
+        : '<span class="material-symbols-outlined md-18 game-share-suggestion-art" aria-hidden="true">sports_esports</span>'}
+      <span class="game-share-suggestion-name">${escapeHtml(activity.name)}</span>
+      <button type="button" class="btn btn-icon game-share-suggestion-stream" data-game-share-suggestion="share" title="${label}" aria-label="${label}">
+        <span class="material-symbols-outlined md-18" aria-hidden="true">screen_share</span>
+      </button>
     `;
-    notice.querySelector('[data-game-share-suggestion="dismiss"]')?.addEventListener('click', () => this.settle(key));
-    notice.querySelector('[data-game-share-suggestion="share"]')?.addEventListener('click', () => {
-      this.settle(key);
-      // Game audio on by default, as when accepting a request; the picker still lets it be turned off.
-      void gameShareRequests.shareGame(true);
-    });
-    slot.appendChild(notice);
-    if (animate) animateEnter(notice, 'notice');
+    row.querySelector('[data-game-share-suggestion="share"]')?.addEventListener('click', () => void this.shareGame());
+    slot.appendChild(row);
+    if (animate) animateEnter(row, 'notice');
   }
 
-  private settle(key: string): void {
-    this.settled = key;
-    const notice = this.findNotice();
-    if (notice) removeWithMotion(notice, 'notice');
+  /**
+   * The click on "Transmitir" is the explicit confirmation sharing already
+   * requires; nothing is captured before it. Only the game's own windows are
+   * offered, with its audio on (the picker still lets it be turned off), and
+   * with none found the person picks one by hand.
+   */
+  public async shareGame(): Promise<void> {
+    let sourceIds: string[] = [];
+    try {
+      sourceIds = await window.api?.findGameWindows?.() ?? [];
+    } catch (error: unknown) {
+      console.warn('[GameShare] Could not look up the game windows', error);
+    }
+    if (sourceIds.length === 0) {
+      showInfoToast(t('gameShare.windowNotFound'), 6000);
+      await screenSharePickerModal.open();
+      return;
+    }
+    await screenSharePickerModal.openForGame({ sourceIds, shareAudio: true });
   }
 
-  private findNotice(): HTMLElement | null {
+  private findRow(): HTMLElement | null {
     return document.querySelector<HTMLElement>(`#${GAME_SHARE_SUGGESTION_SLOT} .game-share-suggestion:not([data-ui-closing])`);
   }
 }
