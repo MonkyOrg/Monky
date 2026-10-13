@@ -23,6 +23,10 @@ export const LIMITS = {
   // three orders of magnitude below MAX_AVATAR_SIZE on purpose: this field is
   // never a place to put bulk data, and the server has no maxPayload of its own.
   MAX_ACTIVITY_ICON_LENGTH: 32 * 1024,
+  // "Pedir para ver a partida" (#763): how long the player has to answer, and
+  // how long the same person waits before asking the same player again.
+  GAME_SHARE_REQUEST_TIMEOUT_MS: 30_000,
+  GAME_SHARE_REQUEST_COOLDOWN_MS: 60_000,
   MAX_AVATAR_SIZE: 5 * 1024 * 1024, // 5 MB
   MAX_USERS_DEFAULT: 20,
   // Sentinel stored in `max_users` when the owner chose not to cap membership

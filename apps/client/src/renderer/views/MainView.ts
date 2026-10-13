@@ -57,6 +57,7 @@ import { isParticipantSpeaking, participantConnectionIndicators, voiceConnection
 import { serverRailView } from './ServerRailView';
 import { soundboardPlayersBar } from './SoundboardPlayersBar';
 import { overlayBridgeService } from '../core/OverlayBridgeService';
+import { gameShareSuggestion } from '../core/GameShareSuggestion';
 import logoUrl from '../assets/Logo.png';
 import { t, tCount } from '../i18n';
 import { getBotVoiceContext } from '../utils/botVoice';
@@ -220,6 +221,7 @@ export class MainView {
             <div id="soundboard-players-slot" class="sb-notice-slot"></div>
             <div id="screenshare-notice-slot"></div>
             <div id="overlay-notice-slot"></div>
+            <div id="game-share-notice-slot"></div>
             <div id="voice-connection-row-slot"></div>
             <div class="user-media-bar" id="user-media-bar">
               <div class="audio-control-group camera-control-group">
@@ -424,6 +426,7 @@ export class MainView {
     this.screenShareNoticeSignature = null;
     this.updateScreenShareNotice();
     this.updateOverlayNotice();
+    gameShareSuggestion.render(false);
 
     const soundboardSlot = document.getElementById('soundboard-players-slot');
     if (soundboardSlot) soundboardPlayersBar.mount(soundboardSlot);
@@ -450,6 +453,7 @@ export class MainView {
             <div id="soundboard-players-slot" class="sb-notice-slot"></div>
             <div id="screenshare-notice-slot"></div>
             <div id="overlay-notice-slot"></div>
+            <div id="game-share-notice-slot"></div>
             <div id="voice-connection-row-slot"></div>
             <div class="user-media-bar" id="user-media-bar">
               <div class="audio-control-group camera-control-group">
@@ -517,6 +521,7 @@ export class MainView {
     this.screenShareNoticeSignature = null;
     this.updateScreenShareNotice();
     this.updateOverlayNotice();
+    gameShareSuggestion.render(false);
     const soundboardSlot = document.getElementById('soundboard-players-slot');
     if (soundboardSlot) soundboardPlayersBar.mount(soundboardSlot);
     if (navigating) this.animateServerEntry();
@@ -708,7 +713,8 @@ export class MainView {
     const watchedScreens = this.getWatchedRemoteScreens();
     const watchedSessions = new Set(watchedScreens.map(screen => screen.sessionId));
     const sharers = this.getRemoteScreenSharers().filter(sharer => !watchedSessions.has(sharer.id));
-    const isSelfSharing = voiceStore.isScreenSharing;
+    // While the game strip shows the game share as live, it is the status (#763).
+    const isSelfSharing = voiceStore.isScreenSharing && !gameShareSuggestion.isLive();
     const voice = getBotVoiceContext();
     const screens = voice ? voice.session.botScreenStore.list(voice.channelId)
       .filter((screen) => !this.voiceStageView?.isWatchingBotScreen(screen.id)
@@ -2936,8 +2942,9 @@ export class MainView {
     });
     const u21 = appEvents.on('network.status', () => this.refreshServerMonitorVisibility());
     const u22 = appEvents.on('voice.screen_watch_changed', () => this.updateScreenShareNotice());
+    const u23 = appEvents.on('game_share.live_changed', () => this.updateScreenShareNotice());
 
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u7b, u7c, u7d, u8, u9, u9b, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22);
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u7b, u7c, u7d, u8, u9, u9b, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22, u23);
   }
 
   /** True when the channel's conversation is currently visible on screen (#14). */

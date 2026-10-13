@@ -805,6 +805,8 @@ export interface IpcInvokeChannels {
   // Presença de jogo (#675)
   'game-presence:set-enabled': { args: [enabled: boolean]; returnType: void };
   'game-presence:get-current': { args: []; returnType: UserActivity | null };
+  /** Window source ids of the running game, for sharing it from the suggestion (#763). */
+  'game-share:find-windows': { args: []; returnType: string[] };
 
   // Sistema / App
   'app:set-language': { args: [language: string]; returnType: void };

@@ -2876,6 +2876,12 @@ input:focus, textarea:focus, select:focus {
   z-index: 80;
 }
 
+/* Empty notice slots (soundboard, screen share, overlay, game, voice row) would
+   each still add a flex gap, leaving blank space at the top of the panel. */
+.user-control-bar > div:empty {
+  display: none;
+}
+
 .user-media-bar {
   display: flex;
   align-items: center;
@@ -2909,6 +2915,228 @@ input:focus, textarea:focus, select:focus {
   background-color: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
+}
+
+/* The game strip atop the voice panel (#763): a header, not a card — no border
+   or background of its own. The action is exactly one media-bar column wide. */
+.game-share-suggestion {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 4px 0 4px 2px;
+  margin-bottom: 2px;
+}
+
+.game-share-suggestion > :not(.game-share-suggestion-timer) {
+  position: relative;
+  z-index: 1;
+}
+
+/* A request is the one state that asks for attention: a light accent tint. */
+.game-share-suggestion::before {
+  content: '';
+  position: absolute;
+  inset: 0 -4px;
+  border-radius: var(--radius-md);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px transparent;
+  transition: background-color var(--motion-panel-duration) var(--motion-easing),
+    box-shadow var(--motion-panel-duration) var(--motion-easing);
+}
+
+.game-share-suggestion[data-state="request"]::before {
+  background: color-mix(in srgb, var(--accent-primary) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-primary) 40%, transparent);
+}
+
+.game-share-suggestion-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background-color: var(--accent-primary);
+  color: #fff;
+  font-size: 8px;
+  letter-spacing: 0;
+}
+
+.game-share-suggestion-request {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--accent-primary) 55%, #ffffff);
+  text-overflow: ellipsis;
+}
+
+.game-share-suggestion-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 30px;
+  flex-shrink: 0;
+  margin-right: -4px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.game-share-suggestion-dismiss[hidden] {
+  display: none;
+}
+
+.game-share-suggestion-dismiss:hover {
+  background: color-mix(in srgb, var(--accent-primary) 18%, transparent);
+  color: var(--text-primary);
+}
+
+.game-share-suggestion-dismiss:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+/* What is left of the 30 s the asker waits, emptying left to right. */
+.game-share-suggestion-timer {
+  position: absolute;
+  z-index: 1;
+  left: 4px;
+  right: 4px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent-primary);
+  transform-origin: left center;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.game-share-suggestion[data-state="request"] .game-share-suggestion-timer {
+  opacity: 1;
+}
+
+.game-share-suggestion-timer--run {
+  animation-name: gameShareTimer;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
+@keyframes gameShareTimer {
+  from { transform: scaleX(var(--game-share-timer-start, 1)); }
+  to { transform: scaleX(0); }
+}
+
+.game-share-suggestion-art {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-tertiary);
+  color: var(--accent-primary);
+}
+
+.game-share-suggestion-art img {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  object-fit: cover;
+}
+
+.game-share-suggestion-art::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 11px;
+  box-shadow: 0 0 0 1.5px transparent;
+  transition: box-shadow var(--motion-panel-duration, 180ms) var(--motion-easing, ease-out);
+}
+
+.game-share-suggestion[data-state="live"] .game-share-suggestion-art::after {
+  box-shadow: 0 0 0 1.5px var(--danger);
+}
+
+.game-share-suggestion-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.game-share-suggestion-text--swap {
+  animation: gameStripSwap var(--motion-notice-duration, 140ms) var(--motion-easing, ease-out);
+}
+
+@keyframes gameStripSwap {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+
+.game-share-suggestion-over {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.game-share-suggestion-over .live-pulse-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+}
+
+.game-share-suggestion-live {
+  color: #ff7b72;
+}
+
+.game-share-suggestion-name {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.game-share-suggestion-cta {
+  flex: 0 0 calc((100% - 12px) / 3);
+  height: 30px;
+  font-size: 12px;
+}
+
+.game-share-suggestion-cta--stop {
+  background-color: rgba(242, 63, 67, 0.15);
+  color: #ff7b72;
+  box-shadow: inset 0 0 0 1px rgba(242, 63, 67, 0.45);
+}
+
+.game-share-suggestion-cta--stop:hover {
+  background-color: var(--danger);
+  color: #fff;
+  box-shadow: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .game-share-suggestion-text--swap { animation: none; }
+  .game-share-suggestion-art::after, .game-share-suggestion::before { transition: none; }
+  /* The time left still matters: a still bar at the current share, without the motion. */
+  .game-share-suggestion-timer--run { animation: none; transform: scaleX(var(--game-share-timer-start, 1)); }
 }
 
 .voice-conn-info {

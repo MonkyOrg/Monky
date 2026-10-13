@@ -70,13 +70,14 @@ async function runUserContextMenuSmoke() {
   const [{ userContextMenu: menu }, servers, participants, { voiceStore: voice },
     { settingsStore: settings }, { networkClient: network }, { audioProcessor: audio },
     { webRtcManager: rtc }, { soundEffects: sounds }, { appEvents }, language,
-    { connectionStore: connection }] = await Promise.all([
+    { connectionStore: connection }, { gameShareRequests: shares },
+    { gameShareSuggestion: suggestion, GAME_SHARE_SUGGESTION_SLOT: suggestionSlot }] = await Promise.all([
     import('/views/UserContextMenu.ts'), import('/stores/serverStore.ts'),
     import('/core/ParticipantManager.ts'), import('/stores/voiceStore.ts'),
     import('/stores/settingsStore.ts'), import('/core/NetworkClient.ts'),
     import('/core/AudioProcessor.ts'), import('/core/WebRtcManager.ts'),
     import('/core/SoundEffects.ts'), import('/core/EventBus.ts'), import('/i18n/index.ts'),
-    import('/stores/connectionStore.ts'),
+    import('/stores/connectionStore.ts'), import('/core/GameShareRequests.ts'), import('/core/GameShareSuggestion.ts'),
   ]);
   let checks = 0;
   let lastClose;
@@ -186,6 +187,226 @@ async function runUserContextMenuSmoke() {
     voice.currentVoiceChannelId = 'room';
     click('self-mute');
     check(sent.length === 1 && sent[0].payload.isMuted === voice.isMuted, 'In-call manual action sends voice state');
+
+    // "Pedir para ver a partida" (#763): only for someone else, playing, in the
+    // same call, not on screen yet, on a server that negotiated the feature.
+    const asks = [];
+    const originalAsk = shares.ask;
+    shares.ask = target => { asks.push(target); return Promise.resolve(); };
+    const askActivity = { source: 'steam', appId: 606150, name: 'Moonlighter', startedAt: Date.now() };
+    const playing = { ...remote, activity: askActivity };
+    server.serverDetails.protocol = { version: 36, minimumVersion: 35, features: ['game-activity', 'game-share-request'] };
+    await open(playing);
+    check(button('ask-to-watch-game')?.closest('.context-menu-activity') !== null, 'Ask to watch sits on the game card');
+    check(!find('input[type="checkbox"],input[type="radio"]'), 'Ask to watch adds no native checkbox');
+    button('ask-to-watch-game').focus();
+    check(document.activeElement === button('ask-to-watch-game'), 'Ask to watch is reachable by keyboard');
+    click('ask-to-watch-game');
+    check(asks.length === 1 && asks[0].id === remote.id && asks[0].nickname === remote.nickname, 'Ask to watch targets the player');
+    await delay();
+    check(!document.querySelector('.user-context-menu:not([data-ui-closing])'), 'Asking closes the menu');
+    await open({ ...user, activity: askActivity });
+    check(!button('ask-to-watch-game'), 'Nobody asks to watch themselves');
+    manager.updateVoiceState({ ...state(remote), isScreenSharing: true });
+    await open(playing);
+    check(!button('ask-to-watch-game'), 'No ask while the player is already on screen');
+    manager.updateVoiceState({ ...state(remote), channelId: 'other-room' });
+    await open(playing);
+    check(!button('ask-to-watch-game'), 'No ask across different calls');
+    manager.updateVoiceState(state(remote));
+    server.serverDetails.protocol = { version: 36, minimumVersion: 35, features: ['game-activity'] };
+    await open(playing);
+    check(!button('ask-to-watch-game'), 'No ask on a server without the feature');
+    menu.close();
+    server.serverDetails.protocol = undefined;
+    shares.ask = originalAsk;
+
+    // The game strip atop the voice panel (#763): in a call with a game running
+    // it names the game with one written action, and turns into the live status.
+    const activity = { source: 'steam', appId: 606150, name: 'Moonlighter', startedAt: Date.now() };
+    const slot = document.createElement('div');
+    slot.id = suggestionSlot;
+    document.body.appendChild(slot);
+    const shared = [];
+    const originalShare = suggestion.shareGame;
+    suggestion.shareGame = () => { shared.push(true); return Promise.resolve(); };
+    const strip = () => slot.querySelector('.game-share-suggestion:not([data-ui-closing])');
+    const cta = () => strip()?.querySelector('.game-share-suggestion-cta');
+    const settle = () => new Promise(resolve => setTimeout(resolve, 300));
+    const liveChanges = [];
+    const offLive = appEvents.on('game_share.live_changed', live => liveChanges.push(live));
+    const setShares = ids => {
+      voice.screenShareIds = [...ids];
+      voice.isScreenSharing = ids.length > 0;
+      appEvents.emit('voice.state_updated');
+    };
+    try {
+      voice.currentVoiceChannelId = null;
+      setShares([]);
+      settings.suggestGameShare = true;
+      suggestion.start();
+      appEvents.emit('game_presence.changed', activity);
+      check(!strip(), 'No game strip outside a call');
+      voice.currentVoiceChannelId = 'room';
+      appEvents.emit('voice.channel_changed', 'room');
+      check(strip()?.dataset.state === 'playing', 'Joining a call with a game running shows the game strip');
+      check(strip().querySelector('.game-share-suggestion-name')?.textContent === 'Moonlighter', 'The strip names the game');
+      check(strip().querySelector('[role="status"]')?.textContent.includes(language.t('gameShare.playing')), 'The status line says the game is being played');
+      check(strip().querySelector('.game-share-suggestion-art .material-symbols-outlined'), 'A game without art gets the generic icon');
+      check(cta()?.textContent === language.t('gameShare.share'), 'The action is written, not just an icon');
+      check(cta()?.getAttribute('aria-label')?.includes('Moonlighter'), 'The action is labelled with the game');
+      check(![...strip().querySelectorAll('.material-symbols-outlined')].some(icon => /screen_share/.test(icon.textContent)),
+        'The strip does not repeat the screen share icon');
+      check(!strip().querySelector('input[type="checkbox"],input[type="radio"]'), 'The strip adds no native checkbox');
+      check(!strip().querySelector('[data-game-share-suggestion="dismiss"]'), 'As in Discord, there is nothing to dismiss');
+      check(document.activeElement !== cta(), 'The strip does not steal focus');
+      cta().focus();
+      check(document.activeElement === cta(), 'The action is reachable by keyboard');
+      const sameStrip = strip();
+      appEvents.emit('voice.state_updated');
+      check(strip() === sameStrip, 'Unrelated voice updates keep the same strip instead of rebuilding it');
+      // One explicit yes before anything is captured.
+      const dialog = () => document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card');
+      cta().click();
+      await settle();
+      check(dialog()?.textContent.includes(language.t('gameShare.confirmTitle', { game: 'Moonlighter' })), 'Compartilhar asks for confirmation first');
+      check(dialog().querySelector('[data-action="cancel"]')?.textContent === language.t('common.cancel'), 'The way out is Cancelar');
+      check(shared.length === 0, 'Nothing is shared while the question is open');
+      dialog().querySelector('[data-action="cancel"]').click();
+      await settle();
+      check(!dialog(), 'Cancelar closes the question');
+      check(shared.length === 0, `Cancelar shares nothing (${shared.length})`);
+      check(strip()?.dataset.state === 'playing', `Cancelar leaves the strip as it was (${strip()?.dataset.state})`);
+      cta().click();
+      await settle();
+      dialog().querySelector('[data-action="confirm"]').click();
+      await settle();
+      check(shared.length === 1, 'Confirming starts the game share');
+
+      // Live: the strip becomes the status and the action stops the game share.
+      suggestion.claimShare('game-share');
+      setShares(['game-share']);
+      check(strip() === sameStrip && strip().dataset.state === 'live', 'Going live keeps the same strip and only changes its state');
+      check(strip().querySelector('.live-pulse-dot') && strip().textContent.includes(language.t('gameShare.live')), 'The live status shows in the strip');
+      check(cta()?.textContent === language.t('gameShare.stop') && cta().dataset.gameShareSuggestion === 'stop', 'Parar takes the place of Compartilhar');
+      check(suggestion.isLive() && liveChanges.at(-1) === true, 'The strip owns the "you are sharing" status while live');
+      setShares(['game-share', 'manual-share']);
+      await settle();
+      check(!strip() && !suggestion.isLive() && liveChanges.at(-1) === false, 'A second, manual share hands the status back to the panel');
+      setShares(['game-share']);
+      check(strip()?.dataset.state === 'live', 'Back to the game share alone, the strip is live again');
+      setShares([]);
+      check(strip()?.dataset.state === 'playing' && cta()?.textContent === language.t('gameShare.share'), 'Stopping returns the strip to Compartilhar');
+      setShares(['manual-share']);
+      await settle();
+      check(!strip(), 'Sharing something else by hand hides the strip');
+      setShares([]);
+      check(strip()?.dataset.state === 'playing', 'The strip comes back once the manual share stops');
+
+      // Someone asked to watch (A3): the strip names them, counts down and answers.
+      const answers = [];
+      const originalCurrent = shares.current;
+      const originalAnswer = shares.answer;
+      let pending = { id: 'ask-1', nickname: 'lucas', expiresAt: Date.now() + 20000, durationMs: 30000 };
+      shares.current = () => pending;
+      shares.answer = (id, accepted) => { answers.push({ id, accepted }); pending = null; appEvents.emit('game_share.request_changed'); };
+      try {
+        const before = strip();
+        appEvents.emit('game_share.request_changed');
+        check(strip() === before && strip().dataset.state === 'request' && strip().dataset.request === 'ask-1', 'A request takes over the same strip');
+        check(strip().textContent.includes(language.t('gameShare.wantsToWatch', { name: 'lucas' })), 'The strip says who wants to watch');
+        check(strip().querySelector('.game-share-suggestion-avatar')?.textContent === 'L', 'The asker shows as an initial');
+        const timer = strip().querySelector('.game-share-suggestion-timer');
+        check(timer?.classList.contains('game-share-suggestion-timer--run') && Math.abs(parseFloat(timer.style.getPropertyValue('--game-share-timer-start')) - 2 / 3) < 0.05,
+          'The timer starts from the time actually left');
+        const dismiss = strip().querySelector('.game-share-suggestion-dismiss');
+        check(!dismiss.hidden && dismiss.getAttribute('aria-label') === language.t('gameShare.notNow'), 'The × means Agora não');
+        dismiss.focus();
+        check(document.activeElement === dismiss, 'Agora não is reachable by keyboard');
+        dismiss.click();
+        check(answers.at(-1)?.id === 'ask-1' && answers.at(-1).accepted === false, 'Agora não declines the request');
+        check(strip().dataset.state === 'playing' && strip().querySelector('.game-share-suggestion-dismiss').hidden, 'Declining returns the strip to Jogando');
+        settings.suggestGameShare = false;
+        appEvents.emit('game_presence.changed', activity);
+        await settle();
+        check(!strip(), 'With the suggestion off there is no strip while nobody asks');
+        pending = { id: 'ask-2', nickname: 'lucas', expiresAt: Date.now() + 30000, durationMs: 30000 };
+        appEvents.emit('game_share.request_changed');
+        check(strip()?.dataset.state === 'request', 'A request still shows with the suggestion off: a person asking is not a nudge');
+        const sharedBefore = shared.length;
+        const answeredBefore = answers.length;
+        cta().click();
+        await settle();
+        dialog().querySelector('[data-action="cancel"]').click();
+        await settle();
+        check(answers.length === answeredBefore && strip()?.dataset.state === 'request' && shared.length === sharedBefore,
+          'Cancelar on a request keeps it waiting, unanswered');
+        cta().click();
+        await settle();
+        dialog().querySelector('[data-action="confirm"]').click();
+        await settle();
+        check(answers.at(-1)?.id === 'ask-2' && answers.at(-1).accepted === true && shared.length === sharedBefore + 1,
+          'Confirming accepts the request and starts the game share');
+        settings.suggestGameShare = true;
+        appEvents.emit('game_presence.changed', activity);
+        pending = { id: 'ask-3', nickname: 'lucas', expiresAt: Date.now() + 30000, durationMs: 30000 };
+        suggestion.claimShare('game-share');
+        setShares(['game-share']);
+        check(strip()?.dataset.state === 'live', 'No request state while already live');
+        setShares([]);
+        check(strip()?.dataset.state === 'request', 'A request still waiting shows again once the share stops');
+        pending = null;
+        appEvents.emit('game_share.request_changed');
+        check(strip()?.dataset.state === 'playing', 'An expired or closed request leaves the strip');
+      } finally {
+        shares.current = originalCurrent;
+        shares.answer = originalAnswer;
+        settings.suggestGameShare = true;
+      }
+
+      const art = '/9j/' + 'A'.repeat(16);
+      appEvents.emit('game_presence.changed', { ...activity, startedAt: activity.startedAt + 1, iconBase64: art });
+      check(strip()?.querySelector('.game-share-suggestion-art img')?.getAttribute('src') === `data:image/jpeg;base64,${art}`,
+        'A new launch rebuilds the strip with the game art');
+      // Without a game window there is no picker to fall back to: the shared error toast says so.
+      const realApi = window.api;
+      window.api = { ...(realApi ?? {}), findGameWindows: () => Promise.resolve([]) };
+      try {
+        await originalShare.call(suggestion);
+      } finally {
+        window.api = realApi;
+      }
+      const toast = [...document.querySelectorAll('.chat-copy-toast[role="alert"]')].at(-1);
+      check(toast?.textContent.includes(language.t('gameShare.windowNotFound')), 'A missing game window is reported in an error toast');
+      check(!document.querySelector('.screen-share-picker-card'), 'Streaming the game never opens the picker');
+      settings.suggestGameShare = false;
+      appEvents.emit('game_presence.changed', activity);
+      await settle();
+      check(!strip(), 'Turning the suggestion off in the settings removes the strip');
+      settings.suggestGameShare = true;
+      appEvents.emit('game_presence.changed', activity);
+      check(!!strip(), 'Turning it back on shows the strip again');
+      appEvents.emit('game_presence.changed', null);
+      await settle();
+      check(!strip(), 'Closing the game removes the strip');
+      appEvents.emit('game_presence.changed', activity);
+      voice.currentVoiceChannelId = null;
+      appEvents.emit('voice.channel_changed', null);
+      await settle();
+      check(!strip(), 'Leaving the call removes the strip');
+      suggestion.dispose();
+      voice.currentVoiceChannelId = 'room';
+      appEvents.emit('game_presence.changed', activity);
+      check(!strip() && slot.childElementCount === 0, 'Disposal stops listening');
+    } finally {
+      offLive();
+      suggestion.dispose();
+      suggestion.shareGame = originalShare;
+      voice.currentVoiceChannelId = null;
+      voice.screenShareIds = [];
+      voice.isScreenSharing = false;
+      slot.remove();
+    }
 
     server.myPermissions = 2147483647;
     for (const action of ['server-mute', 'server-deafen', 'kick-voice', 'move-user']) {

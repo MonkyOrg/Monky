@@ -8,49 +8,55 @@ import { sessionManager, type SessionManager } from './SessionManager';
  * actually running (#675).
  *
  * The detection itself lives in the main process; this side only decides *when*
- * it may run — the setting — and where the result goes: every connected server,
- * plus each new connection as it comes up, since a server that was not yet
- * connected when the game started would otherwise show nothing.
+ * it may run — either setting that needs it — and where the result goes. The
+ * app always hears about the game (the share suggestion, #763), but servers only
+ * while the card setting is on: every connected server, plus each new connection
+ * as it comes up, since a server that was not yet connected when the game
+ * started would otherwise show nothing.
  */
 export class GamePresenceController {
-  private current: UserActivity | null = null;
+  private activity: UserActivity | null = null;
   private readonly disposers: Array<() => void> = [];
 
   constructor(private readonly sessionManager: SessionManager) {}
 
+  /** The game running right now, or null when none is or detection is off. */
+  public get current(): UserActivity | null {
+    return this.activity;
+  }
+
   public start(): void {
-    const off = window.api?.onGamePresenceChanged?.((activity) => {
-      this.current = activity;
-      this.sessionManager.setGameActivity(activity);
-    });
+    const off = window.api?.onGamePresenceChanged?.((activity) => this.update(activity));
     if (off) this.disposers.push(off);
 
     // A server joined after the game started still has to learn about it.
     // Deferred past this dispatch: the listener that stores the server details,
     // and with them the negotiated features, is registered after this one.
     this.disposers.push(appEvents.on('network.connected', () => queueMicrotask(() => {
-      if (!settingsStore.shareGameActivity || !this.current) return;
-      this.sessionManager.setGameActivity(this.current);
+      if (!settingsStore.shareGameActivity || !this.activity) return;
+      this.sessionManager.setGameActivity(this.activity);
     })));
 
-    void this.setEnabled(settingsStore.shareGameActivity);
+    void this.refresh();
   }
 
   /**
-   * Turning sharing off clears the activity everywhere instead of merely
-   * stopping the polling — otherwise the last game would stay on everyone
-   * else's screen, which is the opposite of what the switch promises.
+   * Applies the settings after either one changes. Turning the card off clears
+   * the activity on every server instead of merely stopping the polling —
+   * otherwise the last game would stay on everyone else's screen, which is the
+   * opposite of what the switch promises.
    */
-  public async setEnabled(enabled: boolean): Promise<void> {
-    await window.api?.setGamePresenceEnabled?.(enabled);
-    if (enabled) {
-      const activity = (await window.api?.getCurrentGameActivity?.()) ?? null;
-      this.current = activity;
-      this.sessionManager.setGameActivity(activity);
-      return;
-    }
-    this.current = null;
-    this.sessionManager.setGameActivity(null);
+  public async refresh(): Promise<void> {
+    const detect = settingsStore.shareGameActivity || settingsStore.suggestGameShare;
+    await window.api?.setGamePresenceEnabled?.(detect);
+    this.update(detect ? (await window.api?.getCurrentGameActivity?.()) ?? null : null);
+  }
+
+  /** Servers learn the game through the sessions; the rest of the app, through the event. */
+  private update(activity: UserActivity | null): void {
+    this.activity = activity;
+    this.sessionManager.setGameActivity(settingsStore.shareGameActivity ? activity : null);
+    appEvents.emit('game_presence.changed', activity);
   }
 
   public dispose(): void {

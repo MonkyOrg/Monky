@@ -259,8 +259,8 @@ export class SettingsModal {
       onVisibilityChanged: (appearOffline: boolean) => {
         sessionManager.setAppearOffline(appearOffline);
       },
-      onGameActivityChanged: (enabled: boolean) => {
-        void gamePresence.setEnabled(enabled);
+      onGameActivityChanged: () => {
+        void gamePresence.refresh();
       },
     });
 
