@@ -1609,7 +1609,8 @@ export const en: TranslationMap = {
   'settings.gameShareSuggestionLabel': 'Suggest sharing my game',
   'settings.gameShareSuggestionHint': 'In a voice channel, shows a shortcut above your controls to stream the game open on Steam. Works even without showing the game to others.',
   'gameShare.stream': 'Stream {game}',
-  'gameShare.windowNotFound': 'Could not find the game window. Pick the window to share.',
+  'gameShare.windowNotFound': 'Could not find the game window to stream.',
+  'gameShare.failed': 'Could not stream the game: {error}',
 
   // ── Keyboard Shortcuts (KeybindsTab.ts) ──────────────────────────────────
   'keybinds.title': 'Keyboard Shortcuts',

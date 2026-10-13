@@ -1571,7 +1571,8 @@ export const ptBR = {
   'settings.gameShareSuggestionLabel': 'Sugerir compartilhar o jogo',
   'settings.gameShareSuggestionHint': 'Em um canal de voz, mostra acima dos seus controles um atalho para transmitir o jogo aberto na Steam. Funciona mesmo sem mostrar o jogo para os outros.',
   'gameShare.stream': 'Transmitir {game}',
-  'gameShare.windowNotFound': 'Não encontrei a janela do jogo. Escolha a janela para compartilhar.',
+  'gameShare.windowNotFound': 'Não encontrei a janela do jogo para transmitir.',
+  'gameShare.failed': 'Não foi possível transmitir o jogo: {error}',
 
   // ── Atalhos de Teclado (KeybindsTab.ts) ──────────────────────────────────
   'keybinds.title': 'Atalhos do Teclado',

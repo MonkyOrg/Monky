@@ -1352,7 +1352,7 @@ export function setupIpcHandlers(
 
   ipcMain.handle('game-presence:get-current', () => steamPresence.getCurrent());
 
-  // Listing here also registers the ids, so the picker can resolve them (#763).
+  // Listing here also registers the ids, so the native capture can resolve them (#763).
   ipcMain.handle('game-share:find-windows', async () => {
     if (process.platform !== 'win32') return [];
     const folders = await steamPresence.currentGameFolders();

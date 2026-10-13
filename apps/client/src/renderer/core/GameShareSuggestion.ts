@@ -4,8 +4,9 @@ import { gamePresence } from './GamePresenceController';
 import { gameSessionKey, shouldSuggestGameShare } from './gameShareEligibility';
 import { voiceStore } from '../stores/voiceStore';
 import { settingsStore } from '../stores/settingsStore';
-import { screenSharePickerModal } from '../views/ScreenSharePickerModal';
-import { showInfoToast } from '../views/CopyToast';
+import { startGameShare } from './gameShareStart';
+import { showErrorToast } from '../views/CopyToast';
+import { setButtonLoading } from '../utils/buttonLoading';
 import { activityIconSrc } from '../utils/activityIcon';
 import { escapeHtml } from '../utils/html';
 import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
@@ -22,6 +23,7 @@ export const GAME_SHARE_SUGGESTION_SLOT = 'game-share-notice-slot';
 export class GameShareSuggestion {
   private activity: UserActivity | null = null;
   private readonly unbind: Array<() => void> = [];
+  private starting = false;
 
   public start(): void {
     this.activity = gamePresence.current;
@@ -84,34 +86,41 @@ export class GameShareSuggestion {
         ? `<img class="game-share-suggestion-art" src="${art}" alt="" width="28" height="28">`
         : '<span class="material-symbols-outlined md-18 game-share-suggestion-art" aria-hidden="true">sports_esports</span>'}
       <span class="game-share-suggestion-name">${escapeHtml(activity.name)}</span>
-      <button type="button" class="btn btn-icon game-share-suggestion-stream" data-game-share-suggestion="share" title="${label}" aria-label="${label}">
+      <button type="button" class="btn btn-icon media-bar-btn-lg game-share-suggestion-stream" data-game-share-suggestion="share" title="${label}" aria-label="${label}">
         <span class="material-symbols-outlined md-18" aria-hidden="true">screen_share</span>
       </button>
     `;
-    row.querySelector('[data-game-share-suggestion="share"]')?.addEventListener('click', () => void this.shareGame());
+    const button = row.querySelector<HTMLButtonElement>('[data-game-share-suggestion="share"]');
+    button?.addEventListener('click', () => {
+      if (this.starting) return;
+      this.starting = true;
+      setButtonLoading(button, true);
+      void this.shareGame().finally(() => {
+        this.starting = false;
+        if (button.isConnected) setButtonLoading(button, false);
+      });
+    });
     slot.appendChild(row);
     if (animate) animateEnter(row, 'notice');
   }
 
   /**
-   * The click on "Transmitir" is the explicit confirmation sharing already
-   * requires; nothing is captured before it. Only the game's own windows are
-   * offered, with its audio on (the picker still lets it be turned off), and
-   * with none found the person picks one by hand.
+   * Straight to the stream, as in Discord: no picker, no question. With the
+   * game window gone (closed, or not found among the open ones) it says so
+   * instead of offering the screen or another app.
    */
   public async shareGame(): Promise<void> {
-    let sourceIds: string[] = [];
     try {
-      sourceIds = await window.api?.findGameWindows?.() ?? [];
+      const [sourceId] = await window.api?.findGameWindows?.() ?? [];
+      if (!sourceId) {
+        showErrorToast(t('gameShare.windowNotFound'));
+        return;
+      }
+      await startGameShare(sourceId);
     } catch (error: unknown) {
-      console.warn('[GameShare] Could not look up the game windows', error);
+      console.warn('[GameShare] Could not stream the game', error);
+      showErrorToast(t('gameShare.failed', { error: error instanceof Error ? error.message : String(error) }), 7000);
     }
-    if (sourceIds.length === 0) {
-      showInfoToast(t('gameShare.windowNotFound'), 6000);
-      await screenSharePickerModal.open();
-      return;
-    }
-    await screenSharePickerModal.openForGame({ sourceIds, shareAudio: true });
   }
 
   private findRow(): HTMLElement | null {

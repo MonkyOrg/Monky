@@ -2950,17 +2950,9 @@ span.game-share-suggestion-art {
   white-space: nowrap;
 }
 
+/* Same size and look as the media bar buttons below it, without stretching. */
 .game-share-suggestion-stream {
-  width: 30px;
-  height: 30px;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.game-share-suggestion-stream:hover {
-  color: var(--accent-primary);
+  flex: 0 0 56px;
 }
 
 .voice-conn-info {

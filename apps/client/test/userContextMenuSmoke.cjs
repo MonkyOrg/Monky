@@ -215,6 +215,7 @@ async function runUserContextMenuSmoke() {
       check(stream()?.getAttribute('aria-label')?.includes('Moonlighter'), 'The stream button is labelled with the game');
       check(!suggested().querySelector('input[type="checkbox"],input[type="radio"]'), 'The row adds no native checkbox');
       check(!suggested().querySelector('[data-game-share-suggestion="dismiss"]'), 'As in Discord, there is nothing to dismiss');
+      check(stream().classList.contains('media-bar-btn-lg'), 'Stream uses the media bar button style');
       check(document.activeElement !== stream(), 'The row does not steal focus');
       stream().focus();
       check(document.activeElement === stream(), 'Stream is reachable by keyboard');
@@ -223,6 +224,17 @@ async function runUserContextMenuSmoke() {
         'Unrelated voice updates keep the same row instead of rebuilding it');
       stream().click();
       check(shared.length === 1, 'Stream starts the game share');
+      // Without a game window there is no picker to fall back to: the shared error toast says so.
+      const realApi = window.api;
+      window.api = { ...(realApi ?? {}), findGameWindows: () => Promise.resolve([]) };
+      try {
+        await originalShare.call(suggestion);
+      } finally {
+        window.api = realApi;
+      }
+      const toast = [...document.querySelectorAll('.chat-copy-toast[role="alert"]')].at(-1);
+      check(toast?.textContent.includes(language.t('gameShare.windowNotFound')), 'A missing game window is reported in an error toast');
+      check(!document.querySelector('.screen-share-picker, .modal-backdrop'), 'Streaming the game never opens the picker');
       voice.isScreenSharing = true;
       appEvents.emit('voice.state_updated');
       await settle();
