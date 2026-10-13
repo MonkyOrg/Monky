@@ -9,6 +9,7 @@ import { stopLocalScreenShares } from './screenShareControls';
 import { voiceStore } from '../stores/voiceStore';
 import { settingsStore } from '../stores/settingsStore';
 import { showErrorToast } from '../views/CopyToast';
+import { showConfirm } from '../views/Dialog';
 import { activityIconSrc } from '../utils/activityIcon';
 import { setButtonLoading } from '../utils/buttonLoading';
 import { escapeHtml } from '../utils/html';
@@ -26,7 +27,7 @@ type StripState = 'playing' | 'request' | 'live';
  * a nudge — it lives while the game runs in a call, with nothing to dismiss.
  *
  * - playing: "Jogando · <game>" and "Compartilhar", which streams the game
- *   window straight away;
+ *   window after one confirmation, without the picker;
  * - request: someone in the call asked to watch ("Lucas quer ver"), with a bar
  *   for the 30 s left, "Compartilhar" to accept and × for "Agora não". It shows
  *   even with the suggestion setting off: a person asking is not a nudge;
@@ -222,8 +223,9 @@ export class GameShareSuggestion {
       const action = button.dataset.gameShareSuggestion;
       const request = action === 'accept' ? button.closest<HTMLElement>('.game-share-suggestion')?.dataset.request : undefined;
       if (action === 'stop') await this.stopGame();
-      else {
-        // Accepting is the same click as sharing; the asker hears back first.
+      // "Voltar" leaves everything as it was: nothing captured, a request still waiting.
+      else if (this.activity && await this.confirmShare(this.activity.name)) {
+        // The asker hears back first; a request that expired meanwhile just has nobody to answer.
         if (request) gameShareRequests.answer(request, true);
         await this.shareGame();
       }
@@ -233,8 +235,18 @@ export class GameShareSuggestion {
     }
   }
 
+  /** One explicit yes before anything is captured; stopping never asks. */
+  public confirmShare(game: string): Promise<boolean> {
+    return showConfirm({
+      title: t('gameShare.confirmTitle', { game }),
+      message: t('gameShare.confirmMessage'),
+      confirmLabel: t('gameShare.share'),
+      cancelLabel: t('common.back'),
+    });
+  }
+
   /**
-   * Straight to the stream, as in Discord: no picker, no question. With the
+   * Straight to the stream once confirmed, as in Discord: no picker. With the
    * game window gone (closed, or not found among the open ones) it says so
    * instead of offering the screen or another app.
    */

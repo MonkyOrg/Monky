@@ -1616,6 +1616,8 @@ export const en: TranslationMap = {
   'gameShare.notAccepted': 'Request not accepted.',
   'gameShare.wait': 'You just asked. Wait a bit before asking again.',
   'gameShare.unavailable': 'You cannot ask to watch this match right now.',
+  'gameShare.confirmTitle': 'Share {game}?',
+  'gameShare.confirmMessage': 'Only the game window will be streamed to the channel, with the game audio.',
   'gameShare.playing': 'Playing',
   'gameShare.live': 'Live',
   'gameShare.share': 'Share',

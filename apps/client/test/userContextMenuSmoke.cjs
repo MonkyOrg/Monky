@@ -265,9 +265,23 @@ async function runUserContextMenuSmoke() {
       const sameStrip = strip();
       appEvents.emit('voice.state_updated');
       check(strip() === sameStrip, 'Unrelated voice updates keep the same strip instead of rebuilding it');
+      // One explicit yes before anything is captured.
+      const dialog = () => document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card');
       cta().click();
       await settle();
-      check(shared.length === 1, 'Compartilhar starts the game share');
+      check(dialog()?.textContent.includes(language.t('gameShare.confirmTitle', { game: 'Moonlighter' })), 'Compartilhar asks for confirmation first');
+      check(dialog().querySelector('[data-action="cancel"]')?.textContent === language.t('common.back'), 'The way out is Voltar');
+      check(shared.length === 0, 'Nothing is shared while the question is open');
+      dialog().querySelector('[data-action="cancel"]').click();
+      await settle();
+      check(!dialog(), 'Voltar closes the question');
+      check(shared.length === 0, `Voltar shares nothing (${shared.length})`);
+      check(strip()?.dataset.state === 'playing', `Voltar leaves the strip as it was (${strip()?.dataset.state})`);
+      cta().click();
+      await settle();
+      dialog().querySelector('[data-action="confirm"]').click();
+      await settle();
+      check(shared.length === 1, 'Confirming starts the game share');
 
       // Live: the strip becomes the status and the action stops the game share.
       suggestion.claimShare('game-share');
@@ -320,10 +334,19 @@ async function runUserContextMenuSmoke() {
         appEvents.emit('game_share.request_changed');
         check(strip()?.dataset.state === 'request', 'A request still shows with the suggestion off: a person asking is not a nudge');
         const sharedBefore = shared.length;
+        const answeredBefore = answers.length;
         cta().click();
         await settle();
+        dialog().querySelector('[data-action="cancel"]').click();
+        await settle();
+        check(answers.length === answeredBefore && strip()?.dataset.state === 'request' && shared.length === sharedBefore,
+          'Voltar on a request keeps it waiting, unanswered');
+        cta().click();
+        await settle();
+        dialog().querySelector('[data-action="confirm"]').click();
+        await settle();
         check(answers.at(-1)?.id === 'ask-2' && answers.at(-1).accepted === true && shared.length === sharedBefore + 1,
-          'Compartilhar accepts the request and starts the game share');
+          'Confirming accepts the request and starts the game share');
         settings.suggestGameShare = true;
         appEvents.emit('game_presence.changed', activity);
         pending = { id: 'ask-3', nickname: 'lucas', expiresAt: Date.now() + 30000, durationMs: 30000 };
@@ -355,7 +378,7 @@ async function runUserContextMenuSmoke() {
       }
       const toast = [...document.querySelectorAll('.chat-copy-toast[role="alert"]')].at(-1);
       check(toast?.textContent.includes(language.t('gameShare.windowNotFound')), 'A missing game window is reported in an error toast');
-      check(!document.querySelector('.screen-share-picker, .modal-backdrop'), 'Streaming the game never opens the picker');
+      check(!document.querySelector('.screen-share-picker-card'), 'Streaming the game never opens the picker');
       settings.suggestGameShare = false;
       appEvents.emit('game_presence.changed', activity);
       await settle();

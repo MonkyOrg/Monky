@@ -1578,6 +1578,8 @@ export const ptBR = {
   'gameShare.notAccepted': 'Pedido não aceito.',
   'gameShare.wait': 'Você acabou de pedir. Aguarde um pouco antes de pedir de novo.',
   'gameShare.unavailable': 'Não é possível pedir para ver a partida agora.',
+  'gameShare.confirmTitle': 'Compartilhar {game}?',
+  'gameShare.confirmMessage': 'Só a janela do jogo será transmitida para quem está no canal, com o áudio do jogo.',
   'gameShare.playing': 'Jogando',
   'gameShare.live': 'Ao vivo',
   'gameShare.share': 'Compartilhar',
