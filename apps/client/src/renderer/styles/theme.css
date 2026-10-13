@@ -2876,6 +2876,12 @@ input:focus, textarea:focus, select:focus {
   z-index: 80;
 }
 
+/* Empty notice slots (soundboard, screen share, overlay, game, voice row) would
+   each still add a flex gap, leaving blank space at the top of the panel. */
+.user-control-bar > div:empty {
+  display: none;
+}
+
 .user-media-bar {
   display: flex;
   align-items: center;
