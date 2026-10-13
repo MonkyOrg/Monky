@@ -13,8 +13,10 @@ import { voiceStore } from '../stores/voiceStore';
  *
  * Mirrors the native branch of ScreenSharePickerModal.startSharing; any error
  * is thrown to the caller after the half-started capture is cleaned up.
+ * `claim` learns the share id right before it is published, so the game strip
+ * owns the "live" status from the first voice update on.
  */
-export async function startGameShare(sourceId: string): Promise<void> {
+export async function startGameShare(sourceId: string, claim: (shareId: string) => void): Promise<void> {
   if (voiceStore.isScreenSharing) return;
   const call = captureScreenShareCall();
   const capabilities = await webRtcManager.getNativeScreenCapabilities();
@@ -34,6 +36,7 @@ export async function startGameShare(sourceId: string): Promise<void> {
       await screenAudioService.stop();
       voiceStore.setScreenAudioShare(stream.id);
     }
+    claim(stream.id);
     voiceStore.addScreenShare(stream.id);
     notifyScreenShareState(call);
     published = true;

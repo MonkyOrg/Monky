@@ -188,8 +188,8 @@ async function runUserContextMenuSmoke() {
     click('self-mute');
     check(sent.length === 1 && sent[0].payload.isMuted === voice.isMuted, 'In-call manual action sends voice state');
 
-    // The game row atop the voice panel, as in Discord (#763): in a call with a
-    // game running and no screen share, it names the game and offers to stream it.
+    // The game strip atop the voice panel (#763): in a call with a game running
+    // it names the game with one written action, and turns into the live status.
     const activity = { source: 'steam', appId: 606150, name: 'Moonlighter', startedAt: Date.now() };
     const slot = document.createElement('div');
     slot.id = suggestionSlot;
@@ -197,33 +197,68 @@ async function runUserContextMenuSmoke() {
     const shared = [];
     const originalShare = suggestion.shareGame;
     suggestion.shareGame = () => { shared.push(true); return Promise.resolve(); };
-    const suggested = () => slot.querySelector('.game-share-suggestion:not([data-ui-closing])');
-    const stream = () => suggested()?.querySelector('[data-game-share-suggestion="share"]');
-    const settle = () => new Promise(resolve => setTimeout(resolve, 250));
+    const strip = () => slot.querySelector('.game-share-suggestion:not([data-ui-closing])');
+    const cta = () => strip()?.querySelector('.game-share-suggestion-cta');
+    const settle = () => new Promise(resolve => setTimeout(resolve, 300));
+    const liveChanges = [];
+    const offLive = appEvents.on('game_share.live_changed', live => liveChanges.push(live));
+    const setShares = ids => {
+      voice.screenShareIds = [...ids];
+      voice.isScreenSharing = ids.length > 0;
+      appEvents.emit('voice.state_updated');
+    };
     try {
       voice.currentVoiceChannelId = null;
-      voice.isScreenSharing = false;
+      setShares([]);
       settings.suggestGameShare = true;
       suggestion.start();
       appEvents.emit('game_presence.changed', activity);
-      check(!suggested(), 'No game row outside a call');
+      check(!strip(), 'No game strip outside a call');
       voice.currentVoiceChannelId = 'room';
       appEvents.emit('voice.channel_changed', 'room');
-      check(suggested()?.getAttribute('role') === 'group', 'Joining a call with a game running shows the game row');
-      check(suggested().querySelector('.game-share-suggestion-name')?.textContent === 'Moonlighter', 'The row names the game');
-      check(suggested().querySelector('span.game-share-suggestion-art'), 'A game without art gets the generic icon');
-      check(stream()?.getAttribute('aria-label')?.includes('Moonlighter'), 'The stream button is labelled with the game');
-      check(!suggested().querySelector('input[type="checkbox"],input[type="radio"]'), 'The row adds no native checkbox');
-      check(!suggested().querySelector('[data-game-share-suggestion="dismiss"]'), 'As in Discord, there is nothing to dismiss');
-      check(stream().classList.contains('media-bar-btn-lg'), 'Stream uses the media bar button style');
-      check(document.activeElement !== stream(), 'The row does not steal focus');
-      stream().focus();
-      check(document.activeElement === stream(), 'Stream is reachable by keyboard');
+      check(strip()?.dataset.state === 'playing', 'Joining a call with a game running shows the game strip');
+      check(strip().querySelector('.game-share-suggestion-name')?.textContent === 'Moonlighter', 'The strip names the game');
+      check(strip().querySelector('[role="status"]')?.textContent.includes(language.t('gameShare.playing')), 'The status line says the game is being played');
+      check(strip().querySelector('.game-share-suggestion-art .material-symbols-outlined'), 'A game without art gets the generic icon');
+      check(cta()?.textContent === language.t('gameShare.share'), 'The action is written, not just an icon');
+      check(cta()?.getAttribute('aria-label')?.includes('Moonlighter'), 'The action is labelled with the game');
+      check(!strip().querySelector('.material-symbols-outlined:not(.game-share-suggestion-art *)'), 'The strip does not repeat the screen share icon');
+      check(!strip().querySelector('input[type="checkbox"],input[type="radio"]'), 'The strip adds no native checkbox');
+      check(!strip().querySelector('[data-game-share-suggestion="dismiss"]'), 'As in Discord, there is nothing to dismiss');
+      check(document.activeElement !== cta(), 'The strip does not steal focus');
+      cta().focus();
+      check(document.activeElement === cta(), 'The action is reachable by keyboard');
+      const sameStrip = strip();
       appEvents.emit('voice.state_updated');
-      check(slot.querySelectorAll('.game-share-suggestion').length === 1,
-        'Unrelated voice updates keep the same row instead of rebuilding it');
-      stream().click();
-      check(shared.length === 1, 'Stream starts the game share');
+      check(strip() === sameStrip, 'Unrelated voice updates keep the same strip instead of rebuilding it');
+      cta().click();
+      await settle();
+      check(shared.length === 1, 'Compartilhar starts the game share');
+
+      // Live: the strip becomes the status and the action stops the game share.
+      suggestion.claimShare('game-share');
+      setShares(['game-share']);
+      check(strip() === sameStrip && strip().dataset.state === 'live', 'Going live keeps the same strip and only changes its state');
+      check(strip().querySelector('.live-pulse-dot') && strip().textContent.includes(language.t('gameShare.live')), 'The live status shows in the strip');
+      check(cta()?.textContent === language.t('gameShare.stop') && cta().dataset.gameShareSuggestion === 'stop', 'Parar takes the place of Compartilhar');
+      check(suggestion.isLive() && liveChanges.at(-1) === true, 'The strip owns the "you are sharing" status while live');
+      setShares(['game-share', 'manual-share']);
+      await settle();
+      check(!strip() && !suggestion.isLive() && liveChanges.at(-1) === false, 'A second, manual share hands the status back to the panel');
+      setShares(['game-share']);
+      check(strip()?.dataset.state === 'live', 'Back to the game share alone, the strip is live again');
+      setShares([]);
+      check(strip()?.dataset.state === 'playing' && cta()?.textContent === language.t('gameShare.share'), 'Stopping returns the strip to Compartilhar');
+      setShares(['manual-share']);
+      await settle();
+      check(!strip(), 'Sharing something else by hand hides the strip');
+      setShares([]);
+      check(strip()?.dataset.state === 'playing', 'The strip comes back once the manual share stops');
+
+      const art = '/9j/' + 'A'.repeat(16);
+      appEvents.emit('game_presence.changed', { ...activity, startedAt: activity.startedAt + 1, iconBase64: art });
+      check(strip()?.querySelector('.game-share-suggestion-art img')?.getAttribute('src') === `data:image/jpeg;base64,${art}`,
+        'A new launch rebuilds the strip with the game art');
       // Without a game window there is no picker to fall back to: the shared error toast says so.
       const realApi = window.api;
       window.api = { ...(realApi ?? {}), findGameWindows: () => Promise.resolve([]) };
@@ -235,40 +270,32 @@ async function runUserContextMenuSmoke() {
       const toast = [...document.querySelectorAll('.chat-copy-toast[role="alert"]')].at(-1);
       check(toast?.textContent.includes(language.t('gameShare.windowNotFound')), 'A missing game window is reported in an error toast');
       check(!document.querySelector('.screen-share-picker, .modal-backdrop'), 'Streaming the game never opens the picker');
-      voice.isScreenSharing = true;
-      appEvents.emit('voice.state_updated');
-      await settle();
-      check(!suggested(), 'The row hides while on screen');
-      voice.isScreenSharing = false;
-      appEvents.emit('voice.state_updated');
-      check(!!suggested(), 'Stopping the share brings the row back');
-      const art = '/9j/' + 'A'.repeat(16);
-      appEvents.emit('game_presence.changed', { ...activity, startedAt: activity.startedAt + 1, iconBase64: art });
-      check(suggested()?.querySelector('img.game-share-suggestion-art')?.getAttribute('src') === `data:image/jpeg;base64,${art}`,
-        'A new launch rebuilds the row with the game art');
       settings.suggestGameShare = false;
       appEvents.emit('game_presence.changed', activity);
       await settle();
-      check(!suggested(), 'Turning the suggestion off in the settings removes the row');
+      check(!strip(), 'Turning the suggestion off in the settings removes the strip');
       settings.suggestGameShare = true;
       appEvents.emit('game_presence.changed', activity);
-      check(!!suggested(), 'Turning it back on shows the row again');
+      check(!!strip(), 'Turning it back on shows the strip again');
       appEvents.emit('game_presence.changed', null);
       await settle();
-      check(!suggested(), 'Closing the game removes the row');
+      check(!strip(), 'Closing the game removes the strip');
       appEvents.emit('game_presence.changed', activity);
       voice.currentVoiceChannelId = null;
       appEvents.emit('voice.channel_changed', null);
       await settle();
-      check(!suggested(), 'Leaving the call removes the row');
+      check(!strip(), 'Leaving the call removes the strip');
       suggestion.dispose();
       voice.currentVoiceChannelId = 'room';
       appEvents.emit('game_presence.changed', activity);
-      check(!suggested() && slot.childElementCount === 0, 'Disposal stops listening');
+      check(!strip() && slot.childElementCount === 0, 'Disposal stops listening');
     } finally {
+      offLive();
       suggestion.dispose();
       suggestion.shareGame = originalShare;
       voice.currentVoiceChannelId = null;
+      voice.screenShareIds = [];
+      voice.isScreenSharing = false;
       slot.remove();
     }
 
