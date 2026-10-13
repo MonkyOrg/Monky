@@ -1,5 +1,7 @@
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import fs from 'fs';
+import { requiresClientNote } from './check-client-release-notes.js';
+import { isClientNoteFile } from './generate-changelog.js';
 
 /**
  * Conventional-commit types we recognise. Anything else falls back to a patch,
@@ -275,31 +277,65 @@ export function promoteBetaTag(betaTag) {
 }
 
 /**
- * Gets commit messages between a tag and HEAD, oldest first.
+ * Gets the commits between a tag and HEAD, oldest first, each with the files it
+ * changed: `{ hash, message, files: [{ status, path }] }`.
  *
  * The order is not cosmetic: bumps are applied in sequence, so reading the log
  * newest-first would let an older fix land *after* a newer feature and add a
  * patch on top of the minor it should have been folded into (#465).
+ *
+ * The files decide whether a commit counts at all (`isReleasableCommit`). A
+ * merge is compared with its first parent, so it carries what it brought to the
+ * branch it landed on.
  */
-export function getGitCommitsSinceTag(tag) {
+export function getGitCommitsSinceTag(tag, { cwd } = {}) {
+  const RECORD = '\x1e';
+  const FIELD = '\x1f';
   try {
     const range = tag ? `${tag}..HEAD` : 'HEAD';
-    const DELIMITER = '---__COMMIT_DELIMITER__---';
-    const output = execSync(`git log --reverse ${range} --pretty=format:"%B${DELIMITER}"`, {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'ignore'],
+    const output = execFileSync('git', [
+      '--no-pager', 'log', '--reverse', '--no-renames', '--diff-merges=first-parent', '--name-status', '-z',
+      `--format=${RECORD}%h${FIELD}%B${FIELD}`, range, '--',
+    ], { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+    return output.split(RECORD).slice(1).map((record) => {
+      const [hash, message = '', changes = ''] = record.split(FIELD);
+      // With -z every change is "status NUL path NUL", paths left unquoted.
+      const tokens = changes.split('\0');
+      const files = [];
+      for (let i = 0; i < tokens.length - 1; i += 1) {
+        const status = tokens[i].trim();
+        if (status) files.push({ status: status.charAt(0), path: tokens[++i] });
+      }
+      return { hash, message: message.trim(), files };
     });
-    return output
-      .split(DELIMITER)
-      .map((c) => c.trim())
-      .filter(Boolean);
-  } catch (e) {
+  } catch {
     try {
-      return [execSync('git log -1 --pretty=format:"%B"', { encoding: 'utf8' }).trim()];
+      // Files unknown: the last commit counts, as every commit used to.
+      return [{ message: execFileSync('git', ['log', '-1', '--format=%B'], { cwd, encoding: 'utf8' }).trim() }];
     } catch {
       return [];
     }
   }
+}
+
+/**
+ * Whether a commit ships something to users, and therefore counts towards a
+ * release.
+ *
+ * The line is the one the release notes already draw: application and
+ * dependency files are those that require a client note (`requiresClientNote`).
+ * A commit that only touches CI, scripts, tests or documentation changes nothing
+ * people install, so it neither publishes a release nor moves the next number.
+ * Adding a new note is how a change outside that line ships anyway, such as a
+ * build fix that users need.
+ *
+ * A commit read without its files, as a plain message, still counts: that is
+ * what every commit meant before the files were read.
+ */
+export function isReleasableCommit(commit) {
+  if (!Array.isArray(commit?.files)) return true;
+  return commit.files.some(({ status, path }) =>
+    requiresClientNote(path) || (status === 'A' && isClientNoteFile(path)));
 }
 
 /**
@@ -316,14 +352,22 @@ export function getGitCommitsSinceTag(tag) {
  * highest type meant a release carrying three fixes moved a single patch, and a
  * squashed PR carrying three of them moved one no matter how much it held
  * (#465).
+ *
+ * Only commits that ship something count (`isReleasableCommit`). When none
+ * does, `shouldRelease` is false: the release workflow publishes nothing, and
+ * those commits stay out of the next number too.
  */
 export function calculateNextVersion(options = {}) {
   const channel = options.channel === 'beta' ? 'beta' : 'stable';
   const prevTag = options.prevTag || getLatestReleaseTag() || 'v1.0.55';
   const commits = options.commits || getGitCommitsSinceTag(prevTag);
-  const bumps = options.bumpType ? [options.bumpType] : collectBumps(commits);
-  const bumpType = options.bumpType || determineBumpType(commits);
+  const counted = commits.filter(isReleasableCommit);
+  const messages = counted.map((commit) => (typeof commit === 'string' ? commit : commit.message));
+  const bumps = options.bumpType ? [options.bumpType] : collectBumps(messages);
+  const bumpType = options.bumpType || determineBumpType(messages);
   const baseVersion = applyBumps(prevTag, bumps);
+  const skippedCommits = commits.filter((commit) => !counted.includes(commit));
+  const shouldRelease = counted.length > 0;
 
   if (channel === 'beta') {
     const nextVersion = `${baseVersion}-${BETA_SUFFIX}`;
@@ -337,6 +381,8 @@ export function calculateNextVersion(options = {}) {
       nextTag: `v${nextVersion}`,
       commitsCount: commits.length,
       bumps,
+      shouldRelease,
+      skippedCommits,
     };
   }
 
@@ -350,6 +396,8 @@ export function calculateNextVersion(options = {}) {
     nextTag: `v${baseVersion}`,
     commitsCount: commits.length,
     bumps,
+    shouldRelease,
+    skippedCommits,
   };
 }
 
@@ -370,6 +418,8 @@ if (isDirectRun) {
   const channelArg = (getFlag('--channel') || process.env.RELEASE_CHANNEL || 'stable').toLowerCase();
 
   let version, prevTag, bumpType, channel, prerelease;
+  // A promotion republishes a beta that already shipped, so it always proceeds.
+  let release = true;
 
   if (promoteTag) {
     // Promotion: republish a validated beta as a clean stable release.
@@ -386,12 +436,24 @@ if (isDirectRun) {
     bumpType = result.bumpType;
     channel = result.channel;
     prerelease = result.prerelease;
-    const tally = ['major', 'minor', 'patch']
-      .map((type) => `${type}=${result.bumps.filter((b) => b === type).length}`)
-      .join(' ');
-    console.log(
-      `[Version] Previous tag: ${result.prevTag} | Bumps: ${result.bumps.length} (${tally}) | Highest: ${result.bumpType} | Channel: ${channel} | Next version: ${version}`
-    );
+    release = result.shouldRelease;
+    for (const commit of result.skippedCommits) {
+      console.log(`[Version] Not counted, ships nothing to users: ${commit.hash} ${commit.message.split('\n')[0]}`);
+    }
+    if (release) {
+      const tally = ['major', 'minor', 'patch']
+        .map((type) => `${type}=${result.bumps.filter((b) => b === type).length}`)
+        .join(' ');
+      console.log(
+        `[Version] Previous tag: ${result.prevTag} | Bumps: ${result.bumps.length} (${tally}) | Highest: ${result.bumpType} | Channel: ${channel} | Next version: ${version}`
+      );
+    } else {
+      const reason = `None of the ${result.commitsCount} commit(s) since ${result.prevTag} changes an application or dependency file or adds a release note.`;
+      console.log(`[Version] No release: ${reason}`);
+      if (process.env.GITHUB_STEP_SUMMARY) {
+        fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### No release\n\n${reason} CI, scripts, tests and docs do not publish a version.\n`);
+      }
+    }
   }
 
   // Write to GitHub Actions GITHUB_OUTPUT if available
@@ -399,10 +461,10 @@ if (isDirectRun) {
   if (githubOutput) {
     fs.appendFileSync(
       githubOutput,
-      `version=${version}\nprev_tag=${prevTag}\nbump_type=${bumpType}\nchannel=${channel}\nprerelease=${prerelease}\n`
+      `version=${version}\nprev_tag=${prevTag}\nbump_type=${bumpType}\nchannel=${channel}\nprerelease=${prerelease}\nrelease=${release}\n`
     );
     console.log(
-      `[Version] Written to $GITHUB_OUTPUT: version=${version} channel=${channel} prerelease=${prerelease}`
+      `[Version] Written to $GITHUB_OUTPUT: version=${version} channel=${channel} prerelease=${prerelease} release=${release}`
     );
   }
 }

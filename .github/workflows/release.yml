@@ -3,29 +3,24 @@ name: Release
 on:
   push:
     branches: [main]
-    # Release so faz sentido quando o software muda. Documentacao, imagens e
-    # arquivos de configuracao do GitHub nao entram no binario — gerar release
-    # para eles queima numero de versao e confunde quem acompanha o changelog.
+    # Release so sai quando muda o que chega ao usuario. Quem decide e o
+    # calculate-version.js, com a regra das notas de release: conta o commit que
+    # muda arquivo de aplicacao ou de dependencia (requiresClientNote) ou que
+    # adiciona uma nota nova em release-notes/. CI, scripts, testes e docs nao
+    # publicam versao nem contam para o numero da proxima. Mudanca de build ou de
+    # CI que precisa chegar ao usuario entra com uma nota de release.
     #
-    # O GitHub so pula o workflow quando TODOS os arquivos do push casam com a
-    # lista: commit que mexe em documentacao e codigo junto continua gerando
-    # release, como deve.
-    #
-    # ci.yml e release.yml tambem ficam de fora: os dois duplicam o mesmo setup
-    # de build (Node 22, Python 3.11, MSVC, npm ci + npm run build). Se alguem
-    # corrigir o setup num e esquecer o outro, pular a release esconderia a
-    # divergencia ate a proxima publicacao. Workflow que toca em build precisa
-    # ser exercitado.
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'docs-site/**'
-      - 'images/**'
-      - 'LICENSE'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/DISCUSSION_TEMPLATE/**'
-      - '.github/FUNDING.yml'
-      - '.github/workflows/docs-deploy.yml'
+    # Este filtro so evita rodar onde a regra nao tem o que encontrar: uma
+    # execucao que termina sem publicar ainda dispararia o docs-deploy. Ele
+    # precisa cobrir todo arquivo que a regra conta, e o test-versioning.js
+    # confere isso contra os arquivos do repositorio.
+    paths:
+      - 'apps/**'
+      - 'packages/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'patches/**'
+      - 'release-notes/**'
   workflow_dispatch:
     inputs:
       promote_tag:
@@ -52,6 +47,7 @@ jobs:
       bump_type: ${{ steps.bump.outputs.bump_type }}
       channel: ${{ steps.bump.outputs.channel }}
       prerelease: ${{ steps.bump.outputs.prerelease }}
+      release: ${{ steps.bump.outputs.release }}
       checkout_ref: ${{ steps.ref.outputs.checkout_ref }}
       reuse_build: ${{ steps.ci.outputs.reuse }}
       ci_run_id: ${{ steps.ci.outputs.run_id }}
@@ -79,8 +75,10 @@ jobs:
         with:
           node-version: 22
 
-      # A PR merge into main produces a beta. Manual dispatch only promotes
-      # an explicitly selected beta from main; it never builds a branch beta.
+      # A PR merge into main produces a beta, unless none of the commits since
+      # the last release ships anything to users (release=false). Manual
+      # dispatch only promotes an explicitly selected beta from main; it never
+      # builds a branch beta.
       - name: Calculate Semantic Version
         id: bump
         env:
@@ -99,7 +97,7 @@ jobs:
           fi
 
       - name: Require bilingual client release notes before building
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.bump.outputs.release == 'true'
         env:
           PREV_TAG: ${{ steps.bump.outputs.prev_tag }}
           CHECKOUT_REF: ${{ steps.ref.outputs.checkout_ref }}
@@ -107,6 +105,7 @@ jobs:
 
       - name: Select approved CI build
         id: ci
+        if: steps.bump.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           CHECKOUT_REF: ${{ steps.ref.outputs.checkout_ref }}
@@ -121,6 +120,7 @@ jobs:
   build:
     name: Build (${{ matrix.platform }})
     needs: version
+    if: needs.version.outputs.release == 'true'
     # Generous: a legacy/expired-artifact release recompiles both native runtimes.
     timeout-minutes: 180
     strategy:
@@ -357,6 +357,7 @@ jobs:
   cli:
     name: Pack CLI tarball
     needs: version
+    if: needs.version.outputs.release == 'true'
     timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
@@ -459,6 +460,7 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [version, build, cli]
+    if: needs.version.outputs.release == 'true'
     timeout-minutes: 30
     runs-on: ubuntu-latest
     permissions:
