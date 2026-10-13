@@ -4,6 +4,7 @@ export const tailscaleTutorial: TutorialDefinition = {
   id: 'tailscale',
   name: 'tutorial.tailscale.name',
   icon: 'vpn_lock',
+  skill: 'tailscale',
   steps: [
     {
       title: 'tutorial.tailscale.step1.title',

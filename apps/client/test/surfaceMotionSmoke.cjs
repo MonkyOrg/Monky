@@ -310,6 +310,30 @@ async function* regression() {
   await settle(stableCard);
   check(stableCard.classList.contains('onboarding-card--tutorial') && stableCard.getBoundingClientRect().width === width,
     'Tutorial steps keep the guide card width');
+  const skillCalls = [];
+  let skillGate = null;
+  const toasts = () => [...document.querySelectorAll('.chat-copy-toast:not([data-ui-closing])')];
+  window.api = { saveHostingSkill: async id => { skillCalls.push(id); return skillGate ?? { status: 'saved' }; } };
+  let skillButton = onboarding.querySelector('#tutorial-ai-skill');
+  check(skillButton?.tagName === 'BUTTON' && !skillButton.closest('.tutorial-step-body')
+    && skillButton.compareDocumentPosition(onboarding.querySelector('.tutorial-step-body')) === Node.DOCUMENT_POSITION_FOLLOWING,
+  'The AI skill card is a button pinned above the scrolling step body');
+  skillButton.click();
+  await frame();
+  check(skillCalls.join() === 'lan' && toasts().at(-1)?.getAttribute('role') === 'status',
+    'The AI skill card asks for the tutorial skill and confirms the download');
+  let release;
+  skillGate = new Promise(resolve => { release = resolve; });
+  skillButton.click();
+  skillButton.click();
+  check(skillCalls.length === 2 && skillButton.getAttribute('aria-busy') === 'true' && !skillButton.disabled,
+    'A pending download ignores repeated clicks without dropping focus');
+  release({ status: 'failed', error: 'Skill failure' });
+  await frame();
+  check(!skillButton.hasAttribute('aria-busy') && toasts().at(-1)?.getAttribute('role') === 'alert'
+    && toasts().at(-1).textContent.includes('Skill failure'), 'Download failures use the shared error toast');
+  skillGate = null;
+  for (const toast of document.querySelectorAll('.chat-copy-toast')) toast.remove();
   onboarding.querySelector('#tutorial-next').click();
   check(stableCard.querySelector('[data-ui-closing]')?.inert, 'Tutorial steps retain outgoing real content during motion');
   await settle(stableCard);
@@ -321,10 +345,16 @@ async function* regression() {
     'Back from the first tutorial step returns to the list that opened it');
   onboarding.querySelector('#onboarding-port').click();
   await settle(stableCard);
+  onboarding.querySelector('#tutorial-ai-skill').click();
+  await frame();
+  check(skillCalls.at(-1) === 'port-forward', 'Each tutorial offers its own skill');
+  for (const toast of document.querySelectorAll('.chat-copy-toast')) toast.remove();
   while (onboarding.querySelector('#tutorial-next')) {
     onboarding.querySelector('#tutorial-next').click();
     await settle(stableCard);
+    check(!!onboarding.querySelector('#tutorial-ai-skill'), 'The AI skill card stays on every tutorial step');
   }
+  delete window.api;
   onboarding.querySelector('#tutorial-finish').click();
   check(wizardExit === 'host', 'Finishing a tutorial in the guide continues to the create-server form');
   wizardExit = 'pending';

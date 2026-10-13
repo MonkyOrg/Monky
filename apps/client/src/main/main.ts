@@ -18,6 +18,7 @@ import { ServerManager } from './serverManager';
 import { TrayManager } from './trayManager';
 import { ClientLogger } from './clientLogger';
 import { bindRendererDiagnostics } from './rendererDiagnostics';
+import { bindPerformanceDiagnostics } from './performanceDiagnostics';
 import { OverlayManager } from './overlayManager';
 import { HOME_MIN_HEIGHT, HOME_MIN_WIDTH } from './windowSizing';
 import { bindBotScreenIsolation, installBotScreenRequestGuard, isBotScreenFrame, isBotScreenUrl } from './botScreenIsolation';
@@ -406,6 +407,7 @@ function createWindow(deferShow = false): void {
     message: `Application started — version ${app.getVersion()}, platform ${process.platform} ${process.arch}`,
   });
   bindRendererDiagnostics(mainWindow.webContents, clientLogger);
+  bindPerformanceDiagnostics(mainWindow, clientLogger);
 
   localExecution = setupIpcHandlers(mainWindow, serverManager, trayManager, {
     setMinimizeToTray: (enabled: boolean) => {

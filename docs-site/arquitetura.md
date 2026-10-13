@@ -338,6 +338,17 @@ rejeições antes da publicação. A política de versionamento major do CI para
 alterações de `PROTOCOL_VERSION` permanece vigente.
 :::
 
+O protocolo **37** adiciona `BOT_DIAGNOSTIC`, a única mensagem de bot aceita
+**antes** da autenticação. O `doctor` do CLI de execução a envia por uma conexão
+própria: o servidor confere o token sem vincular a chave (TOFU) nem substituir
+a sessão do bot em execução, informa a compatibilidade de protocolo e testa de
+fora as portas públicas do bot. Uma porta só conta como acessível quando assina
+um desafio novo com a chave Ed25519 do bot; endereços privados (exceto o do
+próprio solicitante), portas de sistema, redirecionamentos e diferenças de
+tempo não revelam nada sobre hosts de terceiros. Servidores anteriores
+respondem como mensagem malformada. Veja
+[Portas, configurações e verificação](/bots-distribuicao#portas-configuracoes-e-verificacao).
+
 ### Autenticação por identidade {#autenticacao-o-servidor-nunca-ve-uma-senha-sua}
 
 O login é por desafio-resposta com criptografia de chave pública. Você não tem

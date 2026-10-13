@@ -418,3 +418,19 @@ test('kernel-only HANDLE helper rejects forged/closed owners and invalid handles
   assert.throws(() => owner.duplicate(Buffer.alloc(8)), { code: 'ERR_RTC_HANDLE' });
   assert.equal(Object.keys(require.cache).some(filename => filename.endsWith('monky_screen_rtc.node')), false);
 });
+
+test('a broken RTC call contract names the violated condition in the host failure', async () => {
+  // A 38.0.0-beta field log only showed the combined assertion source before exit 74.
+  const { encode } = require('../runtime/nativeRtc/engine/node/wire.cjs');
+  for (const label of ['invalid', 'duplicate']) {
+    const { engine } = fixture();
+    await engine.ready;
+    if (label === 'duplicate') void engine.request(1, 'hang', 0, {}).catch(() => {});
+    const id = label === 'invalid' ? 0 : engine.nextId;
+    engine.sendBytes(encode({ type: 'call', id, method: 'snapshot', args: [] }), error => engine.fail(error));
+    await engine.exitState.promise;
+    assert.match(engine.failure.detail, label === 'invalid'
+      ? /identifier 0 \(snapshot\) is invalid/ : new RegExp(`identifier ${id} \\(snapshot\\) is already in flight`));
+    await engine.close();
+  }
+});

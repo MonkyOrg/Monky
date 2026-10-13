@@ -380,6 +380,52 @@ does not override the latter. Red restriction icons indicate administrative
 blocks; a person may still keep their own microphone muted after being
 unblocked.
 
+## Audit log
+
+Open **server name › Audit log** to see what was done on the server, newest
+first. Administrators have access; other members need the **View audit log**
+permission in a role. **Manage server** alone does not grant access, and bots
+never read the audit log. The audit log shows what happens in every channel,
+private ones included, so only grant the permission to people who may see that.
+
+Each entry shows who acted, on what, when, and what changed, with the previous
+and the new value:
+
+- **Channels**: creation, deletion and changes to name, user limit, category,
+  privacy, bot commands, permissions and position, categories included. Dragging
+  a channel records only that channel, not the ones it shifted.
+- **Roles**: creation, deletion, name, color, permissions granted and removed,
+  Everyone's included, and who received or lost each role.
+- **Members**: first join, kicks and nickname changes.
+- **Voice**: server mute and deafen, disconnecting from a room and moving
+  someone, with the room they left and the one they entered.
+- **Server**: changes under **General**, such as name, limits, voice mode and
+  relay. Password and icon only show that they changed.
+- **Events and live**: creating, editing, starting, ending, cancelling and
+  deleting events; posting, updating and ending live actions, forms and featured
+  polls. Ordinary polls only appear when someone changes another person's poll.
+- **Bots**: links, installation, removal, access granted or removed, changed
+  settings and commands used.
+- **Moderation**: other people's messages deleted or restored, and forum posts
+  pinned, locked, renamed or deleted by a moderator.
+
+Type filters and the search by person, channel, role or bot can be combined.
+New entries appear at the top while the window is open, and **Load more** fetches
+older ones.
+
+Each entry keeps the name the item had when the action happened, so it stays
+readable after the channel, role or member is gone. The audit log does not copy
+the text of deleted messages or what was typed into bot commands and settings,
+only the option names. Entries are kept for 90 days, up to 50,000 of them, and
+the oldest are discarded automatically. Bot commands, joins and nickname changes,
+which any member can repeat, use their own quota of 20,000 entries and at most 30
+per person each minute, so a flood of them never erases the moderation history.
+Nobody can edit or delete entries from the app.
+
+Losing the permission, disconnecting or switching servers closes the audit log
+at once. Servers that do not have the audit log yet show neither the menu nor
+the permission: update the server to use it.
+
 ## Choose P2P or SFU
 
 | Mode | Media path | Main consideration |

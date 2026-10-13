@@ -6,6 +6,7 @@
  * idiomas. Chaves terminadas em `.one` / `.other` são usadas via `tCount()`.
  */
 import { communityPtBR } from './community';
+import { serverAuditPtBR } from './serverAudit';
 import { messageSearchPtBR } from '../messageSearch';
 
 export const ptBR = {
@@ -96,6 +97,7 @@ export const ptBR = {
   'poll.moveImageForward': 'Mover imagem para frente',
   'poll.imageUploadFailed': 'Não foi possível enviar a imagem.',
   ...communityPtBR,
+  ...serverAuditPtBR,
   ...messageSearchPtBR,
   'categories.category': 'Categoria',
   'categories.create': 'Criar categoria',
@@ -324,6 +326,14 @@ export const ptBR = {
   'invite.tipLan': '<b>Rede Local (Wi-Fi / Cabo):</b> Use este endereço para outros computadores conectados na mesma rede ou Wi-Fi da sua casa.',
   'invite.tipLoopback': '<b>Localhost:</b> Este endereço só funciona no mesmo computador onde o servidor está em execução.',
   'invite.tipCustom': '<b>Endereço personalizado:</b> Certifique-se de que o host e a porta <b>{port}</b> estão acessíveis pelos seus amigos.',
+  'invite.cardReceived': 'Você recebeu um convite para um servidor',
+  'invite.cardSent': 'Você enviou um convite para um servidor',
+  'invite.cardEventReceived': 'Você recebeu um convite para um evento',
+  'invite.cardEventSent': 'Você enviou um convite para um evento',
+  'invite.cardCompose': 'Convite para um servidor',
+  'invite.cardComposeEvent': 'Convite para um evento',
+  'invite.cardJoin': 'Entrar',
+  'invite.cardJoinLabel': 'Entrar no servidor {name}',
 
   // ── Monitor do servidor (ServerMonitorModal.ts) ──────────────────────────
   'serverMonitor.title': 'Monitor do Servidor',
@@ -1708,6 +1718,7 @@ export const ptBR = {
   'localExecution.operation.youtube.resolve': 'Consultar mídia',
   'localExecution.operation.youtube.preview': 'Preparar prévia',
   'localExecution.operation.youtube.stream': 'Transmitir áudio',
+  'localExecution.operation.youtube.playlist': 'Ler playlist',
   'localExecution.phase.consent': 'Aguardando autorização',
   'localExecution.phase.installing': 'Preparando ferramentas',
   'localExecution.phase.running': 'Executando',
@@ -2040,6 +2051,11 @@ export const ptBR = {
   'tutorial.stepOf': 'Passo {current} de {total}',
   'tutorial.tip': 'Dica',
   'tutorial.copyCommand': 'Copiar comando',
+  'tutorial.aiSkillTitle': 'Usando IA?',
+  'tutorial.aiSkillDesc': 'Baixe essa skill para a IA fazer o trabalho pra você.',
+  'tutorial.aiSkillAction': 'Baixar skill',
+  'tutorial.aiSkillSaved': 'Skill salva! Envie o .zip para a sua IA ou extraia-o na pasta de skills do seu agente.',
+  'tutorial.aiSkillFailed': 'Não foi possível salvar a skill.',
   'tutorial.shotCreateAlt': 'Formulário Criar meu servidor do Monky',
   'tutorial.shotJoinAlt': 'Formulário Entrar em um servidor do Monky',
   'tutorial.shotIpconfigAlt': 'Saída do ipconfig no Windows com o Endereço IPv4 destacado',

@@ -82,6 +82,14 @@ export class CommandAutocomplete {
     this.schedulePage(Date.now() + LIMITS.BOT_AUTOCOMPLETE_DEBOUNCE_MS);
   }
 
+  /** Skips the remaining typing debounce; the connection budget still spaces the actual send. */
+  public flush(): void {
+    if (this.timer === null) return;
+    clearTimeout(this.timer);
+    this.timer = null;
+    this.schedulePage(Date.now());
+  }
+
   public loadMore(): void {
     if (!this.request || !this.hasMore || this.pending) return;
     this.pending = true;

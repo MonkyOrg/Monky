@@ -33,7 +33,7 @@ import {
 } from '@monky/shared';
 import { audioProcessor } from './core/AudioProcessor';
 import { appEvents } from './core/EventBus';
-import { networkClient, type ConnectionStatus } from './core/NetworkClient';
+import { networkClient, type ConnectionStatus, type NetworkDisconnectedPayload } from './core/NetworkClient';
 import { callClient, leaveCurrentCall, rejoinCallOnSession, showHome, suspendCallForNetworkLoss } from './core/serverConnection';
 import { VoiceModeReconnect, type VoiceReconnectCall } from './core/VoiceModeReconnect';
 import { participantManager } from './core/ParticipantManager';
@@ -75,6 +75,7 @@ import { translateProtocolError } from './i18n/protocolErrors';
 import { toAbsoluteServerIconUrl } from './utils/avatar';
 import { installImageFallback } from './utils/imageFallback';
 import { clientLog } from './core/ClientLogService';
+import { startResponsivenessMonitor } from './core/ResponsivenessMonitor';
 import { overlayBridgeService } from './core/OverlayBridgeService';
 import { OverlayStageView } from './views/OverlayStageView';
 import { bindBotChatEvents } from './core/botChatEvents';
@@ -180,6 +181,7 @@ class App {
     // place before any connection exists, otherwise the first events would be
     // applied to whatever store happens to be active (#400).
     sessionManager.install();
+    const stopResponsivenessMonitor = startResponsivenessMonitor();
     appEvents.on<CommunityStartNotice>('community.event_started', notice => {
       soundEffects.play('chat_message');
       showInfoToast(t('community.started', { event: notice.title, server: notice.serverName }), 7000);
@@ -195,6 +197,7 @@ class App {
       if (!sessionManager.isHome()) showHome();
     });
     window.addEventListener('pagehide', () => {
+      stopResponsivenessMonitor();
       this.autoEntryService.dispose();
       gamePresence.dispose();
       gameShareRequests.dispose();
@@ -726,10 +729,16 @@ class App {
       }
     });
 
-    appEvents.on('network.disconnected', () => {
+    appEvents.on('network.disconnected', (payload: NetworkDisconnectedPayload) => {
       const origin = currentEventOrigin();
       const ownsCall = !voiceStore.voiceSessionKey || voiceStore.voiceSessionKey === origin;
+      // A server restart, update or removal drops the call just like a voice
+      // kick, so it gets the same leave cue (#533). Leaving on purpose already
+      // played it. Read before leaving: reset() clears the server deafen.
+      const shouldPlayLeaveCue = ownsCall && payload.cause === 'server'
+        && voiceStore.currentVoiceChannelId !== null && !voiceStore.getEffectiveDeafened();
       if (ownsCall) leaveCurrentCall(false);
+      if (shouldPlayLeaveCue) soundEffects.play('leave_voice');
 
       // The stores resolve to the session that dropped, so this clears the
       // right bundle even when a background server is the one going away.
@@ -811,7 +820,7 @@ class App {
         if (isForegroundEvent()) {
           appEvents.emit('network.server_shutdown', { reason: t('app.kickedFromServerMessage') });
         }
-        networkClient.disconnect();
+        networkClient.disconnect('server');
         return;
       }
       serverStore.removeMemberCompletely(payload.userId);

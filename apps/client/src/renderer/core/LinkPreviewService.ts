@@ -1,5 +1,5 @@
 import { escapeHtml } from '../utils/html';
-import { LruCache } from '@monky/shared';
+import { LruCache, parseServerInviteLink } from '@monky/shared';
 
 export interface LinkPreviewData {
   url: string;
@@ -170,7 +170,10 @@ export class LinkPreviewService {
     const seen = new Set<string>();
     const urls: string[] = [];
     row.querySelectorAll<HTMLAnchorElement>('.chat-message-text .md-link[data-external-link]').forEach((link) => {
-      const normalized = this.normalizeUrl(link.getAttribute('data-external-link'));
+      const rawUrl = link.getAttribute('data-external-link');
+      // Invitations get their own card; the docs page behind them is the same for every server.
+      if (parseServerInviteLink(rawUrl).ok) return;
+      const normalized = this.normalizeUrl(rawUrl);
       if (!normalized || seen.has(normalized) || attachmentUrls.has(normalized)) {
         return;
       }

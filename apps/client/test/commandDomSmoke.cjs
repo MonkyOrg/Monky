@@ -159,11 +159,13 @@ if (!process.versions.electron) {
       const preferenceChecks = await window.webContents.executeJavaScript('window.autocompletePreferencesSmoke()', true);
       const lazyChecks = await window.webContents.executeJavaScript('window.autocompleteLazyPreviewSmoke()', true);
       const paginationChecks = await window.webContents.executeJavaScript('window.autocompletePaginationSmoke()', true);
+      const queuedEnterChecks = await window.webContents.executeJavaScript('window.autocompleteQueuedEnterSmoke()', true);
       await window.webContents.executeJavaScript('window.autocompleteDomCleanup()', true);
       console.log(`Autocomplete DOM smoke: ${checks} checks passed`);
       console.log(`Bot preference transport: ${preferenceChecks} checks passed`);
       console.log(`Lazy autocomplete previews: ${lazyChecks} checks passed`);
       console.log(`Paginated autocomplete: ${paginationChecks} checks passed`);
+      console.log(`Queued autocomplete Enter: ${queuedEnterChecks} checks passed`);
       await finish(0);
       return;
     }
@@ -190,6 +192,7 @@ if (!process.versions.electron) {
     const preferenceChecks = await window.webContents.executeJavaScript('window.autocompletePreferencesSmoke()', true);
     const lazyChecks = await window.webContents.executeJavaScript('window.autocompleteLazyPreviewSmoke()', true);
     const paginationChecks = await window.webContents.executeJavaScript('window.autocompletePaginationSmoke()', true);
+    const queuedEnterChecks = await window.webContents.executeJavaScript('window.autocompleteQueuedEnterSmoke()', true);
     await window.webContents.executeJavaScript('window.autocompleteDomCleanup()', true);
     const sidebarChecks = await window.webContents.executeJavaScript(`(${runSidebarPttSmoke.toString()})()`, true);
     await captureBotVoiceIndicators();
@@ -213,6 +216,7 @@ if (!process.versions.electron) {
     console.log(`Bot preference transport: ${preferenceChecks} checks passed`);
     console.log(`Lazy autocomplete previews: ${lazyChecks} checks passed`);
     console.log(`Paginated autocomplete: ${paginationChecks} checks passed`);
+    console.log(`Queued autocomplete Enter: ${queuedEnterChecks} checks passed`);
     console.log('Screenshots: dist-test\\command-dom-catalog.png and dist-test\\command-dom-composer.png');
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
@@ -912,12 +916,21 @@ async function runMusicCommandNativeSmoke(window) {
       { control: 'Enter', input: '/musica' },
       { control: 'Enter', input: '/listen', locale: 'en' },
       { control: 'Enter', optional: true, input: '/tocar', changeLocale: 'en' },
+      { control: 'Enter', early: true, input: '/tocar' },
     ];
     for (const scenario of scenarios) {
       window.webContents.sendInputEvent({ type: 'mouseLeave', x: -1, y: -1 });
       await window.webContents.executeJavaScript(`window.musicCommandNativeFixture.prepare(${JSON.stringify(scenario)})`, true);
       await window.webContents.debugger.sendCommand('Input.insertText', { text: scenario.input ?? '/play' });
       await key(' ', 'Space', 32, ' ');
+      if (scenario.early) {
+        // Pasting a link and pressing Enter at once must not require waiting for the results.
+        await window.webContents.debugger.sendCommand('Input.insertText', { text: 'https://www.youtube.com/watch?v=generated01' });
+        await key('Enter', 'Enter', 13, '\r');
+        await window.webContents.executeJavaScript('window.musicCommandNativeFixture.queuedResults()', true);
+        await window.webContents.executeJavaScript('window.musicCommandNativeFixture.verify()', true);
+        continue;
+      }
       await window.webContents.debugger.sendCommand('Input.insertText', { text: 'generated music' });
       await window.webContents.executeJavaScript('window.musicCommandNativeFixture.results()', true);
       await key('ArrowDown', 'ArrowDown', 40);
@@ -1153,6 +1166,14 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
         }
         throw new Error(`The highlighted music choice never became a stable pointer target: ${JSON.stringify(choicePointer)}`);
       },
+      queuedResults: async () => {
+        check(invoked.length === beforeInvocations && !root.querySelector('[data-parameter-option]'),
+          'A native Enter before the results neither executes nor submits the pasted link as a value');
+        await waitFor(() => queries.length > beforeQueries, 'A native Enter before the results did not start the search');
+        check(queries.at(-1).payload.query === 'https://www.youtube.com/watch?v=generated01',
+          'The pasted link is searched exactly as typed');
+        reply(queries.at(-1), { status: 'ok', choices: [choices[1]] });
+      },
       verifyOptional: () => {
         check(invoked.length === beforeInvocations, 'Native selection leaves optional parameters open for editing');
         check(store.getCommandDraft('chat')?.autocomplete.busca?.selected?.value === choices[1].value,
@@ -1179,7 +1200,7 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
         check(invoked.at(-1).commandName === 'play' && invoked.at(-1).botId === command.botId,
           'Canonical IDs survive localized name/alias selection with a native first Enter');
         check(events.some(event => event.event === 'input' && event.trusted), 'Search uses native user input, not synthetic value assignment');
-        if (scenario.control !== 'click') {
+        if (scenario.control !== 'click' && !scenario.early) {
           check(events.some(event => event.event === 'change' && event.trusted && event.selected === choices[1].value),
             'The stale native change is exercised after selecting the URL, without clearing the selection');
         }
@@ -1512,8 +1533,6 @@ async function runAutocompleteDomSmoke() {
   check(!!root.querySelector('#bot-parameter-options .bot-loading-spinner') &&
     getComputedStyle(find('#bot-parameter-options .bot-loading-spinner')).animationName === 'reconnect-spin',
   'Search waiting has an actual animated indicator and keeps its localized text');
-  key(input(), 'Enter');
-  check(invoked.length === 0, 'Typed text without a selected choice must not invoke');
   await waitFor(() => queries.length === 1);
   check(JSON.stringify(queries[0].payload.userSettings) === JSON.stringify({ language: 'pt-BR' }),
     'Autocomplete carries only this bot/server/caller custom preferences');
@@ -1544,8 +1563,6 @@ async function runAutocompleteDomSmoke() {
     'Autocomplete preview volume must keep the result list open without invoking');
   type(input(), 'beta');
   check(root.querySelectorAll('[data-parameter-option]').length === 0, 'Editing removes selectable stale results immediately');
-  key(input(), 'Enter');
-  check(invoked.length === 0, 'Enter while loading must not submit the query as an ID');
   await waitFor(() => queries.length === 2);
   check(queries[1].time - queries[0].time >= 1000, 'Actual query sends must be spaced independently of debounce');
   response(queries[1], choices);
@@ -2149,6 +2166,79 @@ async function runAutocompleteDomSmoke() {
     await waitFor(() => emptyMore.hidden);
     check(document.activeElement === input() && root.querySelectorAll('[data-parameter-option]').length === 1,
       'An empty terminal page retains the accumulated choices and restores query focus');
+    find('[data-bot-action="cancel-command"]').click();
+    return checks - beforeChecks;
+  };
+  window.autocompleteQueuedEnterSmoke = async () => {
+    const beforeChecks = checks;
+    command = { ...command, downloadsSound: false, options: requiredOnlyOptions };
+    store.setCommands([command]);
+    server.setSlashCommands([command]);
+    // An idle connection budget makes the timing below measure only the typing debounce.
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    select();
+    await waitFor(() => !!store.getCommandDraft('one'));
+    const invocations = invoked.length;
+    const link = 'https://www.youtube.com/watch?v=queued';
+    let before = queries.length;
+    type(input(), link);
+    const pressedAt = Date.now();
+    key(input(), 'Enter');
+    check(invoked.length === invocations && !root.querySelector('[data-parameter-option]'),
+      'Enter while loading must not submit the typed link as an opaque value');
+    await waitFor(() => queries.length === before + 1);
+    check(queries.at(-1).payload.query === link && queries.at(-1).time - pressedAt < 400,
+      'Enter while loading sends the pending search without waiting for the typing debounce');
+    response(queries.at(-1), [choices[3], choices[4]]);
+    await waitFor(() => invoked.length === invocations + 1 && !store.getCommandDraft('one'));
+    check(invoked.at(-1).options.sound === choices[3].value,
+      'A queued Enter confirms the first result as soon as it arrives, exactly once');
+
+    select();
+    await waitFor(() => !!store.getCommandDraft('one'));
+    type(input(), 'queued then edited');
+    key(input(), 'Enter');
+    type(input(), 'queued then edited again');
+    await waitFor(() => queries.at(-1)?.payload.query === 'queued then edited again');
+    response(queries.at(-1), [choices[5]]);
+    await waitFor(() => !!root.querySelector('[data-parameter-option]'));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    check(invoked.length === invocations + 1 && store.getCommandDraft('one')?.values.sound === undefined,
+      'Editing after Enter discards the queued confirmation and only shows the new results');
+    type(input(), 'queued then escaped');
+    key(input(), 'Enter');
+    key(input(), 'Escape');
+    await waitFor(() => find('#bot-parameter-options').hidden);
+    before = queries.length;
+    key(input(), 'ArrowDown');
+    await waitFor(() => queries.length > before && queries.at(-1).payload.query === 'queued then escaped');
+    response(queries.at(-1), [choices[6]]);
+    await waitFor(() => !!root.querySelector('[data-parameter-option]'));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    check(invoked.length === invocations + 1 && store.getCommandDraft('one')?.values.sound === undefined,
+      'Escape discards a queued confirmation');
+    type(input(), 'queued without results');
+    key(input(), 'Enter');
+    await waitFor(() => queries.at(-1)?.payload.query === 'queued without results');
+    response(queries.at(-1), []);
+    await waitFor(() => find('#bot-parameter-options').textContent.includes(language.t('botChat.autocompleteEmpty')));
+    check(invoked.length === invocations + 1 && !!store.getCommandDraft('one'),
+      'A queued Enter without results only shows the empty state');
+    find('[data-bot-action="cancel-command"]').click();
+
+    command = { ...command, downloadsSound: true };
+    store.setCommands([command]);
+    server.setSlashCommands([command]);
+    select();
+    await waitFor(() => !!store.getCommandDraft('one'));
+    type(input(), 'queued download');
+    key(input(), 'Enter');
+    await waitFor(() => queries.at(-1)?.payload.query === 'queued download');
+    response(queries.at(-1), [choices[7]]);
+    await waitFor(() => !!root.querySelector('[data-parameter-option]'));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    check(invoked.length === invocations + 1 && store.getCommandDraft('one')?.values.sound === undefined,
+      'A queued Enter never confirms an unseen choice for a command that saves files');
     find('[data-bot-action="cancel-command"]').click();
     return checks - beforeChecks;
   };

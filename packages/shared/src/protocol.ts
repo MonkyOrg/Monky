@@ -264,6 +264,13 @@ export enum MessageType {
   BOT_PERMISSIONS_SNAPSHOT = 'BOT_PERMISSIONS_SNAPSHOT',
   BOT_INSTALL_PREVIEW = 'BOT_INSTALL_PREVIEW',
   BOT_INSTALL_PREVIEW_RESULT = 'BOT_INSTALL_PREVIEW_RESULT',
+  /**
+   * Bot runtime CLI -> server, before authentication (protocol 37): checks the
+   * credential and reaches the bot's declared public ports without opening a
+   * bot session, so a running bot is never replaced.
+   */
+  BOT_DIAGNOSTIC = 'BOT_DIAGNOSTIC',
+  BOT_DIAGNOSTIC_RESULT = 'BOT_DIAGNOSTIC_RESULT',
   /** Bot -> server: register slash commands. */
   COMMAND_REGISTER = 'COMMAND_REGISTER',
   /** Server -> bot: commands were registered. */
@@ -306,6 +313,9 @@ export enum MessageType {
   SERVER_SETTINGS_UPDATED = 'SERVER_SETTINGS_UPDATED',
   SERVER_MONITOR_GET = 'SERVER_MONITOR_GET',
   SERVER_MONITOR_SNAPSHOT = 'SERVER_MONITOR_SNAPSHOT',
+  /** Client -> server (`server-audit`): one page of the server audit log. */
+  SERVER_AUDIT_GET = 'SERVER_AUDIT_GET',
+  SERVER_AUDIT_PAGE = 'SERVER_AUDIT_PAGE',
   /**
    * Server -> client, while coturn is being installed (#438). Purely
    * informational: a client that does not know it simply ignores it.

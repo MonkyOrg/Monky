@@ -93,8 +93,9 @@ A transmissão precisa de um canal WebRTC privado entre cliente e bot, mesmo qua
 | Operação | Responsabilidade |
 |----------|------------------|
 | `bot.localExecution(serverId)` | Seleciona a conexão do servidor, sem selecionar outro usuário |
+| `client.supports(operation)` | Informa se o servidor conectado negociou a operação (`false` desconectado ou com servidor antigo) |
 | `client.executor(context)` | Usa uma invocação, autocomplete, prévia ou referência de fonte autorizada |
-| `executor.execute(spec, { signal })` | Executa `youtube.search`, `youtube.resolve` ou `youtube.preview` |
+| `executor.execute(spec, { signal })` | Executa `youtube.search`, `youtube.resolve`, `youtube.preview` ou `youtube.playlist` |
 | `client.retainSource(invocationId, url, { signal })` | Retém a origem e a URL canônica de um item a partir de uma invocação real |
 | `client.checkSourceAvailability(sourceContextId, voiceChannelId, { signal })` | Confirma a presença e o acesso da conexão original, sem iniciar uma tarefa no cliente |
 | `executor.stream(spec, { voiceChannelId, signal })` | Abre uma nova tarefa `youtube.stream` para a sala atual |
@@ -110,9 +111,28 @@ O stream fornece pacotes Opus em `frames`. O bot mantém a cadência de 20 ms e 
 
 Uma recusa antes da admissão da tarefa, ou em uma operação de referência/controle, usa `LocalExecutionRpcError`. Consulte `code` e, quando presentes, `reason` ou `cancellationCause`; esse erro não inventa um evento de tarefa. Não trate uma recusa de consentimento ou uma falha de transporte como erro de autenticação do provedor.
 
+### Playlists
+
+`youtube.playlist` lê os metadados de uma playlist pública do YouTube ou de um álbum do YouTube Music, somente durante um comando ou seu autocomplete. `playlistLink()`, de `@monky/bot-sdk/dist/localRuntime`, reconhece `/playlist?list=` e links de vídeo com `list` (`watch?v=…&list=…`, `youtu.be/…?list=…`, `music.youtube.com`) e devolve a URL canônica `https://www.youtube.com/playlist?list=<id>`. Mixes e rádios (`list=RD…`) voltam como `{ kind: 'mix' }` e nunca são lidos, porque são infinitos e personalizados por conta; listas da conta (`WL`, `LL`, `LM`) não são públicas. `musicInput()` não muda: um link `watch?v=…&list=…` continua significando o vídeo individual.
+
+```ts
+const link = playlistLink(query);
+if (link?.kind === 'playlist' && client.supports('youtube.playlist')) {
+  const playlist = await executor.execute(
+    { operation: 'youtube.playlist', url: link.url, limit: vagasLivres },
+    { signal: ctx.signal },
+  );
+  // playlist.title, playlist.total (contagem do provedor ou null), playlist.tracks, playlist.skipped
+}
+```
+
+`limit` (1 a 500) também limita as requisições ao provedor. As faixas mantêm a ordem da playlist, inclusive repetições; entradas com mais de uma hora, ao vivo, privadas ou fora da política de vídeo individual só aumentam `skipped`. Os metadados da playlist não mostram restrição por idade, então cada faixa ainda precisa de `retainSource()` e de `youtube.stream`, que a revalida antes de tocar. Uma URL de playlist nunca é uma fonte retida.
+
+Playlists são um recurso negociado do protocolo. Com um servidor antigo, `client.supports('youtube.playlist')` é `false` e `execute()` rejeita com `FEATURE_REQUIRES_UPDATE` e `reason: 'invalid_request'`. Quando o cliente Monky de quem pediu é antigo, o servidor recusa com o mesmo código e `reason: 'executor_unavailable'`, em vez de enviar uma tarefa que esse cliente ignoraria.
+
 O fim do decoder não significa que o último quadro já foi consumido. Preserve a cauda até as confirmações finais: `stream.closed` resolve somente após a drenagem de reprodução e a conclusão confirmada pelo servidor, e rejeita em falha ou cancelamento. Aguarde `stream.close()` para cancelar trabalho ativo ou aguardar a conclusão de um stream já drenado; a rejeição de `closed` por si só não substitui o encerramento. Encerrar um stream não libera automaticamente a referência de sua fonte. No cliente, o processo nativo pode terminar antes das confirmações de reprodução, sem perder a possibilidade de cancelar ou revogar a tarefa restante.
 
-Usar o computador do solicitante não garante que o provedor aceite uma requisição. A capacidade inicial aceita somente vídeos públicos individuais elegíveis do YouTube, sem contas, cookies ou contorno de restrições. Recusas do provedor permanecem erros explícitos.
+Usar o computador do solicitante não garante que o provedor aceite uma requisição. A capacidade inicial aceita somente vídeos públicos individuais elegíveis do YouTube e a leitura de playlists públicas e álbuns do YouTube Music, sem mixes, contas, cookies ou contorno de restrições. Recusas do provedor permanecem erros explícitos.
 
 ### Validação integrada no checkout
 

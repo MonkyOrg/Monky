@@ -1,3 +1,4 @@
+import type { HostingSkillId } from '@monky/shared';
 import type { TranslationKey } from '../i18n';
 import type { OnboardingShot } from '../views/onboardingShots';
 
@@ -21,6 +22,8 @@ export interface TutorialDefinition {
   name: TranslationKey;
   /** Material Symbols icon name or emoji. */
   icon: string;
+  /** AI agent skill offered on every step, which does this same setup (see `apps/client/hosting-skills`). */
+  skill: HostingSkillId;
   /** Ordered list of steps. */
   steps: TutorialStep[];
 }

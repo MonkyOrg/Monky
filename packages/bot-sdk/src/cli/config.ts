@@ -241,12 +241,32 @@ export function createCliContext(
   };
 }
 
-export function readConfigFile(file: string): BotConfig {
-  return validateConfig(readJsonFile(file, 'The bot config file'));
+export function readConfigFile(file: string, defaults: { botName?: string } = {}): BotConfig {
+  return validateConfig(normalizeLegacyConfig(readJsonFile(file, 'The bot config file'), defaults));
+}
+
+/**
+ * Profiles written by a bot's former standalone CLI (e.g. MonkyBot) may omit
+ * defaults and keep an inline `hostConsent`. The inline consent is dropped: a
+ * profile without a consent file inherits the current access on its next start.
+ */
+export function normalizeLegacyConfig(value: unknown, defaults: { botName?: string } = {}): unknown {
+  if (!isRecord(value)) return value;
+  const { hostConsent: _legacyConsent, ...config } = value;
+  if (config.botName === undefined && defaults.botName) config.botName = defaults.botName;
+  if (config.mode === 'marketplace') {
+    config.servePort ??= DEFAULT_MARKETPLACE_PORT;
+    config.publicHost ??= 'localhost';
+  }
+  if (config.mode === 'manual' && config.botToken === undefined && config.tokenEnv === undefined) {
+    config.tokenEnv = DEFAULT_TOKEN_ENV;
+  }
+  return config;
 }
 
 export function readConfig(context: CliContext): BotConfig | null {
-  return fs.existsSync(context.configFile) ? readConfigFile(context.configFile) : null;
+  return fs.existsSync(context.configFile)
+    ? readConfigFile(context.configFile, { botName: defaultBotName(context) }) : null;
 }
 
 export function writeConfig(context: CliContext, config: BotConfig): void {
@@ -260,7 +280,7 @@ export function ensureModeSupported(context: CliContext, mode: BotMode): void {
   }
 }
 
-function defaultBotName(context: CliContext): string {
+export function defaultBotName(context: Pick<CliContext, 'displayName'>): string {
   const name = context.displayName.slice(0, LIMITS.MAX_NICKNAME_LENGTH).replace(/[\uD800-\uDBFF]$/, '').trim();
   return name.length < LIMITS.MIN_NICKNAME_LENGTH ? `${name} Bot` : name;
 }

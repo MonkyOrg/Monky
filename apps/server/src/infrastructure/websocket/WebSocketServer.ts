@@ -142,6 +142,7 @@ import {
   adminDeafenUserSchema,
   hasPermission,
   localBotIdentitySchema,
+  localOperationNegotiated,
   botInstallPreviewRequestSchema,
   botInstallSchema,
   botPermissionsGetSchema,
@@ -170,6 +171,7 @@ import {
   nativePollVoteSchema,
   type NativePollCreate,
   type NativePollVote,
+  EVERYONE_ROLE_ID,
 } from '@monky/shared';
 import { AuthService } from '../../application/services/AuthService';
 import { AttachmentService } from '../../application/services/AttachmentService';
@@ -178,6 +180,7 @@ import { ChatService } from '../../application/services/ChatService';
 import { PermissionService } from '../../application/services/PermissionService';
 import { RoleService } from '../../application/services/RoleService';
 import { BotService } from '../../application/services/BotService';
+import { BotDiagnosticService } from '../../application/services/BotDiagnosticService';
 import { BotPermissionError } from '../../application/services/BotPermissionService';
 import { BOT_CHAT_EVENTS, botMessageCapabilities } from './botCapabilityPolicy';
 import { BotSettingsError, BotSettingsService } from '../../application/services/BotSettingsService';
@@ -187,6 +190,15 @@ import { BotScreenHandler } from './BotScreenHandler';
 import { BotScreenService } from '../../application/services/BotScreenService';
 import type { ServerMonitorService } from '../../application/services/ServerMonitorService';
 import { ServerMonitorHandler } from './ServerMonitorHandler';
+import { auditDiff, auditRef, type ServerAuditInput, type ServerAuditService } from '../../application/services/ServerAuditService';
+import {
+  categoryChanges, channelChanges, channelCreationChanges, channelTreeMoves, permissionChanges, pollChanges,
+  serverSettingsChanges, type AuditNames,
+} from '../../application/services/serverAuditChanges';
+import { ServerAuditHandler } from './ServerAuditHandler';
+import type {
+  ServerAuditAction, ServerAuditChange, ServerAuditRef, ChannelPermissionOverwrite, CommandValues, SlashCommand,
+} from '@monky/shared';
 import { CommandRegistry } from '../../application/services/CommandRegistry';
 import { BotLocalExecutionService } from '../../application/services/BotLocalExecutionService';
 import { SignalingService } from '../../application/services/SignalingService';
@@ -196,6 +208,7 @@ import { GameShareRequestService } from '../../application/services/GameShareReq
 import { NativePollError, NativePollService } from '../../application/services/NativePollService';
 import { projectLegacyPolls } from './pollProjection';
 import { IServerRepository } from '../../domain/repositories';
+import type { NativePollRecord } from '../../domain/entities';
 import { scanServerNetworkInterfaces } from '../discovery/ServerIpScanner';
 import { CoturnManager } from '../turn/CoturnManager';
 import { describeSfuPortProblem, SfuManager, SfuProducerClosedError } from '../sfu/SfuManager';
@@ -215,6 +228,8 @@ const BOT_LOCAL_ALLOWED_MESSAGES = new Set<MessageType>([
   MessageType.BOT_LOCAL_MEDIA_SIGNAL,
 ]);
 const MAX_RETIRED_SFU_PRODUCERS = 256;
+/** A reorder from an outdated client can shuffle a whole list; past this, the rest is not itemized. */
+const MAX_AUDITED_MOVES = 10;
 
 interface ClientSession {
   protocol?: ProtocolAgreement;
@@ -306,10 +321,12 @@ export class WebSocketServer {
   private voicePresenceSync: Promise<void> = Promise.resolve();
   /** Last "ask to join" per requester/host pair, for the spam guard (#675). */
   private botInteractions: BotInteractionHandler;
+  private readonly botDiagnostics?: BotDiagnosticService;
   private botLocalExecution: BotLocalExecutionService<BotInteractionSession>;
   private botSelectors?: BotSelectorHandler;
   private botScreens?: BotScreenHandler;
   private readonly serverMonitor?: ServerMonitorHandler;
+  private readonly serverAudit?: ServerAuditHandler;
   private readonly community?: CommunityHandler;
   private readonly messageSearch?: MessageSearchHandler;
   private readonly forum?: ForumHandler;
@@ -349,7 +366,13 @@ export class WebSocketServer {
     private readonly forumService?: ForumService,
     private readonly pollService?: NativePollService,
     private readonly recentSoundCache?: RecentSoundCacheService,
+    private readonly audit?: ServerAuditService,
   ) {
+    if (botService) this.botDiagnostics = new BotDiagnosticService(botService, rateLimiter);
+    if (audit) this.serverAudit = new ServerAuditHandler(audit, this.permissionService, {
+      isCurrent: (session) => this.isCurrentSession(session),
+      send: (session, message) => this.send(session.ws, message),
+    });
     this.dmRelay = new DmRelayService<ClientSession>({
       isCurrent: (session) => this.isCurrentSession(session),
       send: (session, message) => this.send(session.ws, message),
@@ -375,6 +398,17 @@ export class WebSocketServer {
         type: MessageType.POLL_UPDATED,
         payload: poll,
       }),
+      audit: async (session, action, input) => {
+        if (!this.audit) return;
+        this.recordAudit(session, action, {
+          target: input.target,
+          related: {
+            channel: await this.auditChannel(input.channelId),
+            invoker: input.invokerId ? await this.auditIdentity(input.invokerId) : null,
+          },
+          changes: input.changes,
+        });
+      },
     });
     if (messageSearchService) this.messageSearch = new MessageSearchHandler(messageSearchService, {
       isCurrent: session => this.isCurrentSession(session),
@@ -398,6 +432,14 @@ export class WebSocketServer {
           { type: MessageType.FORUM_POST_SAVED, payload: result },
           ...(result.message ? [{ type: MessageType.CHAT_MESSAGE, payload: result.message }] : []),
         ]);
+      },
+      audit: async (session, action, post, changes) => {
+        if (!this.audit) return;
+        this.recordAudit(session, action, {
+          target: auditRef.of('post', post.channelId, post.title),
+          related: { channel: await this.auditChannel(post.forumId), author: await this.auditIdentity(post.authorId) },
+          changes,
+        });
       },
     });
     this.signalingService.configureScreenAccess(
@@ -477,10 +519,12 @@ export class WebSocketServer {
       localContextEnded: (context, cause) => this.botLocalExecution.contextEnded(context, cause),
       consumeLocalPreview: (bot, origin, contextId, requestId, result) =>
         this.botLocalExecution.consumePreview(bot, origin, contextId, requestId, result),
+      commandInvoked: (session, command, channelId, options) => this.auditCommand(session, command, channelId, options),
     }, this.channelService, this.userService, this.commandRegistry, this.botSettings,
       async () => (await this.serverRepo.getServer())?.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH);
     this.botLocalExecution = new BotLocalExecutionService({
       isCurrent: (session) => this.isCurrentBotOperation(session, 'local_execution'),
+      negotiated: (session, operation) => localOperationNegotiated(operation, session.protocol?.features),
       accessVersion: () => {
         const roles = this.channelService.getRoleAccessVersion();
         return roles === null || this.pendingLocalAccessMutations > 0
@@ -799,6 +843,13 @@ export class WebSocketServer {
 
     if (type === MessageType.AUTH_CHALLENGE_RESPONSE) {
       await this.handleAuthChallengeResponse(session, payload as AuthChallengeResponsePayload, requestId);
+      return;
+    }
+
+    // Pre-authentication: a separate connection used by `<bot> doctor`, so it
+    // never creates, replaces or binds a bot session.
+    if (type === MessageType.BOT_DIAGNOSTIC) {
+      await this.handleBotDiagnostic(session, payload, requestId);
       return;
     }
 
@@ -1191,10 +1242,20 @@ export class WebSocketServer {
       case MessageType.ADMIN_KICK_VOICE:
         if (!(await this.requirePermission(session, Permission.KICK_MEMBERS, requestId))) return;
         this.clearVoiceReturn((payload as AdminKickVoicePayload).targetSessionId);
-        if (this.cancelVoiceReconnect((payload as AdminKickVoicePayload).targetSessionId)
-          && !this.signalingService.getVoiceState((payload as AdminKickVoicePayload).targetSessionId)) {
-          this.broadcast({ type: MessageType.ADMIN_KICK_VOICE, requestId, payload });
-          break;
+        {
+          const reconnecting = [...this.voiceReconnectGrants.entries()]
+            .find(([grantSession]) => grantSession.sessionId === (payload as AdminKickVoicePayload).targetSessionId);
+          if (this.cancelVoiceReconnect((payload as AdminKickVoicePayload).targetSessionId)
+            && !this.signalingService.getVoiceState((payload as AdminKickVoicePayload).targetSessionId)) {
+            this.broadcast({ type: MessageType.ADMIN_KICK_VOICE, requestId, payload });
+            const [kicked, grant] = reconnecting ?? [];
+            if (this.audit && kicked?.user) {
+              this.recordAudit(session, 'voice.disconnect', {
+                target: auditRef.member(kicked.user), related: { from: await this.auditChannel(grant?.channelId) },
+              });
+            }
+            break;
+          }
         }
         await this.handleAdminKickVoice(session, payload as AdminKickVoicePayload, requestId);
         break;
@@ -1229,6 +1290,11 @@ export class WebSocketServer {
         } else {
           this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, 'Server monitoring is unavailable.', requestId);
         }
+        break;
+
+      case MessageType.SERVER_AUDIT_GET:
+        if (this.serverAudit) await this.serverAudit.handle(session, payload, requestId);
+        else this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'The audit log is unavailable.', requestId);
         break;
 
       // ── Bot management (#569) ────────────────────────────────────────
@@ -1456,6 +1522,7 @@ export class WebSocketServer {
     const sessionId = result.user.sessionId!;
     session.sessionId = sessionId;
     session.invisible = result.appearOffline === true;
+    if (result.newMember) this.recordAudit(session, 'member.join', { target: auditRef.member(result.user) });
 
     // Prevent duplicate sessions for the *same device*. A lingering/zombie socket
     // (e.g. after a reconnect where the old TCP connection was not yet cleaned
@@ -1654,6 +1721,27 @@ export class WebSocketServer {
   }
 
   // ── Bot authentication (token-based, no challenge) ───────────────────────
+  private async handleBotDiagnostic(session: ClientSession, payload: unknown, requestId?: string): Promise<void> {
+    if (session.user) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Use uma conexão própria, sem autenticação, para o diagnóstico.', requestId);
+      return;
+    }
+    if (!this.botDiagnostics) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'Este servidor não aceita bots.', requestId);
+      return;
+    }
+    const outcome = await this.botDiagnostics.diagnose(payload, session.ip);
+    if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
+    if (outcome.kind === 'invalid') {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Diagnóstico de bot inválido.', requestId);
+    } else if (outcome.kind === 'rate_limited') {
+      Logger.security(`Bot diagnostic rate limit reached for ${session.ip}`);
+      this.sendError(session.ws, ProtocolErrorCode.AUTH_RATE_LIMITED, 'Muitas tentativas de conexão. Aguarde um minuto.', requestId);
+    } else {
+      this.send(session.ws, { type: MessageType.BOT_DIAGNOSTIC_RESULT, requestId, payload: outcome.result });
+    }
+  }
+
   private async handleBotAuth(
     session: ClientSession,
     payload: AuthConnectPayload,
@@ -1883,6 +1971,7 @@ export class WebSocketServer {
       token: result.token,
     };
     this.send(session.ws, { type: MessageType.BOT_CREATED, requestId, payload: createdPayload });
+    this.recordAudit(session, 'bot.create', { target: auditRef.bot(result.bot.id, result.bot.name) });
     await this.broadcastBotSettings();
   }
 
@@ -1937,11 +2026,25 @@ export class WebSocketServer {
         if (!authorized || !authorized()) return;
       }
       if (type === MessageType.BOT_PERMISSIONS_UPDATE) {
+        const previous = [...(permissions.get(botId)?.granted ?? [])];
         permissions.approve(session.user.id, botPermissionsUpdateSchema.parse(parsed.data));
         // Invalidate the old socket synchronously with persistence. Work resumed
         // after any await cannot reuse a grant, even if it is quickly re-enabled.
         this.disconnectBot(botId);
         await this.botSelectors?.revokeBot(botId);
+        const granted = permissions.get(botId)?.granted ?? [];
+        const added = granted.filter((capability) => !previous.includes(capability));
+        const removed = previous.filter((capability) => !granted.includes(capability));
+        if (this.audit && (added.length || removed.length)) {
+          const bot = await this.botService?.findById(botId);
+          this.recordAudit(session, 'bot.permissions', {
+            target: auditRef.bot(botId, bot?.name ?? botId),
+            changes: [
+              ...(added.length ? [{ field: 'capabilitiesGranted', after: added }] : []),
+              ...(removed.length ? [{ field: 'capabilitiesRevoked', after: removed }] : []),
+            ],
+          });
+        }
       }
       const state = permissions.get(botId);
       if (!state) throw new BotPermissionError(ProtocolErrorCode.BAD_REQUEST, 'Bot not found.');
@@ -1988,10 +2091,16 @@ export class WebSocketServer {
       return;
     }
     if (!this.isCurrentSession(session)) return;
+    const previous = this.audit ? await this.botService.findById(botId) : null;
     const result = await this.botService.updateProfile(botId, parsed.data);
     if (!result.success) {
       this.sendError(session.ws, result.errorCode, result.errorMessage, requestId);
       return;
+    }
+    if (previous) {
+      // Bots resend their avatar on every start, so only a new name is worth recording.
+      const changes = auditDiff([['name', previous.name, result.bot.name]]);
+      if (changes.length) this.recordAudit(session, 'bot.profile', { changes });
     }
 
     this.commandRegistry.updateBotIdentity(botId, result.bot.name, result.bot.avatarUrl);
@@ -2023,12 +2132,14 @@ export class WebSocketServer {
       return;
     }
     const cleanupCommunityMedia = this.communityService?.prepareBotDeletion(payload.botId);
+    const revoked = this.audit ? await botService.findById(payload.botId) : null;
     const result = await this.mutateLocalAccess(() => botService.revoke(payload.botId));
     if (!result.success) {
       this.sendError(session.ws, result.errorCode, result.errorMessage, requestId);
       return;
     }
     cleanupCommunityMedia?.();
+    if (revoked) this.recordAudit(session, 'bot.revoke', { target: auditRef.bot(revoked.id, revoked.name) });
 
     this.disconnectBot(payload.botId, 'revoked');
     const revokedPayload: BotRevokedPayload = { botId: payload.botId };
@@ -2108,6 +2219,11 @@ export class WebSocketServer {
 
     const installedPayload: BotInstalledPayload = { bot: result.bot };
     this.send(session.ws, { type: MessageType.BOT_INSTALLED, requestId, payload: installedPayload });
+    this.recordAudit(session, 'bot.install', {
+      target: auditRef.bot(result.bot.id, result.bot.name),
+      changes: result.bot.permissions?.granted.length
+        ? [{ field: 'capabilitiesGranted', after: [...result.bot.permissions.granted] }] : [],
+    });
     this.broadcastCommands();
     await this.broadcastBotSettings(result.bot.id);
   }
@@ -2211,6 +2327,10 @@ export class WebSocketServer {
           if (changed.revision !== update.expectedRevision) {
             this.botLocalExecution.settingsChanged(botId);
             this.botInteractions.settingsChanged(botId);
+            // Setting values can hold secrets such as API keys, so only their names are kept.
+            this.recordAudit(session, 'bot.settings', {
+              target: auditRef.bot(bot.id, bot.name), changes: [{ field: 'settings', after: Object.keys(update.patch) }],
+            });
           }
           // Cache updates precede new-revision executions on the owning socket.
           const owner = this.findSessionById(`bot:${botId}`);
@@ -2481,7 +2601,10 @@ export class WebSocketServer {
         requestId,
         payload: message,
       });
-      if (result.poll.liveAction) await this.community?.refresh();
+      if (result.poll.liveAction) {
+        await this.auditPoll(session, 'poll.create', undefined, result.poll);
+        await this.community?.refresh();
+      }
     } catch (error: unknown) {
       this.sendError(
         session.ws,
@@ -2490,6 +2613,21 @@ export class WebSocketServer {
         requestId,
       );
     }
+  }
+
+  /** Polls run as live actions are always recorded; ordinary polls only when someone else's is changed. */
+  private async auditPoll(
+    session: ClientSession, action: 'poll.create' | 'poll.edit' | 'poll.close', before: NativePollRecord | undefined, after: NativePollRecord,
+  ): Promise<void> {
+    if (!this.audit || !session.user) return;
+    this.recordAudit(session, action, {
+      target: auditRef.of('poll', after.id, after.question),
+      related: {
+        channel: await this.auditChannel(after.channelId),
+        author: after.creatorUserId !== session.user.id ? await this.auditIdentity(after.creatorUserId) : null,
+      },
+      changes: action === 'poll.close' ? [] : pollChanges(before, after),
+    });
   }
 
   private async handlePollVote(
@@ -2567,6 +2705,9 @@ export class WebSocketServer {
         type: MessageType.POLL_UPDATED,
         payload: this.pollService.publicPoll(closed),
       });
+      if (existing.liveAction || existing.creatorUserId !== session.user.id) {
+        await this.auditPoll(session, 'poll.close', existing, closed);
+      }
       if (existing.liveAction) await this.community?.refresh();
     } catch (error: unknown) {
       this.sendError(
@@ -2654,6 +2795,9 @@ export class WebSocketServer {
         type: MessageType.POLL_UPDATED,
         payload: this.pollService.publicPoll(updated),
       });
+      if (existing.liveAction || updated.liveAction || existing.creatorUserId !== session.user.id) {
+        await this.auditPoll(session, 'poll.edit', existing, updated);
+      }
       if (existing.liveAction || updated.liveAction) await this.community?.refresh();
     } catch (error: unknown) {
       this.sendError(
@@ -2789,6 +2933,12 @@ export class WebSocketServer {
     }
 
     await this.broadcastChatMessageUpdated(result.message, requestId);
+    if (this.audit && result.message.userId !== session.user.id) {
+      this.recordAudit(session, 'message.delete', {
+        target: auditRef.member({ id: result.message.userId, nickname: result.message.userNickname, isBot: result.message.isBot }),
+        related: { channel: await this.auditChannel(result.message.channelId) },
+      });
+    }
     const poll = this.pollService?.repository.findByMessageId(payload.messageId);
     if (poll) {
       await this.broadcastToChannel(poll.channelId, {
@@ -2811,6 +2961,12 @@ export class WebSocketServer {
       return;
     }
     await this.broadcastChatMessageUpdated(result.message, requestId);
+    if (this.audit && result.message.userId !== session.user.id) {
+      this.recordAudit(session, 'message.restore', {
+        target: auditRef.member({ id: result.message.userId, nickname: result.message.userNickname, isBot: result.message.isBot }),
+        related: { channel: await this.auditChannel(result.message.channelId) },
+      });
+    }
   }
 
   private async broadcastChatMessageUpdated(message: ChatMessage, requestId?: string): Promise<void> {
@@ -2918,6 +3074,12 @@ export class WebSocketServer {
       payload: channelPayload,
     });
     session.visibleChannelIds?.add(result.channel.id);
+    if (this.audit) {
+      this.recordAudit(session, 'channel.create', {
+        target: auditRef.channel(result.channel),
+        changes: channelCreationChanges(result.channel, await this.auditNames()),
+      });
+    }
 
     await this.reconcileChannelVisibility();
     await this.broadcastBotSettings();
@@ -2929,11 +3091,13 @@ export class WebSocketServer {
     payload: CategoryCreatePayload | CategoryUpdatePayload | CategoryDeletePayload | CategoryReorderPayload,
     requestId?: string,
   ): Promise<void> {
+    const before = this.audit ? await this.channelTreeSnapshot() : undefined;
     const result = await this.mutateLocalAccess(() => this.channelService.mutateCategory(operation, payload, session.user?.id));
     if (!result.success) {
       this.sendError(session.ws, result.errorCode ?? ProtocolErrorCode.BAD_REQUEST, result.errorMessage ?? 'Categoria inválida', requestId);
       return;
     }
+    if (before) await this.auditCategoryMutation(session, operation, payload, before);
     await this.reconcileChannelVisibility(true);
     if (!session.user || !this.isCurrentSession(session)) return;
     const canDeliver = this.captureChannelOperation(session);
@@ -2955,14 +3119,47 @@ export class WebSocketServer {
     });
   }
 
+  private async auditCategoryMutation(
+    session: ClientSession,
+    operation: 'create' | 'update' | 'delete' | 'reorder',
+    payload: CategoryCreatePayload | CategoryUpdatePayload | CategoryDeletePayload | CategoryReorderPayload,
+    before: { channels: ChannelSummary[]; categories: ChannelCategory[] },
+  ): Promise<void> {
+    const after = await this.channelTreeSnapshot();
+    if (operation === 'reorder') {
+      this.recordTreeMoves(session, before, after);
+      return;
+    }
+    const known = new Set(before.categories.map((category) => category.id));
+    const id = operation === 'create'
+      ? after.categories.filter((category) => !known.has(category.id)).at(-1)?.id
+      : 'categoryId' in payload ? payload.categoryId : undefined;
+    const previous = before.categories.find((category) => category.id === id);
+    const next = after.categories.find((category) => category.id === id);
+    if (operation === 'delete') {
+      if (previous) this.recordAudit(session, 'category.delete', { target: auditRef.category(previous) });
+      return;
+    }
+    if (!next) return;
+    if (operation === 'create') {
+      this.recordAudit(session, 'category.create', {
+        target: auditRef.category(next), changes: next.isPrivate ? [{ field: 'private', after: true }] : [],
+      });
+      return;
+    }
+    if (!previous) return;
+    const changes = categoryChanges(previous, next, await this.auditNames(previous, next));
+    if (changes.length) this.recordAudit(session, 'category.update', { target: auditRef.category(next), changes });
+  }
+
   private async handleChannelUpdate(
     session: ClientSession,
     payload: ChannelUpdatePayload,
     requestId?: string
   ): Promise<void> {
+    const before = payload?.channelId ? await this.channelService.getChannelSummary(payload.channelId) : null;
     if (payload?.categoryId !== undefined) {
-      const previous = await this.channelService.getChannelSummary(payload.channelId);
-      if (previous && payload.categoryId !== (previous.categoryId ?? null)) {
+      if (before && payload.categoryId !== (before.categoryId ?? null)) {
         if (payload.categoryId
           ? !(await this.requireCategoryManagement(session, payload.categoryId, requestId))
           : !(await this.requirePermission(session, Permission.MANAGE_CHANNELS, requestId))) return;
@@ -2980,6 +3177,10 @@ export class WebSocketServer {
     }
 
     const channel = result.channel;
+    if (this.audit && before) {
+      const changes = channelChanges(before, channel, await this.auditNames(before, channel));
+      if (changes.length) this.recordAudit(session, 'channel.update', { target: auditRef.channel(channel), changes });
+    }
     const updatedPayload: ChannelUpdatedPayload = { channel };
     this.send(session.ws, {
       type: MessageType.CHANNEL_UPDATED,
@@ -3017,6 +3218,7 @@ export class WebSocketServer {
     payload: ChannelReorderPayload,
     requestId?: string
   ): Promise<void> {
+    const before = this.audit ? await this.channelTreeSnapshot() : undefined;
     const result = await this.channelService.reorderChannels(payload, session.user?.id);
     if (!result.success || !result.positions) {
       this.sendError(
@@ -3027,6 +3229,7 @@ export class WebSocketServer {
       );
       return;
     }
+    if (before) this.recordTreeMoves(session, before, await this.channelTreeSnapshot());
     // Categories share the root with loose channels: when they move, everyone
     // receives their new positions before the channel positions land.
     if (result.categoriesChanged) await this.reconcileChannelVisibility();
@@ -3058,6 +3261,7 @@ export class WebSocketServer {
     requestId?: string
   ): Promise<void> {
     const cleanupCommunityMedia = this.communityService?.prepareChannelDeletion(payload.channelId);
+    const deleted = this.audit ? await this.channelService.getChannelSummary(payload.channelId) : null;
     const result = await this.mutateLocalAccess(() => this.channelService.deleteChannel(payload.channelId));
     if (!result.success) {
       this.sendError(
@@ -3069,6 +3273,7 @@ export class WebSocketServer {
       return;
     }
     cleanupCommunityMedia?.();
+    if (deleted) this.recordAudit(session, 'channel.delete', { target: auditRef.channel(deleted) });
 
     this.botLocalExecution.deleteChannel(payload.channelId);
     this.botInteractions.deleteChannel(payload.channelId);
@@ -3110,6 +3315,7 @@ export class WebSocketServer {
   ): Promise<void> {
     if (!session.user) return;
 
+    const previousNickname = session.user.nickname;
     const result = await this.userService.changeNickname(session.user.id, payload.newNickname);
     if (!result.success || !result.updatedUser) {
       this.sendError(
@@ -3121,6 +3327,11 @@ export class WebSocketServer {
       return;
     }
 
+    if (previousNickname !== result.updatedUser.nickname) {
+      this.recordAudit(session, 'member.nickname', {
+        changes: [{ field: 'nickname', before: previousNickname, after: result.updatedUser.nickname }],
+      });
+    }
     this.applyUserUpdate(result.updatedUser);
     this.broadcastUserUpdate(result.updatedUser, requestId);
   }
@@ -3477,6 +3688,12 @@ export class WebSocketServer {
           result = reconciled;
         }
       }
+    }
+
+    if (this.audit && previousServer) {
+      const current = await this.serverRepo.getServer();
+      const changes = current ? serverSettingsChanges(previousServer, current) : [];
+      if (changes.length) this.recordAudit(session, 'server.update', { changes });
     }
 
     const broadcastPayload: ServerSettingsUpdatedPayload = {
@@ -4977,6 +5194,76 @@ export class WebSocketServer {
       this.sessionSockets.get(session.sessionId) === session.ws;
   }
 
+  /** Records what a member or bot did; servers without the audit log ignore it. */
+  private recordAudit(session: BotInteractionSession, action: ServerAuditAction, input: Omit<ServerAuditInput, 'actor'> = {}): void {
+    if (!this.audit || !session.user) return;
+    this.audit.record(action, {
+      ...input,
+      actor: auditRef.member({ ...session.user, isBot: session.isBot === true || session.user.isBot === true }),
+    });
+  }
+
+  /** A member or bot by id, with the name it has now. */
+  private async auditIdentity(id: string): Promise<ServerAuditRef> {
+    const nickname = (await this.userService.nicknames([id])).get(id);
+    if (nickname !== undefined) return auditRef.user(id, nickname);
+    const bot = await this.botService?.findById(id);
+    return bot ? auditRef.bot(bot.id, bot.name) : auditRef.user(id, id);
+  }
+
+  private async auditChannel(channelId: string | null | undefined): Promise<ServerAuditRef | null> {
+    if (!channelId) return null;
+    const channel = await this.channelService.getChannelSummary(channelId);
+    return channel ? auditRef.channel(channel) : null;
+  }
+
+  private async auditNames(...withOverwrites: Array<{ permissionOverwrites?: readonly ChannelPermissionOverwrite[] } | null | undefined>): Promise<AuditNames> {
+    const userIds = withOverwrites.flatMap((item) =>
+      (item?.permissionOverwrites ?? []).flatMap((overwrite) => overwrite.userId !== undefined ? [overwrite.userId] : []));
+    const [roles, categories, users] = await Promise.all([
+      this.roleService.listRoles(), this.channelService.listCategories(), this.userService.nicknames(userIds),
+    ]);
+    const roleNames = new Map(roles.map((role) => [role.id, role.name]));
+    const categoryNames = new Map(categories.map((category) => [category.id, category.name]));
+    return {
+      category: (id) => id ? categoryNames.get(id) ?? null : null,
+      role: (id) => roleNames.get(id) ?? id,
+      user: (id) => users.get(id) ?? id,
+    };
+  }
+
+  /** A command and the options it was given; values stay out, since members type anything into them. */
+  private async auditCommand(session: BotInteractionSession, command: SlashCommand, channelId: string, options: CommandValues): Promise<void> {
+    if (!this.audit) return;
+    const provided = Object.keys(options);
+    this.recordAudit(session, 'bot.command', {
+      target: auditRef.bot(command.botId, command.botName),
+      related: { channel: await this.auditChannel(channelId) },
+      detail: `/${command.name}`,
+      changes: provided.length ? [{ field: 'commandOptions', after: provided }] : [],
+    });
+  }
+
+  private async channelTreeSnapshot(): Promise<{ channels: ChannelSummary[]; categories: ChannelCategory[] }> {
+    const [channels, categories] = await Promise.all([this.channelService.listChannels(), this.channelService.listCategories()]);
+    return { channels, categories };
+  }
+
+  /** One entry per item that changed place; a drag records the dragged item, not everything it shifted. */
+  private recordTreeMoves(
+    session: ClientSession,
+    before: { channels: ChannelSummary[]; categories: ChannelCategory[] },
+    after: { channels: ChannelSummary[]; categories: ChannelCategory[] },
+  ): void {
+    for (const move of channelTreeMoves(before, after).slice(0, MAX_AUDITED_MOVES)) {
+      this.recordAudit(session, move.target.type === 'category' ? 'category.move' : 'channel.move', {
+        target: move.target,
+        related: { category: move.container },
+        changes: [{ field: 'position', before: move.from, after: move.to }],
+      });
+    }
+  }
+
   private async requirePermission(
     session: ClientSession,
     permission: Permission,
@@ -5174,45 +5461,98 @@ export class WebSocketServer {
       this.sendError(session.ws, result.errorCode || ProtocolErrorCode.BAD_REQUEST, result.errorMessage || 'Erro ao criar cargo.', requestId);
       return;
     }
+    if (result.role) {
+      this.recordAudit(session, 'role.create', {
+        target: auditRef.role(result.role),
+        changes: [
+          ...(result.role.color ? [{ field: 'color', after: result.role.color }] : []),
+          ...(result.role.isDefault ? [{ field: 'isDefault', after: true }] : []),
+          ...permissionChanges(0, result.role.permissions),
+        ],
+      });
+    }
     await this.broadcastRolesState(requestId);
+  }
+
+  /** A role as the audit compares it; Everyone is the base every member has. */
+  private async auditRoleState(roleId: string): Promise<{ id: string; name: string; color: string | null; isDefault: boolean; permissions: number } | undefined> {
+    if (roleId === EVERYONE_ROLE_ID) {
+      return { id: EVERYONE_ROLE_ID, name: '@everyone', color: null, isDefault: false, permissions: await this.permissionService.getEveryonePermissions() };
+    }
+    return (await this.roleService.listRoles()).find((role) => role.id === roleId);
   }
 
   private async handleRoleUpdate(session: ClientSession, payload: RoleUpdatePayload, requestId?: string): Promise<void> {
     if (!session.user) return;
+    const roleId = typeof payload?.roleId === 'string' ? payload.roleId : undefined;
+    const before = this.audit && roleId ? await this.auditRoleState(roleId) : undefined;
     const result = await this.roleService.updateRole(session.user.id, payload, roleModelFor(session.protocol?.features));
     if (!result.success) {
       this.sendError(session.ws, result.errorCode || ProtocolErrorCode.BAD_REQUEST, result.errorMessage || 'Erro ao atualizar cargo.', requestId);
       return;
+    }
+    const after = before && roleId ? await this.auditRoleState(roleId) : undefined;
+    if (before && after) {
+      const changes = [
+        ...auditDiff([
+          ['name', before.name, after.name],
+          ['color', before.color, after.color],
+          ['isDefault', before.isDefault, after.isDefault],
+        ]),
+        ...permissionChanges(before.permissions, after.permissions),
+      ];
+      if (changes.length) this.recordAudit(session, 'role.update', { target: auditRef.role(after), changes });
     }
     await this.broadcastRolesState(requestId);
   }
 
   private async handleRoleDelete(session: ClientSession, payload: RoleDeletePayload, requestId?: string): Promise<void> {
     if (!session.user) return;
+    const deleted = this.audit && typeof payload?.roleId === 'string' ? await this.auditRoleState(payload.roleId) : undefined;
     const result = await this.roleService.deleteRole(session.user.id, payload.roleId);
     if (!result.success) {
       this.sendError(session.ws, result.errorCode || ProtocolErrorCode.BAD_REQUEST, result.errorMessage || 'Erro ao excluir cargo.', requestId);
       return;
     }
+    if (deleted) this.recordAudit(session, 'role.delete', { target: auditRef.role(deleted) });
     await this.broadcastRolesState(requestId);
+  }
+
+  /** Assigning a role someone already has, or removing one they lack, changes nothing and is not recorded. */
+  private async auditRoleAssignment(payload: RoleAssignPayload): Promise<{ held: boolean; role?: ServerAuditRef } | undefined> {
+    if (!this.audit || typeof payload?.userId !== 'string' || typeof payload.roleId !== 'string') return undefined;
+    const [roles, userRoles] = await Promise.all([this.roleService.listRoles(), this.roleService.listUserRoles()]);
+    const role = roles.find((entry) => entry.id === payload.roleId);
+    return {
+      held: userRoles.some((entry) => entry.userId === payload.userId && entry.roleIds.includes(payload.roleId)),
+      role: role ? auditRef.role(role) : undefined,
+    };
   }
 
   private async handleRoleAssign(session: ClientSession, payload: RoleAssignPayload, requestId?: string): Promise<void> {
     if (!session.user) return;
+    const before = await this.auditRoleAssignment(payload);
     const result = await this.roleService.assignRole(session.user.id, payload);
     if (!result.success) {
       this.sendError(session.ws, result.errorCode || ProtocolErrorCode.BAD_REQUEST, result.errorMessage || 'Erro ao atribuir cargo.', requestId);
       return;
+    }
+    if (before && !before.held && before.role) {
+      this.recordAudit(session, 'role.assign', { target: await this.auditIdentity(payload.userId), related: { role: before.role } });
     }
     await this.broadcastRolesState(requestId);
   }
 
   private async handleRoleUnassign(session: ClientSession, payload: RoleAssignPayload, requestId?: string): Promise<void> {
     if (!session.user) return;
+    const before = await this.auditRoleAssignment(payload);
     const result = await this.roleService.unassignRole(session.user.id, payload);
     if (!result.success) {
       this.sendError(session.ws, result.errorCode || ProtocolErrorCode.BAD_REQUEST, result.errorMessage || 'Erro ao remover cargo.', requestId);
       return;
+    }
+    if (before?.held && before.role) {
+      this.recordAudit(session, 'role.unassign', { target: await this.auditIdentity(payload.userId), related: { role: before.role } });
     }
     await this.broadcastRolesState(requestId);
   }
@@ -5273,10 +5613,12 @@ export class WebSocketServer {
     const permission = restriction === 'serverMuted' ? Permission.MUTE_MEMBERS : Permission.DEAFEN_MEMBERS;
     if (!(await this.requirePermission(session, permission, requestId))) return;
     if (!this.isCurrentSession(session)) return;
+    const previous = this.signalingService.getVoiceRestrictions(userId)[restriction];
     const states = restriction === 'serverMuted'
       ? this.signalingService.setServerMuted(userId, value)
       : this.signalingService.setServerDeafened(userId, value);
     const updated: VoiceRestrictionsUpdatedPayload = { userId, ...this.signalingService.getVoiceRestrictions(userId) };
+    const channelId = states[0]?.channelId;
     for (const state of states) {
       const target = this.findSessionById(state.sessionId);
       if (target?.isBot && !isReceivingBotVoice(state)) this.closeBotVoiceReception(target, state.channelId);
@@ -5289,6 +5631,14 @@ export class WebSocketServer {
       payload: { voiceState } satisfies VoiceStateChangedPayload,
     }, undefined, () => this.signalingService.getVoiceState(voiceState.sessionId) === voiceState)));
     this.send(session.ws, { type: MessageType.VOICE_RESTRICTIONS_UPDATED, requestId, payload: updated });
+    if (this.audit && previous !== value) {
+      this.recordAudit(session, restriction === 'serverMuted'
+        ? value ? 'voice.mute' : 'voice.unmute'
+        : value ? 'voice.deafen' : 'voice.undeafen', {
+        target: await this.auditIdentity(userId),
+        related: { channel: await this.auditChannel(channelId) },
+      });
+    }
   }
 
   private async isVoiceIdentity(userId: string): Promise<boolean> {
@@ -5322,6 +5672,11 @@ export class WebSocketServer {
       requestId,
       payload: { channelId: previous.channelId, userId: previous.userId, sessionId: previous.sessionId },
     });
+    if (this.audit) {
+      this.recordAudit(session, 'voice.disconnect', {
+        target: await this.auditIdentity(previous.userId), related: { from: await this.auditChannel(previous.channelId) },
+      });
+    }
   }
 
   private async handleAdminMoveUser(session: ClientSession, payload: AdminMoveUserPayload, requestId?: string): Promise<void> {
@@ -5383,6 +5738,12 @@ export class WebSocketServer {
         user: this.voiceRosterUser(target.user),
       } satisfies VoiceUserJoinedPayload,
     });
+    if (this.audit) {
+      this.recordAudit(session, 'voice.move', {
+        target: auditRef.member({ ...target.user, isBot: target.isBot === true || target.user.isBot === true }),
+        related: { from: await this.auditChannel(previous.channelId), to: await this.auditChannel(payload.channelId) },
+      });
+    }
   }
 
   private async handleMemberKick(session: ClientSession, payload: MemberKickPayload, requestId?: string): Promise<void> {
@@ -5407,6 +5768,7 @@ export class WebSocketServer {
       this.sendError(session.ws, result.errorCode ?? ProtocolErrorCode.BAD_REQUEST, result.errorMessage ?? 'Não foi possível expulsar o membro.', requestId);
       return;
     }
+    this.recordAudit(session, 'member.kick', { target: auditRef.user(targetUserId, result.nickname ?? targetUserId) });
 
     // Kicking removes the person, so every device they are signed in from has to
     // go — not just the most recent one (#309). Marked before any further await
@@ -6213,6 +6575,7 @@ export class WebSocketServer {
       this.botLocalExecution.close();
       this.gameShareRequests.dispose();
       this.serverMonitor?.close();
+      this.serverAudit?.close();
       this.messageSearch?.close();
       this.shutdownResources.defer('server community', () => this.community?.close());
       this.signalingService.setVoiceMembershipListener(undefined);

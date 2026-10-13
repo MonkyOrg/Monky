@@ -20,6 +20,7 @@ import { showErrorToast } from '../CopyToast';
 import { showConfirm } from '../Dialog';
 import { EmojiPicker } from '../EmojiPicker';
 import { lightboxModal } from '../LightboxModal';
+import { mountServerInviteCards, openServerInviteLink } from '../ServerInviteCard';
 import type { MarkdownInput } from '../MarkdownInput';
 import '../MarkdownInput';
 import { dmFailureMessage } from './dmErrors';
@@ -597,9 +598,11 @@ export class DmConversationView {
       link.addEventListener('click', (event) => {
         event.preventDefault();
         const url = link.getAttribute('data-external-link');
-        if (url) void window.api?.openExternal?.(url);
+        if (url && !openServerInviteLink(url)) void window.api?.openExternal?.(url);
       });
     });
+    // Only rows of this user's own messages carry a delivery state.
+    mountServerInviteCards(feed, row => row.hasAttribute('data-delivery'));
     feed.querySelectorAll<HTMLButtonElement>('.md-code-copy').forEach((button) => {
       button.addEventListener('click', (event) => {
         event.preventDefault();

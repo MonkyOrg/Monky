@@ -19,6 +19,7 @@ export enum Permission {
   MANAGE_EVENTS = 1 << 17,
   EMIT_LIVE_ACTIONS = 1 << 18,
   VIEW_CHANNEL = 1 << 19,
+  VIEW_AUDIT_LOG = 1 << 20,
 }
 
 export const DEFAULT_PERMISSIONS =

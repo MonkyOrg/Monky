@@ -1,0 +1,215 @@
+.server-audit-card {
+  max-width: 760px;
+  width: min(760px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  gap: 12px;
+}
+
+.server-audit-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.server-audit-title .material-symbols-outlined {
+  color: var(--accent-primary);
+}
+
+.server-audit-subtitle {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.server-audit-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.server-audit-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.server-audit-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color var(--motion-notice-duration, 140ms) ease, color var(--motion-notice-duration, 140ms) ease,
+    border-color var(--motion-notice-duration, 140ms) ease;
+}
+
+.server-audit-filter:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.server-audit-filter[aria-pressed="true"] {
+  border-color: var(--accent-primary);
+  background: var(--accent-primary);
+  color: #fff;
+}
+
+.server-audit-filter .material-symbols-outlined {
+  font-size: 16px;
+}
+
+.server-audit-search {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 13px;
+}
+
+.server-audit-list {
+  position: relative;
+  min-height: 220px;
+  max-height: 52vh;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+}
+
+.server-audit-entries {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.server-audit-entry {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.server-audit-entry:last-child {
+  border-bottom: 0;
+}
+
+.server-audit-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 18px;
+}
+
+.server-audit-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.server-audit-summary {
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.server-audit-summary strong {
+  font-weight: 600;
+}
+
+.server-audit-related,
+.server-audit-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.server-audit-changes {
+  list-style: none;
+  margin: 0;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.server-audit-change {
+  overflow-wrap: anywhere;
+}
+
+.server-audit-field {
+  color: var(--text-muted);
+}
+
+.server-audit-before {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+
+.server-audit-after {
+  color: var(--text-primary);
+}
+
+/* Read by screen readers in place of the arrow between two values. */
+.server-audit-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.server-audit-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 200px;
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.server-audit-state .material-symbols-outlined {
+  font-size: 32px;
+}
+
+.server-audit-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.server-audit-filter:focus-visible,
+.server-audit-load-more:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .server-audit-filter {
+    transition: none;
+  }
+}

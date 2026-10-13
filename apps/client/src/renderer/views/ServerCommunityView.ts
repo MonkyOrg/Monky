@@ -239,7 +239,7 @@ export class ServerCommunityView {
     return createServerInviteLink({
       v: 1, host: address.hostname, port: Number(address.port || (address.protocol === 'https:' ? 443 : 80)),
       name: this.feed.server.serverDetails?.name, eventId: event.id,
-    });
+    }, getLanguage());
   }
 
   private eventFeedback(modal: ReturnType<typeof openCommunityModal>, message: string): void {

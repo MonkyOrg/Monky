@@ -31,6 +31,7 @@ function result(spec: LocalTaskSpec): LocalTaskResult {
     case 'youtube.resolve':
     case 'youtube.stream': return { operation: spec.operation, track };
     case 'youtube.preview': return { operation: spec.operation, mimeType: 'audio/ogg', audioBase64: 'T2dnUw==' };
+    case 'youtube.playlist': return { operation: spec.operation, title: 'Fixture list', total: 3, tracks: [track], skipped: 2 };
   }
 }
 
@@ -210,6 +211,16 @@ test('prepared permits are opaque, reused for the same binding and cannot accept
   assert.equal(f.runtimes.length, 1);
   assert.equal(f.runtimes[0].closeCount, 1);
   assert.equal((await f.service.snapshot()).tasks.length, 0);
+  const playlist = await f.service.startTask({
+    requestId: 'playlist', permit, spec: { operation: 'youtube.playlist', url: 'https://www.youtube.com/playlist?list=PLfixture123', limit: 3 },
+  });
+  assert.deepEqual(playlist.status === 'started' && playlist.result,
+    { operation: 'youtube.playlist', title: 'Fixture list', total: 3, tracks: [track], skipped: 2 });
+  assert.equal(f.runtimes[1].closeCount, 1, 'A playlist read is one-shot metadata, never a stream');
+  assert.deepEqual(await f.service.startTask({
+    requestId: 'mix', permit, spec: { operation: 'youtube.playlist', url: 'https://www.youtube.com/playlist?list=RDfixture', limit: 3 },
+  }), { status: 'failed', reason: 'invalid_request' });
+  assert.equal(f.runtimes.length, 2);
 });
 
 test('approval does not save permission or release a permit until dialog-owned preparation succeeds', async (t) => {

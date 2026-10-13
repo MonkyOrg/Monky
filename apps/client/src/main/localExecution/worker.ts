@@ -5,7 +5,7 @@ import {
   checkMediaTool, errorDiagnostic, MediaError, terminate, YouTubeSource,
   type AudioStream, type MusicSource, type Track,
 } from '@monky/bot-sdk/dist/localRuntime';
-import { LIMITS, LOCAL_EXECUTION_RUNTIME_LIMITS } from '@monky/shared';
+import { LIMITS, LOCAL_EXECUTION_RUNTIME_LIMITS, localPlaylistResultFitsSpec } from '@monky/shared';
 import type { LocalToolPaths } from './LocalTools';
 import { LocalExecutionError } from './errors';
 import {
@@ -149,6 +149,19 @@ export function runLocalWorker(transport: WorkerChannel, implementation: WorkerI
         const track = await source.resolve(spec.url, controller.signal);
         controller.signal.throwIfAborted();
         await send({ type: 'result', id, result: workerResult({ operation: spec.operation, track: publicTrack(track) }) });
+        break;
+      }
+      case 'youtube.playlist': {
+        const playlist = await source.playlist(spec.url, spec.limit, controller.signal);
+        controller.signal.throwIfAborted();
+        const result = workerResult({
+          operation: spec.operation, title: playlist.title, total: playlist.total,
+          tracks: playlist.tracks.map(publicTrack), skipped: playlist.skipped,
+        });
+        if (result.operation !== 'youtube.playlist' || !localPlaylistResultFitsSpec(spec, result)) {
+          throw new LocalExecutionError('worker_failed');
+        }
+        await send({ type: 'result', id, result });
         break;
       }
       case 'youtube.preview': {

@@ -31,10 +31,14 @@ ${color('COMANDOS', ANSI.bold)}
   stop                          Para o processo gerenciado
   restart [--fresh]             Reinicia usando a configuração salva
   status                        Mostra estado do processo e configuração
+  doctor [--local]              Verifica se o bot pode operar e o que falta
+  requirements                  Lista portas para liberar e configurações do bot
+  consent [--accept FP|--revoke] Revisa a autorização de quem hospeda
   logs [--lines N] [--no-follow]
   config                        Exibe a configuração atual
   config language [pt-BR|en-US]  Consulta ou altera o idioma em Configuração
   config set <k> <v>             Ajusta mode, botName, botDir, serverUrl, botToken, tokenEnv, servePort, publicHost
+  config env [set NOME|unset NOME] Variáveis declaradas pelo bot (salvas no perfil)
   config update-source          Consulta a origem de atualização deste perfil
   config update-source github <URL> [--asset-name <nome.tgz>] [--token-env <VAR>]
   config update-source https <URL.tgz> [--token-env <VAR>]
@@ -55,8 +59,8 @@ ${color('OPÇÕES GLOBAIS', ANSI.bold)}
   --locale pt-BR|en-US          Usa este idioma somente nesta execução
 
 ${color('SETUP NÃO INTERATIVO', ANSI.bold)}
-  ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
-  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-ou-domínio> [--serve-port 7780] [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
+  ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--port <id>=<porta>]... [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
+  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-ou-domínio> [--serve-port 7780] [--port <id>=<porta>]... [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
 
 ${color('ORIGEM DAS ATUALIZAÇÕES', ANSI.bold)}
   O padrão vem de monkyBot.releases ou monkyBot.updateSource no package.json.
@@ -74,10 +78,14 @@ ${color('COMMANDS', ANSI.bold)}
   stop                          Stop the managed process
   restart [--fresh]             Restart using the saved configuration
   status                        Show the process state and configuration
+  doctor [--local]              Check whether the bot can operate and what is missing
+  requirements                  List the bot's ports to allow and its settings
+  consent [--accept FP|--revoke] Review the host operator authorization
   logs [--lines N] [--no-follow]
   config                        Show the current configuration
   config language [pt-BR|en-US]  Show or change language in Configuration
   config set <k> <v>             Set mode, botName, botDir, serverUrl, botToken, tokenEnv, servePort, publicHost
+  config env [set NAME|unset NAME] Bot-declared variables (saved in the profile)
   config update-source          Show the update source for this profile
   config update-source github <URL> [--asset-name <name.tgz>] [--token-env <VAR>]
   config update-source https <URL.tgz> [--token-env <VAR>]
@@ -98,8 +106,8 @@ ${color('GLOBAL OPTIONS', ANSI.bold)}
   --locale pt-BR|en-US          Use this language for this invocation only
 
 ${color('NON-INTERACTIVE SETUP', ANSI.bold)}
-  ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--name "My Bot"] [--bot-dir <directory>] [--yes]
-  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-or-domain> [--serve-port 7780] [--name "My Bot"] [--bot-dir <directory>] [--yes]
+  ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--port <id>=<port>]... [--name "My Bot"] [--bot-dir <directory>] [--yes]
+  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-or-domain> [--serve-port 7780] [--port <id>=<port>]... [--name "My Bot"] [--bot-dir <directory>] [--yes]
 
 ${color('UPDATE SOURCE', ANSI.bold)}
   Defaults come from monkyBot.releases or monkyBot.updateSource in package.json.
@@ -176,6 +184,21 @@ async function dispatchBotCli(context: CliContext, args: string[], explicitLocal
   }
   if (command === 'status') {
     statusCommand(context, rest);
+    return;
+  }
+  if (command === 'doctor') {
+    const { doctorCommand } = await import('./commands/doctor');
+    await doctorCommand(context, rest);
+    return;
+  }
+  if (command === 'requirements') {
+    const [{ requirementsCommand }, { readConfig }] = await Promise.all([import('./requirementsView'), import('./config')]);
+    requirementsCommand(context, rest, readConfig(context));
+    return;
+  }
+  if (command === 'consent') {
+    const [{ consentCommand }, { readConfig }] = await Promise.all([import('./consent'), import('./config')]);
+    await consentCommand(context, rest, readConfig(context), isInteractiveCliAccess(args));
     return;
   }
   if (command === 'logs') {

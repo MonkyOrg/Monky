@@ -296,14 +296,21 @@ With a scope, prefer the conventional form `feat(chat)!:`. Version calculation
 also accepts the marker before the scope (`feat!(chat):`) in existing messages,
 including squash entries, so neither a breaking change nor its `BREAKING CHANGE` footer is lost.
 
-Note that **patch is the default**: every merge into `main` publishes some
-version, even if it is a documentation commit.
+Note that **patch is the default**: an untyped, `docs:` or `chore:` commit also
+adds a patch. But the type only decides the size of the step; **the files
+decide whether there is a step**. A commit produces a version when it changes an
+application or dependency file — the same ones that require a release note — or
+adds a new note under `release-notes/`. A commit that only touches CI, scripts,
+tests or documentation publishes nothing and does not count towards the next
+version number either. If a build or CI change has to reach Monky users, include
+a release note: that is what produces the version.
 
-**Every commit moves the number, one step each.** The count does not just take
-the highest type in the range: a PR with three `fix:` takes `1.0.0` to `1.0.3`,
-and one with two `feat:` followed by three `fix:` takes it to `1.2.3`. Since the
-steps are applied in the order the commits were made, order matters — a `feat:`
-after a `fix:` resets the patch it had just added.
+**Every commit that produces a version moves the number, one step each.** The
+count does not just take the highest type in the range: a PR with three `fix:`
+takes `1.0.0` to `1.0.3`, and one with two `feat:` followed by three `fix:`
+takes it to `1.2.3`. Since the steps are applied in the order the commits were
+made, order matters — a `feat:` after a `fix:` resets the patch it had just
+added.
 
 This holds under **squash** too, which is how `main` receives every PR. The merge
 collapses the PR into a single commit, but GitHub keeps the list of the original

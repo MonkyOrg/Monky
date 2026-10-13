@@ -209,6 +209,11 @@ function readGit(args) {
   return execFileSync('git', ['--no-pager', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
+/** A client release note fragment, as added under release-notes/. */
+export function isClientNoteFile(file) {
+  return /^release-notes\/[^/]+\.json$/.test(file);
+}
+
 /**
  * Only fragments added since the previous release belong to this release.
  * Promotion uses the previous stable tag, so it includes all intervening betas.
@@ -219,7 +224,7 @@ export function getClientNotesInRange(prevTag, git = readGit, head = 'HEAD') {
     ? ['diff', '--no-renames', '--name-only', '-z', '--diff-filter=A', prevTag, head, '--', 'release-notes']
     : ['ls-tree', '-r', '--name-only', '-z', head, '--', 'release-notes'];
   const files = git(args).split('\0')
-    .filter((file) => /^release-notes\/[^/]+\.json$/.test(file))
+    .filter(isClientNoteFile)
     .sort();
   return files.map((file) => {
     let fragment;

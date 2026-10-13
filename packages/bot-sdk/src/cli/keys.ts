@@ -49,6 +49,16 @@ export function loadBotKeys(botDir: string): KeyPair {
   return { publicKeyHex, privateKeyPem };
 }
 
+/** Public key of an existing identity, without creating one; undefined when it is missing or invalid. */
+export function readBotPublicKey(botDir: string): string | undefined {
+  try {
+    const publicKeyHex = fs.readFileSync(keyPaths(botDir).publicKeyFile, 'utf8').trim();
+    return isHexPublicKey(publicKeyHex) ? publicKeyHex : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function loadOrCreateBotKeys(botDir: string): KeyPair {
   const paths = keyPaths(botDir);
   const hasPublic = fs.existsSync(paths.publicKeyFile);

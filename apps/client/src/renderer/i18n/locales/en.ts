@@ -1,5 +1,6 @@
 import type { TranslationMap } from '../index';
 import { communityEn } from './community';
+import { serverAuditEn } from './serverAudit';
 import { messageSearchEn } from '../messageSearch';
 
 /**
@@ -94,6 +95,7 @@ export const en: TranslationMap = {
   'poll.moveImageForward': 'Move image forward',
   'poll.imageUploadFailed': 'Could not upload the image.',
   ...communityEn,
+  ...serverAuditEn,
   ...messageSearchEn,
   'categories.category': 'Category',
   'categories.create': 'Create category',
@@ -362,6 +364,14 @@ export const en: TranslationMap = {
   'invite.tipLan': '<b>Local Network (Wi-Fi / Cable):</b> Use this address for other computers on the same home network or Wi-Fi.',
   'invite.tipLoopback': '<b>Localhost:</b> This address only works on the same computer where the server is running.',
   'invite.tipCustom': '<b>Custom address:</b> Make sure the host and port <b>{port}</b> are reachable by your friends.',
+  'invite.cardReceived': "You've been invited to join a server",
+  'invite.cardSent': 'You sent an invite to join a server',
+  'invite.cardEventReceived': "You've been invited to an event",
+  'invite.cardEventSent': 'You sent an invite to an event',
+  'invite.cardCompose': 'Server invitation',
+  'invite.cardComposeEvent': 'Event invitation',
+  'invite.cardJoin': 'Join',
+  'invite.cardJoinLabel': 'Join the server {name}',
 
   // ── Server monitor (ServerMonitorModal.ts) ───────────────────────────────
   'serverMonitor.title': 'Server Monitor',
@@ -1746,6 +1756,7 @@ export const en: TranslationMap = {
   'localExecution.operation.youtube.resolve': 'Look up media',
   'localExecution.operation.youtube.preview': 'Prepare preview',
   'localExecution.operation.youtube.stream': 'Stream audio',
+  'localExecution.operation.youtube.playlist': 'Read playlist',
   'localExecution.phase.consent': 'Awaiting authorization',
   'localExecution.phase.installing': 'Preparing tools',
   'localExecution.phase.running': 'Running',
@@ -2078,6 +2089,11 @@ export const en: TranslationMap = {
   'tutorial.stepOf': 'Step {current} of {total}',
   'tutorial.tip': 'Tip',
   'tutorial.copyCommand': 'Copy command',
+  'tutorial.aiSkillTitle': 'Using AI?',
+  'tutorial.aiSkillDesc': 'Download this skill and let your AI do the work for you.',
+  'tutorial.aiSkillAction': 'Download skill',
+  'tutorial.aiSkillSaved': 'Skill saved! Upload the .zip to your AI, or extract it into your agent\'s skills folder.',
+  'tutorial.aiSkillFailed': 'Could not save the skill.',
   'tutorial.shotCreateAlt': 'Monky Create my server form',
   'tutorial.shotJoinAlt': 'Monky Join a server form',
   'tutorial.shotIpconfigAlt': 'Windows ipconfig output with the IPv4 Address highlighted',

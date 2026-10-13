@@ -174,6 +174,7 @@ export class BotChatView {
   private autocompleteRequests = new Map<string, AutocompleteRequest>();
   private autocompleteState: AutocompleteState | null = null;
   private autocompletePaged = false;
+  private queuedAutocompleteEnter: { fieldName: string; query: string; userGesture: boolean } | null = null;
   private composing = false;
   private deferredRender = false;
   private submitGesture = false;
@@ -753,6 +754,7 @@ export class BotChatView {
     this.autocompleteField = null;
     this.autocompleteState = null;
     this.autocompletePaged = false;
+    this.queuedAutocompleteEnter = null;
     this.parameterMenu = null;
     this.menuChoices = [];
     audioPreviewService.release(this.composer);
@@ -863,6 +865,7 @@ export class BotChatView {
         event.preventDefault();
         if (this.menuChoices[menu.activeIndex]) this.selectParameterMenuOption(menu.activeIndex, event.isTrusted);
         else if (event.key === 'Enter' && menu.kind === 'autocomplete') {
+          if (this.queueAutocompleteEnter(menu.fieldName, event.isTrusted)) return true;
           const submit = this.composer.querySelector<HTMLButtonElement>('.bot-command-run');
           if (submit && !submit.disabled) {
             this.closeParameterMenu();
@@ -892,6 +895,18 @@ export class BotChatView {
       }
     }
     return false;
+  }
+
+  /** Enter while results load confirms the first one on arrival, as if pressed after it rendered. */
+  private queueAutocompleteEnter(fieldName: string, userGesture: boolean): boolean {
+    const state = this.autocompleteState;
+    const draft = this.store.getCommandDraft(this.channelId);
+    // Saving a file requires a choice the person has actually seen.
+    if (!draft || draft.command.downloadsSound || this.autocompleteField !== fieldName ||
+        (state?.status !== 'loading' && state?.status !== 'preparing')) return false;
+    this.queuedAutocompleteEnter = { fieldName, query: state.query, userGesture };
+    this.autocomplete.flush();
+    return true;
   }
 
   private openAutocomplete(name: string): void {
@@ -1040,6 +1055,17 @@ export class BotChatView {
     const draft = this.store.getCommandDraft(this.channelId);
     if (!fieldName || !draft || !this.isCurrent() || this.composing || draft.pending || this.voiceError(draft.command) ||
         (draft.autocomplete[fieldName]?.query ?? '') !== state.query) return;
+    const queued = this.queuedAutocompleteEnter;
+    if (queued && (queued.fieldName !== fieldName || queued.query !== state.query)) this.queuedAutocompleteEnter = null;
+    else if (queued && state.status !== 'loading' && state.status !== 'preparing') {
+      this.queuedAutocompleteEnter = null;
+      if (state.choices.length && !draft.command.downloadsSound) {
+        this.parameterMenu = { kind: 'autocomplete', fieldName, activeIndex: 0 };
+        this.menuChoices = state.choices;
+        this.selectParameterMenuOption(0, queued.userGesture);
+        return;
+      }
+    }
     const previousCount = this.menuChoices.length;
     const continuing = this.autocompleteState?.query === state.query &&
       state.choices.length >= previousCount && this.menuChoices.every((choice, index) => choice === state.choices[index]) &&
@@ -1166,6 +1192,7 @@ export class BotChatView {
     if (event.target instanceof HTMLInputElement && event.target.dataset.botAutocomplete) {
       // Edits arrive via input; replacing this field can emit a stale change on blur.
       if (event.type === 'change') return;
+      this.queuedAutocompleteEnter = null;
       const name = event.target.dataset.botAutocomplete;
       if (event instanceof InputEvent && event.isComposing) {
         this.composing = true;

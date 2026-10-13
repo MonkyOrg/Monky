@@ -14,12 +14,24 @@ O navegador pode pedir sua confirmação. Em execução de desenvolvimento ou
 portátil, cole o link no aplicativo; o teste local não registra um protocolo
 global no seu sistema.
 
-O link curto usa a própria página inicial, no formato
-`https://monkyorg.github.io/Monky/#~...`; a abertura direta usa
+O link usa a página de convite, no formato
+`https://monkyorg.github.io/Monky/convite/#~...` (ou `/Monky/en/convite/`
+quando o aplicativo está em inglês); a abertura direta usa
 `monky://#~...`. O trecho após `#~` contém os dados completos em formato
 binário, com compressão sem perda quando ela reduzir o tamanho. Não há
 encurtador, código cadastrado ou serviço central para resolver o convite:
-o aplicativo lê o próprio link, mesmo sem carregar o site.
+o aplicativo lê o próprio link, mesmo sem carregar o site. Links gerados antes
+da página de convite, no formato `https://monkyorg.github.io/Monky/#~...`,
+continuam funcionando. Versões anteriores do aplicativo não reconhecem o
+formato novo ao colar o link; nelas, abra o convite pelo navegador ou atualize
+o Monky.
+
+Ao compartilhar o link no WhatsApp, Discord ou Telegram, a prévia mostra um
+card de convite do Monky. Ele é igual para todo servidor: esses aplicativos não
+recebem o trecho após `#`, então não sabem qual é o servidor. Já no chat do
+Monky, em canais e mensagens diretas, o próprio aplicativo lê o link e mostra um
+card com o nome e o endereço do servidor e o botão **Entrar**. O botão e o
+próprio link abrem a mesma confirmação abaixo, sem passar pelo navegador.
 
 Confira nome, endereço e porta no modal e clique em **Entrar**. O Monky usa
 automaticamente o nome da identidade atual, sem pedir que você o redigite.

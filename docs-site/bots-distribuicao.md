@@ -6,6 +6,8 @@ não recebe estes comandos automaticamente.
 
 Complete [Seu primeiro bot](/bots-desenvolvimento) antes de empacotar.
 **Referência:** [BotPackageDefinition](/bots-api-ferramentas#botpackagedefinition),
+[BotRequirements](/bots-api-ferramentas#botrequirements),
+[handleReachabilityProbe](/bots-api-ferramentas#handlereachabilityprobe),
 [BotUpdateSource](/bots-api-ferramentas#botupdatesource) e
 [buildBotPackage](/bots-api-ferramentas#buildbotpackage).
 
@@ -64,10 +66,10 @@ meu-bot status
 meu-bot logs
 ```
 
-O CLI oferece `setup`, `start`, `stop`, `restart`, `status`, `logs` e `config`,
-com um processo PM2 e configuração isolados por nome do bot. `start --foreground`
-roda sem PM2 para desenvolvimento. `npm run cli -- setup` usa o mesmo CLI no
-checkout local, depois de compilar.
+O CLI oferece `setup`, `start`, `stop`, `restart`, `status`, `logs`, `config`,
+`requirements`, `doctor` e `consent`, com um processo PM2 e configuração isolados
+por nome do bot. `start --foreground` roda sem PM2 para desenvolvimento.
+`npm run cli -- setup` usa o mesmo CLI no checkout local, depois de compilar.
 
 Execute `meu-bot` sem comando em um terminal para abrir o **menu por setas**,
 ou use `meu-bot menu`. Enter confirma e Esc cancela; o item **Sair do menu**
@@ -97,8 +99,10 @@ ou `language pt-BR`. `--version` nem sequer lê esse arquivo.
 O CLI passa o idioma efetivo ao processo do bot nessa mesma variável, sem mudar
 identificadores como `setup`, `start`, `mode` ou nomes de variáveis.
 
-O setup segue o fluxo do MonkyBot: modo, diretório de trabalho, dados do modo
-e nome do bot. Em bots que suportam os dois modos, **instalação por URL é o padrão**
+O setup segue o fluxo do MonkyBot: modo, diretório de trabalho, dados do modo,
+[portas declaradas pelo bot](#escolher-as-portas) e nome do bot. No fim, mostra o [aviso de acessos](#consentimento-de-quem-hospeda)
+e pede autorização antes de salvar; recusar não altera nada. Em seguida lista
+as [portas e configurações](#portas-configuracoes-e-verificacao) do bot. Em bots que suportam os dois modos, **instalação por URL é o padrão**
 e a conexão manual é apresentada como **avançada**. Refazer o setup mantém o modo
 anterior por padrão. No modo manual, pede servidor e **token do bot**. Aceita `IP:porta`
 (normalizado para `ws://`), `ws://...` e `wss://...`; valores inválidos são
@@ -122,17 +126,30 @@ o bot. `localhost` só atende servidores na mesma máquina. Declare ambos os mod
 em `monkyBot.modes` para oferecer a escolha.
 
 Cada bot na mesma máquina precisa de uma **porta exclusiva**, por exemplo `7780`
-e `7781`. `/manifest` é um endpoint de cada processo, não um arquivo compartilhado.
+e `7781`, e isso vale também para as portas declaradas por cada bot.
+`/manifest` é um endpoint de cada processo, não um arquivo compartilhado.
 O CLI verifica se consegue usar a porta local antes de salvar; se outro bot ou
 serviço já a ocupa, o setup explica o conflito e pede outra, sem trocar a porta
 automaticamente. O setup não interativo e alterações de porta por `config set`
 falham sem sobrescrever a configuração anterior.
 
-Se o próprio bot estiver usando a porta, execute `meu-bot stop` antes de refazer
+Se a porta estiver em uso pelo próprio bot em execução, o setup confirma a
+identidade com o mesmo desafio assinado do `doctor`, aceita a porta e lembra de
+rodar `meu-bot restart` no fim. Quando não dá para confirmar (porta UDP ou
+listener que não encaminha o desafio), execute `meu-bot stop` antes de refazer
 o setup; a configuração e as chaves são preservadas. `start` também verifica a
 porta antes de iniciar um processo parado; `restart` libera apenas seu processo
 gerenciado antes da checagem, inclusive após atualizações. Essa checagem local
 não verifica regras de firewall e não reserva a porta até o próximo `start`.
+
+Depois de `start` e `restart`, o CLI só anuncia sucesso quando o PM2 confirma o
+processo online e, no modo Marketplace, quando `/manifest` responde nesta
+máquina com um manifest válido, a URL de registro do host e da porta
+configurados e a chave pública do bot (cabeçalho `X-Monky-Bot-Public-Key`,
+enviado por `bot.serve()`). Só então o estado do PM2 é salvo. Se `start`
+encontrar o processo online com o manifest quebrado, recria apenas o processo
+desse perfil. A verificação acontece nesta máquina: firewall e NAT só se
+comprovam de fora, com `meu-bot doctor`.
 
 Configuração e identidade ficam em `~/.<cliName>`, fora do pacote;
 `MONKY_BOT_CLI_HOME` muda a pasta-base, preservando o subdiretório de cada bot.
@@ -151,6 +168,211 @@ o runner fornece `MONKY_SERVE_PORT`, `MONKY_SERVE_PUBLIC_HOST` e
 inteira, pois contém chaves e tokens dos servidores vinculados.
 `validateBotServerUrl`, `validateBotServePort` e `validateBotPublicHost`, exportados
 pelo SDK, permitem à entrada reutilizar as validações do CLI.
+
+## Portas, configurações e verificação {#portas-configuracoes-e-verificacao}
+
+### Declarar o que o bot precisa
+
+Declare em `monkyBot.requirements` as portas de entrada e as configurações que o
+bot lê do ambiente. A porta do manifest do modo Marketplace já é conhecida pelo
+SDK e não deve ser declarada. Exemplo com uma porta de jogos aberta sob demanda
+e uma chave de API:
+
+```json
+{
+  "monkyBot": {
+    "requirements": {
+      "notice": {
+        "pt-BR": "Busca músicas no YouTube.",
+        "en": "Searches music on YouTube."
+      },
+      "ports": [{
+        "id": "games",
+        "description": { "pt-BR": "Assets e multiplayer dos jogos", "en": "Game assets and multiplayer" },
+        "protocol": "tcp",
+        "portEnv": "MEU_BOT_GAMES_PORT",
+        "defaultPort": 7781,
+        "hostEnv": "MEU_BOT_GAMES_HOST",
+        "publicUrlEnv": "MEU_BOT_GAMES_PUBLIC_URL",
+        "exposure": "public",
+        "when": "on-demand"
+      }],
+      "settings": [{
+        "env": "MEU_BOT_API_KEY",
+        "description": { "pt-BR": "Chave da API de músicas", "en": "Music API key" },
+        "required": true,
+        "secret": true
+      }]
+    }
+  }
+}
+```
+
+| Campo | Significado |
+|---|---|
+| `ports[].id` | Nome curto (`a-z`, `0-9`, `-`); `manifest` é reservado |
+| `protocol` | `tcp` (padrão) ou `udp` |
+| `portEnv` / `defaultPort` | Variável que o bot lê para a porta e o valor usado sem ela |
+| `hostEnv` | Variável do endereço de escuta (padrão `0.0.0.0`) |
+| `publicUrlEnv` | Variável com a origem pública `http(s)://host[:porta]`, por exemplo atrás de um proxy HTTPS. No modo Marketplace, sem ela, o CLI usa o host público configurado e a porta |
+| `exposure` | `public` (padrão): outras máquinas precisam acessar; `local`: só esta máquina usa |
+| `when` | `always` (padrão) ou `on-demand`, quando o bot só abre o listener ao usar o recurso |
+| `modes` | Modos em que a porta ou configuração se aplica; padrão: todos de `monkyBot.modes` |
+| `settings[].required` / `secret` | Obrigatória para operar / valor nunca exibido nem aceito como argumento |
+| `notice` | Acessos próprios do bot (serviços externos, ferramentas), exibidos no consentimento |
+
+Os textos têm `pt-BR` e `en`. Há no máximo 8 portas e 32 configurações; cada
+variável aparece uma vez, e nomes usados pelo CLI ou pelo sistema
+(`MONKY_SERVE_*`, `MONKY_BOT_*`, `MONKY_HOST_CONSENT`, `PATH`, `NODE_OPTIONS`,
+`PM2_*`, entre outros) são recusados. O `build` publica a declaração no pacote.
+
+### O que o operador abre e configura
+
+`meu-bot requirements` lista as portas a liberar no firewall ou roteador e as
+configurações, mesmo antes do setup. O mesmo resumo aparece no fim do `setup` e
+no `status`. As configurações declaradas podem vir do ambiente do processo ou
+ser salvas no perfil:
+
+```text
+meu-bot config env
+meu-bot config env set MEU_BOT_GAMES_PORT 7790
+meu-bot config env set MEU_BOT_GAMES_PUBLIC_URL https://games.example.com
+meu-bot config env set MEU_BOT_API_KEY
+meu-bot config env set MEU_BOT_API_KEY --from-env OUTRA_VARIAVEL
+meu-bot config env unset MEU_BOT_API_KEY
+```
+
+Segredos são pedidos com entrada oculta (ou `--from-env`) e nunca passados como
+argumento. Os valores ficam em `~/.<cliName>/environment.json` (`600`/`700` no
+Linux), fora do pacote, e são validados pelo tipo: porta, endereço de escuta ou
+URL pública sem caminho. **O ambiente do processo prevalece**: o runner só
+injeta o valor salvo quando a variável não existe no ambiente, o que mantém
+Docker, systemd e compose funcionando. O `doctor` avisa quando os dois valores
+diferem e diz qual está em uso. No reinício feito pela atualização, o CLI
+descarta as cópias dessas variáveis guardadas no ambiente do atualizador e
+repassa os valores com que o processo do bot estava rodando. Reinicie o bot
+depois de mudar uma configuração.
+
+### Escolher as portas {#escolher-as-portas}
+
+O setup pergunta cada porta declarada que se aplica ao modo escolhido, sugerindo
+o valor salvo no perfil ou o `defaultPort`, e testa a resposta como faz com a
+porta do manifest: TCP ou UDP, conforme o declarado, no endereço de `hostEnv`
+(padrão `0.0.0.0`). Uma porta que já pertence a outra porta do próprio bot
+(manifest ou outra declarada, com o mesmo protocolo) ou que está ocupada por
+outro processo é pedida de novo, sem refazer as outras respostas; nada é salvo
+sem uma porta válida. Só portas diferentes do padrão ficam em `environment.json`:
+escolher o padrão remove o valor salvo. Se a declaração tiver `publicUrlEnv`, o
+setup lembra que a URL pública não muda junto com a porta.
+
+Quando a variável da porta vem do ambiente, o setup mostra o valor e avisa sobre
+conflitos, mas não pergunta nem salva nada, porque o ambiente prevalece; corrija
+o ambiente do serviço. No setup não interativo, informe as portas com
+`--port <id>=<porta>`, uma vez para cada porta:
+
+```text
+meu-bot setup --non-interactive --mode marketplace --public-host bot.example.com --serve-port 7780 --port games=7790
+```
+
+As portas informadas, inclusive a do manifest, precisam estar livres e não
+colidir com outra porta do bot; caso contrário, nada é salvo. As demais (do
+perfil, do padrão ou do ambiente) só geram avisos, para não interromper uma
+automação que já funcionava. `--port` é recusado quando a variável vem do
+ambiente.
+
+`meu-bot config env set` faz o mesmo teste quando a variável é a porta de uma
+declaração do modo atual, e `config set servePort` recusa uma porta já usada por
+outra porta do bot. O teste só enxerga portas abertas no momento: a porta sob
+demanda de **outro bot** parado, ou que ainda não abriu o recurso, não aparece.
+Confira o `requirements` de cada bot da máquina antes de escolher.
+
+### Consentimento de quem hospeda {#consentimento-de-quem-hospeda}
+
+Antes de rodar o bot, quem hospeda confirma os acessos: o processo usa as
+permissões da conta do sistema (sem sandbox), lê o próprio programa, grava a
+identidade e os vínculos em `<botDir>/.keys`, conecta-se a servidores Monky, abre
+as portas declaradas e é gerenciado pelo PM2 do perfil. O aviso inclui as
+configurações e o `notice` do bot. Os administradores de cada servidor continuam
+decidindo quais capacidades o bot pode usar.
+
+A confirmação vale para o diretório de trabalho e para uma **impressão digital**
+calculada a partir das portas, configurações, `notice` e modos declarados.
+`start`, `start --foreground`, `restart` e o runner recusam iniciar sem ela.
+
+```text
+meu-bot consent
+meu-bot consent --accept <impressão digital>
+meu-bot consent --revoke
+```
+
+O setup interativo pede a confirmação; o `--non-interactive` deixa o perfil
+pendente e mostra a impressão digital. Em automação, leia os acessos e defina
+`MONKY_HOST_CONSENT=<impressão digital>` no ambiente do serviço. Perfis criados
+antes do consentimento existir herdam os acessos atuais e continuam rodando; o
+`status` e o `doctor` lembram de revisá-los. Se uma versão nova mudar os acessos
+declarados, `update` mostra o novo aviso e pergunta antes de instalar; o
+`update --yes` e o auto-update pulam essa versão e mantêm o bot atual rodando
+até a aprovação (ou até `MONKY_HOST_CONSENT` corresponder à nova impressão
+digital). Mudar `botDir` também exige nova confirmação.
+
+### Verificar se o bot pode operar (`doctor`)
+
+`meu-bot doctor` (também no menu) diz o que está pronto e o que falta, com
+`[OK]`, `[AVISO]`, `[FALHA]` ou `[PULADO]`, e termina com erro se houver alguma
+falha. Ele confere:
+
+- Node.js, entrada compilada, perfil, identidade em `.keys` e consentimento;
+- o processo no PM2 do perfil e um processo homônimo no PM2 padrão da conta
+  (por exemplo, de um CLI próprio anterior), que pode ocupar as portas;
+- token do modo manual e configurações obrigatórias, no ambiente do processo em
+  execução ou deste terminal;
+- cada porta: se coincide com outra porta do próprio bot, se está livre ou em
+  uso, e, quando em uso, se responde **como este
+  bot** a um desafio assinado com a chave Ed25519; no modo Marketplace, também a
+  validade do manifest;
+- a URL pública a partir desta máquina — roteadores sem *hairpin NAT* podem
+  falhar aqui sem que haja problema;
+- com o servidor Monky: alcance da URL, token, vínculo da chave e compatibilidade
+  de protocolo, e um **teste externo** das portas públicas TCP feito pelo próprio
+  servidor.
+
+No modo manual, o teste usa o servidor e o token configurados. No Marketplace,
+usa até três servidores salvos em `.keys/registrations.json`; sem nenhum
+vínculo, o teste externo é pulado. Ele usa uma conexão separada, sem
+autenticação de sessão, então não derruba o bot em execução nem vincula a chave
+antes do primeiro `start`. Portas livres recebem, durante o teste, um
+respondedor temporário do próprio `doctor`; por isso dá para testar o firewall
+com o bot parado ou antes de alguém usar um recurso sob demanda. Nesse intervalo
+(alguns segundos), a porta fica ocupada. `meu-bot doctor --local` pula toda
+comunicação com servidores.
+
+O teste externo diz se **aquele servidor** consegue acessar a porta pela rede
+dele; outras redes podem ter regras diferentes. Para não servir de scanner, o
+servidor só aceita token válido, no máximo 8 alvos, portas 80, 443 e
+1024–65535, e endereços públicos ou o próprio IP de origem do pedido. Ele resolve
+o DNS uma vez, não segue redirecionamentos e só responde "acessível" quando o
+endpoint assina um desafio novo com a chave do bot; porta fechada, filtrada ou
+outro serviço aparecem igualmente como "não acessível", sempre após o mesmo
+intervalo e com limites por IP, por bot e de concorrência. Servidores
+anteriores ao protocolo 37 não oferecem o teste, e o `doctor` pede para
+atualizá-los.
+
+Listeners próprios do bot, como o servidor de um miniapp, precisam encaminhar o
+desafio para serem verificados enquanto estão ativos:
+
+```ts
+import http from 'node:http';
+import { handleReachabilityProbe } from '@monky/bot-sdk';
+
+const server = http.createServer((request, response) => {
+  if (handleReachabilityProbe(request, response)) return;
+  // ...rotas do bot
+});
+```
+
+`handleReachabilityProbe` atende somente `GET /.well-known/monky-bot-reachability`
+e assina com a identidade que o runner do CLI registra no processo; fora do CLI,
+responde 404. `bot.serve()` já faz isso na porta do manifest.
 
 ## Atualizações opcionais do CLI
 

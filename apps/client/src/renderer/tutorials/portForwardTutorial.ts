@@ -4,6 +4,7 @@ export const portForwardTutorial: TutorialDefinition = {
   id: 'port-forward',
   name: 'tutorial.portForward.name',
   icon: 'router',
+  skill: 'port-forward',
   steps: [
     {
       title: 'tutorial.portForward.step1.title',

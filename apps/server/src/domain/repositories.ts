@@ -32,6 +32,29 @@ export interface IServerRepository {
   updateServer(server: Partial<ServerRecord>): Promise<void>;
 }
 
+export interface ServerAuditQuery {
+  before?: number;
+  after?: number;
+  category?: string;
+  /** Already normalized like the stored search text. */
+  search?: string;
+  /** Entries created before this instant are past retention and never returned. */
+  createdSince: number;
+  limit: number;
+}
+
+/** Synchronous so recording never yields between an action and its audit entry. */
+export interface IServerAuditRepository {
+  append(entry: Omit<import('@monky/shared').ServerAuditEntry, 'id'>, category: string, searchText: string): void;
+  /** Newest first, at most `limit` entries. */
+  list(query: ServerAuditQuery): import('@monky/shared').ServerAuditEntry[];
+  /**
+   * Deletes entries older than `createdBefore`, then keeps only the newest
+   * `keepActivity` of `activityActions` and the newest `keepOther` of the rest.
+   */
+  prune(createdBefore: number, activityActions: readonly string[], keepActivity: number, keepOther: number): void;
+}
+
 export interface IUserRepository {
   findById(id: string): Promise<UserRecord | null>;
   findByClientId(clientId: string): Promise<UserRecord | null>;

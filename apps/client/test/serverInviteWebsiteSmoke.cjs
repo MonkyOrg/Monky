@@ -8,7 +8,7 @@ const clientRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(clientRoot, '..', '..');
 
 if (!process.versions.electron) {
-  test('invitation website provides localized app/download/copy fallbacks without transmitting the payload', {
+  test('invitation website provides preview cards and localized app/download/copy fallbacks without transmitting the payload', {
     timeout: 120_000,
   }, async () => {
     const profile = path.join(clientRoot, 'dist-test', `invite-website-${process.pid}`);
@@ -35,7 +35,7 @@ if (!process.versions.electron) {
     }
   });
 } else {
-  const { app, BrowserWindow } = require('electron');
+  const { app, BrowserWindow, nativeImage } = require('electron');
   const { createServerInviteLink, parseServerInviteLink } = require('@monky/shared');
   app.setPath('userData', process.env.MONKY_INVITE_WEBSITE_PROFILE);
   app.on('window-all-closed', () => {});
@@ -64,7 +64,7 @@ if (!process.versions.electron) {
       }
       const contentType = {
         '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css',
-        '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2',
+        '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.woff2': 'font/woff2',
       }[path.extname(file)] ?? 'application/octet-stream';
       response.writeHead(200, { 'Content-Type': contentType });
       fs.createReadStream(file).pipe(response);
@@ -104,14 +104,40 @@ if (!process.versions.electron) {
       throw new Error('Invitation page did not reach the expected state');
     })()`);
     const invite = { v: 1, host: 'invite-fixture.test', port: 4321, name: '\ufeffSala <em> & teste', password: '\ufefffixture-only-password', eventId: 'calendar-event-123' };
-    const link = createServerInviteLink(invite);
-    for (const language of ['pt-BR', 'en']) {
-      const prefix = language === 'en' ? '/Monky/en/' : '/Monky/';
-      await window.loadURL(`${origin}${prefix}${new URL(link).hash}`).catch(error => {
+    const hash = new URL(createServerInviteLink(invite)).hash;
+    const meta = (html, key) => html.match(new RegExp(`<meta (?:property|name)="${key}" content="([^"]*)"`))?.[1];
+    const open = async url => {
+      await window.loadURL(url).catch(error => {
         if (error.code !== 'ERR_ABORTED' || !error.url?.startsWith('monky:')) throw error;
       });
       await wait(`document.querySelector('.invite-actions button')`);
-      assert.ok(window.webContents.getURL().startsWith(origin + prefix), 'blocked native handoff leaves the web fallback visible');
+    };
+    for (const language of ['pt-BR', 'en']) {
+      const prefix = language === 'en' ? '/Monky/en/' : '/Monky/';
+      const invitePage = `${prefix}convite/`;
+      const link = createServerInviteLink(invite, language);
+      assert.equal(new URL(link).pathname, invitePage, 'links use the page whose card describes an invitation');
+
+      // What WhatsApp, Discord and Telegram read: the HTML without scripts, never the fragment.
+      const html = await (await fetch(origin + invitePage)).text();
+      const title = language === 'en' ? 'Invitation to a Monky server' : 'Convite para um servidor no Monky';
+      assert.equal(meta(html, 'og:title'), title);
+      assert.ok(html.includes(`<title>${title}</title>`), 'the tab and fallback previews use the invitation title');
+      assert.match(meta(html, 'og:description') ?? '', language === 'en' ? /invited to join a server on Monky/ : /convite para entrar em um servidor no Monky/);
+      assert.equal(meta(html, 'og:url'), `https://monkyorg.github.io${invitePage}`);
+      assert.equal(meta(html, 'twitter:card'), 'summary_large_image');
+      assert.equal(meta(html, 'og:image'), 'https://monkyorg.github.io/Monky/convite-og.jpg');
+      const imageResponse = await fetch(origin + new URL(meta(html, 'og:image')).pathname);
+      assert.equal(imageResponse.status, 200, 'the preview image is published with the site');
+      const image = Buffer.from(await imageResponse.arrayBuffer());
+      assert.ok(image.length < 300 * 1024, 'WhatsApp drops large preview images');
+      assert.deepEqual(nativeImage.createFromBuffer(image).getSize(),
+        { width: Number(meta(html, 'og:image:width')), height: Number(meta(html, 'og:image:height')) });
+      const home = await (await fetch(origin + prefix)).text();
+      assert.notEqual(meta(home, 'og:title'), title, 'sharing the documentation keeps the documentation card');
+
+      await open(`${origin}${invitePage}${hash}`);
+      assert.ok(window.webContents.getURL().startsWith(origin + invitePage), 'blocked native handoff leaves the web fallback visible');
       const page = await read(`({
         host: document.querySelector('[data-invite-host]').textContent,
         port: document.querySelector('[data-invite-port]').textContent,
@@ -140,7 +166,7 @@ if (!process.versions.electron) {
         writeText: async value => { window.inviteCopied = value; },
       } }); document.querySelector('.invite-actions button').click();`);
       await wait(`window.inviteCopied`);
-      assert.deepEqual(parseServerInviteLink(await read('window.inviteCopied')), { ok: true, invite });
+      assert.equal(await read('window.inviteCopied'), link, 'the copied link keeps the page and its language');
       await wait(`document.querySelector('.server-invite [role="status"]')`);
       await read(`navigator.clipboard.writeText = async () => { throw new Error('Fixture clipboard denial'); };
         document.querySelector('.invite-actions button').click();`);
@@ -148,32 +174,40 @@ if (!process.versions.electron) {
       await read(`window.location.hash = '~invalid-invitation';`);
       await wait(`document.querySelector('.server-invite [role="alert"]')`);
       assert.equal(await read(`!!document.querySelector('.invite-actions')`), false, 'malformed links never enable an app action');
+      const beforeEmpty = attempts.length;
+      await read(`window.location.hash = '';`);
+      await wait(`document.querySelector('.server-invite [role="alert"]') && !document.querySelector('.VPHero')`);
+      assert.equal(attempts.length, beforeEmpty, 'an invitation page without data neither shows the home nor relaunches');
+
+      // Links shared before the dedicated page pointed at the docs home.
+      await open(`${origin}${prefix}${hash}`);
+      assert.equal(await read(`document.querySelector('[data-invite-host]').textContent`), invite.host);
       const beforeHome = attempts.length;
       await read(`window.location.hash = '';`);
       await wait(`document.querySelector('.VPHero') && !document.querySelector('.server-invite')`);
       await read(`window.location.hash = 'ordinary-home-anchor';`);
       assert.equal(await read(`!!document.querySelector('.server-invite')`), false, 'normal home anchors are not treated as invitations');
       assert.equal(attempts.length, beforeHome, 'returning to the homepage does not relaunch a stale invitation');
-      await read(`window.location.hash = ${JSON.stringify(new URL(link).hash)};`);
+      await read(`window.location.hash = ${JSON.stringify(hash)};`);
       await wait(`document.querySelector('.invite-actions button')`);
       await read(`document.querySelector('.invite-actions a:last-child').click();`);
       await wait(`!document.querySelector('.server-invite') && location.pathname === ${JSON.stringify(prefix + 'download.html')}`);
       await read(`(() => {
         const anchor = document.createElement('a');
-        anchor.href = ${JSON.stringify(origin + prefix + new URL(link).hash)};
+        anchor.href = ${JSON.stringify(link)}.replace('https://monkyorg.github.io', location.origin);
         document.body.appendChild(anchor);
         anchor.click();
         anchor.remove();
       })();`);
-      await wait(`document.querySelector('.invite-actions button')`);
+      await wait(`document.querySelector('.invite-actions button') && location.pathname === ${JSON.stringify(invitePage)}`);
     }
     assert.ok(attempts.length >= 2, 'each valid page attempts to open the app before offering manual fallback');
     const handoffs = attempts.map(url => parseServerInviteLink(url)).filter(result => result.ok);
     assert.ok(handoffs.length >= 2, 'native handoff retains the fragment rather than only a scheme without connection data');
     for (const result of handoffs) assert.deepEqual(result.invite, invite, 'native handoff preserves every field');
-    assert.ok(requests.every(url => !url.includes('#') && !url.includes(invite.password) && !url.includes(new URL(link).hash.slice(1))),
+    assert.ok(requests.every(url => !url.includes('#') && !url.includes(invite.password) && !url.includes(hash.slice(1))),
       'no HTTP request contains the invitation or its password');
-    console.log('Invitation website: PT/EN, native handoff, real download targets, clipboard, validation and fragment privacy passed.');
+    console.log('Invitation website: PT/EN invitation cards, legacy home links, native handoff, real download targets, clipboard, validation and fragment privacy passed.');
     await finish(0);
   }).catch(async error => {
     console.error('Invitation website smoke failed', error);

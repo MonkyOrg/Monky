@@ -6,7 +6,9 @@ import {
   LOCAL_EXECUTION_PROTOCOL_LIMITS as limits,
   LOCAL_EXECUTION_RUNTIME_LIMITS,
   MessageType,
+  PROTOCOL_FEATURES,
   ProtocolErrorCode,
+  localOperationNegotiated,
   localSourceResultSchema,
   localTaskEventSchema,
   localTaskOfferSchema,
@@ -23,6 +25,7 @@ import {
 } from './application/services/BotLocalExecutionService';
 
 const URL = 'https://www.youtube.com/watch?v=abcdefghijk';
+const PLAYLIST_URL = 'https://www.youtube.com/playlist?list=PLabcdefghijklmnop';
 const TRACK = { id: 'abcdefghijk', title: 'Authored fixture', url: URL, duration: 1 };
 const SDP = 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=sctp-port:5000\r\n';
 
@@ -57,6 +60,7 @@ function fixture(t: TestContext) {
   const errors: { session: Session; code: ProtocolErrorCode; reason: string; requestId?: string }[] = [];
   const unexpected: unknown[] = [];
   const state = { allowed: true, declared: true, version: '0', unstable: false };
+  const legacy = new Set<Session>();
   const session = (isBot = false): Session => {
     const id = randomUUID();
     const result: Session = {
@@ -85,6 +89,7 @@ function fixture(t: TestContext) {
   };
   const transport: BotLocalExecutionTransport<Session> = {
     isCurrent: (value) => current.has(value),
+    negotiated: (value, operation) => localOperationNegotiated(operation, legacy.has(value) ? [] : PROTOCOL_FEATURES),
     accessVersion: () => state.unstable ? null : state.version,
     authorizeContext: async (owner, input) => {
       const scope = contexts.get(key(input));
@@ -152,16 +157,63 @@ function fixture(t: TestContext) {
       : offer.spec.operation === 'youtube.preview'
         ? { operation: offer.spec.operation, localPreviewId: randomUUID(), taskId: offer.taskId,
           requestId: offer.requestId, executorSessionId: offer.invokerSessionId }
-        : { operation: offer.spec.operation, track: TRACK },
+        : offer.spec.operation === 'youtube.playlist'
+          ? { operation: offer.spec.operation, title: 'Fixture list', total: 2, tracks: [TRACK], skipped: 1 }
+          : { operation: offer.spec.operation, track: TRACK },
   });
   const ready = (offer: LocalTaskOffer, endpoint: Session) => service.handle(endpoint, MessageType.BOT_LOCAL_TASK_EVENT, {
     state: 'ready', taskId: offer.taskId, mediaGeneration: offer.media?.generation,
   });
   return {
-    service, transport, current, bindings, voices, contexts, state, sent, errors, unexpected, session, origin, bot,
+    service, transport, current, bindings, voices, contexts, state, legacy, sent, errors, unexpected, session, origin, bot,
     context, request, retain, events, negotiate, accept, ready,
   };
 }
+
+test('local playlists are metadata reads refused at admission for peers that did not negotiate them', async (t) => {
+  const f = fixture(t);
+  const spec: LocalTaskSpec = { operation: 'youtube.playlist', url: PLAYLIST_URL, limit: 2 };
+  for (const kind of ['invocation', 'autocomplete'] as const) {
+    const offer = await f.request(f.context(kind).input, spec);
+    assert.equal(offer.media, undefined);
+    assert.equal(offer.voiceChannelId, undefined);
+    assert.deepEqual(offer.spec, spec);
+    assert.ok(f.sent.some((entry) => entry.session === f.origin && entry.message.type === MessageType.BOT_LOCAL_TASK_OFFER &&
+      localTaskOfferSchema.parse(entry.message.payload).taskId === offer.taskId));
+    await f.accept(offer);
+    assert.deepEqual(f.events(offer).map((event) => event.state), ['accepted', 'completed']);
+    assert.deepEqual(f.events(offer)[0], { state: 'accepted', taskId: offer.taskId,
+      result: { operation: 'youtube.playlist', title: 'Fixture list', total: 2, tracks: [TRACK], skipped: 1 } });
+  }
+  const oversized = await f.request(f.context().input, { ...spec, limit: 1 });
+  await f.accept(oversized);
+  assert.deepEqual(f.events(oversized), [{ state: 'failed', taskId: oversized.taskId, reason: 'invalid_request' }]);
+  const source = await f.retain();
+  const before = f.errors.length;
+  await f.service.handle(f.bot, MessageType.BOT_LOCAL_TASK_REQUEST, {
+    context: { kind: 'source', sourceContextId: source.sourceContextId }, spec,
+  }, randomUUID());
+  assert.equal(f.errors.at(-1)?.code, ProtocolErrorCode.BAD_REQUEST, 'A retained video never authorizes a playlist read');
+  assert.equal(f.errors.length, before + 1);
+  const offers = () => f.sent.filter((entry) => entry.message.type === MessageType.BOT_LOCAL_TASK_OFFER).length;
+  const sentOffers = offers();
+  f.legacy.add(f.origin);
+  const requestId = randomUUID();
+  await f.service.handle(f.bot, MessageType.BOT_LOCAL_TASK_REQUEST, { context: f.context().input, spec }, requestId);
+  assert.deepEqual(f.errors.at(-1), { session: f.bot, code: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE,
+    reason: 'executor_unavailable', requestId });
+  assert.equal(offers(), sentOffers, 'An outdated executor never receives an offer it would silently drop');
+  const resolve = await f.request(f.context().input, { operation: 'youtube.resolve', url: URL });
+  assert.equal(resolve.spec.operation, 'youtube.resolve', 'Baseline operations stay available to pinned clients');
+  f.legacy.delete(f.origin);
+  f.legacy.add(f.bot);
+  const botRequestId = randomUUID();
+  await f.service.handle(f.bot, MessageType.BOT_LOCAL_TASK_REQUEST, { context: f.context().input, spec }, botRequestId);
+  assert.deepEqual(f.errors.at(-1), { session: f.bot, code: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE,
+    reason: 'invalid_request', requestId: botRequestId });
+  assert.equal(f.service.counts.tasks, 1, 'Only the admitted baseline resolve remains pending');
+  assert.deepEqual(f.unexpected, []);
+});
 
 test('local execution forwards optional canonical source failures only from the exact executor without inventing details', async (t) => {
   const f = fixture(t);

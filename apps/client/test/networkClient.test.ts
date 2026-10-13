@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
 import { MessageType, PROTOCOL_VERSION, MIN_CLIENT_PROTOCOL, type ProtocolMessage, type ServerShutdownPayload } from '@monky/shared';
-import { NetworkClient, type ConnectionStatus } from '../src/renderer/core/NetworkClient';
+import { NetworkClient, type ConnectionStatus, type NetworkDisconnectedPayload } from '../src/renderer/core/NetworkClient';
 import { appEvents } from '../src/renderer/core/EventBus';
 import { setForegroundContext, setSessionEventRouter } from '../src/renderer/core/sessionRouting';
 
@@ -392,6 +392,29 @@ test('leaving from a reconnect notification cannot schedule a timer after teardo
   assert.equal(f.client.getStatus(), 'DISCONNECTED');
   assert.equal(f.sockets.length, 1);
   assert.equal(f.client['reconnectTimeout'], null);
+});
+
+test('a disconnection tells whether the server or this client ended the session', async context => {
+  const cases: Array<[string, (f: ReturnType<typeof fixture>) => void, NetworkDisconnectedPayload['cause']]> = [
+    ['restart notice', f => f.lastSocket().receive({ type: MessageType.SERVER_SHUTDOWN, payload: { reasonCode: 'stopped' } }), 'server'],
+    ['update notice', f => f.lastSocket().receive({ type: MessageType.SERVER_SHUTDOWN, payload: { reasonCode: 'update' } }), 'server'],
+    ['malformed notice', f => f.lastSocket().receive({ type: MessageType.SERVER_SHUTDOWN, payload: { reasonCode: 'unknown' } }), 'server'],
+    ['explicit leave', f => f.client.disconnect(), 'local'],
+    ['session disposal', f => f.client.dispose(), 'local'],
+  ];
+  for (const [label, end, cause] of cases) {
+    await context.test(label, async nested => {
+      const f = fixture(nested);
+      await f.connected();
+      const departures: NetworkDisconnectedPayload[] = [];
+      const off = appEvents.on<NetworkDisconnectedPayload>('network.disconnected', payload => departures.push(payload));
+      nested.after(off);
+      end(f);
+      f.client.disconnect();
+      assert.deepEqual(departures, [{ cause }]);
+      assert.equal(f.client.getStatus(), 'DISCONNECTED');
+    });
+  }
 });
 
 test('a background server update notice reaches global UI without reconnecting or losing its identity', async context => {
