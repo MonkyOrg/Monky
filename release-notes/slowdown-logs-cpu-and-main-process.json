@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Os logs de lentidão ficaram mais certeiros: o aviso de CPU alta agora funciona em computadores com muitos núcleos, e os travamentos do processo principal, que atrasam cliques sem deixar rastro, passam a ser registrados.",
+  "en": "Slowdown logs are more accurate: the high-CPU warning now works on computers with many cores, and main-process stalls, which delay clicks without leaving a trace, are now recorded."
+}

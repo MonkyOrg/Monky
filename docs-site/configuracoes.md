@@ -786,13 +786,23 @@ responder), mantenha **Gravar logs** ativado, anote o horário e exporte os logs
 antes de reiniciar o aplicativo.
 
 - `UI` / `Slow rendering detected`: no máximo uma linha por minuto com eventos
-  lentos (200 ms ou mais) e quadros longos. `inputDelayMs` e `processingMs`
-  medem o trabalho do aplicativo; `presentationDelayMs` alto com
-  processamento baixo indica atraso na composição ou na GPU.
+  lentos (200 ms ou mais) e quadros longos. `processingMs` mede o código do
+  aplicativo. `inputDelayMs` alto sem `processingMs` nem quadros longos aponta
+  para a composição do Chromium, não para o aplicativo; `presentationDelayMs`
+  alto com processamento baixo indica atraso na composição ou na GPU. No
+  Windows, o atraso só começa a contar quando o processo principal lê o
+  evento: um processo principal ocupado aparece em `Main process blocked`.
+- `APP` / `Main process blocked`: o processo principal, que recebe cliques e
+  teclas antes da interface, passou 200 ms ou mais sem responder em um
+  intervalo de 30 segundos. `maxMs` é o maior travamento; `browserCpu` alto
+  indica trabalho do próprio Monky, e baixo, espera por disco, sistema ou outro
+  processo. O primeiro intervalo após abrir e o primeiro após suspender ou
+  retomar o computador são ignorados.
 - `APP` / `Sustained renderer CPU` e `Renderer CPU recovered`: a interface
   ficou acima de 70% de um núcleo por 2 minutos, e quando voltou ao normal.
-- `APP` / `Process usage summary`: média de CPU e memória por processo a cada
-  10 minutos, para comparar com o período lento.
+- `APP` / `Process usage summary`: média de CPU (em % de um núcleo) e memória
+  por processo a cada 10 minutos, com o maior travamento do processo principal
+  (`mainThreadMaxMs`), para comparar com o período lento.
 - `APP` / mudanças de monitor (com a taxa de atualização), estado da GPU (com
   aviso quando a composição passa a ser feita por software), suspensão e
   retomada, minimizar/restaurar a janela e processos do Chromium que
