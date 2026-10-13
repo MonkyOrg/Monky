@@ -416,3 +416,12 @@ export const userUpdateActivitySchema = z.object({
   activity: userActivitySchema.nullable(),
 }).strict();
 
+export const gameShareRequestSchema = z.object({
+  targetUserId: messageReferenceSchema,
+}).strict();
+
+export const gameShareResponseSchema = z.object({
+  shareRequestId: z.string().uuid(),
+  accepted: z.boolean(),
+}).strict();
+

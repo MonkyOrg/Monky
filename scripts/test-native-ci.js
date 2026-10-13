@@ -220,8 +220,9 @@ test('CI exercises channel permissions and screen privacy alongside voice lifecy
   assert.ok(command);
   assert.ok(command.split(' ').includes('apps/server/dist/test-screen-subscriptions.js'));
   assert.ok(command.split(' ').includes('apps/server/dist/test-voice.js'));
-  // Game presence only exists in this file (#675).
+  // Game presence and "Pedir para ver a partida" only exist in these files (#675, #763).
   assert.ok(command.split(' ').includes('apps/server/dist/test-game-activity.js'));
+  assert.ok(command.split(' ').includes('apps/server/dist/test-game-share-request.js'));
   assert.equal(server['continue-on-error'], undefined);
 });
 

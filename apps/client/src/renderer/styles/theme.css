@@ -2914,12 +2914,114 @@ input:focus, textarea:focus, select:focus {
 /* The game strip atop the voice panel (#763): a header, not a card — no border
    or background of its own. The action is exactly one media-bar column wide. */
 .game-share-suggestion {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
   min-height: 40px;
   padding: 4px 0 4px 2px;
   margin-bottom: 2px;
+}
+
+.game-share-suggestion > :not(.game-share-suggestion-timer) {
+  position: relative;
+  z-index: 1;
+}
+
+/* A request is the one state that asks for attention: a light accent tint. */
+.game-share-suggestion::before {
+  content: '';
+  position: absolute;
+  inset: 0 -4px;
+  border-radius: var(--radius-md);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px transparent;
+  transition: background-color var(--motion-panel-duration) var(--motion-easing),
+    box-shadow var(--motion-panel-duration) var(--motion-easing);
+}
+
+.game-share-suggestion[data-state="request"]::before {
+  background: color-mix(in srgb, var(--accent-primary) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-primary) 40%, transparent);
+}
+
+.game-share-suggestion-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background-color: var(--accent-primary);
+  color: #fff;
+  font-size: 8px;
+  letter-spacing: 0;
+}
+
+.game-share-suggestion-request {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--accent-primary) 55%, #ffffff);
+  text-overflow: ellipsis;
+}
+
+.game-share-suggestion-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 30px;
+  flex-shrink: 0;
+  margin-right: -4px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.game-share-suggestion-dismiss[hidden] {
+  display: none;
+}
+
+.game-share-suggestion-dismiss:hover {
+  background: color-mix(in srgb, var(--accent-primary) 18%, transparent);
+  color: var(--text-primary);
+}
+
+.game-share-suggestion-dismiss:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+/* What is left of the 30 s the asker waits, emptying left to right. */
+.game-share-suggestion-timer {
+  position: absolute;
+  z-index: 1;
+  left: 4px;
+  right: 4px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent-primary);
+  transform-origin: left center;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.game-share-suggestion[data-state="request"] .game-share-suggestion-timer {
+  opacity: 1;
+}
+
+.game-share-suggestion-timer--run {
+  animation-name: gameShareTimer;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
+@keyframes gameShareTimer {
+  from { transform: scaleX(var(--game-share-timer-start, 1)); }
+  to { transform: scaleX(0); }
 }
 
 .game-share-suggestion-art {
@@ -3026,7 +3128,9 @@ input:focus, textarea:focus, select:focus {
 
 @media (prefers-reduced-motion: reduce) {
   .game-share-suggestion-text--swap { animation: none; }
-  .game-share-suggestion-art::after { transition: none; }
+  .game-share-suggestion-art::after, .game-share-suggestion::before { transition: none; }
+  /* The time left still matters: a still bar at the current share, without the motion. */
+  .game-share-suggestion-timer--run { animation: none; transform: scaleX(var(--game-share-timer-start, 1)); }
 }
 
 .voice-conn-info {

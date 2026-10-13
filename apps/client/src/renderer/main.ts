@@ -39,6 +39,7 @@ import { VoiceModeReconnect, type VoiceReconnectCall } from './core/VoiceModeRec
 import { participantManager } from './core/ParticipantManager';
 import { sessionManager } from './core/SessionManager';
 import { gamePresence } from './core/GamePresenceController';
+import { gameShareRequests } from './core/GameShareRequests';
 import { gameShareSuggestion } from './core/GameShareSuggestion';
 import type { LocalExecutionTaskNotice } from './core/LocalExecutionController';
 import { currentEventOrigin, emitOutsideRouting, isForegroundEvent } from './core/sessionRouting';
@@ -187,6 +188,7 @@ class App {
     });
     // Only starts polling if the person turned game sharing on (#675).
     gamePresence.start();
+    gameShareRequests.start();
     gameShareSuggestion.start();
     this.homeView = new HomeView();
     this.mainView = new MainView(this.appContainer, this.homeView);
@@ -198,6 +200,7 @@ class App {
       stopResponsivenessMonitor();
       this.autoEntryService.dispose();
       gamePresence.dispose();
+      gameShareRequests.dispose();
       gameShareSuggestion.dispose();
       this.homeView.destroy();
       void sessionManager.dispose().catch((error: unknown) => {

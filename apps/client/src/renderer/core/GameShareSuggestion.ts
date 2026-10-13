@@ -2,6 +2,7 @@ import type { UserActivity } from '@monky/shared';
 import { appEvents } from './EventBus';
 import { gamePresence } from './GamePresenceController';
 import { gameSessionKey, shouldSuggestGameShare } from './gameShareEligibility';
+import { gameShareRequests, type PendingGameShareRequest } from './GameShareRequests';
 import { startGameShare } from './gameShareStart';
 import { screenAudioService } from './ScreenAudioService';
 import { stopLocalScreenShares } from './screenShareControls';
@@ -17,7 +18,7 @@ import { t } from '../i18n';
 
 export const GAME_SHARE_SUGGESTION_SLOT = 'game-share-notice-slot';
 
-type StripState = 'playing' | 'live';
+type StripState = 'playing' | 'request' | 'live';
 
 /**
  * The game strip atop the voice panel (#763), as in Discord: the game you are
@@ -26,6 +27,9 @@ type StripState = 'playing' | 'live';
  *
  * - playing: "Jogando · <game>" and "Compartilhar", which streams the game
  *   window straight away;
+ * - request: someone in the call asked to watch ("Lucas quer ver"), with a bar
+ *   for the 30 s left, "Compartilhar" to accept and × for "Agora não". It shows
+ *   even with the suggestion setting off: a person asking is not a nudge;
  * - live: the same strip says "Ao vivo" and the action becomes "Parar". It then
  *   owns the "you are sharing" status, so the panel does not stack two.
  *
@@ -48,6 +52,7 @@ export class GameShareSuggestion {
       }),
       appEvents.on('voice.channel_changed', () => this.render()),
       appEvents.on('voice.state_updated', () => this.render()),
+      appEvents.on('game_share.request_changed', () => this.render()),
       appEvents.on('i18n.language_changed', () => this.render(false, true)),
     );
     this.render();
@@ -76,6 +81,8 @@ export class GameShareSuggestion {
   private state(): StripState | null {
     const ids = voiceStore.screenShareIds;
     if (this.liveShareId !== null && !ids.includes(this.liveShareId)) this.liveShareId = null;
+    if (gameShareRequests.current() && this.activity && voiceStore.currentVoiceChannelId !== null
+      && !voiceStore.isScreenSharing) return 'request';
     const visible = shouldSuggestGameShare({
       enabled: settingsStore.suggestGameShare,
       activity: this.activity,
@@ -130,10 +137,18 @@ export class GameShareSuggestion {
         <span class="game-share-suggestion-over"></span>
         <span class="game-share-suggestion-name">${escapeHtml(activity.name)}</span>
       </span>
+      <button type="button" class="game-share-suggestion-dismiss" data-game-share-suggestion="decline" hidden>
+        <span class="material-symbols-outlined md-18" aria-hidden="true">close</span>
+      </button>
       <button type="button" class="screenshare-notice-btn game-share-suggestion-cta" data-game-share-suggestion="share"></button>
+      <span class="game-share-suggestion-timer" aria-hidden="true"></span>
     `;
     const button = strip.querySelector<HTMLButtonElement>('.game-share-suggestion-cta');
     button?.addEventListener('click', () => void this.onAction(button));
+    strip.querySelector('.game-share-suggestion-dismiss')?.addEventListener('click', () => {
+      const id = strip.dataset.request;
+      if (id) gameShareRequests.answer(id, false);
+    });
     this.applyState(strip, activity, state, false);
     // The panel opens room for it instead of the strip popping over the voice row.
     strip.hidden = true;
@@ -142,18 +157,24 @@ export class GameShareSuggestion {
     else strip.hidden = false;
   }
 
-  /** Same place, same size: only the status line and the action change. */
+  /** Same place, same size: only the status line, the actions and the timer change. */
   private applyState(strip: HTMLElement, activity: UserActivity, state: StripState, animate: boolean): void {
-    if (strip.dataset.state === state) return;
+    const request = state === 'request' ? gameShareRequests.current() : null;
+    if (strip.dataset.state === state && (strip.dataset.request ?? null) === (request?.id ?? null)) return;
     const changed = strip.dataset.state !== undefined;
     strip.dataset.state = state;
+    if (request) strip.dataset.request = request.id;
+    else delete strip.dataset.request;
     const over = strip.querySelector<HTMLElement>('.game-share-suggestion-over');
     const text = strip.querySelector<HTMLElement>('.game-share-suggestion-text');
-    if (over) {
-      over.innerHTML = state === 'live'
-        ? `<span class="live-pulse-dot" aria-hidden="true"></span><span class="game-share-suggestion-live">${escapeHtml(t('gameShare.live'))}</span>`
-        : `<span>${escapeHtml(t('gameShare.playing'))}</span>`;
+    if (over) over.innerHTML = this.statusLine(state, request);
+    const dismiss = strip.querySelector<HTMLButtonElement>('.game-share-suggestion-dismiss');
+    if (dismiss) {
+      dismiss.hidden = !request;
+      dismiss.setAttribute('aria-label', t('gameShare.notNow'));
+      dismiss.title = t('gameShare.notNow');
     }
+    this.runTimer(strip, request);
     if (changed && animate && text) {
       text.classList.remove('game-share-suggestion-text--swap');
       void text.offsetWidth;
@@ -162,10 +183,35 @@ export class GameShareSuggestion {
     const button = strip.querySelector<HTMLButtonElement>('.game-share-suggestion-cta');
     if (!button) return;
     const live = state === 'live';
-    button.dataset.gameShareSuggestion = live ? 'stop' : 'share';
+    button.dataset.gameShareSuggestion = live ? 'stop' : request ? 'accept' : 'share';
     button.classList.toggle('game-share-suggestion-cta--stop', live);
     button.textContent = t(live ? 'gameShare.stop' : 'gameShare.share');
     button.setAttribute('aria-label', t(live ? 'gameShare.stopLabel' : 'gameShare.shareLabel', { game: activity.name }));
+  }
+
+  private statusLine(state: StripState, request: PendingGameShareRequest | null): string {
+    if (state === 'live') {
+      return `<span class="live-pulse-dot" aria-hidden="true"></span><span class="game-share-suggestion-live">${escapeHtml(t('gameShare.live'))}</span>`;
+    }
+    if (request) {
+      const initial = Array.from(request.nickname.trim())[0]?.toUpperCase() ?? '?';
+      return `<span class="game-share-suggestion-avatar" aria-hidden="true">${escapeHtml(initial)}</span>`
+        + `<span class="game-share-suggestion-request">${escapeHtml(t('gameShare.wantsToWatch', { name: request.nickname }))}</span>`;
+    }
+    return `<span>${escapeHtml(t('gameShare.playing'))}</span>`;
+  }
+
+  /** The bar empties over what is left of the request, even when the strip was rebuilt midway. */
+  private runTimer(strip: HTMLElement, request: PendingGameShareRequest | null): void {
+    const timer = strip.querySelector<HTMLElement>('.game-share-suggestion-timer');
+    if (!timer) return;
+    timer.classList.remove('game-share-suggestion-timer--run');
+    if (!request) return;
+    const left = Math.max(0, request.expiresAt - Date.now());
+    timer.style.setProperty('--game-share-timer-start', String(left / request.durationMs));
+    timer.style.animationDuration = `${left}ms`;
+    void timer.offsetWidth;
+    timer.classList.add('game-share-suggestion-timer--run');
   }
 
   private async onAction(button: HTMLButtonElement): Promise<void> {
@@ -173,8 +219,14 @@ export class GameShareSuggestion {
     this.busy = true;
     setButtonLoading(button, true);
     try {
-      if (button.dataset.gameShareSuggestion === 'stop') await this.stopGame();
-      else await this.shareGame();
+      const action = button.dataset.gameShareSuggestion;
+      const request = action === 'accept' ? button.closest<HTMLElement>('.game-share-suggestion')?.dataset.request : undefined;
+      if (action === 'stop') await this.stopGame();
+      else {
+        // Accepting is the same click as sharing; the asker hears back first.
+        if (request) gameShareRequests.answer(request, true);
+        await this.shareGame();
+      }
     } finally {
       this.busy = false;
       if (button.isConnected) setButtonLoading(button, false);
