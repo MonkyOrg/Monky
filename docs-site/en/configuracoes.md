@@ -769,13 +769,23 @@ keep **Record logs** enabled, note the time and export the logs before
 restarting the app.
 
 - `UI` / `Slow rendering detected`: at most one line per minute with slow
-  events (200 ms or more) and long frames. `inputDelayMs` and `processingMs`
-  measure the app's own work; a high `presentationDelayMs` with low processing
-  points at compositing or the GPU.
+  events (200 ms or more) and long frames. `processingMs` measures the app's
+  own code. A high `inputDelayMs` without `processingMs` or long frames points
+  at Chromium's compositing rather than the app; a high `presentationDelayMs`
+  with low processing points at compositing or the GPU. On Windows, the delay
+  only starts counting once the main process reads the event: a busy main
+  process shows up as `Main process blocked`.
+- `APP` / `Main process blocked`: the main process, which receives clicks and
+  keys before the interface does, went 200 ms or more without responding
+  within a 30-second interval. `maxMs` is the longest stall; a high
+  `browserCpu` points at Monky's own work, a low one at waiting for the disk,
+  the system or another process. The first interval after opening and the
+  first one after the computer sleeps or resumes are ignored.
 - `APP` / `Sustained renderer CPU` and `Renderer CPU recovered`: the interface
   stayed above 70% of one core for 2 minutes, and when it returned to normal.
-- `APP` / `Process usage summary`: average CPU and memory per process every
-  10 minutes, to compare against the slow period.
+- `APP` / `Process usage summary`: average CPU (in % of one core) and memory
+  per process every 10 minutes, with the main process's longest stall
+  (`mainThreadMaxMs`), to compare against the slow period.
 - `APP` / display changes (including refresh rate), GPU status (with a warning
   when compositing falls back to software), sleep and resume,
   minimizing/restoring the window, and Chromium processes that ended with an
