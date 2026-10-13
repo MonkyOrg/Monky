@@ -5,6 +5,7 @@ import {
   COOL_SAMPLES_TO_RECOVER,
   HOT_RENDERER_CPU,
   HOT_SAMPLES_TO_WARN,
+  MAIN_BLOCK_MS,
   PerformanceDiagnostics,
   SAMPLE_INTERVAL_MS,
   SUMMARY_EVERY_SAMPLES,
@@ -17,10 +18,10 @@ import {
 const RENDERER_PID = 200;
 const visible = { visible: true, minimized: false, focused: true };
 
-function fixture() {
+function fixture(logicalProcessors?: number) {
   const entries: ClientLogEntry[] = [];
   let now = Date.parse('2026-10-12T18:00:00.000Z');
-  const diagnostics = new PerformanceDiagnostics({ write: entry => entries.push(entry) }, () => now);
+  const diagnostics = new PerformanceDiagnostics({ write: entry => entries.push(entry) }, () => now, logicalProcessors);
   return { entries, diagnostics, advance: (ms: number) => { now += ms; } };
 }
 
@@ -38,8 +39,8 @@ function metrics(rendererCpu: number, gpuCpu = 5): ProcessSample[] {
   ];
 }
 
-test('startup records each display with its refresh rate', () => {
-  const { entries, diagnostics } = fixture();
+test('startup records each display with its refresh rate and the logical processor count', () => {
+  const { entries, diagnostics } = fixture(32);
   diagnostics.startup([display(1, 239.757), display(2, 165)]);
   assert.deepEqual(entries.map(entry => [entry.level, entry.category, entry.message]),
     [['INFO', 'APP', 'Performance diagnostics started']]);
@@ -48,6 +49,7 @@ test('startup records each display with its refresh rate', () => {
       { id: 1, width: 2560, height: 1440, scale: 1.25, hz: 239.8 },
       { id: 2, width: 2560, height: 1440, scale: 1.25, hz: 165 },
     ],
+    logicalProcessors: 32,
   });
 });
 
@@ -163,4 +165,57 @@ test('a periodic summary averages each process group over its window and starts 
     other: { avgCpu: 1, maxCpu: 1, memoryMb: 50, processes: 1 },
     utility: { avgCpu: 3, maxCpu: 3, memoryMb: 20, processes: 1 },
   });
+});
+
+test('CPU is converted from a share of the machine to percent of one core', () => {
+  // The compositor stall read as 4.1 % on a 32-thread machine: 131 % of one core.
+  const { entries, diagnostics, advance } = fixture(32);
+  for (let index = 0; index < HOT_SAMPLES_TO_WARN; index++) {
+    diagnostics.sample(metrics(4.1, 0.25), RENDERER_PID, visible); advance(SAMPLE_INTERVAL_MS);
+  }
+  assert.deepEqual(entries.map(entry => entry.message), ['Sustained renderer CPU']);
+  assert.deepEqual(entries[0].data?.usage, {
+    browser: { cpu: 64, memoryMb: 100 }, renderer: { cpu: 131.2, memoryMb: 400 }, gpu: { cpu: 8, memoryMb: 146 },
+    other: { cpu: 32, memoryMb: 50 }, utility: { cpu: 96, memoryMb: 20 },
+  });
+  // Read as percent of one core, the same metrics look idle.
+  const unconverted = fixture();
+  for (let index = 0; index < HOT_SAMPLES_TO_WARN; index++)
+    unconverted.diagnostics.sample(metrics(4.1, 0.25), RENDERER_PID, visible);
+  assert.equal(unconverted.entries.length, 0);
+});
+
+test('a main-process stall is reported, except while starting up or right after sleep', () => {
+  const { entries, diagnostics, advance } = fixture(32);
+  const sample = (maxMs: number, p99Ms = 21): void => {
+    diagnostics.sample(metrics(0.1), RENDERER_PID, visible, { maxMs, p99Ms }); advance(SAMPLE_INTERVAL_MS);
+  };
+  // Module loading and window creation right after binding.
+  sample(4_000);
+  sample(MAIN_BLOCK_MS - 1);
+  assert.equal(entries.length, 0);
+  sample(452.6, 38.4);
+  assert.deepEqual(entries.map(entry => [entry.level, entry.message]), [['WARN', 'Main process blocked']]);
+  assert.deepEqual(entries[0].data, {
+    sampleSeconds: 30, maxMs: 453, p99Ms: 38, browserCpu: 64, visible: true, minimized: false, focused: true,
+  });
+  diagnostics.power('suspend');
+  diagnostics.power('resume');
+  // The hour asleep is one long gap between event loop turns.
+  sample(3_600_000);
+  sample(MAIN_BLOCK_MS);
+  assert.deepEqual(entries.map(entry => entry.message),
+    ['Main process blocked', 'Power state changed', 'Power state changed', 'Main process blocked']);
+});
+
+test('the periodic summary keeps the worst main-process gap of its window', () => {
+  const { entries, diagnostics } = fixture();
+  for (let index = 0; index < SUMMARY_EVERY_SAMPLES; index++) {
+    const maxMs = index === 0 ? 5_000 : index === 7 ? 180.4 : 21;
+    diagnostics.sample(metrics(5), RENDERER_PID, visible, { maxMs, p99Ms: 21 });
+  }
+  assert.deepEqual(entries.map(entry => entry.message), ['Process usage summary']);
+  assert.equal(entries[0].data?.mainThreadMaxMs, 180);
+  for (let index = 0; index < SUMMARY_EVERY_SAMPLES; index++) diagnostics.sample(metrics(5), RENDERER_PID, visible);
+  assert.equal(entries[1].data?.mainThreadMaxMs, undefined);
 });

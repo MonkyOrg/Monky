@@ -2,10 +2,13 @@
  * Main-process performance diagnostics.
  *
  * A "Monky got slow" report needs context the renderer cannot see: which
- * process burns CPU, and what changed around it (displays, sleep, minimizing,
- * a GPU process crash). Only transitions and bounded summaries are logged.
+ * process burns CPU, whether the main process stalls, and what changed around
+ * it (displays, sleep, minimizing, a GPU process crash). Only transitions and
+ * bounded summaries are logged.
  */
 
+import os from 'os';
+import { monitorEventLoopDelay } from 'perf_hooks';
 import { app, powerMonitor, screen, type BrowserWindow, type Display, type GPUFeatureStatus } from 'electron';
 import type { ClientLogEntry, LogLevel } from '@monky/shared';
 
@@ -17,6 +20,9 @@ export const SUMMARY_EVERY_SAMPLES = 20;
 export const HOT_RENDERER_CPU = 70;
 export const HOT_SAMPLES_TO_WARN = 4;
 export const COOL_SAMPLES_TO_RECOVER = 2;
+/** Same bound as a slow interaction: clicks and keys wait this long before the page sees them. */
+export const MAIN_BLOCK_MS = 200;
+export const EVENT_LOOP_RESOLUTION_MS = 20;
 
 type LogSink = { write(entry: ClientLogEntry): void };
 
@@ -27,7 +33,10 @@ export interface DisplaySnapshot {
   displayFrequency: number;
 }
 
-/** The subset of Electron's ProcessMetric used here (memory in kilobytes). */
+/**
+ * The subset of Electron's ProcessMetric used here (memory in kilobytes).
+ * `percentCPUUsage` is a share of the whole machine, not of one core.
+ */
 export interface ProcessSample {
   pid: number;
   type: string;
@@ -47,6 +56,12 @@ export interface WindowState {
   visible: boolean;
   minimized: boolean;
   focused: boolean;
+}
+
+/** Longest and 99th-percentile gaps between main-process event loop turns in one sample interval. */
+export interface MainThreadDelay {
+  maxMs: number;
+  p99Ms: number;
 }
 
 export type GpuStatus = Pick<GPUFeatureStatus, 'gpu_compositing' | 'rasterization' | 'video_decode' | 'video_encode'>;
@@ -106,15 +121,29 @@ export class PerformanceDiagnostics {
   private hotSince: number | null = null;
   private hotPeak = 0;
   private gpuKey: string | null = null;
+  private mainMaxMs: number | null = null;
+  // Startup work and the time asleep would read as stalls of a responsive app.
+  private skipMainThreadSample = true;
 
-  constructor(private readonly sink: LogSink, private readonly now: () => number = Date.now) {}
+  /**
+   * `logicalProcessors` converts Electron's CPU readings back to percent of one
+   * core: `percentCPUUsage` is a share of the whole machine, divided by the
+   * logical processor count.
+   */
+  constructor(
+    private readonly sink: LogSink,
+    private readonly now: () => number = Date.now,
+    private readonly logicalProcessors = 1,
+  ) {}
 
   private log(level: LogLevel, message: string, data: Record<string, unknown>): void {
     this.sink.write({ timestamp: new Date(this.now()).toISOString(), level, category: 'APP', message, data });
   }
 
   startup(list: readonly DisplaySnapshot[]): void {
-    this.log('INFO', 'Performance diagnostics started', { displays: displays(list) });
+    this.log('INFO', 'Performance diagnostics started', {
+      displays: displays(list), logicalProcessors: this.logicalProcessors,
+    });
   }
 
   /**
@@ -148,6 +177,7 @@ export class PerformanceDiagnostics {
   }
 
   power(event: PowerEvent): void {
+    if (event === 'suspend' || event === 'resume') this.skipMainThreadSample = true;
     this.log('INFO', 'Power state changed', { event });
   }
 
@@ -167,7 +197,7 @@ export class PerformanceDiagnostics {
     });
   }
 
-  sample(metrics: readonly ProcessSample[], rendererPid: number, state: WindowState): void {
+  sample(metrics: readonly ProcessSample[], rendererPid: number, state: WindowState, mainThread?: MainThreadDelay): void {
     const groups = new Map<string, Usage>();
     for (const metric of metrics) {
       const group = metric.pid === rendererPid ? 'renderer'
@@ -175,7 +205,7 @@ export class PerformanceDiagnostics {
           : metric.type === 'Browser' ? 'browser'
             : metric.type === 'Utility' ? 'utility' : 'other';
       const usage = groups.get(group) ?? { cpu: 0, memoryMb: 0, processes: 0 };
-      usage.cpu += metric.cpu.percentCPUUsage;
+      usage.cpu += metric.cpu.percentCPUUsage * this.logicalProcessors;
       usage.memoryMb += memoryMb(metric);
       usage.processes++;
       groups.set(group, usage);
@@ -189,7 +219,25 @@ export class PerformanceDiagnostics {
       this.totals.set(group, totals);
     }
     this.trackRenderer(groups.get('renderer')?.cpu ?? 0, groups, state);
+    if (mainThread) this.trackMainThread(mainThread, groups, state);
     if (++this.samples >= SUMMARY_EVERY_SAMPLES) this.summarize(state);
+  }
+
+  /**
+   * On Windows Chromium stamps input when the main process reads it, so a busy
+   * main process delays clicks without showing up in the renderer's timings.
+   */
+  private trackMainThread(delay: MainThreadDelay, groups: Map<string, Usage>, state: WindowState): void {
+    if (this.skipMainThreadSample) {
+      this.skipMainThreadSample = false;
+      return;
+    }
+    this.mainMaxMs = Math.max(this.mainMaxMs ?? 0, delay.maxMs);
+    if (delay.maxMs < MAIN_BLOCK_MS) return;
+    this.log('WARN', 'Main process blocked', {
+      sampleSeconds: SAMPLE_INTERVAL_MS / 1000, maxMs: Math.round(delay.maxMs), p99Ms: Math.round(delay.p99Ms),
+      browserCpu: round(groups.get('browser')?.cpu ?? 0), ...state,
+    });
   }
 
   private usage(groups: Map<string, Usage>): Record<string, Record<string, number>> {
@@ -230,16 +278,18 @@ export class PerformanceDiagnostics {
         memoryMb: totals.memoryMb, processes: totals.processes };
     }
     this.log('INFO', 'Process usage summary', {
-      windowSeconds: (this.samples * SAMPLE_INTERVAL_MS) / 1000, usage, ...state,
+      windowSeconds: (this.samples * SAMPLE_INTERVAL_MS) / 1000, usage,
+      ...(this.mainMaxMs === null ? {} : { mainThreadMaxMs: Math.round(this.mainMaxMs) }), ...state,
     });
     this.samples = 0;
     this.totals = new Map();
+    this.mainMaxMs = null;
   }
 }
 
 /** Binds the diagnostics to the main window; everything is released when it closes. */
 export function bindPerformanceDiagnostics(window: BrowserWindow, sink: LogSink): () => void {
-  const diagnostics = new PerformanceDiagnostics(sink);
+  const diagnostics = new PerformanceDiagnostics(sink, Date.now, Math.max(1, os.cpus().length));
   const state = (): WindowState => ({
     visible: window.isVisible(), minimized: window.isMinimized(), focused: window.isFocused(),
   });
@@ -285,15 +335,23 @@ export function bindPerformanceDiagnostics(window: BrowserWindow, sink: LogSink)
   const onProcessGone = (_event: Electron.Event, details: Electron.Details): void => diagnostics.processGone(details);
   app.on('child-process-gone', onProcessGone);
 
+  // Electron runs the main process's Node event loop on the UI thread, so a long gap between its
+  // turns is a UI-thread stall. reset() also forgets the last turn: a stall starting within one
+  // resolution after it goes unmeasured, a negligible blind spot at one reset per sample.
+  const eventLoop = monitorEventLoopDelay({ resolution: EVENT_LOOP_RESOLUTION_MS });
+  eventLoop.enable();
   const timer = setInterval(() => {
     if (window.isDestroyed()) return;
-    diagnostics.sample(app.getAppMetrics(), window.webContents.getOSProcessId(), state());
+    const mainThread = { maxMs: eventLoop.max / 1e6, p99Ms: eventLoop.percentile(99) / 1e6 };
+    eventLoop.reset();
+    diagnostics.sample(app.getAppMetrics(), window.webContents.getOSProcessId(), state(), mainThread);
   }, SAMPLE_INTERVAL_MS);
 
   const dispose = (): void => {
     if (disposed) return;
     disposed = true;
     clearInterval(timer);
+    eventLoop.disable();
     clearTimeout(gpuFallback);
     app.removeListener('gpu-info-update', reportGpu);
     screen.removeListener('display-added', onDisplayAdded);
