@@ -223,7 +223,7 @@ export class GameShareSuggestion {
       const action = button.dataset.gameShareSuggestion;
       const request = action === 'accept' ? button.closest<HTMLElement>('.game-share-suggestion')?.dataset.request : undefined;
       if (action === 'stop') await this.stopGame();
-      // "Voltar" leaves everything as it was: nothing captured, a request still waiting.
+      // "Cancelar" leaves everything as it was: nothing captured, a request still waiting.
       else if (this.activity && await this.confirmShare(this.activity.name)) {
         // The asker hears back first; a request that expired meanwhile just has nobody to answer.
         if (request) gameShareRequests.answer(request, true);
@@ -241,7 +241,7 @@ export class GameShareSuggestion {
       title: t('gameShare.confirmTitle', { game }),
       message: t('gameShare.confirmMessage'),
       confirmLabel: t('gameShare.share'),
-      cancelLabel: t('common.back'),
+      cancelLabel: t('common.cancel'),
     });
   }
 

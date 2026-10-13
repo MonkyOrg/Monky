@@ -270,13 +270,13 @@ async function runUserContextMenuSmoke() {
       cta().click();
       await settle();
       check(dialog()?.textContent.includes(language.t('gameShare.confirmTitle', { game: 'Moonlighter' })), 'Compartilhar asks for confirmation first');
-      check(dialog().querySelector('[data-action="cancel"]')?.textContent === language.t('common.back'), 'The way out is Voltar');
+      check(dialog().querySelector('[data-action="cancel"]')?.textContent === language.t('common.cancel'), 'The way out is Cancelar');
       check(shared.length === 0, 'Nothing is shared while the question is open');
       dialog().querySelector('[data-action="cancel"]').click();
       await settle();
-      check(!dialog(), 'Voltar closes the question');
-      check(shared.length === 0, `Voltar shares nothing (${shared.length})`);
-      check(strip()?.dataset.state === 'playing', `Voltar leaves the strip as it was (${strip()?.dataset.state})`);
+      check(!dialog(), 'Cancelar closes the question');
+      check(shared.length === 0, `Cancelar shares nothing (${shared.length})`);
+      check(strip()?.dataset.state === 'playing', `Cancelar leaves the strip as it was (${strip()?.dataset.state})`);
       cta().click();
       await settle();
       dialog().querySelector('[data-action="confirm"]').click();
@@ -340,7 +340,7 @@ async function runUserContextMenuSmoke() {
         dialog().querySelector('[data-action="cancel"]').click();
         await settle();
         check(answers.length === answeredBefore && strip()?.dataset.state === 'request' && shared.length === sharedBefore,
-          'Voltar on a request keeps it waiting, unanswered');
+          'Cancelar on a request keeps it waiting, unanswered');
         cta().click();
         await settle();
         dialog().querySelector('[data-action="confirm"]').click();
