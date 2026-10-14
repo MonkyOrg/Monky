@@ -1,4 +1,4 @@
-import { MessageType, getScreenShareQualities, screenShareQualitySchema, type BotScreen, type NativeScreenSource } from '@monky/shared';
+import { MessageType, SCREEN_SHARE_LIMITS, getScreenShareQualities, screenShareQualitySchema, type BotScreen, type NativeScreenSource } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
@@ -681,7 +681,7 @@ export class VoiceStageView {
     const announced = p.voiceState?.screenShareIds;
     if (announced && announced.length > 0) {
       const safe = announced.filter((id) => SAFE_SHARE_ID.test(id));
-      if (safe.length > 0) return safe.slice(0, VoiceStore.MAX_SCREEN_SHARES);
+      if (safe.length > 0) return safe.slice(0, SCREEN_SHARE_LIMITS.maximum);
     }
     return p.voiceState?.isScreenSharing ? [LEGACY_SHARE_ID] : [];
   }

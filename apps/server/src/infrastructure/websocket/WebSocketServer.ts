@@ -152,6 +152,7 @@ import {
   rtcSignalSchema,
   nativeScreenSignalSchema,
   nativeScreenSourcesSchema,
+  SCREEN_SHARE_LIMITS,
   getScreenShareQualities,
   screenShareProfileKey,
   sfuCreateWebRtcTransportSchema,
@@ -5395,7 +5396,10 @@ export class WebSocketServer {
 
   /** Every outbound path, including auth, bots and broadcasts, uses this projection. */
   private projectScreenMessage(session: ClientSession, message: ProtocolMessage): ProtocolMessage | null {
-    const state = (value: VoiceParticipantState) => this.signalingService.projectVoiceState(value, session.user?.id);
+    // A client's native roster only accepts as many screens per person as it negotiated.
+    const shareLimit = session.protocol?.features.includes('screen-shares-8')
+      ? SCREEN_SHARE_LIMITS.maximum : SCREEN_SHARE_LIMITS.legacy;
+    const state = (value: VoiceParticipantState) => this.signalingService.projectVoiceState(value, session.user?.id, shareLimit);
     const roster = (values: VoiceRosterParticipant[]) => values.map(value => ({ ...value, voiceState: state(value.voiceState) }));
     const remember = (id: string) => {
       session.retiredProducerIds?.delete(id);

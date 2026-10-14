@@ -1603,12 +1603,18 @@ test('window owner changes during asynchronous preparation fail before publicati
 test('pending sources reserve capacity before yielding to asynchronous discovery', async t => {
   const gpu = deferred(), f = fixture(t, { gpu });
   await f.join();
-  const pending = ['one', 'two', 'replacement'].map(id => f.addSource(id, { audio: false }));
-  await assert.rejects(f.addSource('four'), /limit/);
-  await assert.rejects(f.addSource('one'), /already exists/);
   gpu.resolve();
+  const { maximum } = shared.SCREEN_SHARE_LIMITS;
+  for (let index = 0; index < maximum - 1; index++) await f.addSource(`screen-${index}`, { audio: false });
+  // The last screen and one pending replacement hold their slots while discovery is still running.
+  const discovery = deferred();
+  gpu.promise = discovery.promise;
+  const pending = ['last', 'replacement'].map(id => f.addSource(id, { audio: false }));
+  await assert.rejects(f.addSource('overflow'), /limit/);
+  await assert.rejects(f.addSource('last'), /already exists/);
+  discovery.resolve();
   await Promise.all(pending);
-  assert.equal((await f.command({ action: 'stats' })).publishers.length, 3);
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, maximum + 1);
 });
 
 test('application audio is reserved before discovery and remains exclusive until source retirement', async t => {

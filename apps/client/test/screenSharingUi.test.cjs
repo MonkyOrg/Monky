@@ -898,6 +898,86 @@ for (const language of ['pt-BR', 'en']) {
   });
 }
 
+for (const language of ['pt-BR', 'en']) {
+  test(`a third screen is added only after a warning, asked once per call (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    for (const id of ['window:303:0', 'window:404:0']) f.voiceStore.addScreenShare(f.createStream(id).id);
+    const addOne = async (tab = 'window') => {
+      await f.picker.open();
+      control(f, `share-tab-${tab}`).click();
+      f.document.querySelector('.source-item').click();
+      const audio = control(f, 'chk-share-audio');
+      audio.checked = false; change(audio);
+      assert.equal(control(f, 'btn-share-add').disabled, false, 'Past two screens adding stays available');
+      await f.picker.startSharing('add');
+    };
+    f.controls.confirm = false;
+    await addOne();
+    assert.equal(f.confirms.length, 1);
+    const [warning] = f.confirms;
+    assert.equal(warning.title, f.i18n.t('screenShare.extraScreensTitle'));
+    assert.equal(warning.message, f.i18n.t('screenShare.extraScreensMessage', { count: '2', max: '8' }));
+    assert.equal(warning.confirmLabel, f.i18n.t('screenShare.extraScreensConfirm'));
+    assert.equal(warning.variant, 'warning');
+    assert.equal(nativeStarts(f).length, 0, 'Declining never starts a capture');
+    assert.equal(f.voiceStore.screenShareIds.length, 2);
+    assert.notEqual(f.picker.modalEl, null, 'Declining keeps the picker open');
+    assert.equal(control(f, 'btn-share-add').disabled, false);
+    assert.equal(warning.signal.aborted, false);
+    f.controls.confirm = true;
+    await f.picker.startSharing('add');
+    assert.equal(f.confirms.length, 2);
+    assert.equal(nativeStarts(f).length, 1);
+    assert.equal(f.voiceStore.screenShareIds.length, 3);
+    assert.equal(f.picker.modalEl, null);
+    assert.equal(warning.signal.aborted, true, 'Closing the picker dismisses an open warning');
+    await addOne();
+    assert.equal(f.confirms.length, 2, 'The same call is not asked again');
+    assert.equal(f.voiceStore.screenShareIds.length, 4);
+    f.voiceStore.currentVoiceChannelId = 'another-room';
+    f.controls.confirm = false;
+    await addOne('screen');
+    assert.equal(f.confirms.length, 3, 'Another call asks again');
+    assert.equal(f.voiceStore.screenShareIds.length, 4);
+  });
+}
+
+test('eight screens hide "Add screen"; a server without screen-shares-8 keeps two and never warns', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  for (let index = 0; index < 8; index++) f.voiceStore.addScreenShare(f.createStream(`window:${300 + index}:0`).id);
+  await f.picker.open();
+  control(f, 'share-tab-screen').click();
+  f.document.querySelector('.source-item').click();
+  assert.equal(f.document.querySelector('#btn-share-add'), null);
+  await f.picker.startSharing('add');
+  assert.equal(f.alerts.length, 1);
+  assert.equal(f.alerts[0].message, f.i18n.t('screenShare.limitMessage', { max: '8' }));
+  assert.equal(f.confirms.length, 0);
+  assert.equal(nativeStarts(f).length, 0);
+
+  const legacy = fixture();
+  t.after(() => legacy.close());
+  legacy.serverStore.serverDetails.protocol.features = ['screen-viewers'];
+  legacy.voiceStore.addScreenShare(legacy.createStream('window:303:0').id);
+  const open = async tab => {
+    await legacy.picker.open();
+    control(legacy, `share-tab-${tab}`).click();
+    legacy.document.querySelector('.source-item').click();
+  };
+  await open('screen');
+  assert.equal(control(legacy, 'btn-share-add').disabled, false);
+  await legacy.picker.startSharing('add');
+  assert.equal(legacy.voiceStore.screenShareIds.length, 2, 'The second screen needs no warning');
+  await open('window');
+  assert.equal(legacy.document.querySelector('#btn-share-add'), null);
+  await legacy.picker.startSharing('add');
+  assert.equal(legacy.alerts.at(-1).message, legacy.i18n.t('screenShare.limitMessage', { max: '2' }));
+  assert.equal(legacy.confirms.length, 0);
+  assert.equal(legacy.voiceStore.screenShareIds.length, 2);
+});
+
 test('switching the source with two live shares asks which one and replaces only that share', async t => {
   const f = fixture();
   t.after(() => f.close());

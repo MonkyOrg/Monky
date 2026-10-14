@@ -60,7 +60,7 @@ export interface PeerSession {
   peerSessionId: string;
   pc: RTCPeerConnection;
   remoteStream: MediaStream;
-  /** Remote screen streams keyed by share id (#253: up to MAX_SCREEN_SHARES). */
+  /** Remote screen streams keyed by share id (#253: up to SCREEN_SHARE_LIMITS.maximum per person). */
   remoteScreenStreams: Map<string, MediaStream>;
   isPolite: boolean;
   makingOffer: boolean;

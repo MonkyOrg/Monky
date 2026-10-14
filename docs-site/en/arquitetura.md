@@ -566,9 +566,18 @@ once. The source is announced in the call without requiring reception of its
 media. In P2P, negotiation and `screen-video-meta` associate the track with
 the correct screen, separately from the camera.
 
-You can share **up to 2 screens at once**. Each is identified by the id of its own
-`MediaStream`, and that id is what ties together the track, the sender and the
-tile on screen.
+Each person can share **up to 8 screens at once**. The limit is per person,
+not per call: each screen costs the sharer another capture, another encoder and
+more upload, while viewers only receive the screens they chose to watch. That
+is why, from the third screen on, Monky asks for confirmation once per call.
+Each is identified by the id of its own `MediaStream`, and that id is what ties
+together the track, the sender and the tile on screen.
+
+The `screen-shares-8` feature is negotiated. Servers without it accept 2 screens
+per person, so the client does not offer a third one on that server. Clients
+without it only receive each person's first 2 screens, which is what their
+native roster accepts; the server also recomputes whether that person shares
+audio for such a client.
 
 **Discovery is not subscription.** Viewing intent belongs to the call rather
 than a view's lifetime. `Watch broadcast` authorizes delivery of that source

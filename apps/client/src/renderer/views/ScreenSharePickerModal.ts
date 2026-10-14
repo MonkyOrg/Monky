@@ -1,12 +1,15 @@
-import type { DesktopSource, NativeScreenCapabilities, NativeScreenCaptureKind, ScreenShareAudience } from '@monky/shared';
+import { SCREEN_SHARE_LIMITS, type DesktopSource, type NativeScreenCapabilities, type NativeScreenCaptureKind,
+  type ScreenShareAudience } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { getAvatarUrl } from '../utils/avatar';
 import { isHexColor } from '../utils/colors';
 import { appEvents } from '../core/EventBus';
 import { screenAudioService } from '../core/ScreenAudioService';
-import { captureScreenShareCall, notifyScreenShareState, stopLocalScreenShares } from '../core/screenShareControls';
+import {
+  captureScreenShareCall, notifyScreenShareState, screenShareLimit, stopLocalScreenShares,
+} from '../core/screenShareControls';
 import { videoService } from '../core/VideoService';
-import { voiceStore, VoiceStore } from '../stores/voiceStore';
+import { voiceStore } from '../stores/voiceStore';
 import { webRtcManager } from '../core/WebRtcManager';
 import { setButtonLoading } from '../utils/buttonLoading';
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
@@ -55,6 +58,8 @@ export class ScreenSharePickerModal {
   private audience: ScreenShareAudience = { userIds: [], roleIds: [] };
   private pickerCall: ReturnType<typeof captureScreenShareCall> | null = null;
   private audioAttentionTimer: number | null = null;
+  /** The call in which adding screens past the comfortable amount was already confirmed. */
+  private extraScreensConfirmedFor: string | null = null;
 
   private audienceIsValid(): boolean {
     return !this.privateShare || this.audience.userIds.length + this.audience.roleIds.length > 0;
@@ -522,7 +527,7 @@ export class ScreenSharePickerModal {
             </label>
           </div>
           <button type="button" id="btn-cancel" class="btn btn-secondary">${t('common.cancel')}</button>
-          ${alreadySharing && voiceStore.canAddScreenShare() ? `
+          ${alreadySharing && voiceStore.canAddScreenShare(screenShareLimit(this.pickerCall)) ? `
             <button type="button" id="btn-share-add" class="btn btn-secondary" disabled>
               <span class="material-symbols-outlined md-16" style="margin-right: 4px;">add_to_queue</span>
               ${t('screenShare.confirmAdd')}
@@ -912,6 +917,25 @@ export class ScreenSharePickerModal {
     await this.startSharing('replace', selection.shareId);
   }
 
+  /**
+   * Past SCREEN_SHARE_LIMITS.comfortable each screen costs another capture, encoder and upload, so adding one
+   * more asks first, once per call. Closing the picker dismisses the question.
+   */
+  private async confirmExtraScreen(limit: number): Promise<boolean> {
+    const count = voiceStore.screenShareIds.length;
+    const callKey = `${voiceStore.voiceSessionKey ?? ''}\n${voiceStore.currentVoiceChannelId ?? ''}`;
+    if (count < SCREEN_SHARE_LIMITS.comfortable || this.extraScreensConfirmedFor === callKey) return true;
+    const confirmed = await showConfirm({
+      title: t('screenShare.extraScreensTitle'),
+      message: t('screenShare.extraScreensMessage', { count: String(count), max: String(limit) }),
+      confirmLabel: t('screenShare.extraScreensConfirm'),
+      variant: 'warning',
+      signal: this.eventController?.signal,
+    });
+    if (confirmed) this.extraScreensConfirmedFor = callKey;
+    return confirmed;
+  }
+
   /** Points at the audio switch that blocks the share, with the toast saying why. */
   private explainScreenAudioTaken(modal: HTMLElement): void {
     showErrorToast(t('screenShare.audioTakenToast'), 6000);
@@ -929,8 +953,8 @@ export class ScreenSharePickerModal {
   /**
    * Starts a screen share. 'replace' keeps the historical behaviour of swapping
    * the current source (#264) — only `targetShareId` when given; 'add'
-   * broadcasts an extra screen alongside the existing ones, up to
-   * VoiceStore.MAX_SCREEN_SHARES (#253).
+   * broadcasts an extra screen alongside the existing ones, up to the call
+   * server's screenShareLimit() (#253).
    */
   private async startSharing(mode: 'add' | 'replace', targetShareId?: string): Promise<void> {
     if (this.isStarting || !this.modalEl || this.gameGuide.isOpen()) return;
@@ -939,10 +963,12 @@ export class ScreenSharePickerModal {
       this.setAudienceOpen(true);
       return;
     }
-    if (mode === 'add' && !voiceStore.canAddScreenShare()) {
+    const call = this.pickerCall ?? captureScreenShareCall();
+    const limit = screenShareLimit(call);
+    if (mode === 'add' && !voiceStore.canAddScreenShare(limit)) {
       await showAlert({
         title: t('screenShare.limitTitle'),
-        message: t('screenShare.limitMessage', { max: String(VoiceStore.MAX_SCREEN_SHARES) }),
+        message: t('screenShare.limitMessage', { max: String(limit) }),
         variant: 'warning',
       });
       return;
@@ -961,7 +987,6 @@ export class ScreenSharePickerModal {
       return;
     }
     const preserveAspectRatio = modal.querySelector<HTMLInputElement>('#chk-preserve-aspect-ratio')?.checked ?? true;
-    const call = this.pickerCall ?? captureScreenShareCall();
     let stream: MediaStream | null = null;
     let published = false;
     let retiringPrevious = false;
@@ -988,6 +1013,8 @@ export class ScreenSharePickerModal {
 
     try {
       if (!source || !sourceId) throw new Error(t('screenShare.sourceUnavailable'));
+      if (mode === 'add' && !await this.confirmExtraScreen(limit)) return;
+      assertCurrent();
       // ScreenCaptureKit captures the entire system mix even for one window.
       // Confirm before capturing or replacing anything (#298).
       if (this.isMac && sourceId?.startsWith('window:') && shareAudio && !screenAudioService.getIsCapturing()) {

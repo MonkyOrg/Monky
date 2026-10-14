@@ -572,9 +572,17 @@ transmitir as duas ao mesmo tempo. A fonte é anunciada na chamada sem exigir
 o recebimento de sua mídia. Em P2P, a negociação e o `screen-video-meta`
 associam a track à tela correta, separada da câmera.
 
-Dá para compartilhar **até 2 telas simultâneas**. Cada uma é identificada pelo id
-do seu próprio `MediaStream`, e é esse id que amarra a track, o sender e o
-quadradinho na tela.
+Cada pessoa pode compartilhar **até 8 telas ao mesmo tempo**. O limite é por
+pessoa, não por chamada: cada tela custa a quem transmite outra captura, outro
+encoder e mais upload, enquanto quem assiste só recebe as telas que escolheu
+assistir. Por isso, a partir da terceira tela o Monky pede confirmação uma vez
+por chamada. Cada uma é identificada pelo id do seu próprio `MediaStream`, e é
+esse id que amarra a track, o sender e o quadradinho na tela.
+
+O recurso `screen-shares-8` é negociado. Servidores sem ele aceitam 2 telas por
+pessoa, então o cliente não oferece uma terceira nesse servidor. Clientes sem ele
+recebem só as 2 primeiras telas de cada pessoa, que é o que o roster nativo deles
+aceita; o servidor também recalcula se a pessoa compartilha som para esse cliente.
 
 **Descoberta não é assinatura.** A intenção de assistir pertence à chamada,
 não ao ciclo de vida de uma view. `Assistir transmissão` autoriza a entrega

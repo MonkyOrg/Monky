@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
-import { MessageType } from '@monky/shared';
-import { captureScreenShareCall, notifyScreenShareState, stopLocalScreenShares } from '../src/renderer/core/screenShareControls';
+import { MessageType, SCREEN_SHARE_LIMITS } from '@monky/shared';
+import {
+  captureScreenShareCall, notifyScreenShareState, screenShareLimit, stopLocalScreenShares,
+} from '../src/renderer/core/screenShareControls';
 import { SessionManager, sessionManager } from '../src/renderer/core/SessionManager';
 import { videoService } from '../src/renderer/core/VideoService';
 import { webRtcManager } from '../src/renderer/core/WebRtcManager';
@@ -171,6 +173,27 @@ test('a slow detach never sends an old screen update to a successor call', async
   await stopped;
   assert.deepEqual(voiceStore.screenShareIds, ['new']);
   assert.equal(f.messages.length, 1);
+});
+
+test('the call server, not the visible one, decides how many screens may be published', context => {
+  const f = fixture(context);
+  const self = f.call.serverStore.currentUser!;
+  const details = (features: string[]) => ({
+    id: 'server', name: 'Server', createdAt: 1, maxUsers: 10, channels: [], voiceStates: {}, members: [self],
+    protocol: { version: 38, minimumVersion: 35, features },
+  });
+  f.visible.serverStore.setServerDetails(details(['screen-shares-8']), self);
+  assert.equal(screenShareLimit(captureScreenShareCall()), SCREEN_SHARE_LIMITS.legacy);
+  f.call.serverStore.setServerDetails(details(['screen-viewers']), self);
+  assert.equal(screenShareLimit(captureScreenShareCall()), SCREEN_SHARE_LIMITS.legacy, 'an older server keeps two screens');
+  f.call.serverStore.setServerDetails(details(['screen-shares-8']), self);
+  const limit = screenShareLimit(captureScreenShareCall());
+  assert.equal(limit, SCREEN_SHARE_LIMITS.maximum);
+  for (let index = 0; index < limit; index++) {
+    assert.equal(voiceStore.canAddScreenShare(limit), true);
+    f.add(`screen-${index}`);
+  }
+  assert.equal(voiceStore.canAddScreenShare(limit), false);
 });
 
 test('call snapshots reject changed rooms and removed sessions rather than falling back to visible proxies', context => {

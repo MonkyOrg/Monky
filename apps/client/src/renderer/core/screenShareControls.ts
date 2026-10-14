@@ -1,4 +1,4 @@
-import { MessageType } from '@monky/shared';
+import { MessageType, SCREEN_SHARE_LIMITS } from '@monky/shared';
 import { voiceStore } from '../stores/voiceStore';
 import { networkClient, type NetworkClient } from './NetworkClient';
 import { sessionManager } from './SessionManager';
@@ -30,6 +30,12 @@ export function captureScreenShareCall(): ScreenShareCall {
       && (sessionKey ? !!session && sessionManager.get(sessionKey) === session : sessionManager.getActive() === session)
       && session?.serverStore.currentUser?.sessionId === sessionId,
   };
+}
+
+/** Screens this call may publish at once; a server without `screen-shares-8` only accepts the legacy pair. */
+export function screenShareLimit(call: Pick<ScreenShareCall, 'serverStore'>): number {
+  return call.serverStore?.serverDetails?.protocol?.features.includes('screen-shares-8')
+    ? SCREEN_SHARE_LIMITS.maximum : SCREEN_SHARE_LIMITS.legacy;
 }
 
 export function notifyScreenShareState(call: Pick<ScreenShareCall, 'client' | 'isCurrent'>): void {

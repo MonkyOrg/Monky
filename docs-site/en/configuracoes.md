@@ -648,6 +648,12 @@ Monky's own window can be shared **only without audio** to prevent call
 feedback. Selecting it turns the audio switch off and disables it, with an
 explanation. Selecting another application restores your previous audio choice.
 
+With a screen already shared, **Add screen** broadcasts another one alongside
+it. Each person can share up to 8 screens. From the third on, Monky warns, once
+per call, that each extra screen uses more of the sharer's processor, graphics
+card and connection. On servers that have not been updated yet, the limit is
+still 2 screens per person.
+
 Choosing the Game Capture card does not start capture or test the application:
 you must confirm with **Share**, **Switch Source** or **Add screen**. Only
 methods advertised by the backend are available; compatibility with the

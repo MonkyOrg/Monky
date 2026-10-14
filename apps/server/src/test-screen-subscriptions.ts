@@ -3,9 +3,10 @@ import { test } from 'node:test';
 import './test-screen-privacy';
 import WebSocket from 'ws';
 import type { types as SfuTypes } from 'mediasoup';
-import { MessageType, ProtocolErrorCode, nativeScreenSignalSchema,
+import { MessageType, ProtocolErrorCode, SCREEN_SHARE_LIMITS, nativeScreenSignalSchema,
   screenViewersRequestSchema, screenViewersResultSchema,
-  type RtcTransportPurpose, type ScreenWatchSignalPayload } from '@monky/shared';
+  type RtcTransportPurpose, type ScreenWatchSignalPayload, type VoiceParticipantState,
+  type VoiceStateChangedPayload } from '@monky/shared';
 import { SignalingService } from './application/services/SignalingService';
 import type { ChannelRecord } from './domain/entities';
 import { SfuManager, SfuProducerClosedError } from './infrastructure/sfu/SfuManager';
@@ -756,6 +757,37 @@ test('private SFU projection hides producers and close events; guessed native/le
   assert.equal(f.created.length, 0, 'guessed IDs never allocate consumers');
   f.manager['producers'].get('video-one')!.appData = { mediaType: 'screen_video', shareId: 'one' };
   assert.equal(f.server['canReceiveProducer'](viewer, 'room', 'video-one'), false, 'private native shares cannot use legacy producers');
+  f.manager.close();
+});
+
+test('one person keeps up to eight screens; clients without screen-shares-8 are only told about the first two', async () => {
+  const f = await signalingFixture();
+  const [current, legacy] = f.clients;
+  current.protocol = { version: 38, minimumVersion: 35, features: ['screen-shares-8'] };
+  legacy.protocol = { version: 38, minimumVersion: 35, features: ['screen-viewers'] };
+  const ids = Array.from({ length: SCREEN_SHARE_LIMITS.maximum + 1 }, (_, index) => `screen-${index}`);
+  const sources = ids.slice(0, SCREEN_SHARE_LIMITS.maximum).map((shareId, index) => ({
+    shareId, instanceId: crypto.randomUUID(), audio: index === SCREEN_SHARE_LIMITS.legacy,
+    video: { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 12000 },
+  }));
+  const voiceState = f.service.updateVoiceState('publisher', {
+    screenShareIds: ids, nativeScreenShares: sources, isSharingScreenAudio: true,
+  })!;
+  assert.deepEqual(voiceState.screenShareIds, ids.slice(0, SCREEN_SHARE_LIMITS.maximum), 'a ninth screen is never kept');
+  const project = (session: typeof current): VoiceParticipantState => (f.server['projectScreenMessage'](session, {
+    type: MessageType.VOICE_STATE_CHANGED, payload: { voiceState },
+  })!.payload as VoiceStateChangedPayload).voiceState;
+  const full = project(current);
+  assert.deepEqual(full.screenShareIds, ids.slice(0, SCREEN_SHARE_LIMITS.maximum));
+  assert.equal(full.nativeScreenShares?.length, SCREEN_SHARE_LIMITS.maximum);
+  assert.equal(full.isSharingScreenAudio, true);
+  const older = project(legacy);
+  assert.deepEqual(older.screenShareIds, ids.slice(0, SCREEN_SHARE_LIMITS.legacy));
+  assert.deepEqual(older.nativeScreenShares?.map(source => source.shareId), ids.slice(0, SCREEN_SHARE_LIMITS.legacy));
+  assert.equal(older.isScreenSharing, true);
+  assert.equal(older.isSharingScreenAudio, false, 'the audio belongs to a screen the older client is never told about');
+  assert.deepEqual(f.service.projectVoiceState(voiceState, 'viewer-b', SCREEN_SHARE_LIMITS.legacy), older,
+    'bots and every other path share the same projection');
   f.manager.close();
 });
 

@@ -4,7 +4,7 @@ import {
   getScreenShareProfile, getScreenShareQualities, getScreenH264ProfileLevelId, nativeScreenP2pControlSchema,
   nativeScreenSignalSchema, nativeScreenSourcesSchema, nativeScreenVideoProfileSchema,
   nativeScreenCommandSchema, nativeScreenPreviewPacketSchema,
-  getScreenAv1MinimumLevelIndex,
+  getScreenAv1MinimumLevelIndex, SCREEN_SHARE_LIMITS,
 } from '../src/index.js';
 
 const video = { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 };
@@ -86,6 +86,16 @@ test('source descriptors are bounded and cannot alias two source instances', () 
     [{ ...source, windowHandle: 1 }], [{ ...source, audio: 'true' }],
     [{ ...source, instanceId: 'old-call' }],
   ]) assert.equal(nativeScreenSourcesSchema.safeParse(sources).success, false);
+});
+
+test('one session publishes up to the negotiated maximum of distinct screens, never more', () => {
+  const distinct = (count: number) => Array.from({ length: count }, (_, index) => ({
+    shareId: `screen-${index}`, instanceId: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`, video, audio: false,
+  }));
+  assert.deepEqual(SCREEN_SHARE_LIMITS, { legacy: 2, comfortable: 2, maximum: 8 });
+  assert.ok(Object.isFrozen(SCREEN_SHARE_LIMITS));
+  assert.equal(nativeScreenSourcesSchema.safeParse(distinct(SCREEN_SHARE_LIMITS.maximum)).success, true);
+  assert.equal(nativeScreenSourcesSchema.safeParse(distinct(SCREEN_SHARE_LIMITS.maximum + 1)).success, false);
 });
 
 test('AV1 widths align before encoding and announcements while H264 retains four-pixel alignment', () => {

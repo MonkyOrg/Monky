@@ -165,9 +165,6 @@ export class VoiceStore {
   public isReconnecting: boolean = false;
   public isConnecting: boolean = false;
 
-  /** Hard cap on simultaneous screen shares per participant (#253). */
-  public static readonly MAX_SCREEN_SHARES = 2;
-
   public setChannel(channelId: string | null, sessionKey: string | null = null): void {
     clientLog.info('CONNECTION', `Voice channel ${channelId ? 'joined' : 'left'}`, { channelId, sessionKey });
     const wasReconnecting = this.isReconnecting;
@@ -346,8 +343,9 @@ export class VoiceStore {
     appEvents.emit('voice.state_updated');
   }
 
-  public canAddScreenShare(): boolean {
-    return this.screenShareIds.length < VoiceStore.MAX_SCREEN_SHARES;
+  /** `limit` depends on the call's server: see screenShareLimit() (#253). */
+  public canAddScreenShare(limit: number): boolean {
+    return this.screenShareIds.length < limit;
   }
 
   public reset(): void {

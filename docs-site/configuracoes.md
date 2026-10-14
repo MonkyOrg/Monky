@@ -661,6 +661,12 @@ evitar eco da chamada. Ao selecioná-la, o switch de áudio fica desligado e
 indisponível, com uma explicação. Ao selecionar outro aplicativo, sua escolha
 anterior de áudio é restaurada.
 
+Com uma tela já compartilhada, **Adicionar tela** transmite outra junto com ela.
+Cada pessoa pode compartilhar até 8 telas. A partir da terceira, o Monky avisa,
+uma vez por chamada, que cada tela a mais usa mais processador, placa de vídeo
+e internet de quem transmite. Em servidores ainda não atualizados, o limite
+continua sendo de 2 telas por pessoa.
+
 Escolher o card de Captura de jogo não inicia a captura nem testa o aplicativo:
 é preciso confirmar em **Compartilhar**, **Trocar Fonte** ou **Adicionar tela**.
 Só ficam disponíveis os métodos informados pelo backend; compatibilidade com

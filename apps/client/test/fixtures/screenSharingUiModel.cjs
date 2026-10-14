@@ -293,8 +293,9 @@ function fixture(language = 'en') {
   };
   const voiceStore = {
     screenShareIds: [], screenAudioShareId: null, camera: 'preserved-camera', voice: 'preserved-call',
+    voiceSessionKey: 'server-a', currentVoiceChannelId: 'room',
     get isScreenSharing() { return this.screenShareIds.length > 0; },
-    canAddScreenShare() { return this.screenShareIds.length < 3; },
+    canAddScreenShare(limit) { return this.screenShareIds.length < limit; },
     addScreenShare(id) { this.screenShareIds.push(id); },
     setScreenAudioShare(id) { this.screenAudioShareId = id; },
   };
@@ -378,7 +379,9 @@ function fixture(language = 'en') {
   const serverStore = {
     currentUser: { id: 'self' }, roles: [{ id: 'friends', name: 'Friends' }, { id: 'admin', name: 'Admin' }],
     knownMembers: new Map([['allowed', { id: 'allowed', nickname: 'Alice' }], ['outsider', { id: 'outsider', nickname: 'Bob' }]]),
+    serverDetails: { protocol: { version: 38, minimumVersion: 35, features: ['screen-shares-8'] } },
   };
+  const confirms = [];
   const stubs = {
     'core/NetworkClient': { networkClient: { getHttpBaseUrl: () => 'http://127.0.0.1:9999' } },
     'core/EventBus': { appEvents },
@@ -386,9 +389,11 @@ function fixture(language = 'en') {
     'core/VideoService': { videoService },
     'core/WebRtcManager': { webRtcManager },
     'stores/settingsStore': { settingsStore },
-    'stores/voiceStore': { voiceStore, VoiceStore: { MAX_SCREEN_SHARES: 3 } },
+    'stores/voiceStore': { voiceStore },
     'core/screenShareControls': {
       captureScreenShareCall: () => ({ isCurrent: () => controls.current, serverStore }),
+      screenShareLimit: call => call.serverStore?.serverDetails?.protocol?.features.includes('screen-shares-8')
+        ? shared.SCREEN_SHARE_LIMITS.maximum : shared.SCREEN_SHARE_LIMITS.legacy,
       notifyScreenShareState: () => traces.push(['notify', [...voiceStore.screenShareIds]]),
       stopLocalScreenShares,
     },
@@ -400,7 +405,10 @@ function fixture(language = 'en') {
         return parsed.success ? parsed.data : null;
       },
     },
-    'views/Dialog': { showAlert: async value => alerts.push(value), showConfirm: async () => controls.confirm },
+    'views/Dialog': {
+      showAlert: async value => alerts.push(value),
+      showConfirm: async value => { confirms.push(value); return controls.confirm; },
+    },
     'views/ScreenShareChooser': {
       screenShareChooser: {
         isOpenFor: anchor => chooser.openAnchor === anchor,
@@ -494,7 +502,7 @@ function fixture(language = 'en') {
       t: i18n.t, showInfoToast: (message, durationMs) => traces.push(['info-toast', message, durationMs]),
       showAlert: stubs['views/Dialog'].showAlert,
     }),
-    settingsStore, serverStore, voiceStore, streams, captures, labels, chooser, capabilities, createStream, traces, alerts, warnings, events, observers, mediaQuery,
+    settingsStore, serverStore, voiceStore, streams, captures, labels, chooser, capabilities, createStream, traces, alerts, confirms, warnings, events, observers, mediaQuery,
     get saves() { return saves; }, get enumerations() { return enumerations; }, get cancelled() { return cancelled; },
     get permissionChecks() { return permissionChecks; },
     close() { picker.close(); quality.cleanup(); document.body.replaceChildren(); },

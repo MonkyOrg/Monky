@@ -3,7 +3,7 @@ import net from 'net';
 import dgram from 'dgram';
 import * as mediasoup from 'mediasoup';
 import type { RouterRtpCodecCapability, TransportListenInfo } from 'mediasoup/node/lib/types.js';
-import { LIMITS, aggregateTransportHealth, VoiceConnectionHealth, type RtcTransportPurpose,
+import { LIMITS, SCREEN_SHARE_LIMITS, aggregateTransportHealth, VoiceConnectionHealth, type RtcTransportPurpose,
   sfuCreateWebRtcTransportSchema, nativeScreenRenditionSchema } from '@monky/shared';
 import { getPublicIp } from '../discovery/ServerIpScanner';
 import { describeFailure } from '../lifecycle/ServerResourceScope';
@@ -498,9 +498,10 @@ export class SfuManager {
     sctpParameters?: mediasoup.types.SctpParameters;
   }> {
     sfuCreateWebRtcTransportSchema.parse({ channelId, direction, purpose, screenSessionId });
-    // 64 watched sources, two publications with four profiles, and the legacy pair.
+    // 64 watched sources, every publication with four profiles, and the legacy pair.
     if (purpose === 'screen' && [...this.transports.values(), ...this.pendingTransports]
-      .filter(record => record.sessionId === sessionId && record.purpose === 'screen').length >= 74) {
+      .filter(record => record.sessionId === sessionId && record.purpose === 'screen').length
+        >= 64 + SCREEN_SHARE_LIMITS.maximum * 4 + 2) {
       throw new Error('Too many screen transports for this voice session');
     }
     const pending: PendingSfuTransport = { sessionId, channelId, direction, purpose, screenSessionId, cancelled: false };

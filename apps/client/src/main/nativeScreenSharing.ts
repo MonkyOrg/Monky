@@ -4,7 +4,7 @@ import { lstat, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises'
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import {
-  MessageType, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenCommandSchema, nativeScreenEventSchema,
+  MessageType, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, SCREEN_SHARE_LIMITS, nativeScreenCommandSchema, nativeScreenEventSchema,
   getScreenShareProfile,
   nativeScreenProducerSchema, nativeScreenReplySchema, nativeScreenRpcMethodSchema, nativeScreenSignalSchema,
   type NativeScreenCall, type NativeScreenCapabilities, type NativeScreenCommand, type NativeScreenCommandResult,
@@ -877,8 +877,8 @@ class NativeScreenSharingService {
       || command.replacesAudioShareId !== undefined))
       throw new Error('Quality replacement must name the exact existing source instance and selected capture.');
     if ((previous && !replacement) || call.sourceSelections.has(command.shareId)
-      || call.sources.size + call.sourceSelections.size >= 3)
-      throw new Error('Native screen source already exists or exceeds the two-share plus pending-replacement limit.');
+      || call.sources.size + call.sourceSelections.size > SCREEN_SHARE_LIMITS.maximum)
+      throw new Error('Native screen source already exists or exceeds the screen-share plus pending-replacement limit.');
     const replacedAudio = command.replacesAudioShareId === undefined ? null : call.sources.get(command.replacesAudioShareId);
     if (command.replacesAudioShareId !== undefined && (!command.audio || !replacedAudio?.source.audio))
       throw new Error('Audio replacement must name an existing audible source in this call.');
