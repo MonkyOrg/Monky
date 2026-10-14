@@ -22,8 +22,60 @@ export interface AutocompleteState {
   error?: string;
 }
 
-interface QueryBudget { nextRequestAt: number; lastRequest: AbortSignal | null }
+interface QueryBudget {
+  nextRequestAt: number;
+  lastRequest: AbortSignal | null;
+  /** Settles once the lane is free again for the next background command. */
+  lane: Promise<void>;
+  queued: number;
+}
 const budgets = new WeakMap<object, QueryBudget>();
+
+function budgetFor(connection: object): QueryBudget {
+  let budget = budgets.get(connection);
+  if (!budget) {
+    budget = { nextRequestAt: -Infinity, lastRequest: null, lane: Promise.resolve(), queued: 0 };
+    budgets.set(connection, budget);
+  }
+  return budget;
+}
+
+/**
+ * The server keeps one search per connection, and an invocation cancels it. Commands
+ * confirmed in the background therefore run one at a time, in order, while searches
+ * typed meanwhile wait instead of replacing the search a queued command depends on.
+ * The server handles a connection's messages in order, so `release` may free the lane
+ * as soon as the invocation is sent; otherwise it frees when the work settles.
+ */
+export function runInCommandLane<T>(connection: object, work: (release: () => void) => Promise<T>): Promise<T> {
+  const budget = budgetFor(connection);
+  budget.queued++;
+  let free = (): void => {};
+  const lane = new Promise<void>((resolve) => { free = resolve; });
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    budget.queued--;
+    free();
+  };
+  const result = budget.lane.then(() => work(release));
+  void result.then(release, release);
+  budget.lane = lane;
+  return result;
+}
+
+function waitForLane(lane: Promise<void>, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    signal.throwIfAborted();
+    const abort = (): void => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    void lane.then(() => {
+      signal.removeEventListener('abort', abort);
+      resolve();
+    });
+  });
+}
 
 function waitForBudget(milliseconds: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -59,10 +111,11 @@ export class CommandAutocomplete {
   constructor(
     connection: object,
     private prepareSearch: (query: string, signal: AbortSignal, page: number, cursor?: string) => Promise<PreparedAutocompleteRequest>,
-    private update: (state: AutocompleteState) => void
+    private update: (state: AutocompleteState) => void,
+    /** A search made by a command already running in the lane must not wait for itself. */
+    private readonly insideCommandLane = false,
   ) {
-    this.budget = budgets.get(connection) ?? { nextRequestAt: -Infinity, lastRequest: null };
-    budgets.set(connection, this.budget);
+    this.budget = budgetFor(connection);
   }
 
   public setQuery(query: string): void {
@@ -126,8 +179,10 @@ export class CommandAutocomplete {
     let dispatched = false;
     try {
       const send = await this.prepareSearch(query, signal, page, cursor);
-      while (current() && Date.now() < this.budget.nextRequestAt) {
-        await waitForBudget(this.budget.nextRequestAt - Date.now(), signal);
+      const queuedBehindLane = (): boolean => !this.insideCommandLane && this.budget.queued > 0;
+      while (current() && (queuedBehindLane() || Date.now() < this.budget.nextRequestAt)) {
+        if (queuedBehindLane()) await waitForLane(this.budget.lane, signal);
+        else await waitForBudget(this.budget.nextRequestAt - Date.now(), signal);
       }
       if (!current()) return;
       const pending = send();

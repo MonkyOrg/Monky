@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { LIMITS, MessageType, ProtocolErrorCode, type SlashCommand } from '@monky/shared';
 import {
-  AUTOCOMPLETE_REQUEST_INTERVAL_MS, CommandAutocomplete, type AutocompleteState, type PreparedAutocompleteRequest,
+  AUTOCOMPLETE_REQUEST_INTERVAL_MS, CommandAutocomplete, runInCommandLane, type AutocompleteState, type PreparedAutocompleteRequest,
 } from '../src/renderer/utils/commandAutocomplete';
 import { commandValuesFromInputs } from '../src/renderer/utils/botInputs';
 import { createChatStore } from '../src/renderer/stores/chatStore';
@@ -110,6 +110,56 @@ test('flush skips the remaining debounce without bypassing the connection budget
   context.mock.timers.tick(1);
   await flush();
   assert.deepEqual(sent[1], { query: 'second', time: 100 + AUTOCOMPLETE_REQUEST_INTERVAL_MS });
+});
+
+test('background commands run in order while searches typed meanwhile wait for them', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const connection = {};
+  const sent: string[] = [];
+  const search = async (query: string) => async () => {
+    sent.push(query);
+    return { status: 'ok', choices: [] };
+  };
+  const steps: string[] = [];
+  let finishFirst = (): void => {};
+  let finishThird = (): void => {};
+  const first = runInCommandLane(connection, async () => {
+    steps.push('first');
+    const background = new CommandAutocomplete(connection, search, () => {}, true);
+    background.setQuery('background');
+    background.flush();
+    await new Promise<void>((resolve) => { finishFirst = resolve; });
+    background.close();
+  });
+  const second = runInCommandLane(connection, async () => {
+    steps.push('second');
+    throw new Error('failed command');
+  });
+  const third = runInCommandLane(connection, async (release) => {
+    steps.push('third');
+    release();
+    await new Promise<void>((resolve) => { finishThird = resolve; });
+  });
+  const typed = new CommandAutocomplete(connection, search, () => {});
+  context.after(() => typed.close());
+  typed.setQuery('typed meanwhile');
+  await flush();
+  context.mock.timers.tick(0);
+  await flush();
+  assert.deepEqual(sent, ['background'], 'A search made by the running command does not wait for itself');
+  assert.deepEqual(steps, ['first']);
+  context.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_DEBOUNCE_MS + AUTOCOMPLETE_REQUEST_INTERVAL_MS);
+  await flush();
+  assert.deepEqual(sent, ['background'], 'A typed search cannot replace the search a queued command still needs');
+  finishFirst();
+  await first;
+  await assert.rejects(second, /failed command/);
+  await flush();
+  assert.deepEqual(steps, ['first', 'second', 'third'], 'Commands keep their order and a failure does not block the rest');
+  assert.deepEqual(sent, ['background', 'typed meanwhile'],
+    'Once the last command releases the lane after sending, the waiting search starts without waiting for its reply');
+  finishThird();
+  await third;
 });
 
 test('delayed local preparation cannot bunch actual requests that reserved earlier callback slots', async (context) => {

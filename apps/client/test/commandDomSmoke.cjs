@@ -976,13 +976,22 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     }
     throw new Error(message + ': ' + JSON.stringify({
       query: document.querySelector('[data-bot-autocomplete]')?.value,
-      notice: document.querySelector('.bot-command-voice-error')?.textContent,
+      notice: errorToast(),
+      active: document.activeElement?.outerHTML?.slice(0, 160),
       menu: document.querySelector('#bot-parameter-options')?.textContent,
       channel: voiceStore.currentVoiceChannelId, session: voiceStore.voiceSessionKey,
       invoked: invoked.length, draftError: store.getCommandDraft('chat')?.error,
       selected: store.getCommandDraft('chat')?.autocomplete.track?.selected?.value,
     }));
   };
+  // Composer errors live in the shared alert toast and on the disabled run button, never loose in the form.
+  const errorToast = () => [...document.querySelectorAll('.chat-copy-toast--danger:not([data-ui-closing])')]
+    .map(toast => toast.getAttribute('role') === 'alert' ? toast.textContent.trim() : '').join('');
+  const blockedReason = () => {
+    const run = document.querySelector('.bot-command-run');
+    return run && run.title !== run.getAttribute('aria-label') ? run.title : '';
+  };
+  const looseErrors = () => document.querySelectorAll('[data-command-form] .bot-error, [data-command-form] .bot-command-voice-error').length;
   const type = (element, value) => {
     if (!element) throw new Error(`Missing voice command input for ${value}`);
     element.focus(); element.value = value; element.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1092,6 +1101,8 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
   const cleanup = async () => {
     nativeListeners.forEach(unbind => unbind());
     view.destroy(); off(); audioPreviewService.release(); voiceStore.reset(); await sessionManager.removeAll();
+    // Later fixtures assert on the single shared toast slot.
+    document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
     // Later fixtures install standalone stores instead of SessionManager bundles.
     routing.setSessionEventRouter((_sessionKey, _event, emit) => emit());
     window.Audio = NativeAudio; window.api = previousApi; language.setLanguage('pt-BR');
@@ -1169,6 +1180,9 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
       queuedResults: async () => {
         check(invoked.length === beforeInvocations && !root.querySelector('[data-parameter-option]'),
           'A native Enter before the results neither executes nor submits the pasted link as a value');
+        check(!store.getCommandDraft('chat'), 'A native Enter before the results closes the composer at once');
+        await waitFor(() => !!root.querySelector('#chat-message-input')?.contains(document.activeElement),
+          'Closing the composer on Enter must return focus to the chat input while the search continues');
         await waitFor(() => queries.length > beforeQueries, 'A native Enter before the results did not start the search');
         check(queries.at(-1).payload.query === 'https://www.youtube.com/watch?v=generated01',
           'The pasted link is searched exactly as typed');
@@ -1230,6 +1244,8 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     check(queries.length === 0 && previews.length === 0 && invoked.length === 0, 'Outside voice blocks query, preview and execute');
     check(!input().disabled && !root.querySelector('[data-bot-action=cancel-command]').disabled &&
       root.querySelector('.bot-command-run').disabled, 'Voice denial keeps command editing and clearing available');
+    check(errorToast().includes('canal de voz') && blockedReason().includes('canal de voz') && looseErrors() === 0,
+      'Voice denial is explained by the shared alert toast and the run button, not loose text in the composer');
     join('voice');
     type(input(), 'pending leave');
     await waitFor(() => queries.length === 1, 'Pending voice query did not start');
@@ -1258,10 +1274,11 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     const activeAudio = played.at(-1);
     moveBot('other');
     check(activeAudio.paused && nativeCancels.length > 0, 'Bot room mismatch stops running private playback');
-    check(root.querySelector('.bot-command-voice-error').textContent.includes('já está em outro canal de voz'),
-      'Mismatch is a localized, explicit explanation');
+    check(blockedReason().includes('já está em outro canal de voz') && errorToast().includes('já está em outro canal de voz') &&
+      looseErrors() === 0, 'Mismatch is a localized, explicit explanation');
     language.setLanguage('en'); view.render();
-    check(root.querySelector('.bot-command-voice-error').textContent.includes('already in another voice channel'), 'Mismatch follows selected English language');
+    check(blockedReason().includes('already in another voice channel') && errorToast().includes('already in another voice channel'),
+      'Mismatch follows selected English language');
     const beforeQueries = queries.length;
     type(input(), 'wrong room');
     root.querySelector('[data-command-form]').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
@@ -1283,7 +1300,7 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     await waitFor(() => queries.length > beforeEligibleQuery, 'Eligible room query did not start');
     const eligibleQuery = queries.at(-1);
     join('voice');
-    check(root.querySelector('.bot-command-voice-error').hidden &&
+    check(!blockedReason() &&
       cancellations.some(entry => entry.type === 'COMMAND_AUTOCOMPLETE_CANCEL' && entry.payload.requestId === eligibleQuery.requestId),
     'An eligible room-to-room move cancels the original search authority');
     reply(eligibleQuery, { status: 'ok', choices: [{ label: 'Wrong room result', value: 'wrong-room' }] });
@@ -1297,7 +1314,7 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     join('other');
     reply(eligiblePreview, ready, 'COMMAND_AUDIO_PREVIEW_RESULT');
     await new Promise(resolve => setTimeout(resolve, 30));
-    check(root.querySelector('.bot-command-voice-error').hidden && loads.length === loadsBeforeMove &&
+    check(!blockedReason() && loads.length === loadsBeforeMove &&
       cancellations.some(entry => entry.type === 'COMMAND_AUDIO_PREVIEW_CANCEL' && entry.payload.requestId === eligiblePreview.requestId),
     'An eligible room move cancels pending preview work and rejects its late audio');
     await prepare('eligible playing preview');
@@ -1306,7 +1323,7 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     await waitFor(() => played.length > playedBeforeMove && !played.at(-1).paused, 'Eligible preview did not start');
     const eligibleAudio = played.at(-1);
     join('voice');
-    check(eligibleAudio.paused && root.querySelector('.bot-command-voice-error').hidden,
+    check(eligibleAudio.paused && !blockedReason(),
       'Changing rooms stops current playback even when the bot is not in voice and the caller stays eligible');
     join('other');
     await prepare('hidden selection');
@@ -2171,6 +2188,8 @@ async function runAutocompleteDomSmoke() {
   };
   window.autocompleteQueuedEnterSmoke = async () => {
     const beforeChecks = checks;
+    const errorToast = () => [...document.querySelectorAll('.chat-copy-toast--danger:not([data-ui-closing])')]
+      .map(toast => toast.getAttribute('role') === 'alert' ? toast.textContent.trim() : '').join('');
     command = { ...command, downloadsSound: false, options: requiredOnlyOptions };
     store.setCommands([command]);
     server.setSlashCommands([command]);
@@ -2186,18 +2205,51 @@ async function runAutocompleteDomSmoke() {
     key(input(), 'Enter');
     check(invoked.length === invocations && !root.querySelector('[data-parameter-option]'),
       'Enter while loading must not submit the typed link as an opaque value');
+    check(!store.getCommandDraft('one'), 'Enter while loading closes the composer at once instead of waiting for the results');
+    await waitFor(() => find('#chat-command-composer').hidden && find('#chat-message-input').contains(document.activeElement));
+    checks++; // The composer and its loading panel leave, and the chat input takes the focus back.
     await waitFor(() => queries.length === before + 1);
-    check(queries.at(-1).payload.query === link && queries.at(-1).time - pressedAt < 400,
+    const background = queries.at(-1);
+    check(background.payload.query === link && background.time - pressedAt < 400,
       'Enter while loading sends the pending search without waiting for the typing debounce');
-    response(queries.at(-1), [choices[3], choices[4]]);
-    await waitFor(() => invoked.length === invocations + 1 && !store.getCommandDraft('one'));
+    // The server keeps one search per connection, so a command opened meanwhile must wait its turn.
+    select();
+    await waitFor(() => !!store.getCommandDraft('one'));
+    type(input(), 'typed meanwhile');
+    await new Promise(resolve => setTimeout(resolve, 1800));
+    check(queries.length === before + 1 && !queryCancels.some(cancel => cancel.requestId === background.requestId),
+      'A search typed while a command finishes in the background waits instead of replacing its search');
+    response(background, [choices[3], choices[4]]);
+    await waitFor(() => invoked.length === invocations + 1);
     check(invoked.at(-1).options.sound === choices[3].value,
-      'A queued Enter confirms the first result as soon as it arrives, exactly once');
+      'The background command confirms the first result as soon as it arrives, exactly once');
+    await waitFor(() => queries.length === before + 2);
+    check(queries.at(-1).payload.query === 'typed meanwhile' && !!store.getCommandDraft('one'),
+      'The waiting search starts after the background command, in the composer that stayed open');
+    response(queries.at(-1), [choices[5]]);
+    await waitFor(() => !!root.querySelector('[data-parameter-option]'));
+    find('[data-bot-action="cancel-command"]').click();
+    await waitFor(() => !store.getCommandDraft('one'));
 
+    select();
+    await waitFor(() => !!store.getCommandDraft('one'));
+    type(input(), 'queued without results');
+    key(input(), 'Enter');
+    check(!store.getCommandDraft('one'), 'Enter on any typed text closes the composer while the search runs');
+    await waitFor(() => queries.at(-1)?.payload.query === 'queued without results');
+    response(queries.at(-1), []);
+    await waitFor(() => errorToast().includes(language.t('botChat.searchEmpty')));
+    check(invoked.length === invocations + 1 && errorToast().includes('/query') && !store.getCommandDraft('one'),
+      'A background search without results reports, in an alert naming the command, that nothing was sent');
+
+    command = { ...command, options: [...requiredOnlyOptions, { name: 'later', description: 'Later', type: 'boolean' }] };
+    store.setCommands([command]);
+    server.setSlashCommands([command]);
     select();
     await waitFor(() => !!store.getCommandDraft('one'));
     type(input(), 'queued then edited');
     key(input(), 'Enter');
+    check(!!store.getCommandDraft('one'), 'With optional parameters, Enter while loading keeps the composer open for them');
     type(input(), 'queued then edited again');
     await waitFor(() => queries.at(-1)?.payload.query === 'queued then edited again');
     response(queries.at(-1), [choices[5]]);
@@ -2217,16 +2269,15 @@ async function runAutocompleteDomSmoke() {
     await new Promise(resolve => setTimeout(resolve, 30));
     check(invoked.length === invocations + 1 && store.getCommandDraft('one')?.values.sound === undefined,
       'Escape discards a queued confirmation');
-    type(input(), 'queued without results');
+    type(input(), 'queued fills only');
     key(input(), 'Enter');
-    await waitFor(() => queries.at(-1)?.payload.query === 'queued without results');
-    response(queries.at(-1), []);
-    await waitFor(() => find('#bot-parameter-options').textContent.includes(language.t('botChat.autocompleteEmpty')));
-    check(invoked.length === invocations + 1 && !!store.getCommandDraft('one'),
-      'A queued Enter without results only shows the empty state');
+    await waitFor(() => queries.at(-1)?.payload.query === 'queued fills only');
+    response(queries.at(-1), [choices[7]]);
+    await waitFor(() => store.getCommandDraft('one')?.values.sound === choices[7].value);
+    check(invoked.length === invocations + 1, 'With optional parameters, the first result only fills the field');
     find('[data-bot-action="cancel-command"]').click();
 
-    command = { ...command, downloadsSound: true };
+    command = { ...command, downloadsSound: true, options: requiredOnlyOptions };
     store.setCommands([command]);
     server.setSlashCommands([command]);
     select();
@@ -2240,6 +2291,7 @@ async function runAutocompleteDomSmoke() {
     check(invoked.length === invocations + 1 && store.getCommandDraft('one')?.values.sound === undefined,
       'A queued Enter never confirms an unseen choice for a command that saves files');
     find('[data-bot-action="cancel-command"]').click();
+    document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
     return checks - beforeChecks;
   };
   return checks;
@@ -3445,6 +3497,11 @@ async function runDomSmoke(sharedModule) {
   client.ws = { readyState: WebSocket.OPEN, send() {}, close() {} };
   client.getCurrentServerUrl = () => 'wss://command-fixture.example/';
   client.send = (messageType, payload) => sent.push({ type: messageType, payload });
+  // Like a server that has not answered yet, without a request timeout turning into a failure toast mid-fixture.
+  const fixtureSendRequest = client.sendRequest.bind(client);
+  client.sendRequest = (messageType, payload, ...rest) => messageType === 'COMMAND_INVOKE'
+    ? (client.send(messageType, payload), new Promise(() => {}))
+    : fixtureSendRequest(messageType, payload, ...rest);
   chats.setActiveChatStore(store);
   servers.setActiveServerStore(server);
   networks.setActiveNetworkClient(client);
@@ -3928,32 +3985,34 @@ async function runDomSmoke(sharedModule) {
   const exactPing = { ...ping, botId: 'zeta', botName: 'Zeta Bot' };
   const botNameMatch = { ...ping, name: 'start', botId: 'ping-bot', botName: 'Ping Bot' };
   refreshRegistry([exactPing, botNameMatch]);
+  const invokes = () => sent.filter(entry => entry.type === 'COMMAND_INVOKE');
   for (const selectKey of ['Enter', 'Tab', ' ']) {
     type(find('#chat-message-input'), '/ping');
-    const before = sent.filter(entry => entry.type === 'COMMAND_INVOKE').length;
+    const before = invokes().length;
     key(find('#chat-message-input'), selectKey);
-    check(store.getCommandDraft('one')?.command.botId === exactPing.botId,
-      `${selectKey} must prefer a unique exact command over an unrelated bot-name match`);
     if (selectKey === ' ') {
-      check(sent.filter(entry => entry.type === 'COMMAND_INVOKE').length === before &&
-        !store.getCommandDraft('one').pending,
-      'Space selects a no-argument command without invoking it');
+      check(store.getCommandDraft('one')?.command.botId === exactPing.botId,
+        'Space must prefer a unique exact command over an unrelated bot-name match');
+      check(invokes().length === before && !store.getCommandDraft('one').pending,
+        'Space selects a no-argument command without invoking it');
+      store.setCommandPending('one', store.getCommandDraft('one'), false);
+      find('[data-bot-action="cancel-command"]').click();
     } else {
-      check(sent.at(-1)?.type === 'COMMAND_INVOKE' && sent.at(-1)?.payload.botId === exactPing.botId,
-        `${selectKey} must immediately invoke the exact no-argument command`);
+      check(!store.getCommandDraft('one'), `${selectKey} sends a no-argument command at once instead of keeping the composer open`);
+      await waitFor(() => invokes().length === before + 1);
+      check(invokes().at(-1).payload.botId === exactPing.botId,
+        `${selectKey} must prefer and immediately invoke a unique exact command over an unrelated bot-name match`);
     }
-    store.setCommandPending('one', store.getCommandDraft('one'), false);
-    find('[data-bot-action="cancel-command"]').click();
   }
   type(find('#chat-message-input'), '/ping');
   key(find('#chat-message-input'), 'ArrowDown');
   refreshRegistry([exactPing, botNameMatch]);
   check(find('.command-row.active strong').textContent === '/start', 'Refresh must preserve deliberate keyboard navigation');
+  const beforeExplicit = invokes().length;
   key(find('#chat-message-input'), 'Enter');
-  check(store.getCommandDraft('one')?.command.name === 'start', 'Explicit navigation must still select another matching command');
-  check(sent.at(-1)?.payload.commandName === 'start', 'Explicit selection must invoke the no-argument command');
-  store.setCommandPending('one', store.getCommandDraft('one'), false);
-  find('[data-bot-action="cancel-command"]').click();
+  await waitFor(() => invokes().length === beforeExplicit + 1);
+  check(invokes().at(-1).payload.commandName === 'start' && !store.getCommandDraft('one'),
+    'Explicit navigation must still select and invoke another matching no-argument command');
   type(find('#chat-message-input'), '/ping');
   key(find('#chat-message-input'), 'ArrowDown');
   const beforeSpace = sent.filter(entry => entry.type === 'COMMAND_INVOKE').length;
@@ -4029,6 +4088,10 @@ async function runDomSmoke(sharedModule) {
     'Incomplete required parameters must keep the visual submit button disabled');
   key(document.activeElement, 'Enter');
   check(sent.every((entry) => entry.type !== 'COMMAND_INVOKE'), 'Invalid required inputs must not execute');
+  const validationToast = active('.chat-copy-toast--danger');
+  check(validationToast?.getAttribute('role') === 'alert' && validationToast.textContent.includes('Repeat count') &&
+    !document.querySelector('[data-command-form] .bot-error, [data-command-form] .bot-command-voice-error'),
+  'A rejected execution explains the invalid parameter in the shared alert toast, never as loose text in the composer');
   const countInput = find('#chat-command-composer [data-field-name="count"] [data-bot-input]');
   const countField = countInput.closest('[data-field-name]');
   check(getComputedStyle(countInput).borderTopWidth === '0px' && getComputedStyle(countInput).paddingLeft === '2px',
@@ -4038,8 +4101,12 @@ async function runDomSmoke(sharedModule) {
   check(!find('[data-field-name="song"]').classList.contains('focused') && countField.classList.contains('focused'),
     'Moving between parameters must move the focus highlight');
   type(countInput, '11');
-  check(countField.classList.contains('invalid') &&
-    getComputedStyle(countField).borderTopColor === getComputedStyle(find('[data-command-form] > .bot-error')).color,
+  const dangerProbe = document.createElement('span');
+  dangerProbe.style.color = 'var(--danger)';
+  document.body.append(dangerProbe);
+  const dangerColor = getComputedStyle(dangerProbe).color;
+  dangerProbe.remove();
+  check(countField.classList.contains('invalid') && getComputedStyle(countField).borderTopColor === dangerColor,
     'An out-of-range value must keep a red parameter border even while focused');
   type(countInput, '0');
   check(!countField.classList.contains('invalid') && !countInput.hasAttribute('aria-invalid'),
@@ -4134,9 +4201,11 @@ async function runDomSmoke(sharedModule) {
   find('[data-bot-choice="member"]').click();
   option(caller.nickname).click();
   find('#chat-command-composer button[type="submit"]').click();
-  check(sent.some((entry) => entry.type === 'COMMAND_INVOKE' && entry.payload.options.member === caller.id), 'Self-targeting must pass command validation and send the caller ID');
-  const selfDraft = store.getCommandDraft('one');
-  store.setCommandPending('one', selfDraft, false);
+  check(!store.getCommandDraft('one'), 'A valid submission leaves the composer at once');
+  await waitFor(() => sent.some((entry) => entry.type === 'COMMAND_INVOKE' && entry.payload.options.member === caller.id));
+  checks++; // Self-targeting must pass command validation and send the caller ID.
+  store.selectCommand('one', command);
+  await frame();
   key(find('#chat-command-composer [data-field-name="song"] [data-bot-input]'), 'Escape');
   check(!store.getCommandDraft('one'), 'Escape must cancel selected command');
   check(getComputedStyle(find('.chat-input-wrapper')).display !== 'none', 'Normal composer must return after cancel');
@@ -4148,10 +4217,12 @@ async function runDomSmoke(sharedModule) {
   check(find('#chat-message-input').value === 'Ordinary draft stays here', 'Channel switches must retain ordinary drafts');
   type(find('#chat-message-input'), '/ping');
   key(find('#chat-message-input'), 'Tab');
-  check(sent.filter((entry) => entry.type === 'COMMAND_INVOKE').length === 2, 'No-argument Tab selection must execute immediately');
-  find('#chat-command-composer button[type="submit"]').click();
-  find('#chat-command-composer form').requestSubmit();
-  check(sent.filter((entry) => entry.type === 'COMMAND_INVOKE').length === 2, 'Pending invocation must reject duplicate submit');
+  check(!store.getCommandDraft('one'), 'No-argument Tab selection must execute immediately, leaving the composer at once');
+  await view.botChat.invoke();
+  document.querySelector('#chat-command-composer form')?.requestSubmit();
+  await waitFor(() => sent.filter((entry) => entry.type === 'COMMAND_INVOKE').length === 2);
+  await frame();
+  check(sent.filter((entry) => entry.type === 'COMMAND_INVOKE').length === 2, 'A submitted command cannot be sent twice');
   const invocation = { invocationId: 'dom-invocation', channelId: 'one', botId: command.botId, commandName: 'ping' };
   store.acknowledgeCommand(invocation);
   store.clearCommand('one');
@@ -4489,6 +4560,8 @@ async function runDomSmoke(sharedModule) {
   };
   window.prepareToolbarPointerFixture = async () => {
     const { initTooltips } = await import('/core/TooltipService.ts');
+    // Copy assertions below observe the single shared toast slot; earlier command errors may still occupy it.
+    document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
     const offTooltips = initTooltips();
     const writeText = navigator.clipboard.writeText;
     const write = navigator.clipboard.write;

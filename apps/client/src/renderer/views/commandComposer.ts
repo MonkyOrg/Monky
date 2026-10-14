@@ -135,6 +135,8 @@ export function renderCompactCommand(
   ).success;
   const hint = fields[0] ? commandParameterHint(fields[0]) : draft.command.description;
   const actionLabel = t(draft.pending ? 'botChat.invoking' : preparing ? 'localExecution.preparing' : 'botChat.execute');
+  // Errors surface as toasts; the disabled run button keeps the reason for hover and assistive tech.
+  const blockedReason = voiceError ?? (available ? undefined : t('botChat.commandUnavailable'));
   return `<form class="bot-compact-command-form" data-command-form
     data-bot-id="${escapeHtml(draft.command.botId)}" data-command-name="${escapeHtml(draft.command.name)}" novalidate>
     <div class="bot-command-hint">
@@ -155,14 +157,12 @@ export function renderCompactCommand(
       </div>
       <button type="submit" class="btn btn-primary bot-command-run" ${disabled || !available || !canExecute || voiceError ? 'disabled' : ''}
         ${draft.pending || preparing ? 'data-loading="1" aria-busy="true"' : ''}
-        title="${escapeHtml(actionLabel)}" aria-label="${escapeHtml(actionLabel)}">
+        title="${escapeHtml(blockedReason ?? actionLabel)}" aria-label="${escapeHtml(actionLabel)}">
         <span class="material-symbols-outlined md-18">send</span>
       </button>
     </div>
     ${preparing ? `<p class="bot-status bot-command-preparation" role="status">${renderLoadingIndicator(t('localExecution.preparing'))}</p>` : ''}
     ${draft.command.downloadsSound ? `<p class="bot-local-download-cue"><span class="material-symbols-outlined md-16" aria-hidden="true">download</span>${t('botChat.localDownload')}</p>` : ''}
-    <p class="bot-command-voice-error" role="status" ${voiceError ? '' : 'hidden'}>${escapeHtml(voiceError ?? '')}</p>
-    <p class="bot-error" role="alert" ${draft.error || !available ? '' : 'hidden'}>${escapeHtml(draft.error ?? (!available ? t('botChat.commandUnavailable') : ''))}</p>
     <div class="bot-parameter-menu" id="bot-parameter-options" hidden></div>
   </form>`;
 }
