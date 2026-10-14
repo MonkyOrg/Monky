@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Servidor reiniciando em segundo plano não joga mais um aviso no meio da sua tela: agora aparece só um toast discreto. O aviso grande fica para o servidor que você está vendo ou onde está em chamada.",
+  "en": "A server restarting in the background no longer drops a popup in the middle of your screen: you get a small toast instead. The big notice is kept for the server you are looking at or calling on."
+}

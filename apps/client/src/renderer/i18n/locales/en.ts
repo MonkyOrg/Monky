@@ -2029,6 +2029,8 @@ export const en: TranslationMap = {
   'app.serverUpdatingTitle': 'Server updating',
   'app.serverUpdatingMessage': 'The server "{server}" is restarting to update. Try reconnecting in a few seconds.',
   'app.serverShutdownMessage': 'The host closed the server. You were disconnected.',
+  'app.serverClosedToast': 'The host closed the server "{server}". You were disconnected from it.',
+  'app.serverUpdatingToast': 'The server "{server}" is restarting to update. You were disconnected from it.',
   'app.kickedFromServerMessage': 'You were removed from the server by an administrator.',
   'upload.cancelled': 'Upload cancelled',
   'upload.noConnection': 'No connection to the server',

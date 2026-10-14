@@ -1991,6 +1991,8 @@ export const ptBR = {
   'app.serverUpdatingTitle': 'Servidor em atualização',
   'app.serverUpdatingMessage': 'O servidor "{server}" está reiniciando para atualização. Tente reconectar em alguns segundos.',
   'app.serverShutdownMessage': 'O anfitrião encerrou o servidor. Você foi desconectado.',
+  'app.serverClosedToast': 'O anfitrião encerrou o servidor "{server}". Você foi desconectado dele.',
+  'app.serverUpdatingToast': 'O servidor "{server}" está reiniciando para atualização. Você foi desconectado dele.',
   'app.kickedFromServerMessage': 'Você foi removido do servidor por um administrador.',
   'upload.cancelled': 'Upload cancelado',
   'upload.noConnection': 'Sem conexão com o servidor',
