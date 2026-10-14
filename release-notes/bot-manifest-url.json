@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Esqueceu de onde veio aquele bot? Quem administra bots agora vê a URL do manifest nas configurações dele e copia com um clique. Bots vinculados antes desta versão aparecem sem URL registrada. Atualize o servidor para usar.",
+  "en": "Forgot where that bot came from? Bot managers now see its manifest URL in the bot settings and can copy it in one click. Bots linked before this version show no recorded URL. Update the server to use it."
+}

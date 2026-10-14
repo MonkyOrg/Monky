@@ -142,6 +142,9 @@ async function runBotSettingsDomSmoke() {
     requested: ['commands', 'send_messages', 'local_execution'], granted: [], revision: 1,
     reviewRequired: true, reviewedBy: null, reviewedAt: null,
   };
+  // Like the server: only managers whose client negotiated `bot-manifest-url` receive the field.
+  let manifestFeature = false;
+  let manifestUrl = 'https://bots.example.com:7780/manifest';
   const visibleDefinition = () => {
     const visible = {
       ...(userDefinition ? { user: userDefinition } : {}),
@@ -161,6 +164,7 @@ async function runBotSettingsDomSmoke() {
     capabilities: { downloadsSound: id === 'audio-bot' }, schemaRevision, revision,
     hasServerSettings: id === 'generic-bot', hasUserSettings: id === 'generic-bot' && !!userDefinition,
     canConfigure: canConfigure(), canManage: canManage(), permissions: structuredClone(permissions),
+    ...(manifestFeature && canManage() && id === 'generic-bot' ? { manifestUrl } : {}),
   });
   const snapshot = id => ({
     bot: summary(id),
@@ -265,7 +269,12 @@ async function runBotSettingsDomSmoke() {
     find('[data-settings-bot="generic-bot"]').click();
     await settle(() => !!document.querySelector('#bot-settings-user-count'));
     check(!document.querySelector('[data-settings-scope="server"]'), 'Shared behavior is omitted without configure permission');
+    check(find('[data-settings-scope="user"]').getAttribute('aria-expanded') === 'true' &&
+      [...document.querySelectorAll('.bot-settings-modal .settings-section-link')].map(link => link.textContent).join('|') ===
+        [language.t('botSettings.language'), 'Preferências pessoais'].join('|'),
+    'A tab with several sections lists them in the standard subsection menu');
     check(find('#bot-settings-form h3').textContent === 'Preferências pessoais' &&
+      find('#bot-settings-form h3').classList.contains('bot-settings-section-title') &&
       find('#bot-settings-form [data-settings-section="bot-defined"] > .bot-field-description').textContent === 'Opções pessoais salvas neste dispositivo.',
       'Personal form title and description follow declared app-language metadata');
     check(find('label[for="bot-settings-user-count"]').textContent.includes('Quantidade') &&
@@ -361,6 +370,9 @@ async function runBotSettingsDomSmoke() {
     check(!server.hasPermission(Permission.MANAGE_BOTS), 'Configure-only role has no installation/profile management grant');
     await modal.open('generic-bot');
     find('[data-settings-scope="server"]').click();
+    check(find('[data-settings-scope="server"]').getAttribute('aria-expanded') === 'false' &&
+      !document.querySelector('.bot-settings-modal .settings-section-link'),
+    'A tab whose only section is the bot form has no subsection menu repeating it');
     check(find('#bot-settings-form h3').textContent === 'Configurações de música' &&
       find('label[for="bot-settings-server-music_idle_seconds"]').textContent.includes('Tempo de inatividade'),
       'Server music settings use declared Portuguese titles and labels');
@@ -557,6 +569,10 @@ async function runBotSettingsDomSmoke() {
     check(find('[data-settings-scope="permissions"]').getAttribute('aria-selected') === 'true' &&
       !document.querySelector('[data-settings-scope="server"]'),
     'An unreviewed declaration opens its review for managers without exposing shared settings');
+    check(find('[data-settings-scope="permissions"]').getAttribute('aria-expanded') === 'false' &&
+      !document.querySelector('.bot-settings-modal .settings-section-link') &&
+      !document.querySelector('.bot-settings-modal #tab-panel-permissions h3'),
+    'The permissions tab neither repeats its name as a heading nor as a subsection menu');
     check(document.querySelectorAll('[data-bot-capability]').length === 3 &&
       !document.querySelector('[data-bot-capability="publish_voice"]') &&
       ![...document.querySelectorAll('[data-bot-capability]')].some(input => input.checked),
@@ -612,6 +628,66 @@ async function runBotSettingsDomSmoke() {
       find('.bot-settings-body').textContent.includes(language.t('botPermissions.undeclared')),
     'Manual and migrated bots with no declaration cannot receive fabricated approval');
     modal.close();
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const copied = [];
+    let copyFailure = null;
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => {
+      if (copyFailure) throw copyFailure;
+      copied.push(value);
+    } } });
+    const toast = () => document.querySelector('.chat-copy-toast:not([data-ui-closing])');
+    try {
+      await modal.open('generic-bot');
+      check(!document.querySelector('.bot-settings-modal [data-bot-manifest], .bot-settings-modal [data-bot-manifest-missing]'),
+        'Servers without the manifest URL feature show neither the row nor the unrecorded note');
+      manifestFeature = true;
+      await modal.open('generic-bot');
+      for (const scope of ['permissions', 'user']) {
+        find(`[data-settings-scope="${scope}"]`).click();
+        const url = find('.bot-settings-modal [data-bot-manifest] .bot-settings-manifest-url');
+        check(url.textContent === manifestUrl && url.title === manifestUrl &&
+          find('[data-bot-manifest]').getAttribute('aria-labelledby') === 'bot-settings-manifest-label' &&
+          find('#bot-settings-manifest-label').textContent === language.t('bots.manifestUrlLabel'),
+        `Managers see the full manifest URL with its label in the ${scope} tab`);
+      }
+      const copy = find('[data-settings-copy-manifest]');
+      check(copy.type === 'button' && copy.getAttribute('aria-label') === language.t('botSettings.manifestCopy') &&
+        copy.title === language.t('botSettings.manifestCopy') &&
+        copy.querySelector('.material-symbols-outlined')?.textContent === 'content_copy',
+      'The copy button is a labelled icon button');
+      copy.focus();
+      copy.click();
+      await settle(() => copied.length === 1 && !!toast());
+      equal(copied, [manifestUrl], 'Copying writes exactly the manifest URL');
+      check(toast().getAttribute('role') === 'status' && toast().textContent.includes(language.t('botSettings.manifestCopied')) &&
+        document.activeElement === copy, 'A successful copy is confirmed by the shared toast without moving focus');
+      copyFailure = new Error('Fixture clipboard denied');
+      find('[data-settings-copy-manifest]').click();
+      await settle(() => toast()?.classList.contains('chat-copy-toast--danger'));
+      check(toast().getAttribute('role') === 'alert' && toast().textContent.includes(language.t('botSettings.manifestCopyFailed')) &&
+        !find('.bot-settings-body').textContent.includes(language.t('botSettings.manifestCopyFailed')),
+      'A failed copy uses the shared alert toast instead of loose text in the modal');
+      copyFailure = null;
+      server.myPermissions = Permission.CONFIGURE_BOTS;
+      appEvents.emit('server.roles_updated');
+      check(!document.querySelector('.bot-settings-modal [data-bot-manifest]') && modal.snapshot.bot.manifestUrl === undefined,
+        'Losing bot management removes the manifest URL from the screen and from memory');
+      await modal.open('generic-bot');
+      check(!document.querySelector('.bot-settings-modal [data-bot-manifest], .bot-settings-modal [data-bot-manifest-missing]'),
+        'People who only configure bots never see the manifest URL');
+      server.myPermissions = Permission.MANAGE_BOTS;
+      manifestUrl = null;
+      await modal.open('generic-bot');
+      check(find('[data-bot-manifest-missing]').textContent === language.t('botSettings.manifestMissing') &&
+        !document.querySelector('.bot-settings-modal [data-bot-manifest], .bot-settings-modal [data-settings-copy-manifest]'),
+      'Bots without a recorded manifest explain why instead of offering an empty copy button');
+    } finally {
+      modal.close();
+      manifestFeature = false;
+      manifestUrl = 'https://bots.example.com:7780/manifest';
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else delete navigator.clipboard;
+    }
     const reviewPreview = {
       previewId: 'review-preview', expiresAt: Date.now() + 60000,
       manifest: { name: 'Review <bot>', description: 'Declared access', registrationUrl: 'https://bot.example/register',

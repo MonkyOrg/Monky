@@ -49,7 +49,7 @@ Use this when the bot does not expose a reachable manifest:
 1. Open **Show advanced option** and generate a registration/token.
 2. Copy the token displayed **only once** into the bot's setup.
 3. Wait for the process to connect and announce its identity and capabilities.
-4. Open that bot's settings, review **Server permissions** and save.
+4. Open that bot's settings, review **Permissions** and save.
 
 The token authenticates the registration; it **does not approve actions**.
 A reservation without an identity waits for the connection in bot
@@ -97,8 +97,12 @@ Right-click the bot in the member list or on its message, then open
 | Section | Who controls it | What changes |
 | --- | --- | --- |
 | **My preferences** | You | This bot's language and personal preferences on this device |
-| **Behavior on this server** | Administrators or a role allowed to configure bots | Shared options provided by the bot itself |
-| **Server permissions** | People allowed to manage bots | Capabilities the bot may perform on this server |
+| **Behavior** | Administrators or a role allowed to configure bots | Shared options provided by the bot itself on this server |
+| **Permissions** | People allowed to manage bots | Capabilities the bot may perform on this server |
+
+People who manage bots also see, at the top of the settings, the **Manifest
+URL** used to link the bot, with a button to copy it. Bots linked with a
+token, or before the server stored this information, show no recorded URL.
 
 **Follow Monky** uses the app's language. An explicit choice applies only to
 this bot/server/identity in the current profile; it does not translate old
@@ -159,7 +163,7 @@ administrator, ends that instance for everyone.
 ## Bots that receive voice
 
 A bot can receive microphones only if it requests **Listen to voice-room microphones** and an
-administrator approves it in **Bot settings → Server permissions**.
+administrator approves it in **Bot settings → Permissions**.
 Publishing audio is a separate permission: music bots do not start
 listening automatically.
 

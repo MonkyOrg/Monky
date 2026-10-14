@@ -22,6 +22,7 @@ import { botPreferenceScopeFor } from '../utils/botSettingsContext';
 import { botInputError, botRequestError, convertBotInputValues, initialBotInputValues } from '../utils/botInputs';
 import { applyBotFieldAction, readBotFieldChange, renderBotFields, type BotFieldContext } from './botFields';
 import { showAlert } from './Dialog';
+import { showCopyToast, showErrorToast } from './CopyToast';
 import type { ContextMenuItem } from './ContextMenu';
 import { renderLoadingSkeleton } from '../utils/loadingSkeleton';
 import { SettingsSectionNavigation } from './settings/SettingsSectionNavigation';
@@ -275,6 +276,13 @@ export class BotSettingsModal {
 
   private refreshAuthorization(render = true): void {
     if (!this.snapshot) return;
+    if (!this.canManage() && this.snapshot.bot.manifestUrl !== undefined) {
+      // The manifest URL can reveal internal hosts; it leaves memory together with the manager role.
+      const bot = { ...this.snapshot.bot };
+      delete bot.manifestUrl;
+      this.snapshot = { ...this.snapshot, bot };
+      if (render) this.render();
+    }
     if (!this.canManage() && this.scope === 'permissions') {
       this.scope = 'user';
       this.permissionDraft = [];
@@ -382,6 +390,12 @@ export class BotSettingsModal {
     const message = stale ? t(this.scope === 'permissions' ? 'botPermissions.conflict' : 'botSettings.conflict') : this.message ||
       (invalid && !invalid.success ? t('botSettings.stalePreferences') : '');
     const error = stale || this.error || !!(invalid && !invalid.success);
+    const manifestUrl = snapshot && this.canManage() ? snapshot.bot.manifestUrl : undefined;
+    // A subsection menu with a single entry would only repeat the tab, so sections are listed from two up.
+    const sectionCount = snapshot && this.scope === 'user'
+      ? 1 + Number(snapshot.bot.capabilities.downloadsSound) + Number(!!form) : 0;
+    const section = (key: string, label: string): string => sectionCount > 1
+      ? `data-settings-section="${key}" data-settings-label="${escapeHtml(label)}"` : '';
     this.root.innerHTML = `<div class="modal-card settings-modal-card bot-settings-card" role="dialog" aria-modal="true" aria-labelledby="bot-settings-title" tabindex="-1">
       <div class="settings-sidebar">
         <div class="bot-settings-sidebar-title">${t('botSettings.title')}</div>
@@ -391,7 +405,7 @@ export class BotSettingsModal {
             aria-selected="${scope === this.scope}" tabindex="${scope === this.scope ? '0' : '-1'}"
             aria-controls="tab-panel-${scope}" ${this.saving ? 'disabled' : ''}>
             <span class="material-symbols-outlined md-18" aria-hidden="true">${scope === 'permissions' ? 'shield' : scope === 'server' ? 'dns' : 'person'}</span>
-            ${t(scope === 'permissions' ? 'botPermissions.title' : scope === 'user' ? 'botSettings.userTab' : 'botSettings.serverTab')}</button>`).join('')}
+            <span>${t(scope === 'permissions' ? 'botPermissions.title' : scope === 'user' ? 'botSettings.userTab' : 'botSettings.serverTab')}</span></button>`).join('')}
         </div>
       </div>
       <div class="settings-main-container">
@@ -404,15 +418,23 @@ export class BotSettingsModal {
       <div class="settings-tab-panel" id="tab-panel-${snapshot ? this.scope : 'catalog'}"
         ${snapshot ? `role="tabpanel" aria-labelledby="bot-settings-tab-${this.scope}"` : ''}>
         ${this.loading ? `<p class="bot-status" role="status">${renderLoadingIndicator(t('botSettings.loading'))}</p>${renderLoadingSkeleton('lines', 5)}` : snapshot ? `
-          <div class="bot-settings-identity">
-            <img src="${escapeHtml(getAvatarUrl(snapshot.bot.avatarUrl))}" alt="" data-fallback="avatar">
-            <div><div class="bot-settings-name">${escapeHtml(snapshot.bot.name)}</div>
-              <div class="bot-settings-presence">${t(snapshot.bot.online ? 'botSettings.online' : 'botSettings.offline')}</div></div>
+          <div class="bot-settings-header">
+            <div class="bot-settings-identity">
+              <img src="${escapeHtml(getAvatarUrl(snapshot.bot.avatarUrl))}" alt="" data-fallback="avatar">
+              <div><div class="bot-settings-name">${escapeHtml(snapshot.bot.name)}</div>
+                <div class="bot-settings-presence">${t(snapshot.bot.online ? 'botSettings.online' : 'botSettings.offline')}</div></div>
+            </div>
+            ${manifestUrl ? `<div class="bot-settings-manifest" role="group" aria-labelledby="bot-settings-manifest-label" data-bot-manifest>
+              <span class="bot-settings-manifest-label" id="bot-settings-manifest-label">${escapeHtml(t('bots.manifestUrlLabel'))}</span>
+              <span class="bot-settings-manifest-url" title="${escapeHtml(manifestUrl)}">${escapeHtml(manifestUrl)}</span>
+              <button type="button" class="bot-settings-manifest-copy" data-settings-copy-manifest
+                title="${escapeHtml(t('botSettings.manifestCopy'))}" aria-label="${escapeHtml(t('botSettings.manifestCopy'))}">
+                <span class="material-symbols-outlined md-16" aria-hidden="true">content_copy</span></button>
+            </div>` : manifestUrl === null ? `<p class="bot-settings-description" data-bot-manifest-missing>${escapeHtml(t('botSettings.manifestMissing'))}</p>` : ''}
           </div>
           ${!snapshot.bot.online ? `<p class="bot-settings-description">${t('botSettings.offlineHint')}</p>` : ''}
           ${this.scope === 'permissions' && active ? `<form id="bot-settings-form" class="bot-settings-form" novalidate>
-            <h3>${t('botPermissions.title')}</h3>
-            ${snapshot.bot.permissions?.reviewRequired !== false ? `<p role="status">${t('botPermissions.reviewPending')}</p>` : ''}
+            ${snapshot.bot.permissions?.reviewRequired !== false ? `<p class="bot-settings-review-pending" role="status">${t('botPermissions.reviewPending')}</p>` : ''}
             ${renderBotPermissionControls(snapshot.bot.permissions?.requested ?? null, this.permissionDraft, 'bot-settings-permissions', this.blocked())}
           </form>` : active && draft ? `<div id="bot-settings-panel">
             <p class="bot-settings-description">${t(this.scope === 'user' ? 'botSettings.userDescription' : 'botSettings.serverDescription')}</p>
@@ -422,7 +444,7 @@ export class BotSettingsModal {
             </button>` : ''}
             <form id="bot-settings-form" class="bot-settings-form" novalidate>
               <fieldset ${this.blocked() ? 'disabled' : ''}>
-                ${this.scope === 'user' ? `<div class="bot-settings-host-preference form-group" data-settings-section="language" data-settings-label="${escapeHtml(t('botSettings.language'))}">
+                ${this.scope === 'user' ? `<div class="bot-settings-host-preference form-group" ${section('language', t('botSettings.language'))}>
                   <label for="bot-settings-locale">${t('botSettings.language')}</label>
                   <p class="bot-field-description" id="bot-settings-language-description">${t('botSettings.languageDescription')}</p>
                   <select id="bot-settings-locale" data-settings-locale aria-describedby="bot-settings-language-description bot-settings-language-auto-hint">
@@ -432,15 +454,15 @@ export class BotSettingsModal {
                   </select>
                   <p class="bot-field-description" id="bot-settings-language-auto-hint">${t('botSettings.languageAutoDescription')}</p>
                 </div>` : ''}
-                ${this.scope === 'user' && snapshot.bot.capabilities.downloadsSound ? `<div class="bot-settings-host-preference bot-field" data-settings-section="downloads" data-settings-label="${escapeHtml(t('botSettings.askFileName'))}">
+                ${this.scope === 'user' && snapshot.bot.capabilities.downloadsSound ? `<div class="bot-settings-host-preference bot-field" ${section('downloads', t('botSettings.askFileName'))}>
                   <div class="bot-field-heading"><label for="bot-settings-host-prompt">${t('botSettings.askFileName')}</label></div>
                   <label class="toggle-switch"><input type="checkbox" role="switch" id="bot-settings-host-prompt"
                     data-settings-host-prompt aria-describedby="bot-settings-host-hint" ${this.confirmFileName ? 'checked' : ''}>
                     <span class="toggle-slider"></span></label>
                   <p class="bot-field-description" id="bot-settings-host-hint">${t('botSettings.askFileNameHint')}</p>
                 </div>` : ''}
-                ${form ? `<section data-settings-section="bot-defined" data-settings-label="${escapeHtml(form.title)}">
-                  <h3 class="bot-settings-name">${escapeHtml(form.title)}</h3>
+                ${form ? `<section class="bot-settings-section" ${section('bot-defined', form.title)}>
+                  <h3 class="bot-settings-section-title">${escapeHtml(form.title)}</h3>
                   ${form.description ? `<p class="bot-field-description">${escapeHtml(form.description)}</p>` : ''}
                   ${renderBotFields(form.fields, draft.values, this.fieldContext())}
                 </section>` : ''}
@@ -531,6 +553,7 @@ export class BotSettingsModal {
     const target = event.target;
     if (target.closest('[data-settings-close]')) { this.close(); return; }
     if (!this.session || !this.isCurrent(this.session)) { this.close(); return; }
+    if (target.closest('[data-settings-copy-manifest]')) { void this.copyManifestUrl(this.session); return; }
     if (this.loading || this.saving) return;
     if (this.scope === 'user' && target.closest('[data-settings-local-tools]')) {
       this.close();
@@ -611,6 +634,19 @@ export class BotSettingsModal {
       void this.save();
     }
   };
+
+  private async copyManifestUrl(session: SettingsSession): Promise<void> {
+    const url = this.canManage() ? this.snapshot?.bot.manifestUrl : undefined;
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch (error) {
+      console.warn('[BotSettingsModal] Could not copy the manifest URL', error);
+      if (this.isCurrent(session)) showErrorToast(t('botSettings.manifestCopyFailed'));
+      return;
+    }
+    if (this.isCurrent(session)) showCopyToast(t('botSettings.manifestCopied'));
+  }
 
   private async save(): Promise<void> {
     if (this.scope === 'permissions') { await this.savePermissions(); return; }

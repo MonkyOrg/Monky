@@ -18,7 +18,7 @@ own identity.
 
 | Scope | Who can change it | Storage |
 |---|---|---|
-| **Behavior on this server** | Administrators/owner or roles with **Configure bot behavior** (`CONFIGURE_BOTS`) | This server's database; affects everyone using that bot there |
+| **Behavior** | Administrators/owner or roles with **Configure bot behavior** (`CONFIGURE_BOTS`) | This server's database; affects everyone using that bot there |
 | **My preferences** | The individual user | Local profile, separated by endpoint, server, identity, and bot; not synchronized across devices |
 
 `CONFIGURE_BOTS` is independent of `MANAGE_BOTS`, which controls linking and unlinking, not identity. Only the authenticated bot can change its name and avatar. Unauthorized readers receive neither the shared values nor the shared form. The SDK declares reusable fields; it does not inject HTML or create a global app-settings tab. Bots without shared settings do not show that section.

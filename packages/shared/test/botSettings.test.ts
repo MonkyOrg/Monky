@@ -6,7 +6,7 @@ import {
   botSettingsUpdateSchema, botSelectorRespondSchema, botSelectorRespondedSchema,
   commandInvokeSchema, commandExecutionSchema, commandAutocompleteSchema,
   commandAutocompleteExecutionSchema, commandRegisterSchema, commandSubmitSchema,
-  resolveBotSettingsValues, localizeBotSettingsForm,
+  resolveBotSettingsValues, localizeBotSettingsForm, createProtocolOffer, negotiateProtocol,
 } from '../src/index.js';
 
 const definition = botSettingsDefinitionSchema.parse({
@@ -118,6 +118,23 @@ assert.equal(botSettingsSummarySchema.safeParse(bot).success, true);
 assert.equal(botSettingsSummarySchema.safeParse({ ...bot, tokenHash: 'private' }).success, false);
 assert.equal(botSettingsSummarySchema.safeParse({ ...bot, revision: -1 }).success, false);
 assert.equal(botSettingsSummarySchema.safeParse({ ...bot, revision: Number.MAX_SAFE_INTEGER + 1 }).success, false);
+// Managers on clients that negotiated `bot-manifest-url` see the URL used at installation, or null when none was recorded.
+for (const manifestUrl of ['https://bots.example.com:7780/manifest', 'http://192.168.0.20:7780/manifest', null]) {
+  assert.equal(botSettingsSummarySchema.safeParse({ ...bot, canManage: true, manifestUrl }).success, true);
+  assert.equal(botSettingsSnapshotSchema.safeParse({ bot: { ...bot, manifestUrl }, definition: { user: definition.user } }).success, true);
+}
+for (const manifestUrl of ['ftp://bots.example.com/manifest', 'javascript:alert(1)', 'https://user:secret@bots.example.com/manifest',
+  'not a url', '', `https://bots.example.com/${'a'.repeat(2048)}`, 7780]) {
+  assert.equal(botSettingsSummarySchema.safeParse({ ...bot, manifestUrl }).success, false, String(manifestUrl));
+}
+assert.equal(createProtocolOffer('client').features.includes('bot-manifest-url'), true);
+assert.equal(createProtocolOffer('bot').features.includes('bot-manifest-url'), false);
+const olderClientFeatures = createProtocolOffer('client').features.filter((feature) => feature !== 'bot-manifest-url');
+assert.equal(negotiateProtocol(38, { minimumVersion: 35, features: olderClientFeatures }, 'client')?.features.includes('bot-manifest-url'), false);
+assert.equal(negotiateProtocol(38, createProtocolOffer('client'), 'client')?.features.includes('bot-manifest-url'), true);
+assert.equal(negotiateProtocol(38, { minimumVersion: 24, features: ['bot-manifest-url'] }, 'bot')?.features.includes('bot-manifest-url'), false);
+// A client built before the feature keeps its strict summary schema, so the server must never send it the field.
+assert.equal(botSettingsSummarySchema.omit({ manifestUrl: true }).safeParse({ ...bot, manifestUrl: null }).success, false);
 assert.equal(botSettingsSnapshotSchema.safeParse({ bot, definition: { user: definition.user } }).success, true);
 const server = { schemaRevision: 1, revision: 2, values: { count: 3 } };
 assert.equal(botServerSettingsSnapshotSchema.safeParse(server).success, true);

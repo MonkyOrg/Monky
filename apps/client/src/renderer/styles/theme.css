@@ -5779,6 +5779,10 @@ input:focus, textarea:focus, select:focus {
 .bot-settings-card .settings-tab-btn {
   text-align: left;
 }
+/* Same header title size as the app and server settings. */
+.bot-settings-card .settings-content-header .modal-title {
+  font-size: 16px;
+}
 .bot-permission-row {
   display: flex;
   align-items: center;
@@ -5800,9 +5804,21 @@ input:focus, textarea:focus, select:focus {
 .bot-permission-row p {
   margin: 6px 0 0;
 }
+.bot-permission-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.bot-permission-status {
+  margin: 12px 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
 .bot-permission-consent {
+  margin: 10px 0 4px;
   padding: 12px;
-  background: var(--bg-elevated);
+  background: var(--bg-card);
   border-radius: var(--radius-md);
   font-size: 12px;
   line-height: 1.5;
@@ -5854,6 +5870,64 @@ input:focus, textarea:focus, select:focus {
   gap: 10px;
   min-width: 0;
 }
+.bot-settings-header {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.bot-settings-manifest {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 4px 4px 4px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+.bot-settings-manifest-label {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.bot-settings-manifest-url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.bot-settings-manifest-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+.bot-settings-manifest-copy:hover,
+.bot-settings-manifest-copy:focus-visible {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+.bot-settings-manifest-copy:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
+}
 .bot-settings-identity img,
 .bot-settings-entry img {
   width: 36px;
@@ -5891,6 +5965,23 @@ input:focus, textarea:focus, select:focus {
 }
 .bot-settings-host-preference {
   margin: 16px 0;
+}
+.bot-settings-section {
+  margin-top: 16px;
+}
+/* Section titles use the standard settings section label, not browser heading defaults. */
+.bot-settings-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.bot-settings-review-pending {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--warning);
 }
 .bot-settings-card [data-settings-save] {
   margin-left: auto;

@@ -205,7 +205,7 @@ O modo `--foreground` mantém o processo nesse terminal sem criar um daemon PM2.
 
 ## 4. Aprove e execute
 
-No cliente, abra **Configurações do bot → Permissões no servidor**, permita
+No cliente, abra **Configurações do bot → Permissões**, permita
 a capacidade de **comandos** e as outras capacidades solicitadas pelas
 funcionalidades que você adicionou, e salve. Estar online não substitui essa aprovação.
 
