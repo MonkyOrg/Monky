@@ -5,7 +5,8 @@ import http from 'node:http';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import {
-  BOT_CAPABILITIES, MessageType, Permission, ProtocolErrorCode, botPermissionsSnapshotSchema,
+  BOT_CAPABILITIES, MessageType, Permission, PROTOCOL_VERSION, ProtocolErrorCode, botPermissionsSnapshotSchema,
+  botSettingsListResponseSchema, botSettingsSnapshotSchema, botSettingsSummarySchema, createProtocolOffer,
   type BotCapability,
 } from '@monky/shared';
 import { SqliteBotPermissionRepository } from './infrastructure/database/SqliteBotPermissionRepository';
@@ -616,6 +617,81 @@ test('install previews bind identity, requests and administrator session before 
   requestedCapabilities = undefined;
   await owner.peer.error(MessageType.BOT_INSTALL_PREVIEW, { manifestUrl }, ProtocolErrorCode.BOT_CAPABILITIES_INVALID);
   assert.equal(registrations, 1);
+});
+
+test('the installed manifest URL reaches only bot managers whose client negotiated it', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const offer = createProtocolOffer('client');
+  // A client built before `bot-manifest-url` offers every other feature and rejects unknown summary fields.
+  const olderOffer = { ...offer, features: offer.features.filter((feature) => feature !== 'bot-manifest-url') };
+  const olderSummary = botSettingsSummarySchema.omit({ manifestUrl: true });
+  const connect = (name: string, keys = identity(), protocolOffer = offer) =>
+    f.human(name, keys, randomUUID(), false, PROTOCOL_VERSION, protocolOffer);
+  const owner = await connect('Manifest owner');
+  const olderOwner = await connect('Manifest owner', owner.keys, olderOffer);
+  const configurer = await connect('Manifest configurer');
+  const member = await connect('Manifest member');
+  const configRole = { id: randomUUID(), name: 'Configurators', color: null, position: 1,
+    permissions: Permission.CONFIGURE_BOTS, isDefault: false, createdAt: Date.now() };
+  await f.roleRepo.create(configRole);
+  await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: configurer.id, roleId: configRole.id });
+  await owner.peer.barrier();
+  const keys = identity();
+  const server = http.createServer((request, response) => {
+    response.setHeader('Content-Type', 'application/json');
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    if (request.url === '/manifest') {
+      response.end(JSON.stringify({ name: 'Manifest bot', requestedCapabilities: ['commands'], registrationUrl: `http://127.0.0.1:${address.port}/register` }));
+    } else {
+      request.resume();
+      response.end(JSON.stringify({ publicKey: keys.publicKey }));
+    }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const manifestUrl = `http://127.0.0.1:${address.port}/manifest`;
+  const preview = await owner.peer.request(MessageType.BOT_INSTALL_PREVIEW, { manifestUrl });
+  assert.equal(preview.type, MessageType.BOT_INSTALL_PREVIEW_RESULT);
+  const since = olderOwner.peer.messages.length;
+  const installed = await owner.peer.request(MessageType.BOT_INSTALL, { previewId: preview.payload.previewId, grantedCapabilities: ['commands'] });
+  assert.equal(installed.type, MessageType.BOT_INSTALLED);
+  const botId = text(record(installed.payload.bot).id);
+  assert.equal('manifestUrl' in record(installed.payload.bot), false, 'Bot listings never carry the manifest URL');
+  assert.equal((await f.botRepo.findById(botId))?.manifestUrl, manifestUrl);
+
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const linkedId = text(record(created.payload.bot).id);
+  await f.bot(text(created.payload.token), identity(), 'Token bot');
+  const summaries = async (peer = owner.peer) =>
+    botSettingsListResponseSchema.parse((await peer.request(MessageType.BOT_SETTINGS_LIST, {})).payload).bots;
+  const snapshot = async (peer = owner.peer, id = botId) =>
+    botSettingsSnapshotSchema.parse((await peer.request(MessageType.BOT_SETTINGS_GET, { botId: id })).payload).bot;
+  const listed = await summaries();
+  assert.equal(listed.find((bot) => bot.botId === botId)?.manifestUrl, manifestUrl);
+  assert.equal(listed.find((bot) => bot.botId === linkedId)?.manifestUrl, null, 'Token links have no recorded manifest');
+  assert.equal((await snapshot()).manifestUrl, manifestUrl);
+  assert.equal((await snapshot(owner.peer, linkedId)).manifestUrl, null);
+
+  for (const peer of [configurer.peer, member.peer]) {
+    for (const summary of [...await summaries(peer), await snapshot(peer)]) {
+      assert.equal('manifestUrl' in summary, false, 'People who cannot manage bots never receive the URL');
+    }
+  }
+  const olderSummaries: Record<string, unknown>[] = [...await summaries(olderOwner.peer), await snapshot(olderOwner.peer)];
+  await olderOwner.peer.barrier();
+  for (const message of olderOwner.peer.messages.slice(since)) {
+    if (message.type === MessageType.BOT_SETTINGS_LIST_RESPONSE) olderSummaries.push(...records(message.payload.bots));
+    if (message.type === MessageType.BOT_SETTINGS_SNAPSHOT) olderSummaries.push(record(message.payload.bot));
+  }
+  assert.ok(olderSummaries.length >= 4 && olderSummaries.some((summary) => summary.canManage === true));
+  for (const summary of olderSummaries) {
+    assert.equal(olderSummary.safeParse(summary).success, true, `A manager on an older client still parses ${JSON.stringify(summary)}`);
+  }
 });
 
 test('bot installation preserves the connection endpoint and rejects remote loopback before issuing credentials', async t => {

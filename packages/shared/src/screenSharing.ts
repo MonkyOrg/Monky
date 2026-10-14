@@ -113,6 +113,13 @@ export const nativeScreenSourceSchema = z.object({
   audience: screenShareAudienceSchema.optional(),
 }).strict();
 export type NativeScreenSource = z.infer<typeof nativeScreenSourceSchema>;
+/**
+ * Screens one session may publish at once (#253). Each one costs its publisher a capture process, an encoder
+ * session and upload, so the bound is per session, not per call; viewers only receive the ones they watch.
+ * Peers that negotiated `screen-shares-8` exchange up to `maximum`; older ones only ever see `legacy`. From
+ * `comfortable` on, the client asks for confirmation before adding another screen.
+ */
+export const SCREEN_SHARE_LIMITS = Object.freeze({ legacy: 2, comfortable: 2, maximum: 8 });
 export const screenViewersRequestSchema = z.object({
   channelId: reference(128), publisherSessionId: reference(128),
   shareId: screenShareIdSchema, sourceInstanceId: z.string().uuid().nullable(),
@@ -121,7 +128,7 @@ export const screenViewersResultSchema = screenViewersRequestSchema.extend({
   viewerSessionIds: z.array(reference(128)).max(1024),
 }).strict();
 export type ScreenViewersResult = z.infer<typeof screenViewersResultSchema>;
-export const nativeScreenSourcesSchema = z.array(nativeScreenSourceSchema).max(2)
+export const nativeScreenSourcesSchema = z.array(nativeScreenSourceSchema).max(SCREEN_SHARE_LIMITS.maximum)
   .refine(sources => new Set(sources.map(source => source.shareId)).size === sources.length
     && new Set(sources.map(source => source.instanceId)).size === sources.length);
 

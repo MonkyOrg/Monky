@@ -566,9 +566,18 @@ once. The source is announced in the call without requiring reception of its
 media. In P2P, negotiation and `screen-video-meta` associate the track with
 the correct screen, separately from the camera.
 
-You can share **up to 2 screens at once**. Each is identified by the id of its own
-`MediaStream`, and that id is what ties together the track, the sender and the
-tile on screen.
+Each person can share **up to 8 screens at once**. The limit is per person,
+not per call: each screen costs the sharer another capture, another encoder and
+more upload, while viewers only receive the screens they chose to watch. That
+is why, from the third screen on, Monky asks for confirmation once per call.
+Each is identified by the id of its own `MediaStream`, and that id is what ties
+together the track, the sender and the tile on screen.
+
+The `screen-shares-8` feature is negotiated. Servers without it accept 2 screens
+per person, so the client does not offer a third one on that server. Clients
+without it only receive each person's first 2 screens, which is what their
+native roster accepts; the server also recomputes whether that person shares
+audio for such a client.
 
 **Discovery is not subscription.** Viewing intent belongs to the call rather
 than a view's lifetime. `Watch broadcast` authorizes delivery of that source
@@ -613,6 +622,21 @@ is why Monky has a native C++ module:
 
 If the module fails to load, nothing breaks: sharing keeps working without sound
 and the app says so.
+
+Each share with sound opens its own capture session. The module accepts up to 8
+sessions at once, one for each screen a person may share, and keeps the legacy
+capture exclusive. The main process decides which sounds may coexist and repeats
+the picker's checks: a monitor's sound (and, on macOS, any source's, because
+ScreenCaptureKit delivers the system mix) does not coexist with another, and two
+windows of the same process do not capture the same sound. Because process
+loopback includes the processes an application started, the same applies to
+processes where one descends from the other, like a launcher and the game it
+opened; the picker receives each window's parent-process chain and the main
+process checks again, on a fresh snapshot, before capturing. When a screen takes
+over the applications' sound, each of them switches to a new instance of the
+same broadcast without audio — viewers follow the switch as they do for a
+quality change — and the screen's capture starts only after they give up their
+sound.
 
 ### Quality and bandwidth
 

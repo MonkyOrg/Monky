@@ -4,7 +4,7 @@ import {
   nativeScreenFailureSchema, nativeScreenRenditionSchema, nativeScreenSignalSchema, nativeScreenCaptureModeSchema,
   nativeScreenSourcesSchema, nativeScreenVideoProfileSchema, screenShareIdSchema, screenShareQualitySchema,
   screenEncodingModeSchema, screenEncodingStrategySchema, screenCodecPreferenceSchema, screenCodecSchema,
-  type NativeScreenSource, type ScreenEncodingAvailability,
+  SCREEN_SHARE_LIMITS, type NativeScreenSource, type ScreenEncodingAvailability,
 } from './screenSharing.js';
 
 const reference = z.string().min(1).max(128).refine(value => !value.includes('\0')
@@ -99,7 +99,9 @@ export const nativeScreenCommandSchema = z.discriminatedUnion('action', [
     desktopSourceId: z.string().regex(/^(?:window:[1-9][0-9]{0,15}:(?:[0-9]{1,10}|[a-f0-9]{64})|screen:[0-9]{1,16}:[0-9]{1,10}|native-monitor:[a-f0-9]{64})$/),
     captureKind: nativeScreenCaptureKindSchema.optional(),
     preserveAspectRatio: z.boolean().default(true),
-    replacesAudioShareId: screenShareIdSchema.optional(),
+    /** Audible sources this one takes the audio from; each gives it up before this capture starts (#253). */
+    replacesAudioShareIds: z.array(screenShareIdSchema).min(1).max(SCREEN_SHARE_LIMITS.maximum)
+      .refine(ids => new Set(ids).size === ids.length).optional(),
     replacesSourceInstanceId: uuid.optional(),
     video: nativeScreenVideoProfileSchema, audio: z.boolean(), audioBitrateKbps: nativeScreenAudioBitrateSchema,
     encodingMode: screenEncodingModeSchema.optional(), codec: screenCodecPreferenceSchema.optional(),

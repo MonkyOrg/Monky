@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
-import { MessageType, PROTOCOL_VERSION, MIN_CLIENT_PROTOCOL, type ProtocolMessage, type ServerShutdownPayload } from '@monky/shared';
-import { NetworkClient, type ConnectionStatus, type NetworkDisconnectedPayload } from '../src/renderer/core/NetworkClient';
+import { MessageType, PROTOCOL_VERSION, MIN_CLIENT_PROTOCOL, type ProtocolMessage } from '@monky/shared';
+import { NetworkClient, type ConnectionStatus, type NetworkDisconnectedPayload, type ServerShutdownNotice } from '../src/renderer/core/NetworkClient';
 import { appEvents } from '../src/renderer/core/EventBus';
 import { setForegroundContext, setSessionEventRouter } from '../src/renderer/core/sessionRouting';
 
@@ -422,8 +422,8 @@ test('a background server update notice reaches global UI without reconnecting o
   f.client.sessionKey = 'background-server';
   await f.connected();
   f.lastSocket().receive({ type: MessageType.SERVER_SETTINGS_UPDATED, payload: { name: 'Remote fixture server' } });
-  const notices: Array<ServerShutdownPayload & { serverName?: string }> = [];
-  const off = appEvents.on<ServerShutdownPayload & { serverName?: string }>('network.server_shutdown', notice => notices.push(notice));
+  const notices: ServerShutdownNotice[] = [];
+  const off = appEvents.on<ServerShutdownNotice>('network.server_shutdown', notice => notices.push(notice));
   setSessionEventRouter(() => {});
   context.after(() => {
     off();
@@ -435,7 +435,8 @@ test('a background server update notice reaches global UI without reconnecting o
   assert.equal(notices.length, 0, 'UI waits for the borrowed background routing scope to finish');
   setForegroundContext(true);
   await setImmediate();
-  assert.deepEqual(notices, [{ reasonCode: 'update', serverName: 'Remote fixture server' }]);
+  assert.deepEqual(notices, [{ reasonCode: 'update', serverName: 'Remote fixture server', sessionKey: 'background-server' }],
+    'The notice names its session, so the UI can tell a background server from the one in use');
   assert.equal(f.client.getStatus(), 'DISCONNECTED');
   context.mock.timers.tick(60_000);
   await setImmediate();

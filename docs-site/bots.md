@@ -49,7 +49,7 @@ Use quando o bot não expõe um manifest acessível:
 1. Abra **Mostrar opção avançada** e gere um vínculo/token.
 2. Copie o token mostrado **uma única vez** e informe-o no setup do bot.
 3. Aguarde o processo conectar e anunciar sua identidade e capacidades.
-4. Abra as configurações desse bot, revise **Permissões no servidor** e salve.
+4. Abra as configurações desse bot, revise **Permissões** e salve.
 
 O token autentica o vínculo; **não aprova ações**. Uma reserva ainda sem
 identidade fica aguardando a conexão na administração de bots. Não divulgue o
@@ -97,8 +97,13 @@ configurações do servidor.
 | Seção | Quem controla | O que muda |
 | --- | --- | --- |
 | **Minhas preferências** | Você | Idioma desse bot e preferências pessoais neste dispositivo |
-| **Comportamento neste servidor** | Administração ou cargo autorizado a configurar bots | Opções compartilhadas que o próprio bot disponibiliza |
-| **Permissões no servidor** | Quem pode gerenciar bots | Capacidades que o bot pode executar nesse servidor |
+| **Comportamento** | Administração ou cargo autorizado a configurar bots | Opções compartilhadas que o próprio bot disponibiliza neste servidor |
+| **Permissões** | Quem pode gerenciar bots | Capacidades que o bot pode executar nesse servidor |
+
+Quem pode gerenciar bots também vê, no topo das configurações, a **URL do
+Manifest** usada para vincular o bot, com um botão para copiá-la. Bots
+vinculados por token, ou antes de o servidor guardar essa informação,
+aparecem sem URL registrada.
 
 **Seguir o Monky** usa o idioma do aplicativo. Uma escolha própria vale
 somente para esse bot/servidor/identidade neste perfil; não traduz mensagens
@@ -159,8 +164,8 @@ administrador autorizado, encerra aquela instância para todos.
 ## Bots que recebem voz
 
 Um bot só pode receber microfones se solicitar a capacidade **Ouvir microfones nas salas de voz**
-e um administrador aprová-la em **Configurações do bot → Permissões no
-servidor**. Publicar áudio é uma permissão independente: bots de música
+e um administrador aprová-la em **Configurações do bot → Permissões**.
+Publicar áudio é uma permissão independente: bots de música
 não começam a ouvir automaticamente.
 
 A lista de participantes mostra **Ouvindo vozes** enquanto a recepção

@@ -75,6 +75,8 @@ export class VideoService {
   private screenStreams: Map<string, MediaStream> = new Map();
   /** Maps stream id → desktop source id so the picker can hide active shares. */
   private screenSourceIds: Map<string, string> = new Map();
+  /** What each share shows (window title, screen number), to tell several apart. */
+  private screenLabels = new Map<string, string>();
   private nativeScreenCaptures = new Map<string, NativeScreenCapture>();
   private currentPreset: QualityPresetType = settingsStore.qualityPreset;
   private readonly stopCameraOnPageHide = () => this.stopCamera();
@@ -618,6 +620,7 @@ export class VideoService {
       if (!this.nativeScreenCaptures.has(id)) stream.getTracks().forEach((t) => t.stop());
       this.screenStreams.delete(id);
       this.screenSourceIds.delete(id);
+      this.screenLabels.delete(id);
       this.nativeScreenCaptures.delete(id);
       appEvents.emit('local.screen_stopped', id);
     }
@@ -642,6 +645,20 @@ export class VideoService {
   /** Returns the set of desktop source ids currently being shared. */
   public getActiveSourceIds(): Set<string> {
     return new Set(this.screenSourceIds.values());
+  }
+
+  public getScreenSourceId(shareId: string): string | null {
+    return this.screenSourceIds.get(shareId) ?? null;
+  }
+
+  /** Names a live share so a choice between several shares can show what each one is. */
+  public setScreenShareLabel(shareId: string, label: string): void {
+    const name = label.trim();
+    if (name && this.screenStreams.has(shareId)) this.screenLabels.set(shareId, name);
+  }
+
+  public getScreenShareLabel(shareId: string): string | null {
+    return this.screenLabels.get(shareId) ?? null;
   }
 }
 

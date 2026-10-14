@@ -73,7 +73,7 @@ interface Presentation {
 
 type SourceInput = Omit<NativeScreenCapture, 'source'> & {
   shareId: string; video: NativeScreenVideoProfile; audio: boolean;
-  replacesAudioShareId?: string;
+  replacesAudioShareIds?: readonly string[];
   audience?: NativeScreenSource['audience'];
 };
 interface Source {
@@ -593,7 +593,7 @@ export class NativeScreenController {
         preserveAspectRatio: input.preserveAspectRatio ?? true,
         encodingMode: settingsStore.screenEncodingMode, codec: settingsStore.preferredScreenCodec,
         encodingStrategy: settingsStore.screenEncodingStrategy,
-        ...(input.replacesAudioShareId ? { replacesAudioShareId: input.replacesAudioShareId } : {}),
+        ...(input.replacesAudioShareIds?.length ? { replacesAudioShareIds: [...input.replacesAudioShareIds] } : {}),
         ...(input.captureKind ? { captureKind: input.captureKind } : {}),
       }).then(result => {
         this.current(call);
@@ -631,7 +631,7 @@ export class NativeScreenController {
   }
 
   private refreshSource(call: Call, shareId: string, selected?: {
-    video: NativeScreenVideoProfile; audioBitrateKbps: number;
+    video: NativeScreenVideoProfile; audioBitrateKbps: number; audio?: boolean;
   }): Promise<void> {
     this.current(call);
     const execute = async (): Promise<void> => {
@@ -640,9 +640,11 @@ export class NativeScreenController {
       if (!capture) return;
       const video = selected?.video ?? capture.source.video;
       const audioBitrateKbps = selected?.audioBitrateKbps ?? capture.audioBitrateKbps;
+      // A source may give up its audio in place (#253), never acquire it.
+      const audio = capture.source.audio && selected?.audio !== false;
       const previous = call.sources.get(shareId);
       if (previous && !previous.removing && screenShareProfileKey(capture.source.video) === screenShareProfileKey(video)
-        && capture.audioBitrateKbps === audioBitrateKbps) return;
+        && capture.audioBitrateKbps === audioBitrateKbps && capture.source.audio === audio) return;
       const isCurrentCapture = () => this.call === call && !call.stopping && call.context.isCurrent()
         && videoService.getNativeScreenCapture(shareId) === capture;
       if (selected && previous?.descriptor && !previous.removing) {
@@ -654,7 +656,7 @@ export class NativeScreenController {
             replacesSourceInstanceId: previous.descriptor.instanceId,
             desktopSourceId: capture.desktopSourceId, captureKind: capture.captureKind,
             preserveAspectRatio: capture.preserveAspectRatio ?? true,
-            video, audio: capture.source.audio, audioBitrateKbps,
+            video, audio, audioBitrateKbps,
             encodingMode: settingsStore.screenEncodingMode, codec: settingsStore.preferredScreenCodec,
             encodingStrategy: settingsStore.screenEncodingStrategy,
           });
@@ -687,9 +689,9 @@ export class NativeScreenController {
         }
         return;
       }
-      const replace = async (nextVideo: NativeScreenVideoProfile, nextAudioBitrate: number): Promise<void> => {
+      const replace = async (nextVideo: NativeScreenVideoProfile, nextAudioBitrate: number, nextAudio: boolean): Promise<void> => {
         const source = await this.addCallSource(call, {
-          ...capture, shareId, video: nextVideo, audioBitrateKbps: nextAudioBitrate, audio: capture.source.audio,
+          ...capture, shareId, video: nextVideo, audioBitrateKbps: nextAudioBitrate, audio: nextAudio,
           audience: capture.source.audience,
         });
         this.current(call);
@@ -705,11 +707,11 @@ export class NativeScreenController {
         removed = true;
         this.current(call);
         if (videoService.getNativeScreenCapture(shareId) !== capture) return;
-        await replace(video, audioBitrateKbps);
+        await replace(video, audioBitrateKbps, audio);
       } catch (error) {
         if (isCurrentCapture()) {
           if (removed && previous && selected) {
-            try { await replace(capture.source.video, capture.audioBitrateKbps); }
+            try { await replace(capture.source.video, capture.audioBitrateKbps, capture.source.audio); }
             catch (rollbackError) {
               if (isCurrentCapture()) emitOutsideRouting(() => appEvents.emit('local.screen_ended_externally', shareId));
               throw new AggregateError([error, rollbackError], 'Native screen quality change and restoration failed.');
@@ -737,6 +739,16 @@ export class NativeScreenController {
       { video, audioBitrateKbps: profile.audioBitrateKbps })));
     this.changed();
     return captures.length;
+  }
+
+  /** Keeps the share on air but stops capturing its audio, which a whole screen is taking over (#253). */
+  public async withdrawAudio(shareId: string): Promise<void> {
+    const capture = videoService.getNativeScreenCapture(shareId);
+    if (!capture?.source.audio) return;
+    const call = await this.ensureCall();
+    await this.refreshSource(call, shareId,
+      { video: capture.source.video, audioBitrateKbps: capture.audioBitrateKbps, audio: false });
+    this.changed();
   }
 
   public settingsIssue(profile: QualityProfile, codec: ScreenCodecPreference): 'profile' | 'codec' | null {
@@ -910,7 +922,7 @@ export class NativeScreenController {
         if (track.kind === 'audio') {
           entry.audioTrack = track;
           this.mediaRouter.routeScreenAudioTrack(entry.publisherSessionId, track,
-            error => this.browserFailed(call, entry, error));
+            error => this.browserFailed(call, entry, error), entry.source.shareId);
           void this.applyAudio(call, entry).catch(error => this.browserFailed(call, entry, error));
         } else {
           if (entry.stream) for (const previous of entry.stream.getTracks()) previous.stop();

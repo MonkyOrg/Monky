@@ -60,7 +60,7 @@ export interface PeerSession {
   peerSessionId: string;
   pc: RTCPeerConnection;
   remoteStream: MediaStream;
-  /** Remote screen streams keyed by share id (#253: up to MAX_SCREEN_SHARES). */
+  /** Remote screen streams keyed by share id (#253: up to SCREEN_SHARE_LIMITS.maximum per person). */
   remoteScreenStreams: Map<string, MediaStream>;
   isPolite: boolean;
   makingOffer: boolean;
@@ -437,7 +437,7 @@ export class WebRtcManager {
     desktopSourceId: string, audio: boolean, isWanted: () => boolean,
     captureKind: NativeScreenCaptureKind = 'window',
     preserveAspectRatio = true,
-    audioReplacement?: { shareId?: string; retirePrevious: () => Promise<void> },
+    audioReplacement?: { shareIds: readonly string[]; retirePrevious: () => Promise<void> },
     audience?: NativeScreenSource['audience'],
   ): Promise<MediaStream> {
     if (this.voiceReconnectSuspended) throw new Error(t('screenCodec.reconnecting'));
@@ -454,14 +454,14 @@ export class WebRtcManager {
       const source = await this.nativeScreens.addSource({
         shareId: stream.id, desktopSourceId, captureKind, preserveAspectRatio, video, audio, audience,
         audioBitrateKbps: profile.audioBitrateKbps,
-        ...(audioReplacement?.shareId ? { replacesAudioShareId: audioReplacement.shareId } : {}),
+        ...(audioReplacement?.shareIds.length ? { replacesAudioShareIds: audioReplacement.shareIds } : {}),
       });
       if (!isWanted()) throw new DOMException('Screen selection was cancelled.', 'AbortError');
       videoService.registerNativeScreenShare(stream, {
         source, desktopSourceId, captureKind, preserveAspectRatio, audioBitrateKbps: profile.audioBitrateKbps,
       });
-      // Admission/preflight does not acquire PCM. Retire its exact former owner
-      // before preview demand can activate the replacement's selected capture.
+      // Admission/preflight does not acquire PCM. Its former owners give up their
+      // audio before preview demand can activate the replacement's selected capture.
       if (audioReplacement) {
         await audioReplacement.retirePrevious();
         if (!isWanted()) throw new DOMException('Screen selection was cancelled.', 'AbortError');
@@ -480,6 +480,12 @@ export class WebRtcManager {
       catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Native source preparation and cleanup failed.'); }
       throw error;
     }
+  }
+
+  /** Keeps a local share on air without its audio, e.g. when a whole screen takes the sound over (#253). */
+  public async withdrawScreenAudio(shareId: string): Promise<void> {
+    await this.nativeScreens.withdrawAudio(shareId);
+    voiceStore.removeScreenAudioShare(shareId);
   }
 
   // Resolves with the active native shares now using the profile, or null after a reported failure.
@@ -2692,7 +2698,7 @@ export class WebRtcManager {
     if (!stream) return;
     const error = reason instanceof Error ? reason : new Error(String(reason));
     clientLog.error('SCREEN_SHARE', 'Screen codec could not be honored', { shareId, error: error.message });
-    const stopAudio = voiceStore.screenAudioShareId === shareId;
+    const stopAudio = voiceStore.screenAudioShareIds.includes(shareId);
     videoService.stopScreenShare(shareId);
     stream.getTracks().forEach((track) => track.stop());
     voiceStore.removeScreenShare(shareId);

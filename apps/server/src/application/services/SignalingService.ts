@@ -1,5 +1,6 @@
 import {
   ProtocolErrorCode,
+  SCREEN_SHARE_LIMITS,
   VoiceParticipantState,
   WebRtcSignalPayload,
   type NativeScreenSignalPayload,
@@ -13,9 +14,6 @@ import type { VoiceRestrictions } from '../../domain/entities';
 import { Logger } from '../../infrastructure/logger/Logger';
 
 export class SignalingService {
-  /** Hard cap on simultaneous screen shares per participant (#253). */
-  private static readonly MAX_SCREEN_SHARES = 2;
-
   // Map of sessionId -> VoiceParticipantState. Keyed per connection, not per
   // person, so the same user can be in voice from two devices at once (#309).
   private voiceStates: Map<string, VoiceParticipantState> = new Map();
@@ -62,11 +60,20 @@ export class SignalingService {
       && source.audience.roleIds.some(id => this.screenRoleIds.get(viewerUserId)?.has(id));
   }
 
-  public projectVoiceState(state: VoiceParticipantState, viewerUserId?: string): VoiceParticipantState {
+  /**
+   * What one viewer may know about a participant's screens. `shareLimit` is how many screens per person the
+   * viewer's client accepts: those without `screen-shares-8` get only the first SCREEN_SHARE_LIMITS.legacy.
+   */
+  public projectVoiceState(
+    state: VoiceParticipantState, viewerUserId?: string, shareLimit: number = SCREEN_SHARE_LIMITS.maximum,
+  ): VoiceParticipantState {
     const sources = state.nativeScreenShares ?? [];
-    const visible = sources.filter(source => this.canSeeScreenSource(state, source, viewerUserId));
-    const hidden = new Set(sources.filter(source => !visible.includes(source)).map(source => source.shareId));
-    const screenShareIds = (state.screenShareIds ?? []).filter(id => !hidden.has(id));
+    const hidden = new Set(sources.filter(source => !this.canSeeScreenSource(state, source, viewerUserId))
+      .map(source => source.shareId));
+    const allowed = (state.screenShareIds ?? []).filter(id => !hidden.has(id));
+    for (const id of allowed.slice(shareLimit)) hidden.add(id);
+    const screenShareIds = allowed.slice(0, shareLimit);
+    const visible = sources.filter(source => !hidden.has(source.shareId));
     return {
       ...state, screenShareIds,
       nativeScreenShares: visible.map(source => {
@@ -304,7 +311,7 @@ export class SignalingService {
     if (!Array.isArray(value)) return [];
     return value
       .filter((id): id is string => typeof id === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(id))
-      .slice(0, SignalingService.MAX_SCREEN_SHARES);
+      .slice(0, SCREEN_SHARE_LIMITS.maximum);
   }
 
   public getVoiceState(sessionId: string): VoiceParticipantState | undefined {

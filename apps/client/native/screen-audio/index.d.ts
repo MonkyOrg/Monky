@@ -128,7 +128,9 @@ export interface PacketCaptureSession {
 }
 
 /**
- * Explicit opt-in, exclusive with start(). Windows only; never invokes the
+ * Explicit opt-in, exclusive with start(). Up to eight packet sessions may run
+ * at once, one per shared source (#253); which ones may coexist is the caller's
+ * policy. Windows only; never invokes the
  * legacy resampler, microphone processing, platform ADM or output playback.
  * At most 32 PCM delivery/admission credits of at most 1 MiB each. A packet
  * callback may return a Promise<void> to retain its credit until admission/copy,
@@ -220,6 +222,13 @@ export interface NativeWindowState {
 
 /** Inspects the exact HWND even while hidden/minimized. Null means it is gone; inspection failures throw. */
 export function getWindowState(hwnd: number): NativeWindowState | null;
+
+/**
+ * Windows only. Running parents of each process, nearest first, from one process snapshot; null for a
+ * process that is gone. Windows captures an application's audio together with the processes it
+ * started, so related applications must not both share their audio (#253). At most 256 IDs.
+ */
+export function getProcessAncestry(processIds: readonly number[]): (number[] | null)[];
 
 /**
  * Whether other windows fully cover this top-level window, using the same rule

@@ -247,7 +247,9 @@ function fixture(language = 'en') {
   document.querySelector = selector => document.body.querySelector(selector);
   document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   const storage = new Map(), modules = new Map(), traces = [], alerts = [], warnings = [], events = [], observers = [];
-  const captures = new Map(), streams = new Map();
+  const captures = new Map(), streams = new Map(), labels = new Map();
+  // Stands in for the share dropdown: tests decide what the user picks.
+  const chooser = { result: null, calls: [], closed: 0, openAnchor: null };
   const source = (id, type, name = id) => ({ id, type, name, thumbnailDataUrl: '', appIconDataUrl: null });
   const sources = [source(MONITOR_SOURCE_ID, 'screen'), source('window:101:0', 'window'), source('window:202:0', 'window')];
   const capabilities = { capture: true, captureAudio: true, receive: true, captureKinds: ['window', 'monitor', 'game'], backend: 'libobs-amf', reason: null };
@@ -290,11 +292,14 @@ function fixture(language = 'en') {
     save() { saves++; appEvents.emit('settings.updated'); },
   };
   const voiceStore = {
-    screenShareIds: [], screenAudioShareId: null, camera: 'preserved-camera', voice: 'preserved-call',
+    screenShareIds: [], screenAudioShareIds: [], camera: 'preserved-camera', voice: 'preserved-call',
+    voiceSessionKey: 'server-a', currentVoiceChannelId: 'room',
     get isScreenSharing() { return this.screenShareIds.length > 0; },
-    canAddScreenShare() { return this.screenShareIds.length < 3; },
+    get hasScreenAudio() { return this.screenAudioShareIds.length > 0; },
+    canAddScreenShare(limit) { return this.screenShareIds.length < limit; },
     addScreenShare(id) { this.screenShareIds.push(id); },
-    setScreenAudioShare(id) { this.screenAudioShareId = id; },
+    addScreenAudioShare(id) { if (!this.screenAudioShareIds.includes(id)) this.screenAudioShareIds.push(id); },
+    removeScreenAudioShare(id) { this.screenAudioShareIds = this.screenAudioShareIds.filter(value => value !== id); },
   };
   const screenAudioService = {
     getIsCapturing: () => controls.capturingAudio, getIsTestTone: () => false,
@@ -308,13 +313,15 @@ function fixture(language = 'en') {
     getNativeScreenCapture: id => captures.get(id),
     getNativeScreenCaptures: () => [...captures.values()],
     cancelPendingScreenShare: () => { cancelled++; },
-    stopScreenShare: id => { traces.push(['video-stop', id]); streams.delete(id); captures.delete(id); },
+    stopScreenShare: id => { traces.push(['video-stop', id]); streams.delete(id); captures.delete(id); labels.delete(id); },
     startScreenShare: async () => { throw new Error('Chromium capture fallback must not run'); },
+    setScreenShareLabel: (id, label) => { if (streams.has(id)) labels.set(id, label); },
+    getScreenShareLabel: id => labels.get(id) ?? null,
   };
-  const createStream = (desktopSourceId = 'window:101:0') => {
+  const createStream = (desktopSourceId = 'window:101:0', captureKind = desktopSourceId.startsWith('native-monitor:') ? 'monitor' : 'window') => {
     const stream = { id: `stream-${++sequence}`, getVideoTracks: () => [] };
     streams.set(stream.id, stream);
-    captures.set(stream.id, { desktopSourceId, source: { shareId: stream.id } });
+    captures.set(stream.id, { desktopSourceId, captureKind, source: { shareId: stream.id } });
     return stream;
   };
   const webRtcManager = {
@@ -323,13 +330,17 @@ function fixture(language = 'en') {
       traces.push(['native-start', id, audio, kind, preserveAspectRatio, ...(audience ? [audience] : [])]);
       if (controls.start) return controls.start({ id, audio, isWanted, kind, preserveAspectRatio, audioReplacement });
       if (audioReplacement) {
-        traces.push(['audio-replacement', audioReplacement.shareId]);
+        traces.push(['audio-replacement', [...audioReplacement.shareIds]]);
         await audioReplacement.retirePrevious();
         if (!isWanted()) throw new DOMException('Cancelled selection', 'AbortError');
       }
-      const stream = createStream(id);
+      const stream = createStream(id, kind);
       if (audience) captures.get(stream.id).source.audience = audience;
       return stream;
+    },
+    async withdrawScreenAudio(shareId) {
+      traces.push(['withdraw-audio', shareId]);
+      voiceStore.removeScreenAudioShare(shareId);
     },
     assertScreenSharingSettings(profile, codec) {
       traces.push(['assert-settings', profile, codec]);
@@ -344,7 +355,7 @@ function fixture(language = 'en') {
     for (const id of shareIds) {
       streams.delete(id); captures.delete(id);
       voiceStore.screenShareIds = voiceStore.screenShareIds.filter(value => value !== id);
-      if (voiceStore.screenAudioShareId === id) voiceStore.screenAudioShareId = null;
+      voiceStore.removeScreenAudioShare(id);
     }
   };
   class Controller extends AbortController {
@@ -374,7 +385,9 @@ function fixture(language = 'en') {
   const serverStore = {
     currentUser: { id: 'self' }, roles: [{ id: 'friends', name: 'Friends' }, { id: 'admin', name: 'Admin' }],
     knownMembers: new Map([['allowed', { id: 'allowed', nickname: 'Alice' }], ['outsider', { id: 'outsider', nickname: 'Bob' }]]),
+    serverDetails: { protocol: { version: 38, minimumVersion: 35, features: ['screen-shares-8'] } },
   };
+  const confirms = [];
   const stubs = {
     'core/NetworkClient': { networkClient: { getHttpBaseUrl: () => 'http://127.0.0.1:9999' } },
     'core/EventBus': { appEvents },
@@ -382,9 +395,11 @@ function fixture(language = 'en') {
     'core/VideoService': { videoService },
     'core/WebRtcManager': { webRtcManager },
     'stores/settingsStore': { settingsStore },
-    'stores/voiceStore': { voiceStore, VoiceStore: { MAX_SCREEN_SHARES: 3 } },
+    'stores/voiceStore': { voiceStore },
     'core/screenShareControls': {
       captureScreenShareCall: () => ({ isCurrent: () => controls.current, serverStore }),
+      screenShareLimit: call => call.serverStore?.serverDetails?.protocol?.features.includes('screen-shares-8')
+        ? shared.SCREEN_SHARE_LIMITS.maximum : shared.SCREEN_SHARE_LIMITS.legacy,
       notifyScreenShareState: () => traces.push(['notify', [...voiceStore.screenShareIds]]),
       stopLocalScreenShares,
     },
@@ -396,7 +411,21 @@ function fixture(language = 'en') {
         return parsed.success ? parsed.data : null;
       },
     },
-    'views/Dialog': { showAlert: async value => alerts.push(value), showConfirm: async () => controls.confirm },
+    'views/Dialog': {
+      showAlert: async value => alerts.push(value),
+      showConfirm: async value => {
+        confirms.push(value);
+        return typeof controls.confirm === 'function' ? controls.confirm(value) : controls.confirm;
+      },
+    },
+    'views/ScreenShareChooser': {
+      screenShareChooser: {
+        isOpenFor: anchor => chooser.openAnchor === anchor,
+        isOpenWithin: root => chooser.openAnchor !== null && root.contains(chooser.openAnchor),
+        choose: async (anchor, purpose) => { chooser.calls.push([anchor.id, purpose]); return chooser.result; },
+        close: () => { chooser.closed++; chooser.openAnchor = null; },
+      },
+    },
     'utils/scroll': {
       smoothScrollIntoView(target, options) {
         target.scrollIntoView({ ...options, behavior: 'smooth' });
@@ -482,7 +511,7 @@ function fixture(language = 'en') {
       t: i18n.t, showInfoToast: (message, durationMs) => traces.push(['info-toast', message, durationMs]),
       showAlert: stubs['views/Dialog'].showAlert,
     }),
-    settingsStore, serverStore, voiceStore, streams, captures, capabilities, createStream, traces, alerts, warnings, events, observers, mediaQuery,
+    settingsStore, serverStore, voiceStore, streams, captures, labels, chooser, capabilities, createStream, traces, alerts, confirms, warnings, events, observers, mediaQuery,
     get saves() { return saves; }, get enumerations() { return enumerations; }, get cancelled() { return cancelled; },
     get permissionChecks() { return permissionChecks; },
     close() { picker.close(); quality.cleanup(); document.body.replaceChildren(); },

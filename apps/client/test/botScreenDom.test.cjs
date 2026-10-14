@@ -225,8 +225,36 @@ if (!process.versions.electron) {
     await run(aliceWindow, 'window.screenFixture.selfShare(); document.querySelector("#screenshare-self-stop-btn").click()');
     await waitFor(async () => await run(aliceWindow, '!window.screenFixture.isSelfSharing()'), 'self screen-share stop');
     assert.equal(await run(aliceWindow, 'window.screenFixture.sent.some(entry => entry.type === "VOICE_STATE_UPDATE" && entry.payload.isScreenSharing === false)'), true);
-    await run(aliceWindow, 'document.querySelector("#screenshare-notice-btn").click()');
-    assert.equal(await run(aliceWindow, '!!document.querySelector("#stage-participants-area .stage-focused-main[data-kind=screen]") && !document.querySelector("#stage-participants-area [data-kind=screen] .screen-locked")'), true);
+    const dialog = '.modal-backdrop:not([data-ui-closing]) .dialog-card';
+    const focusedScreen = '!!document.querySelector("#stage-participants-area .stage-focused-main[data-kind=screen]")';
+    // Your own share icon and LIVE badge stay informational: there is nothing to watch.
+    await run(aliceWindow, 'window.screenFixture.selfLive(true)');
+    await waitFor(async () => await run(aliceWindow, '!!document.querySelector("#voice-mini-user-alice-device .voice-mini-icon.live")'), 'own share icon');
+    assert.deepEqual(await run(aliceWindow, `[
+      document.querySelector("#voice-mini-user-alice-device .voice-mini-icon.live").tagName,
+      document.querySelector(".member-item[data-user-id=alice] .member-live-badge")?.tagName,
+      [...document.querySelectorAll("[data-watch-live]")].map(button => button.dataset.watchLive),
+    ]`), ['SPAN', 'SPAN', ['remote-device', 'remote-device']]);
+    await run(aliceWindow, 'window.screenFixture.selfLive(false)');
+    await waitFor(async () => await run(aliceWindow, '!document.querySelector("#voice-mini-user-alice-device .voice-mini-icon.live")'), 'own share icon gone');
+    // Someone else's share icon asks first; cancelling opens nothing.
+    await run(aliceWindow, 'document.querySelector(".voice-participant-mini [data-watch-live]").click()');
+    await waitFor(async () => await run(aliceWindow, `!!document.querySelector(${JSON.stringify(dialog)})`), 'watch question from the share icon');
+    assert.equal(await run(aliceWindow, `document.querySelector(${JSON.stringify(`${dialog} .dialog-message`)}).textContent`),
+      'Remote está compartilhando a tela. Abrir o palco e assistir agora?');
+    assert.equal(await run(aliceWindow, 'document.querySelector(".voice-participant-mini [data-watch-live]").getAttribute("aria-label")'),
+      'Assistir à transmissão de Remote');
+    await run(aliceWindow, `document.querySelector(${JSON.stringify(`${dialog} [data-action=cancel]`)}).click()`);
+    await waitFor(async () => await run(aliceWindow, '!document.querySelector(".modal-backdrop .dialog-card")'), 'watch question dismissed');
+    assert.equal(await run(aliceWindow, focusedScreen), false, 'Cancelling neither focuses nor watches the broadcast');
+    // The LIVE badge in the member list asks the same; confirming focuses and watches it.
+    await run(aliceWindow, 'document.querySelector(".member-item [data-watch-live]").click()');
+    await waitFor(async () => await run(aliceWindow, `!!document.querySelector(${JSON.stringify(dialog)})`), 'watch question from the LIVE badge');
+    assert.equal(await run(aliceWindow, `document.querySelector(${JSON.stringify(`${dialog} [data-action=confirm]`)}).textContent`), 'Assistir transmissão');
+    await run(aliceWindow, `document.querySelector(${JSON.stringify(`${dialog} [data-action=confirm]`)}).click()`);
+    await waitFor(async () => await run(aliceWindow, `${focusedScreen} && !document.querySelector(".modal-backdrop .dialog-card")`),
+      'stage focused on the broadcast once the question is gone');
+    assert.equal(await run(aliceWindow, `${focusedScreen} && !document.querySelector("#stage-participants-area [data-kind=screen] .screen-locked")`), true);
     assert.equal(frames(aliceWindow).length, 0, 'Watching a screen does not opt into miniapps');
     assert.equal(await run(aliceWindow, 'document.querySelectorAll("[data-bot-screen-id]").length'), 4, 'Every room miniapp has a persistent stage tile before opt-in');
     assert.equal(await run(aliceWindow, '!document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=end]").hidden'), true, 'The creator can end a miniapp before opening its iframe');
@@ -804,6 +832,10 @@ async function setupVoiceStage(id, locale, adminPermission) {
     setLanguage: language.setLanguage,
     isSelfSharing: () => voiceStore.isScreenSharing,
     selfShare() { voiceStore.setScreenSharing(true); appEvents.emit('participants.updated'); },
+    selfLive(enabled) {
+      session.participants.updateVoiceState(state(user, 'voice', enabled ? { isScreenSharing: true, screenShareIds: ['own-share'] } : {}));
+      appEvents.emit('participants.updated');
+    },
     redraw() {
       appEvents.emit('participants.updated');
       voiceStore.setSpeaking(false);

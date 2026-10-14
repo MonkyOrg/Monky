@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -28,26 +29,40 @@ struct Failure : std::runtime_error {
 };
 
 enum class CaptureOwner { none, legacy, packet };
-inline std::atomic<CaptureOwner> captureOwner{CaptureOwner::none};
+// Legacy capture keeps process-wide state, so it excludes every other capture. Packet captures are
+// independent sessions: several applications may share their own audio at once (#253). The bound
+// matches the screens one session may publish; which sources may coexist is decided by the caller.
+constexpr int kMaxPacketCaptures = 8;
+constexpr int kLegacyOwner = -1;
+// kLegacyOwner while legacy capture runs, otherwise the number of packet sessions.
+inline std::atomic<int> captureOwners{0};
 
 class CaptureLease {
  public:
-  explicit CaptureLease(CaptureOwner owner) {
-    auto expected = CaptureOwner::none;
-    held_ = captureOwner.compare_exchange_strong(expected, owner);
+  explicit CaptureLease(CaptureOwner owner) : owner_(owner) {
+    int current = captureOwners.load();
+    if (owner == CaptureOwner::legacy) {
+      current = 0;
+      held_ = captureOwners.compare_exchange_strong(current, kLegacyOwner);
+      return;
+    }
+    while (current >= 0 && current < kMaxPacketCaptures) {
+      if (captureOwners.compare_exchange_weak(current, current + 1)) { held_ = true; return; }
+    }
   }
   ~CaptureLease() { Release(); }
   CaptureLease(const CaptureLease&) = delete;
   CaptureLease& operator=(const CaptureLease&) = delete;
   bool held() const { return held_; }
   void Release() {
-    if (held_) {
-      captureOwner.store(CaptureOwner::none);
-      held_ = false;
-    }
+    if (!held_) return;
+    if (owner_ == CaptureOwner::legacy) captureOwners.store(0);
+    else captureOwners.fetch_sub(1);
+    held_ = false;
   }
  private:
-  bool held_;
+  CaptureOwner owner_;
+  bool held_ = false;
 };
 
 inline bool IsInProcessTree(uint32_t process, uint32_t root,
@@ -71,6 +86,28 @@ inline void ValidateIncludedProcess(uint32_t selected, uint32_t host,
     throw Failure("ERR_AUDIO_TARGET", "Selected process is absent from the process snapshot");
   if (IsInProcessTree(selected, host, parents) || IsInProcessTree(host, selected, parents))
     throw Failure("ERR_AUDIO_TARGET", "INCLUDE cannot exclude the Monky process tree");
+}
+
+// Running parents of a process, nearest first; nullopt when the snapshot lacks the process. Windows
+// captures an application's audio together with the processes it started, so a launcher and the game
+// it opened would share the game's audio twice (#253).
+inline std::optional<std::vector<uint32_t>> ProcessAncestry(
+    uint32_t process, const std::vector<std::pair<uint32_t, uint32_t>>& parents) {
+  const auto parentOf = [&parents](uint32_t id) -> std::optional<uint32_t> {
+    for (const auto& item : parents) if (item.first == id) return item.second;
+    return std::nullopt;
+  };
+  auto parent = parentOf(process);
+  if (!process || !parent) return std::nullopt;
+  std::vector<uint32_t> chain;
+  while (*parent && *parent != process && std::find(chain.begin(), chain.end(), *parent) == chain.end()) {
+    const auto next = parentOf(*parent);
+    // An exited parent's ID may already belong to an unrelated process.
+    if (!next) break;
+    chain.push_back(*parent);
+    parent = next;
+  }
+  return chain;
 }
 
 struct Format {

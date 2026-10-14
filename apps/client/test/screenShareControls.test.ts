@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
-import { MessageType } from '@monky/shared';
-import { captureScreenShareCall, notifyScreenShareState, stopLocalScreenShares } from '../src/renderer/core/screenShareControls';
+import { MessageType, SCREEN_SHARE_LIMITS } from '@monky/shared';
+import {
+  captureScreenShareCall, notifyScreenShareState, screenShareLimit, stopLocalScreenShares,
+} from '../src/renderer/core/screenShareControls';
 import { SessionManager, sessionManager } from '../src/renderer/core/SessionManager';
 import { videoService } from '../src/renderer/core/VideoService';
 import { webRtcManager } from '../src/renderer/core/WebRtcManager';
@@ -47,10 +49,10 @@ function fixture(context: TestContext) {
   context.mock.method(webRtcManager, 'clearLocalScreenTracks', () => { clears++; });
   const audio = {
     stops: 0,
-    associations: [] as Array<string | null>,
+    associations: [] as string[][],
     async stop() {
       this.stops++;
-      this.associations.push(voiceStore.screenAudioShareId);
+      this.associations.push([...voiceStore.screenAudioShareIds]);
     },
   };
   const add = (shareId: string) => {
@@ -65,16 +67,16 @@ test('stopping an audio-associated share keeps the other screen and notifies the
   const f = fixture(context);
   f.add('first');
   f.add('second');
-  voiceStore.setScreenAudioShare('first');
+  voiceStore.addScreenAudioShare('first');
   await stopLocalScreenShares(f.audio, { shareIds: ['first'] });
   assert.deepEqual(f.stopped, ['first']);
   assert.deepEqual(f.detached, ['first']);
   assert.deepEqual([...f.captures], ['second']);
   assert.deepEqual(voiceStore.screenShareIds, ['second']);
   assert.equal(voiceStore.isScreenSharing, true);
-  assert.equal(voiceStore.screenAudioShareId, null);
+  assert.deepEqual(voiceStore.screenAudioShareIds, []);
   assert.equal(f.audio.stops, 1);
-  assert.deepEqual(f.audio.associations, ['first'], 'stop pending audio before removeScreenShare forgets its owner');
+  assert.deepEqual(f.audio.associations, [['first']], 'stop pending audio before removeScreenShare forgets its owner');
   assert.deepEqual(f.messages, [{
     target: f.call.key, type: MessageType.VOICE_STATE_UPDATE,
     payload: { screenShareIds: ['second'], nativeScreenShares: [], isScreenSharing: true, isSharingScreenAudio: false },
@@ -85,20 +87,35 @@ test('stopping a different share preserves the associated audio and stopping the
   const f = fixture(context);
   f.add('first');
   f.add('second');
-  voiceStore.setScreenAudioShare('first');
+  voiceStore.addScreenAudioShare('first');
   await stopLocalScreenShares(f.audio, { shareIds: ['second'] });
   assert.equal(f.audio.stops, 0);
-  assert.equal(voiceStore.screenAudioShareId, 'first');
+  assert.deepEqual(voiceStore.screenAudioShareIds, ['first']);
   await stopLocalScreenShares(f.audio, { shareIds: ['first'] });
   assert.equal(f.audio.stops, 1);
   assert.equal(voiceStore.isScreenSharing, false);
   assert.deepEqual(f.messages.at(-1)?.payload, { screenShareIds: [], nativeScreenShares: [], isScreenSharing: false, isSharingScreenAudio: false });
 });
 
+test('with several applications sharing their sound, stopping one keeps the others audible', async context => {
+  const f = fixture(context);
+  for (const shareId of ['first', 'second', 'silent']) f.add(shareId);
+  voiceStore.addScreenAudioShare('first');
+  voiceStore.addScreenAudioShare('second');
+  await stopLocalScreenShares(f.audio, { shareIds: ['first'] });
+  assert.deepEqual(voiceStore.screenAudioShareIds, ['second']);
+  assert.equal(voiceStore.hasScreenAudio, true);
+  await stopLocalScreenShares(f.audio, { shareIds: ['silent'] });
+  assert.deepEqual(voiceStore.screenAudioShareIds, ['second'], 'A silent share takes no sound with it');
+  await stopLocalScreenShares(f.audio, { shareIds: ['second'] });
+  assert.deepEqual(voiceStore.screenAudioShareIds, []);
+  assert.equal(voiceStore.hasScreenAudio, false);
+});
+
 test('replacement stops only the old captures and audio, then publishes the replacement without an intermediate state', async context => {
   const f = fixture(context);
   f.add('old');
-  voiceStore.setScreenAudioShare('old');
+  voiceStore.addScreenAudioShare('old');
   f.captures.add('replacement');
   const call = captureScreenShareCall();
   await stopLocalScreenShares(f.audio, { shareIds: ['old'], notify: false });
@@ -138,7 +155,7 @@ test('teardown clears synchronously without renegotiation or screen state update
   const stoppingAudio = gate();
   context.mock.method(f.audio, 'stop', () => stoppingAudio.promise);
   f.add('old');
-  voiceStore.setScreenAudioShare('old');
+  voiceStore.addScreenAudioShare('old');
   const stopped = stopLocalScreenShares(f.audio, { teardown: true });
   assert.equal(f.clears(), 1);
   assert.deepEqual(f.stopped, [undefined]);
@@ -147,11 +164,11 @@ test('teardown clears synchronously without renegotiation or screen state update
   assert.deepEqual(f.messages, []);
   voiceStore.setChannel('next-room', f.visible.key);
   f.add('new');
-  voiceStore.setScreenAudioShare('new');
+  voiceStore.addScreenAudioShare('new');
   stoppingAudio.release();
   await stopped;
   assert.deepEqual(voiceStore.screenShareIds, ['new']);
-  assert.equal(voiceStore.screenAudioShareId, 'new');
+  assert.deepEqual(voiceStore.screenAudioShareIds, ['new']);
   assert.deepEqual([...f.captures], ['new']);
   assert.deepEqual(f.messages, []);
 });
@@ -171,6 +188,27 @@ test('a slow detach never sends an old screen update to a successor call', async
   await stopped;
   assert.deepEqual(voiceStore.screenShareIds, ['new']);
   assert.equal(f.messages.length, 1);
+});
+
+test('the call server, not the visible one, decides how many screens may be published', context => {
+  const f = fixture(context);
+  const self = f.call.serverStore.currentUser!;
+  const details = (features: string[]) => ({
+    id: 'server', name: 'Server', createdAt: 1, maxUsers: 10, channels: [], voiceStates: {}, members: [self],
+    protocol: { version: 38, minimumVersion: 35, features },
+  });
+  f.visible.serverStore.setServerDetails(details(['screen-shares-8']), self);
+  assert.equal(screenShareLimit(captureScreenShareCall()), SCREEN_SHARE_LIMITS.legacy);
+  f.call.serverStore.setServerDetails(details(['screen-viewers']), self);
+  assert.equal(screenShareLimit(captureScreenShareCall()), SCREEN_SHARE_LIMITS.legacy, 'an older server keeps two screens');
+  f.call.serverStore.setServerDetails(details(['screen-shares-8']), self);
+  const limit = screenShareLimit(captureScreenShareCall());
+  assert.equal(limit, SCREEN_SHARE_LIMITS.maximum);
+  for (let index = 0; index < limit; index++) {
+    assert.equal(voiceStore.canAddScreenShare(limit), true);
+    f.add(`screen-${index}`);
+  }
+  assert.equal(voiceStore.canAddScreenShare(limit), false);
 });
 
 test('call snapshots reject changed rooms and removed sessions rather than falling back to visible proxies', context => {

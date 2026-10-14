@@ -52,7 +52,7 @@ Administrative mute/deafen has different semantics: while the connection is rest
 ## Receive microphones
 
 Request `receive_voice` in `requestedCapabilities` and obtain approval in
-**Bot settings → Server permissions**. Join using
+**Bot settings → Permissions**. Join using
 `await bot.joinVoice(serverId, channelId, { receiveAudio: true, invocationId })`
 and call `connection.receiveAudio({ signal })`. There is one iterator per
 connection; nothing is delivered to the application before creating it.

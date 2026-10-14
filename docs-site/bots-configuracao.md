@@ -18,7 +18,7 @@ a própria identidade.
 
 | Escopo | Quem altera | Onde fica |
 |---|---|---|
-| **Comportamento neste servidor** | Administradores/proprietário ou cargo com **Configurar comportamento dos bots** (`CONFIGURE_BOTS`) | Banco desse servidor; afeta todos que usam esse bot nele |
+| **Comportamento** | Administradores/proprietário ou cargo com **Configurar comportamento dos bots** (`CONFIGURE_BOTS`) | Banco desse servidor; afeta todos que usam esse bot nele |
 | **Minhas preferências** | A própria pessoa | Perfil local, separado por endereço, servidor, identidade e bot; não sincroniza entre dispositivos |
 
 `CONFIGURE_BOTS` é independente de `MANAGE_BOTS`, que controla vínculo e desvínculo, não a identidade. Nome e avatar só podem ser atualizados pelo bot autenticado. Quem não pode configurar não recebe os valores nem o formulário compartilhado. O SDK declara campos reutilizáveis; não injeta HTML nem cria uma aba global nas configurações do app. Se o bot não declarar opções compartilhadas, essa seção não aparece.

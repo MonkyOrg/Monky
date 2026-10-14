@@ -89,6 +89,13 @@ and audio on its own. **Stop watching** stops delivery of that screen only to
 you, without turning off your microphone, camera or the stream for other
 viewers. This applies to both P2P and SFU.
 
+You can also start from the voice channel list or the member list: click the
+screen-share icon next to the publisher's name or the **LIVE** badge. Monky
+asks whether you want to watch and, once you confirm, opens the stage focused
+on that broadcast, already watching it. If you are not in the same voice
+channel, the question tells you that you will join it. Your own icon and badge
+only show that you are broadcasting.
+
 Shared audio belongs to the publisher: if you are watching two of their screens,
 stopping one keeps the audio needed by the other. Stopping the last one also
 ends that audio reception. Muting is a separate playback preference; it does
@@ -647,6 +654,30 @@ to Normal rather than carrying over the previous window's Game Capture choice.
 Monky's own window can be shared **only without audio** to prevent call
 feedback. Selecting it turns the audio switch off and disables it, with an
 explanation. Selecting another application restores your previous audio choice.
+
+With a screen already shared, **Add screen** broadcasts another one alongside
+it. Each person can share up to 8 screens. From the third on, Monky warns, once
+per call, that each extra screen uses more of the sharer's processor, graphics
+card and connection. On servers that have not been updated yet, the limit is
+still 2 screens per person.
+
+Each application window carries its own application's sound, so several
+applications can be shared with sound at the same time. Two windows of the
+same application, however, cannot carry sound together, because they would
+capture the same sound twice. On Windows, an application's sound includes the
+programs it started, so the same applies to related applications, like a
+launcher and the game it opened. A whole screen's sound is the entire computer's
+and includes every application's: while a screen shares sound, no other share
+can carry sound. In these cases the share does not start; a notice explains why
+and highlights the audio switch, which must be turned off to continue. On
+macOS, any share's sound is the entire computer's, so only one share at a time
+carries sound.
+
+On Windows, if applications already share sound and you share a screen with
+sound, through **Add screen** or **Switch Source**, Monky asks which sound to
+use. **Use screen sound** moves the sound to the screen, and the windows keep
+broadcasting without sound. **Keep app sound**, or closing the question, shares
+the screen without sound.
 
 Choosing the Game Capture card does not start capture or test the application:
 you must confirm with **Share**, **Switch Source** or **Add screen**. Only

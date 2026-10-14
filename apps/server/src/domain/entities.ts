@@ -191,6 +191,8 @@ export interface BotRecord {
   createdAt: number;
   /** Last protocol presented by this bound bot; null for pre-migration links. */
   lastProtocolVersion?: number | null;
+  /** Manifest URL used to install this bot; null for token links and bots installed before migration 052. */
+  manifestUrl?: string | null;
 }
 
 export interface BotSettingsRecord {

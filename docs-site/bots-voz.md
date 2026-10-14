@@ -52,7 +52,7 @@ Mute/deafen administrativo tem outra semântica: enquanto a conexão estiver blo
 ## Receber microfones
 
 Solicite `receive_voice` em `requestedCapabilities` e obtenha a aprovação em
-**Configurações do bot → Permissões no servidor**. Entre com
+**Configurações do bot → Permissões**. Entre com
 `await bot.joinVoice(serverId, channelId, { receiveAudio: true, invocationId })`
 e use `connection.receiveAudio({ signal })`. Existe um único iterador por
 conexão; não há entrega à aplicação antes de criá-lo. Trocar o opt-in exige

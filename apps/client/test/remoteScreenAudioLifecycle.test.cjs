@@ -131,6 +131,30 @@ test('retrying an old screen output cannot remove or close its replacement track
   assert.deepEqual(f.router.getScreenAudioElement('publisher').srcObject.getTracks(), [replacement]);
 });
 
+test('each application one person shares keeps its own sound until that share stops', async t => {
+  const f = fixture(t), first = f.track('first-app'), second = f.track('second-app');
+  f.router.routeScreenAudioTrack('publisher', first, undefined, 'share-a');
+  f.router.routeScreenAudioTrack('publisher', second, undefined, 'share-b');
+  await tick();
+  assert.equal(f.elements.size, 2, 'The second application does not replace the first one');
+  assert.deepEqual(f.router.getScreenAudioElement('publisher', 'share-a').srcObject.getTracks(), [first]);
+  assert.deepEqual(f.router.getScreenAudioElement('publisher', 'share-b').srcObject.getTracks(), [second]);
+  const gains = () => [...f.router.screenAudioPipelines.values()].map(pipeline => pipeline.gain.gain.value);
+  // Mute and volume belong to the person, so they reach every application.
+  f.router.setScreenAudioMuted('publisher', false);
+  assert.deepEqual(gains(), [1, 1]);
+  f.router.setScreenAudioMuted('publisher', true);
+  assert.deepEqual(gains(), [0, 0]);
+  const context = f.router.audioContexts.get('screen');
+  await f.router.cleanupScreenAudio('publisher', second);
+  assert.equal(f.router.getScreenAudioElement('publisher', 'share-b'), undefined);
+  assert.deepEqual(f.router.getScreenAudioElement('publisher', 'share-a').srcObject.getTracks(), [first]);
+  assert.equal(context.closeCalls, 0, 'The remaining application keeps playing');
+  await f.router.cleanupScreenAudio('publisher');
+  assert.equal(f.elements.size, 0);
+  assert.equal(context.state, 'closed');
+});
+
 test('concurrent cleanup deduplicates closure and global teardown retries failed context ownership', async t => {
   const f = fixture(t), track = f.screen('publisher');
   await tick();

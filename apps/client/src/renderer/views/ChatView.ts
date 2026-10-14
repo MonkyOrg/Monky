@@ -3,7 +3,7 @@ import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, 
 import type { AttachmentMeta, BotLocale, ChatMessageUpdatedPayload, ChatSendPayload, CommandPresentation, MessageReply, NativePoll, ResolvedMessageBlock, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
-import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
+import { cancelSurfaceMotion } from '../utils/surfaceMotion';
 import { formatMessageTime, renderReplyPreview } from '../utils/messageReply';
 import { appEvents } from '../core/EventBus';
 import { networkClient, getActiveNetworkClient } from '../core/NetworkClient';
@@ -3463,16 +3463,9 @@ export class ChatView {
     this.updateSendButtonState();
   }
 
+  /** Attachment errors use the shared toast, which the user can close, rather than a line inside the tray. */
   private showTrayNotice(message: string): void {
-    const tray = document.getElementById('chat-attachment-tray');
-    if (!tray) return;
-    const notice = document.createElement('div');
-    notice.className = 'tray-notice';
-    notice.innerText = message;
-    tray.appendChild(notice);
-    animateEnter(notice, 'notice');
-    const timeout = setTimeout(() => removeWithMotion(notice, 'notice'), 3000);
-    this.unbindEvents.push(() => { clearTimeout(timeout); cancelSurfaceMotion(notice); notice.remove(); });
+    this.unbindEvents.push(showErrorToast(message));
   }
 
   private async downloadAttachment(url: string, fileName: string): Promise<void> {

@@ -546,6 +546,11 @@ export const botSettingsSummarySchema = z.object({
   canConfigure: z.boolean(),
   permissions: botPermissionsSchema.optional(),
   canManage: z.boolean().optional(),
+  /**
+   * Manifest URL used to install the bot, sent only to people who manage bots on clients that negotiated
+   * `bot-manifest-url`. Null when the bot was linked by token or installed before the server recorded it.
+   */
+  manifestUrl: httpUrl.nullable().optional(),
 }).strict();
 export type BotSettingsSummary = z.infer<typeof botSettingsSummarySchema>;
 

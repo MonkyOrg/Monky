@@ -1,4 +1,4 @@
-import { MessageType } from '@monky/shared';
+import { MessageType, SCREEN_SHARE_LIMITS } from '@monky/shared';
 import { voiceStore } from '../stores/voiceStore';
 import { networkClient, type NetworkClient } from './NetworkClient';
 import { sessionManager } from './SessionManager';
@@ -32,6 +32,12 @@ export function captureScreenShareCall(): ScreenShareCall {
   };
 }
 
+/** Screens this call may publish at once; a server without `screen-shares-8` only accepts the legacy pair. */
+export function screenShareLimit(call: Pick<ScreenShareCall, 'serverStore'>): number {
+  return call.serverStore?.serverDetails?.protocol?.features.includes('screen-shares-8')
+    ? SCREEN_SHARE_LIMITS.maximum : SCREEN_SHARE_LIMITS.legacy;
+}
+
 export function notifyScreenShareState(call: Pick<ScreenShareCall, 'client' | 'isCurrent'>): void {
   if (!call.isCurrent() || !call.client) return;
   const screenShareIds = [...voiceStore.screenShareIds];
@@ -57,7 +63,7 @@ export async function stopLocalScreenShares(
   const removedIds = new Set(shareIds);
   // removeScreenShare clears this association, so decide before mutating it.
   const stopAudio = allShares
-    || (voiceStore.screenAudioShareId !== null && removedIds.has(voiceStore.screenAudioShareId))
+    || voiceStore.screenAudioShareIds.some(id => removedIds.has(id))
     || (shareIds.some(id => activeIds.has(id)) && [...activeIds].every(id => removedIds.has(id)));
   const audioStopped = stopAudio ? audio.stop() : Promise.resolve();
 
@@ -69,7 +75,10 @@ export async function stopLocalScreenShares(
       videoService.stopScreenShare(shareId);
       voiceStore.removeScreenShare(shareId);
     }
-    if (stopAudio && voiceStore.screenAudioShareId !== null) voiceStore.setScreenAudioShare(null);
+    // With nothing left on air, no audio association may outlive its share.
+    if (stopAudio && !voiceStore.isScreenSharing) {
+      for (const id of [...voiceStore.screenAudioShareIds]) voiceStore.removeScreenAudioShare(id);
+    }
   }
 
   // Closing calls already retire their transports. Do not negotiate or announce

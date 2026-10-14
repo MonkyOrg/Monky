@@ -34,7 +34,7 @@ export async function startGameShare(sourceId: string, claim: (shareId: string) 
     if (!isWanted()) throw new DOMException('Screen share was cancelled', 'AbortError');
     if (shareAudio) {
       await screenAudioService.stop();
-      voiceStore.setScreenAudioShare(stream.id);
+      voiceStore.addScreenAudioShare(stream.id);
     }
     claim(stream.id);
     voiceStore.addScreenShare(stream.id);

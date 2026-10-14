@@ -8,13 +8,14 @@ export function renderBotPermissionControls(
   const capabilities = requested ?? [];
   const toggle = (id: string, label: string, checked: boolean, attribute: string, description?: string): string => `
     <div class="bot-permission-row">
-      <div><label for="${id}">${escapeHtml(label)}</label>
+      <div><label for="${id}" class="bot-permission-label">${escapeHtml(label)}</label>
         ${description ? `<p id="${id}-hint" class="bot-settings-description">${escapeHtml(description)}</p>` : ''}</div>
       <label class="toggle-switch"><input id="${id}" type="checkbox" role="switch" ${attribute}
         ${description ? `aria-describedby="${id}-hint"` : ''} ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
         <span class="toggle-slider"></span></label>
     </div>`;
-  return `<section data-settings-section="bot-permissions" data-settings-label="${escapeHtml(t('botPermissions.title'))}">
+  // The permissions are the only content of their settings tab, so they are not listed as a subsection.
+  return `<section>
     <p class="bot-settings-description">${t('botPermissions.description')}</p>
     <p class="bot-permission-consent">${t('botPermissions.localConsent')}</p>
     ${capabilities.length ? toggle(`${prefix}-all`, t('botPermissions.allowAll'),
@@ -22,7 +23,7 @@ export function renderBotPermissionControls(
     <div class="bot-permission-list">${capabilities.map((capability) => toggle(`${prefix}-${capability}`,
       t(`botPermissions.${capability}.title`), granted.includes(capability), `data-bot-capability="${capability}"`,
       t(`botPermissions.${capability}.description`))).join('')}</div>
-    ${!capabilities.length ? `<p role="status">${t(requested === null ? 'botPermissions.undeclared' : 'botPermissions.none')}</p>` : ''}
+    ${!capabilities.length ? `<p class="bot-permission-status" role="status">${t(requested === null ? 'botPermissions.undeclared' : 'botPermissions.none')}</p>` : ''}
     <p class="bot-settings-description">${t('botPermissions.listeningUnavailable')}</p>
   </section>`;
 }

@@ -19,7 +19,6 @@ import {
   RolesListPayload,
   ServerErrorPayload,
   ServerSettingsUpdatedPayload,
-  ServerShutdownPayload,
   UserJoinedPayload,
   UserLeftPayload,
   UserConnectionStatePayload,
@@ -43,6 +42,7 @@ import { gameShareRequests } from './core/GameShareRequests';
 import { gameShareSuggestion } from './core/GameShareSuggestion';
 import type { LocalExecutionTaskNotice } from './core/LocalExecutionController';
 import { currentEventOrigin, emitOutsideRouting, isForegroundEvent } from './core/sessionRouting';
+import { presentServerShutdownNotice } from './core/serverShutdownNotice';
 import { soundEffects } from './core/SoundEffects';
 import type { CommunityStartNotice } from './core/CommunityFeed';
 import { soundboardService } from './core/SoundboardService';
@@ -1176,18 +1176,9 @@ class App {
       });
     });
 
-    // Host closed the server: show a friendly notice (the network layer already
-    // returned us to the home screen).
-    appEvents.on('network.server_shutdown', (data: ServerShutdownPayload & { serverName?: string }) => {
-      const updating = data?.reasonCode === 'update';
-      showAlert({
-        title: t(updating ? 'app.serverUpdatingTitle' : 'app.serverShutdownTitle'),
-        message: updating
-          ? t('app.serverUpdatingMessage', { server: data.serverName || '' })
-          : data?.reason || t('app.serverShutdownMessage'),
-        variant: 'warning',
-      });
-    });
+    // A server ended the session on purpose (closed, updating or removed us).
+    // The server in use gets a modal; one kept in the background, a toast.
+    appEvents.on('network.server_shutdown', presentServerShutdownNotice);
 
     // The SFU link dropped and is being rebuilt. Instead of a blocking modal,
     // this surfaces in the sidebar voice indicator (yellow) plus a recurring

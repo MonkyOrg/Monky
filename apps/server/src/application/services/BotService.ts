@@ -60,7 +60,9 @@ export class BotService {
     return this.mutate(() => this.createBot(createdByUserId, undefined, isAuthorized));
   }
 
-  private async createBot(createdByUserId: string, identity?: BotIdentity, isAuthorized = () => true): Promise<BotCreateResult> {
+  private async createBot(
+    createdByUserId: string, identity?: BotIdentity, isAuthorized = () => true, manifestUrl: string | null = null,
+  ): Promise<BotCreateResult> {
     const parsed = botIdentitySchema.safeParse(identity ?? { name: 'Bot' });
     if (!parsed.success) {
       return {
@@ -108,6 +110,7 @@ export class BotService {
       boundPublicKey: null,
       createdByUserId,
       createdAt: now,
+      manifestUrl,
     };
     try {
       await this.botRepo.create(record);
@@ -130,6 +133,15 @@ export class BotService {
   async list(): Promise<BotInfo[]> {
     const records = await this.botRepo.listAll();
     return records.map((r) => this.toBotInfo(r));
+  }
+
+  /**
+   * Manifest URLs recorded at installation, by bot. Kept out of BotInfo because it may reveal internal hosts,
+   * so only the bot settings of people who manage bots carry it.
+   */
+  async manifestUrls(): Promise<Map<string, string | null>> {
+    const records = await this.botRepo.listAll();
+    return new Map(records.map((record) => [record.id, record.manifestUrl ?? null]));
   }
 
   async getCompatibility(): Promise<BotCompatibilitySummary> {
@@ -379,7 +391,7 @@ export class BotService {
       const created = await this.createBot(createdByUserId, {
         name: manifest.name,
         ...(manifest.icon !== undefined ? { avatarBase64: manifest.icon } : {}),
-      }, isAuthorized);
+      }, isAuthorized, preview.url);
       if (!created.success) return created;
       try {
         const { permissions } = permissionService.declare(created.bot.id, manifest.requestedCapabilities);

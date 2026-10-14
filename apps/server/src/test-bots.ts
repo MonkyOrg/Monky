@@ -1432,7 +1432,7 @@ test('bot identity migration preserves legacy profiles and persists new pending 
   database.close();
   database = await DatabaseConnection.create(filename);
   const repository = new SqliteBotRepository(database.getDb());
-  assert.deepEqual(await repository.findById(legacy.id), { ...legacy, lastProtocolVersion: null });
+  assert.deepEqual(await repository.findById(legacy.id), { ...legacy, lastProtocolVersion: null, manifestUrl: null });
   assert.equal(record(database.getDb().prepare('SELECT count(*) AS count FROM schema_migrations WHERE version = ?')
     .get('024_bot_profile_authority.sql')).count, 1);
   const service = new BotService(repository, new SqliteServerRepository(database.getDb()),
@@ -1448,8 +1448,83 @@ test('bot identity migration preserves legacy profiles and persists new pending 
   database.close();
   database = await DatabaseConnection.create(filename);
   const restored = new SqliteBotRepository(database.getDb());
-  assert.deepEqual(await restored.findById(legacy.id), { ...legacy, lastProtocolVersion: null });
+  assert.deepEqual(await restored.findById(legacy.id), { ...legacy, lastProtocolVersion: null, manifestUrl: null });
   assert.deepEqual(await restored.findById(pending.bot.id), before);
+});
+
+test('bot manifest URL migration keeps existing links unrecorded and persists installed URLs across restart', async (t) => {
+  const dataDir = path.join(__dirname, '..', `.bot-manifest-data-${process.pid}-${randomUUID()}`);
+  const filename = path.join(dataDir, 'server.db');
+  let database = await DatabaseConnection.create(filename);
+  t.after(() => { database.close(); fs.rmSync(dataDir, { recursive: true, force: true }); });
+  await new SqliteUserRepository(database.getDb()).create({
+    id: 'owner', clientId: 'owner', publicKey: null, nickname: 'Owner', avatarPath: null, createdAt: 0, lastSeenAt: 0,
+  });
+  const legacy = {
+    id: 'legacy', name: 'Installed before', tokenHash: BotService.hashToken('legacy-token'), avatarPath: null,
+    boundPublicKey: identity().publicKey, createdByUserId: 'owner', createdAt: 1, profilePending: false,
+  };
+  await new SqliteBotRepository(database.getDb()).create(legacy);
+  // Reopen the populated database with the schema immediately before this migration.
+  database.getDb().exec('ALTER TABLE bots DROP COLUMN manifest_url');
+  database.getDb().prepare('DELETE FROM schema_migrations WHERE version = ?').run('052_bot_manifest_url.sql');
+  database.close();
+  database = await DatabaseConnection.create(filename);
+  let repository = new SqliteBotRepository(database.getDb());
+  assert.deepEqual(await repository.findById(legacy.id), { ...legacy, lastProtocolVersion: null, manifestUrl: null });
+  assert.equal(record(database.getDb().prepare('SELECT count(*) AS count FROM schema_migrations WHERE version = ?')
+    .get('052_bot_manifest_url.sql')).count, 1);
+  const installed = { ...legacy, id: 'installed', tokenHash: BotService.hashToken('installed-token'), createdAt: 2,
+    manifestUrl: 'https://bots.example.test:7780/manifest' };
+  await repository.create(installed);
+  await repository.update(installed.id, { name: 'Renamed by the bot' });
+  database.close();
+  database = await DatabaseConnection.create(filename);
+  repository = new SqliteBotRepository(database.getDb());
+  assert.equal((await repository.findById(installed.id))?.manifestUrl, installed.manifestUrl);
+  assert.equal((await repository.findByTokenHash(installed.tokenHash))?.manifestUrl, installed.manifestUrl);
+  assert.deepEqual((await repository.listAll()).map((bot) => [bot.id, bot.manifestUrl]),
+    [[legacy.id, null], [installed.id, installed.manifestUrl]]);
+  const service = new BotService(repository, new SqliteServerRepository(database.getDb()),
+    new AvatarStorageService(dataDir), () => new Map<string, UserSummary>());
+  assert.deepEqual([...await service.manifestUrls()], [[legacy.id, null], [installed.id, installed.manifestUrl]]);
+  const manual = await service.create('owner');
+  assert.ok(manual.success);
+  assert.equal((await repository.findById(manual.bot.id))?.manifestUrl, null);
+  assert.equal('manifestUrl' in manual.bot, false, 'BotInfo never carries the manifest URL');
+});
+
+test('bot settings summaries expose the manifest URL only to managers whose client asked for it', async (t) => {
+  const dataDir = path.join(__dirname, '..', `.bot-manifest-summary-${process.pid}-${randomUUID()}`);
+  const database = await DatabaseConnection.create(path.join(dataDir, 'server.db'));
+  t.after(() => { database.close(); fs.rmSync(dataDir, { recursive: true, force: true }); });
+  await new SqliteUserRepository(database.getDb()).create({
+    id: 'owner', clientId: 'owner', publicKey: null, nickname: 'Owner', avatarPath: null, createdAt: 0, lastSeenAt: 0,
+  });
+  const repository = new SqliteBotRepository(database.getDb());
+  for (const [id, manifestUrl] of [['installed', 'https://bots.example.test/manifest'], ['linked', null]] as const) {
+    await repository.create({
+      id, name: `Bot ${id}`, tokenHash: BotService.hashToken(id), avatarPath: null, boundPublicKey: null,
+      createdByUserId: 'owner', createdAt: id === 'installed' ? 1 : 2, profilePending: false, manifestUrl,
+    });
+  }
+  const bots = new BotService(repository, new SqliteServerRepository(database.getDb()),
+    new AvatarStorageService(dataDir), () => new Map<string, UserSummary>());
+  const service = new BotSettingsService(new SqliteBotSettingsRepository(database.getDb()));
+  const infos = await bots.list();
+  const urls = await bots.manifestUrls();
+  assert.deepEqual(service.list(infos, true, true, urls).bots.map((bot) => bot.manifestUrl),
+    ['https://bots.example.test/manifest', null]);
+  assert.equal(service.snapshot(infos[0], false, false, true, urls).bot.manifestUrl, 'https://bots.example.test/manifest');
+  for (const summary of [
+    ...service.list(infos, true, false, urls).bots, ...service.list(infos, true, true).bots,
+    service.snapshot(infos[0], true, false, false, urls).bot, service.snapshot(infos[0], false, true, false, urls).bot,
+  ]) {
+    assert.equal('manifestUrl' in summary, false, 'Non-managers, bots and clients without the feature never receive the field');
+  }
+  // A stored value the current contract rejects degrades to "not recorded" instead of breaking the catalog.
+  const invalid = new Map([['installed', 'ftp://bots.example.test/manifest']]);
+  assert.equal(service.list([infos[0]], false, true, invalid).bots[0].manifestUrl, null);
 });
 
 test('human counts exclude bot accounts and collapse multiple devices without changing the online bot map', async (t) => {

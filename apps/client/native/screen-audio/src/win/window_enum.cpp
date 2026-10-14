@@ -12,11 +12,13 @@
 #include <napi.h>
 #include <windows.h>
 #include <dwmapi.h>
+#include <tlhelp32.h>
 #include <algorithm>
 #include <vector>
 #include <string>
 #include <cmath>
 #include <set>
+#include "../packet_core.h"
 
 namespace {
 
@@ -188,6 +190,57 @@ Napi::Value platform_list_windows(Napi::Env env) {
   }
 
   return arr;
+}
+
+// Running parents of each process, nearest first, from a single snapshot; null for a process that is
+// gone. The caller keeps a launcher and the game it opened from both sharing the game's audio (#253).
+Napi::Value platform_get_process_ancestry(const Napi::CallbackInfo& info) {
+  const auto env = info.Env();
+  if (info.Length() != 1 || !info[0].IsArray() || info[0].As<Napi::Array>().Length() > 256) {
+    Napi::TypeError::New(env, "An array of at most 256 process IDs is required").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  const auto input = info[0].As<Napi::Array>();
+  std::vector<uint32_t> processes;
+  for (uint32_t index = 0; index < input.Length(); ++index) {
+    const auto item = input.Get(index);
+    const auto value = item.IsNumber() ? item.As<Napi::Number>().DoubleValue() : 0.0;
+    if (!std::isfinite(value) || value < 1 || value > 4294967295.0 || std::floor(value) != value) {
+      Napi::TypeError::New(env, "Process IDs must be positive 32-bit integers").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    processes.push_back(static_cast<uint32_t>(value));
+  }
+  const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) {
+    Napi::Error::New(env, "Cannot snapshot the running processes: " + std::to_string(GetLastError()))
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  std::vector<std::pair<uint32_t, uint32_t>> parents;
+  for (BOOL more = Process32FirstW(snapshot, &entry); more; more = Process32NextW(snapshot, &entry))
+    parents.emplace_back(entry.th32ProcessID, entry.th32ParentProcessID);
+  const auto error = GetLastError();
+  CloseHandle(snapshot);
+  if (parents.empty() || error != ERROR_NO_MORE_FILES) {
+    Napi::Error::New(env, "Cannot finish the process snapshot: " + std::to_string(error)).ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  auto result = Napi::Array::New(env, processes.size());
+  for (uint32_t index = 0; index < processes.size(); ++index) {
+    const auto chain = screen_audio::ProcessAncestry(processes[index], parents);
+    if (!chain) {
+      result.Set(index, env.Null());
+      continue;
+    }
+    auto ancestors = Napi::Array::New(env, chain->size());
+    for (uint32_t depth = 0; depth < chain->size(); ++depth)
+      ancestors.Set(depth, Napi::Number::New(env, static_cast<double>((*chain)[depth])));
+    result.Set(index, ancestors);
+  }
+  return result;
 }
 
 namespace {

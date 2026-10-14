@@ -254,6 +254,9 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   // 'frozen' keeps the frame count, 'painting' adds frames on every read.
   let frameProbeMode = 'frozen', nextFrameProbe = 1;
   const frameProbes = new Map();
+  // Modeled process snapshot: child process → the process that started it.
+  const processParents = new Map();
+  let processSnapshotError = null;
   let focused = true;
   let monitor = structuredClone(monitorTarget), monitorReads = 0;
   const frame = { url: 'file:///C:/monky-test/index.html', detached: false, isDestroyed: () => frameDestroyed, postMessage() {} };
@@ -380,6 +383,15 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
       return { state: 'running', frames: probe.frames, error: null };
     },
     stopWindowFrameProbe: id => frameProbes.delete(id),
+    getProcessAncestry: ids => {
+      if (processSnapshotError) throw processSnapshotError;
+      return ids.map(id => {
+        const chain = [];
+        for (let parent = processParents.get(id); parent !== undefined && !chain.includes(parent); parent = processParents.get(parent))
+          chain.push(parent);
+        return chain;
+      });
+    },
     createPacketCapture(selection, onEvent) {
       captures.push(selection);
       if (packetCapture) return packetCapture(selection, onEvent);
@@ -485,6 +497,8 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
     allowProbeRetirement: () => { probeRetires = true; },
     setProbeFailure: value => { probeFailure = value; },
     replaceTarget: value => { target = value; },
+    setProcessParent: (child, parent) => { processParents.set(child, parent); },
+    failProcessSnapshot: error => { processSnapshotError = error; },
     closeWindow: () => { windowOpen = false; },
     pauseWindow: value => { windowPaused = value; },
     setWindowProcessPath: value => { windowProcessPath = value; },
@@ -1142,7 +1156,7 @@ test('macOS does not release audio from a forged snapshot while its original lea
   await f.join();
   await assert.rejects(f.addSource(), /original macOS capture lease/);
   assert.equal(f.probes[0].snapshot().nativeClosed, true);
-  await assert.rejects(f.addSource('another'), /reserve capture audio/);
+  await assert.rejects(f.addSource('another'), /Whole-system screen audio/);
   f.allowProbeRetirement();
   await f.command({ action: 'source-remove', shareId: f.source.shareId });
   assert.equal((await f.addSource('recovered')).kind, 'source');
@@ -1221,7 +1235,7 @@ test('preparation failure before process creation still awaits the original brid
   assert.equal(f.probes[0].stopCalls, 1);
   assert.equal(settled, false);
   assert.equal(f.removedDirectories.length, f.encodingProbes.length);
-  await assert.rejects(f.addSource('another'), /reserve capture audio/);
+  await assert.rejects(f.addSource('another'), /screenShare\.appAudioAlreadyShared/);
   probeStop.resolve();
   await rejected;
   assert.equal(f.probes[0].closed, true);
@@ -1250,7 +1264,7 @@ test('a resolved nativeClosed snapshot without the original child exit retains s
   assert.equal(f.probes[0].snapshot().nativeClosed, true);
   assert.equal(f.probes[0].closed, false); assert.equal(f.removedDirectories.length, f.encodingProbes.length);
   await assert.rejects(f.addSource(), /already exists/);
-  await assert.rejects(f.addSource('another'), /reserve capture audio/);
+  await assert.rejects(f.addSource('another'), /screenShare\.appAudioAlreadyShared/);
   await assert.rejects(f.command({ action: 'source-remove', shareId: f.source.shareId }), /original selected-source probe/);
   f.allowProbeRetirement();
   await f.command({ action: 'source-remove', shareId: f.source.shareId });
@@ -1603,56 +1617,138 @@ test('window owner changes during asynchronous preparation fail before publicati
 test('pending sources reserve capacity before yielding to asynchronous discovery', async t => {
   const gpu = deferred(), f = fixture(t, { gpu });
   await f.join();
-  const pending = ['one', 'two', 'replacement'].map(id => f.addSource(id, { audio: false }));
-  await assert.rejects(f.addSource('four'), /limit/);
-  await assert.rejects(f.addSource('one'), /already exists/);
   gpu.resolve();
+  const { maximum } = shared.SCREEN_SHARE_LIMITS;
+  for (let index = 0; index < maximum - 1; index++) await f.addSource(`screen-${index}`, { audio: false });
+  // The last screen and one pending replacement hold their slots while discovery is still running.
+  const discovery = deferred();
+  gpu.promise = discovery.promise;
+  const pending = ['last', 'replacement'].map(id => f.addSource(id, { audio: false }));
+  await assert.rejects(f.addSource('overflow'), /limit/);
+  await assert.rejects(f.addSource('last'), /already exists/);
+  discovery.resolve();
   await Promise.all(pending);
-  assert.equal((await f.command({ action: 'stats' })).publishers.length, 3);
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, maximum + 1);
 });
 
-test('application audio is reserved before discovery and remains exclusive until source retirement', async t => {
+test('whole-system audio is reserved before discovery and excludes every other shared audio until retirement', async t => {
   const gpu = deferred(), f = fixture(t, { gpu });
   await f.join();
-  const pending = f.addSource('audio-owner');
-  await assert.rejects(f.addSource('second-audio'), /reserve capture audio/);
+  const monitor = { captureKind: 'monitor', desktopSourceId: monitorId };
+  const pending = f.addSource('system-audio', monitor);
+  await assert.rejects(f.addSource('app-audio'), /Whole-system screen audio/);
+  await assert.rejects(f.addSource('second-system', monitor), /Whole-system screen audio/);
   const silent = f.addSource('silent-window', { audio: false });
   assert.equal(f.captures.length, 0);
   gpu.resolve(); await Promise.all([pending, silent]);
-  await assert.rejects(f.addSource('second-audio'), /reserve capture audio/);
-  await f.command({ action: 'source-remove', shareId: 'audio-owner' });
-  assert.equal((await f.addSource('second-audio')).source.audio, true);
+  await assert.rejects(f.addSource('app-audio'), /Whole-system screen audio/);
+  await f.command({ action: 'source-remove', shareId: 'system-audio' });
+  assert.equal((await f.addSource('app-audio')).source.audio, true);
+  await assert.rejects(f.addSource('system-audio', monitor), /Whole-system screen audio/,
+    'Application audio also excludes the whole system mix, which already contains it');
   assert.equal(f.captures.length, 0, 'An audio reservation must not capture before Watch.');
 });
 
-test('audio replacement reserves only the exact same-call source and failed preflight leaves its owner intact', async t => {
+test('applications share their own audio side by side, but one application is never captured twice', async t => {
+  // Two processes behind one modeled window: the source monitor must not compare them meanwhile.
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = fixture(t);
+  await f.join();
+  const window = process => ({ kind: 'window', hwnd: 12345, expectedProcessId: process, expectedProcessCreationTime100ns: '123456789' });
+  assert.equal((await f.addSource('first-app')).source.audio, true);
+  await assert.rejects(f.addSource('same-app'), /screenShare\.appAudioAlreadyShared/);
+  assert.equal((await f.addSource('same-app-silent', { audio: false })).source.audio, false);
+  f.replaceTarget(window(56790));
+  assert.equal((await f.addSource('second-app')).source.audio, true, 'Another application keeps its own audio');
+  await assert.rejects(f.addSource('system-audio', { captureKind: 'monitor', desktopSourceId: monitorId }),
+    /Whole-system screen audio/);
+  await f.command({ action: 'source-remove', shareId: 'first-app' });
+  f.replaceTarget(window(56789));
+  assert.equal((await f.addSource('first-app-again')).source.audio, true, 'Retirement releases the application');
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 3);
+  assert.equal(f.captures.length, 0);
+});
+
+test('a launcher and the game it opened never both share the game\'s audio', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = fixture(t);
+  await f.join();
+  const window = process => ({ kind: 'window', hwnd: 12345, expectedProcessId: process, expectedProcessCreationTime100ns: '123456789' });
+  // 56789 is a launcher, 56791 the game it started through a helper (56790); 56792 is unrelated.
+  f.setProcessParent(56790, 56789);
+  f.setProcessParent(56791, 56790);
+  assert.equal((await f.addSource('launcher')).source.audio, true);
+  f.replaceTarget(window(56791));
+  await assert.rejects(f.addSource('game'), /screenShare\.appAudioAlreadyShared/, 'The launcher already captures its game');
+  assert.equal((await f.addSource('game-silent', { audio: false })).source.audio, false);
+  f.replaceTarget(window(56792));
+  assert.equal((await f.addSource('other-app')).source.audio, true, 'An unrelated application keeps its own audio');
+  await f.command({ action: 'source-remove', shareId: 'launcher' });
+  f.replaceTarget(window(56791));
+  assert.equal((await f.addSource('game')).source.audio, true, 'The game shares its own audio once the launcher stops');
+  f.replaceTarget(window(56789));
+  await assert.rejects(f.addSource('launcher-again'), /screenShare\.appAudioAlreadyShared/,
+    'Nor may the launcher join while its game shares audio');
+  assert.equal(f.captures.length, 0);
+});
+
+test('without a process snapshot, distinct applications still share audio and one process is never shared twice', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = fixture(t);
+  await f.join();
+  const window = process => ({ kind: 'window', hwnd: 12345, expectedProcessId: process, expectedProcessCreationTime100ns: '123456789' });
+  f.failProcessSnapshot(new Error('modeled snapshot failure'));
+  assert.equal((await f.addSource('first-app')).source.audio, true);
+  f.replaceTarget(window(56790));
+  assert.equal((await f.addSource('second-app')).source.audio, true, 'An unavailable snapshot does not block the share');
+  assert.ok(f.errors.some(values => String(values[0]).includes('process trees')), 'The missing comparison is diagnosed');
+  f.replaceTarget(window(56789));
+  await assert.rejects(f.addSource('same-app'), /screenShare\.appAudioAlreadyShared/);
+});
+
+test('a same-share replacement may give up its audio, never acquire it, and then frees its application', async t => {
+  const f = fixture(t);
+  await f.join();
+  const audible = (await f.addSource()).source;
+  const silent = (await f.addSource(audible.shareId, { replacesSourceInstanceId: audible.instanceId, audio: false })).source;
+  assert.equal(silent.audio, false);
+  assert.notEqual(silent.instanceId, audible.instanceId);
+  await assert.rejects(f.addSource(audible.shareId, { replacesSourceInstanceId: silent.instanceId }),
+    /Quality replacement must name/);
+  assert.equal((await f.addSource('same-app-again')).source.audio, true, 'Withdrawn audio no longer reserves the application');
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 2);
+  assert.equal(f.captures.length, 0);
+});
+
+test('audio replacement reserves only the exact same-call sources and failed preflight leaves their owners intact', async t => {
   const f = fixture(t);
   await f.join();
   const old = (await f.addSource('old-audio', { captureKind: 'game' })).source;
   for (const changes of [
-    { replacesAudioShareId: 'missing' }, { replacesAudioShareId: old.shareId, audio: false },
-  ]) await assert.rejects(f.addSource('invalid', changes), /existing audible source/);
+    { replacesAudioShareIds: ['missing'] }, { replacesAudioShareIds: [old.shareId], audio: false },
+  ]) await assert.rejects(f.addSource('invalid', changes), /existing audible sources/);
+  await assert.rejects(f.addSource('duplicate', { replacesAudioShareIds: [old.shareId, old.shareId] }));
   const otherCallId = randomUUID();
   await f.invoke({ ...f.config, callId: otherCallId, action: 'join' });
   await assert.rejects(f.invoke({
     action: 'source-add', callId: otherCallId, shareId: 'cross-call', desktopSourceId: monitorId,
-    captureKind: 'monitor', video, audio: true, audioBitrateKbps: 128, replacesAudioShareId: old.shareId,
-  }), /existing audible source/);
+    captureKind: 'monitor', video, audio: true, audioBitrateKbps: 128, replacesAudioShareIds: [old.shareId],
+  }), /existing audible sources/);
   await f.invoke({ action: 'leave', callId: otherCallId });
   f.setProbeFailure(new Error('Replacement preflight failed'));
   await assert.rejects(f.addSource('new-audio', {
-    captureKind: 'monitor', desktopSourceId: monitorId, replacesAudioShareId: old.shareId,
+    captureKind: 'monitor', desktopSourceId: monitorId, replacesAudioShareIds: [old.shareId],
   }), /preflight failed/);
   f.setProbeFailure(null);
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 1);
   assert.equal(f.sent.some(event => event.shareId === old.shareId && event.state === 'closed'), false);
   await f.addSource('new-audio', {
-    captureKind: 'monitor', desktopSourceId: monitorId, replacesAudioShareId: old.shareId,
+    captureKind: 'monitor', desktopSourceId: monitorId, replacesAudioShareIds: [old.shareId],
   });
-  await assert.rejects(f.addSource('third-audio', { replacesAudioShareId: old.shareId }), /reserve capture audio/);
+  await assert.rejects(f.addSource('third-audio', { replacesAudioShareIds: [old.shareId] }), /Whole-system screen audio/);
   assert.equal(f.captures.length, 0);
   await f.command({ action: 'source-remove', shareId: 'new-audio' });
-  await assert.rejects(f.addSource('unrelated-audio'), /reserve capture audio/);
+  await assert.rejects(f.addSource('unrelated-audio'), /screenShare\.appAudioAlreadyShared/);
 });
 
 test('same-share quality preflight preserves the running instance on failure and retires it only after acceptance', async t => {
@@ -1742,11 +1838,11 @@ test('replacement preview cannot activate PCM before the prior owner retires', a
   await f.join();
   const old = (await f.addSource('old-audio')).source;
   const next = (await f.addSource('new-audio', {
-    captureKind: 'monitor', desktopSourceId: monitorId, replacesAudioShareId: old.shareId,
+    captureKind: 'monitor', desktopSourceId: monitorId, replacesAudioShareIds: [old.shareId],
   })).source;
   await assert.rejects(f.command({
     action: 'preview-start', shareId: next.shareId, sourceInstanceId: next.instanceId, presentationId: randomUUID(),
-  }), /previous screen audio owner must retire/);
+  }), /must give up their audio/);
   assert.equal(f.endpoints.length, 0);
   assert.equal(f.captures.length, 0);
   assert.equal(f.sent.some(event => event.shareId === old.shareId && event.state === 'closed'), false);
@@ -1756,7 +1852,7 @@ test('cancelling replacement admission releases its reservation without cancelli
   const f = fixture(t);
   await f.join();
   const old = (await f.addSource('old-audio')).source;
-  const replacement = { captureKind: 'monitor', desktopSourceId: monitorId, replacesAudioShareId: old.shareId };
+  const replacement = { captureKind: 'monitor', desktopSourceId: monitorId, replacesAudioShareIds: [old.shareId] };
   const pending = f.addSource('new-audio', replacement);
   const rejected = assert.rejects(pending, { name: 'AbortError' });
   await f.command({ action: 'source-remove', shareId: 'new-audio' });
@@ -1800,7 +1896,7 @@ test('same-call game/window to monitor swaps retire PCM, reset selectors and rej
   for (const [index, kind] of ['game', 'monitor', 'window', 'monitor', 'game'].entries()) {
     const source = (await f.addSource(`swap-${index}`, {
       captureKind: kind, desktopSourceId: kind === 'monitor' ? monitorId : 'window:12345:0',
-      ...(previous ? { replacesAudioShareId: previous.shareId } : {}),
+      ...(previous ? { replacesAudioShareIds: [previous.shareId] } : {}),
     })).source;
     assert.equal(nativeCaptures.length, index, 'Admission/preflight alone never opens a PCM capture');
     if (previous) {
@@ -2180,7 +2276,7 @@ test('cancelling pending audio admission releases only its own reservation', asy
   await f.command({ action: 'source-remove', shareId: 'audio-owner' });
   const replacement = f.addSource('audio-owner');
   gpu.resolve(); await rejected; await replacement;
-  await assert.rejects(f.addSource('second-audio'), /reserve capture audio/);
+  await assert.rejects(f.addSource('second-audio'), /screenShare\.appAudioAlreadyShared/);
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 1);
 });
 

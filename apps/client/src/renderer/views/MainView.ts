@@ -19,8 +19,7 @@ import { connectionStore, SavedServer } from '../stores/connectionStore';
 import { audioProcessor } from '../core/AudioProcessor';
 import { selectNoiseSuppression } from '../core/AudioDeviceService';
 import { webRtcManager } from '../core/WebRtcManager';
-import { screenAudioService } from '../core/ScreenAudioService';
-import { stopLocalScreenShares } from '../core/screenShareControls';
+import { chooseSharesToStop, screenShareChooser, stopChosenShares } from './ScreenShareChooser';
 import { ChatView } from './ChatView';
 import type { HomeView } from './home/HomeView';
 import { bindPttIndicators, renderMicrophoneButton } from './PttIndicator';
@@ -720,8 +719,10 @@ export class MainView {
       .filter((screen) => !this.voiceStageView?.isWatchingBotScreen(screen.id)
         && !voice.session.botScreenStore.isInvitationDismissed(screen.id)) : [];
     const loadFailed = voice?.session.botScreenStore.loadFailed ?? false;
+    // The count re-renders the stop button when a second screen turns it into a menu.
+    const selfShareCount = isSelfSharing ? voiceStore.screenShareIds.length : 0;
     const signature = JSON.stringify([
-      this.activeContentView, isSelfSharing, watchedScreens, sharers, voice?.session.key, voice?.channelId,
+      this.activeContentView, isSelfSharing, selfShareCount, watchedScreens, sharers, voice?.session.key, voice?.channelId,
       screens.map((screen) => [screen.id, screen.instanceId, screen.title]), loadFailed,
     ]);
     if (signature === this.screenShareNoticeSignature) return;
@@ -742,7 +743,8 @@ export class MainView {
         <div class="screenshare-notice screenshare-notice--self">
           <span class="material-symbols-outlined md-16 screenshare-notice-icon">screen_share</span>
           <span class="screenshare-notice-text">${t('main.screenShareSelfNotice')}</span>
-          <button id="screenshare-self-stop-btn" class="screenshare-notice-btn screenshare-notice-btn--danger">${t('screenShare.stopSharing')}</button>
+          <button id="screenshare-self-stop-btn" class="screenshare-notice-btn screenshare-notice-btn--danger"
+            aria-haspopup="${selfShareCount > 1 ? 'menu' : 'false'}">${t('screenShare.stopSharing')}</button>
         </div>
       `);
     }
@@ -816,10 +818,17 @@ export class MainView {
     });
     slot.querySelector('[data-reload-bot-screens]')?.addEventListener('click', () => appEvents.emit('voice.bot_screens_reload'));
 
-    // Stop self-sharing handler
-    document.getElementById('screenshare-self-stop-btn')?.addEventListener('click', async () => {
+    // Stop self-sharing handler; with several screens it asks which one first.
+    const selfStop = document.getElementById('screenshare-self-stop-btn');
+    if (selfStop) selfStop.addEventListener('click', async () => {
+      if (screenShareChooser.isOpenFor(selfStop)) {
+        screenShareChooser.close();
+        return;
+      }
+      const selection = await chooseSharesToStop(selfStop);
+      if (!selection) return;
       try {
-        await stopLocalScreenShares(screenAudioService);
+        await stopChosenShares(selection);
       } catch (error) {
         await showAlert({
           title: t('screenShare.errorTitle'),
@@ -895,6 +904,35 @@ export class MainView {
     if (botScreenId) this.voiceStageView?.watchBotScreen(botScreenId);
     this.renderChannels();
     this.updateScreenShareNotice();
+  }
+
+  /**
+   * Someone else's share icon or LIVE badge asks first, then opens the stage focused on their
+   * broadcast and watching it. Someone sharing in another voice channel is reached by joining it.
+   */
+  private async watchLive(sessionId: string): Promise<void> {
+    const sharing = () => {
+      const participant = participantManager.get(sessionId);
+      return participant?.voiceState?.isScreenSharing ? participant : undefined;
+    };
+    const participant = sharing();
+    const channelId = participant?.voiceState?.channelId;
+    const session = sessionManager.getActive();
+    if (!participant || !channelId || !session) return;
+    const inCall = voiceStore.voiceSessionKey === session.key && voiceStore.currentVoiceChannelId === channelId;
+    const name = participantManager.displayName(participant);
+    const channel = session.serverStore.serverDetails?.channels.find((value) => value.id === channelId)?.name ?? '';
+    const confirmed = await showConfirm({
+      title: t('main.watchLiveTitle'),
+      message: inCall ? t('main.watchLiveMessage', { name }) : t('main.watchLiveJoinMessage', { name, channel }),
+      confirmLabel: inCall ? t('stage.watchBroadcast') : t('main.watchLiveJoinConfirm'),
+      variant: 'info',
+    });
+    // The broadcast may have ended, or the user moved elsewhere, while the question was open.
+    if (!confirmed || sessionManager.getActive() !== session || sharing()?.voiceState?.channelId !== channelId) return;
+    if (!inCall && !await this.handleJoinVoiceChannel(channelId)) return;
+    if (voiceStore.voiceSessionKey !== session.key || voiceStore.currentVoiceChannelId !== channelId || !sharing()) return;
+    this.openVoiceStage(sessionId);
   }
 
   private closeServerDropdown(): void {
@@ -1360,7 +1398,13 @@ export class MainView {
                       ${isConnecting ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-connecting" title="${t(isSfu ? 'main.sfuConnecting' : 'main.peerConnecting')}">sync</span>` : ''}
                       ${isRelayed ? `<span class="material-symbols-outlined md-14 voice-mini-icon relayed" title="${t('main.peerRelayed')}">swap_horiz</span>` : ''}
                       ${renderAudioMuteIndicators({ ...p.voiceState, isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened, permissionMuted: isPermissionMuted })}
-                      ${p.voiceState?.isScreenSharing ? `<span class="material-symbols-outlined md-14 voice-mini-icon live" title="${t('main.sharingScreen')}">screen_share</span>` : ''}
+                      ${p.voiceState?.isScreenSharing ? (isLocal
+                        ? `<span class="material-symbols-outlined md-14 voice-mini-icon live" title="${t('main.sharingScreen')}">screen_share</span>`
+                        : `<button type="button" class="voice-mini-icon live voice-mini-watch" data-watch-live="${escapeHtml(sessionId)}"
+                            title="${escapeHtml(t('main.watchLiveAria', { name: displayName }))}"
+                            aria-label="${escapeHtml(t('main.watchLiveAria', { name: displayName }))}">
+                            <span class="material-symbols-outlined md-14" aria-hidden="true">screen_share</span>
+                          </button>`) : ''}
                       ${p.voiceState?.isCameraOn ? `<span class="material-symbols-outlined md-14 voice-mini-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
                       ${p.user.activity ? (activityIconSrc(p.user.activity.iconBase64)
                         ? `<img class="voice-mini-art" src="${activityIconSrc(p.user.activity.iconBase64)}" alt="" title="${escapeHtml(t('main.playingGame', { game: p.user.activity.name }))}">`
@@ -1490,6 +1534,14 @@ export class MainView {
         });
         el.addEventListener('dragend', () => { el.classList.remove('dragging'); });
       }
+    });
+
+    // Someone else's share icon opens their broadcast, after asking.
+    this.container.querySelectorAll<HTMLButtonElement>('.voice-participant-mini [data-watch-live]').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (button.dataset.watchLive) void this.watchLive(button.dataset.watchLive);
+      });
     });
 
     // Voice channel drop targets for user drag-and-drop (#248, #357)
@@ -2434,7 +2486,11 @@ export class MainView {
               ${m.id === serverStore.ownerId ? `<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
               ${m.isBot ? `<span class="member-badge-bot" title="Bot">BOT</span>` : ''}
               ${isReconnecting ? `<span class="member-reconnecting-badge" title="${t('main.reconnectingTitle')}"><span class="material-symbols-outlined md-14 spin">sync</span></span>` : ''}
-              ${(!effectiveOffline && voiceState?.isScreenSharing) ? `<span class="member-live-badge" title="${t('main.sharingScreen')}">LIVE</span>` : ''}
+              ${(!effectiveOffline && voiceState?.isScreenSharing) ? (isLocal || !vm
+                ? `<span class="member-live-badge" title="${t('main.sharingScreen')}">LIVE</span>`
+                : `<button type="button" class="member-live-badge" data-watch-live="${escapeHtml(vm.user.sessionId || vm.user.id)}"
+                    title="${escapeHtml(t('main.watchLiveAria', { name: m.nickname }))}"
+                    aria-label="${escapeHtml(t('main.watchLiveAria', { name: m.nickname }))}">LIVE</button>`) : ''}
               ${(!effectiveOffline && voiceState?.isCameraOn) ? `<span class="material-symbols-outlined md-14 member-cam-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
               ${renderAudioMuteIndicators({ ...voiceState, isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened, permissionMuted: isPermissionMuted }, { showMicrophone: inVoice || isServerMuted || isPermissionMuted })}
             </div>
@@ -2486,6 +2542,12 @@ export class MainView {
           if (member) {
             userContextMenu.open(mouseEvent.clientX, mouseEvent.clientY, member);
           }
+        });
+      });
+      listEl.querySelectorAll<HTMLButtonElement>('[data-watch-live]').forEach((button) => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          if (button.dataset.watchLive) void this.watchLive(button.dataset.watchLive);
         });
       });
     }

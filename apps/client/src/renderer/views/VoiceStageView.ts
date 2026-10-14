@@ -1,4 +1,4 @@
-import { MessageType, getScreenShareQualities, screenShareQualitySchema, type BotScreen, type NativeScreenSource } from '@monky/shared';
+import { MessageType, SCREEN_SHARE_LIMITS, getScreenShareQualities, screenShareQualitySchema, type BotScreen, type NativeScreenSource } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
@@ -11,7 +11,7 @@ import { networkClient } from '../core/NetworkClient';
 import { callClient, leaveCurrentCall } from '../core/serverConnection';
 import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
 import { screenAudioService } from '../core/ScreenAudioService';
-import { stopLocalScreenShares } from '../core/screenShareControls';
+import { chooseSharesToStop, screenShareChooser, stopChosenShares, type ScreenShareSelection } from './ScreenShareChooser';
 import { getActiveServerStore, serverStore } from '../stores/serverStore';
 import { settingsStore } from '../stores/settingsStore';
 import { voiceStore, VoiceStore } from '../stores/voiceStore';
@@ -527,7 +527,7 @@ export class VoiceStageView {
 
     const btnScreen = document.getElementById('stage-btn-screen');
     if (btnScreen) {
-      const hasScreenAudio = voiceStore.screenAudioShareId !== null || screenAudioService.getIsCapturing();
+      const hasScreenAudio = voiceStore.hasScreenAudio || screenAudioService.getIsCapturing();
       btnScreen.className = `btn btn-icon ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}`;
       btnScreen.title = voiceStore.isScreenSharing
         ? (hasScreenAudio ? t('stage.stopScreenShareWithAudio') : t('stage.stopScreenShare'))
@@ -550,9 +550,10 @@ export class VoiceStageView {
     const btnLeave = document.getElementById('stage-btn-leave') as HTMLButtonElement | null;
 
     if (btnStopShare) {
-      const hasScreenAudio = voiceStore.screenAudioShareId !== null || screenAudioService.getIsCapturing();
+      const hasScreenAudio = voiceStore.hasScreenAudio || screenAudioService.getIsCapturing();
       btnStopShare.style.display = voiceStore.isScreenSharing ? 'inline-flex' : 'none';
       btnStopShare.title = hasScreenAudio ? t('stage.stopScreenShareWithAudio') : t('stage.stopScreenShare');
+      btnStopShare.setAttribute('aria-haspopup', voiceStore.screenShareIds.length > 1 ? 'menu' : 'false');
     }
     if (btnLeave) {
       btnLeave.style.marginLeft = '12px';
@@ -562,7 +563,7 @@ export class VoiceStageView {
     const bannerWrapper = document.getElementById('stage-broadcast-banner-wrapper');
     if (bannerWrapper) {
       const isBroadcasting = voiceStore.isCameraOn || voiceStore.isScreenSharing;
-      const hasScreenAudio = voiceStore.screenAudioShareId !== null || screenAudioService.getIsCapturing();
+      const hasScreenAudio = voiceStore.hasScreenAudio || screenAudioService.getIsCapturing();
       // Only touch the DOM when the banner's content would actually change, so
       // the live-pulse animation isn't restarted on every state update (#70).
       const signature = isBroadcasting
@@ -588,12 +589,26 @@ export class VoiceStageView {
             </div>
           `;
           const btnQuickStop = document.getElementById('btn-stage-quick-stop');
-          btnQuickStop?.addEventListener('click', () => this.handleStopStreaming());
+          btnQuickStop?.addEventListener('click', async () => {
+            if (!voiceStore.isScreenSharing) {
+              await this.handleStopStreaming();
+              return;
+            }
+            if (screenShareChooser.isOpenFor(btnQuickStop)) {
+              screenShareChooser.close();
+              return;
+            }
+            const selection = await chooseSharesToStop(btnQuickStop);
+            if (selection) await this.handleStopStreaming(selection);
+          });
           setSurfaceVisible(bannerWrapper, true, 'panel', 'block');
         } else {
           setSurfaceVisible(bannerWrapper, false, 'panel', undefined, () => bannerWrapper.replaceChildren());
         }
       }
+      // Kept outside the signature so a second screen does not restart the live pulse (#70).
+      document.getElementById('btn-stage-quick-stop')?.setAttribute('aria-haspopup',
+        voiceStore.isScreenSharing && voiceStore.screenShareIds.length > 1 ? 'menu' : 'false');
     }
   }
 
@@ -666,7 +681,7 @@ export class VoiceStageView {
     const announced = p.voiceState?.screenShareIds;
     if (announced && announced.length > 0) {
       const safe = announced.filter((id) => SAFE_SHARE_ID.test(id));
-      if (safe.length > 0) return safe.slice(0, VoiceStore.MAX_SCREEN_SHARES);
+      if (safe.length > 0) return safe.slice(0, SCREEN_SHARE_LIMITS.maximum);
     }
     return p.voiceState?.isScreenSharing ? [LEGACY_SHARE_ID] : [];
   }
@@ -2250,10 +2265,10 @@ export class VoiceStageView {
     this.setChannel(channelId);
   }
 
-  private async handleStopStreaming(): Promise<void> {
+  private async handleStopStreaming(selection: ScreenShareSelection = { all: true }): Promise<void> {
     if (voiceStore.isScreenSharing) {
       try {
-        await stopLocalScreenShares(screenAudioService);
+        await stopChosenShares(selection);
       } catch (error) {
         await showAlert({
           title: t('screenShare.errorTitle'),
@@ -2383,9 +2398,16 @@ export class VoiceStageView {
 
     btnStopShare?.addEventListener('click', async () => {
       if (isButtonLoading(btnStopShare)) return;
+      if (screenShareChooser.isOpenFor(btnStopShare)) {
+        screenShareChooser.close();
+        return;
+      }
+      // With several screens the user picks which one; loading only covers the stop itself.
+      const selection = await chooseSharesToStop(btnStopShare);
+      if (!selection || !btnStopShare.isConnected) return;
       setButtonLoading(btnStopShare, true);
       try {
-        await this.handleStopStreaming();
+        await this.handleStopStreaming(selection);
       } finally {
         setButtonLoading(btnStopShare, false);
       }

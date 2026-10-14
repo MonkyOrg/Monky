@@ -152,6 +152,7 @@ import {
   rtcSignalSchema,
   nativeScreenSignalSchema,
   nativeScreenSourcesSchema,
+  SCREEN_SHARE_LIMITS,
   getScreenShareQualities,
   screenShareProfileKey,
   sfuCreateWebRtcTransportSchema,
@@ -2319,6 +2320,7 @@ export class WebSocketServer {
       }
       const bot = await this.botService.getInfo(botId);
       if (!bot) throw new BotSettingsError(ProtocolErrorCode.BAD_REQUEST, 'Bot not found.');
+      const manifestUrls = await this.botManifestUrls(session);
       const handled = await this.withBotSettingsPermission(session, (canConfigure, canManage) => {
         if (type === MessageType.BOT_SETTINGS_UPDATE) {
           if (!canConfigure) throw new BotSettingsError(ProtocolErrorCode.PERMISSION_DENIED, 'You cannot configure bots.');
@@ -2340,7 +2342,7 @@ export class WebSocketServer {
           }
         }
         this.send(session.ws, { type: MessageType.BOT_SETTINGS_SNAPSHOT, requestId,
-          payload: settingsService.snapshot(bot, canConfigure, session.isBot === true, canManage) });
+          payload: settingsService.snapshot(bot, canConfigure, session.isBot === true, canManage, manifestUrls) });
       });
       if (handled && type === MessageType.BOT_SETTINGS_UPDATE) await this.broadcastBotSettings(botId);
     } catch (error) {
@@ -2348,13 +2350,20 @@ export class WebSocketServer {
     }
   }
 
+  /** Only clients that negotiated `bot-manifest-url` get the URLs; BotSettingsService still requires MANAGE_BOTS. */
+  private async botManifestUrls(session: ClientSession): Promise<Map<string, string | null> | undefined> {
+    if (session.isBot || !this.botService || !session.protocol?.features.includes('bot-manifest-url')) return undefined;
+    return this.botService.manifestUrls();
+  }
+
   private async sendBotSettingsList(session: ClientSession, requestId?: string): Promise<void> {
     if (!this.botSettings || !this.botService || !session.user || session.isBot || !this.isCurrentSession(session)) return;
     const settingsService = this.botSettings;
     const bots = await this.botService.list();
+    const manifestUrls = await this.botManifestUrls(session);
     await this.withBotSettingsPermission(session, (canConfigure, canManage) => {
       this.send(session.ws, { type: MessageType.BOT_SETTINGS_LIST_RESPONSE, requestId,
-        payload: settingsService.list(bots, canConfigure, canManage) });
+        payload: settingsService.list(bots, canConfigure, canManage, manifestUrls) });
     });
   }
 
@@ -2367,10 +2376,11 @@ export class WebSocketServer {
       if (!changedBotId || (session.isBot && (session.botId !== changedBotId || !session.botSettingsReady))) continue;
       const bot = await this.botService.getInfo(changedBotId);
       if (!bot) continue;
+      const manifestUrls = await this.botManifestUrls(session);
       await this.withBotSettingsPermission(session, (canConfigure, canManage) => {
         if (!canConfigure && !canManage && !session.isBot) return;
         this.send(session.ws, { type: MessageType.BOT_SETTINGS_SNAPSHOT,
-          payload: settingsService.snapshot(bot, canConfigure, session.isBot === true, canManage) });
+          payload: settingsService.snapshot(bot, canConfigure, session.isBot === true, canManage, manifestUrls) });
       });
     }
   }
@@ -5386,7 +5396,10 @@ export class WebSocketServer {
 
   /** Every outbound path, including auth, bots and broadcasts, uses this projection. */
   private projectScreenMessage(session: ClientSession, message: ProtocolMessage): ProtocolMessage | null {
-    const state = (value: VoiceParticipantState) => this.signalingService.projectVoiceState(value, session.user?.id);
+    // A client's native roster only accepts as many screens per person as it negotiated.
+    const shareLimit = session.protocol?.features.includes('screen-shares-8')
+      ? SCREEN_SHARE_LIMITS.maximum : SCREEN_SHARE_LIMITS.legacy;
+    const state = (value: VoiceParticipantState) => this.signalingService.projectVoiceState(value, session.user?.id, shareLimit);
     const roster = (values: VoiceRosterParticipant[]) => values.map(value => ({ ...value, voiceState: state(value.voiceState) }));
     const remember = (id: string) => {
       session.retiredProducerIds?.delete(id);

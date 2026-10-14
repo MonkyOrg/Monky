@@ -205,7 +205,7 @@ daemon.
 
 ## 4. Approve and run
 
-In the client, open **Bot settings → Server permissions**, enable the
+In the client, open **Bot settings → Permissions**, enable the
 requested **commands** capability and any other capabilities requested by the
 features you added, then save. Being online does not replace this approval.
 

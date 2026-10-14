@@ -20,7 +20,10 @@ type Inspection = {
   monitors(): NativeMonitorInfo[];
   monitorState(deviceId: string): NativeMonitorInfo | null;
   isWindowExcluded?(hwnd: number): boolean;
+  /** Running parents of each process, nearest first, from one snapshot; null for a process that is gone. */
+  processAncestry?(processIds: readonly number[]): (number[] | null)[];
 };
+type ListedWindow = { id: string; window: NativeWindowInfo; processAncestry?: number[] };
 type MonitorTarget = Extract<NativeScreenCaptureTarget, { deviceId: string }>;
 type WindowTarget = Extract<NativeScreenCaptureTarget, { hwnd: number }>;
 
@@ -54,7 +57,7 @@ export class NativeDesktopSources {
 
   constructor(private readonly inspect: Inspection) {}
 
-  listWindows(): { id: string; window: NativeWindowInfo }[] {
+  listWindows(): ListedWindow[] {
     // Refreshing another picker must not revoke a still-owned hidden/minimized
     // selection needed for source restoration.
     const selected = new Map([...this.windows].filter(([, target]) => {
@@ -64,7 +67,7 @@ export class NativeDesktopSources {
         && state.processCreationTime100ns === target.expectedProcessCreationTime100ns;
     }));
     const handles = new Set<number>();
-    const result: { id: string; window: NativeWindowInfo }[] = [];
+    const result: ListedWindow[] = [];
     for (const window of this.inspect.windows()) {
       if (this.inspect.isWindowExcluded?.(window.hwnd)) continue;
       if (isGhostWindow(window) || (!window.isVisible && !window.isIconic) || !window.processCreationTime100ns) continue;
@@ -84,7 +87,31 @@ export class NativeDesktopSources {
       result.push({ id, window });
     }
     this.windows = selected;
-    return result;
+    return this.withAncestry(result);
+  }
+
+  /**
+   * Windows captures an application's audio together with the processes it started, so the picker keeps
+   * related applications, like a launcher and the game it opened, from both sharing audio (#253). Main
+   * checks again before capturing; without this list the picker only compares the processes themselves.
+   */
+  private withAncestry(listed: ListedWindow[]): ListedWindow[] {
+    if (!this.inspect.processAncestry || !listed.length) return listed;
+    const chains = new Map<number, number[]>();
+    try {
+      const processIds = [...new Set(listed.map(({ window }) => window.processId))];
+      for (let offset = 0; offset < processIds.length; offset += 256) {
+        const chunk = processIds.slice(offset, offset + 256);
+        this.inspect.processAncestry(chunk).forEach((chain, index) => { if (chain) chains.set(chunk[index], chain); });
+      }
+    } catch (error) {
+      console.warn('[ScreenShare:Main] Could not read window process ancestry:', error);
+      return listed;
+    }
+    return listed.map(entry => {
+      const processAncestry = chains.get(entry.window.processId);
+      return processAncestry ? { ...entry, processAncestry } : entry;
+    });
   }
 
   listMonitors(): { id: string; monitor: NativeMonitorInfo }[] {

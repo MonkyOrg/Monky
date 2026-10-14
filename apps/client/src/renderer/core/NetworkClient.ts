@@ -12,6 +12,7 @@ import {
   legacyProtocolFallback,
   RECONNECT_DELAYS_MS,
   ServerErrorPayload,
+  ServerShutdownPayload,
   serverShutdownSchema,
 } from '@monky/shared';
 import { appEvents } from './EventBus';
@@ -32,6 +33,18 @@ export type DisconnectCause = 'local' | 'server';
 
 export interface NetworkDisconnectedPayload {
   cause: DisconnectCause;
+}
+
+/**
+ * A server ending this session on purpose, as `network.server_shutdown`
+ * delivers it. The event skips session routing so background servers are
+ * told too, which is why it names its session itself: only that tells the
+ * server the user is on apart from one merely kept connected (#400).
+ */
+export interface ServerShutdownNotice extends ServerShutdownPayload {
+  serverName?: string;
+  /** Absent when the app raises the notice itself, for the server on screen. */
+  sessionKey?: string;
 }
 
 export class RequestTimeoutError extends Error {
@@ -528,8 +541,8 @@ export class NetworkClient {
         return;
       }
       this.emitScoped('network.server_shutdown', {
-        ...parsed.data, serverName: this.serverName || this.currentServerUrl,
-      });
+        ...parsed.data, serverName: this.serverName || this.currentServerUrl, sessionKey: this.sessionKey,
+      } satisfies ServerShutdownNotice);
       this.disconnect('server');
       return;
     }

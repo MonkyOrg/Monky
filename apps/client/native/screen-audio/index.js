@@ -66,6 +66,12 @@ function getWindowState(hwnd) {
   return binding.getWindowState(hwnd);
 }
 
+function getProcessAncestry(processIds) {
+  if (!binding || typeof binding.getProcessAncestry !== 'function')
+    throw new Error('Native process inspection is unavailable. Rebuild the native audio module.');
+  return binding.getProcessAncestry(processIds);
+}
+
 function getWindowOcclusion(hwnd) {
   if (!binding || typeof binding.getWindowOcclusion !== 'function') return null;
   return binding.getWindowOcclusion(hwnd);
@@ -111,7 +117,7 @@ function setWindowResizeAspect(handle, ratio, extraWidth, extraHeight) {
 
 module.exports = {
   isSupported, isPacketCaptureSupported, start, stop, getLastError, getStatus, createPacketCapture,
-  listWindowOwners, listWindows, restoreWindow, getWindowState, getWindowOcclusion, startWindowFrameProbe,
+  listWindowOwners, listWindows, restoreWindow, getWindowState, getProcessAncestry, getWindowOcclusion, startWindowFrameProbe,
   getWindowFrameProbe, stopWindowFrameProbe, getKeyboardLayout, listMonitors,
   getMonitorState, setWindowResizeAspect,
 };

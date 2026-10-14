@@ -572,9 +572,17 @@ transmitir as duas ao mesmo tempo. A fonte é anunciada na chamada sem exigir
 o recebimento de sua mídia. Em P2P, a negociação e o `screen-video-meta`
 associam a track à tela correta, separada da câmera.
 
-Dá para compartilhar **até 2 telas simultâneas**. Cada uma é identificada pelo id
-do seu próprio `MediaStream`, e é esse id que amarra a track, o sender e o
-quadradinho na tela.
+Cada pessoa pode compartilhar **até 8 telas ao mesmo tempo**. O limite é por
+pessoa, não por chamada: cada tela custa a quem transmite outra captura, outro
+encoder e mais upload, enquanto quem assiste só recebe as telas que escolheu
+assistir. Por isso, a partir da terceira tela o Monky pede confirmação uma vez
+por chamada. Cada uma é identificada pelo id do seu próprio `MediaStream`, e é
+esse id que amarra a track, o sender e o quadradinho na tela.
+
+O recurso `screen-shares-8` é negociado. Servidores sem ele aceitam 2 telas por
+pessoa, então o cliente não oferece uma terceira nesse servidor. Clientes sem ele
+recebem só as 2 primeiras telas de cada pessoa, que é o que o roster nativo deles
+aceita; o servidor também recalcula se a pessoa compartilha som para esse cliente.
 
 **Descoberta não é assinatura.** A intenção de assistir pertence à chamada,
 não ao ciclo de vida de uma view. `Assistir transmissão` autoriza a entrega
@@ -620,6 +628,21 @@ Monky tem um módulo nativo em C++:
 
 Se o módulo não carregar, nada quebra: o compartilhamento continua funcionando
 sem som e o app avisa.
+
+Cada compartilhamento com som abre a própria sessão de captura. O módulo aceita
+até 8 sessões ao mesmo tempo, uma para cada tela permitida por pessoa, e mantém
+a captura legada exclusiva. Quais sons podem coexistir é decidido no processo
+principal, que repete as checagens do seletor: o som de um monitor (e, no macOS,
+o de qualquer fonte, porque o ScreenCaptureKit entrega a mistura do sistema) não
+convive com outro, e duas janelas do mesmo processo não capturam o mesmo som.
+Como o *process loopback* inclui os processos que o aplicativo abriu, o mesmo
+vale para processos em que um descende do outro, como um launcher e o jogo
+que ele abriu; o seletor recebe a cadeia de processos pais de cada janela e o
+processo principal confere de novo, num instantâneo atual, antes de capturar.
+Quando uma tela assume o som de aplicativos, cada um deles troca para uma nova
+instância da mesma transmissão, sem áudio — quem assiste acompanha a troca como
+numa mudança de qualidade —, e a captura da tela só começa depois que eles
+liberam o som.
 
 ### Qualidade e banda
 
