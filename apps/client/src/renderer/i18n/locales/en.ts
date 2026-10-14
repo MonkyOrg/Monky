@@ -911,6 +911,14 @@ export const en: TranslationMap = {
   'screenShare.macSystemAudioWarnMessage': 'On macOS, Monky cannot isolate a single window\'s audio. If you continue with audio enabled, ALL of your computer\'s sound will be broadcast — notifications, music, other calls and every other app — not just the chosen application. Do you want to continue?',
   'screenShare.macSystemAudioWarnConfirm': 'Share anyway',
   'screenShare.audioAlreadySharing': 'Audio is already being shared on another screen',
+  'screenShare.audioTakenToast': 'Only one screen can share audio at a time, and another one already has it. Turn off audio for this screen to continue.',
+  'screenShare.chooseStopTitle': 'Which screen should stop?',
+  'screenShare.chooseSwitchTitle': 'Which screen should switch?',
+  'screenShare.chooseStopItem': 'Stop {name}',
+  'screenShare.chooseSwitchItem': 'Switch the source of {name}',
+  'screenShare.stopAllScreens': 'Stop all screens',
+  'screenShare.withAudio': 'With audio',
+  'screenShare.withoutAudio': 'Without audio',
 
   // ── Cryptographic identity ───────────────────────────────────────────────
   'identity.sectionTitle': 'Identity',

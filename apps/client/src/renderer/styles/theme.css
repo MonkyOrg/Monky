@@ -2789,6 +2789,142 @@ input:focus, textarea:focus, select:focus {
   color: #fff;
 }
 
+/* Choosing which of several local screen shares to stop or switch, by preview. */
+.screen-share-chooser {
+  position: fixed;
+  z-index: 10000;
+  box-sizing: border-box;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background-color: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
+.screen-share-chooser-title {
+  padding: 4px 6px 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.screen-share-choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.screen-share-choice:hover,
+.screen-share-choice:focus-visible {
+  background-color: var(--bg-card-hover);
+}
+
+.screen-share-choice:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+
+.screen-share-choice-preview {
+  position: relative;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 112px;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background-color: #000;
+  color: var(--text-muted);
+}
+
+.screen-share-choice-preview video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.screen-share-choice-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.screen-share-choice-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.screen-share-choice-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.screen-share-choice-meta[data-audio] {
+  color: var(--success);
+}
+
+.screen-share-choice-action {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: color 0.12s ease;
+}
+
+.screen-share-chooser[data-purpose='stop'] .screen-share-choice:hover .screen-share-choice-action,
+.screen-share-chooser[data-purpose='stop'] .screen-share-choice:focus-visible .screen-share-choice-action {
+  color: var(--danger);
+}
+
+.screen-share-chooser[data-purpose='switch'] .screen-share-choice:hover .screen-share-choice-action,
+.screen-share-chooser[data-purpose='switch'] .screen-share-choice:focus-visible .screen-share-choice-action {
+  color: var(--accent-primary);
+}
+
+.screen-share-chooser-separator {
+  height: 1px;
+  margin: 4px 2px;
+  background-color: var(--border-color);
+}
+
+.screen-share-choice--all {
+  padding: 8px 10px;
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.screen-share-choice--all:hover,
+.screen-share-choice--all:focus-visible {
+  background-color: var(--danger);
+  color: #fff;
+}
+
+/* The audio switch that blocks adding a screen, pointed at by the toast that explains it. */
+.share-audio-toggle[data-attention] .toggle-slider {
+  box-shadow: 0 0 0 2px var(--danger);
+}
+
 /* Voice Channel Connected Participants nested under channel */
 .voice-participants-sublist {
   display: flex;

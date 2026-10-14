@@ -19,8 +19,7 @@ import { connectionStore, SavedServer } from '../stores/connectionStore';
 import { audioProcessor } from '../core/AudioProcessor';
 import { selectNoiseSuppression } from '../core/AudioDeviceService';
 import { webRtcManager } from '../core/WebRtcManager';
-import { screenAudioService } from '../core/ScreenAudioService';
-import { stopLocalScreenShares } from '../core/screenShareControls';
+import { chooseSharesToStop, screenShareChooser, stopChosenShares } from './ScreenShareChooser';
 import { ChatView } from './ChatView';
 import type { HomeView } from './home/HomeView';
 import { bindPttIndicators, renderMicrophoneButton } from './PttIndicator';
@@ -720,8 +719,10 @@ export class MainView {
       .filter((screen) => !this.voiceStageView?.isWatchingBotScreen(screen.id)
         && !voice.session.botScreenStore.isInvitationDismissed(screen.id)) : [];
     const loadFailed = voice?.session.botScreenStore.loadFailed ?? false;
+    // The count re-renders the stop button when a second screen turns it into a menu.
+    const selfShareCount = isSelfSharing ? voiceStore.screenShareIds.length : 0;
     const signature = JSON.stringify([
-      this.activeContentView, isSelfSharing, watchedScreens, sharers, voice?.session.key, voice?.channelId,
+      this.activeContentView, isSelfSharing, selfShareCount, watchedScreens, sharers, voice?.session.key, voice?.channelId,
       screens.map((screen) => [screen.id, screen.instanceId, screen.title]), loadFailed,
     ]);
     if (signature === this.screenShareNoticeSignature) return;
@@ -742,7 +743,8 @@ export class MainView {
         <div class="screenshare-notice screenshare-notice--self">
           <span class="material-symbols-outlined md-16 screenshare-notice-icon">screen_share</span>
           <span class="screenshare-notice-text">${t('main.screenShareSelfNotice')}</span>
-          <button id="screenshare-self-stop-btn" class="screenshare-notice-btn screenshare-notice-btn--danger">${t('screenShare.stopSharing')}</button>
+          <button id="screenshare-self-stop-btn" class="screenshare-notice-btn screenshare-notice-btn--danger"
+            aria-haspopup="${selfShareCount > 1 ? 'menu' : 'false'}">${t('screenShare.stopSharing')}</button>
         </div>
       `);
     }
@@ -816,10 +818,17 @@ export class MainView {
     });
     slot.querySelector('[data-reload-bot-screens]')?.addEventListener('click', () => appEvents.emit('voice.bot_screens_reload'));
 
-    // Stop self-sharing handler
-    document.getElementById('screenshare-self-stop-btn')?.addEventListener('click', async () => {
+    // Stop self-sharing handler; with several screens it asks which one first.
+    const selfStop = document.getElementById('screenshare-self-stop-btn');
+    if (selfStop) selfStop.addEventListener('click', async () => {
+      if (screenShareChooser.isOpenFor(selfStop)) {
+        screenShareChooser.close();
+        return;
+      }
+      const selection = await chooseSharesToStop(selfStop);
+      if (!selection) return;
       try {
-        await stopLocalScreenShares(screenAudioService);
+        await stopChosenShares(selection);
       } catch (error) {
         await showAlert({
           title: t('screenShare.errorTitle'),

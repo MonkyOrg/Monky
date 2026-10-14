@@ -6,6 +6,7 @@ import { gameShareRequests, type PendingGameShareRequest } from './GameShareRequ
 import { startGameShare } from './gameShareStart';
 import { screenAudioService } from './ScreenAudioService';
 import { stopLocalScreenShares } from './screenShareControls';
+import { videoService } from './VideoService';
 import { voiceStore } from '../stores/voiceStore';
 import { settingsStore } from '../stores/settingsStore';
 import { showErrorToast } from '../views/CopyToast';
@@ -77,6 +78,8 @@ export class GameShareSuggestion {
   /** Called by startGameShare right before the share is published. */
   public claimShare(shareId: string): void {
     this.liveShareId = shareId;
+    // Names the share after the game when it sits next to another screen.
+    if (this.activity) videoService.setScreenShareLabel(shareId, this.activity.name);
   }
 
   private state(): StripState | null {

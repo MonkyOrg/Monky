@@ -857,10 +857,125 @@ test('replacing an audible game with a monitor keeps audio requested instead of 
   assert.equal(control(f, 'chk-share-audio').disabled, false);
   assert.equal(control(f, 'share-audio-text').textContent, f.i18n.t('screenShare.shareAudio'));
   assert.equal(control(f, 'btn-share').disabled, false);
-  assert.equal(control(f, 'btn-share-add').disabled, true, 'Adding cannot steal the existing audio owner');
+  assert.equal(control(f, 'btn-share-add').disabled, false, 'Adding stays clickable: the click explains the audio owner');
   await f.picker.startSharing('replace');
   assert.equal(nativeStarts(f)[0][2], true);
   assert.equal(f.voiceStore.screenAudioShareId, f.voiceStore.screenShareIds[0]);
+});
+
+for (const language of ['pt-BR', 'en']) {
+  test(`adding a screen with audio while another share owns it explains why in a toast (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    const previous = f.createStream('window:303:0');
+    f.voiceStore.addScreenShare(previous.id);
+    f.voiceStore.setScreenAudioShare(previous.id);
+    await f.picker.open();
+    control(f, 'share-tab-screen').click();
+    f.document.querySelector('.source-item').click();
+    assert.equal(control(f, 'chk-share-audio').checked, true);
+    const add = control(f, 'btn-share-add');
+    assert.equal(add.disabled, false, 'A disabled button gave no feedback at all on click');
+    assert.equal(add.getAttribute('title'), null, 'The reason no longer hides in a hover tooltip');
+    add.click();
+    await flush();
+    assert.equal(nativeStarts(f).length, 0, 'The second audio share is not attempted');
+    assert.equal(f.alerts.length, 0, 'A toast, not a blocking modal');
+    const toast = f.document.querySelector('.chat-copy-toast');
+    assert.equal(toast?.getAttribute('role'), 'alert');
+    assert.equal(f.document.querySelector('.chat-copy-toast-label').textContent, f.i18n.t('screenShare.audioTakenToast'));
+    assert.ok(f.document.querySelector('.share-audio-toggle').hasAttribute('data-attention'), 'The blocking switch is pointed out');
+    assert.equal(f.document.activeElement, control(f, 'chk-share-audio'));
+    assert.notEqual(f.picker.modalEl, null, 'The picker stays open so audio can be turned off');
+    assert.deepEqual(f.voiceStore.screenShareIds, [previous.id]);
+    const audio = control(f, 'chk-share-audio');
+    audio.checked = false; change(audio);
+    add.click();
+    await flush();
+    assert.equal(nativeStarts(f).at(-1)[2], false, 'Without audio the screen is added');
+    assert.equal(f.voiceStore.screenShareIds.length, 2);
+    assert.equal(f.voiceStore.screenAudioShareId, previous.id, 'The first screen keeps its audio');
+  });
+}
+
+test('switching the source with two live shares asks which one and replaces only that share', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  const first = f.createStream('window:303:0'), second = f.createStream('window:404:0');
+  for (const stream of [first, second]) f.voiceStore.addScreenShare(stream.id);
+  f.voiceStore.setScreenAudioShare(first.id);
+  await f.picker.open();
+  control(f, 'share-tab-screen').click();
+  f.document.querySelector('.source-item').click();
+  const audio = control(f, 'chk-share-audio');
+  audio.checked = false; change(audio);
+  const button = control(f, 'btn-share');
+  assert.equal(button.getAttribute('aria-haspopup'), 'menu');
+  button.click();
+  await flush();
+  assert.deepEqual(f.chooser.calls, [['btn-share', 'switch']]);
+  assert.equal(nativeStarts(f).length, 0, 'Dismissing the dropdown starts nothing');
+  assert.equal(f.traces.some(value => value[0] === 'stop-shares'), false);
+  f.chooser.result = { shareId: second.id };
+  button.click();
+  await flush();
+  assert.deepEqual(f.traces.filter(value => value[0] === 'stop-shares'), [['stop-shares', [second.id], false]]);
+  assert.equal(f.voiceStore.screenShareIds.length, 2);
+  assert.ok(f.voiceStore.screenShareIds.includes(first.id), 'The other share keeps running');
+  assert.ok(!f.voiceStore.screenShareIds.includes(second.id));
+  assert.equal(f.voiceStore.screenAudioShareId, first.id, 'It also keeps its audio');
+  const replacement = f.voiceStore.screenShareIds.find(id => id !== first.id);
+  assert.equal(f.labels.get(replacement), MONITOR_SOURCE_ID, 'The new share is named after its source for the next choice');
+  assert.equal(f.picker.modalEl, null);
+});
+
+test('switching a share without audio keeps the other share audible, and its owner can hand the audio over', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  const first = f.createStream('window:303:0'), second = f.createStream('window:404:0');
+  for (const stream of [first, second]) f.voiceStore.addScreenShare(stream.id);
+  f.voiceStore.setScreenAudioShare(first.id);
+  await f.picker.open();
+  control(f, 'share-tab-screen').click();
+  f.document.querySelector('.source-item').click();
+  assert.equal(control(f, 'chk-share-audio').checked, true);
+  f.chooser.result = { shareId: second.id };
+  control(f, 'btn-share').click();
+  await flush();
+  assert.equal(nativeStarts(f).length, 0);
+  assert.equal(f.traces.some(value => value[0] === 'stop-shares'), false, 'Nothing is stopped before the conflict is resolved');
+  assert.equal(f.document.querySelector('.chat-copy-toast-label').textContent, f.i18n.t('screenShare.audioTakenToast'));
+  f.chooser.result = { shareId: first.id };
+  control(f, 'btn-share').click();
+  await flush();
+  assert.deepEqual(f.traces.filter(value => value[0] === 'audio-replacement'), [['audio-replacement', first.id]]);
+  assert.deepEqual(f.traces.filter(value => value[0] === 'stop-shares'), [['stop-shares', [first.id], false]]);
+  assert.ok(f.voiceStore.screenShareIds.includes(second.id));
+  assert.equal(f.voiceStore.screenAudioShareId, f.voiceStore.screenShareIds.find(id => id !== second.id));
+});
+
+test('a single share is switched directly, and a double-click with two shares asks first', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  const only = f.createStream('window:303:0');
+  f.voiceStore.addScreenShare(only.id);
+  await f.picker.open();
+  control(f, 'share-tab-screen').click();
+  f.document.querySelector('.source-item').click();
+  assert.equal(control(f, 'btn-share').getAttribute('aria-haspopup'), 'false');
+  control(f, 'btn-share').click();
+  await flush();
+  assert.deepEqual(f.chooser.calls, []);
+  assert.deepEqual(f.traces.filter(value => value[0] === 'stop-shares'), [['stop-shares', [only.id], false]]);
+  const added = f.createStream('window:404:0');
+  f.voiceStore.addScreenShare(added.id);
+  await f.picker.open();
+  control(f, 'share-tab-window').click();
+  const card = f.document.querySelector('[data-source-id="window:101:0"]');
+  card.dispatchEvent(new Event('dblclick', { bubbles: true }));
+  await flush();
+  assert.deepEqual(f.chooser.calls, [['btn-share', 'switch']]);
+  assert.equal(nativeStarts(f).length, 1, 'Only the first, direct switch started a capture');
 });
 
 for (const language of ['pt-BR', 'en']) {

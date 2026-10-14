@@ -370,6 +370,7 @@ test('real VideoService source replacement does not stop the preload-owned gener
   }).outputText;
   const Owner = vm.runInNewContext(compiled, { clientLog: { info() {} }, appEvents: { emit() {} } });
   const owner = { screenStreams: new Map([['native', f.owner.srcObject]]), screenSourceIds: new Map([['native', 'owned-hwnd']]),
+    screenLabels: new Map([['native', 'Owned window']]),
     nativeScreenCaptures: new Map([['native', { source: { shareId: 'native' } }]]) };
   Owner.prototype.stopScreenShare.call(owner, 'native');
   f.output();
@@ -377,6 +378,7 @@ test('real VideoService source replacement does not stop the preload-owned gener
   assert.deepEqual(f.errors, [], 'Source removal closed the generator before a still-active decoded frame reached its writer.');
   assert.equal(f.track.readyState, 'live', 'Only the preload presentation owner may stop its generator.');
   assert.equal(owner.screenStreams.size, 0);
+  assert.equal(owner.screenLabels.size, 0, 'A stopped share no longer has a name to be chosen by.');
   await f.controller.stop(f.scope.presentationId);
   assert.equal(f.track.readyState, 'ended');
   assert.equal(f.platform.decoders[0].state, 'closed');

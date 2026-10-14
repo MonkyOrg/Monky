@@ -247,7 +247,9 @@ function fixture(language = 'en') {
   document.querySelector = selector => document.body.querySelector(selector);
   document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   const storage = new Map(), modules = new Map(), traces = [], alerts = [], warnings = [], events = [], observers = [];
-  const captures = new Map(), streams = new Map();
+  const captures = new Map(), streams = new Map(), labels = new Map();
+  // Stands in for the share dropdown: tests decide what the user picks.
+  const chooser = { result: null, calls: [], closed: 0, openAnchor: null };
   const source = (id, type, name = id) => ({ id, type, name, thumbnailDataUrl: '', appIconDataUrl: null });
   const sources = [source(MONITOR_SOURCE_ID, 'screen'), source('window:101:0', 'window'), source('window:202:0', 'window')];
   const capabilities = { capture: true, captureAudio: true, receive: true, captureKinds: ['window', 'monitor', 'game'], backend: 'libobs-amf', reason: null };
@@ -308,8 +310,10 @@ function fixture(language = 'en') {
     getNativeScreenCapture: id => captures.get(id),
     getNativeScreenCaptures: () => [...captures.values()],
     cancelPendingScreenShare: () => { cancelled++; },
-    stopScreenShare: id => { traces.push(['video-stop', id]); streams.delete(id); captures.delete(id); },
+    stopScreenShare: id => { traces.push(['video-stop', id]); streams.delete(id); captures.delete(id); labels.delete(id); },
     startScreenShare: async () => { throw new Error('Chromium capture fallback must not run'); },
+    setScreenShareLabel: (id, label) => { if (streams.has(id)) labels.set(id, label); },
+    getScreenShareLabel: id => labels.get(id) ?? null,
   };
   const createStream = (desktopSourceId = 'window:101:0') => {
     const stream = { id: `stream-${++sequence}`, getVideoTracks: () => [] };
@@ -397,6 +401,14 @@ function fixture(language = 'en') {
       },
     },
     'views/Dialog': { showAlert: async value => alerts.push(value), showConfirm: async () => controls.confirm },
+    'views/ScreenShareChooser': {
+      screenShareChooser: {
+        isOpenFor: anchor => chooser.openAnchor === anchor,
+        isOpenWithin: root => chooser.openAnchor !== null && root.contains(chooser.openAnchor),
+        choose: async (anchor, purpose) => { chooser.calls.push([anchor.id, purpose]); return chooser.result; },
+        close: () => { chooser.closed++; chooser.openAnchor = null; },
+      },
+    },
     'utils/scroll': {
       smoothScrollIntoView(target, options) {
         target.scrollIntoView({ ...options, behavior: 'smooth' });
@@ -482,7 +494,7 @@ function fixture(language = 'en') {
       t: i18n.t, showInfoToast: (message, durationMs) => traces.push(['info-toast', message, durationMs]),
       showAlert: stubs['views/Dialog'].showAlert,
     }),
-    settingsStore, serverStore, voiceStore, streams, captures, capabilities, createStream, traces, alerts, warnings, events, observers, mediaQuery,
+    settingsStore, serverStore, voiceStore, streams, captures, labels, chooser, capabilities, createStream, traces, alerts, warnings, events, observers, mediaQuery,
     get saves() { return saves; }, get enumerations() { return enumerations; }, get cancelled() { return cancelled; },
     get permissionChecks() { return permissionChecks; },
     close() { picker.close(); quality.cleanup(); document.body.replaceChildren(); },

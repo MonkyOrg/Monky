@@ -873,6 +873,14 @@ export const ptBR = {
   'screenShare.macSystemAudioWarnMessage': 'No macOS, o Monky não consegue isolar o áudio de uma única janela. Ao continuar com o áudio ligado, TODO o som do seu computador será transmitido — notificações, música, outras chamadas e qualquer outro app —, não apenas o do aplicativo escolhido. Deseja continuar?',
   'screenShare.macSystemAudioWarnConfirm': 'Compartilhar mesmo assim',
   'screenShare.audioAlreadySharing': 'Áudio já está sendo compartilhado em outra tela',
+  'screenShare.audioTakenToast': 'Só uma tela pode compartilhar som por vez, e outra já está com o som. Desligue o som desta tela para continuar.',
+  'screenShare.chooseStopTitle': 'Qual tela parar?',
+  'screenShare.chooseSwitchTitle': 'Qual tela trocar?',
+  'screenShare.chooseStopItem': 'Parar {name}',
+  'screenShare.chooseSwitchItem': 'Trocar a fonte de {name}',
+  'screenShare.stopAllScreens': 'Parar todas as telas',
+  'screenShare.withAudio': 'Com som',
+  'screenShare.withoutAudio': 'Sem som',
 
   // ── Identidade criptográfica ─────────────────────────────────────────────
   'identity.sectionTitle': 'Identidade',
