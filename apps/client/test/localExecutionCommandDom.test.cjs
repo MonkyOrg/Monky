@@ -284,6 +284,9 @@ async function runSelectionPreflight(language) {
     native.at(-1).resolve({ status: 'failed', reason: 'permission_denied' });
     await waitFor(() => store.getCommandDraft('text')?.error === t('localExecution.failure.permission_denied'),
       'Selection denial did not surface a localized error');
+    check(document.querySelector('.chat-copy-toast--danger[role="alert"]')?.textContent.includes(t('localExecution.failure.permission_denied'))
+      && !root.querySelector('[data-command-form] .bot-error'),
+    'A failed check is reported in the shared alert toast instead of loose text inside the composer');
     view.botChat.renderComposer();
     await flush();
     check(native.length === beforeDenial + 1 && !root.querySelector('[data-bot-input]').disabled,

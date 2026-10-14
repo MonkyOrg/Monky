@@ -48,7 +48,7 @@ import {
   renderParameterChoices, renderParameterChoiceItems,
   type ParameterChoice,
 } from './commandComposer';
-import { CommandAutocomplete, type AutocompleteState } from '../utils/commandAutocomplete';
+import { CommandAutocomplete, runInCommandLane, type AutocompleteState } from '../utils/commandAutocomplete';
 import { settingsStore } from '../stores/settingsStore';
 import { localSoundDownloads } from '../core/LocalSoundDownloadService';
 import { soundDownloadText } from '../utils/soundDownloadText';
@@ -60,6 +60,7 @@ import { botPreferenceScopeFor, botUserSettingsPayload } from '../utils/botSetti
 import { botLocaleFor } from '../utils/botLocale';
 import { botSettingsMenuItem } from './BotSettingsModal';
 import { contextMenu } from './ContextMenu';
+import { showErrorToast } from './CopyToast';
 import { currentEventOrigin } from '../core/sessionRouting';
 import { commandVoiceContextKey, commandVoiceError } from '../utils/botVoice';
 import { smoothScrollIntoView } from '../utils/scroll';
@@ -155,7 +156,35 @@ interface AutocompleteRequest {
   payload: CommandAutocompletePayload;
   resources: Set<string>;
   cancel: () => void;
+  submission?: CommandSubmission;
 }
+
+/** Who a search answers to: the open composer, or a command already submitted. */
+interface SearchContext {
+  draft: CommandDraft;
+  optionName: string;
+  current: () => boolean;
+  prepare: (signal: AbortSignal) => Promise<PreparedLocalCapability[]>;
+  submission?: CommandSubmission;
+}
+
+/**
+ * A command the person already confirmed. It leaves the composer at once and
+ * finishes in the background, so failures can only be reported by a toast.
+ */
+interface CommandSubmission {
+  draft: CommandDraft;
+  userGesture: boolean;
+  connectionId: string;
+  voiceContext: string;
+  metadata: string;
+  folder: string;
+  owner: AbortController;
+  grants: Promise<PreparedLocalCapability[]>;
+  stopReason?: string;
+}
+
+class SubmissionFailure extends Error {}
 
 /**
  * DOM listeners belong to this channel view; drafts and forms belong to its
@@ -188,6 +217,8 @@ export class BotChatView {
   } | null = null;
   private preparingCommand: CommandDraft | null = null;
   private commandPreparationId: string | null = null;
+  private submissions = new Set<CommandSubmission>();
+  private blockedNotice: { draft: CommandDraft; reason: string } | null = null;
 
   constructor(
     private store: ChatStore,
@@ -276,7 +307,8 @@ export class BotChatView {
         if (!this.isCurrent() || (origin !== null && origin !== this.client.sessionKey)) return;
         const parsed = commandAutocompleteCancelSchema.safeParse(payload);
         const request = parsed.success ? this.autocompleteRequests.get(parsed.data.requestId) : undefined;
-        if (request) {
+        if (request?.submission) this.stopSubmission(request.submission, t('botChat.searchFailed'));
+        else if (request) {
           if (this.autocompletePaged) this.expireAutocompleteRequest(request);
           else this.closeParameterMenu();
         }
@@ -401,6 +433,12 @@ export class BotChatView {
 
   private refreshVoiceEligibility(): void {
     if (!this.isCurrent()) return;
+    for (const submission of this.submissions) {
+      const { command } = submission.draft;
+      if (command.voiceRequirement && commandVoiceContextKey(command, this.client, this.server) !== submission.voiceContext) {
+        this.stopSubmission(submission, this.voiceError(command) ?? t('botChat.voiceContextChanged'));
+      }
+    }
     const draft = this.store.getCommandDraft(this.channelId);
     if (draft?.command.voiceRequirement &&
         this.store.setCommandVoiceContext(this.channelId, commandVoiceContextKey(draft.command, this.client, this.server))) {
@@ -458,6 +496,7 @@ export class BotChatView {
     this.closeParameterMenu();
     const draft = this.store.getCommandDraft(this.channelId);
     if (!draft) {
+      this.blockedNotice = null;
       setSurfaceVisible(this.composer, false, 'panel', undefined, () => this.composer.replaceChildren());
       this.onComposerChanged();
       return;
@@ -471,6 +510,7 @@ export class BotChatView {
     );
     setSurfaceVisible(this.composer, true);
     this.onComposerChanged();
+    this.announceCommandBlock(draft);
     if (menu?.kind === 'autocomplete') this.openAutocomplete(menu.fieldName);
     else if (menu) this.openParameterMenu(menu, activeChoice);
     if (focused) {
@@ -513,7 +553,7 @@ export class BotChatView {
       }
     } catch (error) {
       if ((this.commandPreparationId === preparationId || this.commandPreparationId === null) && current()) {
-        this.store.setCommandPending(this.channelId, draft, false, t(`localExecution.failure.${localFailure(error)}`));
+        this.rejectCommand(draft, t(`localExecution.failure.${localFailure(error)}`));
       }
       return;
     } finally {
@@ -664,8 +704,8 @@ export class BotChatView {
     ).success;
     const voiceError = this.voiceError(draft.command);
     button.disabled = draft.pending || this.preparingCommand === draft || !this.canSend() || !this.store.isCommandAvailable(draft.command) || !canExecute || !!voiceError;
-    const notice = this.composer.querySelector<HTMLElement>('.bot-command-voice-error');
-    if (notice) { notice.textContent = voiceError ?? ''; notice.hidden = !voiceError; }
+    button.title = this.commandBlockReason(draft) ?? button.getAttribute('aria-label') ?? '';
+    this.announceCommandBlock(draft);
   }
 
   private updateArgumentMeasure(input: HTMLInputElement | HTMLTextAreaElement): void {
@@ -897,16 +937,36 @@ export class BotChatView {
     return false;
   }
 
-  /** Enter while results load confirms the first one on arrival, as if pressed after it rendered. */
+  /**
+   * Enter while results load confirms the first one on arrival, as if pressed after it rendered.
+   * When that confirmation would run the command, the command is submitted at once and the
+   * search finishes in the background; otherwise the composer stays open to receive the choice.
+   */
   private queueAutocompleteEnter(fieldName: string, userGesture: boolean): boolean {
     const state = this.autocompleteState;
     const draft = this.store.getCommandDraft(this.channelId);
     // Saving a file requires a choice the person has actually seen.
-    if (!draft || draft.command.downloadsSound || this.autocompleteField !== fieldName ||
+    if (!draft || draft.command.downloadsSound || this.autocompleteField !== fieldName || !this.canSend() ||
         (state?.status !== 'loading' && state?.status !== 'preparing')) return false;
+    if (this.runsOnConfirmation(draft, fieldName)) {
+      const blocked = this.commandBlockReason(draft);
+      if (blocked) this.rejectCommand(draft, blocked);
+      else void this.submit(draft, userGesture, fieldName);
+      return true;
+    }
     this.queuedAutocompleteEnter = { fieldName, query: state.query, userGesture };
     this.autocomplete.flush();
     return true;
+  }
+
+  /** Mirrors selectParameterMenuOption: confirming a suggestion runs only commands without optional parameters. */
+  private runsOnConfirmation(draft: CommandDraft, fieldName: string): boolean {
+    const { command } = draft;
+    if ((command.options ?? []).some((option) => !option.required)) return false;
+    const values = visibleCommandValues(command, draft.values, draft.visibleOptionalNames);
+    delete values[fieldName];
+    return commandValuesFromInputs({ ...command, options: command.options?.filter((option) => option.name !== fieldName) },
+      values, this.server.getHumanMembersInDisplayOrder(), draft.autocomplete, draft.visibleOptionalNames).success;
   }
 
   private openAutocomplete(name: string): void {
@@ -926,7 +986,20 @@ export class BotChatView {
   ): Promise<() => Promise<CommandAutocompleteResultPayload>> {
     const draft = this.store.getCommandDraft(this.channelId);
     const optionName = this.autocompleteField;
-    if (signal.aborted || !draft || !optionName || draft.pending || !this.isCurrent() || !this.canSend() || this.voiceError(draft.command)) {
+    if (!draft || !optionName) throw new DOMException('Autocomplete closed', 'AbortError');
+    return this.prepareSearch({
+      draft, optionName,
+      current: () => this.isCurrent() && !draft.pending && this.store.getCommandDraft(this.channelId) === draft &&
+        this.autocompleteField === optionName,
+      prepare: (prepareSignal) => this.prepareLocalCommand(draft, prepareSignal),
+    }, query, signal, page, cursor);
+  }
+
+  private async prepareSearch(
+    context: SearchContext, query: string, signal: AbortSignal, page: number, cursor?: string,
+  ): Promise<() => Promise<CommandAutocompleteResultPayload>> {
+    const { draft, optionName } = context;
+    if (signal.aborted || !context.current() || !this.canSend() || this.voiceError(draft.command)) {
       throw new DOMException('Autocomplete closed', 'AbortError');
     }
     const connectionId = this.client.getConnectionId();
@@ -942,16 +1015,15 @@ export class BotChatView {
       ...botUserSettingsPayload(this.client, this.server, draft.command.botId),
     };
     if (commandLocalCapabilities(draft.command).length) {
-      [grant] = await this.prepareLocalCommand(draft, signal);
-      if (signal.aborted || draft.pending || this.autocompleteField !== optionName ||
+      [grant] = await context.prepare(signal);
+      if (signal.aborted || !context.current() ||
         this.client.getConnectionId() !== connectionId || draft.autocomplete[optionName]?.query !== query) {
         throw new DOMException('Autocomplete changed during preparation', 'AbortError');
       }
     }
     return async () => {
-      if (signal.aborted || !this.isCurrent() || !this.canSend() || this.voiceError(draft.command) ||
-        draft.pending || this.store.getCommandDraft(this.channelId) !== draft || !this.store.isCommandAvailable(draft.command) ||
-        this.autocompleteField !== optionName || this.client.getConnectionId() !== connectionId ||
+      if (signal.aborted || !context.current() || !this.canSend() || this.voiceError(draft.command) ||
+        !this.store.isCommandAvailable(draft.command) || this.client.getConnectionId() !== connectionId ||
         draft.autocomplete[optionName]?.query !== query) {
         throw new DOMException('Autocomplete changed before dispatch', 'AbortError');
       }
@@ -974,7 +1046,9 @@ export class BotChatView {
           this.client.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId });
         }
       };
-      const active: AutocompleteRequest = { requestId, connectionId, payload, resources: new Set(), cancel };
+      const active: AutocompleteRequest = {
+        requestId, connectionId, payload, resources: new Set(), cancel, submission: context.submission,
+      };
       this.autocompleteRequests.set(requestId, active);
       signal.addEventListener('abort', cancel, { once: true });
       if (signal.aborted) cancel();
@@ -1423,11 +1497,11 @@ export class BotChatView {
     const voiceError = this.voiceError(command);
     if (voiceError) {
       this.closeParameterMenu();
-      this.store.setCommandPending(this.channelId, draft, false, voiceError);
+      this.rejectCommand(draft, voiceError);
       return;
     }
     if (!this.store.isCommandAvailable(command)) {
-      this.store.setCommandPending(this.channelId, draft, false, t('botChat.commandUnavailable'));
+      this.rejectCommand(draft, t('botChat.commandUnavailable'));
       return;
     }
     const result = commandValuesFromInputs(
@@ -1436,72 +1510,107 @@ export class BotChatView {
     );
     if (!result.success) {
       this.store.touchCommandField(this.channelId, result.field);
-      this.store.setCommandPending(this.channelId, draft, false,
-        botInputError(commandInputFields(this.localizedCommand(command)), result.field, result.reason));
+      this.rejectCommand(draft, botInputError(commandInputFields(this.localizedCommand(command)), result.field, result.reason));
       this.focusInvalidField(`command-${this.channelId}`, result.field);
       return;
     }
-    const payload: CommandInvokePayload = {
-      commandName: command.name,
-      botId: command.botId,
-      channelId: this.channelId,
-      options: result.values,
-      locale: botLocaleFor(this.client, this.server, command.botId),
+    if (command.downloadsSound && (!userGesture || !draft.downloadConsent)) {
+      this.rejectCommand(draft, t('botChat.downloadNeedsGesture'));
+      return;
+    }
+    await this.submit(draft, userGesture);
+  }
+
+  /** The command stays open for correction, and the reason goes to the shared feedback surface. */
+  private rejectCommand(draft: CommandDraft, error: string): void {
+    if (this.store.setCommandPending(this.channelId, draft, false, error) && this.isCurrent()) showErrorToast(error);
+  }
+
+  private commandBlockReason(draft: CommandDraft): string | undefined {
+    return this.voiceError(draft.command) ?? (this.store.isCommandAvailable(draft.command) ? undefined : t('botChat.commandUnavailable'));
+  }
+
+  /** A disabled run button alone does not say why, so each new reason is announced once. */
+  private announceCommandBlock(draft: CommandDraft): void {
+    const reason = this.canSend() ? this.commandBlockReason(draft) : undefined;
+    if (!reason) {
+      this.blockedNotice = null;
+      return;
+    }
+    if (this.blockedNotice?.draft === draft && this.blockedNotice.reason === reason) return;
+    this.blockedNotice = { draft, reason };
+    if (this.isCurrent()) showErrorToast(reason);
+  }
+
+  /**
+   * Confirming a command frees the composer at once. The rest finishes in the background,
+   * one command at a time per connection, so a later search or command cannot cancel it.
+   */
+  private submit(draft: CommandDraft, userGesture: boolean, searchField?: string): Promise<void> {
+    const submission: CommandSubmission = {
+      draft, userGesture,
+      connectionId: this.client.getConnectionId(),
+      voiceContext: commandVoiceContextKey(draft.command, this.client, this.server),
+      metadata: this.localMetadataKey(draft.command),
+      folder: settingsStore.soundboardFolderPath,
+      owner: new AbortController(),
+      grants: Promise.resolve([]),
     };
-    const connectionId = this.client.getConnectionId();
+    // Claim the local tools before the composer releases its own hold on them.
+    submission.grants = this.prepareSubmission(submission);
+    submission.grants.catch(() => undefined);
+    this.submissions.add(submission);
+    this.store.clearCommand(this.channelId, draft);
+    return runInCommandLane(this.client, (release) => this.runSubmission(submission, release, searchField));
+  }
+
+  private async prepareSubmission(submission: CommandSubmission): Promise<PreparedLocalCapability[]> {
+    const { command } = submission.draft;
+    const capabilities = commandLocalCapabilities(command);
+    if (!capabilities.length) return [];
+    const controller = localExecutionFor(this.client);
+    const bot = commandLocalIdentity(command);
+    return Promise.all(capabilities.map((capability) => controller.prepare(bot, capability, submission.owner.signal)));
+  }
+
+  private async runSubmission(submission: CommandSubmission, release: () => void, searchField?: string): Promise<void> {
+    const { draft } = submission;
+    const { command } = draft;
     const requestId = uuidv4();
     let local: LocalExecutionController | undefined;
-    let grant: PreparedLocalCapability | undefined;
-    const voiceEpoch = this.voiceEpoch;
-    const folder = settingsStore.soundboardFolderPath;
-    if (command.downloadsSound && (!userGesture || !draft.downloadConsent)) {
-      this.store.setCommandPending(this.channelId, draft, false, t('botChat.downloadNeedsGesture'));
-      return;
-    }
     try {
-      if (commandLocalCapabilities(command).length) {
-        this.preparingCommand = draft;
-        this.commandPreparationId = requestId;
-        this.renderComposer();
-        [grant] = await this.prepareLocalCommand(draft);
-        if (this.preparingCommand !== draft || this.commandPreparationId !== requestId || this.store.getCommandDraft(this.channelId) !== draft ||
-          !this.isCurrent() || this.client.getConnectionId() !== connectionId || voiceEpoch !== this.voiceEpoch) return;
-        this.preparingCommand = null;
-        this.commandPreparationId = null;
+      this.checkSubmission(submission);
+      if (searchField) await this.confirmFirstChoice(submission, searchField);
+      const result = commandValuesFromInputs(
+        command, visibleCommandValues(command, draft.values, draft.visibleOptionalNames), this.server.getHumanMembersInDisplayOrder(),
+        draft.autocomplete, draft.visibleOptionalNames
+      );
+      if (!result.success) {
+        throw new SubmissionFailure(botInputError(commandInputFields(this.localizedCommand(command)), result.field, result.reason));
       }
-    } catch (error) {
-      if (this.commandPreparationId === requestId) {
-        this.preparingCommand = null;
-        this.commandPreparationId = null;
+      let grant: PreparedLocalCapability | undefined;
+      try {
+        [grant] = await submission.grants;
+      } catch (error) {
+        if (submission.owner.signal.aborted) throw error;
+        throw new SubmissionFailure(t(`localExecution.failure.${localFailure(error)}`));
       }
-      if (this.commandPreparationId === null && this.isCurrent() && this.store.getCommandDraft(this.channelId) === draft &&
-        this.client.getConnectionId() === connectionId && voiceEpoch === this.voiceEpoch &&
-        this.localMetadataKey(command) === this.localMetadataKey(draft.command)) {
-        this.store.setCommandPending(this.channelId, draft, false, t(`localExecution.failure.${localFailure(error)}`));
-      }
-      return;
-    }
-    this.store.setCommandPending(this.channelId, draft, true);
-    try {
+      this.checkSubmission(submission);
+      const payload: CommandInvokePayload = {
+        commandName: command.name,
+        botId: command.botId,
+        channelId: this.channelId,
+        options: result.values,
+        locale: botLocaleFor(this.client, this.server, command.botId),
+      };
       if (command.downloadsSound) {
-        const availability = await window.api?.soundDownloadAvailability?.(folder);
+        const availability = await window.api?.soundDownloadAvailability?.(submission.folder);
         if (availability !== 'ready') {
-          this.store.setCommandPending(this.channelId, draft, false,
-            t(availability === 'unavailable' ? 'botChat.downloadWriteFailed'
-              : availability === 'confirmation_required' ? 'botChat.downloadFolderNeedsConfirmation' : 'botChat.downloadFolderRequired'));
-          return;
+          throw new SubmissionFailure(t(availability === 'unavailable' ? 'botChat.downloadWriteFailed'
+            : availability === 'confirmation_required' ? 'botChat.downloadFolderNeedsConfirmation' : 'botChat.downloadFolderRequired'));
         }
         payload.allowSoundDownload = true;
-      }
-      if (this.store.getCommandDraft(this.channelId) !== draft || !draft.pending ||
-          this.client.getConnectionId() !== connectionId || !this.canSend()) return;
-      if (voiceEpoch !== this.voiceEpoch || this.voiceError(command)) {
-        this.store.setCommandPending(this.channelId, draft, false, this.voiceError(command) ?? t('botChat.voiceContextChanged'));
-        return;
-      }
-      if (!this.store.isCommandAvailable(command) || this.localMetadataKey(command) !== this.localMetadataKey(draft.command)) {
-        this.store.setCommandPending(this.channelId, draft, false, t('botChat.commandUnavailable'));
-        return;
+        this.checkSubmission(submission);
       }
       if (grant) {
         local = localExecutionFor(this.client);
@@ -1509,30 +1618,93 @@ export class BotChatView {
           channelId: this.channelId, commandName: command.name,
         });
       }
-      const ack = await this.client.sendRequest<CommandInvokedPayload>(MessageType.COMMAND_INVOKE,
+      const response = this.client.sendRequest<CommandInvokedPayload>(MessageType.COMMAND_INVOKE,
         { ...payload, ...botUserSettingsPayload(this.client, this.server, command.botId) }, requestId);
+      // Sent: the server handles this connection's messages in order, so the next command may start.
+      release();
+      const ack = await response;
       local?.acknowledgeRequest(requestId, ack);
-      if (this.store.getCommandDraft(this.channelId) !== draft || !draft.pending || voiceEpoch !== this.voiceEpoch) return;
-      if (this.voiceError(command)) {
-        this.store.setCommandPending(this.channelId, draft, false, this.voiceError(command));
-        return;
-      }
       if (!ack || typeof ack.invocationId !== 'string' || !ack.invocationId || ack.invocationId.length > 128 ||
           ack.botId !== command.botId || ack.commandName !== command.name || ack.channelId !== this.channelId ||
-          this.client.getConnectionId() !== connectionId || this.client.getStatus() !== 'CONNECTED') {
-        local?.releaseRequest(requestId);
-        this.store.setCommandPending(this.channelId, draft, false, t('botChat.requestFailed'));
-        return;
+          this.client.getConnectionId() !== submission.connectionId || this.client.getStatus() !== 'CONNECTED') {
+        throw new SubmissionFailure(t('botChat.requestFailed'));
       }
+      // From here the accepted invocation owns its local request.
+      local = undefined;
+      const voiceProblem = this.submissionVoiceProblem(submission);
+      if (voiceProblem) throw new SubmissionFailure(voiceProblem);
       this.store.acknowledgeCommand(ack, command);
-      if (command.downloadsSound) localSoundDownloads.authorize(this.client, this.store, this.server, command, ack, connectionId, folder, userGesture);
-      this.store.clearCommand(this.channelId, draft);
+      if (command.downloadsSound) {
+        localSoundDownloads.authorize(this.client, this.store, this.server, command, ack, submission.connectionId,
+          submission.folder, submission.userGesture);
+      }
     } catch (error) {
       local?.releaseRequest(requestId);
-      if (this.store.getCommandDraft(this.channelId) === draft && draft.pending && voiceEpoch === this.voiceEpoch) {
-        this.store.setCommandPending(this.channelId, draft, false, botRequestError(error));
-      }
+      const reason = error instanceof SubmissionFailure ? error.message
+        : submission.owner.signal.aborted ? submission.stopReason ?? t('botChat.requestFailed') : botRequestError(error);
+      const { displayName } = getCommandPresentation(command, botLocaleFor(this.client, this.server, command.botId));
+      // The composer is gone, so name the command and leave a little longer to read.
+      showErrorToast(t('botChat.backgroundFailure', { command: displayName, reason }), 7000);
+    } finally {
+      submission.owner.abort();
+      this.submissions.delete(submission);
     }
+  }
+
+  /** Enter arrived before the suggestions: confirm the first one, as the open list would have. */
+  private async confirmFirstChoice(submission: CommandSubmission, fieldName: string): Promise<void> {
+    const { draft } = submission;
+    const context: SearchContext = {
+      draft, optionName: fieldName, submission,
+      current: () => !this.submissionProblem(submission),
+      prepare: (signal) => observeWithSignal(submission.grants, signal),
+    };
+    let search: CommandAutocomplete | undefined;
+    const state = await observeWithSignal(new Promise<AutocompleteState>((resolve) => {
+      search = new CommandAutocomplete(this.client,
+        (query, signal, page, cursor) => this.prepareSearch(context, query, signal, page, cursor),
+        (next) => { if (next.status !== 'loading' && next.status !== 'preparing') resolve(next); },
+        true);
+      search.setQuery(draft.autocomplete[fieldName]?.query ?? '');
+      search.flush();
+    }), submission.owner.signal).finally(() => search?.close());
+    const choice = state.status === 'ready' ? state.choices[0] : undefined;
+    // A changed context (voice, connection, catalog) explains a stopped search better than its own error.
+    this.checkSubmission(submission);
+    if (!choice) {
+      throw new SubmissionFailure(state.status === 'empty' ? t('botChat.searchEmpty')
+        : state.error && !state.error.includes('Timeout') ? state.error : t('botChat.searchFailed'));
+    }
+    draft.autocomplete[fieldName] = { query: choice.label, selected: { ...choice } };
+    draft.values[fieldName] = choice.value;
+  }
+
+  /** Why a submitted command can no longer run as the person confirmed it, if it cannot. */
+  private submissionProblem(submission: CommandSubmission): string | undefined {
+    if (submission.owner.signal.aborted) return submission.stopReason ?? t('botChat.requestFailed');
+    if (this.client.getStatus() !== 'CONNECTED' || this.client.getConnectionId() !== submission.connectionId) {
+      return t('botChat.requestFailed');
+    }
+    const { command } = submission.draft;
+    const current = this.store.getCommands().find((entry) => entry.botId === command.botId && entry.name === command.name);
+    if (!this.canSend() || !current || this.localMetadataKey(current) !== submission.metadata) return t('botChat.commandUnavailable');
+    return this.submissionVoiceProblem(submission);
+  }
+
+  private submissionVoiceProblem(submission: CommandSubmission): string | undefined {
+    const { command } = submission.draft;
+    return this.voiceError(command) ?? (commandVoiceContextKey(command, this.client, this.server) !== submission.voiceContext
+      ? t('botChat.voiceContextChanged') : undefined);
+  }
+
+  private checkSubmission(submission: CommandSubmission): void {
+    const problem = this.submissionProblem(submission);
+    if (problem) throw new SubmissionFailure(problem);
+  }
+
+  private stopSubmission(submission: CommandSubmission, reason: string): void {
+    submission.stopReason ??= reason;
+    submission.owner.abort();
   }
 
   private async submitForm(invocationId: string, interactionId: string): Promise<void> {

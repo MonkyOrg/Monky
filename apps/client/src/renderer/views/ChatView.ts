@@ -3157,6 +3157,7 @@ export class ChatView {
     const draft = chatStore.getCommandDraft(this.currentChannelId);
     if (draft && !command.options?.length && text.trim()) {
       chatStore.setCommandPending(this.currentChannelId, draft, false, t('botChat.unexpectedText'));
+      showErrorToast(t('botChat.unexpectedText'));
     }
     void this.botChat?.activateCommand(userGesture, autoInvoke);
   }

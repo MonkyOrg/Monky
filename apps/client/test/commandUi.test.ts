@@ -203,6 +203,28 @@ test('legacy command options keep compact identifier labels when no display labe
   assert.ok(!markup.includes('>Pesquise uma música pelo título ou URL.</label>'));
 });
 
+test('compact composer keeps errors out of its layout and leaves the reason on the run button', () => {
+  const store = createChatStore();
+  store.setCommands([command]);
+  store.selectCommand('channel', command, 'Song');
+  const draft = store.getCommandDraft('channel')!;
+  store.setCommandPending('channel', draft, false, 'Fixture failure');
+  for (const locale of ['pt-BR', 'en'] as const) {
+    setLanguage(locale);
+    const unavailable = renderCompactCommand(draft, 'channel', [member], true, false);
+    const run = unavailable.match(/<button type="submit"[^>]*>/)?.[0] ?? '';
+    assert.match(run, / disabled/);
+    assert.ok(run.includes(`title="${t('botChat.commandUnavailable')}"`), 'An unavailable command explains itself on the run button');
+    assert.ok(run.includes(`aria-label="${t('botChat.execute')}"`), 'The run button keeps its action name');
+    assert.doesNotMatch(unavailable, /class="bot-error"|bot-command-voice-error|Fixture failure/,
+      'Operation errors go to the shared toast instead of loose text inside the composer');
+    const ready = renderCompactCommand(draft, 'channel', [member], true, true);
+    assert.ok((ready.match(/<button type="submit"[^>]*>/)?.[0] ?? '').includes(`title="${t('botChat.execute')}"`),
+      'Without a blocking reason the run button only names its action');
+  }
+  setLanguage('pt-BR');
+});
+
 test('voice denial explains catalog and composer gating without disabling editing or unrelated commands', () => {
   const store = createChatStore();
   const music = { ...command, voiceRequirement: 'same-bot-channel' as const };
@@ -216,8 +238,10 @@ test('voice denial explains catalog and composer gating without disabling editin
     assert.match(required, locale === 'en' ? /voice channel.*device/i : /canal de voz.*dispositivo/i);
     assert.match(mismatch, locale === 'en' ? /already in another voice channel/i : /já está em outro canal de voz/i);
     const markup = renderCompactCommand(draft, 'channel', [member], true, true, mismatch);
-    assert.ok(markup.includes(mismatch));
-    assert.match(markup, /class="btn btn-primary bot-command-run" disabled/);
+    const run = markup.match(/<button type="submit"[^>]*>/)?.[0] ?? '';
+    assert.match(run, /class="btn btn-primary bot-command-run" disabled/);
+    assert.ok(run.includes(`title="${mismatch}"`), 'The disabled run button keeps the voice reason');
+    assert.doesNotMatch(markup, /bot-command-voice-error|class="bot-error"/, 'The reason is never loose text in the composer');
     assert.doesNotMatch(markup, /data-bot-input[^>]*disabled/);
     assert.doesNotMatch(markup, /data-bot-action="cancel-command"[^>]*disabled/);
     const catalog = renderCommandCatalog(groupCommands([music, { ...command, name: 'utility' }], [], locale), 0,

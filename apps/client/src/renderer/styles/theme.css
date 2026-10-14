@@ -5292,7 +5292,6 @@ input:focus, textarea:focus, select:focus {
   padding: 0;
   justify-content: center;
 }
-.bot-compact-command-form > .bot-error,
 .bot-compact-command-form > .bot-command-preparation {
   margin: 4px 10px 8px;
 }

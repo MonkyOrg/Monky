@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Avisos dos comandos de bots, como falta de canal de voz ou bot offline, agora aparecem em um aviso flutuante, no lugar de texto solto e desalinhado no compositor.",
+  "en": "Bot command warnings, like a missing voice channel or an offline bot, now show up in a floating alert instead of loose, misaligned text in the composer."
+}

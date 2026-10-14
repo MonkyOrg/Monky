@@ -2569,6 +2569,9 @@ export const en: TranslationMap = {
   'botChat.commandUnavailable': 'Command unavailable or bot offline. Choose a command in the list; nothing was posted to chat.',
   'botChat.unexpectedText': 'This command does not take text. Check the selected command before running it.',
   'botChat.requestFailed': 'Could not confirm the response. Check your connection before trying again.',
+  'botChat.backgroundFailure': '/{command}: {reason}',
+  'botChat.searchEmpty': 'No results found. Nothing was sent.',
+  'botChat.searchFailed': 'Search failed. Nothing was sent.',
   'botChat.attachmentsKept': 'Attachments are kept for your next chat message, not for the command.',
 
   'protocolError.botOffline': 'The bot is offline. Wait for it to reconnect, then try again.',

@@ -2531,6 +2531,9 @@ export const ptBR = {
   'botChat.commandUnavailable': 'Comando indisponível ou bot offline. Escolha um comando da lista; nada foi enviado ao chat.',
   'botChat.unexpectedText': 'Este comando não recebe texto. Confira o comando selecionado antes de executar.',
   'botChat.requestFailed': 'Não foi possível confirmar a resposta. Confira sua conexão antes de tentar novamente.',
+  'botChat.backgroundFailure': '/{command}: {reason}',
+  'botChat.searchEmpty': 'Nenhum resultado encontrado. Nada foi enviado.',
+  'botChat.searchFailed': 'Não foi possível pesquisar. Nada foi enviado.',
   'botChat.attachmentsKept': 'Os anexos ficam reservados para sua próxima mensagem, não para o comando.',
 
   'protocolError.botOffline': 'O bot está offline. Aguarde ele se reconectar e tente novamente.',
