@@ -63,7 +63,7 @@ export async function stopLocalScreenShares(
   const removedIds = new Set(shareIds);
   // removeScreenShare clears this association, so decide before mutating it.
   const stopAudio = allShares
-    || (voiceStore.screenAudioShareId !== null && removedIds.has(voiceStore.screenAudioShareId))
+    || voiceStore.screenAudioShareIds.some(id => removedIds.has(id))
     || (shareIds.some(id => activeIds.has(id)) && [...activeIds].every(id => removedIds.has(id)));
   const audioStopped = stopAudio ? audio.stop() : Promise.resolve();
 
@@ -75,7 +75,10 @@ export async function stopLocalScreenShares(
       videoService.stopScreenShare(shareId);
       voiceStore.removeScreenShare(shareId);
     }
-    if (stopAudio && voiceStore.screenAudioShareId !== null) voiceStore.setScreenAudioShare(null);
+    // With nothing left on air, no audio association may outlive its share.
+    if (stopAudio && !voiceStore.isScreenSharing) {
+      for (const id of [...voiceStore.screenAudioShareIds]) voiceStore.removeScreenAudioShare(id);
+    }
   }
 
   // Closing calls already retire their transports. Do not negotiate or announce

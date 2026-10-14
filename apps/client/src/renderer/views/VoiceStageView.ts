@@ -527,7 +527,7 @@ export class VoiceStageView {
 
     const btnScreen = document.getElementById('stage-btn-screen');
     if (btnScreen) {
-      const hasScreenAudio = voiceStore.screenAudioShareId !== null || screenAudioService.getIsCapturing();
+      const hasScreenAudio = voiceStore.hasScreenAudio || screenAudioService.getIsCapturing();
       btnScreen.className = `btn btn-icon ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}`;
       btnScreen.title = voiceStore.isScreenSharing
         ? (hasScreenAudio ? t('stage.stopScreenShareWithAudio') : t('stage.stopScreenShare'))
@@ -550,7 +550,7 @@ export class VoiceStageView {
     const btnLeave = document.getElementById('stage-btn-leave') as HTMLButtonElement | null;
 
     if (btnStopShare) {
-      const hasScreenAudio = voiceStore.screenAudioShareId !== null || screenAudioService.getIsCapturing();
+      const hasScreenAudio = voiceStore.hasScreenAudio || screenAudioService.getIsCapturing();
       btnStopShare.style.display = voiceStore.isScreenSharing ? 'inline-flex' : 'none';
       btnStopShare.title = hasScreenAudio ? t('stage.stopScreenShareWithAudio') : t('stage.stopScreenShare');
       btnStopShare.setAttribute('aria-haspopup', voiceStore.screenShareIds.length > 1 ? 'menu' : 'false');
@@ -563,7 +563,7 @@ export class VoiceStageView {
     const bannerWrapper = document.getElementById('stage-broadcast-banner-wrapper');
     if (bannerWrapper) {
       const isBroadcasting = voiceStore.isCameraOn || voiceStore.isScreenSharing;
-      const hasScreenAudio = voiceStore.screenAudioShareId !== null || screenAudioService.getIsCapturing();
+      const hasScreenAudio = voiceStore.hasScreenAudio || screenAudioService.getIsCapturing();
       // Only touch the DOM when the banner's content would actually change, so
       // the live-pulse animation isn't restarted on every state update (#70).
       const signature = isBroadcasting

@@ -5,7 +5,9 @@
 #include <iostream>
 #include <limits>
 #include <future>
+#include <memory>
 #include <thread>
+#include <vector>
 
 using namespace screen_audio;
 
@@ -179,13 +181,23 @@ int main() {
       Require(!conflict.held(), "Packet interrupted legacy ownership");
     }
     {
-      CaptureLease packet(CaptureOwner::packet);
-      Require(packet.held(), "Legacy cleanup retained the lease");
+      // Each shared application owns an independent packet session (#253).
+      std::vector<std::unique_ptr<CaptureLease>> packets;
+      for (int i = 0; i < kMaxPacketCaptures; ++i) {
+        packets.push_back(std::make_unique<CaptureLease>(CaptureOwner::packet));
+        Require(packets.back()->held(), "Independent packet sessions must coexist");
+      }
+      CaptureLease overflow(CaptureOwner::packet);
+      Require(!overflow.held(), "Packet sessions are unbounded");
       CaptureLease conflict(CaptureOwner::legacy);
       Require(!conflict.held(), "Legacy interrupted packet ownership");
-      packet.Release(); packet.Release();
+      packets.front()->Release(); packets.front()->Release();
+      CaptureLease reused(CaptureOwner::packet);
+      Require(reused.held(), "A released packet slot was leaked");
+      CaptureLease stillBusy(CaptureOwner::legacy);
+      Require(!stillBusy.held(), "Legacy started beside packet sessions");
     }
-    Require(captureOwner.load() == CaptureOwner::none, "Idempotent lease cleanup failed");
+    Require(captureOwners.load() == 0, "Idempotent lease cleanup failed");
     const std::vector<std::pair<uint32_t, uint32_t>> parents{{10, 1}, {11, 10}, {12, 11}, {20, 1}, {1, 0}};
     ValidateIncludedProcess(20, 10, parents);
     Reject([&] { ValidateIncludedProcess(10, 10, parents); }, "ERR_AUDIO_TARGET");
@@ -193,6 +205,12 @@ int main() {
     Reject([&] { ValidateIncludedProcess(1, 10, parents); }, "ERR_AUDIO_TARGET");
     Reject([&] { ValidateIncludedProcess(999, 10, parents); }, "ERR_AUDIO_TARGET");
     Reject([&] { IsInProcessTree(1, 10, {{1, 2}, {2, 1}}); }, "ERR_AUDIO_TARGET");
+    Require(ProcessAncestry(12, parents) == std::vector<uint32_t>{11, 10, 1}, "A game lost the launcher that opened it");
+    Require(ProcessAncestry(20, parents) == std::vector<uint32_t>{1}, "A sibling became a parent");
+    Require(!ProcessAncestry(999, parents) && !ProcessAncestry(0, parents), "An absent process has no ancestry");
+    Require(ProcessAncestry(5, {{5, 1}, {1, 2}, {2, 1}}) == std::vector<uint32_t>{1, 2}, "A recycled-ID loop never ended");
+    Require(ProcessAncestry(3, {{3, 9}}) == std::vector<uint32_t>{} && ProcessAncestry(7, {{7, 7}}) == std::vector<uint32_t>{},
+        "An exited or self-referencing parent joined the chain");
     PacketBudget budget;
     for (size_t i = 0; i < kMaxQueuedPackets; ++i) Require(budget.Acquire(), "Queue capacity too small");
     Require(!budget.Acquire(), "Unbounded packet queue");

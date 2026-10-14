@@ -89,6 +89,13 @@ da imagem e do som. **Parar de assistir** interrompe a entrega daquela tela
 somente para você, sem desligar seu microfone, sua câmera ou a transmissão
 dos outros espectadores. Isso vale tanto em P2P quanto em SFU.
 
+Também dá para começar pela lista do canal de voz ou pela lista de membros:
+clique no ícone de compartilhamento ao lado do nome de quem transmite ou no selo
+**LIVE**. O Monky pergunta se você quer assistir e, ao confirmar, abre o palco
+com o foco nessa transmissão, já assistindo. Se você não estiver no mesmo canal
+de voz, a pergunta avisa que você vai entrar nele. O seu próprio ícone e o seu
+selo apenas indicam que você está transmitindo.
+
 O som compartilhado pertence à pessoa que transmite: se você estiver assistindo
 a duas telas dela, parar uma mantém o som necessário para a outra. Parar a última
 encerra também esse recebimento de áudio. Mutar o som é uma preferência de
@@ -666,6 +673,24 @@ Cada pessoa pode compartilhar até 8 telas. A partir da terceira, o Monky avisa,
 uma vez por chamada, que cada tela a mais usa mais processador, placa de vídeo
 e internet de quem transmite. Em servidores ainda não atualizados, o limite
 continua sendo de 2 telas por pessoa.
+
+Cada janela de aplicativo leva o som do próprio aplicativo, então vários
+aplicativos podem ser compartilhados com som ao mesmo tempo. Duas janelas do
+mesmo aplicativo, porém, não levam som juntas, porque capturariam o mesmo som
+duas vezes. No Windows, o som de um aplicativo inclui o dos programas que ele
+abriu, então o mesmo vale para aplicativos ligados entre si, como um launcher e
+o jogo que ele abriu. Já o som de uma tela inteira é o de todo o computador e inclui o
+dos aplicativos: enquanto uma tela compartilha som, nenhum outro
+compartilhamento pode levar som. Nesses casos, o compartilhamento não começa;
+um aviso explica o motivo e destaca o switch de áudio, que precisa ser
+desligado para continuar. No macOS, o som de qualquer compartilhamento é o do
+computador inteiro, então só um compartilhamento por vez leva som.
+
+No Windows, se aplicativos já estão com som e você compartilha uma tela com
+som, por **Adicionar tela** ou **Trocar Fonte**, o Monky pergunta qual som usar.
+**Usar o som da tela** passa o som para a tela, e as janelas continuam
+transmitindo sem som. **Manter o som dos aplicativos**, ou fechar a pergunta,
+compartilha a tela sem som.
 
 Escolher o card de Captura de jogo não inicia a captura nem testa o aplicativo:
 é preciso confirmar em **Compartilhar**, **Trocar Fonte** ou **Adicionar tela**.

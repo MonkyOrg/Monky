@@ -629,6 +629,21 @@ Monky tem um módulo nativo em C++:
 Se o módulo não carregar, nada quebra: o compartilhamento continua funcionando
 sem som e o app avisa.
 
+Cada compartilhamento com som abre a própria sessão de captura. O módulo aceita
+até 8 sessões ao mesmo tempo, uma para cada tela permitida por pessoa, e mantém
+a captura legada exclusiva. Quais sons podem coexistir é decidido no processo
+principal, que repete as checagens do seletor: o som de um monitor (e, no macOS,
+o de qualquer fonte, porque o ScreenCaptureKit entrega a mistura do sistema) não
+convive com outro, e duas janelas do mesmo processo não capturam o mesmo som.
+Como o *process loopback* inclui os processos que o aplicativo abriu, o mesmo
+vale para processos em que um descende do outro, como um launcher e o jogo
+que ele abriu; o seletor recebe a cadeia de processos pais de cada janela e o
+processo principal confere de novo, num instantâneo atual, antes de capturar.
+Quando uma tela assume o som de aplicativos, cada um deles troca para uma nova
+instância da mesma transmissão, sem áudio — quem assiste acompanha a troca como
+numa mudança de qualidade —, e a captura da tela só começa depois que eles
+liberam o som.
+
 ### Qualidade e banda
 
 Os perfis controlam resolução, FPS e teto de bitrate. No caminho Chromium,

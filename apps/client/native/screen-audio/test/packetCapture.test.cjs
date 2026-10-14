@@ -201,7 +201,7 @@ test('QPC-only 7.1 capture keeps one epoch and null counter through the actual N
   assertOwnedCleanup(binding.trace(), 12);
 });
 
-test('startup error rejects ready, closes, and releases exclusive ownership', async () => {
+test('startup error rejects ready, closes, and releases its packet session', async () => {
   binding.configure(1);
   const events = [];
   const session = binding.createPacketCapture({}, (event) => events.push(event.type));
@@ -550,7 +550,7 @@ test('a refilled real TSFN is not a bounded callback burst: PCM waits for downst
   assertOwnedCleanup(binding.trace(), 96);
 });
 
-test('packet and legacy double share the real production lease without stopping each other', async () => {
+test('packet sessions coexist while legacy capture stays exclusive on the real production lease', async () => {
   binding.configure(4);
   assert.equal(binding.legacyStart(), true);
   const busy = binding.createPacketCapture({}, () => {});
@@ -563,11 +563,33 @@ test('packet and legacy double share the real production lease without stopping 
   assert.equal(binding.legacyStart(), false);
   binding.legacyStop(); // An unowned legacy stop must not stop packet acquisition.
   assert.equal(binding.activeWorkers(), 1);
+  // Each shared application owns its own packet session (#253).
   const second = binding.createPacketCapture({}, () => {});
-  await assert.rejects(second.ready, { code: 'ERR_AUDIO_BUSY' });
-  await second.closed;
-  assert.equal(binding.activeWorkers(), 1);
+  await second.ready;
+  assert.equal(binding.activeWorkers(), 2);
+  assert.equal(binding.legacyStart(), false);
+  await second.stop();
+  assert.equal(binding.activeWorkers(), 1, 'Stopping one session leaves the other capturing');
   await session.stop();
+  assert.equal(binding.legacyStart(), true);
+  binding.legacyStop();
+});
+
+test('packet sessions are bounded and a released slot is reusable', async () => {
+  binding.configure(4);
+  const sessions = [];
+  for (let index = 0; index < 8; index++) {
+    sessions.push(binding.createPacketCapture({}, () => {}));
+    await sessions.at(-1).ready;
+  }
+  const overflow = binding.createPacketCapture({}, () => {});
+  await assert.rejects(overflow.ready, { code: 'ERR_AUDIO_BUSY' });
+  assert.equal((await overflow.closed).state, 'failed');
+  await sessions.shift().stop();
+  const reused = binding.createPacketCapture({}, () => {});
+  await reused.ready;
+  for (const session of [...sessions, reused]) await session.stop();
+  assert.equal(binding.activeWorkers(), 0);
   assert.equal(binding.legacyStart(), true);
   binding.legacyStop();
 });

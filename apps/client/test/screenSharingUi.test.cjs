@@ -618,6 +618,41 @@ test('fallback toast lasts eight seconds without extending the default informati
   }
 });
 
+for (const [language, label] of [['pt-BR', 'Fechar aviso'], ['en', 'Dismiss notice']]) {
+  test(`every toast can be closed before it expires, and keyboard focus goes back (${language})`, t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const f = fixture(language);
+    t.after(() => f.close());
+    const { showErrorToast, showInfoToast, showCopyToast, showSuccessToast } = f.load('views/CopyToast');
+    const field = f.document.createElement('button');
+    f.document.body.appendChild(field);
+    for (const show of [showErrorToast, showInfoToast, showCopyToast, showSuccessToast]) {
+      field.focus();
+      show('Covers the button I want');
+      const toast = f.document.querySelector('.chat-copy-toast');
+      const close = toast.querySelector('.chat-copy-toast-close');
+      assert.equal(close.tagName, 'BUTTON');
+      assert.equal(close.getAttribute('type'), 'button');
+      assert.equal(close.getAttribute('aria-label'), label);
+      assert.equal(close.getAttribute('title'), label);
+      assert.equal(toast.querySelector('.material-symbols-outlined').textContent, show === showErrorToast ? 'error'
+        : show === showInfoToast ? 'info' : 'check_circle', 'The status icon still comes first');
+      close.focus();
+      close.click();
+      assert.equal(toast.isConnected, false, 'Closing does not wait for the timer');
+      assert.equal(f.document.activeElement, field, 'Keyboard focus returns where it was');
+    }
+    const closeFirst = showErrorToast('First', 5000);
+    f.document.querySelector('.chat-copy-toast-close').click();
+    const clearSecond = showErrorToast('Second', 60000);
+    const second = f.document.querySelector('.chat-copy-toast');
+    t.mock.timers.tick(5000);
+    closeFirst();
+    assert.equal(second.isConnected, true, 'A closed toast cannot close the newer one, by timer or by its handle');
+    clearSecond();
+  });
+}
+
 test('legacy capability fixtures enable only windows; explicit empty/unsupported kinds never enable capture', async t => {
   const f = fixture();
   t.after(() => f.close());
@@ -794,7 +829,7 @@ for (const [tab, kind, sourceId] of [
     assert.equal(f.voiceStore.screenShareIds.length, 2);
     assert.ok(f.voiceStore.screenShareIds.includes(previous.id));
     assert.equal(f.streams.get(previous.id), previous);
-    assert.equal(f.voiceStore.screenAudioShareId, f.voiceStore.screenShareIds[1]);
+    assert.deepEqual(f.voiceStore.screenAudioShareIds, [f.voiceStore.screenShareIds[1]]);
     assert.equal(f.voiceStore.camera, 'preserved-camera');
     assert.equal(f.voiceStore.voice, 'preserved-call');
     assert.equal(f.traces.filter(value => value[0] === 'notify').length, 1);
@@ -849,7 +884,7 @@ test('replacing an audible game with a monitor keeps audio requested instead of 
   t.after(() => f.close());
   const previous = f.createStream('window:303:0');
   f.voiceStore.addScreenShare(previous.id);
-  f.voiceStore.setScreenAudioShare(previous.id);
+  f.voiceStore.addScreenAudioShare(previous.id);
   await f.picker.open();
   control(f, 'share-tab-screen').click();
   f.document.querySelector('.source-item').click();
@@ -860,18 +895,21 @@ test('replacing an audible game with a monitor keeps audio requested instead of 
   assert.equal(control(f, 'btn-share-add').disabled, false, 'Adding stays clickable: the click explains the audio owner');
   await f.picker.startSharing('replace');
   assert.equal(nativeStarts(f)[0][2], true);
-  assert.equal(f.voiceStore.screenAudioShareId, f.voiceStore.screenShareIds[0]);
+  assert.deepEqual(f.voiceStore.screenAudioShareIds, [f.voiceStore.screenShareIds[0]]);
+  assert.equal(f.confirms.length, 0, 'Replacing every share hands the audio over without asking');
 });
 
+const toastText = f => f.document.querySelector('.chat-copy-toast-label')?.textContent;
+
 for (const language of ['pt-BR', 'en']) {
-  test(`adding a screen with audio while another share owns it explains why in a toast (${language})`, async t => {
+  test(`a whole screen's sound leaves no room for other sound, explained in a toast (${language})`, async t => {
     const f = fixture(language);
     t.after(() => f.close());
-    const previous = f.createStream('window:303:0');
+    const previous = f.createStream(MONITOR_SOURCE_ID);
     f.voiceStore.addScreenShare(previous.id);
-    f.voiceStore.setScreenAudioShare(previous.id);
+    f.voiceStore.addScreenAudioShare(previous.id);
     await f.picker.open();
-    control(f, 'share-tab-screen').click();
+    control(f, 'share-tab-window').click();
     f.document.querySelector('.source-item').click();
     assert.equal(control(f, 'chk-share-audio').checked, true);
     const add = control(f, 'btn-share-add');
@@ -880,10 +918,9 @@ for (const language of ['pt-BR', 'en']) {
     add.click();
     await flush();
     assert.equal(nativeStarts(f).length, 0, 'The second audio share is not attempted');
-    assert.equal(f.alerts.length, 0, 'A toast, not a blocking modal');
-    const toast = f.document.querySelector('.chat-copy-toast');
-    assert.equal(toast?.getAttribute('role'), 'alert');
-    assert.equal(f.document.querySelector('.chat-copy-toast-label').textContent, f.i18n.t('screenShare.audioTakenToast'));
+    assert.equal(f.alerts.length + f.confirms.length, 0, 'A toast, not a blocking modal');
+    assert.equal(f.document.querySelector('.chat-copy-toast')?.getAttribute('role'), 'alert');
+    assert.equal(toastText(f), f.i18n.t('screenShare.audioTakenToast'));
     assert.ok(f.document.querySelector('.share-audio-toggle').hasAttribute('data-attention'), 'The blocking switch is pointed out');
     assert.equal(f.document.activeElement, control(f, 'chk-share-audio'));
     assert.notEqual(f.picker.modalEl, null, 'The picker stays open so audio can be turned off');
@@ -892,9 +929,127 @@ for (const language of ['pt-BR', 'en']) {
     audio.checked = false; change(audio);
     add.click();
     await flush();
-    assert.equal(nativeStarts(f).at(-1)[2], false, 'Without audio the screen is added');
+    assert.equal(nativeStarts(f).at(-1)[2], false, 'Without audio the window is added');
     assert.equal(f.voiceStore.screenShareIds.length, 2);
-    assert.equal(f.voiceStore.screenAudioShareId, previous.id, 'The first screen keeps its audio');
+    assert.deepEqual(f.voiceStore.screenAudioShareIds, [previous.id], 'The screen keeps its sound');
+  });
+
+  test(`applications each share their own sound, but not one application twice (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    const window = (id, processId) => ({ ...f.source(id, 'window'), processId });
+    f.controls.sources = async () => [window('window:101:0', 1001), window('window:202:0', 2002), window('window:203:0', 2002)];
+    const add = async sourceId => {
+      await f.picker.open();
+      control(f, 'share-tab-window').click();
+      f.document.querySelector(`[data-source-id="${sourceId}"]`).click();
+      assert.equal(control(f, 'chk-share-audio').checked, true);
+      control(f, 'btn-share-add').click();
+      await flush();
+    };
+    const first = f.createStream('window:101:0');
+    f.voiceStore.addScreenShare(first.id);
+    f.voiceStore.addScreenAudioShare(first.id);
+    await add('window:202:0');
+    assert.equal(nativeStarts(f).at(-1)[2], true, 'Another application shares its own sound');
+    assert.equal(f.confirms.length + f.alerts.length, 0);
+    const second = f.voiceStore.screenShareIds[1];
+    assert.deepEqual(f.voiceStore.screenAudioShareIds, [first.id, second]);
+    await add('window:203:0');
+    assert.equal(nativeStarts(f).length, 1, 'The same application is never captured twice');
+    assert.equal(toastText(f), f.i18n.t('screenShare.appAudioTakenToast'));
+    const audio = control(f, 'chk-share-audio');
+    audio.checked = false; change(audio);
+    control(f, 'btn-share-add').click();
+    await flush();
+    assert.equal(nativeStarts(f).at(-1)[2], false, 'Its other window can still be shown without sound');
+    assert.deepEqual(f.voiceStore.screenAudioShareIds, [first.id, second]);
+  });
+
+  for (const launcherShared of [true, false]) {
+    test(`a launcher and the game it opened never both share sound, from the ${launcherShared ? 'launcher' : 'game'} (${language})`, async t => {
+      const f = fixture(language);
+      t.after(() => f.close());
+      // The launcher (1001) started the game (2002); both descend from the shell (500), like an unrelated app (3003).
+      const window = (id, processId, processAncestry) => ({ ...f.source(id, 'window'), processId, processAncestry });
+      const launcher = window('window:101:0', 1001, [500]), game = window('window:202:0', 2002, [1001, 500]);
+      f.controls.sources = async () => [launcher, game, window('window:303:0', 3003, [500])];
+      const add = async sourceId => {
+        await f.picker.open();
+        control(f, 'share-tab-window').click();
+        f.document.querySelector(`[data-source-id="${sourceId}"]`).click();
+        assert.equal(control(f, 'chk-share-audio').checked, true);
+        control(f, 'btn-share-add').click();
+        await flush();
+      };
+      const [shared, added] = launcherShared ? [launcher, game] : [game, launcher];
+      const first = f.createStream(shared.id);
+      f.voiceStore.addScreenShare(first.id);
+      f.voiceStore.addScreenAudioShare(first.id);
+      await add(added.id);
+      assert.equal(nativeStarts(f).length, 0, 'Windows would capture the game\'s sound twice');
+      assert.equal(toastText(f), f.i18n.t('screenShare.appAudioTakenToast'));
+      await add('window:303:0');
+      assert.equal(nativeStarts(f).at(-1)[2], true, 'A shared shell ancestor does not relate two applications');
+      assert.equal(f.voiceStore.screenAudioShareIds.length, 2);
+    });
+  }
+
+  for (const takeover of [false, true]) {
+    test(`adding a whole screen with sound asks to ${takeover ? 'take over' : 'keep'} the applications' sound (${language})`, async t => {
+      const f = fixture(language);
+      t.after(() => f.close());
+      const apps = [f.createStream('window:303:0'), f.createStream('window:404:0', 'game')];
+      for (const [index, app] of apps.entries()) {
+        f.voiceStore.addScreenShare(app.id);
+        f.voiceStore.addScreenAudioShare(app.id);
+        f.labels.set(app.id, ['Spotify', 'Doom'][index]);
+      }
+      const title = f.i18n.t('screenShare.replaceAppAudioTitle');
+      f.controls.confirm = question => question.title !== title || takeover;
+      await f.picker.open();
+      control(f, 'share-tab-screen').click();
+      f.document.querySelector('.source-item').click();
+      control(f, 'btn-share-add').click();
+      await flush();
+      const question = f.confirms.find(value => value.title === title);
+      const names = new Intl.ListFormat(language, { type: 'conjunction' }).format(['Spotify', 'Doom']);
+      assert.equal(question.message, f.i18n.t('screenShare.replaceAppAudioMessage', { apps: names }));
+      assert.equal(question.confirmLabel, f.i18n.t('screenShare.replaceAppAudioConfirm'));
+      assert.equal(question.cancelLabel, f.i18n.t('screenShare.replaceAppAudioKeep'));
+      assert.equal(question.variant, 'warning');
+      assert.equal(nativeStarts(f).length, 1);
+      assert.equal(nativeStarts(f)[0][2], takeover, takeover ? 'The screen carries the sound' : 'The screen is shared silently');
+      assert.ok(apps.every(app => f.voiceStore.screenShareIds.includes(app.id)), 'The applications keep running');
+      const screen = f.voiceStore.screenShareIds.find(id => !apps.some(app => app.id === id));
+      if (!takeover) {
+        assert.deepEqual(f.voiceStore.screenAudioShareIds, apps.map(app => app.id), 'The applications keep their sound');
+        assert.equal(f.traces.some(value => ['withdraw-audio', 'audio-replacement'].includes(value[0])), false);
+        return;
+      }
+      assert.deepEqual(f.traces.filter(value => value[0] === 'audio-replacement'), [['audio-replacement', apps.map(app => app.id)]]);
+      assert.deepEqual(f.traces.filter(value => value[0] === 'withdraw-audio'), apps.map(app => ['withdraw-audio', app.id]));
+      const order = f.traces.map(value => value[0]);
+      assert.ok(order.lastIndexOf('withdraw-audio') < order.indexOf('notify'), 'The applications give their sound up before the screen is announced');
+      assert.deepEqual(f.voiceStore.screenAudioShareIds, [screen], 'The screen now carries the only sound');
+    });
+  }
+
+  test(`on macOS every shared sound is the whole computer's, so only one share carries it (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    f.api.platform = 'darwin';
+    const previous = f.createStream('window:303:0');
+    f.voiceStore.addScreenShare(previous.id);
+    f.voiceStore.addScreenAudioShare(previous.id);
+    await f.picker.open();
+    control(f, 'share-tab-window').click();
+    f.document.querySelector('.source-item').click();
+    control(f, 'btn-share-add').click();
+    await flush();
+    assert.equal(nativeStarts(f).length, 0);
+    assert.equal(f.confirms.length, 0, 'Nothing to take over: the existing sound is already the whole mix');
+    assert.equal(toastText(f), f.i18n.t('screenShare.audioTakenMacToast'));
   });
 }
 
@@ -983,7 +1138,7 @@ test('switching the source with two live shares asks which one and replaces only
   t.after(() => f.close());
   const first = f.createStream('window:303:0'), second = f.createStream('window:404:0');
   for (const stream of [first, second]) f.voiceStore.addScreenShare(stream.id);
-  f.voiceStore.setScreenAudioShare(first.id);
+  f.voiceStore.addScreenAudioShare(first.id);
   await f.picker.open();
   control(f, 'share-tab-screen').click();
   f.document.querySelector('.source-item').click();
@@ -1003,18 +1158,20 @@ test('switching the source with two live shares asks which one and replaces only
   assert.equal(f.voiceStore.screenShareIds.length, 2);
   assert.ok(f.voiceStore.screenShareIds.includes(first.id), 'The other share keeps running');
   assert.ok(!f.voiceStore.screenShareIds.includes(second.id));
-  assert.equal(f.voiceStore.screenAudioShareId, first.id, 'It also keeps its audio');
+  assert.deepEqual(f.voiceStore.screenAudioShareIds, [first.id], 'It also keeps its audio');
   const replacement = f.voiceStore.screenShareIds.find(id => id !== first.id);
   assert.equal(f.labels.get(replacement), MONITOR_SOURCE_ID, 'The new share is named after its source for the next choice');
   assert.equal(f.picker.modalEl, null);
 });
 
-test('switching a share without audio keeps the other share audible, and its owner can hand the audio over', async t => {
+test('switching a silent share to a whole screen with sound asks first, and the sound owner hands it over directly', async t => {
   const f = fixture();
   t.after(() => f.close());
   const first = f.createStream('window:303:0'), second = f.createStream('window:404:0');
   for (const stream of [first, second]) f.voiceStore.addScreenShare(stream.id);
-  f.voiceStore.setScreenAudioShare(first.id);
+  f.voiceStore.addScreenAudioShare(first.id);
+  const title = f.i18n.t('screenShare.replaceAppAudioTitle');
+  f.controls.confirm = question => question.title !== title;
   await f.picker.open();
   control(f, 'share-tab-screen').click();
   f.document.querySelector('.source-item').click();
@@ -1022,16 +1179,22 @@ test('switching a share without audio keeps the other share audible, and its own
   f.chooser.result = { shareId: second.id };
   control(f, 'btn-share').click();
   await flush();
-  assert.equal(nativeStarts(f).length, 0);
-  assert.equal(f.traces.some(value => value[0] === 'stop-shares'), false, 'Nothing is stopped before the conflict is resolved');
-  assert.equal(f.document.querySelector('.chat-copy-toast-label').textContent, f.i18n.t('screenShare.audioTakenToast'));
+  assert.equal(f.confirms.filter(question => question.title === title).length, 1, 'The other share\'s sound is not taken silently');
+  assert.deepEqual(f.traces.filter(value => value[0] === 'stop-shares'), [['stop-shares', [second.id], false]]);
+  assert.equal(nativeStarts(f)[0][2], false, 'Keeping the application\'s sound switches to the screen without sound');
+  assert.deepEqual(f.voiceStore.screenAudioShareIds, [first.id]);
+  await f.picker.open();
+  control(f, 'share-tab-window').click();
+  f.document.querySelector('[data-source-id="window:101:0"]').click();
   f.chooser.result = { shareId: first.id };
   control(f, 'btn-share').click();
   await flush();
-  assert.deepEqual(f.traces.filter(value => value[0] === 'audio-replacement'), [['audio-replacement', first.id]]);
-  assert.deepEqual(f.traces.filter(value => value[0] === 'stop-shares'), [['stop-shares', [first.id], false]]);
-  assert.ok(f.voiceStore.screenShareIds.includes(second.id));
-  assert.equal(f.voiceStore.screenAudioShareId, f.voiceStore.screenShareIds.find(id => id !== second.id));
+  assert.equal(f.confirms.filter(question => question.title === title).length, 1, 'Switching the owner itself asks nothing');
+  assert.deepEqual(f.traces.filter(value => value[0] === 'audio-replacement'), [['audio-replacement', [first.id]]]);
+  assert.deepEqual(f.traces.filter(value => value[0] === 'stop-shares').at(-1), ['stop-shares', [first.id], false]);
+  const replacement = f.voiceStore.screenShareIds.find(id => id !== first.id && id !== f.voiceStore.screenShareIds[0]);
+  assert.ok(!f.voiceStore.screenShareIds.includes(first.id));
+  assert.deepEqual(f.voiceStore.screenAudioShareIds, [replacement]);
 });
 
 test('a single share is switched directly, and a double-click with two shares asks first', async t => {
@@ -1064,9 +1227,9 @@ for (const language of ['pt-BR', 'en']) {
     t.after(() => f.close());
     const initial = f.createStream('window:303:0');
     f.voiceStore.addScreenShare(initial.id);
-    f.voiceStore.setScreenAudioShare(initial.id);
+    f.voiceStore.addScreenAudioShare(initial.id);
     for (const kind of ['monitor', 'game', 'monitor', 'window', 'monitor']) {
-      const oldId = f.voiceStore.screenAudioShareId, before = f.traces.length;
+      const oldId = f.voiceStore.screenAudioShareIds[0], before = f.traces.length;
       await f.picker.open();
       if (kind === 'monitor') {
         control(f, 'share-tab-screen').click();
@@ -1077,12 +1240,12 @@ for (const language of ['pt-BR', 'en']) {
         f.i18n.t(kind === 'monitor' ? 'screenShare.shareAudio' : 'screenShare.shareAppAudio'));
       await f.picker.startSharing('replace');
       const transitions = f.traces.slice(before);
-      assert.deepEqual(transitions.filter(value => value[0] === 'audio-replacement'), [['audio-replacement', oldId]]);
+      assert.deepEqual(transitions.filter(value => value[0] === 'audio-replacement'), [['audio-replacement', [oldId]]]);
       assert.deepEqual(transitions.filter(value => value[0] === 'stop-shares'), [['stop-shares', [oldId], false]]);
       assert.equal(transitions.filter(value => value[0] === 'notify').length, 1, 'No intermediate empty roster may clear spectator audio preferences');
       assert.equal(f.voiceStore.screenShareIds.length, 1);
-      assert.notEqual(f.voiceStore.screenAudioShareId, oldId);
-      assert.equal(f.voiceStore.screenAudioShareId, f.voiceStore.screenShareIds[0]);
+      assert.notEqual(f.voiceStore.screenShareIds[0], oldId);
+      assert.deepEqual(f.voiceStore.screenAudioShareIds, [f.voiceStore.screenShareIds[0]]);
       assert.equal(f.voiceStore.voice, 'preserved-call');
       assert.equal(f.voiceStore.camera, 'preserved-camera');
     }
@@ -1094,13 +1257,13 @@ test('audio replacement preflight failure leaves the old share audible and an un
   t.after(() => f.close());
   const old = f.createStream('window:303:0');
   f.voiceStore.addScreenShare(old.id);
-  f.voiceStore.setScreenAudioShare(old.id);
+  f.voiceStore.addScreenAudioShare(old.id);
   await f.picker.open();
   control(f, 'share-tab-screen').click();
   f.document.querySelector('.source-item').click();
   f.controls.start = async () => { throw new Error('Monitor probe failed'); };
   await f.picker.startSharing('replace');
-  assert.equal(f.voiceStore.screenAudioShareId, old.id);
+  assert.deepEqual(f.voiceStore.screenAudioShareIds, [old.id]);
   assert.equal(f.streams.get(old.id), old);
   assert.equal(f.traces.some(value => value[0] === 'stop-shares'), false);
   assert.equal(f.alerts.length, 1);
@@ -1111,7 +1274,7 @@ test('audio replacement preflight failure leaves the old share audible and an un
   assert.equal(control(f, 'btn-share-add').disabled, false);
   await f.picker.startSharing('add');
   assert.equal(nativeStarts(f).at(-1)[2], false);
-  assert.equal(f.voiceStore.screenAudioShareId, old.id);
+  assert.deepEqual(f.voiceStore.screenAudioShareIds, [old.id]);
   assert.equal(f.voiceStore.screenShareIds.length, 2);
 });
 
@@ -1120,7 +1283,7 @@ test('failed old audio retirement never publishes the replacement or hides the e
   t.after(() => f.close());
   const old = f.createStream('window:303:0');
   f.voiceStore.addScreenShare(old.id);
-  f.voiceStore.setScreenAudioShare(old.id);
+  f.voiceStore.addScreenAudioShare(old.id);
   f.controls.stop = async () => { throw new Error('PCM retirement failed'); };
   await f.picker.open();
   control(f, 'share-tab-screen').click();
@@ -1128,7 +1291,7 @@ test('failed old audio retirement never publishes the replacement or hides the e
   await f.picker.startSharing('replace');
   assert.match(f.alerts[0].message, /PCM retirement failed/);
   assert.deepEqual(f.voiceStore.screenShareIds, [old.id]);
-  assert.equal(f.voiceStore.screenAudioShareId, old.id);
+  assert.deepEqual(f.voiceStore.screenAudioShareIds, [old.id]);
   assert.deepEqual(f.traces.filter(value => value[0] === 'notify'), [['notify', [old.id]]]);
 });
 
@@ -1537,18 +1700,18 @@ test('audio availability and reservation cannot silently capture another mix or 
   change(audio);
   assert.equal(control(f, 'btn-share').disabled, false);
   f.capabilities.captureAudio = true;
-  f.voiceStore.screenAudioShareId = 'other-audio-share';
+  f.voiceStore.screenAudioShareIds = ['other-audio-share'];
   await f.picker.open();
   assert.equal(control(f, 'chk-share-audio').disabled, true);
   assert.equal(control(f, 'chk-share-audio').checked, false);
   assert.equal(control(f, 'share-audio-text').textContent, f.i18n.t('screenShare.audioAlreadySharing'));
-  f.voiceStore.screenAudioShareId = null;
+  f.voiceStore.screenAudioShareIds = [];
   await f.picker.open();
   f.document.querySelector('.source-item').click();
   f.controls.capturingAudio = true;
   await f.picker.startSharing('replace');
   assert.equal(nativeStarts(f).length, 0);
-  assert.ok(f.alerts.at(-1).message.includes(f.i18n.t('screenShare.audioAlreadySharing')));
+  assert.equal(toastText(f), f.i18n.t('screenShare.audioTakenToast'), 'Audio held outside any share is explained in a toast');
   assert.equal(control(f, 'btn-share').disabled, true);
 });
 

@@ -480,7 +480,7 @@ for (const failure of [null, 'admission', 'retirement', 'cancelled']) {
     const starting = exports.SourceStartCore.prototype.startNativeScreenShare.call(
       { nativeScreens: f.controller, voiceReconnectSuspended: false },
       `native-monitor:${'a'.repeat(64)}`, true, () => current, 'monitor', false, {
-        shareId: old.shareId,
+        shareIds: [old.shareId],
         retirePrevious: async () => {
           retireCalls++;
           await gate.promise;
@@ -494,7 +494,7 @@ for (const failure of [null, 'admission', 'retirement', 'cancelled']) {
     await tick();
     assert.equal(f.commands.some(command => command.action === 'preview-start'), false,
       'Replacement must never acquire PCM while the previous owner may still be active');
-    assert.equal(f.commands.findLast(command => command.action === 'source-add').replacesAudioShareId, old.shareId);
+    assert.deepEqual(f.commands.findLast(command => command.action === 'source-add').replacesAudioShareIds, [old.shareId]);
     if (failure === 'cancelled') current = false;
     gate.resolve();
     const stream = await checked;
@@ -506,7 +506,7 @@ for (const failure of [null, 'admission', 'retirement', 'cancelled']) {
       const add = f.commands.findLast(command => command.action === 'source-add');
       const remove = f.commands.findIndex(command => command.action === 'source-remove' && command.shareId === old.shareId);
       const preview = f.commands.findIndex(command => command.action === 'preview-start');
-      assert.equal(add.replacesAudioShareId, old.shareId);
+      assert.deepEqual(add.replacesAudioShareIds, [old.shareId]);
       assert.equal(add.audio, true);
       assert.ok(remove >= 0 && preview > remove);
       assert.equal(f.captures.get(stream.id).source.audio, true);
@@ -888,6 +888,25 @@ test('two concurrent reconnect syncs cannot retire the source restored by the fi
   assert.notEqual(f.captures.get(old.shareId).source.instanceId, old.instanceId);
   assert.equal(f.sources.size, 1);
   assert.equal(f.announceCount(), 1);
+});
+
+test('withdrawing audio replaces the same share in place, silent, and keeps it on air', async t => {
+  const f = fixture(t), old = await f.local();
+  assert.equal(old.audio, true);
+  await f.controller.withdrawAudio(old.shareId);
+  const replacement = f.commands.filter(command => command.action === 'source-add').at(-1);
+  assert.equal(replacement.shareId, old.shareId);
+  assert.equal(replacement.replacesSourceInstanceId, old.instanceId);
+  assert.equal(replacement.audio, false);
+  assert.deepEqual(replacement.video, old.video, 'Only the audio changes');
+  assert.equal(f.captures.get(old.shareId).source.audio, false);
+  assert.notEqual(f.captures.get(old.shareId).source.instanceId, old.instanceId);
+  assert.equal(f.commands.some(command => command.action === 'source-remove'), false, 'The share never leaves the call');
+  assert.equal(f.announceCount(), 1);
+  await f.controller.withdrawAudio(old.shareId);
+  assert.equal(f.commands.filter(command => command.action === 'source-add').length, 2, 'A silent share has nothing to give up');
+  await f.controller.applyQuality(profile());
+  assert.equal(f.commands.filter(command => command.action === 'source-add').at(-1).audio, false, 'Later quality changes keep it silent');
 });
 
 test('roster sync and late old Closed cannot restore or terminate a profile replacement', async t => {

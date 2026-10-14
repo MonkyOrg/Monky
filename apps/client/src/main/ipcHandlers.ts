@@ -152,6 +152,7 @@ let screenAudio: {
   listWindowOwners?: () => NativeWindowOwner[];
   listWindows?: () => NativeWindowInfo[];
   getWindowState?: (hwnd: number) => NativeWindowState | null;
+  getProcessAncestry?: (processIds: readonly number[]) => (number[] | null)[];
   listMonitors?: () => NativeMonitorInfo[];
   getMonitorState?: (deviceId: string) => NativeMonitorInfo | null;
   restoreWindow?: (hwnd: number) => boolean;
@@ -365,6 +366,10 @@ export function setupIpcHandlers(
     monitorState(deviceId) {
       if (!screenAudio?.getMonitorState) throw new Error('Native monitor identity inspection is unavailable.');
       return screenAudio.getMonitorState(deviceId);
+    },
+    processAncestry(ids) {
+      if (!screenAudio?.getProcessAncestry) throw new Error('Native process inspection is unavailable.');
+      return screenAudio.getProcessAncestry(ids);
     },
   });
   const assertCaptureSourceAllowed = (sourceId: string): void => {
@@ -713,10 +718,12 @@ export function setupIpcHandlers(
       let result: DesktopSource[];
       try {
         windows = type === 'screen' ? [] : nativeSources.listWindows();
-        result = windows.map(({ id, window }) => {
+        result = windows.map(({ id, window, processAncestry }) => {
           const occlusionEngine = browserOcclusionEngine(window.processPath);
           return {
             id, name: window.title, type: 'window', isOwnWindow: window.processId === process.pid,
+            processId: window.processId,
+            ...(processAncestry ? { processAncestry } : {}),
             ...(occlusionEngine ? { occlusionEngine } : {}),
             thumbnailDataUrl: '', appIconDataUrl: null, thumbnailState: window.isIconic ? 'unavailable' : 'pending',
           } satisfies DesktopSource;

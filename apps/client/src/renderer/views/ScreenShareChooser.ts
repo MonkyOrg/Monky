@@ -106,7 +106,7 @@ class ScreenShareChooser {
 
   private renderShare(shareId: string, index: number, purpose: ScreenSharePurpose): HTMLButtonElement {
     const name = videoService.getScreenShareLabel(shareId) ?? t('screenShare.screenNumber', { number: index + 1 });
-    const withAudio = voiceStore.screenAudioShareId === shareId;
+    const withAudio = voiceStore.screenAudioShareIds.includes(shareId);
     const button = this.menuItem('screen-share-choice');
     button.dataset.shareId = shareId;
     const action = t(purpose === 'stop' ? 'screenShare.chooseStopItem' : 'screenShare.chooseSwitchItem', { name });

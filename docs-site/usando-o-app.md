@@ -2,7 +2,9 @@
 
 Depois de conectar, a lateral esquerda organiza servidores e canais; o centro
 mostra a conversa ou o palco de voz; a lista à direita reúne os membros.
-Conectar ao servidor e entrar em uma chamada são ações separadas.
+Conectar ao servidor e entrar em uma chamada são ações separadas. Os avisos
+rápidos somem sozinhos, mas também podem ser fechados no botão **×** para
+liberar o que estiver embaixo deles.
 
 <AppScreenshot src="/screenshots/conversa-pt.png" alt="Conversa demonstrativa com servidores e canais à esquerda, mensagens ao centro e membros à direita." caption="Captura do cliente para Windows com dados demonstrativos. Nomes, conversas e bot foram criados para este guia." />
 
@@ -84,6 +86,9 @@ bloqueado até você escolher uma imagem. Isso também vale para chroma key com
 substituição por imagem; nenhum vídeo sem o efeito é publicado como alternativa.
 
 Quem pode assistir vê o selo **LIVE**. Clique no card para destacar ou use tela cheia.
+Clicar no selo **LIVE** ou no ícone de compartilhamento ao lado do nome de
+alguém pergunta se você quer assistir e abre o palco já nessa transmissão; veja
+[Assistir a telas compartilhadas](/configuracoes#assistir-a-telas-compartilhadas).
 
 ### Ajuste de FPS para o codificador
 

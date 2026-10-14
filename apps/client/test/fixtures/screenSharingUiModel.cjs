@@ -292,12 +292,14 @@ function fixture(language = 'en') {
     save() { saves++; appEvents.emit('settings.updated'); },
   };
   const voiceStore = {
-    screenShareIds: [], screenAudioShareId: null, camera: 'preserved-camera', voice: 'preserved-call',
+    screenShareIds: [], screenAudioShareIds: [], camera: 'preserved-camera', voice: 'preserved-call',
     voiceSessionKey: 'server-a', currentVoiceChannelId: 'room',
     get isScreenSharing() { return this.screenShareIds.length > 0; },
+    get hasScreenAudio() { return this.screenAudioShareIds.length > 0; },
     canAddScreenShare(limit) { return this.screenShareIds.length < limit; },
     addScreenShare(id) { this.screenShareIds.push(id); },
-    setScreenAudioShare(id) { this.screenAudioShareId = id; },
+    addScreenAudioShare(id) { if (!this.screenAudioShareIds.includes(id)) this.screenAudioShareIds.push(id); },
+    removeScreenAudioShare(id) { this.screenAudioShareIds = this.screenAudioShareIds.filter(value => value !== id); },
   };
   const screenAudioService = {
     getIsCapturing: () => controls.capturingAudio, getIsTestTone: () => false,
@@ -316,10 +318,10 @@ function fixture(language = 'en') {
     setScreenShareLabel: (id, label) => { if (streams.has(id)) labels.set(id, label); },
     getScreenShareLabel: id => labels.get(id) ?? null,
   };
-  const createStream = (desktopSourceId = 'window:101:0') => {
+  const createStream = (desktopSourceId = 'window:101:0', captureKind = desktopSourceId.startsWith('native-monitor:') ? 'monitor' : 'window') => {
     const stream = { id: `stream-${++sequence}`, getVideoTracks: () => [] };
     streams.set(stream.id, stream);
-    captures.set(stream.id, { desktopSourceId, source: { shareId: stream.id } });
+    captures.set(stream.id, { desktopSourceId, captureKind, source: { shareId: stream.id } });
     return stream;
   };
   const webRtcManager = {
@@ -328,13 +330,17 @@ function fixture(language = 'en') {
       traces.push(['native-start', id, audio, kind, preserveAspectRatio, ...(audience ? [audience] : [])]);
       if (controls.start) return controls.start({ id, audio, isWanted, kind, preserveAspectRatio, audioReplacement });
       if (audioReplacement) {
-        traces.push(['audio-replacement', audioReplacement.shareId]);
+        traces.push(['audio-replacement', [...audioReplacement.shareIds]]);
         await audioReplacement.retirePrevious();
         if (!isWanted()) throw new DOMException('Cancelled selection', 'AbortError');
       }
-      const stream = createStream(id);
+      const stream = createStream(id, kind);
       if (audience) captures.get(stream.id).source.audience = audience;
       return stream;
+    },
+    async withdrawScreenAudio(shareId) {
+      traces.push(['withdraw-audio', shareId]);
+      voiceStore.removeScreenAudioShare(shareId);
     },
     assertScreenSharingSettings(profile, codec) {
       traces.push(['assert-settings', profile, codec]);
@@ -349,7 +355,7 @@ function fixture(language = 'en') {
     for (const id of shareIds) {
       streams.delete(id); captures.delete(id);
       voiceStore.screenShareIds = voiceStore.screenShareIds.filter(value => value !== id);
-      if (voiceStore.screenAudioShareId === id) voiceStore.screenAudioShareId = null;
+      voiceStore.removeScreenAudioShare(id);
     }
   };
   class Controller extends AbortController {
@@ -407,7 +413,10 @@ function fixture(language = 'en') {
     },
     'views/Dialog': {
       showAlert: async value => alerts.push(value),
-      showConfirm: async value => { confirms.push(value); return controls.confirm; },
+      showConfirm: async value => {
+        confirms.push(value);
+        return typeof controls.confirm === 'function' ? controls.confirm(value) : controls.confirm;
+      },
     },
     'views/ScreenShareChooser': {
       screenShareChooser: {

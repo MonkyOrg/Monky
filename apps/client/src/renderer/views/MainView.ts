@@ -906,6 +906,35 @@ export class MainView {
     this.updateScreenShareNotice();
   }
 
+  /**
+   * Someone else's share icon or LIVE badge asks first, then opens the stage focused on their
+   * broadcast and watching it. Someone sharing in another voice channel is reached by joining it.
+   */
+  private async watchLive(sessionId: string): Promise<void> {
+    const sharing = () => {
+      const participant = participantManager.get(sessionId);
+      return participant?.voiceState?.isScreenSharing ? participant : undefined;
+    };
+    const participant = sharing();
+    const channelId = participant?.voiceState?.channelId;
+    const session = sessionManager.getActive();
+    if (!participant || !channelId || !session) return;
+    const inCall = voiceStore.voiceSessionKey === session.key && voiceStore.currentVoiceChannelId === channelId;
+    const name = participantManager.displayName(participant);
+    const channel = session.serverStore.serverDetails?.channels.find((value) => value.id === channelId)?.name ?? '';
+    const confirmed = await showConfirm({
+      title: t('main.watchLiveTitle'),
+      message: inCall ? t('main.watchLiveMessage', { name }) : t('main.watchLiveJoinMessage', { name, channel }),
+      confirmLabel: inCall ? t('stage.watchBroadcast') : t('main.watchLiveJoinConfirm'),
+      variant: 'info',
+    });
+    // The broadcast may have ended, or the user moved elsewhere, while the question was open.
+    if (!confirmed || sessionManager.getActive() !== session || sharing()?.voiceState?.channelId !== channelId) return;
+    if (!inCall && !await this.handleJoinVoiceChannel(channelId)) return;
+    if (voiceStore.voiceSessionKey !== session.key || voiceStore.currentVoiceChannelId !== channelId || !sharing()) return;
+    this.openVoiceStage(sessionId);
+  }
+
   private closeServerDropdown(): void {
     const menu = document.getElementById('server-dropdown-menu');
     const toggle = document.getElementById('server-dropdown-toggle');
@@ -1369,7 +1398,13 @@ export class MainView {
                       ${isConnecting ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-connecting" title="${t(isSfu ? 'main.sfuConnecting' : 'main.peerConnecting')}">sync</span>` : ''}
                       ${isRelayed ? `<span class="material-symbols-outlined md-14 voice-mini-icon relayed" title="${t('main.peerRelayed')}">swap_horiz</span>` : ''}
                       ${renderAudioMuteIndicators({ ...p.voiceState, isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened, permissionMuted: isPermissionMuted })}
-                      ${p.voiceState?.isScreenSharing ? `<span class="material-symbols-outlined md-14 voice-mini-icon live" title="${t('main.sharingScreen')}">screen_share</span>` : ''}
+                      ${p.voiceState?.isScreenSharing ? (isLocal
+                        ? `<span class="material-symbols-outlined md-14 voice-mini-icon live" title="${t('main.sharingScreen')}">screen_share</span>`
+                        : `<button type="button" class="voice-mini-icon live voice-mini-watch" data-watch-live="${escapeHtml(sessionId)}"
+                            title="${escapeHtml(t('main.watchLiveAria', { name: displayName }))}"
+                            aria-label="${escapeHtml(t('main.watchLiveAria', { name: displayName }))}">
+                            <span class="material-symbols-outlined md-14" aria-hidden="true">screen_share</span>
+                          </button>`) : ''}
                       ${p.voiceState?.isCameraOn ? `<span class="material-symbols-outlined md-14 voice-mini-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
                       ${p.user.activity ? (activityIconSrc(p.user.activity.iconBase64)
                         ? `<img class="voice-mini-art" src="${activityIconSrc(p.user.activity.iconBase64)}" alt="" title="${escapeHtml(t('main.playingGame', { game: p.user.activity.name }))}">`
@@ -1499,6 +1534,14 @@ export class MainView {
         });
         el.addEventListener('dragend', () => { el.classList.remove('dragging'); });
       }
+    });
+
+    // Someone else's share icon opens their broadcast, after asking.
+    this.container.querySelectorAll<HTMLButtonElement>('.voice-participant-mini [data-watch-live]').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (button.dataset.watchLive) void this.watchLive(button.dataset.watchLive);
+      });
     });
 
     // Voice channel drop targets for user drag-and-drop (#248, #357)
@@ -2443,7 +2486,11 @@ export class MainView {
               ${m.id === serverStore.ownerId ? `<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
               ${m.isBot ? `<span class="member-badge-bot" title="Bot">BOT</span>` : ''}
               ${isReconnecting ? `<span class="member-reconnecting-badge" title="${t('main.reconnectingTitle')}"><span class="material-symbols-outlined md-14 spin">sync</span></span>` : ''}
-              ${(!effectiveOffline && voiceState?.isScreenSharing) ? `<span class="member-live-badge" title="${t('main.sharingScreen')}">LIVE</span>` : ''}
+              ${(!effectiveOffline && voiceState?.isScreenSharing) ? (isLocal || !vm
+                ? `<span class="member-live-badge" title="${t('main.sharingScreen')}">LIVE</span>`
+                : `<button type="button" class="member-live-badge" data-watch-live="${escapeHtml(vm.user.sessionId || vm.user.id)}"
+                    title="${escapeHtml(t('main.watchLiveAria', { name: m.nickname }))}"
+                    aria-label="${escapeHtml(t('main.watchLiveAria', { name: m.nickname }))}">LIVE</button>`) : ''}
               ${(!effectiveOffline && voiceState?.isCameraOn) ? `<span class="material-symbols-outlined md-14 member-cam-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
               ${renderAudioMuteIndicators({ ...voiceState, isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened, permissionMuted: isPermissionMuted }, { showMicrophone: inVoice || isServerMuted || isPermissionMuted })}
             </div>
@@ -2495,6 +2542,12 @@ export class MainView {
           if (member) {
             userContextMenu.open(mouseEvent.clientX, mouseEvent.clientY, member);
           }
+        });
+      });
+      listEl.querySelectorAll<HTMLButtonElement>('[data-watch-live]').forEach((button) => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          if (button.dataset.watchLive) void this.watchLive(button.dataset.watchLive);
         });
       });
     }

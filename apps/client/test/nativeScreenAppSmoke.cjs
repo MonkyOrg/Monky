@@ -883,6 +883,14 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
   const unbind = appEvents.on('native_screen.source_failed', event => nativeErrors.push(event));
   const sharing = () => session.participants.getInVoiceChannel(channel.id)
     .find(value => value.user.sessionId !== auth.currentUser.sessionId && value.voiceState.nativeScreenShares?.length);
+  // The browser receiver plays each shared source's audio separately (#253).
+  const browserScreenPipeline = remote => {
+    const element = remote && webRtcManager['mediaRouter'].getScreenAudioElement(remote.user.sessionId,
+      remote.voiceState.nativeScreenShares[0].shareId);
+    const trackId = element?.srcObject?.getAudioTracks()[0]?.id;
+    return trackId && [...webRtcManager['mediaRouter']['screenAudioPipelines'].values()]
+      .find(pipeline => pipeline.trackId === trackId);
+  };
   const watchedVideo = () => [...document.querySelectorAll('video.stage-video-element')]
     .find(video => video.srcObject instanceof MediaStream && video.srcObject.getVideoTracks().length);
   const videoIdentities = new WeakMap();
@@ -958,7 +966,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       const sourceListStarted = performance.now();
       const opening = !document.querySelector('#share-sources-panel');
       const previous = videoService.getNativeScreenCaptures()[0]?.source;
-      if (replace && (!previous?.audio || voiceStore.screenAudioShareId !== previous.shareId))
+      if (replace && (!previous?.audio || !voiceStore.screenAudioShareIds.includes(previous.shareId)))
         throw new Error('Replacement requires the currently published, owned audible source.');
       if (opening) {
         const button = document.querySelector('#stage-btn-screen');
@@ -1070,7 +1078,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         throw new Error('Sharing changed the saved encoding preferences.');
       if (replace && (capture().source.audio !== true || capture().source.shareId === previous.shareId
         || capture().source.instanceId === previous.instanceId || videoService.getNativeScreenCaptures().length !== 1
-        || voiceStore.screenAudioShareId !== capture().source.shareId))
+        || voiceStore.screenAudioShareIds.join(',') !== capture().source.shareId))
         throw new Error('Replace did not transfer the single audio owner to a fresh source instance.');
       return { source: capture().source, self: auth.currentUser.sessionId, desktopSourceId,
         picker: { backend, audio: audioEnabled, preserveAspectRatio, captureKind: gameFallback ? 'game' : 'window',
@@ -1188,7 +1196,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         mainCall: webRtcManager['nativeScreens']['call']?.config.callId ?? null,
         visibleSession: sessionManager.getActive()?.key ?? null, voiceSession: voiceStore.voiceSessionKey,
         localNativeSources: videoService.getNativeScreenCaptures().length,
-        localScreenShareIds: [...voiceStore.screenShareIds], screenAudioShareId: voiceStore.screenAudioShareId,
+        localScreenShareIds: [...voiceStore.screenShareIds], screenAudioShareIds: [...voiceStore.screenAudioShareIds],
         previewState: document.querySelector('[data-preview-state]')?.dataset.previewState ?? null,
         focused: document.hasFocus(),
         previewPauseWhenUnfocused: settingsStore.screenSharePreviewPauseWhenUnfocused,
@@ -1331,13 +1339,11 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       channelButton.click();
     },
     browserAudioReady() {
-      const remote = sharing();
-      const pipeline = remote && webRtcManager['mediaRouter']['screenAudioPipelines'].get(remote.user.sessionId);
+      const pipeline = browserScreenPipeline(sharing());
       return !!pipeline && pipeline.gain.context.state === 'running';
     },
     async browserAudioSignal() {
-      const remote = sharing();
-      const pipeline = remote && webRtcManager['mediaRouter']['screenAudioPipelines'].get(remote.user.sessionId);
+      const pipeline = browserScreenPipeline(sharing());
       if (!pipeline || pipeline.gain.context.state !== 'running') throw new Error('The actual browser screen output graph is not running.');
       const context = pipeline.gain.context, split = context.createChannelSplitter(2);
       measuredScreenContext = context;
@@ -1519,7 +1525,7 @@ async function exerciseSourceQualityChanges(publisher, viewer) {
     assert.deepEqual(evidence.receiverState.watches, initialState.watches);
     assert.equal(evidence.publisherState.mainCall, publisherCall);
     assert.equal(evidence.receiverState.mainCall, viewerCall);
-    assert.equal(evidence.publisherState.screenAudioShareId, shareId);
+    assert.deepEqual(evidence.publisherState.screenAudioShareIds, [shareId]);
     assert.deepEqual(evidence.publisherState.localScreenShareIds, [shareId]);
     assert.deepEqual(evidence.publisherState.errors, expectedPublisherEvents);
     assert.deepEqual(evidence.receiverState.errors, []);
@@ -2043,7 +2049,7 @@ async function run() {
       assert.equal(evidence.receiverState.mainCall, viewerCall);
       assert.equal(evidence.publisherState.channelId, publisher.identity.channelId);
       assert.equal(evidence.receiverState.channelId, viewer.identity.channelId);
-      assert.equal(evidence.publisherState.screenAudioShareId, current.source.shareId);
+      assert.deepEqual(evidence.publisherState.screenAudioShareIds, [current.source.shareId]);
       assert.deepEqual(evidence.publisherState.localScreenShareIds, [current.source.shareId]);
       assert.deepEqual(evidence.receiverState.sources, [current.source]);
       assert.equal(evidence.receiverState.browserWatches, 1);
@@ -2125,7 +2131,7 @@ async function run() {
     retiredCapturePids.add(capturePid);
     const final = await collectEvidence('sourceReplacementRetired', publisher, viewer);
     assert.equal(final.publisherState.localNativeSources, 0);
-    assert.equal(final.publisherState.screenAudioShareId, null);
+    assert.deepEqual(final.publisherState.screenAudioShareIds, []);
     assert.equal(final.receiverState.screenOutputContext, null);
     assert.deepEqual(final.sfuScreenProducers, []);
     assert.deepEqual(final.publisherState.errors, []);

@@ -96,6 +96,13 @@ export interface DesktopSource {
   name: string;
   type: 'screen' | 'window';
   isOwnWindow?: boolean;
+  /** Owning process of a window, so two windows of one application are not both captured with sound (#253). */
+  processId?: number;
+  /**
+   * Running parents of that process, nearest first. Windows captures an application's audio together
+   * with the processes it started, so a launcher and the game it opened are not both captured with sound.
+   */
+  processAncestry?: number[];
   /** Browser engine that stops painting this window once other windows fully cover it, freezing its capture. */
   occlusionEngine?: BrowserOcclusionEngine;
   displayNumber?: number;

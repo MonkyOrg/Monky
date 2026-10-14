@@ -33,15 +33,22 @@ type RequestInput = Omit<Extract<RendererRequest, { type: 'signal' }>, 'requestI
 type SourceRecord = {
   desktopSourceId: string;
   source: NativeScreenSource; publisher: NativeScreenPublisher; captureHub: NativePcmCaptureHub | null;
+  audioScope: AudioScope | null;
   monitor: NodeJS.Timeout | null;
   preview: NativeScreenPreviewBridge | null;
   previewMode: NativeScreenCaptureMode | null;
   stopFrameProbe: () => void;
 };
+/**
+ * What a source's audio capture contains (#253). A monitor captures the whole system mix, and so does
+ * every source on macOS, where ScreenCaptureKit cannot isolate one application; a window captures its
+ * application's process tree, known once the selected window is resolved.
+ */
+type AudioScope = { system: boolean; processId: number | null };
 type SubscriptionRecord = { source: NativeScreenSource; publisherSessionId: string; subscription: NativeScreenSubscription };
 type WatchIntent = { presentationId: string; audio: NativeScreenAudioPreferences };
 type SourceSelection = {
-  audio: boolean; abort: AbortController; probe: SelectedCaptureProbe | null;
+  audioScope: AudioScope | null; abort: AbortController; probe: SelectedCaptureProbe | null;
   done: Promise<void>; finish: () => void;
 };
 type CallRecord = {
@@ -209,6 +216,23 @@ function capturedBrowserEngine(target: { hwnd: number; expectedProcessId: number
   } catch (error) {
     console.warn('[NativeScreen] Could not identify the captured window browser:', error);
     return null;
+  }
+}
+/**
+ * Whether an application's audio overlaps audio already shared. Windows captures each application
+ * together with the processes it started, so another window of it, or a launcher and the game it
+ * opened, would share the same audio twice (#253).
+ */
+function sharesApplicationAudio(processId: number, shared: readonly number[]): boolean {
+  if (shared.includes(processId)) return true;
+  if (!shared.length || process.platform !== 'win32') return false;
+  try {
+    const [own, ...others] = screenAudio.getProcessAncestry([processId, ...shared]);
+    return shared.some((other, index) => !!own?.includes(other) || !!others[index]?.includes(processId));
+  } catch (error) {
+    // Without a process snapshot, distinct processes are treated as unrelated instead of blocking the share.
+    console.warn('[NativeScreen] Could not compare the shared applications\' process trees:', error);
+    return false;
   }
 }
 
@@ -865,6 +889,15 @@ class NativeScreenSharingService {
     if (errors.length) throw new AggregateError(errors, 'Local screen preview focus transition failed.');
   }
 
+  /** Audio already captured or reserved in any call, except by the sources a new one supersedes. */
+  private audioScopes(superseded: ReadonlySet<SourceRecord>): AudioScope[] {
+    return [...this.calls.values()].flatMap(call => [
+      ...[...call.sources.values()].filter(entry => entry.source.audio && !superseded.has(entry))
+        .map(entry => entry.audioScope ?? { system: true, processId: null }),
+      ...[...call.sourceSelections.values()].flatMap(entry => entry.audioScope ? [entry.audioScope] : []),
+    ]);
+  }
+
   private async addSource(call: CallRecord, command: Extract<NativeScreenCommand, { action: 'source-add' }>): Promise<NativeScreenCommandResult> {
     const diagnostic = { ...this.context(call, command.shareId), captureKind: command.captureKind ?? 'window',
       video: diagnosticProfile(command.video), audio: command.audio, preserveAspectRatio: command.preserveAspectRatio ?? true };
@@ -873,24 +906,27 @@ class NativeScreenSharingService {
     const replacement = command.replacesSourceInstanceId === undefined ? undefined : previous;
     if (command.replacesSourceInstanceId !== undefined && (!replacement
       || replacement.source.instanceId !== command.replacesSourceInstanceId
-      || replacement.desktopSourceId !== command.desktopSourceId || replacement.source.audio !== command.audio
-      || command.replacesAudioShareId !== undefined))
+      || replacement.desktopSourceId !== command.desktopSourceId
+      // A replacement may give up its audio (#253), never acquire it.
+      || (command.audio && !replacement.source.audio)
+      || command.replacesAudioShareIds !== undefined))
       throw new Error('Quality replacement must name the exact existing source instance and selected capture.');
     if ((previous && !replacement) || call.sourceSelections.has(command.shareId)
       || call.sources.size + call.sourceSelections.size > SCREEN_SHARE_LIMITS.maximum)
       throw new Error('Native screen source already exists or exceeds the screen-share plus pending-replacement limit.');
-    const replacedAudio = command.replacesAudioShareId === undefined ? null : call.sources.get(command.replacesAudioShareId);
-    if (command.replacesAudioShareId !== undefined && (!command.audio || !replacedAudio?.source.audio))
-      throw new Error('Audio replacement must name an existing audible source in this call.');
-    const replacedAudioInstanceId = replacedAudio?.source.instanceId;
-    if (command.audio && [...this.calls.values()].some(owner =>
-      [...owner.sources.values()].some(entry => entry.source.audio
-        && entry !== replacement && (owner !== call || entry.source.shareId !== command.replacesAudioShareId))
-      || [...owner.sourceSelections.values()].some(entry => entry.audio)))
-      throw new Error('Only one shared source can reserve capture audio at a time.');
+    const audioOwners = (command.replacesAudioShareIds ?? []).map(shareId => call.sources.get(shareId));
+    if (command.replacesAudioShareIds !== undefined && (!command.audio || audioOwners.some(owner => !owner?.source.audio)))
+      throw new Error('Audio replacement must name existing audible sources in this call.');
+    const superseded = new Set([replacement, ...audioOwners].filter((entry): entry is SourceRecord => entry !== undefined));
+    const supersededAudio = audioOwners.flatMap(owner => owner ? [[owner.source.shareId, owner.source.instanceId] as const] : []);
+    const audioScope: AudioScope | null = command.audio
+      ? { system: process.platform === 'darwin' || (command.captureKind ?? 'window') === 'monitor', processId: null } : null;
+    // Applications may each share their own audio; the whole system mix already contains all of them.
+    if (audioScope && this.audioScopes(superseded).some(scope => scope.system || audioScope.system))
+      throw new Error('Whole-system screen audio cannot be combined with another shared audio.');
     let finish!: () => void;
     const done = new Promise<void>(resolve => { finish = resolve; });
-    const selection: SourceSelection = { audio: command.audio, abort: new AbortController(), probe: null, done, finish };
+    const selection: SourceSelection = { audioScope, abort: new AbortController(), probe: null, done, finish };
     call.sourceSelections.set(command.shareId, selection);
     const assertCurrent = (): void => {
       this.current(call);
@@ -917,6 +953,13 @@ class NativeScreenSharingService {
       if (target.kind !== kind) throw new Error('Native source resolution changed the requested capture kind.');
       if (command.audio && target.kind !== 'monitor' && target.expectedProcessId === process.pid)
         throw Object.assign(new Error(mt('screenShare.ownWindowAudioUnavailable')), { code: 'ERR_AUDIO_TARGET' });
+      if (audioScope && !audioScope.system && target.kind !== 'monitor') {
+        const shared = this.audioScopes(superseded)
+          .flatMap(scope => !scope.system && scope.processId !== null ? [scope.processId] : []);
+        if (sharesApplicationAudio(target.expectedProcessId, shared))
+          throw Object.assign(new Error(mt('screenShare.appAudioAlreadyShared')), { code: 'ERR_AUDIO_TARGET' });
+        audioScope.processId = target.expectedProcessId;
+      }
       const occlusionEngine = process.platform === 'win32' && target.platform !== 'darwin' && target.kind !== 'monitor'
         ? capturedBrowserEngine(target) : null;
       let paused = false;
@@ -1027,9 +1070,8 @@ class NativeScreenSharingService {
         },
         createEndpoint: options => {
           this.current(call);
-          if (command.replacesAudioShareId
-            && call.sources.get(command.replacesAudioShareId)?.source.instanceId === replacedAudioInstanceId)
-            throw new Error('The previous screen audio owner must retire before replacement capture starts.');
+          if (supersededAudio.some(([shareId, instanceId]) => call.sources.get(shareId)?.source.instanceId === instanceId))
+            throw new Error('Previous screen audio owners must give up their audio before replacement capture starts.');
           sourceState();
           const diagnostic = { ...this.context(call, source.shareId, options.pipelineId), role: 'publish',
             quality: options.quality, video: diagnosticProfile(getScreenShareProfile(source.video, options.quality, source.codec)),
@@ -1060,8 +1102,8 @@ class NativeScreenSharingService {
           });
         },
       });
-      const entry: SourceRecord = { desktopSourceId: command.desktopSourceId,
-        source, publisher, captureHub, monitor: null, preview: null, previewMode: null, stopFrameProbe: () => undefined };
+      const entry: SourceRecord = { desktopSourceId: command.desktopSourceId, source, publisher, captureHub, audioScope,
+        monitor: null, preview: null, previewMode: null, stopFrameProbe: () => undefined };
       call.sources.set(source.shareId, entry);
       // An announcement owns its exact target even without a capture pipeline.
       let observedPaused = paused, reportedHidden = false, hiddenChecks = 0;

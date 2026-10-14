@@ -29,8 +29,11 @@ export class VoiceStore {
    */
   public screenShareIds: string[] = [];
   public isScreenSharing: boolean = false;
-  /** Share whose system audio is being captured, if any (#253: at most one). */
-  public screenAudioShareId: string | null = null;
+  /**
+   * Shares whose capture carries audio (#253). Each application may share its own; a whole screen's
+   * audio is the entire system mix, so it is always the only one.
+   */
+  public screenAudioShareIds: string[] = [];
   /** Explicit receive intent belongs to the call, never to a mounted view. */
   private watchedScreenShares = new Map<string, Set<string>>();
   /** Last published share ids per participant of the call, to tell new sources from old ones. */
@@ -191,7 +194,7 @@ export class VoiceStore {
       this.isCameraOn = false;
       this.screenShareIds = [];
       this.isScreenSharing = false;
-      this.screenAudioShareId = null;
+      this.screenAudioShareIds = [];
       this.isSpeaking = false;
       this.isReconnecting = false;
       this.isConnecting = false;
@@ -316,7 +319,7 @@ export class VoiceStore {
     this.isScreenSharing = sharing;
     if (!sharing) {
       this.screenShareIds = [];
-      this.screenAudioShareId = null;
+      this.screenAudioShareIds = [];
     }
     appEvents.emit('voice.state_updated');
   }
@@ -332,14 +335,21 @@ export class VoiceStore {
   public removeScreenShare(shareId: string): void {
     this.screenShareIds = this.screenShareIds.filter((id) => id !== shareId);
     this.isScreenSharing = this.screenShareIds.length > 0;
-    if (this.screenAudioShareId === shareId) {
-      this.screenAudioShareId = null;
-    }
+    this.screenAudioShareIds = this.screenAudioShareIds.filter((id) => id !== shareId);
     appEvents.emit('voice.state_updated');
   }
 
-  public setScreenAudioShare(shareId: string | null): void {
-    this.screenAudioShareId = shareId;
+  public get hasScreenAudio(): boolean {
+    return this.screenAudioShareIds.length > 0;
+  }
+
+  public addScreenAudioShare(shareId: string): void {
+    if (!this.screenAudioShareIds.includes(shareId)) this.screenAudioShareIds.push(shareId);
+    appEvents.emit('voice.state_updated');
+  }
+
+  public removeScreenAudioShare(shareId: string): void {
+    this.screenAudioShareIds = this.screenAudioShareIds.filter((id) => id !== shareId);
     appEvents.emit('voice.state_updated');
   }
 
@@ -364,7 +374,7 @@ export class VoiceStore {
     this.isCameraOn = false;
     this.screenShareIds = [];
     this.isScreenSharing = false;
-    this.screenAudioShareId = null;
+    this.screenAudioShareIds = [];
     this.isReconnecting = false;
     this.isConnecting = false;
     this.setMicrophoneState(false, false);

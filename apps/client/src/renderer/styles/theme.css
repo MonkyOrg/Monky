@@ -3977,6 +3977,37 @@ input:focus, textarea:focus, select:focus {
   background: color-mix(in srgb, var(--danger) 12%, var(--bg-secondary));
 }
 .chat-copy-toast--danger .material-symbols-outlined { color: var(--danger); }
+/* The toast lets clicks through to what it covers; only its close button takes them. */
+.chat-copy-toast-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  margin: -4px -8px -4px 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  pointer-events: auto;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+.chat-copy-toast .chat-copy-toast-close .material-symbols-outlined { color: inherit; }
+.chat-copy-toast-close:hover,
+.chat-copy-toast-close:focus-visible {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+.chat-copy-toast-close:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-copy-toast-close { transition: none; }
+}
 .version-copy {
   padding: 2px 4px;
   border: 0;
@@ -7064,13 +7095,6 @@ input:focus, textarea:focus, select:focus {
   background: var(--bg-input);
 }
 
-.tray-notice {
-  width: 100%;
-  font-size: 11px;
-  color: var(--danger);
-  padding: 2px 2px 0;
-}
-
 /* Drag & drop affordance */
 .chat-container.chat-drag-over {
   background: rgba(88, 101, 242, 0.05);
@@ -9740,6 +9764,45 @@ button[data-loading="1"]::after {
 
 .voice-mini-icon.live {
   color: var(--danger);
+}
+
+/* Someone else's share icon and LIVE badge open their broadcast. */
+.voice-mini-watch,
+button.member-live-badge {
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+}
+.voice-mini-watch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  line-height: 1;
+  transition: background-color 140ms ease;
+}
+.voice-mini-watch:hover,
+.voice-mini-watch:focus-visible {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+}
+button.member-live-badge {
+  line-height: inherit;
+  transition: filter 140ms ease;
+}
+button.member-live-badge:hover,
+button.member-live-badge:focus-visible {
+  filter: brightness(1.2);
+}
+.voice-mini-watch:focus-visible,
+button.member-live-badge:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .voice-mini-watch,
+  button.member-live-badge { transition: none; }
 }
 
 .voice-mini-icon.muted {

@@ -49,10 +49,10 @@ function fixture(context: TestContext) {
   context.mock.method(webRtcManager, 'clearLocalScreenTracks', () => { clears++; });
   const audio = {
     stops: 0,
-    associations: [] as Array<string | null>,
+    associations: [] as string[][],
     async stop() {
       this.stops++;
-      this.associations.push(voiceStore.screenAudioShareId);
+      this.associations.push([...voiceStore.screenAudioShareIds]);
     },
   };
   const add = (shareId: string) => {
@@ -67,16 +67,16 @@ test('stopping an audio-associated share keeps the other screen and notifies the
   const f = fixture(context);
   f.add('first');
   f.add('second');
-  voiceStore.setScreenAudioShare('first');
+  voiceStore.addScreenAudioShare('first');
   await stopLocalScreenShares(f.audio, { shareIds: ['first'] });
   assert.deepEqual(f.stopped, ['first']);
   assert.deepEqual(f.detached, ['first']);
   assert.deepEqual([...f.captures], ['second']);
   assert.deepEqual(voiceStore.screenShareIds, ['second']);
   assert.equal(voiceStore.isScreenSharing, true);
-  assert.equal(voiceStore.screenAudioShareId, null);
+  assert.deepEqual(voiceStore.screenAudioShareIds, []);
   assert.equal(f.audio.stops, 1);
-  assert.deepEqual(f.audio.associations, ['first'], 'stop pending audio before removeScreenShare forgets its owner');
+  assert.deepEqual(f.audio.associations, [['first']], 'stop pending audio before removeScreenShare forgets its owner');
   assert.deepEqual(f.messages, [{
     target: f.call.key, type: MessageType.VOICE_STATE_UPDATE,
     payload: { screenShareIds: ['second'], nativeScreenShares: [], isScreenSharing: true, isSharingScreenAudio: false },
@@ -87,20 +87,35 @@ test('stopping a different share preserves the associated audio and stopping the
   const f = fixture(context);
   f.add('first');
   f.add('second');
-  voiceStore.setScreenAudioShare('first');
+  voiceStore.addScreenAudioShare('first');
   await stopLocalScreenShares(f.audio, { shareIds: ['second'] });
   assert.equal(f.audio.stops, 0);
-  assert.equal(voiceStore.screenAudioShareId, 'first');
+  assert.deepEqual(voiceStore.screenAudioShareIds, ['first']);
   await stopLocalScreenShares(f.audio, { shareIds: ['first'] });
   assert.equal(f.audio.stops, 1);
   assert.equal(voiceStore.isScreenSharing, false);
   assert.deepEqual(f.messages.at(-1)?.payload, { screenShareIds: [], nativeScreenShares: [], isScreenSharing: false, isSharingScreenAudio: false });
 });
 
+test('with several applications sharing their sound, stopping one keeps the others audible', async context => {
+  const f = fixture(context);
+  for (const shareId of ['first', 'second', 'silent']) f.add(shareId);
+  voiceStore.addScreenAudioShare('first');
+  voiceStore.addScreenAudioShare('second');
+  await stopLocalScreenShares(f.audio, { shareIds: ['first'] });
+  assert.deepEqual(voiceStore.screenAudioShareIds, ['second']);
+  assert.equal(voiceStore.hasScreenAudio, true);
+  await stopLocalScreenShares(f.audio, { shareIds: ['silent'] });
+  assert.deepEqual(voiceStore.screenAudioShareIds, ['second'], 'A silent share takes no sound with it');
+  await stopLocalScreenShares(f.audio, { shareIds: ['second'] });
+  assert.deepEqual(voiceStore.screenAudioShareIds, []);
+  assert.equal(voiceStore.hasScreenAudio, false);
+});
+
 test('replacement stops only the old captures and audio, then publishes the replacement without an intermediate state', async context => {
   const f = fixture(context);
   f.add('old');
-  voiceStore.setScreenAudioShare('old');
+  voiceStore.addScreenAudioShare('old');
   f.captures.add('replacement');
   const call = captureScreenShareCall();
   await stopLocalScreenShares(f.audio, { shareIds: ['old'], notify: false });
@@ -140,7 +155,7 @@ test('teardown clears synchronously without renegotiation or screen state update
   const stoppingAudio = gate();
   context.mock.method(f.audio, 'stop', () => stoppingAudio.promise);
   f.add('old');
-  voiceStore.setScreenAudioShare('old');
+  voiceStore.addScreenAudioShare('old');
   const stopped = stopLocalScreenShares(f.audio, { teardown: true });
   assert.equal(f.clears(), 1);
   assert.deepEqual(f.stopped, [undefined]);
@@ -149,11 +164,11 @@ test('teardown clears synchronously without renegotiation or screen state update
   assert.deepEqual(f.messages, []);
   voiceStore.setChannel('next-room', f.visible.key);
   f.add('new');
-  voiceStore.setScreenAudioShare('new');
+  voiceStore.addScreenAudioShare('new');
   stoppingAudio.release();
   await stopped;
   assert.deepEqual(voiceStore.screenShareIds, ['new']);
-  assert.equal(voiceStore.screenAudioShareId, 'new');
+  assert.deepEqual(voiceStore.screenAudioShareIds, ['new']);
   assert.deepEqual([...f.captures], ['new']);
   assert.deepEqual(f.messages, []);
 });

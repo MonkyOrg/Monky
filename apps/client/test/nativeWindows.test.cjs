@@ -129,6 +129,34 @@ test('overlay exclusion removes metadata and previews and rejects a previously s
   assert.equal((await e.enumerate(true)).filter(source => source.type === 'window').length, 1);
 });
 
+test('the screen-audio package exposes every native function its types declare', () => {
+  const root = path.resolve(__dirname, '..', 'native', 'screen-audio');
+  const declared = [...fs.readFileSync(path.join(root, 'index.d.ts'), 'utf8').matchAll(/^export function (\w+)/gmu)]
+    .map(match => match[1]);
+  assert.ok(declared.includes('getProcessAncestry') && declared.includes('getWindowState'));
+  const exported = require(path.join(root, 'index.js'));
+  assert.deepEqual(declared.filter(name => typeof exported[name] !== 'function'), [],
+    'A function declared for Main must also be re-exported by the package entry, not only by the binary');
+});
+
+test('listed windows carry their process ancestry so related applications are not both captured with sound', () => {
+  const module = moduleFor();
+  const game = { ...structuredClone(window), hwnd: 124, title: 'Game', processId: 457 };
+  const requests = [];
+  let ancestry = ids => ids.map(id => id === 457 ? [456, 10] : id === 456 ? [10] : null);
+  const sources = new module.NativeDesktopSources({
+    windows: () => [structuredClone(window), structuredClone(game)], windowState: () => null,
+    monitors: () => [], monitorState: () => null,
+    processAncestry: ids => { requests.push([...ids]); return ancestry(ids); },
+  });
+  assert.deepEqual(sources.listWindows().map(({ window: listed, processAncestry }) => [listed.processId, processAncestry]),
+    [[456, [10]], [457, [456, 10]]]);
+  assert.deepEqual(requests, [[456, 457]], 'One snapshot serves every listed window');
+  ancestry = () => { throw new Error('modeled snapshot failure'); };
+  assert.deepEqual(sources.listWindows().map(({ processAncestry }) => processAncestry), [undefined, undefined],
+    'Without a snapshot the windows are still listed, and Main checks again before capturing');
+});
+
 test('legacy capture propagates rejected window preparation without acquiring or falling back', async () => {
   const file = path.resolve(__dirname, '..', 'src', 'renderer', 'core', 'VideoService.ts');
   const source = ts.createSourceFile(file, fs.readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true);

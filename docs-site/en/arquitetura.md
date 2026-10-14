@@ -623,6 +623,21 @@ is why Monky has a native C++ module:
 If the module fails to load, nothing breaks: sharing keeps working without sound
 and the app says so.
 
+Each share with sound opens its own capture session. The module accepts up to 8
+sessions at once, one for each screen a person may share, and keeps the legacy
+capture exclusive. The main process decides which sounds may coexist and repeats
+the picker's checks: a monitor's sound (and, on macOS, any source's, because
+ScreenCaptureKit delivers the system mix) does not coexist with another, and two
+windows of the same process do not capture the same sound. Because process
+loopback includes the processes an application started, the same applies to
+processes where one descends from the other, like a launcher and the game it
+opened; the picker receives each window's parent-process chain and the main
+process checks again, on a fresh snapshot, before capturing. When a screen takes
+over the applications' sound, each of them switches to a new instance of the
+same broadcast without audio — viewers follow the switch as they do for a
+quality change — and the screen's capture starts only after they give up their
+sound.
+
 ### Quality and bandwidth
 
 Profiles control resolution, FPS and the bitrate ceiling. Chromium sending

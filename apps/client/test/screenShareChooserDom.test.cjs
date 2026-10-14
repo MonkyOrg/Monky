@@ -281,7 +281,7 @@ async function setupChooser() {
   };
   const first = share('#c0392b', 'Main monitor', 'native-monitor:1', 'monitor');
   const second = share('#2471a3', 'Game <b>Valorant</b>', 'window:7:0', 'game');
-  voiceStore.setScreenAudioShare(first);
+  voiceStore.addScreenAudioShare(first);
   const results = [];
   window.chooserFixture = {
     ...chooser, videoService, voiceStore, appEvents, first, second, results,

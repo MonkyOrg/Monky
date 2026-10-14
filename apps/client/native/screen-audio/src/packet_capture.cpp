@@ -454,7 +454,7 @@ QueueResult Queue(State& state, std::unique_ptr<Event> event) {
 void Execute(Shared shared) noexcept {
   auto& state = *shared;
   try {
-    if (!state.lease.held()) throw Failure("ERR_AUDIO_BUSY", "Already capturing (legacy or packet mode)");
+    if (!state.lease.held()) throw Failure("ERR_AUDIO_BUSY", "Audio capture is busy (legacy capture or packet session limit)");
     if (!state.stop.load()) {
       Format format;
       Timeline timeline;
@@ -665,7 +665,7 @@ Napi::Value CreatePacketCapture(const Napi::CallbackInfo& info) {
 #endif
     NapiCheck(napi_add_async_cleanup_hook(env, Cleanup, state.get(), &state->cleanup));
     if (!state->lease.held()) {
-      state->Fail("ERR_AUDIO_BUSY", "Already capturing (legacy or packet mode)");
+      state->Fail("ERR_AUDIO_BUSY", "Audio capture is busy (legacy capture or packet session limit)");
       state->workDone = true;
       ReleaseProducer(*state);
       queued = true;

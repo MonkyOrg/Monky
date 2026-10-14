@@ -18,6 +18,18 @@ interface AudioContextRetirement {
   work?: Promise<void>;
 }
 
+const SHARE_KEY_SEPARATOR = '\u0000';
+/**
+ * Screen audio plays per shared source: one person may share several applications' sound at once
+ * (#253). Legacy screen audio, a single resource per person, keeps the person's own key.
+ */
+function screenAudioKey(peerSessionId: string, shareId?: string): string {
+  return shareId === undefined ? peerSessionId : `${peerSessionId}${SHARE_KEY_SEPARATOR}${shareId}`;
+}
+function screenAudioPeer(key: string): string {
+  return key.split(SHARE_KEY_SEPARATOR, 1)[0];
+}
+
 /**
  * RemoteMediaRouter manages playback, volume (0–200%), audio routing,
  * speaker device sinks, and video DOM attachments for remote audio and screen tracks.
@@ -96,8 +108,8 @@ export class RemoteMediaRouter {
     return this.audioElements.get(peerSessionId);
   }
 
-  public getScreenAudioElement(peerSessionId: string): HTMLAudioElement | undefined {
-    return this.screenAudioElements.get(peerSessionId);
+  public getScreenAudioElement(peerSessionId: string, shareId?: string): HTMLAudioElement | undefined {
+    return this.screenAudioElements.get(screenAudioKey(peerSessionId, shareId));
   }
 
   public getVoiceAudioLevel(peerSessionId: string): number | null {
@@ -143,8 +155,10 @@ export class RemoteMediaRouter {
 
   // ── Screen audio routing ──
 
-  public routeScreenAudioTrack(peerSessionId: string, track: MediaStreamTrack, onError?: (error: unknown) => void): void {
-    let screenAudioEl = this.screenAudioElements.get(peerSessionId);
+  public routeScreenAudioTrack(peerSessionId: string, track: MediaStreamTrack, onError?: (error: unknown) => void,
+    shareId?: string): void {
+    const key = screenAudioKey(peerSessionId, shareId);
+    let screenAudioEl = this.screenAudioElements.get(key);
     if (!screenAudioEl) {
       screenAudioEl = document.createElement('audio');
       screenAudioEl.autoplay = true;
@@ -152,14 +166,15 @@ export class RemoteMediaRouter {
       // Playback preference is independent of the call's transport subscription.
       screenAudioEl.muted = true;
       screenAudioEl.setAttribute('data-screen-audio-session', peerSessionId);
+      if (shareId !== undefined) screenAudioEl.setAttribute('data-screen-audio-share', shareId);
       document.body.appendChild(screenAudioEl);
-      this.screenAudioElements.set(peerSessionId, screenAudioEl);
+      this.screenAudioElements.set(key, screenAudioEl);
     }
     const screenStream = new MediaStream([track]);
     screenAudioEl.srcObject = screenStream;
     const participant = this.getVoiceParticipants().get(peerSessionId);
     const volume = settingsStore.getScreenAudioVolume(peerSessionId, participant?.user.clientId);
-    this.applyVolumeToElement(screenAudioEl, volume, peerSessionId, this.screenAudioPipelines, track);
+    this.applyVolumeToElement(screenAudioEl, volume, key, this.screenAudioPipelines, track);
     void this.playRemoteAudio('screen', screenAudioEl, screenStream)
       .catch((error: unknown) => {
         console.warn('[WebRTC:MediaRouter] Screen audio playback failed:', error);
@@ -170,11 +185,18 @@ export class RemoteMediaRouter {
     };
   }
 
+  /** Every shared source of this person: like the microphone, mute and volume are per person. */
+  private peerScreenAudio(peerSessionId: string): Array<[string, HTMLAudioElement]> {
+    return [...this.screenAudioElements].filter(([key]) => screenAudioPeer(key) === peerSessionId);
+  }
+
+  private screenAudioStream(key: string): MediaStream | null {
+    const element = this.screenAudioElements.get(key);
+    return element?.srcObject instanceof MediaStream ? element.srcObject : null;
+  }
+
   public setScreenAudioMuted(peerSessionId: string, muted: boolean): void {
-    const screenAudioEl = this.screenAudioElements.get(peerSessionId);
-    if (screenAudioEl) {
-      screenAudioEl.muted = muted;
-    }
+    for (const [, screenAudioEl] of this.peerScreenAudio(peerSessionId)) screenAudioEl.muted = muted;
     const participant = this.getVoiceParticipants().get(peerSessionId);
     this.setScreenAudioVolume(peerSessionId, settingsStore.getScreenAudioVolume(peerSessionId, participant?.user.clientId));
   }
@@ -367,11 +389,9 @@ export class RemoteMediaRouter {
   }
 
   public setScreenAudioVolume(peerSessionId: string, volume: number): void {
-    const screenAudioEl = this.screenAudioElements.get(peerSessionId);
-    if (screenAudioEl) {
-      const stream = screenAudioEl.srcObject as MediaStream | null;
-      const track = stream?.getAudioTracks()[0];
-      this.applyVolumeToElement(screenAudioEl, volume, peerSessionId, this.screenAudioPipelines, track);
+    for (const [key, screenAudioEl] of this.peerScreenAudio(peerSessionId)) {
+      const track = this.screenAudioStream(key)?.getAudioTracks()[0];
+      this.applyVolumeToElement(screenAudioEl, volume, key, this.screenAudioPipelines, track);
     }
   }
 
@@ -398,25 +418,31 @@ export class RemoteMediaRouter {
     }
   }
 
+  /** Without a track, every source of this person stops; with one, only the source still playing it. */
   public cleanupScreenAudio(peerSessionId: string, expectedTrack?: MediaStreamTrack): Promise<void> {
-    const el = this.screenAudioElements.get(peerSessionId);
-    const stream = el?.srcObject instanceof MediaStream ? el.srcObject : null;
-    if (!expectedTrack || stream?.getTracks().includes(expectedTrack)) {
-      if (el) {
-        try { el.pause(); }
-        catch (error: unknown) { console.warn('[WebRTC:MediaRouter] Could not pause screen decoder:', error); }
-        for (const track of stream?.getAudioTracks() ?? []) track.onended = null;
-        el.srcObject = null;
-        el.remove();
-        this.screenAudioElements.delete(peerSessionId);
+    const keys = [...new Set([...this.screenAudioElements.keys(), ...this.screenAudioPipelines.keys()])]
+      .filter(key => screenAudioPeer(key) === peerSessionId
+        && (!expectedTrack || this.screenAudioStream(key)?.getTracks().includes(expectedTrack)));
+    if (!expectedTrack || keys.length) {
+      let retiredTrack = expectedTrack;
+      for (const key of keys) {
+        const el = this.screenAudioElements.get(key);
+        const stream = this.screenAudioStream(key);
+        retiredTrack ??= stream?.getAudioTracks()[0];
+        if (el) {
+          try { el.pause(); }
+          catch (error: unknown) { console.warn('[WebRTC:MediaRouter] Could not pause screen decoder:', error); }
+          for (const track of stream?.getAudioTracks() ?? []) track.onended = null;
+          el.srcObject = null;
+          el.remove();
+          this.screenAudioElements.delete(key);
+        }
+        this.cleanupAudioPipeline(key, this.screenAudioPipelines);
       }
-      this.cleanupAudioPipeline(peerSessionId, this.screenAudioPipelines);
       if (!this.screenAudioPipelines.size) {
         const context = this.audioContexts.get('screen');
         this.audioContexts.delete('screen');
-        if (context) this.retiringAudioContexts.set(context, {
-          peerSessionId, track: expectedTrack ?? stream?.getAudioTracks()[0],
-        });
+        if (context) this.retiringAudioContexts.set(context, { peerSessionId, track: retiredTrack });
       }
     }
     // The element may be gone while an earlier context close still needs acknowledgement.
@@ -503,7 +529,8 @@ export class RemoteMediaRouter {
     }
     this.audioElements.clear();
 
-    for (const peerSessionId of this.screenAudioElements.keys()) void this.cleanupScreenAudio(peerSessionId);
+    for (const peerSessionId of new Set([...this.screenAudioElements.keys()].map(screenAudioPeer)))
+      void this.cleanupScreenAudio(peerSessionId);
 
     for (const [peerSessionId, sfuScreens] of this.sfuRemoteScreenStreams.entries()) {
       for (const [shareId, stream] of sfuScreens.entries()) {

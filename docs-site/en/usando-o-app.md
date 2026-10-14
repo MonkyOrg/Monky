@@ -2,7 +2,9 @@
 
 After connecting, the left sidebar organizes servers and channels, the center
 shows chat or the voice stage, and the right side lists members. Connecting
-to a server and joining a call are separate actions.
+to a server and joining a call are separate actions. Short notices disappear on
+their own, and you can also close them with the **×** button to reach whatever
+is underneath.
 
 <AppScreenshot src="/screenshots/conversa-en.png" alt="A demo conversation with servers and channels on the left, messages in the center and members on the right." caption="Windows client capture using demo data. The names, conversation and bot were created for this guide." />
 
@@ -83,6 +85,9 @@ until you choose an image. This also applies to chroma key with an image
 replacement; unprocessed video is never published as a fallback.
 
 People allowed to watch see a **LIVE** badge. Click the card to spotlight it or use fullscreen.
+Clicking the **LIVE** badge or the screen-share icon next to someone's name asks
+whether you want to watch and opens the stage on that broadcast; see
+[Watching shared screens](/en/configuracoes#watching-shared-screens).
 
 ### Adjusting FPS for the encoder
 
