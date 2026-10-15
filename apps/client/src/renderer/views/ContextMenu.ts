@@ -210,6 +210,10 @@ export class ContextMenu {
     return this.menuEl !== null && this.returnFocus === anchor;
   }
 
+  public isOpen(): boolean {
+    return this.menuEl !== null;
+  }
+
   public close(): void {
     this.closeSubmenu();
     this.returnFocus?.setAttribute('aria-expanded', 'false');

@@ -193,6 +193,28 @@ async function runLightboxZoomSmoke(window) {
   const wheel = deltaY => evaluate(`document.querySelector('.attachment-lightbox:not([data-ui-closing]) .lightbox-media--image').dispatchEvent(new WheelEvent('wheel', {
     deltaY: ${deltaY}, bubbles: true, cancelable: true
   }))`);
+  const menuState = () => evaluate(`(() => {
+    const menu = document.querySelector('.floating-context-menu:not([data-ui-closing])');
+    return {
+      open: !!menu, viewerOpen: !!document.querySelector('.attachment-lightbox:not([data-ui-closing])'),
+      items: [...(menu?.querySelectorAll('[role="menuitem"]') ?? [])].map(item => {
+        const rect = item.getBoundingClientRect();
+        const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+        return {
+          label: item.querySelector(':scope > span:not(.material-symbols-outlined)')?.textContent,
+          shortcut: item.querySelector('kbd')?.textContent ?? '', disabled: item.disabled, x, y,
+          reachable: document.elementFromPoint(x, y)?.closest('[role="menuitem"]') === item,
+        };
+      }),
+    };
+  })()`);
+  const rightClick = async (from, to = from) => {
+    await mouse({ type: 'mouseMoved', ...from });
+    await mouse({ type: 'mousePressed', ...from, button: 'right', buttons: 2, clickCount: 1 });
+    if (to !== from) await mouse({ type: 'mouseMoved', ...to, button: 'right', buttons: 2 });
+    await mouse({ type: 'mouseReleased', ...to, button: 'right', buttons: 0, clickCount: 1 });
+    await new Promise(resolve => setTimeout(resolve, 50));
+  };
   const initialSize = window.getContentSize();
   try {
     await evaluate(`(async () => {
@@ -203,16 +225,39 @@ async function runLightboxZoomSmoke(window) {
         return canvas.toDataURL('image/png');
       };
       const source = document.createElement('div');
+      window.zoomDownloads = [];
       window.closeZoomFixture = lightboxModal.open([
         { kind: 'image', url: image(1600, 1000), fileName: 'Landscape', senderName: '', timestamp: '', source },
         { kind: 'image', url: image(400, 900), fileName: 'Portrait', senderName: '', timestamp: '', source },
         { kind: 'video', url: '', fileName: 'Video layout', senderName: '', timestamp: '', source }
-      ], 0, async () => {});
+      ], 0, async (url, fileName) => { window.zoomDownloads.push(fileName); });
     })()`);
     const base = await ready();
     await paint();
     check(base.frame.width <= base.stage.width + 1 && base.frame.height <= base.stage.height + 1,
       'Initial image and container fit the viewing stage');
+    const center = { x: base.width / 2, y: base.height / 2 };
+    await rightClick(center);
+    let menu = await menuState();
+    check(menu.open && menu.items.map(item => item.label).join('|') === 'Copy image|Download'
+      && menu.items[0].shortcut === `${process.platform === 'darwin' ? 'Cmd' : 'Ctrl'}+C` && !menu.items[1].disabled,
+    `A real right-click on the image offers the toolbar copy and download actions: ${JSON.stringify(menu)}`);
+    check(menu.items.every(item => item.reachable), 'The media menu stacks above the viewer instead of opening hidden behind it');
+    await dispatchKey(window, 'ArrowRight', 'ArrowRight', 39);
+    check((await state()).naturalWidth === 1600 && (await menuState()).open,
+      'Arrow keys belong to the open menu instead of switching the image underneath it');
+    await dispatchClick(window, { x: center.x, y: 8 });
+    menu = await menuState();
+    check(!menu.open && menu.viewerOpen, 'The press that dismisses the menu over the backdrop keeps the viewer open');
+    await rightClick(center);
+    await dispatchKey(window, 'Escape', 'Escape', 27);
+    menu = await menuState();
+    check(!menu.open && menu.viewerOpen, 'Escape closes only the menu, leaving the viewer open');
+    await rightClick(center);
+    const download = (await menuState()).items[1];
+    await dispatchClick(window, { x: download.x, y: download.y });
+    check(await evaluate('window.zoomDownloads.join()') === 'Landscape' && !(await menuState()).open,
+      'Download from the menu saves the right-clicked item and dismisses the menu');
     await mouse({ type: 'mouseMoved', x: base.width / 2, y: base.height / 2 });
     await mouse({ type: 'mouseWheel', x: base.width / 2, y: base.height / 2, deltaX: 0, deltaY: -100 });
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -227,6 +272,12 @@ async function runLightboxZoomSmoke(window) {
     check(grown.percent === `${Math.round(grown.image.width / grown.naturalWidth * 100)}%`,
       'The indicator reflects real image magnification instead of compounding the new container size');
     check(grown.closeAccessible, 'Toolbar controls remain hit-testable above enlarged images');
+    await rightClick({ x: grown.width / 2, y: grown.height / 2 }, { x: grown.width / 2 + 100, y: grown.height / 2 + 60 });
+    const rightDragged = await state();
+    check(Math.abs(rightDragged.frame.left - grown.frame.left) <= 1 && Math.abs(rightDragged.frame.top - grown.frame.top) <= 1
+      && !rightDragged.dragging, 'Dragging with the secondary button never pans a zoomed image');
+    check((await menuState()).open, 'The secondary button still opens the menu over a zoomed image');
+    await dispatchKey(window, 'Escape', 'Escape', 27);
     await mouse({ type: 'mousePressed', x: grown.width / 2, y: grown.height / 2, button: 'left', clickCount: 1 });
     await mouse({ type: 'mouseMoved', x: grown.width - 2, y: grown.height - 2, button: 'left', buttons: 1 });
     await mouse({ type: 'mouseReleased', x: grown.width - 2, y: grown.height - 2, button: 'left', clickCount: 1 });
@@ -266,6 +317,16 @@ async function runLightboxZoomSmoke(window) {
     const video = await state();
     check(!video.imageFrame && video.inlineWidth === '' && video.transform === '' && video.copyHidden,
       'Video navigation clears image-only geometry without changing video layout');
+    const player = await evaluate(`(() => {
+      const rect = document.querySelector('.attachment-lightbox:not([data-ui-closing]) .chat-video-player--lightbox').getBoundingClientRect();
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    })()`);
+    await rightClick(player);
+    menu = await menuState();
+    check(menu.open && menu.items.map(item => item.label).join('|') === 'Download',
+      `Videos offer download without the image-only copy action: ${JSON.stringify(menu)}`);
+    await dispatchKey(window, 'Escape', 'Escape', 27);
+    check((await menuState()).viewerOpen, 'Dismissing the video menu keeps the viewer open');
     await dispatchKey(window, 'Escape', 'Escape', 27);
     check(await evaluate('!document.querySelector(".attachment-lightbox:not([data-ui-closing])")'),
       'Escape still closes the enlarged viewer');
@@ -273,7 +334,7 @@ async function runLightboxZoomSmoke(window) {
   } catch (error) {
     throw new Error(`Lightbox zoom failed after ${checks} checks: ${error.message}`, { cause: error });
   } finally {
-    await evaluate('window.closeZoomFixture?.(); delete window.closeZoomFixture');
+    await evaluate('window.closeZoomFixture?.(); delete window.closeZoomFixture; delete window.zoomDownloads');
     window.setContentSize(...initialSize);
   }
 }
@@ -1099,6 +1160,25 @@ async function installFixture(systemClipboard = false) {
         expect(key.defaultPrevented, 'Ctrl+C in the image viewer uses image copying');
         await expectImage();
         lightboxModal.close();
+
+        const viewerBaseline = listenerCount();
+        const openViewerMenu = () => {
+          find('.attachment-lightbox:not([data-ui-closing]) .lightbox-media--image')
+            .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 60, clientY: 60 }));
+          return [...document.querySelectorAll('.floating-context-menu:not([data-ui-closing]) [role="menuitem"]')];
+        };
+        find('[data-message-id="photo"] .chat-attachment-lightbox-trigger').click();
+        const viewerItems = openViewerMenu();
+        expect(viewerItems.map(item => item.querySelector(':scope > span:not(.material-symbols-outlined)').textContent).join('|')
+          === `${label}|${locale === 'en' ? 'Download' : 'Baixar'}`, 'The image viewer context menu offers localized copy and download actions');
+        viewerItems[0].click();
+        await expectImage();
+        expect(!document.querySelector('.floating-context-menu:not([data-ui-closing])'), 'Copying from the image viewer menu dismisses it');
+        openViewerMenu();
+        lightboxModal.close();
+        expect(!document.querySelector('.floating-context-menu:not([data-ui-closing]), .attachment-lightbox:not([data-ui-closing])')
+          && listenerCount() === viewerBaseline, `Closing the viewer with its menu open removes both and their global listeners: ${
+          JSON.stringify(listenerSummary())}`);
       }
 
       await prepareImages('en');

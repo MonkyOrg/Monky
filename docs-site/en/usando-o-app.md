@@ -293,9 +293,10 @@ Clicking outside closes the menu, including clicks inside the message field or c
 
 To copy the **image**, rather than its file name or address, use **Copy image**
 in the attachment controls or its right-click menu. Sticker menus also offer
-this action. In the expanded viewer, use the copy button or `Ctrl+C`
-(`Cmd+C` on macOS), with no text selected. The destination receives a PNG image
-at its original size; animated images are copied as a static frame.
+this action. In the expanded viewer, use the copy button, the right-click menu
+on the image, or `Ctrl+C` (`Cmd+C` on macOS), with no text selected. The
+destination receives a PNG image at its original size; animated images are
+copied as a static frame.
 Copying supports up to 50 MB and 64 megapixels and reports unavailable images
 or clipboard access instead of substituting a link.
 
@@ -304,6 +305,11 @@ and its container grow together instead of zooming inside a fixed crop.
 Once it exceeds the window, drag to explore the details. Double-click toggles
 between the initial fit and original size, up to 8× the initial fit; arrow keys navigate attachments
 and `Escape` closes the viewer.
+
+Right-click the enlarged image or video for a menu with **Copy image** (images
+only) and **Download**, the same actions as the corner buttons. While the menu
+is open, the keyboard acts on it: `Escape` closes just the menu, and clicking
+outside it doesn't close the viewer either.
 
 **Reply** keeps a reference to the original message with its author and preview. Replies support text, attachments, code and stickers; public bot messages can also receive replies. Cancel with the `×` in the composer or `Escape`. The reference stays with the channel draft. Clicking the preview jumps to the original, loading a history window if needed; **Back to latest messages** returns to recent conversation. Previews reflect edits and show **Message deleted** when the original is deleted, without retaining its content. Private bot messages cannot be referenced.
 
