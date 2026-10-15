@@ -24,12 +24,14 @@ import { OverlayManager } from './overlayManager';
 import { HOME_MIN_HEIGHT, HOME_MIN_WIDTH } from './windowSizing';
 import { bindBotScreenIsolation, installBotScreenRequestGuard, isBotScreenFrame, isBotScreenUrl } from './botScreenIsolation';
 import { bindBotScreenDocuments, registerBotScreenScheme } from './botScreenDocuments';
+import { BotDeviceStorage } from './botStorage/BotDeviceStorage';
+import { bindBotDeviceStorage } from './botStorage/ipc';
 import { resolveDevelopmentProfile } from './developmentProfile';
 import { bindDevelopmentQa, configureDevelopmentQaMedia, loadDevelopmentQa } from './developmentQa';
 import { CrashRecovery } from './crashRecovery';
 import { hasIdentity } from './identityService';
 import { initializeMainLanguage, mt } from './i18n';
-import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
+import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, BOT_STORAGE_CHANGED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
 import { ServerInviteInbox, registerServerInviteProtocol } from './serverInvites';
 import { configureVideoPresentation } from './videoPresentation';
 import { handleScreenPictureInPictureOpen } from './screenPictureInPictureWindow';
@@ -90,8 +92,19 @@ if (process.platform === 'win32' && process.env.MONKY_DISABLE_WGC !== '1') {
 }
 
 let mainWindow: BrowserWindow | null = null;
-const unbindBotScreenDocuments = bindBotScreenDocuments(contents => mainWindow?.webContents === contents);
-app.once('will-quit', unbindBotScreenDocuments);
+const botDeviceStorage = new BotDeviceStorage(path.join(app.getPath('userData'), 'bot-storage'), (scopeId) => {
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(BOT_STORAGE_CHANGED, scopeId);
+  }
+});
+const isMainWindowContents = (contents: Electron.WebContents): boolean => mainWindow?.webContents === contents;
+const unbindBotScreenDocuments = bindBotScreenDocuments(isMainWindowContents, botDeviceStorage);
+const unbindBotDeviceStorage = bindBotDeviceStorage(isMainWindowContents, botDeviceStorage);
+app.once('will-quit', () => {
+  unbindBotScreenDocuments();
+  unbindBotDeviceStorage();
+  void botDeviceStorage.dispose();
+});
 const serverInviteInbox = new ServerInviteInbox();
 let overlayManager: OverlayManager | null = null;
 let trayManager: TrayManager | null = null;

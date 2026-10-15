@@ -7,19 +7,19 @@ outline: 2
 
 Complete public signatures of the Monky bot SDK, generated from the TypeScript entry point of `@monky/bot-sdk`. Optional fields use `?`; `readonly` fields must not be mutated. The source links include validation rules and implementation details.
 
-[Bot SDK overview and events](/en/bots-api) · [Connection](/en/bots-conexao) · [Commands](/en/bots-comandos) · [Permissions](/en/bots-permissoes)
+[Bot SDK overview and events](/en/bots-api) · [Connection](/en/bots-conexao) · [Commands](/en/bots-comandos) · [Permissions](/en/bots-permissoes) · [Storage](/en/bots-armazenamento)
 
 ## `BotCapability` {#botcapability}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botPermissions.ts#L18)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botPermissions.ts#L20)
 
 ```ts
-export type BotCapability = "commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions";
+export type BotCapability = "commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions" | "server_storage" | "device_storage";
 ```
 
 ## `BotChoice` {#botchoice}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L233)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L241)
 
 ```ts
 export interface BotChoice {
@@ -33,7 +33,7 @@ export interface BotChoice {
 
 ## `BotClient` {#botclient}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L382)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L395)
 
 ```ts
 export class BotClient extends EventEmitter {
@@ -41,6 +41,7 @@ export class BotClient extends EventEmitter {
     updateScreen(serverId: string, ref: BotScreenRef, patch: BotScreenPatch): Promise<BotScreen>;
     closeScreen(serverId: string, ref: BotScreenRef): Promise<void>;
     listScreens(serverId: string, channelId: string): Promise<BotScreen[]>;
+    storage(serverId: string): BotStorage;
     localExecution(serverId: string): LocalExecutionClient;
     joinVoice(serverId: string, channelId: string, options?: BotVoiceJoinOptions): Promise<BotVoiceConnection>;
     getVoiceConnection(serverId: string): BotVoiceConnection | undefined;
@@ -91,7 +92,7 @@ export class BotClient extends EventEmitter {
 
 ## `BotManifest` {#botmanifest}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1390)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1410)
 
 ```ts
 export interface BotManifest {
@@ -118,7 +119,7 @@ export interface BotManifest {
 
 ## `BotOptions` {#botoptions}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L126)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L134)
 
 ```ts
 export interface BotOptions {
@@ -140,22 +141,33 @@ export interface BotOptions {
 
 ## `BotPermissions` {#botpermissions}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botPermissions.ts#L38)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botPermissions.ts#L40)
 
 ```ts
 export type BotPermissions = {
     revision: number;
-    requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[] | null;
-    granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[];
+    requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions" | "server_storage" | "device_storage")[] | null;
+    granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions" | "server_storage" | "device_storage")[];
     reviewRequired: boolean;
     reviewedBy: string | null;
     reviewedAt: number | null;
 };
 ```
 
+## `BotRequestError` {#botrequesterror}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/requestError.ts#L2)
+
+```ts
+export class BotRequestError extends Error {
+    constructor(message: string, code?: string);
+    readonly code: string;
+}
+```
+
 ## `BotSelectorResponseContext` {#botselectorresponsecontext}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L243)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L251)
 
 ```ts
 export interface BotSelectorResponseContext {
@@ -166,7 +178,7 @@ export interface BotSelectorResponseContext {
 
 ## `BotSelectorResponseEvent` {#botselectorresponseevent}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L241)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L249)
 
 ```ts
 export type BotSelectorResponseEvent = {
@@ -177,9 +189,115 @@ export type BotSelectorResponseEvent = {
 };
 ```
 
+## `BotStorage` {#botstorage}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/BotStorageClient.ts#L23)
+
+```ts
+export interface BotStorage {
+    get(key: string): Promise<BotStoredObject | null>;
+    put(key: string, data: Uint8Array | ArrayBuffer | string, options?: BotStoragePutOptions): Promise<BotStorageObjectInfo | null>;
+    delete(key: string): Promise<boolean>;
+    list(options?: BotStorageList): Promise<BotStorageListResult>;
+    usage(): Promise<BotStorageUsage>;
+}
+```
+
+## `BotStorageLevel` {#botstoragelevel}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botStorage.ts#L101)
+
+```ts
+export type BotStorageLevel = "ok" | "near_full" | "full";
+```
+
+## `BotStorageList` {#botstoragelist}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botStorage.ts#L143)
+
+```ts
+export type BotStorageList = {
+    limit?: number | undefined;
+    prefix?: string | undefined;
+    after?: string | undefined;
+};
+```
+
+## `BotStorageListResult` {#botstoragelistresult}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botStorage.ts#L156)
+
+```ts
+export type BotStorageListResult = {
+    objects: {
+        key: string;
+        sizeBytes: number;
+        contentType: string | null;
+        updatedAt: number;
+    }[];
+    next: string | null;
+};
+```
+
+## `BotStorageObjectInfo` {#botstorageobjectinfo}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botStorage.ts#L124)
+
+```ts
+export type BotStorageObjectInfo = {
+    key: string;
+    sizeBytes: number;
+    contentType: string | null;
+    updatedAt: number;
+};
+```
+
+## `BotStoragePutOptions` {#botstorageputoptions}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/BotStorageClient.ts#L13)
+
+```ts
+export interface BotStoragePutOptions {
+    contentType?: string;
+    /**
+     * For saves nobody asked for, such as an autosave: a full storage resolves `null`
+     * instead of rejecting, so the activity goes on. People see the warning in Monky.
+     */
+    autosave?: boolean;
+}
+```
+
+## `BotStorageUsage` {#botstorageusage}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botStorage.ts#L116)
+
+```ts
+export type BotStorageUsage = {
+    usedBytes: number;
+    maxBytes: number;
+    objectCount: number;
+    maxObjects: number;
+    level: "ok" | "near_full" | "full";
+};
+```
+
+## `BotStoredObject` {#botstoredobject}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/BotStorageClient.ts#L9)
+
+```ts
+export interface BotStoredObject {
+    data: Uint8Array<ArrayBufferLike>;
+    key: string;
+    sizeBytes: number;
+    contentType: string | null;
+    updatedAt: number;
+}
+```
+
 ## `CommandAudioPreviewContext` {#commandaudiopreviewcontext}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L175)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L183)
 
 ```ts
 export interface CommandAudioPreviewContext {
@@ -207,7 +325,7 @@ export interface CommandAudioPreviewContext {
 
 ## `CommandAudioPreviewData` {#commandaudiopreviewdata}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L188)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L196)
 
 ```ts
 export interface CommandAudioPreviewData {
@@ -218,7 +336,7 @@ export interface CommandAudioPreviewData {
 
 ## `CommandAudioPreviewResponse` {#commandaudiopreviewresponse}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L193)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L201)
 
 ```ts
 export type CommandAudioPreviewResponse = {
@@ -232,7 +350,7 @@ export type CommandAudioPreviewResponse = {
 
 ## `CommandAutocompleteContext` {#commandautocompletecontext}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L159)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L167)
 
 ```ts
 export interface CommandAutocompleteContext {
@@ -263,7 +381,7 @@ export interface CommandAutocompleteContext {
 
 ## `CommandContext` {#commandcontext}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L195)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L203)
 
 ```ts
 export interface CommandContext {
@@ -307,7 +425,7 @@ export interface CommandContext {
 
 ## `CommandDefinition` {#commanddefinition}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L142)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L150)
 
 ```ts
 export interface CommandDefinition {
@@ -326,7 +444,7 @@ export interface CommandDefinition {
 
 ## `ServeOptions` {#serveoptions}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L2034)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L2074)
 
 ```ts
 export interface ServeOptions {

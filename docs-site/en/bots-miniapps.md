@@ -63,6 +63,7 @@ Inside the isolated document, the `window.monkyScreen` bridge provides:
 | `sendAction(action, payload)` | Sends an intent bound to the current revision; returns whether the bridge accepted sending it, not whether the bot accepted the action |
 | `onBeforeClose(handler)` | Runs before a close this person asked for; returning `false` keeps the view open. See [View lifecycle](#ciclo-de-vida-da-visualizacao) |
 | `onClose(handler)` | Runs on every close, with the view already hidden and muted, for up to 5 seconds |
+| `storage` | Data kept on this computer, when the bot has `device_storage` and the person allows it; see [Bot storage](/en/bots-armazenamento#nos-computadores). Missing in older clients |
 
 Read `window.monkyScreen.viewer.locale` inside the `onState()` callback to translate each person's controls. Changing the app language also triggers this callback without changing shared state/revision or recreating the iframe. Do not derive the controls' language from public state or the screen creator's language.
 
@@ -110,7 +111,7 @@ to do, such as asking whether the person wants to save the game.
 | Hook | When it runs | How Monky waits |
 |------|--------------|-----------------|
 | `onBeforeClose(({ reason }) => ...)` | Before **Leave miniapp** (`leave`) or **End miniapp** (`end`), when this person asks for it | The view stays open and may ask anything. Handlers run in order; the first one returning `false`, directly or through a promise, keeps the miniapp open |
-| `onClose(({ reason }) => ...)` | On every close, including after an `onBeforeClose` | Up to 5 seconds, with the view already hidden and muted, without new state or `sendAction`. Handlers run in parallel |
+| `onClose(({ reason }) => ...)` | On every close, including after an `onBeforeClose` | Up to 5 seconds, with the view already hidden and muted, without new state or `sendAction`; `storage` keeps working. Handlers run in parallel |
 
 Both return a function that removes the registration. Register them while the
 document loads: Monky only waits for hooks it already knows about. The
@@ -162,8 +163,9 @@ screen.onClose?.(async () => {
 ```
 
 Since `onClose` runs without a screen, do not ask the person anything or start
-downloads in it: save to the bot's service, and also keep a periodic save for
-the cases without a hook. A download the person starts from a miniapp button
+downloads in it: save to the bot's service or, if the person allowed it, to
+[storage on the computer](/en/bots-armazenamento#salvar-ao-fechar), and also
+keep a periodic save for the cases without a hook. A download the person starts from a miniapp button
 before `onBeforeClose` answers, on the other hand, reaches the browser before
 the view closes and carries on afterwards.
 
@@ -176,6 +178,12 @@ new bot permissions. The notice describes networking (including the local
 network), web storage, audio/video, manually selected files, downloads,
 fullscreen, pointer capture and bridge-provided data. Selecting a file allows
 the app to read it and potentially send it over the network.
+
+If the administrator approved `device_storage`, the same notice asks whether
+the miniapp may keep data on the computer of whoever opens it: **Do not store**
+(default), **This session only** or **Always**. The choice applies only to that
+computer and does not change the bot's permissions on the server. See
+[Bot storage](/en/bots-armazenamento#nos-computadores).
 
 Cancelling creates no document and executes none of its code. Leaving, losing access,
 changing rooms/servers or disconnecting closes the view and revokes bridge actions;
@@ -200,7 +208,7 @@ remain blocked even after confirmation.
 
 Each document has a random `monky-miniapp://…` origin, separate from Monky and other views. It is not a `srcdoc` sharing the host application's origin. Apps can use external scripts/styles, `fetch`, WebSocket, WebRTC, WebAssembly, Workers, canvas/WebGL, audio/video, forms, web storage, file selection, and downloads. Fullscreen and pointer lock follow browser interaction rules. Camera, microphone, display capture, clipboard, and devices are not automatically authorized; miniapps do not inherit the client's permissions.
 
-External resources follow CORS and browser rules. Configure the service to accept the miniapp's origin and use HTTPS/WSS in production. A new view gets a new origin: do not use its local storage to persist a game. Large resources and real-time traffic can go directly to the app's service, without going through `state` or `sendAction`. The Monky envelope limit therefore does not cap the size of an engine, media, or files loaded by the application.
+External resources follow CORS and browser rules. Configure the service to accept the miniapp's origin and use HTTPS/WSS in production. A new view gets a new origin: do not use its web storage to persist a game; [`monkyScreen.storage`](/en/bots-armazenamento#nos-computadores) exists for that. Large resources and real-time traffic can go directly to the app's service, without going through `state` or `sendAction`. The Monky envelope limit therefore does not cap the size of an engine, media, or files loaded by the application.
 
 Navigating the miniapp frame keeps the destination isolated but does not
 transfer the authenticated `monkyScreen` bridge. Use in-document navigation or
@@ -210,7 +218,9 @@ of Monky's main window remain blocked. Origin storage is cleared when the view c
 Each participant adjusts the miniapp's volume on their own card, from 0 to
 200%, and can mute it, with the same control as a screen share. Its button sits
 over the miniapp's bottom-right corner: keep essential controls out of that
-corner. Monky applies the adjustment inside
+corner. The bottom-left corner gets the
+[storage warning](/en/bots-armazenamento#avisos) when the bot's space is almost
+full. Monky applies the adjustment inside
 the isolated document, before the bot's scripts, to `<audio>`/`<video>` and to
 the `destination` of every `AudioContext`. The app still reads back the volume
 it set on its elements. Above 100%, only Web Audio is amplified: the browser

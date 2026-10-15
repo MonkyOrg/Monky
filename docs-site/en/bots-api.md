@@ -121,10 +121,12 @@ Do not keep the handler open throughout a long poll.
 | `listScreens(serverId, channelId)` | `Promise<BotScreen[]>`; lists voice-room miniapps |
 | `closeScreen(serverId, ref)` | `Promise<void>`; ends the instance for everyone |
 | `localExecution(serverId)` | `LocalExecutionClient`; authorized executors and sources for that server |
+| `storage(serverId)` | `BotStorage`; the bot's private files on that server (`server_storage`) |
 
 A `BotScreenRef` contains **`id` and `instanceId`**. An Opus stream is not an
 audio file or authorization to receive participants' voices. Read the
-[voice](/en/bots-voz), [miniapp](/en/bots-miniapps) and
+[voice](/en/bots-voz), [miniapp](/en/bots-miniapps),
+[storage](/en/bots-armazenamento) and
 [local execution](/en/bots-execucao-local) guides before implementing lifecycle
 management.
 

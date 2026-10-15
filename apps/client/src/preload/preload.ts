@@ -4,7 +4,11 @@ import {
   createNativeScreenPresentation, registerNativeAudioPortReceiver, type NativeScreenPresentationController,
 } from '@monky/screen-share';
 import * as nativeAudioProtocol from '@monky/shared';
-import { BOT_SCREEN_DOCUMENT_IPC, SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, DESKTOP_SOURCES_IPC, EVENT_CALENDAR_IPC, HOSTING_SKILL_IPC, type BotScreenDocumentConsent, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
+import { BOT_SCREEN_DOCUMENT_IPC, BOT_STORAGE_CHANGED, BOT_STORAGE_IPC, SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, DESKTOP_SOURCES_IPC, EVENT_CALENDAR_IPC, HOSTING_SKILL_IPC, type BotScreenDocumentConsent, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
+import type {
+  BotDeviceStorageDecision, BotDeviceStorageDocumentState, BotDeviceStorageEntry, BotDeviceStorageRequest,
+  BotDeviceStorageResponse, BotDeviceStorageScope,
+} from '@monky/shared';
 import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenEventSchema } from '@monky/shared';
 import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
 import { DM_EVENT, DM_IPC, type DmApi, type DmEvent, type DmExportMode } from '@monky/shared';
@@ -84,9 +88,24 @@ import type {
 
 export type { LinkPreviewData, OverlayBounds, OverlayConfig, OverlayMode, OverlayLayout, OverlayPosition, OverlayParticipantState, OverlaySyncState } from '@monky/shared';
 
+export interface BotStorageApi {
+  documentState: (url: string) => Promise<BotDeviceStorageDocumentState>;
+  documentRequest: (url: string, request: BotDeviceStorageRequest) => Promise<BotDeviceStorageResponse>;
+  list: () => Promise<BotDeviceStorageEntry[]>;
+  get: (scope: BotDeviceStorageScope) => Promise<BotDeviceStorageEntry>;
+  setDecision: (scope: BotDeviceStorageScope, decision: BotDeviceStorageDecision) => Promise<BotDeviceStorageEntry>;
+  setQuota: (scope: BotDeviceStorageScope, maxBytes: number) => Promise<BotDeviceStorageEntry>;
+  /** Deletes what the bot stored and keeps the preference. */
+  clear: (scopeId: string) => Promise<void>;
+  /** Deletes what the bot stored and the preferences of that server, account and bot. */
+  forget: (scopeId: string) => Promise<void>;
+  onChanged: (callback: (scopeId: string) => void) => () => void;
+}
+
 export interface ElectronApi {
   createBotScreenDocument: (html: string, consent: BotScreenDocumentConsent) => Promise<string>;
   removeBotScreenDocument: (url: string) => Promise<void>;
+  botStorage: BotStorageApi;
   nativeScreenCommand: (command: NativeScreenCommand) => Promise<NativeScreenCommandResult>;
   nativeScreenReply: (reply: NativeScreenReply) => Promise<void>;
   onNativeScreenEvent: (callback: (event: NativeScreenEvent) => void) => () => void;
@@ -385,6 +404,21 @@ const api: ElectronApi = {
   takeServerInvite: () => ipcRenderer.invoke(SERVER_INVITE_IPC.take),
   createBotScreenDocument: (html, consent) => ipcRenderer.invoke(BOT_SCREEN_DOCUMENT_IPC.create, html, consent),
   removeBotScreenDocument: url => ipcRenderer.invoke(BOT_SCREEN_DOCUMENT_IPC.remove, url),
+  botStorage: {
+    documentState: url => ipcRenderer.invoke(BOT_STORAGE_IPC.documentState, url),
+    documentRequest: (url, request) => ipcRenderer.invoke(BOT_STORAGE_IPC.documentRequest, url, request),
+    list: () => ipcRenderer.invoke(BOT_STORAGE_IPC.list),
+    get: scope => ipcRenderer.invoke(BOT_STORAGE_IPC.get, scope),
+    setDecision: (scope, decision) => ipcRenderer.invoke(BOT_STORAGE_IPC.setDecision, { scope, decision }),
+    setQuota: (scope, maxBytes) => ipcRenderer.invoke(BOT_STORAGE_IPC.setQuota, { scope, maxBytes }),
+    clear: scopeId => ipcRenderer.invoke(BOT_STORAGE_IPC.clear, scopeId),
+    forget: scopeId => ipcRenderer.invoke(BOT_STORAGE_IPC.forget, scopeId),
+    onChanged: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, scopeId: string) => callback(scopeId);
+      ipcRenderer.on(BOT_STORAGE_CHANGED, listener);
+      return () => ipcRenderer.removeListener(BOT_STORAGE_CHANGED, listener);
+    },
+  },
   onServerInviteAvailable: (callback) => {
     const listener = () => callback();
     ipcRenderer.on(SERVER_INVITE_AVAILABLE, listener);

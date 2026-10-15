@@ -6091,6 +6091,135 @@ input:focus, textarea:focus, select:focus {
   min-height: 1.5em;
   margin-top: 12px;
 }
+
+/* Bot storage: settings tab, the list of bot data on this computer and the
+   usage bar both share, in the style of the server storage tab. */
+.storage-usage {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0;
+}
+.storage-usage-labels,
+.storage-usage-details {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+.storage-usage-labels {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.storage-usage-details {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.storage-usage-percent {
+  font-weight: 600;
+  color: var(--accent-primary);
+}
+.storage-usage-bar {
+  height: 8px;
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  background: var(--bg-input);
+}
+.storage-usage-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent-primary);
+  transition: width var(--motion-panel-duration) var(--motion-easing);
+}
+.storage-usage[data-level="near_full"] :is(.storage-usage-percent, .storage-usage-warning) {
+  color: var(--warning);
+}
+.storage-usage[data-level="near_full"] .storage-usage-fill {
+  background: var(--warning);
+}
+.storage-usage[data-level="full"] :is(.storage-usage-percent, .storage-usage-warning) {
+  color: var(--danger);
+}
+.storage-usage[data-level="full"] .storage-usage-fill {
+  background: var(--danger);
+}
+.bot-storage-settings {
+  display: grid;
+  gap: 14px;
+}
+.bot-storage-section {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+.bot-storage-section > p {
+  margin: 0;
+}
+.bot-storage-section > .btn {
+  justify-self: start;
+}
+.bot-storage-section .input-mode-cards {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+.bot-storage-decision-label,
+.bot-storage-limit label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.bot-storage-limit {
+  display: grid;
+  gap: 4px;
+}
+.bot-storage-limit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bot-storage-limit-row .input-field {
+  flex: 0 1 160px;
+  min-width: 0;
+}
+.bot-storage-limit-row .input-field::-webkit-inner-spin-button,
+.bot-storage-limit-row .input-field::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
+.bot-storage-limit .input-field[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+.bot-device-storage-entry {
+  margin-bottom: 10px;
+  padding: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow-wrap: anywhere;
+}
+.bot-device-storage-entry .storage-usage {
+  margin-bottom: 0;
+}
+.bot-device-storage-entry-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.bot-device-storage-entry-header > div {
+  min-width: 0;
+}
+.bot-device-storage-entry-header > .btn {
+  flex-shrink: 0;
+}
+.bot-device-storage-entry-meta {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
 .mention-item.active .mention-nick {
   color: #fff;
 }
@@ -8130,6 +8259,63 @@ input:focus, textarea:focus, select:focus {
   width: 100vw;
   height: 100vh;
   background: var(--bg-card);
+}
+
+/* Storage warning drawn by Monky, not by the miniapp: bottom-left of the tile,
+   opposite the volume control, and still there in fullscreen. */
+.bot-screen-storage-badge {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 72px);
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 55%, transparent);
+  border-radius: var(--radius-full);
+  background: rgba(0, 0, 0, 0.72);
+  color: var(--warning);
+  font: 600 12px var(--font-main);
+  backdrop-filter: blur(4px);
+  cursor: pointer;
+}
+
+.bot-screen-storage-badge[data-level="full"] {
+  border-color: color-mix(in srgb, var(--danger) 65%, transparent);
+  color: var(--danger);
+}
+
+.bot-screen-storage-badge > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bot-screen-storage-badge:hover {
+  background: rgba(0, 0, 0, 0.86);
+}
+
+.bot-screen-storage-badge:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+.stage-bot-screen-card:fullscreen .bot-screen-storage-badge {
+  left: 16px;
+  bottom: 16px;
+}
+
+.stage-mini-card .bot-screen-storage-badge {
+  left: 4px;
+  bottom: 4px;
+  padding: 2px;
+}
+
+.stage-mini-card .bot-screen-storage-badge > span:last-child {
+  display: none;
 }
 
 .stage-grid {
@@ -10789,6 +10975,45 @@ button.member-live-badge:focus-visible {
 
 .dialog-option-hint {
   margin: 8px 0 0;
+}
+
+/* Context a confirmation carries without asking anything, e.g. a remembered choice. */
+.dialog-note {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* Mutually exclusive choice inside a confirmation, as selectable cards. */
+.dialog-choices {
+  margin-top: 16px;
+}
+
+.dialog-choices-legend {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.dialog-choices .input-mode-cards {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.dialog-choices .input-mode-card {
+  padding: 10px 12px;
+}
+
+.dialog-choices .input-mode-card-title {
+  margin-bottom: 2px;
 }
 
 .dialog-input-error {

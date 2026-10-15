@@ -7,6 +7,7 @@
  */
 import { communityPtBR } from './community';
 import { serverAuditPtBR } from './serverAudit';
+import { botStoragePtBR } from './botStorage';
 import { messageSearchPtBR } from '../messageSearch';
 
 export const ptBR = {
@@ -98,6 +99,7 @@ export const ptBR = {
   'poll.imageUploadFailed': 'Não foi possível enviar a imagem.',
   ...communityPtBR,
   ...serverAuditPtBR,
+  ...botStoragePtBR,
   ...messageSearchPtBR,
   'categories.category': 'Categoria',
   'categories.create': 'Criar categoria',

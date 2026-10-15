@@ -99,6 +99,7 @@ configurações do servidor.
 | **Minhas preferências** | Você | Idioma desse bot e preferências pessoais neste dispositivo |
 | **Comportamento** | Administração ou cargo autorizado a configurar bots | Opções compartilhadas que o próprio bot disponibiliza neste servidor |
 | **Permissões** | Quem pode gerenciar bots | Capacidades que o bot pode executar nesse servidor |
+| **Armazenamento** | Quem pode gerenciar bots (no servidor) e você (neste computador) | Espaço que o bot ocupa no servidor e no seu computador, limites e exclusão |
 
 Quem pode gerenciar bots também vê, no topo das configurações, a **URL do
 Manifest** usada para vincular o bot, com um botão para copiá-la. Bots
@@ -170,6 +171,30 @@ transmissão de tela, no canto inferior direito: passe o mouse sobre o botão
 (ou chegue com **Tab**) para ajustar de 0 a 200% e clique nele para mutar.
 Volume e mudo valem para todos os miniapps do mesmo bot; o volume fica salvo
 neste computador e o mudo dura até você sair da sala.
+
+### Dados guardados pelo bot
+
+Bots com a capacidade **Guardar dados no servidor** mantêm arquivos próprios no
+servidor, como saves de jogos. Só quem pode gerenciar bots vê, na aba
+**Armazenamento** das configurações do bot, quanto eles ocupam, ajusta o limite
+(100 MB por padrão) e apaga os dados; as demais pessoas veem ali apenas os dados
+do próprio computador. Desvincular o bot apaga o que ele guardou no servidor.
+
+Se o bot também pode **pedir para guardar dados nos computadores**, ao abrir um
+miniapp você escolhe **Não guardar**, **Só nesta sessão** ou **Sempre**. Sem
+permitir, o miniapp funciona normalmente e você ainda pode baixar arquivos
+manualmente. Em **Configurações do bot → Armazenamento → Neste computador**,
+mude a decisão (**Perguntar**, **Sempre** ou **Nunca**), o limite (50 MB por
+padrão) ou apague os dados. Em **Configurações → Ferramentas de bots → Dados de
+bots neste computador**, você vê e apaga o que todos os bots guardaram aqui,
+inclusive de servidores e bots que já não usa. O Monky nunca apaga esses dados
+remotamente.
+
+Quando o espaço no seu computador está quase cheio, o card do miniapp mostra
+**Armazenamento quase cheio**; quando enche, **Armazenamento cheio: saves
+automáticos pausados**. Quem pode gerenciar bots também recebe esse aviso sobre
+o armazenamento no servidor. Clique no aviso para liberar espaço ou aumentar o
+limite.
 
 ## Bots que recebem voz
 

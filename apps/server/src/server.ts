@@ -19,6 +19,9 @@ import { BotSettingsService } from './application/services/BotSettingsService';
 import { SqliteBotSettingsRepository } from './infrastructure/database/SqliteBotSettingsRepository';
 import { SqliteBotPermissionRepository } from './infrastructure/database/SqliteBotPermissionRepository';
 import { BotPermissionService } from './application/services/BotPermissionService';
+import { BotStorageService } from './application/services/BotStorageService';
+import { SqliteBotStorageRepository } from './infrastructure/database/SqliteBotStorageRepository';
+import { BotStorageFileStore } from './infrastructure/security/BotStorageFileStore';
 import { SqliteBotSelectorRepository } from './infrastructure/database/SqliteBotSelectorRepository';
 import { CommandRegistry } from './application/services/CommandRegistry';
 import { ChannelService } from './application/services/ChannelService';
@@ -328,6 +331,14 @@ export class MonkyServer {
 
     // Bot infrastructure (#569).
     const botRepo = new SqliteBotRepository(db);
+    const botStorage = new BotStorageService(new SqliteBotStorageRepository(db), new BotStorageFileStore(config.dataDir));
+    resources.defer('bot storage', () => botStorage.dispose());
+    try {
+      // Before any connection can write: a file written meanwhile would look unreferenced.
+      await botStorage.reconcile();
+    } catch (error) {
+      Logger.warn('BOT', 'Bot storage reconciliation failed; unreferenced files may remain until the next start.', error);
+    }
     const botService = new BotService(
       botRepo,
       serverRepo,
@@ -341,6 +352,7 @@ export class MonkyServer {
         return bots;
       },
       botPermissions,
+      botStorage,
     );
     const commandRegistry = new CommandRegistry();
 
@@ -551,6 +563,7 @@ export class MonkyServer {
       pollService,
       recentSoundCache,
       new ServerAuditService(serverRecord.id, new SqliteServerAuditRepository(db), rateLimiter),
+      botStorage,
     );
     resources.defer('WebSocket server', () => wsServer.close(instance?.shutdownReason ?? 'stopped'));
 

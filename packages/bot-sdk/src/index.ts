@@ -25,6 +25,12 @@ export type {
 export { BotVoiceConnection } from './voice/BotVoiceConnection';
 export type { BotVoicePacket, BotVoiceAudioReceiver } from './voice/VoiceAudioReceiver';
 export { BotScreenClient } from './BotScreenClient';
+import { createBotStorage, type BotStorage } from './BotStorageClient';
+export { type BotStorage, type BotStoragePutOptions, type BotStoredObject } from './BotStorageClient';
+import { BotRequestError } from './requestError';
+export { BotRequestError } from './requestError';
+export type { BotStorageList, BotStorageListResult, BotStorageLevel, BotStorageObjectInfo, BotStorageUsage } from '@monky/shared';
+export type { BotDeviceStorageStatus, BotScreenStorage, BotScreenStorageEntry, BotScreenStorageUsage } from '@monky/shared';
 export * from './managedTools';
 export * from './localExecution/contracts';
 import { handleReachabilityProbe } from './reachability';
@@ -77,6 +83,8 @@ import {
   resolveBotLocale,
   validateBotFormValues,
   validateCommandOptions,
+  withoutBotStorageCapabilities,
+  BOT_MANIFEST_FEATURES_HEADER,
 } from '@monky/shared';
 import { RegistrationStore, type BotRegistration } from './RegistrationStore';
 import {
@@ -330,6 +338,11 @@ const RESOURCE_RESPONSES = new Set<string>([
   MessageType.BOT_SCREEN_SNAPSHOT,
   MessageType.BOT_SCREEN_LIST_RESULT,
   MessageType.BOT_SCREEN_REMOVED,
+  MessageType.BOT_STORAGE_SAVED,
+  MessageType.BOT_STORAGE_GET_RESULT,
+  MessageType.BOT_STORAGE_DELETED,
+  MessageType.BOT_STORAGE_LIST_RESULT,
+  MessageType.BOT_STORAGE_USAGE_RESULT,
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -421,6 +434,26 @@ export class BotClient extends EventEmitter {
 
   listScreens(serverId: string, channelId: string): Promise<BotScreen[]> {
     return this.screens.listScreens(serverId, channelId);
+  }
+
+  /**
+   * Objects this bot keeps on the Monky server, private to the bot. Requires `server_storage`
+   * in `requestedCapabilities`, an administrator's approval and a server that supports it.
+   */
+  storage(serverId: string): BotStorage {
+    if (!this.options.requestedCapabilities.includes('server_storage')) {
+      throw new Error('Declare server_storage in BotOptions.requestedCapabilities to use bot storage.');
+    }
+    return createBotStorage({
+      request: (type, payload, timeoutMs) => {
+        const conn = this.connections.get(serverId);
+        if (conn?.connected && !conn.protocolFeatures?.includes('bot-storage')) {
+          return Promise.reject(new BotRequestError('This Monky server does not support bot storage yet. Update the server.',
+            ProtocolErrorCode.FEATURE_REQUIRES_UPDATE));
+        }
+        return this.requestResource(serverId, type, payload, timeoutMs);
+      },
+    });
   }
 
   localExecution(serverId: string): LocalExecutionClient {
@@ -697,7 +730,7 @@ export class BotClient extends EventEmitter {
       botSelectorFinalizeSchema.parse({ id, ...normalizeBotMessageContent(content) })));
   }
 
-  private requestResource(serverId: string, type: MessageType, payload: unknown): Promise<unknown> {
+  private requestResource(serverId: string, type: MessageType, payload: unknown, timeoutMs = 8000): Promise<unknown> {
     const conn = this.connections.get(serverId);
     if (!conn?.connected) return Promise.reject(new Error('The bot is not connected to this server.'));
     if (this.resourceRequests.size >= 100) return Promise.reject(new Error('Too many pending bot resource requests.'));
@@ -706,7 +739,7 @@ export class BotClient extends EventEmitter {
       const timer = setTimeout(() => {
         this.resourceRequests.delete(requestId);
         reject(new Error('Bot resource acknowledgement timed out.'));
-      }, 8000);
+      }, timeoutMs);
       this.resourceRequests.set(requestId, { conn, resolve, reject, timer });
       try {
         this.sendToConn(conn, { type, requestId, payload });
@@ -1083,7 +1116,10 @@ export class BotClient extends EventEmitter {
       this.resourceRequests.delete(msg.requestId);
       if (msg.type === MessageType.SERVER_ERROR) {
         const payload = isRecord(msg.payload) ? msg.payload : {};
-        resourceRequest.reject(new Error(typeof payload.message === 'string' ? payload.message : 'Bot resource request failed.'));
+        resourceRequest.reject(new BotRequestError(
+          typeof payload.message === 'string' ? payload.message : 'Bot resource request failed.',
+          typeof payload.code === 'string' ? payload.code : undefined,
+        ));
       } else resourceRequest.resolve(msg.payload);
       return;
     }
@@ -1475,7 +1511,9 @@ export class BotClient extends EventEmitter {
     this.sendToConn(conn, {
       type: MessageType.COMMAND_REGISTER,
       payload: {
-        requestedCapabilities: this.options.requestedCapabilities,
+        // A server without bot-storage rejects the whole declaration if it lists those names.
+        requestedCapabilities: conn.protocolFeatures?.includes('bot-storage')
+          ? this.options.requestedCapabilities : withoutBotStorageCapabilities(this.options.requestedCapabilities),
         commands: [...this.commands.values()].map(({ name, description, options, localizations, downloadsSound, voiceRequirement, localCapabilities }) => ({
           name, description, options: options ?? [], localizations, downloadsSound, voiceRequirement, localCapabilities,
         })),
@@ -1895,8 +1933,9 @@ export class BotClient extends EventEmitter {
       avatarBase64: opts.icon ?? this.profile.avatarBase64,
     });
     let listeningPort = port;
-    const getManifest = (): BotManifest => botManifestSchema.parse({
-      requestedCapabilities: this.options.requestedCapabilities,
+    const getManifest = (serverFeatures?: string): BotManifest => botManifestSchema.parse({
+      requestedCapabilities: serverFeatures?.split(',').map((feature) => feature.trim()).includes('bot-storage')
+        ? this.options.requestedCapabilities : withoutBotStorageCapabilities(this.options.requestedCapabilities),
       name: opts.name,
       description: opts.description,
       icon: opts.icon ?? this.profile.avatarBase64 ?? undefined,
@@ -1922,7 +1961,8 @@ export class BotClient extends EventEmitter {
       if (handleReachabilityProbe(req, res, this.options.publicKey)) return;
       if (req.method === 'GET' && req.url === '/manifest') {
         res.writeHead(200, { 'Content-Type': 'application/json', 'X-Monky-Bot-Public-Key': this.options.publicKey.toLowerCase() });
-        res.end(JSON.stringify(getManifest()));
+        const features = req.headers[BOT_MANIFEST_FEATURES_HEADER];
+        res.end(JSON.stringify(getManifest(typeof features === 'string' ? features : undefined)));
         return;
       }
       if (req.method === 'POST' && req.url === '/register') {
@@ -2042,7 +2082,7 @@ export interface ServeOptions {
   publicHost?: string;
 }
 
-export { BOT_CAPABILITIES, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode } from '@monky/shared';
+export { BOT_CAPABILITIES, BOT_STORAGE_LIMITS, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode } from '@monky/shared';
 export {
   botSettingsDefinitionSchema, botSettingsContextSchema, botServerSettingsSnapshotSchema,
   botSettingsSnapshotSchema, botSettingsValuesSchema, botSelectorRespondedSchema, resolveBotSettingsValues,

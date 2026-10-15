@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { BotLocale } from './botLocales.js';
+import type { BotScreenStorage } from './botStorage.js';
 
 export const BOT_SCREEN_LIMITS = {
   htmlBytes: 128 * 1024,
@@ -149,7 +150,13 @@ export interface BotScreenBridge {
   onBeforeClose(handler: (event: BotScreenBeforeCloseEvent) => boolean | void | Promise<boolean | void>): () => void;
   /**
    * Runs on every close, while the view is already hidden, muted and cut from state and actions.
-   * The document is kept for at most 5 seconds so the handlers can finish, e.g. saving.
+   * The document is kept for at most 5 seconds so the handlers can finish, e.g. saving; `storage`
+   * keeps working meanwhile.
    */
   onClose(handler: (event: BotScreenCloseEvent) => void | Promise<void>): () => void;
+  /**
+   * Data kept on this computer, when the bot has `device_storage` and the person allows it.
+   * Missing in clients released before bot storage.
+   */
+  readonly storage?: BotScreenStorage;
 }

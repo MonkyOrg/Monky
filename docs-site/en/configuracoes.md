@@ -12,7 +12,7 @@ preferences. To change something shared with participants, use
 | Keybinds | Key combinations for quick actions |
 | Notifications and Sounds | Personal sounds and notices |
 | Quality & sharing | Voice, camera and screen profiles, codec, local preview and telemetry |
-| Bot tools | Local installations, permissions, cache and tasks |
+| Bot tools | Local installations, permissions, cache, tasks and data bots kept on this computer |
 | Logs | Local events and client diagnostics |
 | About and Updates | Version, updates, window behavior and community |
 
@@ -755,6 +755,12 @@ without consent.
 Revoking authorization or removing a tool ends affected work. Read
 [Tools on your computer](/en/bots#tools-on-your-computer) before approving
 a request.
+
+**Bot data on this computer** lists what miniapps kept here, such as saves,
+separated by server, account and bot, with the space used and the current
+decision. The list includes servers and bots you no longer use; **Delete**
+removes that bot's data and preferences. See
+[Data kept by the bot](/en/bots#data-kept-by-the-bot).
 
 ## Logs
 

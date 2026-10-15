@@ -99,6 +99,7 @@ Right-click the bot in the member list or on its message, then open
 | **My preferences** | You | This bot's language and personal preferences on this device |
 | **Behavior** | Administrators or a role allowed to configure bots | Shared options provided by the bot itself on this server |
 | **Permissions** | People allowed to manage bots | Capabilities the bot may perform on this server |
+| **Storage** | People allowed to manage bots (on the server) and you (on this computer) | Space the bot takes on the server and on your computer, limits and deletion |
 
 People who manage bots also see, at the top of the settings, the **Manifest
 URL** used to link the bot, with a button to copy it. Bots linked with a
@@ -169,6 +170,28 @@ share, in its bottom-right corner: hover the button (or reach it with **Tab**)
 to adjust from 0 to 200%, and click it to mute. Volume and mute apply to every
 miniapp of the same bot; the volume is saved on this computer and the mute
 lasts until you leave the room.
+
+### Data kept by the bot
+
+Bots with the **Store data on the server** capability keep their own files on
+the server, such as game saves. Only people allowed to manage bots see, in the
+**Storage** tab of the bot settings, how much they take, set the limit (100 MB
+by default) and delete the data; everyone else sees only the data on their own
+computer there. Unlinking the bot deletes what it stored on the server.
+
+If the bot may also **ask to store data on computers**, you choose **Do not
+store**, **This session only** or **Always** when opening a miniapp. If you do
+not allow it, the miniapp works normally and you can still download files
+manually. In **Bot settings → Storage → On this computer**, change the decision
+(**Ask**, **Always** or **Never**), the limit (50 MB by default) or delete the
+data. In **Settings → Bot tools → Bot data on this computer**, you see and
+delete what every bot kept here, including from servers and bots you no
+longer use. Monky never deletes this data remotely.
+
+When the space on your computer is almost full, the miniapp card shows
+**Storage almost full**; once full, **Storage full: autosaves paused**. People
+allowed to manage bots also get this warning about the storage on the server.
+Click the warning to free space or raise the limit.
 
 ## Bots that receive voice
 

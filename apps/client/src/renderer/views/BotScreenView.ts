@@ -1,16 +1,29 @@
 import {
-  BOT_SCREEN_PERMISSION_POLICY_VERSION, MessageType, Permission, botScreenSchema, botScreenRemovedSchema,
-  type BotScreen, type BotScreenAction, type BotScreenBeforeCloseReason, type BotScreenCloseReason, type BotScreenRemoved,
+  BOT_SCREEN_PERMISSION_POLICY_VERSION, MessageType, Permission, botDeviceStorageScopeSchema, botScreenSchema, botScreenRemovedSchema,
+  botStorageInfoSchema, botStorageLevelEventSchema,
+  type BotDeviceStorageDecision, type BotDeviceStorageGrant, type BotDeviceStorageScope, type BotScreen, type BotScreenAction,
+  type BotScreenBeforeCloseReason, type BotScreenCloseReason, type BotScreenRemoved, type BotStorageUsage,
 } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
+import { currentEventOrigin } from '../core/sessionRouting';
 import { getLanguage, t, type TranslationKey } from '../i18n';
 import { settingsStore } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
+import { formatBytes } from '../utils/attachment';
 import { botRequestError } from '../utils/botInputs';
 import { getBotVoiceContext, type BotVoiceContext } from '../utils/botVoice';
+import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { BotScreenFrame } from './BotScreenFrame';
+import { botSettingsModal } from './BotSettingsModal';
 import { BotScreenVolumeControl } from './BotScreenVolumeControl';
-import { showConfirm } from './Dialog';
+import { showConfirm, showConfirmWithChoice } from './Dialog';
+
+/** What the person may decide about storing data on this computer when opening the view. */
+interface StorageOffer {
+  scope: BotDeviceStorageScope;
+  decision: BotDeviceStorageDecision;
+  maxBytes: number;
+}
 
 /** A persistent stage tile; viewing and layout never change the game's seats. */
 export class BotScreenView {
@@ -30,6 +43,10 @@ export class BotScreenView {
   private placeholder = document.createElement('div');
   private placeholderHint = document.createElement('p');
   private error = document.createElement('p');
+  /** Rendered by Monky, so every miniapp shows it and none can hide or imitate it. */
+  private storageBadge = document.createElement('button');
+  private deviceStorage: BotStorageUsage | null = null;
+  private serverStorage: BotStorageUsage | null = null;
   private destroyed = false;
   private focused = false;
   private requestId: string | null = null;
@@ -91,6 +108,14 @@ export class BotScreenView {
     this.error.className = 'bot-error';
     this.error.setAttribute('role', 'alert');
     this.error.hidden = true;
+    this.storageBadge.type = 'button';
+    this.storageBadge.className = 'bot-screen-storage-badge';
+    this.storageBadge.dataset.botScreenAction = 'storage';
+    this.storageBadge.hidden = true;
+    this.storageBadge.addEventListener('click', (event) => {
+      event.stopPropagation();
+      botSettingsModal.createOpenAction(this.screen.botId, this.context.session.client, this.context.session.serverStore, 'storage')();
+    });
     controls.append(this.focus, this.fullscreen, this.close, this.endButton);
     header.append(this.title, controls);
     this.body.className = 'bot-screen-body';
@@ -98,7 +123,7 @@ export class BotScreenView {
     this.placeholder.append(this.openButton, this.placeholderHint);
     this.body.append(this.placeholder);
     // The volume overlays the tile's bottom-right corner; right after the toolbar in focus order.
-    this.element.append(header, this.volumeControl.element, this.notice, this.body, this.error);
+    this.element.append(header, this.volumeControl.element, this.storageBadge, this.notice, this.body, this.error);
     this.localize();
     this.syncVolume();
     this.unbind = [
@@ -109,6 +134,13 @@ export class BotScreenView {
       // Another tile of the same bot, or another window, may have changed the saved volume.
       appEvents.on('settings.updated', () => this.syncVolume()),
       appEvents.on('voice.miniapp_mute_changed', () => this.syncVolume()),
+      appEvents.on(`message.${MessageType.BOT_STORAGE_LEVEL}`, (payload: unknown) => {
+        const parsed = botStorageLevelEventSchema.safeParse(payload);
+        if (!parsed.success || parsed.data.botId !== this.screen.botId || !this.frame || !this.serverStorage ||
+            currentEventOrigin() !== this.context.session.client.sessionKey) return;
+        this.serverStorage = parsed.data.usage;
+        this.renderStorageBadge();
+      }),
     ];
   }
 
@@ -125,14 +157,34 @@ export class BotScreenView {
     try {
       if (document.fullscreenElement) await document.exitFullscreen();
       if (controller.signal.aborted || this.pendingConsent !== controller || !this.canRead()) return;
-      const approved = await showConfirm({
+      const offer = await this.prepareStorage(controller.signal);
+      if (controller.signal.aborted || this.pendingConsent !== controller || !this.canRead()) return;
+      const dialog = {
         title: t('botScreen.permissionTitle', { title: screen.title }),
         message: t('botScreen.permissionMessage'),
         confirmLabel: t('botScreen.permissionAllow'),
         cancelLabel: t('botScreen.permissionDeny'),
-        variant: 'info',
+        variant: 'info' as const,
         requireUserGesture: true, focusCancel: true, signal: controller.signal,
-      });
+      };
+      const storageText = offer ? { bot: offer.scope.botName, limit: formatBytes(offer.maxBytes) } : undefined;
+      let approved: boolean;
+      let grant: BotDeviceStorageGrant = 'none';
+      if (offer?.decision === 'ask') {
+        const answer = await showConfirmWithChoice<BotDeviceStorageGrant>({ ...dialog, choices: {
+          legend: t('botScreen.storageTitle'), description: t('botScreen.storageDescription', storageText), selected: 'none',
+          options: [
+            { value: 'none', label: t('botScreen.storageNone'), description: t('botScreen.storageNoneHint'), icon: 'block' },
+            { value: 'session', label: t('botScreen.storageSession'), description: t('botScreen.storageSessionHint'), icon: 'schedule' },
+            { value: 'always', label: t('botScreen.storageAlways'), description: t('botScreen.storageAlwaysHint'), icon: 'save' },
+          ],
+        } });
+        approved = answer.confirmed;
+        grant = answer.choice;
+      } else {
+        approved = await showConfirm({ ...dialog, note: offer
+          ? t(offer.decision === 'always' ? 'botScreen.storageAlwaysNotice' : 'botScreen.storageNeverNotice', storageText) : undefined });
+      }
       if (controller.signal.aborted || this.pendingConsent !== controller || !this.canRead()) return;
       if (!approved) {
         this.error.textContent = t('botScreen.permissionDenied');
@@ -148,20 +200,83 @@ export class BotScreenView {
       }, {
         policyVersion: BOT_SCREEN_PERMISSION_POLICY_VERSION, serverKey: this.context.session.key,
         botId: screen.botId, screenId: screen.id, instanceId: screen.instanceId,
+        ...(offer ? { storage: { scope: offer.scope, grant } } : {}),
       }, (action) => { void this.act(action); }, error => {
         console.error('[Bot screens] Could not open miniapp document.', error);
         this.leave();
         this.error.textContent = t('botScreen.openError');
         this.error.hidden = false;
         appEvents.emit('stage.bot_screens_changed');
-      }, this.outputVolume());
+      }, this.outputVolume(), (state) => {
+        if (this.frame !== frame) return;
+        this.deviceStorage = state.status === 'granted' ? state.usage : null;
+        this.renderStorageBadge();
+      });
       this.frame = frame;
       this.body.append(frame.element);
       this.placeholder.hidden = true;
       this.localize();
+      this.renderStorageBadge();
     } finally {
       if (this.pendingConsent === controller) this.pendingConsent = null;
     }
+  }
+
+  /** Only bots the administrator allowed may ask; anything unexpected opens the miniapp without storage. */
+  private async prepareStorage(signal: AbortSignal): Promise<StorageOffer | null> {
+    const { session, user } = this.context;
+    this.serverStorage = null;
+    if (!session.serverStore.serverDetails?.protocol?.features.includes('bot-storage')) return null;
+    try {
+      const info = botStorageInfoSchema.parse(await session.client.sendRequest<unknown>(
+        MessageType.BOT_STORAGE_INFO_GET, { botId: this.screen.botId }, crypto.randomUUID(),
+      ));
+      if (signal.aborted || info.botId !== this.screen.botId) return null;
+      // The server part, and with it its warning on this card, reaches only people who manage bots.
+      this.serverStorage = info.server?.granted ? info.server.usage : null;
+      if (!info.device.granted) return null;
+      const details = session.serverStore.serverDetails;
+      const scope = botDeviceStorageScopeSchema.safeParse({
+        serverUrl: session.client.getCurrentServerUrl(), serverId: details?.id, serverName: details?.name,
+        userId: user.id, botId: this.screen.botId,
+        botName: session.serverStore.knownMembers.get(this.screen.botId)?.nickname || this.screen.title,
+      });
+      if (!scope.success) return null;
+      const entry = await window.api.botStorage.get(scope.data);
+      return signal.aborted ? null : { scope: scope.data, decision: entry.decision, maxBytes: entry.usage.maxBytes };
+    } catch (error: unknown) {
+      console.warn('[Bot screens] Opening the miniapp without storage on this computer.', error);
+      return null;
+    }
+  }
+
+  private renderStorageBadge(): void {
+    const usages = this.frame ? [this.deviceStorage, this.serverStorage].filter((usage) => usage !== null) : [];
+    const level = usages.some((usage) => usage.level === 'full') ? 'full'
+      : usages.some((usage) => usage.level === 'near_full') ? 'near_full' : 'ok';
+    if (level !== 'ok') {
+      const details = [
+        ...(this.deviceStorage ? [t('botScreen.storageDeviceDetail', {
+          used: formatBytes(this.deviceStorage.usedBytes), total: formatBytes(this.deviceStorage.maxBytes),
+        })] : []),
+        ...(this.serverStorage ? [t('botScreen.storageServerDetail', {
+          used: formatBytes(this.serverStorage.usedBytes), total: formatBytes(this.serverStorage.maxBytes),
+        })] : []),
+        t('botScreen.storageBadgeHint'),
+      ];
+      const label = t(level === 'full' ? 'botScreen.storageFull' : 'botScreen.storageNearFull');
+      const glyph = document.createElement('span');
+      glyph.className = 'material-symbols-outlined md-16';
+      glyph.setAttribute('aria-hidden', 'true');
+      glyph.textContent = level === 'full' ? 'error' : 'warning';
+      const text = document.createElement('span');
+      text.textContent = label;
+      this.storageBadge.replaceChildren(glyph, text);
+      this.storageBadge.dataset.level = level;
+      this.storageBadge.title = details.join('\n');
+      this.storageBadge.setAttribute('aria-label', `${label}. ${details.join(' ')}`);
+    }
+    setSurfaceVisible(this.storageBadge, level !== 'ok', 'notice');
   }
 
   /** Closes the local view; the frame's onClose hooks learn why. */
@@ -173,6 +288,9 @@ export class BotScreenView {
     this.confirming = null;
     this.frame?.retire(reason);
     this.frame = null;
+    this.deviceStorage = null;
+    this.serverStorage = null;
+    this.renderStorageBadge();
     this.volumeControl.close();
     this.placeholder.hidden = false;
     this.error.hidden = true;

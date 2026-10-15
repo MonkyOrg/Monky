@@ -1,12 +1,27 @@
 import { randomUUID } from 'node:crypto';
 import { ipcMain, protocol, type Session, type WebContents } from 'electron';
-import { BOT_SCREEN_DOCUMENT_IPC, BOT_SCREEN_LIMITS, botScreenDocumentConsentSchema } from '@monky/shared';
+import { BOT_SCREEN_DOCUMENT_IPC, BOT_SCREEN_LIMITS, botScreenDocumentConsentSchema, type BotDeviceStorageScope } from '@monky/shared';
+import { botDeviceStorageScopeId, type BotDeviceStorage } from './botStorage/BotDeviceStorage';
+
+/** Storage on this computer that one opened miniapp document may reach. */
+export interface BotScreenStorageBinding {
+  scopeId: string;
+  scope: BotDeviceStorageScope;
+  /** "Only this session": lasts while this document exists; reopening asks again. */
+  session: boolean;
+}
 
 const scheme = 'monky-miniapp';
-const documents = new Map<string, { owner: WebContents; session: Session; html: string }>();
+const documents = new Map<string, { owner: WebContents; session: Session; html: string; storage: BotScreenStorageBinding | null }>();
 const sessions = new WeakSet<Session>();
 const owners = new WeakSet<WebContents>();
 const maxDocumentBytes = BOT_SCREEN_LIMITS.htmlBytes + BOT_SCREEN_LIMITS.stateBytes * 6 + 32 * 1024;
+
+/** Removing the document (leaving the miniapp) ends whatever it was allowed to store. */
+export function botScreenDocumentStorage(url: string, owner: WebContents): BotScreenStorageBinding | null {
+  const entry = documents.get(url);
+  return entry && entry.owner === owner && !owner.isDestroyed() ? entry.storage : null;
+}
 
 async function removeDocument(url: string): Promise<void> {
   const entry = documents.get(url);
@@ -38,16 +53,36 @@ export function installBotScreenDocuments(session: Session): void {
   });
 }
 
-export function bindBotScreenDocuments(isOwner: (contents: WebContents) => boolean): () => void {
-  ipcMain.handle(BOT_SCREEN_DOCUMENT_IPC.create, (event, ...args: unknown[]): string => {
+export function bindBotScreenDocuments(isOwner: (contents: WebContents) => boolean, storage?: BotDeviceStorage): () => void {
+  ipcMain.handle(BOT_SCREEN_DOCUMENT_IPC.create, async (event, ...args: unknown[]): Promise<string> => {
     if (!isOwner(event.sender) || event.senderFrame !== event.sender.mainFrame || args.length !== 2 ||
         typeof args[0] !== 'string' || !args[0] || Buffer.byteLength(args[0]) > maxDocumentBytes) {
       throw new Error('Invalid miniapp document request.');
     }
-    if (!botScreenDocumentConsentSchema.safeParse(args[1]).success) {
+    const consent = botScreenDocumentConsentSchema.safeParse(args[1]);
+    if (!consent.success) {
       throw new Error('Current, instance-bound miniapp consent is required.');
     }
     const owner = event.sender;
+    const html = args[0];
+    let binding: BotScreenStorageBinding | null = null;
+    if (consent.data.storage && storage) {
+      const { scope, grant } = consent.data.storage;
+      const scopeId = botDeviceStorageScopeId(scope);
+      let session = grant === 'session';
+      if (grant === 'always') {
+        try {
+          // "Always" is remembered, but never overrides a "Never" chosen in the bot settings.
+          if (await storage.decision(scopeId) === 'ask') await storage.setDecision(scope, 'always');
+        } catch (error) {
+          // The person allowed it: that holds for this view, and each storage operation reports its own failure.
+          console.warn('[Bot storage] Could not remember the storage decision; it applies to this view only.', error);
+          session = true;
+        }
+      }
+      binding = { scopeId, scope, session };
+    }
+    if (owner.isDestroyed() || !isOwner(owner)) throw new Error('The miniapp window closed.');
     if ([...documents.values()].filter(entry => entry.owner === owner).length >= 2) {
       throw new Error('Close another miniapp before opening this one.');
     }
@@ -64,7 +99,7 @@ export function bindBotScreenDocuments(isOwner: (contents: WebContents) => boole
       owner.once('destroyed', clear);
     }
     const url = `${scheme}://${randomUUID()}/index.html`;
-    documents.set(url, { owner, session: owner.session, html: args[0] });
+    documents.set(url, { owner, session: owner.session, html, storage: binding });
     return url;
   });
   ipcMain.handle(BOT_SCREEN_DOCUMENT_IPC.remove, async (event, ...args: unknown[]): Promise<void> => {

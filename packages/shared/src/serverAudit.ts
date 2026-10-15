@@ -77,6 +77,7 @@ export const SERVER_AUDIT_ACTIONS = {
   'bot.profile': 'bots',
   'bot.permissions': 'bots',
   'bot.settings': 'bots',
+  'bot.storage': 'bots',
   'bot.command': 'bots',
   'message.delete': 'messages',
   'message.restore': 'messages',

@@ -1406,8 +1406,8 @@ export type BotSettingsSnapshot = {
         avatarUrl?: string | null | undefined;
         permissions?: {
             revision: number;
-            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[] | null;
-            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[];
+            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions" | "server_storage" | "device_storage")[] | null;
+            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions" | "server_storage" | "device_storage")[];
             reviewRequired: boolean;
             reviewedBy: string | null;
             reviewedAt: number | null;
@@ -1672,8 +1672,8 @@ type Input = {
         avatarUrl?: string | null | undefined;
         permissions?: {
             revision: number;
-            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[] | null;
-            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[];
+            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions" | "server_storage" | "device_storage")[] | null;
+            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions" | "server_storage" | "device_storage")[];
             reviewRequired: boolean;
             reviewedBy: string | null;
             reviewedAt: number | null;
@@ -1929,8 +1929,8 @@ type Output = {
         avatarUrl?: string | null | undefined;
         permissions?: {
             revision: number;
-            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[] | null;
-            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[];
+            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions" | "server_storage" | "device_storage")[] | null;
+            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions" | "server_storage" | "device_storage")[];
             reviewRequired: boolean;
             reviewedBy: string | null;
             reviewedAt: number | null;
@@ -2192,8 +2192,8 @@ export type BotSettingsSummary = {
     avatarUrl?: string | null | undefined;
     permissions?: {
         revision: number;
-        requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[] | null;
-        granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions")[];
+        requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions" | "server_storage" | "device_storage")[] | null;
+        granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps" | "live_actions" | "server_storage" | "device_storage")[];
         reviewRequired: boolean;
         reviewedBy: string | null;
         reviewedAt: number | null;
@@ -2426,7 +2426,7 @@ export interface CommandPresentation {
 
 ## `CommandResponsePayload` {#commandresponsepayload}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1291)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1311)
 
 ```ts
 export interface CommandResponsePayload {
