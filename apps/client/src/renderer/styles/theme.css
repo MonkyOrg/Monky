@@ -2824,7 +2824,8 @@ input:focus, textarea:focus, select:focus {
   border: 1px solid var(--border-color);
   border-radius: 8px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-  z-index: 10000;
+  /* Above the image viewer (.attachment-lightbox), whose media also opens this menu. */
+  z-index: 10060;
   display: flex;
   flex-direction: column;
   padding: 6px;

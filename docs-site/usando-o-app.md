@@ -302,9 +302,10 @@ O botão **Opções de formatação**, ao lado do emoji, abre uma barra dentro d
 
 Para copiar a **imagem**, e não o nome ou endereço do arquivo, use **Copiar imagem**
 nos controles do anexo ou no menu do botão direito. Isso também funciona no menu
-das figurinhas. Na visualização ampliada, use o botão de copiar ou `Ctrl+C`
-(`Cmd+C` no macOS), sem texto selecionado. O destino recebe uma imagem PNG no
-tamanho original; imagens animadas são copiadas como um quadro estático.
+das figurinhas. Na visualização ampliada, use o botão de copiar, o menu do botão
+direito sobre a imagem ou `Ctrl+C` (`Cmd+C` no macOS), sem texto selecionado. O
+destino recebe uma imagem PNG no tamanho original; imagens animadas são copiadas
+como um quadro estático.
 A cópia aceita até 50 MB e 64 megapixels e avisa se a imagem ou o clipboard
 estiverem indisponíveis, sem substituir a imagem por um link.
 
@@ -314,6 +315,11 @@ Quando ultrapassar a janela, arraste para explorar os detalhes. O duplo clique
 alterna entre o enquadramento inicial e o tamanho original, até o limite de
 8× do enquadramento inicial; setas navegam pelos
 anexos e `Escape` fecha o visualizador.
+
+O botão direito sobre a imagem ou o vídeo ampliado abre um menu com **Copiar
+imagem** (só em imagens) e **Baixar**, as mesmas ações dos botões do canto.
+Enquanto o menu está aberto, o teclado age nele: `Escape` fecha só o menu, e
+clicar fora dele também não fecha o visualizador.
 
 **Responder** mantém uma referência à mensagem original, com autor e prévia. A resposta pode incluir texto, anexos, código ou figurinha; mensagens públicas de bots também podem receber respostas. Cancele pelo `×` no campo de composição ou com `Escape`. A referência acompanha o rascunho do canal. Clicar na prévia leva à mensagem original, carregando uma janela do histórico se necessário; **Voltar às mensagens recentes** retorna ao fim da conversa. A prévia acompanha edições e mostra **Mensagem apagada** se o original for excluído, sem preservar seu conteúdo. Mensagens privadas de bots não podem ser usadas como referência.
 

@@ -4,7 +4,8 @@ import { initializeCustomVideoPlayers } from '../utils/videoPlayer';
 import { showAlert } from './Dialog';
 import { playChatMedia } from '../core/ChatMediaOutput';
 import { ImageClipboard } from '../utils/imageClipboard';
-import { withButtonLoading } from '../utils/buttonLoading';
+import { isButtonLoading, withButtonLoading } from '../utils/buttonLoading';
+import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 
 /**
  * Handler de download que o lightbox espera. Fica aqui porque todo mundo que
@@ -61,6 +62,8 @@ export class LightboxModal {
     let currentInlineVideo: HTMLVideoElement | null = null;
     let resumeInlineVideoOnClose = false;
     const imageClipboard = new ImageClipboard();
+    const mediaMenu = new ContextMenu();
+    let pressedWithMenuOpen = false;
 
     const overlay = document.createElement('div');
     overlay.className = 'attachment-lightbox';
@@ -113,6 +116,42 @@ export class LightboxModal {
     }
 
     const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+    const copyImage = (item: LightboxMedia) => {
+      if (item.kind === 'image') void imageClipboard.copy(item.url);
+    };
+
+    const download = (item: LightboxMedia) => {
+      void withButtonLoading(downloadButton, () => onDownload(item.url, item.fileName));
+    };
+
+    // Right-clicking the media offers the toolbar actions for the item under the pointer.
+    const openMediaMenu = (event: MouseEvent) => {
+      const media = event.target instanceof Element
+        ? event.target.closest('.lightbox-media--image, .chat-video-player--lightbox') : null;
+      // A fullscreen video hides everything outside it, including a menu on <body>.
+      if (!media || document.fullscreenElement) return;
+      event.preventDefault();
+      const item = items[currentIndex];
+      const entries: ContextMenuItem[] = [];
+      if (item.kind === 'image') {
+        entries.push({
+          label: t('chat.copyImage'), icon: 'content_copy',
+          shortcut: `${navigator.platform.startsWith('Mac') ? 'Cmd' : 'Ctrl'}+C`,
+          onClick: () => copyImage(item),
+        });
+      }
+      entries.push({
+        label: t('common.download'), icon: 'download', disabled: isButtonLoading(downloadButton),
+        onClick: () => download(item),
+      });
+      mediaMenu.open(event.clientX, event.clientY, entries);
+    };
+
+    // Window capture runs before the menu's own outside-press dismissal on document.
+    const onPointerDown = () => {
+      pressedWithMenuOpen = mediaMenu.isOpen();
+    };
 
     const updateZoomIndicator = () => {
       if (!currentImage) {
@@ -268,7 +307,8 @@ export class LightboxModal {
           setZoom(zoom > 1.01 ? 1 : getActualScale());
         });
         img.addEventListener('pointerdown', (e) => {
-          if (!stage.classList.contains('is-pannable')) return;
+          // Only the primary button pans; the secondary one opens the media menu.
+          if (e.button !== 0 || !stage.classList.contains('is-pannable')) return;
           e.preventDefault();
           e.stopPropagation();
           pointerId = e.pointerId;
@@ -338,6 +378,8 @@ export class LightboxModal {
     };
 
     const onKey = (e: KeyboardEvent) => {
+      // Like a native menu, an open media menu owns the keyboard.
+      if (mediaMenu.isOpen()) return;
       const target = e.target as HTMLElement | null;
       const isFormField = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
 
@@ -362,6 +404,8 @@ export class LightboxModal {
     };
 
     const close = () => {
+      mediaMenu.close();
+      window.removeEventListener('pointerdown', onPointerDown, true);
       imageClipboard.cancel();
       syncCurrentVideoBackToInline({ resume: true });
       releaseDrag();
@@ -379,8 +423,7 @@ export class LightboxModal {
     copyButton.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
-      const current = items[currentIndex];
-      if (current.kind === 'image') void imageClipboard.copy(current.url);
+      copyImage(items[currentIndex]);
     });
     closeButton.addEventListener('click', (e) => {
       e.preventDefault();
@@ -390,8 +433,7 @@ export class LightboxModal {
     downloadButton.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      const current = items[currentIndex];
-      void withButtonLoading(downloadButton, () => onDownload(current.url, current.fileName));
+      download(items[currentIndex]);
     });
     prevButton.addEventListener('click', (e) => {
       e.preventDefault();
@@ -404,8 +446,14 @@ export class LightboxModal {
       navigate(1);
     });
     overlay.addEventListener('click', (e) => {
+      // The press that dismisses the media menu must not also close the viewer.
+      const dismissedMenu = pressedWithMenuOpen;
+      pressedWithMenuOpen = false;
+      if (dismissedMenu) return;
       if (e.target === overlay || e.target === stage || e.target === frame) close();
     });
+    overlay.addEventListener('contextmenu', openMediaMenu);
+    window.addEventListener('pointerdown', onPointerDown, true);
     document.addEventListener('keydown', onKey, true);
     document.body.appendChild(overlay);
     renderCurrent();
