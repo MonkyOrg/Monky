@@ -23,6 +23,7 @@ const flush = async () => { for (let count = 0; count < 20; count++) await Promi
 
 class MountedRoot extends EventTarget {
   isConnected = true;
+  querySelector() { return null; }
   querySelectorAll() { return []; }
 }
 
@@ -81,8 +82,8 @@ function fixture(language = 'en') {
   const modules = new Map();
   const allowed = new Set([
     'views/settings/tabs/LocalToolsTab', 'i18n/index', 'i18n/locales/en',
-    'i18n/locales/pt-BR', 'i18n/locales/community', 'i18n/locales/serverAudit', 'i18n/messageSearch',
-    'utils/html', 'utils/attachment', 'utils/loadingIndicator',
+    'i18n/locales/pt-BR', 'i18n/locales/community', 'i18n/locales/serverAudit', 'i18n/locales/botStorage', 'i18n/messageSearch',
+    'utils/html', 'utils/attachment', 'utils/loadingIndicator', 'utils/storageUsage', 'views/settings/BotDeviceStorageList',
   ]);
   function load(name) {
     if (modules.has(name)) return modules.get(name);
@@ -99,6 +100,9 @@ function fixture(language = 'en') {
       require(request) {
         if (request.endsWith('/core/EventBus')) return { appEvents: { emit() {} } };
         if (request.endsWith('/core/NetworkClient')) return { networkClient: {} };
+        // The bot data list confirms and reports with the shared dialog and toasts; localToolsDom.test.cjs runs them.
+        if (request.endsWith('/Dialog')) return { showConfirm: async () => false };
+        if (request.endsWith('/CopyToast')) return { showErrorToast() {}, showSuccessToast() {} };
         if (!request.startsWith('.')) throw new Error(`Unexpected IPC or network dependency: ${request}`);
         let resolved = path.posix.normalize(path.posix.join(path.posix.dirname(name), request));
         if (resolved === 'i18n') resolved = 'i18n/index';
@@ -146,8 +150,8 @@ for (const language of ['pt-BR', 'en']) {
     const html = f.tab.renderHtml();
     assert.ok(html.includes('data-settings-label="Tools &quot;quoted&quot; &lt;tag&gt; &amp; friends"'));
     const sections = [...html.matchAll(/data-settings-section="([^"]+)"/g)].map(match => match[1]);
-    assert.deepEqual(sections, ['local-tools-storage', 'local-tools-tools', 'local-tools-permissions', 'local-tools-tasks']);
-    assert.equal(new Set(sections).size, 4);
+    assert.deepEqual(sections, ['local-tools-storage', 'local-tools-tools', 'local-tools-permissions', 'local-tools-bot-storage', 'local-tools-tasks']);
+    assert.equal(new Set(sections).size, 5);
     assert.ok(html.includes(f.t('localExecution.notLoaded')));
     assert.ok(!html.includes('href=') && !html.includes('<script'));
   });

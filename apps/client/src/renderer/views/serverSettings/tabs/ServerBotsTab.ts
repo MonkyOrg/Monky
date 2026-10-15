@@ -2,6 +2,7 @@ import {
   MessageType,
   Permission,
   botInstallPreviewSchema,
+  botStorageInfoSchema,
   type BotInfo,
   type BotCreatedPayload,
   type BotListResponsePayload,
@@ -11,9 +12,12 @@ import { appEvents } from '../../../core/EventBus';
 import { escapeHtml } from '../../../utils/html';
 import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import { getAvatarUrl } from '../../../utils/avatar';
+import { formatBytes } from '../../../utils/attachment';
 import { getLanguage, t } from '../../../i18n';
+import { serverStore } from '../../../stores/serverStore';
 import { showAlert, showConfirm } from '../../Dialog';
 import { botSettingsModal } from '../../BotSettingsModal';
+import { BotStorageSettings } from '../../BotStorageSettings';
 import { showBotPermissionReview } from '../../BotPermissionReview';
 import { botRequestError } from '../../../utils/botInputs';
 import type { ServerSettingsContext } from '../ServerSettingsContext';
@@ -432,8 +436,10 @@ export class ServerBotsTab {
     const bot = this.bots.find((entry) => entry.id === botId);
     if (!client || !context || !bot || context.operations.isPending(`bot-revoke:${botId}`)) return;
     await context.operations.run(`bot-revoke:${botId}`, t('bots.revoke'), Permission.MANAGE_BOTS, async () => {
+      const stored = await this.storedBytes(botId);
       const confirmed = await showConfirm({
         message: t('bots.revokeConfirm', { name: this.displayName(bot) }),
+        note: stored ? t('bots.revokeStorageWarning', { size: formatBytes(stored) }) : undefined,
         confirmLabel: t('bots.revoke'),
         variant: 'danger',
       });
@@ -445,6 +451,19 @@ export class ServerBotsTab {
         void this.refreshList();
       }
     });
+  }
+
+  /** What removing the bot would delete from this server; unknown sizes never block the removal. */
+  private async storedBytes(botId: string): Promise<number> {
+    const context = this.context;
+    if (!context || !this.client || !BotStorageSettings.supported(serverStore)) return 0;
+    try {
+      const info = botStorageInfoSchema.parse(await context.request<unknown>(MessageType.BOT_STORAGE_INFO_GET, { botId }, Permission.MANAGE_BOTS));
+      return info.botId === botId ? info.server?.usage.usedBytes ?? 0 : 0;
+    } catch (error: unknown) {
+      console.warn('[Bots] Could not read the bot storage before removal.', error);
+      return 0;
+    }
   }
 
   private displayName(bot: BotInfo): string {

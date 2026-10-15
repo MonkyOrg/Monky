@@ -13,6 +13,9 @@ import { BotSelectorService } from '../application/services/BotSelectorService';
 import { BotSettingsService } from '../application/services/BotSettingsService';
 import { BotPermissionService } from '../application/services/BotPermissionService';
 import { SqliteBotPermissionRepository } from '../infrastructure/database/SqliteBotPermissionRepository';
+import { BotStorageService } from '../application/services/BotStorageService';
+import { SqliteBotStorageRepository } from '../infrastructure/database/SqliteBotStorageRepository';
+import { BotStorageFileStore } from '../infrastructure/security/BotStorageFileStore';
 import { ChannelService } from '../application/services/ChannelService';
 import { ChatService } from '../application/services/ChatService';
 import { CommunityService } from '../application/services/CommunityService';
@@ -179,6 +182,8 @@ export async function createFixture(options: {
   const roleRepo = new SqliteRoleRepository(db);
   const botRepo = new SqliteBotRepository(db);
   const botPermissions = new BotPermissionService(new SqliteBotPermissionRepository(db));
+  // Discarded files go immediately so tests can observe them; production waits for the database snapshot.
+  const botStorage = new BotStorageService(new SqliteBotStorageRepository(db), new BotStorageFileStore(dataDir, 0));
   const avatars = new AvatarStorageService(dataDir);
   const rateLimiter = new RateLimiter();
   const attachmentRepo = new SqliteAttachmentRepository(db);
@@ -205,7 +210,7 @@ export async function createFixture(options: {
     const bots = new Map<string, UserSummary>();
     for (const { user } of online().values()) if (user.isBot) bots.set(user.id, user);
     return bots;
-  }, botPermissions);
+  }, botPermissions, botStorage);
   await ensureServerSeedData({ serverName: 'Bot tests', maxUsers: 10 }, serverRepo, channelRepo, roleRepo);
   const httpServer = http.createServer();
   let communityService!: CommunityService;
@@ -253,7 +258,7 @@ export async function createFixture(options: {
     registry,
     selectorService,
     new BotSettingsService(new SqliteBotSettingsRepository(database.getDb()), botPermissions),
-    undefined, null, communityService, searchService, forumService, pollService,
+    undefined, null, communityService, searchService, forumService, pollService, undefined, undefined, botStorage,
   );
   online = () => wsServer.getOnlineUsersMap();
   httpServer.listen(0, '127.0.0.1');
@@ -307,6 +312,7 @@ export async function createFixture(options: {
   };
   const dispose = async () => {
     await wsServer.close();
+    botStorage.dispose();
     await Promise.all(peers.map((peer) => peer.close()));
     await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
     rateLimiter.dispose();
@@ -317,7 +323,7 @@ export async function createFixture(options: {
     url,
     connect, human, bot, dispose, peers, wsServer, botService, botRepo, roleRepo, avatars,
     channelService, userService, registry, dataDir, messageRepo, channelRepo, userRepo, serverRepo, chatService, attachmentRepo,
-    database, permissions, botPermissions, signalingService, coturnManager, authService, roleService, rateLimiter,
+    database, permissions, botPermissions, botStorage, signalingService, coturnManager, authService, roleService, rateLimiter,
     communityService, forumService, searchService,
   };
 }

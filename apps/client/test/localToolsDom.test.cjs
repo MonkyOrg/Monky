@@ -128,6 +128,9 @@ async function runRegression(language) {
   const sources = [];
   const listeners = new Set();
   const listenerHistory = [];
+  const storageListeners = new Set();
+  const forgotten = [];
+  let storageEntries = [];
   const mutation = (kind, input) => {
     const request = { ...deferred(), kind, input };
     mutations.push(request);
@@ -145,6 +148,15 @@ async function runRegression(language) {
     clearLocalExecutionCache: () => mutation('cache'),
     cancelLocalExecutionTask: id => mutation('cancel', id),
     openExternal: url => { const request = { ...deferred(), url }; sources.push(request); return request.promise; },
+    botStorage: {
+      list: async () => structuredClone(storageEntries),
+      forget: async id => {
+        forgotten.push(id);
+        storageEntries = storageEntries.filter(entry => entry.id !== id);
+        for (const listener of storageListeners) listener();
+      },
+      onChanged: callback => { storageListeners.add(callback); return () => storageListeners.delete(callback); },
+    },
   };
   let state = { supported: true, tools: [], permissions: [], tasks: [], toolsBytes: 0, cacheBytes: 0 };
   const emit = value => { state = structuredClone(value); for (const listener of listeners) listener(structuredClone(state)); };
@@ -184,8 +196,40 @@ async function runRegression(language) {
   }
   check(field('[data-local-tools-size]').textContent === '0 B' && field('[data-local-cache-size]').textContent === '0 B', 'actual zero totals render after loading');
   const sections = [...container.querySelectorAll('[data-settings-section]')];
-  check(sections.length === 4 && new Set(sections.map(section => section.dataset.settingsSection)).size === 4, 'sections have distinct navigation anchors');
+  check(sections.length === 5 && new Set(sections.map(section => section.dataset.settingsSection)).size === 5, 'sections have distinct navigation anchors');
   check(sections.every(section => section.dataset.settingsLabel === section.querySelector('h3').textContent), 'section labels match localized headings');
+
+  const storageList = field('[data-bot-storage-list]');
+  await waitFor(() => storageList.textContent.includes(t('botStorage.localEmpty')), () => 'bot data list shows its empty state');
+  check(storageListeners.size === 1, 'bot data list subscribes once');
+  const storageScope = {
+    serverUrl: 'wss://same.example.invalid/', serverId: 'server-original', serverName: 'Server <b>x</b>', userId: 'user-1', botId: 'nes',
+    botName: 'NES <img src=x onerror=bad()>',
+  };
+  const storageUsage = { usedBytes: 2048, maxBytes: 50 * 1024 * 1024, objectCount: 2, maxObjects: 1000, level: 'ok' };
+  storageEntries = [
+    { id: 'e'.repeat(64), scope: storageScope, decision: 'always', usage: storageUsage, updatedAt: 1000 },
+    { id: 'f'.repeat(64), scope: { ...storageScope, botId: 'quiet', botName: 'Quiet' }, decision: 'ask', usage: { ...storageUsage, usedBytes: 0, objectCount: 0 }, updatedAt: 1000 },
+  ];
+  for (const listener of storageListeners) listener();
+  await waitFor(() => storageList.querySelectorAll('[data-bot-storage-forget]').length === 1, () => 'bot data list renders what is stored');
+  check(storageList.textContent.includes(storageScope.botName) && storageList.textContent.includes(storageScope.serverName)
+    && !storageList.querySelector('img, b'), 'bot and server names in the bot data list display literally');
+  check(storageList.textContent.includes(t('botStorage.localDecision.always')) && storageList.textContent.includes('2 KB')
+    && storageList.textContent.includes('same.example.invalid'), 'the list shows the decision, the usage and the server host');
+  check(!storageList.textContent.includes('Quiet'), 'a scope with no data and the default decision is not listed');
+  storageList.querySelector('[data-bot-storage-forget]').click();
+  await waitFor(() => document.querySelector('.dialog-card [data-action="confirm"]'), () => 'deleting bot data asks for confirmation');
+  check(document.activeElement === document.querySelector('.dialog-card [data-action="cancel"]'), 'the destructive confirmation focuses cancel');
+  check(document.querySelector('.dialog-card').textContent.includes('2 KB'), 'the confirmation shows how much will be deleted');
+  // Miniapps keep saving while the person decides: the list refreshes, and the removal still happens.
+  storageEntries = storageEntries.map(entry => ({ ...entry, usage: { ...entry.usage, usedBytes: entry.usage.usedBytes + 1024 } }));
+  for (const listener of storageListeners) listener();
+  await waitFor(() => storageList.textContent.includes('3 KB'), () => 'a change during the confirmation refreshes the list');
+  document.querySelector('.dialog-card [data-action="confirm"]').click();
+  await waitFor(() => forgotten.length === 1 && storageList.textContent.includes(t('botStorage.localEmpty')),
+    () => 'a confirmed deletion forgets the data and refreshes the list');
+  check(forgotten[0] === 'e'.repeat(64), 'the deletion targets the chosen entry');
 
   const bot = {
     serverOrigin: 'wss://same.example.invalid', serverId: 'server-original', serverName: 'Server <script>bad()</script>',

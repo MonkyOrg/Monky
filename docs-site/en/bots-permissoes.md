@@ -30,6 +30,8 @@ When creating or editing a text channel, the **Allow bot commands** switch start
 | `selectors` | Persistent public choice controls and their responses; publication also requires `send_messages` |
 | `miniapps` | Shared voice-room miniapps, including authorized participant actions |
 | `live_actions` | Native form/selector banners; also requires `commands` and the caller's `EMIT_LIVE_ACTIONS` permission |
+| `server_storage` | The bot's private files on this server, up to the limit the administrator sets; removing the bot deletes this data |
+| `device_storage` | Lets the bot's miniapps ask to keep data on the computer of whoever opens them; each person decides |
 
 Registering commands requires `commands`; commands with `downloadsSound` also declare `sound_download`, and those with `localCapabilities` declare `local_execution`. Public replies require `send_messages`; default private replies require only `commands`. Role, channel, and initiating-user permissions still apply.
 
@@ -40,6 +42,8 @@ While reception is active, the participant list shows **Listening to voices**. T
 The SDK does not record, transcribe or send audio to AI services. Bot operators must disclose their processing and retention and comply with applicable consent and privacy rules. Read [format, example and cleanup](/en/bots-voz#receive-microphones) before enabling the capability.
 
 **Device consent is separate.** Granting `local_execution` or `sound_download` on the server neither installs tools nor authorizes a computer. The person still controls local requests and can deny or revoke them in local tool settings. Personal preferences, bot language, and file-name confirmation do not become administrator-controlled permissions.
+
+Likewise, `device_storage` only allows **asking**: when opening each miniapp, the person chooses whether it keeps data on their computer, and can change that decision or delete the data at any time. See [Bot storage](/en/bots-armazenamento).
 
 In the tool request, **Always allow and prepare** remembers authorization for this bot and capability on this server. On reconnect, Monky checks tools in the background without reopening the request. **Allow until disconnect and prepare** remains available as a temporary choice; previous temporary grants are not automatically promoted. Tools are kept in Monky's local installation and reused by other servers, but each server/bot still needs its own consent.
 

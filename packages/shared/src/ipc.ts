@@ -32,6 +32,10 @@ import type {
   LocalTaskFailureEvent,
 } from './localExecution.js';
 import type { UserActivity } from './models.js';
+import {
+  botDeviceStorageGrantSchema, botDeviceStorageScopeSchema,
+  type BotDeviceStorageDocumentState, type BotDeviceStorageEntry, type BotDeviceStorageResponse,
+} from './botStorage.js';
 
 export interface RendererBootstrapFailure {
   phase: 'constructor' | 'initialization';
@@ -68,15 +72,31 @@ export const BOT_SCREEN_DOCUMENT_IPC = {
   remove: 'bot-screen-document:remove',
 } as const satisfies Record<string, keyof IpcInvokeChannels>;
 
-export const BOT_SCREEN_PERMISSION_POLICY_VERSION = 1;
+export const BOT_SCREEN_PERMISSION_POLICY_VERSION = 2;
 export const botScreenDocumentConsentSchema = z.object({
   policyVersion: z.literal(BOT_SCREEN_PERMISSION_POLICY_VERSION),
   serverKey: z.string().min(1).max(1024),
   botId: z.string().min(1).max(128),
   screenId: z.string().min(1).max(128),
   instanceId: z.string().min(1).max(128),
-}).strict();
+  /** Present only when the server administrator allowed `device_storage` for this bot. */
+  storage: z.object({ scope: botDeviceStorageScopeSchema, grant: botDeviceStorageGrantSchema }).strict().optional(),
+}).strict().refine((consent) => !consent.storage || consent.storage.scope.botId === consent.botId, {
+  message: 'Storage consent addresses another bot', path: ['storage'],
+});
 export type BotScreenDocumentConsent = z.infer<typeof botScreenDocumentConsentSchema>;
+
+export const BOT_STORAGE_IPC = {
+  documentState: 'bot-storage:document-state',
+  documentRequest: 'bot-storage:document-request',
+  list: 'bot-storage:list',
+  get: 'bot-storage:get',
+  setDecision: 'bot-storage:set-decision',
+  setQuota: 'bot-storage:set-quota',
+  clear: 'bot-storage:clear',
+  forget: 'bot-storage:forget',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+export const BOT_STORAGE_CHANGED = 'bot-storage:changed' satisfies keyof IpcEvents;
 
 export type CrashRecoveryActionResult =
   | { ok: true; copied?: boolean }
@@ -786,6 +806,14 @@ export const NATIVE_SCREEN_EVENT = 'native-screen:event' satisfies keyof IpcEven
 export interface IpcInvokeChannels {
   'bot-screen-document:create': { args: [html: string, consent: BotScreenDocumentConsent]; returnType: string };
   'bot-screen-document:remove': { args: [url: string]; returnType: void };
+  'bot-storage:document-state': { args: [url: string]; returnType: BotDeviceStorageDocumentState };
+  'bot-storage:document-request': { args: [url: string, request: unknown]; returnType: BotDeviceStorageResponse };
+  'bot-storage:list': { args: []; returnType: BotDeviceStorageEntry[] };
+  'bot-storage:get': { args: [scope: unknown]; returnType: BotDeviceStorageEntry };
+  'bot-storage:set-decision': { args: [input: unknown]; returnType: BotDeviceStorageEntry };
+  'bot-storage:set-quota': { args: [input: unknown]; returnType: BotDeviceStorageEntry };
+  'bot-storage:clear': { args: [scopeId: string]; returnType: void };
+  'bot-storage:forget': { args: [scopeId: string]; returnType: void };
   'editor:command': { args: [command: EditorCommand]; returnType: { success: boolean } };
   'native-screen:invoke': { args: [command: NativeScreenCommand]; returnType: NativeScreenCommandResult };
   'native-screen:reply': { args: [reply: NativeScreenReply]; returnType: void };
@@ -985,6 +1013,8 @@ export interface IpcEvents {
   'soundboard:download-progress': [progress: SoundboardDownloadProgress];
   'local-execution:changed': [snapshot: LocalExecutionSnapshot];
   'local-execution:task-failed': [failure: LocalTaskFailureEvent];
+  /** Usage, preference or grants of one bot's storage on this computer changed. */
+  'bot-storage:changed': [scopeId: string];
   'local-preparation-dialog:changed': [state: LocalPreparationDialogState];
   'shortcut:action-triggered': [action: string];
   'ptt:state-changed': [active: boolean];

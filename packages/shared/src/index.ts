@@ -62,6 +62,7 @@ export * from './botScreens.js';
 export * from './localExecution.js';
 export * from './localExecutionProtocol.js';
 export * from './botPermissions.js';
+export * from './botStorage.js';
 export * from './protocolCompatibility.js';
 export * from './botDiagnostics.js';
 export * from './messageBlocks.js';

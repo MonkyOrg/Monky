@@ -14,6 +14,8 @@ interface AlertOptions {
 interface ConfirmOptions {
   title?: string;
   message: string;
+  /** A short remark below the message. */
+  note?: string;
   confirmLabel?: string;
   cancelLabel?: string;
   variant?: DialogVariant;
@@ -32,6 +34,21 @@ interface DialogTextInput {
   hint?: string;
   maxLength?: number;
   validate?: (value: string) => string | undefined;
+}
+
+export interface DialogChoice<T extends string> {
+  value: T;
+  label: string;
+  description?: string;
+  icon?: string;
+}
+
+/** Mutually exclusive options shown as selectable cards, never as radio buttons. */
+export interface DialogChoices<T extends string> {
+  legend: string;
+  description?: string;
+  options: DialogChoice<T>[];
+  selected: T;
 }
 
 let dialogId = 0;
@@ -56,19 +73,23 @@ function buildDialog(params: {
   textInput?: DialogTextInput;
   textInputs?: DialogTextInput[];
   focusInput?: number;
+  choices?: DialogChoices<string>;
+  /** A short remark below the message, e.g. what was already decided elsewhere. */
+  note?: string;
   signal?: AbortSignal;
   requireUserGesture?: boolean;
   focusCancel?: boolean;
-  onResolve: (confirmed: boolean, checked: boolean, value: string, values: string[]) => void;
+  onResolve: (confirmed: boolean, checked: boolean, value: string, values: string[], choice: string | null) => void;
 }): void {
   const fields = params.textInputs ?? (params.textInput ? [params.textInput] : []);
   if (params.signal?.aborted) {
-    params.onResolve(false, false, fields[0]?.value ?? '', fields.map(field => field.value));
+    params.onResolve(false, false, fields[0]?.value ?? '', fields.map(field => field.value), params.choices?.selected ?? null);
     return;
   }
   const { icon, color } = VARIANT_ICON[params.variant];
   const previousFocus = document.activeElement;
   const inputId = `dialog-input-${++dialogId}`;
+  let choice = params.choices?.selected ?? null;
 
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
@@ -81,6 +102,19 @@ function buildDialog(params: {
         </div>
       </div>
       ${params.message ? `<div class="dialog-message" style="white-space: pre-line;">${escapeHtml(params.message)}</div>` : ''}
+      ${params.note ? `<p class="dialog-note">${escapeHtml(params.note)}</p>` : ''}
+      ${params.choices ? `<div class="dialog-choices">
+        <p class="dialog-choices-legend" id="${inputId}-choices">${escapeHtml(params.choices.legend)}</p>
+        ${params.choices.description ? `<p class="dialog-option-hint" id="${inputId}-choices-hint">${escapeHtml(params.choices.description)}</p>` : ''}
+        <div class="input-mode-cards" role="group" aria-labelledby="${inputId}-choices"
+          ${params.choices.description ? `aria-describedby="${inputId}-choices-hint"` : ''}>
+          ${params.choices.options.map((option) => `<button type="button" class="voice-mode-card input-mode-card"
+            data-dialog-choice="${escapeHtml(option.value)}" aria-pressed="${option.value === choice}">
+            <span class="input-mode-card-title">${option.icon ? `<span class="material-symbols-outlined md-18" aria-hidden="true">${escapeHtml(option.icon)}</span>` : ''}${escapeHtml(option.label)}</span>
+            ${option.description ? `<span class="input-mode-card-description">${escapeHtml(option.description)}</span>` : ''}
+          </button>`).join('')}
+        </div>
+      </div>` : ''}
       ${fields.map((field, index) => `<div class="dialog-text-field">
         <label for="${inputId}-${index}">${escapeHtml(field.label)}</label>
         <div class="dialog-text-input-row">
@@ -145,8 +179,15 @@ function buildDialog(params: {
     if (previousFocus instanceof HTMLElement && previousFocus.isConnected && !previousFocus.closest('[inert], [hidden], [data-ui-closing]')) {
       previousFocus.focus();
     }
-    params.onResolve(confirmed, checked, inputs[0]?.value ?? '', inputs.map(field => field.value));
+    params.onResolve(confirmed, checked, inputs[0]?.value ?? '', inputs.map(field => field.value), choice);
   };
+
+  const choiceCards = [...backdrop.querySelectorAll<HTMLButtonElement>('[data-dialog-choice]')];
+  const select = (card: HTMLButtonElement): void => {
+    choice = card.dataset.dialogChoice ?? choice;
+    for (const other of choiceCards) other.setAttribute('aria-pressed', String(other === card));
+  };
+  for (const card of choiceCards) card.addEventListener('click', () => select(card));
 
   const onAbort = (): void => settle(false);
   const onKeyDown = (e: KeyboardEvent): void => {
@@ -161,6 +202,11 @@ function buildDialog(params: {
       e.stopImmediatePropagation();
       if (params.requireUserGesture && (!e.isTrusted || e.repeat || e.isComposing || e.keyCode === 229)) return;
       if (e.target === checkbox) return;
+      if (e.target instanceof HTMLButtonElement && choiceCards.includes(e.target)) {
+        // Enter picks the focused card; confirming stays a separate, deliberate action.
+        select(e.target);
+        return;
+      }
       if (e.target instanceof HTMLElement && e.target.dataset.action === 'cancel') {
         settle(false);
         return;
@@ -223,6 +269,7 @@ export function showConfirm(options: ConfirmOptions): Promise<boolean> {
       title: options.title ?? t('dialog.confirmTitle'),
       focusCancel: options.focusCancel,
       message: options.message,
+      note: options.note,
       variant: options.variant ?? 'warning',
       showCancel: true,
       confirmLabel: options.confirmLabel ?? t('common.confirm'),
@@ -231,6 +278,32 @@ export function showConfirm(options: ConfirmOptions): Promise<boolean> {
       signal: options.signal,
       requireUserGesture: options.requireUserGesture,
       onResolve: (confirmed) => resolve(confirmed),
+    });
+  });
+}
+
+/** Confirmation together with one of several mutually exclusive choices, shown as cards. */
+export function showConfirmWithChoice<T extends string>(
+  options: ConfirmOptions & { choices: DialogChoices<T> }
+): Promise<{ confirmed: boolean; choice: T }> {
+  const values = options.choices.options.map((option) => option.value);
+  return new Promise((resolve) => {
+    buildDialog({
+      title: options.title ?? t('dialog.confirmTitle'),
+      message: options.message,
+      note: options.note,
+      variant: options.variant ?? 'warning',
+      showCancel: true,
+      confirmLabel: options.confirmLabel ?? t('common.confirm'),
+      cancelLabel: options.cancelLabel ?? t('common.cancel'),
+      confirmClass: options.variant === 'danger' ? 'btn-danger' : 'btn-primary',
+      choices: options.choices,
+      signal: options.signal,
+      requireUserGesture: options.requireUserGesture,
+      focusCancel: options.focusCancel,
+      onResolve: (confirmed, _checked, _value, _values, choice) => resolve({
+        confirmed, choice: values.find((value) => value === choice) ?? options.choices.selected,
+      }),
     });
   });
 }

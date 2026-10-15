@@ -8,6 +8,33 @@ export interface IBotPermissionRepository {
   transaction<T>(operation: () => T): T;
 }
 
+export interface BotStorageObjectRecord {
+  botId: string;
+  key: string;
+  /** Name of the file in the bot's directory; never derived from the key. */
+  filename: string;
+  sizeBytes: number;
+  contentType: string | null;
+  updatedAt: number;
+}
+
+export interface IBotStorageRepository {
+  find(botId: string, key: string): BotStorageObjectRecord | undefined;
+  /** Keys starting with `prefix`, after `after`, in key order. */
+  list(botId: string, prefix: string, after: string | undefined, limit: number): BotStorageObjectRecord[];
+  usage(botId: string): { usedBytes: number; objectCount: number };
+  save(record: BotStorageObjectRecord): void;
+  delete(botId: string, key: string): void;
+  /** Removes every object of the bot and returns what was removed. */
+  deleteAll(botId: string): BotStorageObjectRecord[];
+  quota(botId: string): number | undefined;
+  setQuota(botId: string, maxBytes: number): void;
+  botExists(botId: string): boolean;
+  /** Every bot id together with the files its objects reference, for startup reconciliation. */
+  references(): Map<string, Set<string>>;
+  transaction<T>(operation: () => T): T;
+}
+
 export interface IBotSettingsRepository {
   /** Existing bots without a declaration return an empty revision-zero record. */
   findById(botId: string): BotSettingsRecord | undefined;

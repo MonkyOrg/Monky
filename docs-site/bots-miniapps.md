@@ -62,6 +62,7 @@ No documento isolado, o bridge `window.monkyScreen` fornece:
 | `sendAction(action, payload)` | Envia uma intenção vinculada à revisão atual; retorna se o bridge aceitou o envio, não se o bot aceitou a ação |
 | `onBeforeClose(handler)` | Roda antes de um fechamento pedido por esta pessoa; devolver `false` mantém a visualização aberta. Veja [Ciclo de vida da visualização](#ciclo-de-vida-da-visualizacao) |
 | `onClose(handler)` | Roda em todo fechamento, com a visualização já escondida e muda, por até 5 segundos |
+| `storage` | Dados guardados neste computador, quando o bot tem `device_storage` e a pessoa permite; veja [Armazenamento do bot](/bots-armazenamento#nos-computadores). Ausente em clientes antigos |
 
 Leia `window.monkyScreen.viewer.locale` dentro do callback de `onState()` para traduzir os controles de cada pessoa. Trocar o idioma no aplicativo também aciona esse callback, sem mudar o estado/revisão compartilhados nem recriar o iframe. Não escolha o idioma dos controles a partir do estado público ou do idioma de quem criou a tela.
 
@@ -110,7 +111,7 @@ fazer, como perguntar se a pessoa quer salvar a partida.
 | Gancho | Quando roda | Como o Monky espera |
 |--------|-------------|---------------------|
 | `onBeforeClose(({ reason }) => ...)` | Antes de **Sair do miniapp** (`leave`) ou **Encerrar miniapp** (`end`), quando esta pessoa pede | A visualização continua aberta e pode perguntar o que quiser. Os handlers rodam em ordem; o primeiro que devolver `false`, direto ou por uma promise, mantém o miniapp aberto |
-| `onClose(({ reason }) => ...)` | Em todo fechamento, inclusive depois de um `onBeforeClose` | Até 5 segundos, com a visualização já escondida e muda, sem estado novo e sem `sendAction`. Os handlers rodam em paralelo |
+| `onClose(({ reason }) => ...)` | Em todo fechamento, inclusive depois de um `onBeforeClose` | Até 5 segundos, com a visualização já escondida e muda, sem estado novo e sem `sendAction`; o `storage` continua funcionando. Os handlers rodam em paralelo |
 
 Os dois devolvem uma função que cancela o registro. Registre-os enquanto o
 documento carrega: o Monky só espera os ganchos que já conhece. O `reason` do
@@ -161,8 +162,9 @@ tela.onClose?.(async () => {
 ```
 
 Como o `onClose` roda sem tela, não pergunte nada à pessoa nem inicie downloads
-nele: salve no serviço do bot e mantenha também um salvamento periódico para os
-casos sem gancho. Já um download que a pessoa inicia num botão do miniapp antes
+nele: salve no serviço do bot ou, se a pessoa permitiu, no
+[armazenamento do computador](/bots-armazenamento#salvar-ao-fechar), e mantenha
+também um salvamento periódico para os casos sem gancho. Já um download que a pessoa inicia num botão do miniapp antes
 de o `onBeforeClose` responder chega ao navegador antes de a visualização fechar
 e continua depois disso.
 
@@ -175,6 +177,12 @@ novas permissões ao bot. O aviso descreve rede (inclusive rede local),
 armazenamento web, áudio/vídeo, arquivos escolhidos manualmente, downloads,
 tela cheia, captura do cursor e os dados fornecidos pelo bridge. Selecionar um
 arquivo permite que o app o leia e eventualmente o envie pela rede.
+
+Se o administrador aprovou `device_storage`, o mesmo aviso pergunta se o
+miniapp pode guardar dados no computador de quem abre: **Não guardar** (padrão),
+**Só nesta sessão** ou **Sempre**. A escolha vale só para esse computador e não
+muda as permissões do bot no servidor. Veja
+[Armazenamento do bot](/bots-armazenamento#nos-computadores).
 
 Cancelar não cria o documento nem executa seu código. Sair, perder acesso, mudar de
 sala/servidor ou desconectar encerra a visualização e revoga as ações pelo bridge; abrir
@@ -200,7 +208,7 @@ suportados continuam bloqueados mesmo após a confirmação.
 
 O documento tem uma origem própria e aleatória `monky-miniapp://…`, separada do Monky e de outras visualizações. Não é um `srcdoc` com a origem do aplicativo hospedeiro. É possível usar scripts e estilos externos, `fetch`, WebSocket, WebRTC, WebAssembly, Workers, canvas/WebGL, áudio/vídeo, formulários, armazenamento web, seleção de arquivos e downloads. Fullscreen e pointer lock seguem as regras de interação do navegador. Câmera, microfone, captura de tela, clipboard e dispositivos continuam sem autorização automática; o miniapp não herda as permissões do cliente.
 
-Os recursos externos seguem CORS e as regras do navegador. Configure o serviço para aceitar a origem do miniapp e use HTTPS/WSS em produção. A origem é nova a cada abertura: não use o armazenamento local como persistência da partida. Recursos grandes e tráfego em tempo real podem ir diretamente ao serviço do app; não precisam passar por `state` ou `sendAction`. Desse modo, o limite do envelope do Monky não limita o tamanho de uma engine, mídia ou arquivo carregado pela aplicação.
+Os recursos externos seguem CORS e as regras do navegador. Configure o serviço para aceitar a origem do miniapp e use HTTPS/WSS em produção. A origem é nova a cada abertura: não use o armazenamento web dela como persistência da partida; para isso existe [`monkyScreen.storage`](/bots-armazenamento#nos-computadores). Recursos grandes e tráfego em tempo real podem ir diretamente ao serviço do app; não precisam passar por `state` ou `sendAction`. Desse modo, o limite do envelope do Monky não limita o tamanho de uma engine, mídia ou arquivo carregado pela aplicação.
 
 Ao navegar o próprio frame, a página de destino permanece isolada, mas não
 herda o bridge autenticado `monkyScreen`; para mantê-lo, use navegação interna
@@ -210,7 +218,9 @@ bloqueados. O armazenamento da origem é descartado ao fechar a visualização.
 Cada participante ajusta o volume do miniapp no próprio card, de 0 a 200%, e
 pode mutá-lo, com o mesmo controle de uma transmissão de tela. O botão fica
 sobre o canto inferior direito do miniapp: não coloque controles essenciais
-nesse canto. O Monky aplica o ajuste dentro do
+nesse canto. O canto inferior esquerdo recebe o
+[aviso de armazenamento](/bots-armazenamento#avisos) quando o espaço do bot
+está quase cheio. O Monky aplica o ajuste dentro do
 documento isolado, antes dos scripts do bot, a `<audio>`/`<video>` e à saída
 (`destination`) de cada `AudioContext`. O app continua lendo nos elementos o
 volume que definiu. Acima de 100%, só o Web Audio é amplificado: o navegador

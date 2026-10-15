@@ -12,6 +12,7 @@ import { getLanguage, t, type TranslationKey } from '../../../i18n';
 import { formatBytes } from '../../../utils/attachment';
 import { escapeHtml } from '../../../utils/html';
 import { renderLoadingIndicator } from '../../../utils/loadingIndicator';
+import { BotDeviceStorageList } from '../BotDeviceStorageList';
 
 type Mutation =
   | { kind: 'permission'; permissionId: string; enabled: boolean }
@@ -119,6 +120,7 @@ export class LocalToolsTab {
   private tools = new Map<string, HTMLElement>();
   private permissions = new Map<string, HTMLElement>();
   private tasks = new Map<string, HTMLElement>();
+  private readonly storageList = new BotDeviceStorageList();
 
   public renderHtml(): string {
     return `<div data-local-tools-root style="font-size: 12px; line-height: 1.5;">
@@ -150,6 +152,7 @@ export class LocalToolsTab {
         <p data-local-empty="permissions" style="color: var(--text-muted);" hidden>${escapeHtml(t('localExecution.noPermissions'))}</p>
         <div data-local-list="permissions"></div>
       `)}
+      ${sectionHtml('local-tools-bot-storage', 'botStorage.localTitle', BotDeviceStorageList.html())}
       ${sectionHtml('local-tools-tasks', 'localExecution.tasks', `
         <p data-local-empty="tasks" style="color: var(--text-muted);" hidden>${escapeHtml(t('localExecution.noTasks'))}</p>
         <div data-local-list="tasks"></div>
@@ -186,6 +189,8 @@ export class LocalToolsTab {
     root.addEventListener('click', click);
     root.addEventListener('change', change);
     this.unbind.push(() => root.removeEventListener('click', click), () => root.removeEventListener('change', change));
+    const storageRoot = root.querySelector<HTMLElement>('[data-bot-storage-list]');
+    if (storageRoot) this.storageList.attach(storageRoot);
     this.initialLoad = this.subscribe(root, generation) ? this.refreshState(root, generation) : Promise.resolve();
     return this.initialLoad;
   }
@@ -547,6 +552,7 @@ export class LocalToolsTab {
 
   public cleanup(): void {
     this.generation++;
+    this.storageList.cleanup();
     this.readController?.abort();
     this.readController = null;
     this.unsubscribe?.();

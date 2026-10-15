@@ -74,6 +74,7 @@ const ACTION_KEYS: Record<ServerAuditAction, TranslationKey> = {
   'bot.profile': 'serverAudit.action.bot.profile',
   'bot.permissions': 'serverAudit.action.bot.permissions',
   'bot.settings': 'serverAudit.action.bot.settings',
+  'bot.storage': 'serverAudit.action.bot.storage',
   'bot.command': 'serverAudit.action.bot.command',
   'message.delete': 'serverAudit.action.message.delete',
   'message.restore': 'serverAudit.action.message.restore',
@@ -147,6 +148,8 @@ const FIELD_KEYS: Record<string, TranslationKey> = {
   capabilitiesGranted: 'serverAudit.field.capabilitiesGranted',
   capabilitiesRevoked: 'serverAudit.field.capabilitiesRevoked',
   settings: 'serverAudit.field.settings',
+  storageLimit: 'serverAudit.field.storageLimit',
+  storageCleared: 'serverAudit.field.storageCleared',
   commandOptions: 'serverAudit.field.commandOptions',
   pinned: 'serverAudit.field.pinned',
   locked: 'serverAudit.field.locked',
@@ -183,7 +186,7 @@ const VALUE_KEYS: Record<string, Record<string, TranslationKey>> = {
 };
 
 const TIME_FIELDS = new Set(['startsAt', 'endsAt', 'expiresAt', 'closesAt']);
-const BYTE_FIELDS = new Set(['maxFileSize', 'maxStorage']);
+const BYTE_FIELDS = new Set(['maxFileSize', 'maxStorage', 'storageLimit', 'storageCleared']);
 
 function isBotCapability(value: string): value is BotCapability {
   return BOT_CAPABILITIES.some((capability) => capability === value);

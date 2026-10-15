@@ -8,6 +8,7 @@ import { bindBotScreenEvents } from '../src/renderer/core/botScreenEvents';
 import { BotScreenStore, type VoiceBotScreensUpdated } from '../src/renderer/stores/botScreenStore';
 import { isForegroundEvent, routeSessionEvent } from '../src/renderer/core/sessionRouting';
 import { BotScreenFrame, botScreenDocument } from '../src/renderer/views/BotScreenFrame';
+import { installMiniappStorage, miniappStorageResult, readMiniappStorageRequest } from '../src/renderer/views/botScreenStorage';
 import { voiceStore } from '../src/renderer/stores/voiceStore';
 import { commandVoiceError, commandVoiceContextKey, getBotVoiceContext } from '../src/renderer/utils/botVoice';
 
@@ -32,6 +33,125 @@ test('miniapp consent requires the current policy and exact bot/screen instance 
   for (const field of ['botId', 'screenId', 'instanceId'] as const) {
     assert.throws(() => new BotScreenFrame(snapshot(), { id: 'alice', nickname: 'Alice', locale: 'en' },
       { ...consent, [field]: 'another-instance' }, () => {}, () => {}), /consent does not match/);
+  }
+});
+
+test('storage consent is optional and can only address the bot that owns the miniapp', () => {
+  const consent: BotScreenDocumentConsent = {
+    policyVersion: BOT_SCREEN_PERMISSION_POLICY_VERSION, serverKey: 'server',
+    botId: 'bot', screenId: 'game', instanceId: 'game-instance',
+  };
+  const scope = {
+    serverUrl: 'wss://monky.example/ws', serverId: 'server-id', serverName: 'Server', userId: 'alice', botId: 'bot', botName: 'Bot',
+  };
+  for (const grant of ['none', 'session', 'always'] as const) {
+    assert.equal(botScreenDocumentConsentSchema.safeParse({ ...consent, storage: { scope, grant } }).success, true, grant);
+  }
+  for (const storage of [
+    { scope: { ...scope, botId: 'another-bot' }, grant: 'always' },
+    { scope, grant: 'forever' },
+    { scope: { ...scope, serverUrl: 'https://monky.example' }, grant: 'session' },
+    { scope, grant: 'session', path: '/etc' },
+  ]) assert.equal(botScreenDocumentConsentSchema.safeParse({ ...consent, storage }).success, false, JSON.stringify(storage));
+});
+
+test('miniapp storage requests are validated before they reach the main process', () => {
+  assert.deepEqual(readMiniappStorageRequest({ type: 'storage', id: 1, op: 'get', key: 'nes/game/slot-1' }),
+    { id: 1, request: { op: 'get', key: 'nes/game/slot-1' } });
+  assert.deepEqual(readMiniappStorageRequest({ type: 'storage', id: 2, op: 'list', prefix: 'nes/' }),
+    { id: 2, request: { op: 'list', prefix: 'nes/' } });
+  const bytes = readMiniappStorageRequest({
+    type: 'storage', id: 3, op: 'set', key: 'nes/game/auto', value: { kind: 'bytes', bytes: new Uint8Array([1, 2, 3]).buffer }, autosave: true,
+  });
+  assert.ok(bytes?.request.op === 'set' && bytes.request.value.kind === 'bytes' && bytes.request.autosave);
+  assert.deepEqual([...bytes.request.value.bytes], [1, 2, 3]);
+  for (const invalid of [
+    null, 'storage', { type: 'storage', op: 'usage' }, { type: 'storage', id: 0, op: 'usage' }, { type: 'storage', id: 1.5, op: 'usage' },
+    { type: 'storage', id: 4, op: 'drop' }, { type: 'storage', id: 4, op: 'get', key: '' }, { type: 'storage', id: 4, op: 'get', key: 'a/../b' },
+    { type: 'storage', id: 4, op: 'get', key: '/etc/passwd' }, { type: 'storage', id: 4, op: 'get', key: 'a', scope: 'other-bot' },
+    { type: 'storage', id: 4, op: 'set', key: 'a', value: { kind: 'text', text: 'x' } },
+    { type: 'storage', id: 4, op: 'set', key: 'a', value: { kind: 'bytes', bytes: [1, 2] }, autosave: false },
+    { type: 'storage', id: 4, op: 'set', key: 'a', value: { kind: 'text', text: 'x'.repeat(4 * 1024 * 1024 + 1) }, autosave: false },
+  ]) assert.equal(readMiniappStorageRequest(invalid), null, JSON.stringify(invalid)?.slice(0, 120));
+});
+
+test('storage answers copy bytes for the document and expose only the usage it needs', () => {
+  const usage = { usedBytes: 3, maxBytes: 1024 * 1024, objectCount: 1, maxObjects: 1000, level: 'ok' } as const;
+  const source = new Uint8Array([7, 8, 9]);
+  const { message, transfer } = miniappStorageResult(5, { ok: true, op: 'get', value: { kind: 'bytes', bytes: source }, usage });
+  assert.equal(transfer.length, 1);
+  assert.notEqual(transfer[0], source.buffer, 'The main-process buffer is never handed to the miniapp');
+  assert.deepEqual(message, { type: 'storage-result', id: 5, ok: true, value: { kind: 'bytes', bytes: transfer[0] }, usage: { usedBytes: 3, maxBytes: 1024 * 1024, level: 'ok' } });
+  assert.deepEqual(miniappStorageResult(6, { ok: false, reason: 'quota', usage }).message,
+    { type: 'storage-result', id: 6, ok: false, reason: 'quota', usage: { usedBytes: 3, maxBytes: 1024 * 1024, level: 'ok' } });
+  assert.deepEqual(miniappStorageResult(7, { ok: false, reason: 'denied', usage: null }).message,
+    { type: 'storage-result', id: 7, ok: false, reason: 'denied', usage: null });
+});
+
+test('monkyScreen.storage waits for permission, and autosaves never interrupt the miniapp', async () => {
+  const bridge = installMiniappStorage(8);
+  const storage = bridge.api;
+  const statuses: string[] = [];
+  const off = storage.onStatus((status) => statuses.push(status));
+  await assert.rejects(storage.get('slot'), { name: 'MonkyStorageError', reason: 'unavailable' });
+  assert.equal(await storage.set('auto', 'state', { autosave: true }), false, 'No answer yet: the autosave is skipped');
+  const channel = new MessageChannel();
+  const sent: Array<Record<string, unknown>> = [];
+  channel.port2.onmessage = (event: MessageEvent<Record<string, unknown>>) => { sent.push(event.data); };
+  const next = async (): Promise<Record<string, unknown>> => {
+    for (let attempt = 0; attempt < 100 && !sent.length; attempt++) await new Promise((resolve) => setTimeout(resolve, 5));
+    const message = sent.shift();
+    assert.ok(message, 'The bridge posted a request');
+    return message;
+  };
+  try {
+    bridge.attach(channel.port1);
+    assert.equal(bridge.receive({ type: 'storage-status', status: 'denied' }), true);
+    await assert.rejects(storage.get('slot'), { reason: 'denied' });
+    assert.equal(bridge.receive({ type: 'storage-status', status: 'granted' }), true);
+    assert.equal(bridge.receive({ type: 'state', state: {}, revision: 1 }), false, 'Other messages are left to the bootstrap');
+    assert.deepEqual(statuses, ['unavailable', 'denied', 'granted']);
+    assert.equal(storage.status, 'granted');
+
+    const original = new Uint8Array([1, 2, 3]);
+    const saving = storage.set('slot', original);
+    const request = await next();
+    assert.equal(request.type, 'storage');
+    assert.equal(request.op, 'set');
+    assert.equal(request.key, 'slot');
+    assert.equal(request.autosave, false);
+    assert.deepEqual(original, new Uint8Array([1, 2, 3]), 'Sending never detaches the buffer of the miniapp');
+    bridge.receive({ type: 'storage-result', id: request.id, ok: true, usage: null });
+    assert.equal(await saving, true);
+
+    const autosave = storage.set('auto', 'state', { autosave: true });
+    const autosaveRequest = await next();
+    bridge.receive({ type: 'storage-result', id: autosaveRequest.id, ok: false, reason: 'quota', usage: null });
+    assert.equal(await autosave, false, 'A full storage pauses autosaves silently');
+    const manual = storage.set('slot', 'state');
+    const manualRequest = await next();
+    bridge.receive({ type: 'storage-result', id: manualRequest.id, ok: false, reason: 'quota', usage: null });
+    await assert.rejects(manual, { reason: 'quota' }, 'A save the person asked for reports the failure');
+
+    await assert.rejects(storage.set('slot', 'more than eight bytes'), { reason: 'too_large' });
+    assert.equal(await storage.set('slot', 'more than eight bytes', { autosave: true }), false);
+    // @ts-expect-error The type rules this out; plain-JS miniapps still get a TypeError.
+    await assert.rejects(storage.set('slot', { not: 'bytes' }), TypeError);
+
+    const reading = storage.get('slot');
+    const read = await next();
+    const bytes = new Uint8Array([4, 5]).buffer;
+    bridge.receive({ type: 'storage-result', id: read.id, ok: true, value: { kind: 'bytes', bytes }, usage: null });
+    assert.equal(await reading, bytes);
+    const listing = storage.list();
+    const list = await next();
+    bridge.receive({ type: 'storage-result', id: list.id, ok: true, keys: [{ key: 'slot', sizeBytes: 2, updatedAt: 1 }], usage: null });
+    assert.deepEqual(await listing, [{ key: 'slot', size: 2, updatedAt: 1 }]);
+    assert.equal(bridge.receive({ type: 'storage-result', id: 999, ok: true }), true, 'Unknown answers are ignored');
+  } finally {
+    off();
+    channel.port1.close();
+    channel.port2.close();
   }
 });
 

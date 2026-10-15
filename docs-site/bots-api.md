@@ -120,10 +120,12 @@ real. Não mantenha o handler aberto durante uma votação longa.
 | `listScreens(serverId, channelId)` | `Promise<BotScreen[]>`; lista miniapps da sala de voz |
 | `closeScreen(serverId, ref)` | `Promise<void>`; encerra a instância para todos |
 | `localExecution(serverId)` | `LocalExecutionClient`; executores e fontes autorizadas daquele servidor |
+| `storage(serverId)` | `BotStorage`; arquivos privados do bot naquele servidor (`server_storage`) |
 
 Um `BotScreenRef` inclui **`id` e `instanceId`**. Um stream Opus não é um
 arquivo de áudio nem uma autorização para receber a voz dos participantes.
-Consulte os guias de [voz](/bots-voz), [miniapps](/bots-miniapps) e
+Consulte os guias de [voz](/bots-voz), [miniapps](/bots-miniapps),
+[armazenamento](/bots-armazenamento) e
 [execução local](/bots-execucao-local) antes de implementar o ciclo de vida.
 
 ## Eventos

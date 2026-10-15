@@ -16,7 +16,7 @@ test('release warnings follow the affected protocol floor, not every additive bu
   assert.ok(additive);
   assert.equal(releaseRequiresProtocolUpdate(additive, 'client'), false);
   assert.equal(releaseRequiresProtocolUpdate(additive, 'bot'), false);
-  const future = { ...additive, protocolVersion: 39, minimumBotProtocol: 39, minimumClientProtocol: 39 };
+  const future = { ...additive, protocolVersion: 40, minimumBotProtocol: 40, minimumClientProtocol: 40 };
   assert.equal(releaseRequiresProtocolUpdate(future, 'bot'), true);
   assert.equal(releaseRequiresProtocolUpdate({ ...future, minimumBotProtocol: 24 }, 'bot'), false);
   assert.equal(releaseRequiresProtocolUpdate(future, 'client'), true);

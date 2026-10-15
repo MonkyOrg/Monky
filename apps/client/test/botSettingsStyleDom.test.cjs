@@ -197,8 +197,8 @@ async function* runBotSettingsStyle(language, dump) {
     },
   };
   const permissions = {
-    requested: ['commands', 'send_messages', 'publish_voice', 'local_execution', 'sound_download', 'receive_voice'],
-    granted: ['commands', 'send_messages', 'publish_voice', 'local_execution', 'sound_download'],
+    requested: ['commands', 'send_messages', 'publish_voice', 'local_execution', 'sound_download', 'receive_voice', 'server_storage', 'device_storage'],
+    granted: ['commands', 'send_messages', 'publish_voice', 'local_execution', 'sound_download', 'server_storage', 'device_storage'],
     revision: 3, reviewRequired: true, reviewedBy: null, reviewedAt: null,
   };
   let manifestUrl = 'https://bots.monky.example:7780/very/long/path/that/does/not/fit/in/one/line/of/the/settings/manifest';
@@ -207,6 +207,23 @@ async function* runBotSettingsStyle(language, dump) {
     schemaRevision: 1, revision: 1, hasServerSettings: true, hasUserSettings: true, canConfigure: true, canManage: true,
     permissions: structuredClone(permissions), manifestUrl,
   });
+  // This page has no preload: the storage on this computer is answered here.
+  const MIB = 1024 * 1024;
+  const deviceDecisions = [];
+  const deviceEntry = (scope, decision) => ({
+    id: 'a'.repeat(64), scope, decision, updatedAt: 1,
+    usage: { usedBytes: 2 * MIB, maxBytes: 50 * MIB, objectCount: 3, maxObjects: 1000, level: 'ok' },
+  });
+  let deviceDecision = 'ask';
+  // The server answers its part only to people who manage bots.
+  let serverStorageVisible = true;
+  window.api = { botStorage: {
+    get: async scope => deviceEntry(scope, deviceDecision),
+    setDecision: async (scope, decision) => { deviceDecisions.push(decision); deviceDecision = decision; return deviceEntry(scope, decision); },
+    setQuota: async scope => deviceEntry(scope, deviceDecision),
+    clear: async () => {},
+    onChanged: () => () => {},
+  } };
   const botServer = servers.createServerStore();
   const botClient = networks.createNetworkClient();
   botClient.getConnectionId = () => 1;
@@ -217,12 +234,21 @@ async function* runBotSettingsStyle(language, dump) {
     if (type === 'BOT_SETTINGS_GET' && payload.botId === 'monky-bot') {
       return { bot: summary(), definition, server: { schemaRevision: 1, revision: 1, values: { idle: 60, announce: true } } };
     }
+    if (type === 'BOT_STORAGE_INFO_GET' && payload.botId === 'monky-bot') {
+      return {
+        botId: 'monky-bot', device: { requested: true, granted: true },
+        server: serverStorageVisible
+          ? { requested: true, granted: true, usage: { usedBytes: 92 * MIB, maxBytes: 100 * MIB, objectCount: 12, maxObjects: 10000, level: 'near_full' } }
+          : null,
+      };
+    }
     throw new Error(`Unexpected bot settings request ${type}`);
   };
   botServer.setServerDetails({
     id: 'style-server', name: 'Servidor de estilo', createdAt: 1, maxUsers: 10, voiceStates: {}, channels: [],
     members: [owner], knownMembers: [owner], roles: [], userRoles: [], ownerId: owner.id,
     myPermissions: Permission.CONFIGURE_BOTS | Permission.MANAGE_BOTS,
+    protocol: { version: 39, minimumVersion: 35, features: ['bot-storage'] },
   }, owner);
   networks.setActiveNetworkClient(botClient);
   servers.setActiveServerStore(botServer);
@@ -232,9 +258,10 @@ async function* runBotSettingsStyle(language, dump) {
     await flush();
     bot.sidebarTitle = styleOf(find('.bot-settings-modal .settings-sidebar > :first-child'));
     bot.headerTitle = styleOf(find('#bot-settings-title'));
-    for (const scope of ['user', 'server', 'permissions']) {
+    for (const scope of ['user', 'server', 'permissions', 'storage']) {
       find(`[data-settings-scope="${scope}"]`).click();
       await flush();
+      for (let attempt = 0; scope === 'storage' && attempt < 50 && live('.bot-storage-section').length < 2; attempt++) await flush();
       const tabs = live('.bot-settings-modal .settings-tab-btn');
       bot[scope] = {
         tabs: tabs.map(tabMetrics), menu: subsectionMenu(find(`[data-settings-scope="${scope}"]`)),
@@ -261,8 +288,35 @@ async function* runBotSettingsStyle(language, dump) {
             parseFloat(getComputedStyle(element).fontSize) > 14)
           .map(element => `${element.tagName.toLowerCase()}.${element.className}: ${element.textContent.trim().slice(0, 40)}`),
       };
+      if (scope === 'storage') {
+        const panel = find('#tab-panel-storage');
+        bot.storage.details = {
+          sections: live('.bot-storage-section').length,
+          bars: live('.bot-storage-section .storage-usage-bar[role="progressbar"]').length,
+          warning: find('.bot-storage-section .storage-usage-warning').textContent,
+          warningColor: getComputedStyle(find('.bot-storage-section .storage-usage-warning')).color,
+          fill: getComputedStyle(find('.bot-storage-section .storage-usage-fill')).backgroundColor,
+          decisions: live('[data-storage-decision]').map(card => [card.dataset.storageDecision, card.getAttribute('aria-pressed')]),
+          nativeChoices: [...panel.querySelectorAll('input[type="checkbox"], input[type="radio"]')].filter(input => input.checkVisibility()).length,
+          limits: live('[data-storage-limit] input').map(input => input.value),
+          footer: { save: !!document.querySelector('[data-settings-save]'), defaults: !!document.querySelector('[data-settings-defaults]') },
+        };
+        find('[data-storage-decision="always"]').click();
+        for (let attempt = 0; attempt < 50 && find('[data-storage-decision="always"]').getAttribute('aria-pressed') !== 'true'; attempt++) await flush();
+        bot.storage.details.chosen = { pressed: find('[data-storage-decision="always"]').getAttribute('aria-pressed'), saved: [...deviceDecisions] };
+      }
       yield `bot-${scope}`;
     }
+    // Someone who cannot manage bots: no server part, only this computer.
+    serverStorageVisible = false;
+    find('[data-settings-reload]').click();
+    for (let attempt = 0; attempt < 50 && (live('[data-storage-section="server"]').length || !live('[data-storage-section="device"]').length); attempt++) await flush();
+    bot.storageMember = {
+      sections: live('.bot-storage-section').map(section => section.dataset.storageSection),
+      serverControls: !!document.querySelector('[data-storage-limit="server"], [data-storage-clear="server"]'),
+      deviceControls: !!document.querySelector('[data-storage-limit="device"]') && live('[data-storage-decision]').length === 3,
+    };
+    serverStorageVisible = true;
     const recordedUrl = manifestUrl;
     manifestUrl = null;
     await modal.open('monky-bot');
@@ -333,7 +387,7 @@ async function* runBotSettingsStyle(language, dump) {
   const standardActive = standard.tabs.find(tab => tab.active);
   check(standardInactive && standardActive && standardActive.lines === 1,
     'The server settings reference renders single-line inactive and active tabs');
-  for (const scope of ['user', 'server', 'permissions']) {
+  for (const scope of ['user', 'server', 'permissions', 'storage']) {
     for (const tab of bot[scope].tabs) {
       same(tab, tab.active ? standardActive : standardInactive, tabKeys,
         `Bot tab "${tab.label}" (${tab.active ? 'active' : 'inactive'}) uses the standard settings tab typography`);
@@ -345,7 +399,7 @@ async function* runBotSettingsStyle(language, dump) {
     'The bot sidebar title matches the standard settings sidebar title');
   same(bot.headerTitle, standard.headerTitle, ['fontFamily', 'fontSize', 'fontWeight', 'color'],
     'The bot header title matches the standard settings header title');
-  for (const scope of ['user', 'server', 'permissions']) {
+  for (const scope of ['user', 'server', 'permissions', 'storage']) {
     check(bot[scope].headings.every(heading => heading.className.includes('bot-settings-section-title')),
       `The ${scope} tab has no unstyled browser-default headings: ${JSON.stringify(bot[scope].headings.map(heading => heading.text))}`);
     for (const title of bot[scope].sectionTitles) {
@@ -355,7 +409,7 @@ async function* runBotSettingsStyle(language, dump) {
   }
   check(bot.server.sectionTitles.some(title => title.text === 'Música' || title.text === 'Music'),
     'The shared form keeps its declared title as a standard section title');
-  for (const scope of ['server', 'permissions']) {
+  for (const scope of ['server', 'permissions', 'storage']) {
     check(!bot[scope].menu.expanded && bot[scope].menu.links.length === 0,
       `The ${scope} tab has a single section, so it shows no subsection menu repeating it: ${JSON.stringify(bot[scope].menu)}`);
   }
@@ -372,7 +426,7 @@ async function* runBotSettingsStyle(language, dump) {
   check(bot.missing.text === t('botSettings.manifestMissing') && !bot.missing.copy &&
     bot.missing.fontSize === bot.missing.mutedFontSize && bot.missing.color === bot.missing.mutedColor,
   `A bot without a recorded manifest shows only the muted explanation: ${JSON.stringify(bot.missing)}`);
-  for (const scope of ['user', 'server', 'permissions']) {
+  for (const scope of ['user', 'server', 'permissions', 'storage']) {
     const rows = bot[scope].manifest;
     check(rows.length === 1, `The ${scope} tab shows the manifest URL once, in the bot header`);
     same(rows[0].label, standard.sectionTitle, ['fontFamily', 'fontSize', 'fontWeight', 'letterSpacing', 'textTransform', 'color'],
@@ -390,7 +444,20 @@ async function* runBotSettingsStyle(language, dump) {
   check(bot.permissions.reviewStatus.length === 1, 'A pending review is announced in the permissions tab');
   same(bot.permissions.reviewStatus[0], standard.rowTitle, ['fontFamily', 'fontSize', 'fontWeight'],
     'The pending review status uses the standard row title size instead of a default paragraph');
-  for (const scope of ['user', 'server', 'permissions']) {
+  const storage = bot.storage.details;
+  check(storage.sections === 2 && storage.bars === 2, `The storage tab shows the server and this computer, each with a usage bar: ${JSON.stringify(storage)}`);
+  check(storage.warning === t('botStorage.nearFull') && storage.warningColor === storage.fill && storage.fill !== getComputedStyle(document.body).color,
+    `A nearly full storage is announced in the warning color: ${JSON.stringify(storage)}`);
+  check(JSON.stringify(storage.decisions) === JSON.stringify([['ask', 'true'], ['always', 'false'], ['never', 'false']]),
+    `The decision on this computer uses selectable cards: ${JSON.stringify(storage.decisions)}`);
+  check(storage.nativeChoices === 0, 'The storage tab shows no native checkbox or radio button');
+  check(JSON.stringify(storage.limits) === JSON.stringify(['100', '50']), `Both limits are shown in MB: ${JSON.stringify(storage.limits)}`);
+  check(!storage.footer.save && !storage.footer.defaults, 'Storage changes apply at once, without the form save buttons');
+  check(storage.chosen.pressed === 'true' && JSON.stringify(storage.chosen.saved) === JSON.stringify(['always']),
+    `Choosing a card saves the decision: ${JSON.stringify(storage.chosen)}`);
+  check(JSON.stringify(bot.storageMember.sections) === JSON.stringify(['device']) && !bot.storageMember.serverControls &&
+    bot.storageMember.deviceControls, `People who cannot manage bots see only their own computer: ${JSON.stringify(bot.storageMember)}`);
+  for (const scope of ['user', 'server', 'permissions', 'storage']) {
     check(bot[scope].oversized.length === 0, `The ${scope} tab has no text at browser default sizes: ${bot[scope].oversized.join('; ')}`);
   }
   check(t('botSettings.serverTab') !== 'botSettings.serverTab', 'Tab labels are localized');

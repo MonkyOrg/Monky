@@ -30,6 +30,8 @@ Ao criar ou editar um canal de texto, o switch **Permitir comandos de bots** vem
 | `selectors` | Controles públicos persistentes de escolha e suas respostas; publicar também exige `send_messages` |
 | `miniapps` | Miniapps compartilhados nas salas de voz, incluindo ações de participantes autorizados |
 | `live_actions` | Banners com formulários e seletores nativos; exige também `commands` e `EMIT_LIVE_ACTIONS` para quem iniciou |
+| `server_storage` | Arquivos privados do bot neste servidor, até o limite definido pelo administrador; remover o bot apaga esses dados |
+| `device_storage` | Pedido para os miniapps do bot guardarem dados no computador de quem os abre; cada pessoa decide |
 
 Registrar comandos exige `commands`; comandos com `downloadsSound` também declaram `sound_download`, e aqueles com `localCapabilities` declaram `local_execution`. Respostas públicas exigem `send_messages`; a resposta privada padrão exige apenas `commands`. As permissões dos cargos, dos canais e de quem iniciou a ação continuam valendo.
 
@@ -40,6 +42,8 @@ Enquanto a recepção está ativa, a lista de participantes mostra **Ouvindo voz
 O SDK não grava, transcreve nem envia áudio a serviços de IA. Quem opera o bot deve informar o uso e a retenção implementados e cumprir os consentimentos e as regras de privacidade aplicáveis. Veja [formato, exemplo e encerramento](/bots-voz#receber-microfones) antes de habilitar a capacidade.
 
 **Consentimento no computador é separado.** Permitir `local_execution` ou `sound_download` no servidor não instala ferramentas nem autoriza o dispositivo. A pessoa ainda controla os pedidos locais e pode recusá-los/revogá-los nas configurações de ferramentas locais. Preferências pessoais, idioma do bot e confirmação de nomes de arquivos não viram permissões administrativas.
+
+Do mesmo modo, `device_storage` permite apenas **pedir**: ao abrir cada miniapp, a pessoa escolhe se ele guarda dados no computador dela, e pode mudar a decisão ou apagar os dados quando quiser. Veja [Armazenamento do bot](/bots-armazenamento).
 
 No pedido de ferramentas, **Sempre permitir e preparar** lembra a autorização deste bot e capacidade neste servidor. Ao reconectar, o Monky verifica as ferramentas em segundo plano, sem reabrir o pedido. **Permitir até desconectar e preparar** continua disponível como escolha temporária; autorizações temporárias antigas não são promovidas automaticamente. As ferramentas ficam na instalação local do Monky e são reutilizadas por outros servidores, mas cada servidor/bot ainda precisa de seu próprio consentimento.
 

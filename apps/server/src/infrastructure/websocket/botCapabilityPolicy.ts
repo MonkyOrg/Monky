@@ -72,6 +72,12 @@ export function botMessageCapabilities(type: MessageType, payload: unknown): Bot
     case MessageType.BOT_LOCAL_TASK_EVENT:
     case MessageType.BOT_LOCAL_MEDIA_SIGNAL:
       return ['local_execution'];
+    case MessageType.BOT_STORAGE_PUT:
+    case MessageType.BOT_STORAGE_GET:
+    case MessageType.BOT_STORAGE_DELETE:
+    case MessageType.BOT_STORAGE_LIST:
+    case MessageType.BOT_STORAGE_USAGE:
+      return ['server_storage'];
     default:
       return undefined;
   }

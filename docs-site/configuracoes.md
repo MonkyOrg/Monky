@@ -12,7 +12,7 @@ participantes, use [Configurações do Servidor](/administrar-servidor).
 | Atalhos | Combinações para ações rápidas |
 | Notificações e Sons | Sons e avisos pessoais |
 | Qualidade e compartilhamento | Perfis de voz, câmera e tela, codec, prévia local e telemetria |
-| Ferramentas de bots | Instalações locais, permissões, cache e tarefas |
+| Ferramentas de bots | Instalações locais, permissões, cache, tarefas e dados que bots guardaram neste computador |
 | Logs | Eventos locais e diagnóstico do cliente |
 | Sobre e Updates | Versão, atualização, comportamento da janela e comunidade |
 
@@ -771,6 +771,12 @@ seu computador sem consentimento.
 Revogar uma autorização ou remover uma ferramenta encerra o trabalho afetado.
 Confira [Ferramentas no seu computador](/bots#ferramentas-no-seu-computador)
 antes de aprovar um pedido.
+
+**Dados de bots neste computador** lista o que miniapps guardaram aqui, como
+saves, separado por servidor, conta e bot, com o espaço ocupado e a decisão
+atual. A lista inclui servidores e bots que você não usa mais; **Apagar** remove
+os dados e as preferências daquele bot. Veja
+[Dados guardados pelo bot](/bots#dados-guardados-pelo-bot).
 
 ## Logs
 

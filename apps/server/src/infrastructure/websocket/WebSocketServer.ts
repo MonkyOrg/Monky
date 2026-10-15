@@ -149,6 +149,13 @@ import {
   botInstallSchema,
   botPermissionsGetSchema,
   botPermissionsUpdateSchema,
+  isBotStorageCapability,
+  withoutBotStorageCapabilities,
+  withoutBotStoragePermissions,
+  type BotPermissions,
+  type BotSettingsListResponse,
+  type BotSettingsSnapshot,
+  type BotStorageUsage,
   type BotCapability,
   messageReferenceSchema,
   rtcSignalSchema,
@@ -193,6 +200,8 @@ import { BotSelectorService } from '../../application/services/BotSelectorServic
 import { BotSelectorHandler } from './BotSelectorHandler';
 import { BotScreenHandler } from './BotScreenHandler';
 import { BotScreenService } from '../../application/services/BotScreenService';
+import { BotStorageHandler } from './BotStorageHandler';
+import type { BotStorageService } from '../../application/services/BotStorageService';
 import type { ServerMonitorService } from '../../application/services/ServerMonitorService';
 import { ServerMonitorHandler } from './ServerMonitorHandler';
 import { auditDiff, auditRef, type ServerAuditInput, type ServerAuditService } from '../../application/services/ServerAuditService';
@@ -330,6 +339,9 @@ export class WebSocketServer {
   private botLocalExecution: BotLocalExecutionService<BotInteractionSession>;
   private botSelectors?: BotSelectorHandler;
   private botScreens?: BotScreenHandler;
+  private readonly botStorage?: BotStorageHandler<ClientSession>;
+  /** Level warnings go out in order, even while each recipient's permission is checked. */
+  private botStorageLevels: Promise<void> = Promise.resolve();
   private readonly serverMonitor?: ServerMonitorHandler;
   private readonly serverAudit?: ServerAuditHandler;
   private readonly community?: CommunityHandler;
@@ -372,8 +384,25 @@ export class WebSocketServer {
     private readonly pollService?: NativePollService,
     private readonly recentSoundCache?: RecentSoundCacheService,
     private readonly audit?: ServerAuditService,
+    botStorageService?: BotStorageService,
   ) {
     if (botService) this.botDiagnostics = new BotDiagnosticService(botService, rateLimiter);
+    if (botService && botStorageService) {
+      this.botStorage = new BotStorageHandler<ClientSession>(botStorageService, {
+        isCurrent: (session) => session.isBot
+          ? this.isCurrentBotOperation(session, 'server_storage') : this.isCurrentSession(session),
+        send: (session, message) => this.send(session.ws, message),
+        permissions: (botId) => this.botService?.permissions?.get(botId),
+        authorizeManagement: (session, requestId) => this.botManagementAuthorization(session, requestId),
+        canManage: (session) => this.canManageBots(session),
+        audit: async (session, botId, changes) => {
+          if (!this.audit) return;
+          const bot = await this.botService?.findById(botId);
+          this.recordAudit(session, 'bot.storage', { target: auditRef.bot(botId, bot?.name ?? botId), changes });
+        },
+      });
+      botStorageService.setLevelListener((botId, usage) => this.broadcastBotStorageLevel(botId, usage));
+    }
     if (audit) this.serverAudit = new ServerAuditHandler(audit, this.permissionService, {
       isCurrent: (session) => this.isCurrentSession(session),
       send: (session, message) => this.send(session.ws, message),
@@ -1374,6 +1403,18 @@ export class WebSocketServer {
         else this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Programmable screens are unavailable.', requestId);
         break;
 
+      case MessageType.BOT_STORAGE_PUT:
+      case MessageType.BOT_STORAGE_GET:
+      case MessageType.BOT_STORAGE_DELETE:
+      case MessageType.BOT_STORAGE_LIST:
+      case MessageType.BOT_STORAGE_USAGE:
+      case MessageType.BOT_STORAGE_INFO_GET:
+      case MessageType.BOT_STORAGE_LIMIT_UPDATE:
+      case MessageType.BOT_STORAGE_CLEAR:
+        if (this.botStorage) await this.botStorage.handle(session, type, payload, requestId);
+        else this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'Bot storage is unavailable.', requestId);
+        break;
+
       case MessageType.SELECTOR_CREATE:
       case MessageType.SELECTOR_LIST:
       case MessageType.SELECTOR_UPDATE:
@@ -2036,7 +2077,10 @@ export class WebSocketServer {
       }
       if (type === MessageType.BOT_PERMISSIONS_UPDATE) {
         const previous = [...(permissions.get(botId)?.granted ?? [])];
-        permissions.approve(session.user.id, botPermissionsUpdateSchema.parse(parsed.data));
+        const update = botPermissionsUpdateSchema.parse(parsed.data);
+        // A client that cannot see the storage capabilities leaves them as they were.
+        permissions.approve(session.user.id, this.supportsBotStorage(session) ? update
+          : { ...update, granted: [...update.granted, ...previous.filter(isBotStorageCapability)] });
         // Invalidate the old socket synchronously with persistence. Work resumed
         // after any await cannot reuse a grant, even if it is quickly re-enabled.
         this.disconnectBot(botId);
@@ -2057,7 +2101,8 @@ export class WebSocketServer {
       }
       const state = permissions.get(botId);
       if (!state) throw new BotPermissionError(ProtocolErrorCode.BAD_REQUEST, 'Bot not found.');
-      this.send(session.ws, { type: MessageType.BOT_PERMISSIONS_SNAPSHOT, requestId, payload: { botId, permissions: state } });
+      this.send(session.ws, { type: MessageType.BOT_PERMISSIONS_SNAPSHOT, requestId,
+        payload: { botId, permissions: this.visibleBotPermissions(session, state) } });
       await this.broadcastBotSettings(botId);
     } catch (error) {
       this.sendBotSettingsError(session, error, requestId);
@@ -2077,7 +2122,10 @@ export class WebSocketServer {
     );
     if (!authorized()) return;
     if (!result.success) this.sendError(session.ws, result.errorCode, result.errorMessage, requestId);
-    else this.send(session.ws, { type: MessageType.BOT_INSTALL_PREVIEW_RESULT, requestId, payload: result.preview });
+    else this.send(session.ws, { type: MessageType.BOT_INSTALL_PREVIEW_RESULT, requestId, payload: this.supportsBotStorage(session)
+      ? result.preview : { ...result.preview, manifest: {
+        ...result.preview.manifest, requestedCapabilities: withoutBotStorageCapabilities(result.preview.manifest.requestedCapabilities),
+      } } });
   }
 
   private async handleBotUpdateProfile(session: ClientSession, payload: unknown, requestId?: string): Promise<void> {
@@ -2350,7 +2398,7 @@ export class WebSocketServer {
           }
         }
         this.send(session.ws, { type: MessageType.BOT_SETTINGS_SNAPSHOT, requestId,
-          payload: settingsService.snapshot(bot, canConfigure, session.isBot === true, canManage, manifestUrls) });
+          payload: this.visibleBotSettings(session, settingsService.snapshot(bot, canConfigure, session.isBot === true, canManage, manifestUrls)) });
       });
       if (handled && type === MessageType.BOT_SETTINGS_UPDATE) await this.broadcastBotSettings(botId);
     } catch (error) {
@@ -2371,7 +2419,7 @@ export class WebSocketServer {
     const manifestUrls = await this.botManifestUrls(session);
     await this.withBotSettingsPermission(session, (canConfigure, canManage) => {
       this.send(session.ws, { type: MessageType.BOT_SETTINGS_LIST_RESPONSE, requestId,
-        payload: settingsService.list(bots, canConfigure, canManage, manifestUrls) });
+        payload: this.visibleBotSettingsList(session, settingsService.list(bots, canConfigure, canManage, manifestUrls)) });
     });
   }
 
@@ -2388,9 +2436,49 @@ export class WebSocketServer {
       await this.withBotSettingsPermission(session, (canConfigure, canManage) => {
         if (!canConfigure && !canManage && !session.isBot) return;
         this.send(session.ws, { type: MessageType.BOT_SETTINGS_SNAPSHOT,
-          payload: settingsService.snapshot(bot, canConfigure, session.isBot === true, canManage, manifestUrls) });
+          payload: this.visibleBotSettings(session, settingsService.snapshot(bot, canConfigure, session.isBot === true, canManage, manifestUrls)) });
       });
     }
+  }
+
+  /** Peers without `bot-storage` reject the storage capability names in their strict enum. */
+  private supportsBotStorage(session: BotInteractionSession): boolean {
+    return session.protocol?.features.includes('bot-storage') === true;
+  }
+
+  private visibleBotPermissions(session: BotInteractionSession, permissions: BotPermissions): BotPermissions {
+    return this.supportsBotStorage(session) ? permissions : withoutBotStoragePermissions(permissions);
+  }
+
+  private visibleBotSettings(session: BotInteractionSession, snapshot: BotSettingsSnapshot): BotSettingsSnapshot {
+    const { permissions } = snapshot.bot;
+    return permissions && !this.supportsBotStorage(session)
+      ? { ...snapshot, bot: { ...snapshot.bot, permissions: withoutBotStoragePermissions(permissions) } } : snapshot;
+  }
+
+  private visibleBotSettingsList(session: BotInteractionSession, list: BotSettingsListResponse): BotSettingsListResponse {
+    if (this.supportsBotStorage(session)) return list;
+    return { bots: list.bots.map((bot) => bot.permissions ? { ...bot, permissions: withoutBotStoragePermissions(bot.permissions) } : bot) };
+  }
+
+  /** Read-only check for the bot storage views: refusing it answers no error. */
+  private async canManageBots(session: ClientSession): Promise<boolean> {
+    if (!session.user || session.isBot || !this.isCurrentSession(session)) return false;
+    return this.permissionService.checkPermission(session.user.id, Permission.MANAGE_BOTS);
+  }
+
+  /**
+   * Tells the people who manage bots, also on the bot's miniapps, that its server storage is about to stop
+   * accepting saves. Everyone else only sees the storage of their own computer.
+   */
+  private broadcastBotStorageLevel(botId: string, usage: BotStorageUsage): void {
+    this.botStorageLevels = this.botStorageLevels.then(async () => {
+      for (const session of [...this.sessions.values()]) {
+        if (!session.user || session.isBot || !this.supportsBotStorage(session) || !this.isCurrentSession(session)) continue;
+        if (!await this.canManageBots(session) || !this.isCurrentSession(session)) continue;
+        this.send(session.ws, { type: MessageType.BOT_STORAGE_LEVEL, payload: { botId, usage } });
+      }
+    }).catch((error: unknown) => { Logger.error('BOT', 'Could not announce a bot storage level.', error); });
   }
 
   private sendBotSettingsError(session: ClientSession, error: unknown, requestId?: string): void {
@@ -6763,6 +6851,7 @@ export class WebSocketServer {
       this.gameShareRequests.dispose();
       this.serverMonitor?.close();
       this.serverAudit?.close();
+      this.botStorage?.close();
       this.messageSearch?.close();
       this.shutdownResources.defer('server community', () => this.community?.close());
       this.signalingService.setVoiceMembershipListener(undefined);

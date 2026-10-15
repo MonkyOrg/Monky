@@ -37,6 +37,7 @@ const guideTitles = {
   'bots-audio': ['Áudio', 'Audio'],
   'bots-voz': ['Voz', 'Voice'],
   'bots-miniapps': ['Miniapps', 'Miniapps'],
+  'bots-armazenamento': ['Armazenamento', 'Storage'],
   'bots-execucao-local': ['Execução local', 'Local execution'],
   'bots-distribuicao': ['Distribuição', 'Distribution'],
 };
@@ -45,7 +46,7 @@ const groups = {
   client: {
     file: 'bots-api-cliente',
     titles: ['BotClient e contextos', 'BotClient and contexts'],
-    guides: ['bots-conexao', 'bots-comandos', 'bots-permissoes'],
+    guides: ['bots-conexao', 'bots-comandos', 'bots-permissoes', 'bots-armazenamento'],
     items: [],
   },
   interactions: {
@@ -57,7 +58,7 @@ const groups = {
   media: {
     file: 'bots-api-midia',
     titles: ['Tipos de mídia e execução local', 'Media and local execution types'],
-    guides: ['bots-voz', 'bots-miniapps', 'bots-execucao-local'],
+    guides: ['bots-voz', 'bots-miniapps', 'bots-armazenamento', 'bots-execucao-local'],
     items: [],
   },
   tools: {
@@ -73,8 +74,9 @@ function groupFor(name, declaration) {
   if (/^[A-Z_]+$/.test(name)) return groups.tools;
   if (/managedTools|[\\/]cli[\\/]|[\\/]tooling[\\/]|[\\/]reachability\.ts|[\\/]constants\.ts|[\\/]protocol\.ts/.test(file)
     && !['BotManifest', 'CommandResponsePayload'].includes(name)) return groups.tools;
-  if (/^(BotVoice|BotScreen|Local)/.test(name)) return groups.media;
-  if (path.resolve(file) === entry || ['BotCapability', 'BotPermissions', 'BotManifest'].includes(name)) return groups.client;
+  if (/^(BotVoice|BotScreen|BotDeviceStorage|Local)/.test(name)) return groups.media;
+  if (path.resolve(file) === entry || /^(BotStor|BotRequestError$)/.test(name)
+    || ['BotCapability', 'BotPermissions', 'BotManifest'].includes(name)) return groups.client;
   return groups.interactions;
 }
 

@@ -127,6 +127,26 @@ export enum MessageType {
   BOT_SCREEN_ACTION = 'BOT_SCREEN_ACTION',
   BOT_SCREEN_ACTION_EVENT = 'BOT_SCREEN_ACTION_EVENT',
   BOT_SCREEN_REMOVED = 'BOT_SCREEN_REMOVED',
+  /** Bot -> server (`server_storage`): objects kept by the bot on the Monky server. */
+  BOT_STORAGE_PUT = 'BOT_STORAGE_PUT',
+  BOT_STORAGE_SAVED = 'BOT_STORAGE_SAVED',
+  BOT_STORAGE_GET = 'BOT_STORAGE_GET',
+  BOT_STORAGE_GET_RESULT = 'BOT_STORAGE_GET_RESULT',
+  BOT_STORAGE_DELETE = 'BOT_STORAGE_DELETE',
+  BOT_STORAGE_DELETED = 'BOT_STORAGE_DELETED',
+  BOT_STORAGE_LIST = 'BOT_STORAGE_LIST',
+  BOT_STORAGE_LIST_RESULT = 'BOT_STORAGE_LIST_RESULT',
+  BOT_STORAGE_USAGE = 'BOT_STORAGE_USAGE',
+  BOT_STORAGE_USAGE_RESULT = 'BOT_STORAGE_USAGE_RESULT',
+  /** Client -> server (`bot-storage`): usage and grants of one bot's storage. */
+  BOT_STORAGE_INFO_GET = 'BOT_STORAGE_INFO_GET',
+  /** Client -> server (`bot-storage`, MANAGE_BOTS). */
+  BOT_STORAGE_LIMIT_UPDATE = 'BOT_STORAGE_LIMIT_UPDATE',
+  /** Client -> server (`bot-storage`, MANAGE_BOTS): deletes everything the bot keeps on the server. */
+  BOT_STORAGE_CLEAR = 'BOT_STORAGE_CLEAR',
+  BOT_STORAGE_INFO = 'BOT_STORAGE_INFO',
+  /** Server -> clients (`bot-storage`): a bot's server storage changed warning level. */
+  BOT_STORAGE_LEVEL = 'BOT_STORAGE_LEVEL',
   BOT_VOICE_CONTEXT = 'BOT_VOICE_CONTEXT',
   BOT_VOICE_CONTEXT_RESULT = 'BOT_VOICE_CONTEXT_RESULT',
   BOT_LOCAL_SOURCE_REQUEST = 'BOT_LOCAL_SOURCE_REQUEST',

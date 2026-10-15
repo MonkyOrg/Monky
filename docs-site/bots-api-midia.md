@@ -7,11 +7,19 @@ outline: 2
 
 Assinaturas públicas completas do SDK de bots do Monky, geradas da entrada TypeScript de `@monky/bot-sdk`. Campos opcionais usam `?`; campos `readonly` não devem ser alterados. Os links de origem incluem regras de validação e detalhes da implementação.
 
-[Visão geral do SDK de bots e eventos](/bots-api) · [Voz](/bots-voz) · [Miniapps](/bots-miniapps) · [Execução local](/bots-execucao-local)
+[Visão geral do SDK de bots e eventos](/bots-api) · [Voz](/bots-voz) · [Miniapps](/bots-miniapps) · [Armazenamento](/bots-armazenamento) · [Execução local](/bots-execucao-local)
+
+## `BotDeviceStorageStatus` {#botdevicestoragestatus}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botStorage.ts#L230)
+
+```ts
+export type BotDeviceStorageStatus = "granted" | "unavailable" | "denied";
+```
 
 ## `BotScreen` {#botscreen}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L103)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L104)
 
 ```ts
 export type BotScreen = {
@@ -30,7 +38,7 @@ export type BotScreen = {
 
 ## `BotScreenActionEvent` {#botscreenactionevent}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L108)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L109)
 
 ```ts
 export type BotScreenActionEvent = {
@@ -48,7 +56,7 @@ export type BotScreenActionEvent = {
 
 ## `BotScreenBeforeCloseEvent` {#botscreenbeforecloseevent}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L120)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L121)
 
 ```ts
 export interface BotScreenBeforeCloseEvent {
@@ -58,7 +66,7 @@ export interface BotScreenBeforeCloseEvent {
 
 ## `BotScreenBeforeCloseReason` {#botscreenbeforeclosereason}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L112)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L113)
 
 ```ts
 export type BotScreenBeforeCloseReason = "leave" | "end";
@@ -66,7 +74,7 @@ export type BotScreenBeforeCloseReason = "leave" | "end";
 
 ## `BotScreenBridge` {#botscreenbridge}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L139)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L140)
 
 ```ts
 export interface BotScreenBridge {
@@ -82,9 +90,15 @@ export interface BotScreenBridge {
     onBeforeClose(handler: (event: BotScreenBeforeCloseEvent) => boolean | void | Promise<boolean | void>): () => void;
     /**
      * Runs on every close, while the view is already hidden, muted and cut from state and actions.
-     * The document is kept for at most 5 seconds so the handlers can finish, e.g. saving.
+     * The document is kept for at most 5 seconds so the handlers can finish, e.g. saving; `storage`
+     * keeps working meanwhile.
      */
     onClose(handler: (event: BotScreenCloseEvent) => void | Promise<void>): () => void;
+    /**
+     * Data kept on this computer, when the bot has `device_storage` and the person allows it.
+     * Missing in clients released before bot storage.
+     */
+    readonly storage?: BotScreenStorage;
 }
 ```
 
@@ -105,7 +119,7 @@ export class BotScreenClient {
 
 ## `BotScreenCloseEvent` {#botscreencloseevent}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L124)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L125)
 
 ```ts
 export interface BotScreenCloseEvent {
@@ -115,7 +129,7 @@ export interface BotScreenCloseEvent {
 
 ## `BotScreenCloseReason` {#botscreenclosereason}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L118)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L119)
 
 ```ts
 export type BotScreenCloseReason = "ended" | BotScreenBeforeCloseReason | "revoked";
@@ -123,7 +137,7 @@ export type BotScreenCloseReason = "ended" | BotScreenBeforeCloseReason | "revok
 
 ## `BotScreenCreate` {#botscreencreate}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L105)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L106)
 
 ```ts
 export type BotScreenCreate = {
@@ -138,7 +152,7 @@ export type BotScreenCreate = {
 
 ## `BotScreenJson` {#botscreenjson}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L17)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L18)
 
 ```ts
 export type BotScreenJson = string | number | boolean | BotScreenJson[] | {
@@ -148,7 +162,7 @@ export type BotScreenJson = string | number | boolean | BotScreenJson[] | {
 
 ## `BotScreenPatch` {#botscreenpatch}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L106)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L107)
 
 ```ts
 export type BotScreenPatch = {
@@ -159,7 +173,7 @@ export type BotScreenPatch = {
 
 ## `BotScreenRef` {#botscreenref}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L104)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L105)
 
 ```ts
 export type BotScreenRef = {
@@ -170,7 +184,7 @@ export type BotScreenRef = {
 
 ## `BotScreenRemoved` {#botscreenremoved}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L109)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L110)
 
 ```ts
 export type BotScreenRemoved = {
@@ -202,9 +216,59 @@ export type BotScreenRemoved = {
 };
 ```
 
+## `BotScreenStorage` {#botscreenstorage}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botStorage.ts#L260)
+
+```ts
+export interface BotScreenStorage {
+    /** `unavailable` until Monky connects the document, and whenever nothing may be stored. */
+    readonly status: BotDeviceStorageStatus;
+    /** Calls back at once with the current status and on every change; returns an unsubscribe function. */
+    onStatus(callback: (status: BotDeviceStorageStatus) => void): () => void;
+    get(key: string): Promise<string | ArrayBuffer | null>;
+    /** With `{ autosave: true }`, a save that cannot happen resolves `false` instead of rejecting. */
+    set(key: string, value: string | ArrayBuffer | ArrayBufferView | Blob, options?: {
+        autosave?: boolean;
+    }): Promise<boolean>;
+    /** Resolves whether the key existed. */
+    delete(key: string): Promise<boolean>;
+    /** In key order. */
+    list(options?: {
+        prefix?: string;
+    }): Promise<BotScreenStorageEntry[]>;
+    usage(): Promise<BotScreenStorageUsage | null>;
+}
+```
+
+## `BotScreenStorageEntry` {#botscreenstorageentry}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botStorage.ts#L241)
+
+```ts
+export interface BotScreenStorageEntry {
+    readonly key: string;
+    readonly size: number;
+    /** Milliseconds since the epoch. */
+    readonly updatedAt: number;
+}
+```
+
+## `BotScreenStorageUsage` {#botscreenstorageusage}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botStorage.ts#L248)
+
+```ts
+export interface BotScreenStorageUsage {
+    readonly usedBytes: number;
+    readonly maxBytes: number;
+    readonly level: BotStorageLevel;
+}
+```
+
 ## `BotScreenViewer` {#botscreenviewer}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L129)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L130)
 
 ```ts
 export interface BotScreenViewer {

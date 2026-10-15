@@ -55,6 +55,8 @@ export const BOT_CAPABILITIES = [
     'selectors',
     'miniapps',
     'live_actions',
+    'server_storage',
+    'device_storage',
 ] as const;
 ```
 
@@ -64,6 +66,31 @@ export const BOT_CAPABILITIES = [
 
 ```ts
 export const BOT_LOCALES = ['pt-BR', 'en'] as const;
+```
+
+## `BOT_STORAGE_LIMITS` {#bot_storage_limits}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botStorage.ts#L6)
+
+```ts
+export const BOT_STORAGE_LIMITS = {
+    /** Base64 inflates an object by a third and the result must still fit one WebSocket message (8 MiB). */
+    objectBytes: 4 * MIB,
+    keyLength: 200,
+    contentTypeLength: 128,
+    serverObjects: 10000,
+    deviceObjects: 1000,
+    serverDefaultBytes: 100 * MIB,
+    deviceDefaultBytes: 50 * MIB,
+    minQuotaBytes: MIB,
+    maxQuotaBytes: 100 * 1024 * MIB,
+    /** From this share of the quota on, people are warned that saves will soon stop. */
+    nearFullRatio: 0.9,
+    listPageSize: 100,
+    operationsPerSecond: 20,
+    /** Server, account and bot combinations kept on one computer. */
+    deviceScopes: 512,
+} as const;
 ```
 
 ## `BotLocalizedText` {#botlocalizedtext}
@@ -629,6 +656,26 @@ export enum MessageType {
     BOT_SCREEN_ACTION = 'BOT_SCREEN_ACTION',
     BOT_SCREEN_ACTION_EVENT = 'BOT_SCREEN_ACTION_EVENT',
     BOT_SCREEN_REMOVED = 'BOT_SCREEN_REMOVED',
+    /** Bot -> server (`server_storage`): objects kept by the bot on the Monky server. */
+    BOT_STORAGE_PUT = 'BOT_STORAGE_PUT',
+    BOT_STORAGE_SAVED = 'BOT_STORAGE_SAVED',
+    BOT_STORAGE_GET = 'BOT_STORAGE_GET',
+    BOT_STORAGE_GET_RESULT = 'BOT_STORAGE_GET_RESULT',
+    BOT_STORAGE_DELETE = 'BOT_STORAGE_DELETE',
+    BOT_STORAGE_DELETED = 'BOT_STORAGE_DELETED',
+    BOT_STORAGE_LIST = 'BOT_STORAGE_LIST',
+    BOT_STORAGE_LIST_RESULT = 'BOT_STORAGE_LIST_RESULT',
+    BOT_STORAGE_USAGE = 'BOT_STORAGE_USAGE',
+    BOT_STORAGE_USAGE_RESULT = 'BOT_STORAGE_USAGE_RESULT',
+    /** Client -> server (`bot-storage`): usage and grants of one bot's storage. */
+    BOT_STORAGE_INFO_GET = 'BOT_STORAGE_INFO_GET',
+    /** Client -> server (`bot-storage`, MANAGE_BOTS). */
+    BOT_STORAGE_LIMIT_UPDATE = 'BOT_STORAGE_LIMIT_UPDATE',
+    /** Client -> server (`bot-storage`, MANAGE_BOTS): deletes everything the bot keeps on the server. */
+    BOT_STORAGE_CLEAR = 'BOT_STORAGE_CLEAR',
+    BOT_STORAGE_INFO = 'BOT_STORAGE_INFO',
+    /** Server -> clients (`bot-storage`): a bot's server storage changed warning level. */
+    BOT_STORAGE_LEVEL = 'BOT_STORAGE_LEVEL',
     BOT_VOICE_CONTEXT = 'BOT_VOICE_CONTEXT',
     BOT_VOICE_CONTEXT_RESULT = 'BOT_VOICE_CONTEXT_RESULT',
     BOT_LOCAL_SOURCE_REQUEST = 'BOT_LOCAL_SOURCE_REQUEST',
@@ -870,7 +917,7 @@ export enum MessageType {
 [Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/constants.ts#L1)
 
 ```ts
-export const PROTOCOL_VERSION = 38;
+export const PROTOCOL_VERSION = 39;
 ```
 
 ## `ProtocolErrorCode` {#protocolerrorcode}

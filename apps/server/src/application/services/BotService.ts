@@ -11,6 +11,8 @@ import {
   botProfileUpdateSchema,
   botCapabilitiesSchema,
   unreviewedBotPermissions,
+  BOT_MANIFEST_FEATURES_HEADER,
+  createProtocolOffer,
   type BotCapability,
   type BotInstallPreview,
   type BotManifest,
@@ -22,6 +24,7 @@ import { IBotRepository, IServerRepository } from '../../domain/repositories';
 import { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
 import { Logger } from '../../infrastructure/logger/Logger';
 import { BotPermissionService } from './BotPermissionService';
+import type { BotStorageService } from './BotStorageService';
 
 type BotFailure = {
   success: false;
@@ -49,6 +52,7 @@ export class BotService {
     private avatarStorage: AvatarStorageService,
     private getOnlineBotsMap: () => Map<string, UserSummary>,
     readonly permissions?: BotPermissionService,
+    private readonly storage?: Pick<BotStorageService, 'removeBot'>,
   ) {}
 
   /** SHA-256 hex hash of the raw token string. */
@@ -242,6 +246,8 @@ export class BotService {
       }
       await this.botRepo.delete(botId);
       if (record.avatarPath) this.avatarStorage.deleteAvatar(record.avatarPath);
+      // Its objects left the database with the bot row; the files follow.
+      this.storage?.removeBot(botId);
       Logger.info('BOT', `Bot "${record.name}" (${botId}) revoked.`);
       return { success: true };
     });
@@ -294,7 +300,10 @@ export class BotService {
   private async fetchManifest(manifestUrl: string): Promise<{ success: true; manifest: BotManifest } | BotFailure> {
     let rawManifest: unknown;
     try {
-      const res = await fetch(manifestUrl, { signal: AbortSignal.timeout(10_000) });
+      // Lets a bot declare capabilities this server understands while older servers keep installing it.
+      const res = await fetch(manifestUrl, { signal: AbortSignal.timeout(10_000), headers: {
+        [BOT_MANIFEST_FEATURES_HEADER]: createProtocolOffer('bot').features.join(','),
+      } });
       if (!res.ok) {
         return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: `O bot não respondeu corretamente (HTTP ${res.status}). Verifique se a URL está correta e o bot está em execução.` };
       }
