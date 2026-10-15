@@ -210,6 +210,21 @@ async function runInviteCardSmoke(language, fixture) {
   check(cards.openServerInviteLink(fixture.pt) === true, 'clicking the invitation link itself opens the review');
   await flush();
   check(document.querySelector('#join-invite-form [data-invite-host]')?.textContent === fixture.server.host, 'the review shows the address');
+  // Nickname rule (#567): a refusal explains itself on the field; accents and emoji go through.
+  const reviewForm = document.querySelector('#join-invite-form');
+  const reviewNickname = reviewForm.querySelector('#invite-join-nickname');
+  const reviewError = document.querySelector('[data-invite-error]');
+  check(!!reviewNickname, 'without an identity the review asks for a nickname');
+  reviewNickname.value = 'Ad\u200Bmin';
+  reviewForm.requestSubmit();
+  check(reviewNickname.validationMessage === t('identity.nicknameInvalidCharacters') && reviewError.hidden,
+    'an invisible character is refused with its reason and never reaches the connection');
+  reviewNickname.value = 'Ângela 🐒';
+  reviewNickname.dispatchEvent(new Event('input', { bubbles: true }));
+  check(reviewNickname.validationMessage === '', 'editing the nickname clears the previous reason');
+  reviewForm.requestSubmit();
+  check(!reviewError.hidden && reviewError.textContent === t('connection.connectError'),
+    'accents and emoji pass the nickname check and the join is attempted');
   document.querySelector('#join-invite-form [data-invite-cancel]').click();
   for (let attempt = 0; attempt < 100 && document.querySelector('#join-invite-form'); attempt++) {
     await new Promise(resolve => setTimeout(resolve, 20));

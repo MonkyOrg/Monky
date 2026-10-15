@@ -64,6 +64,14 @@ const ERROR_KEYS: Record<ProtocolErrorCode, TranslationKey> = {
 const LEGACY_MISMATCH_MESSAGE = /vers[ãa]o de protocolo/i;
 const LEGACY_EXPECTED_VERSION = /esperado:\s*(\d+)/i;
 
+/**
+ * Servers released before #567 only accepted unaccented letters, digits, spaces
+ * and `_ - .` in a nickname. They refuse anything else with this exact text —
+ * as BAD_REQUEST while connecting and NICKNAME_INVALID when renaming — which on
+ * its own reads like the person typed something wrong, not that the server is old.
+ */
+const LEGACY_NICKNAME_CHARACTERS_MESSAGE = 'Nickname contém caracteres inválidos';
+
 const BOT_ADDRESS_ERRORS = new Map<string, TranslationKey>([
   ['Não foi possível determinar o endereço do servidor para o bot. Reconecte usando a URL completa do servidor.', 'bots.serverAddressUnavailable'],
   ['Um bot remoto não pode usar localhost para acessar este servidor. Reconecte pelo IP ou domínio acessível ao bot e tente novamente.', 'bots.serverAddressLoopback'],
@@ -111,6 +119,8 @@ export function translateProtocolError(
 ): string {
   const mismatch = detectVersionMismatch(code, serverMessage, serverProtocolVersion);
   if (mismatch) return describeVersionMismatch(mismatch.serverVersion);
+  if ((code === ProtocolErrorCode.BAD_REQUEST || code === ProtocolErrorCode.NICKNAME_INVALID)
+    && serverMessage === LEGACY_NICKNAME_CHARACTERS_MESSAGE) return t('protocolError.nicknameServerOutdated');
   const badRequestKey = code === ProtocolErrorCode.BAD_REQUEST && serverMessage
     ? BOT_ADDRESS_ERRORS.get(serverMessage) ?? POLL_ERRORS.get(serverMessage) : undefined;
   if (badRequestKey) return t(badRequestKey);

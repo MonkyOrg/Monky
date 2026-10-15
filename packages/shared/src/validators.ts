@@ -156,12 +156,49 @@ export const chatHistoryRequestSchema = z.object({
   aroundMessageId: messageReferenceSchema.optional(),
 });
 
+export type NicknameIssue = 'too_short' | 'too_long' | 'invalid_characters';
+
+// Any language, accent or emoji is welcome in a nickname (#567). Refused are the
+// characters that render as nothing or rearrange the text around them — control,
+// format and default-ignorable characters (zero-width spaces, bidirectional
+// overrides, Hangul fillers), the blank Braille pattern, surrogate halves,
+// private-use and unassigned code points, line separators — because they make
+// a name invisible or let two different names look identical. `<` and `>` stay
+// out as defence in depth.
+const FORBIDDEN_NICKNAME_CHARACTER = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2800\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}<>]/u;
+// The zero-width joiner and the emoji variation selectors are invisible as well,
+// but they are what draws 👨‍👩‍👧 and ❤️ as emoji; only in that role do they pass.
+const EMOJI_JOINER = /(?<=\p{Extended_Pictographic}[\p{Emoji_Modifier}\uFE0F]?)\u200D(?=\p{Extended_Pictographic})/gu;
+const EMOJI_VARIATION = /(?<=\p{Emoji})[\uFE0E\uFE0F]/gu;
+
+const NICKNAME_ISSUE_MESSAGES: Record<NicknameIssue, string> = {
+  too_short: `Nickname deve ter pelo menos ${LIMITS.MIN_NICKNAME_LENGTH} caracteres`,
+  too_long: `Nickname não pode exceder ${LIMITS.MAX_NICKNAME_LENGTH} caracteres`,
+  // Not the old "caracteres inválidos": clients recognise an outdated server by that text.
+  invalid_characters: 'Nickname contém caracteres invisíveis, de controle ou < >',
+};
+
+/** Stored form of a nickname: trimmed and in NFC, so a precomposed and a decomposed "João" are one name. */
+export function normalizeNickname(nickname: string): string {
+  return nickname.trim().normalize('NFC');
+}
+
+/** Why a server would refuse this nickname, or `null` when it is accepted. */
+export function getNicknameIssue(nickname: string): NicknameIssue | null {
+  const normalized = normalizeNickname(nickname);
+  if (normalized.length < LIMITS.MIN_NICKNAME_LENGTH) return 'too_short';
+  if (normalized.length > LIMITS.MAX_NICKNAME_LENGTH) return 'too_long';
+  const visible = normalized.replace(EMOJI_JOINER, '').replace(EMOJI_VARIATION, '');
+  return FORBIDDEN_NICKNAME_CHARACTER.test(visible) ? 'invalid_characters' : null;
+}
+
 export const nicknameSchema = z
   .string()
-  .min(LIMITS.MIN_NICKNAME_LENGTH, `Nickname deve ter pelo menos ${LIMITS.MIN_NICKNAME_LENGTH} caracteres`)
-  .max(LIMITS.MAX_NICKNAME_LENGTH, `Nickname não pode exceder ${LIMITS.MAX_NICKNAME_LENGTH} caracteres`)
-  .regex(/^[a-zA-Z0-9_\-\.\s]+$/, 'Nickname contém caracteres inválidos')
-  .transform((val) => val.trim());
+  .transform(normalizeNickname)
+  .superRefine((nickname, context) => {
+    const issue = getNicknameIssue(nickname);
+    if (issue) context.addIssue({ code: z.ZodIssueCode.custom, message: NICKNAME_ISSUE_MESSAGES[issue] });
+  });
 
 export function createMessageContentSchema(limit: number = LIMITS.MAX_MESSAGE_LENGTH, allowEmpty = false) {
   return z.string().transform(value => value.trim())
