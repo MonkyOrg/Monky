@@ -234,6 +234,8 @@ export interface ElectronApi {
   setGamePresenceEnabled: (enabled: boolean) => Promise<void>;
   getCurrentGameActivity: () => Promise<UserActivity | null>;
   findGameWindows: () => Promise<string[]>;
+  /** Seconds since the last keyboard or mouse input in the whole system, for the AFK channel. */
+  getSystemIdleSeconds: () => Promise<number>;
   onGamePresenceChanged: (cb: (activity: UserActivity | null) => void) => () => void;
   openOverlay: (config: OverlayConfig) => Promise<{ success: boolean }>;
   closeOverlay: () => Promise<{ success: boolean }>;
@@ -611,6 +613,7 @@ const api: ElectronApi = {
   setGamePresenceEnabled: (enabled) => ipcRenderer.invoke('game-presence:set-enabled', enabled),
   getCurrentGameActivity: () => ipcRenderer.invoke('game-presence:get-current'),
   findGameWindows: () => ipcRenderer.invoke('game-share:find-windows'),
+  getSystemIdleSeconds: () => ipcRenderer.invoke('system:get-idle-seconds'),
   onGamePresenceChanged: (cb) => {
     const listener = (_e: Electron.IpcRendererEvent, activity: UserActivity | null) => cb(activity);
     ipcRenderer.on('game-presence:changed', listener);

@@ -159,6 +159,24 @@ test('DM relay setting requires negotiated support before submitting', () => {
   assert.equal(serverSettingsValidationError({ dmRelayEnabled: true }, supported), null);
 });
 
+test('AFK settings require negotiated support, a channel name and one of the offered idle times', () => {
+  for (const patch of [{ afkChannelEnabled: true }, { afkChannelName: 'AFK' }, { afkTimeoutSeconds: 300 }]) {
+    assert.equal(serverSettingsValidationError(patch, server()), 'chat.featureUpdateRequired');
+  }
+  const supported = server({ protocol: { version: PROTOCOL_VERSION, minimumVersion: MIN_CLIENT_PROTOCOL, features: ['afk-channel'] } });
+  assert.equal(serverSettingsValidationError({ afkChannelEnabled: true, afkChannelName: 'Ausentes' }, supported), null);
+  assert.equal(serverSettingsValidationError({ afkChannelEnabled: false }, supported), null);
+  for (const name of ['A', ' A ', 'x'.repeat(51)]) {
+    assert.equal(serverSettingsValidationError({ afkChannelName: name }, supported), 'serverSettings.afkChannelNameInvalid');
+  }
+  for (const seconds of [60, 300, 900, 1800, 3600]) {
+    assert.equal(serverSettingsValidationError({ afkTimeoutSeconds: seconds }, supported), null);
+  }
+  for (const seconds of [0, 120, 899.5, NaN]) {
+    assert.equal(serverSettingsValidationError({ afkTimeoutSeconds: seconds }, supported), 'serverSettings.invalidValue');
+  }
+});
+
 test('per-field validation uses current persisted prerequisites and does not resubmit unrelated settings', () => {
   const s = server();
   assert.equal(serverSettingsValidationError({ name: 'A' }, s), 'serverSettings.nameInvalid');

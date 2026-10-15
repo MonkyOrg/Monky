@@ -175,6 +175,7 @@ export enum MessageType {
   VOICE_RECONNECTED = 'VOICE_RECONNECTED',
   VOICE_LEAVE = 'VOICE_LEAVE',
   VOICE_STATE_UPDATE = 'VOICE_STATE_UPDATE',
+  VOICE_AFK = 'VOICE_AFK',
   ADMIN_MUTE_USER = 'ADMIN_MUTE_USER',
   ADMIN_DEAFEN_USER = 'ADMIN_DEAFEN_USER',
   ADMIN_GET_VOICE_RESTRICTIONS = 'ADMIN_GET_VOICE_RESTRICTIONS',
@@ -564,6 +565,12 @@ export interface ServerUpdateSettingsPayload {
   voiceMode?: VoiceMode;
   /** Turn the host's TURN relay on or off (#425). Linux-only; see CoturnManager. */
   turnEnabled?: boolean;
+  /** Creates (true) or removes (false) the AFK voice channel (`afk-channel`). */
+  afkChannelEnabled?: boolean;
+  /** Name of the AFK channel, used when creating it and to rename it afterwards. */
+  afkChannelName?: string;
+  /** One of AFK_TIMEOUT_OPTIONS_SECONDS. */
+  afkTimeoutSeconds?: number;
 }
 
 export interface RoleCreatePayload {
@@ -700,6 +707,16 @@ export interface VoiceStateUpdatePayload {
   nativeScreenShares?: NativeScreenSource[];
 }
 
+/**
+ * Client -> server: this connection went idle in `channelId` (`afk-channel`).
+ * The server moves it to the AFK channel and announces it with ADMIN_MOVE_USER,
+ * like any other move. Naming the room keeps a late report from moving someone
+ * who has changed rooms in the meantime.
+ */
+export interface VoiceAfkPayload {
+  channelId: string;
+}
+
 export interface AdminMuteUserPayload {
   targetUserId: string;
   muted: boolean;
@@ -825,6 +842,9 @@ export interface ServerSettingsUpdatedPayload {
   maxUsers?: number;
   /** Current state of the host's TURN relay (#425). */
   turnEnabled?: boolean;
+  /** The AFK voice channel, or null once it is removed (`afk-channel`). */
+  afkChannelId?: string | null;
+  afkTimeoutSeconds?: number;
   /**
    * Relay availability as it stands *after* this update (#438).
    *

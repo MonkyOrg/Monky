@@ -31,6 +31,7 @@ import {
   channelTreeRoot,
   reorderChannelTreeRoot,
   type ChannelTreeRootItem,
+  LIMITS,
 } from '@monky/shared';
 import { ChannelRecord } from '../../domain/entities';
 import { ICategoryRepository, IChannelRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
@@ -254,7 +255,8 @@ export class ChannelService {
         ? Math.max(-1, ...existingChannels.filter((channel) => !channel.forumId && channel.categoryId === categoryId).map((channel) => channel.position)) + 1
         : await this.nextRootPosition(server.id),
       createdAt: Date.now(),
-      maxParticipants: parseResult.data.maxParticipants || 10,
+      // Only voice rooms have a user limit; 0 means none.
+      maxParticipants: parseResult.data.type === 'VOICE' ? parseResult.data.maxParticipants : LIMITS.VOICE_USER_LIMIT_NONE,
       isPrivate,
       botCommandsEnabled: parseResult.data.botCommandsEnabled,
       // Links are meaningless on a public channel and would resurface if it were
@@ -300,6 +302,15 @@ export class ChannelService {
     }
     if (existing.forumId) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Use forum post controls.' };
+    }
+    if (maxParticipants !== undefined && maxParticipants !== LIMITS.VOICE_USER_LIMIT_NONE) {
+      if (existing.type !== 'VOICE') {
+        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'O limite de pessoas só vale para canais de voz.' };
+      }
+      // Idle members are moved into it whatever its occupancy, so a limit there would only mislead.
+      if (await this.getAfkChannelId() === channelId) {
+        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'O canal AFK não tem limite de pessoas.' };
+      }
     }
     const nextCategoryId = categoryId === undefined ? existing.categoryId ?? null : categoryId;
     const changesAccess = isPrivate !== undefined || allowedRoleIds !== undefined || permissionOverwrites !== undefined;
@@ -439,9 +450,41 @@ export class ChannelService {
         errorMessage: 'Canal não encontrado',
       };
     }
+    // The AFK room belongs to the server settings: only turning it off there removes it.
+    if (await this.getAfkChannelId() === channelId) {
+      return {
+        success: false,
+        errorCode: ProtocolErrorCode.BAD_REQUEST,
+        errorMessage: 'Desative o canal AFK nas configurações do servidor para removê-lo.',
+      };
+    }
 
     await this.channelRepo.delete(channelId);
     return { success: true };
+  }
+
+  /** The AFK voice channel, when the server has one and it still exists. */
+  public async getAfkChannelId(): Promise<string | null> {
+    const id = (await this.serverRepo.getServer())?.afkChannelId;
+    if (!id) return null;
+    return (await this.channelRepo.findById(id))?.type === 'VOICE' ? id : null;
+  }
+
+  /** Creates the AFK room at the end of the channel list, public and without a user limit. */
+  public async createAfkChannel(name: string): Promise<{
+    success: boolean; errorCode?: ProtocolErrorCode; errorMessage?: string; channel?: ChannelSummary;
+  }> {
+    const created = await this.createChannel({ name, type: 'VOICE' });
+    if (created.success && created.channel) await this.serverRepo.updateServer({ afkChannelId: created.channel.id });
+    return created;
+  }
+
+  /** Turns the AFK room off and deletes it, returning the id it had. */
+  public async removeAfkChannel(): Promise<string | null> {
+    const id = await this.getAfkChannelId();
+    await this.serverRepo.updateServer({ afkChannelId: null });
+    if (id) await this.channelRepo.delete(id);
+    return id;
   }
 
   public async listCategories(): Promise<ChannelCategory[]> {

@@ -33,7 +33,14 @@ export const LIMITS = {
   // (#403). The column is NOT NULL, so "no limit" needs a value rather than
   // NULL; 0 is safe because a server capped at zero members is meaningless.
   MAX_USERS_UNLIMITED: 0,
-  MAX_PARTICIPANTS_PER_CHANNEL_DEFAULT: 10,
+  // Voice channel user limit. 0 means no limit, which is how every channel
+  // starts: servers before `voice-user-limit` capped each room at a hidden 10
+  // that nobody could see or change. Two digits fit the sidebar badge.
+  VOICE_USER_LIMIT_NONE: 0,
+  VOICE_USER_LIMIT_MAX: 99,
+  // Inactivity before a member is moved to the AFK channel. The server only
+  // accepts the steps listed in AFK_TIMEOUT_OPTIONS_SECONDS.
+  AFK_TIMEOUT_DEFAULT_SECONDS: 15 * 60,
   MIN_NICKNAME_LENGTH: 2,
   MAX_NICKNAME_LENGTH: 32,
   MIN_CHANNEL_NAME_LENGTH: 2,
@@ -151,6 +158,14 @@ export const LIMITS = {
 } as const;
 
 export const RECONNECT_DELAYS_MS = [1000, 2000, 3000, 5000] as const;
+
+/** Inactivity steps offered for the AFK channel, in seconds: 1, 5, 15, 30 and 60 minutes. */
+export const AFK_TIMEOUT_OPTIONS_SECONDS = [60, 5 * 60, 15 * 60, 30 * 60, 60 * 60] as const;
+export type AfkTimeoutSeconds = typeof AFK_TIMEOUT_OPTIONS_SECONDS[number];
+
+export function isAfkTimeoutSeconds(value: unknown): value is AfkTimeoutSeconds {
+  return AFK_TIMEOUT_OPTIONS_SECONDS.some((option) => option === value);
+}
 
 /**
  * Tokens that mention everyone in a channel (#464).

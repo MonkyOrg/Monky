@@ -120,7 +120,7 @@ export async function ensureServerSeedData(
       type: 'TEXT',
       position: 0,
       createdAt: now,
-      maxParticipants: 50,
+      maxParticipants: LIMITS.VOICE_USER_LIMIT_NONE,
       isPrivate: false,
       allowedRoleIds: [],
     });
@@ -135,7 +135,7 @@ export async function ensureServerSeedData(
       type: 'VOICE',
       position: 1,
       createdAt: now,
-      maxParticipants: LIMITS.MAX_PARTICIPANTS_PER_CHANNEL_DEFAULT,
+      maxParticipants: LIMITS.VOICE_USER_LIMIT_NONE,
       isPrivate: false,
       allowedRoleIds: [],
     });

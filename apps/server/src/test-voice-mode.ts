@@ -73,6 +73,7 @@ function fixture(restricted = true) {
   server['channelService'] = {
     canUserAccessChannel: async (_userId: string, _channelId: string, permission = Permission.VIEW_CHANNEL) =>
       exists && viewAllowed && (permission !== Permission.SPEAK || speakAllowed),
+    getAfkChannelId: async () => null,
   } as typeof server['channelService'];
   const auth = Object.create(AuthService.prototype) as AuthService;
   auth.updateServerSettings = async (payload) => {

@@ -56,6 +56,15 @@ sem exibir um alerta adicional.
 
 Clique em um **canal de voz** para entrar na chamada. Quem fala ganha um anel verde no avatar. A barra inferior tem microfone, fone/ensurdecer e desconectar. O painel mostra ping médio e permite sair só da chamada.
 
+Canais privados mostram um cadeado no canto do próprio ícone. Um canal de voz
+com [limite de pessoas](/administrar-servidor#limite-de-pessoas) mostra ao lado
+do nome quantos participantes estão nele e o máximo; com a sala cheia, só entra
+quem tem permissão para mover membros. Se o servidor tiver um
+[canal AFK](/administrar-servidor#canal-afk), marcado com uma lua, quem fica
+inativo em uma chamada é movido para lá com o microfone mutado pelo servidor.
+Ninguém entra nele por conta própria; ao sair, o microfone continua mutado até
+você desmutá-lo.
+
 Cada canal de voz também possui um chat persistente. Passe o mouse sobre a linha
 do canal e use o botão redondo de balão, ao lado dos três pontos, para abrir o
 palco e o chat na lateral direita sem entrar na chamada. No palco, o mesmo balão

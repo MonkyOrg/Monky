@@ -464,7 +464,7 @@ test('real server: administrative actions are recorded with names and only audit
   assert.equal(update?.target?.name, 'stage');
   assert.deepEqual(update?.changes, [
     { field: 'name', before: 'lobby', after: 'stage' },
-    { field: 'userLimit', before: 10, after: 12 },
+    { field: 'userLimit', before: 0, after: 12 },
   ]);
   const assigned = all.find(entry => entry.action === 'role.assign' && entry.target?.id === auditor.id);
   assert.equal(assigned?.related.role?.name, 'Auditors');

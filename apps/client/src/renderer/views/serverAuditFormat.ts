@@ -124,6 +124,8 @@ const FIELD_KEYS: Record<string, TranslationKey> = {
   maxFileSize: 'serverAudit.field.maxFileSize',
   maxStorage: 'serverAudit.field.maxStorage',
   maxBots: 'serverAudit.field.maxBots',
+  afkChannel: 'serverAudit.field.afkChannel',
+  afkTimeout: 'serverAudit.field.afkTimeout',
   eventsEnabled: 'serverAudit.field.eventsEnabled',
   banner: 'serverAudit.field.banner',
   title: 'serverAudit.field.title',
@@ -214,6 +216,8 @@ export function formatAuditValue(field: string, value: ServerAuditValue): string
   if (typeof value === 'number') {
     if (TIME_FIELDS.has(field)) return formatAuditTime(value);
     if (BYTE_FIELDS.has(field)) return formatBytes(value);
+    if (field === 'userLimit' && value === 0) return t('serverAudit.noLimit');
+    if (field === 'afkTimeout') return t('serverAudit.minutes', { count: Math.round(value / 60) });
     return new Intl.NumberFormat(getLanguage()).format(value);
   }
   const key = VALUE_KEYS[field]?.[value];

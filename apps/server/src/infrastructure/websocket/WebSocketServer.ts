@@ -98,6 +98,8 @@ import {
   CommandRegisteredPayload,
   CommandsListResponsePayload,
   VoiceJoinPayload,
+  VoiceAfkPayload,
+  voiceAfkSchema,
   VoiceModeTransition,
   VoiceReconnectPayload,
   VoiceLeavePayload,
@@ -173,6 +175,8 @@ import {
   type NativePollCreate,
   type NativePollVote,
   EVERYONE_ROLE_ID,
+  channelNameSchema,
+  isAfkTimeoutSeconds,
 } from '@monky/shared';
 import { AuthService } from '../../application/services/AuthService';
 import { AttachmentService } from '../../application/services/AttachmentService';
@@ -1131,6 +1135,10 @@ export class WebSocketServer {
 
       case MessageType.VOICE_STATE_UPDATE:
         await this.handleVoiceStateUpdate(session, payload as VoiceStateUpdatePayload, requestId);
+        break;
+
+      case MessageType.VOICE_AFK:
+        await this.handleVoiceAfk(session, payload, requestId);
         break;
 
       case MessageType.RTC_SIGNAL:
@@ -3197,13 +3205,19 @@ export class WebSocketServer {
       requestId,
       payload: updatedPayload,
     });
+    await this.publishChannelUpdate(channel, session.ws);
+  }
 
-    // CHANNEL_UPDATED only makes sense for clients that already have the channel
-    // and keep access to it. Those who just gained or lost it are served by the
-    // reconciliation, which sends them a CREATED or a DELETED instead (#384).
+  /**
+   * CHANNEL_UPDATED only makes sense for clients that already have the channel
+   * and keep access to it. Those who just gained or lost it are served by the
+   * reconciliation, which sends them a CREATED or a DELETED instead (#384).
+   */
+  private async publishChannelUpdate(channel: ChannelSummary, skip?: WebSocket): Promise<void> {
+    const updatedPayload: ChannelUpdatedPayload = { channel };
     const audience = await this.resolveChannelAudience(channel);
     for (const [ws, peer] of this.sessions.entries()) {
-      if (ws === session.ws || !peer.user || ws.readyState !== WebSocket.OPEN) continue;
+      if (ws === skip || !peer.user || ws.readyState !== WebSocket.OPEN) continue;
       if (!peer.visibleChannelIds?.has(channel.id)) continue;
       if (!audience.has(peer.user.id)) continue;
 
@@ -3284,26 +3298,7 @@ export class WebSocketServer {
     }
     cleanupCommunityMedia?.();
     if (deleted) this.recordAudit(session, 'channel.delete', { target: auditRef.channel(deleted) });
-
-    this.botLocalExecution.deleteChannel(payload.channelId);
-    this.botInteractions.deleteChannel(payload.channelId);
-
-    // If it was a voice channel, disconnect any participants still in it so they
-    // are not stranded in a "ghost" channel after it has been removed.
-    const strandedParticipants = this.signalingService.getParticipantsInChannel(payload.channelId);
-    for (const participant of strandedParticipants) {
-      this.signalingService.leaveVoiceChannel(participant.sessionId);
-      this.closeSfuSession(participant.sessionId, payload.channelId);
-      const leavePayload: VoiceUserLeftPayload = {
-        channelId: payload.channelId,
-        userId: participant.userId,
-        sessionId: participant.sessionId,
-      };
-      this.broadcast({
-        type: MessageType.VOICE_USER_LEFT,
-        payload: leavePayload,
-      });
-    }
+    this.releaseDeletedChannel(payload.channelId);
 
     const channelPayload: ChannelDeletedPayload = { channelId: payload.channelId };
     this.send(session.ws, {
@@ -3316,6 +3311,23 @@ export class WebSocketServer {
     // Everyone else who could see it is told by the reconciliation, which no
     // longer finds the channel and therefore removes it from their list (#384).
     await this.reconcileChannelVisibility();
+  }
+
+  /** What a removed channel leaves behind: bot state tied to it and anyone still in its voice room. */
+  private releaseDeletedChannel(channelId: string): void {
+    this.botLocalExecution.deleteChannel(channelId);
+    this.botInteractions.deleteChannel(channelId);
+
+    // If it was a voice channel, disconnect any participants still in it so they
+    // are not stranded in a "ghost" channel after it has been removed.
+    for (const participant of this.signalingService.getParticipantsInChannel(channelId)) {
+      this.signalingService.leaveVoiceChannel(participant.sessionId);
+      this.closeSfuSession(participant.sessionId, channelId);
+      this.broadcast({
+        type: MessageType.VOICE_USER_LEFT,
+        payload: { channelId, userId: participant.userId, sessionId: participant.sessionId } satisfies VoiceUserLeftPayload,
+      });
+    }
   }
 
   private async handleUserChangeNickname(
@@ -3502,6 +3514,27 @@ export class WebSocketServer {
         'Atualize o cliente e o servidor para configurar mensagens diretas.', requestId);
       return;
     }
+    const changesAfk = payload.afkChannelEnabled !== undefined || payload.afkChannelName !== undefined
+      || payload.afkTimeoutSeconds !== undefined;
+    if (changesAfk && !session.protocol?.features.includes('afk-channel')) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE,
+        'Atualize o cliente e o servidor para configurar o canal AFK.', requestId);
+      return;
+    }
+    // Checked before anything is applied, so a bad field never leaves the AFK room half configured.
+    if ((payload.afkChannelEnabled !== undefined && typeof payload.afkChannelEnabled !== 'boolean')
+      || (payload.afkTimeoutSeconds !== undefined && !isAfkTimeoutSeconds(payload.afkTimeoutSeconds))) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Configuração do canal AFK inválida.', requestId);
+      return;
+    }
+    if (payload.afkChannelName !== undefined) {
+      const name = channelNameSchema.safeParse(payload.afkChannelName);
+      if (!name.success) {
+        this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST,
+          name.error.errors[0]?.message ?? 'Nome do canal AFK inválido.', requestId);
+        return;
+      }
+    }
     if ((payload.recentSoundCacheEnabled !== undefined || payload.recentSoundCacheLimit !== undefined)
       && !this.recentSoundCache) {
       this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR,
@@ -3592,6 +3625,12 @@ export class WebSocketServer {
     const stillAllowed = await this.requirePermission(session, Permission.MANAGE_SERVER, requestId);
     if (!stillAllowed || !this.isCurrentSession(session)) {
       if (payload.voiceMode === 'sfu' && previousVoiceMode !== 'sfu') this.sfuManager.close();
+      return;
+    }
+    const afkError = await this.applyAfkChannelSettings(session, payload);
+    if (afkError) {
+      if (payload.voiceMode === 'sfu' && previousVoiceMode !== 'sfu') this.sfuManager.close();
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, afkError, requestId);
       return;
     }
     let result = await this.mutateLocalAccess(() => this.authService.updateServerSettings(payload));
@@ -3725,6 +3764,8 @@ export class WebSocketServer {
       maxMessageLength: result.maxMessageLength,
       turnEnabled: result.turnEnabled,
       turnAvailability: CoturnManager.describeAvailability(),
+      afkChannelId: await this.channelService.getAfkChannelId(),
+      afkTimeoutSeconds: result.afkTimeoutSeconds,
     };
 
     // Broadcast updated server settings to all clients
@@ -3745,6 +3786,41 @@ export class WebSocketServer {
         result.hasPassword ? 'Ativa' : 'Sem Senha'
       }, Modo de Voz: ${result.voiceMode ?? 'p2p'}, Soundboard: ${result.allowSoundboard ? 'Habilitado' : 'Desabilitado'})`
     );
+  }
+
+  /**
+   * Creates, renames or removes the AFK room (`afk-channel`). It is an ordinary
+   * voice channel, so its arrival, rename and removal reach members through the
+   * usual channel events. Returns why nothing changed, or null.
+   */
+  private async applyAfkChannelSettings(session: ClientSession, payload: ServerUpdateSettingsPayload): Promise<string | null> {
+    if (payload.afkChannelEnabled === undefined && payload.afkChannelName === undefined) return null;
+    const current = await this.channelService.getAfkChannelId();
+    if (payload.afkChannelEnabled === false) {
+      if (!current) return null;
+      const cleanupCommunityMedia = this.communityService?.prepareChannelDeletion(current);
+      const removed = await this.mutateLocalAccess(() => this.channelService.removeAfkChannel());
+      cleanupCommunityMedia?.();
+      if (removed) this.releaseDeletedChannel(removed);
+      await this.reconcileChannelVisibility();
+      return null;
+    }
+    if (payload.afkChannelEnabled === true && !current) {
+      const created = await this.mutateLocalAccess(() => this.channelService.createAfkChannel(payload.afkChannelName ?? 'AFK'));
+      if (!created.success) return created.errorMessage ?? 'Não foi possível criar o canal AFK.';
+      await this.reconcileChannelVisibility();
+      return null;
+    }
+    if (payload.afkChannelName === undefined || !current) return null;
+    const before = await this.channelService.getChannelSummary(current);
+    const renamed = await this.mutateLocalAccess(() => this.channelService.updateChannel({ channelId: current, name: payload.afkChannelName }));
+    if (!renamed.success || !renamed.channel) return renamed.errorMessage ?? 'Não foi possível renomear o canal AFK.';
+    if (this.audit && before) {
+      const changes = channelChanges(before, renamed.channel, await this.auditNames(before, renamed.channel));
+      if (changes.length) this.recordAudit(session, 'channel.update', { target: auditRef.channel(renamed.channel), changes });
+    }
+    await this.publishChannelUpdate(renamed.channel);
+    return null;
   }
 
   private cancelVoiceReconnect(sessionId: string): boolean {
@@ -3784,8 +3860,10 @@ export class WebSocketServer {
         return;
       }
       const permissionMuted = await this.resolvePermissionMuted(session, payload.channelId);
+      // The grant proves this connection was inside the room before the mode switch emptied it.
       const result = await this.signalingService.joinVoiceChannel(
-        session.sessionId, session.user.id, payload.channelId, payload.isMuted, payload.isDeafened, permissionMuted
+        session.sessionId, session.user.id, payload.channelId, payload.isMuted, payload.isDeafened, permissionMuted,
+        { bypassUserLimit: true },
       );
       admitted = !!result.voiceState;
       if (!result.success || !result.voiceState) {
@@ -3886,6 +3964,11 @@ export class WebSocketServer {
 
     if (!payload?.channelId) {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Dados de som inválidos', requestId);
+      return;
+    }
+    // The AFK room silences everyone inside it, the Soundboard included.
+    if (payload.channelId === await this.channelService.getAfkChannelId()) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'O canal AFK não toca sons da Soundboard.', requestId);
       return;
     }
     const audio = this.validateRecentSoundPayload(session, payload, requestId);
@@ -4125,14 +4208,23 @@ export class WebSocketServer {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Leave the current voice channel before joining another.', requestId);
       return;
     }
+    const afkChannelId = await this.channelService.getAfkChannelId();
+    if (payload.channelId === afkChannelId && !this.mayEnterAfkChannel(session, afkChannelId)) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED,
+        'O canal AFK só recebe quem fica inativo em uma chamada.', requestId);
+      return;
+    }
+    // Leaving the AFK room trades its server mute for an ordinary one, which only the member undoes.
+    const leavingAfk = !!afkChannelId && previous?.channelId === afkChannelId && payload.channelId !== afkChannelId;
 
     const result = await this.signalingService.joinVoiceChannel(
       session.sessionId,
       session.user.id,
       payload.channelId,
-      payload.isMuted,
+      leavingAfk ? true : payload.isMuted,
       payload.isDeafened,
-      await this.resolvePermissionMuted(session, payload.channelId)
+      await this.resolvePermissionMuted(session, payload.channelId),
+      { bypassUserLimit: () => this.mayExceedVoiceUserLimit(session, payload.channelId) },
     );
     if (!result.success || !result.voiceState) {
       this.sendError(
@@ -4534,8 +4626,33 @@ export class WebSocketServer {
   }
 
   private async resolvePermissionMuted(session: ClientSession, channelId: string): Promise<boolean> {
-    return !!session.user && !session.isBot &&
-      !(await this.channelService.canUserAccessChannel(session.user.id, channelId, Permission.SPEAK));
+    if (!session.user || session.isBot) return false;
+    // Whoever is in the AFK room is muted by the server, administrators included.
+    if (channelId === await this.channelService.getAfkChannelId()) return true;
+    return !(await this.channelService.canUserAccessChannel(session.user.id, channelId, Permission.SPEAK));
+  }
+
+  /**
+   * Nobody joins the AFK room on purpose: a connection gets there only when the
+   * server moves it in, and may then announce itself again while inside or when
+   * returning to it after a dropped socket.
+   */
+  private mayEnterAfkChannel(session: ClientSession, afkChannelId: string): boolean {
+    if (session.isBot || !session.sessionId) return false;
+    return this.signalingService.getVoiceState(session.sessionId)?.channelId === afkChannelId
+      || this.voiceReturnGrants?.get(session.sessionId)?.channelId === afkChannelId;
+  }
+
+  /**
+   * A full voice room still admits members with Move Members (administrators
+   * included) and anyone returning to the room their dropped socket was in.
+   */
+  private async mayExceedVoiceUserLimit(session: ClientSession, channelId: string): Promise<boolean> {
+    if (!session.user || !session.sessionId) return false;
+    if (this.voiceReturnGrants?.get(session.sessionId)?.channelId === channelId) return true;
+    return session.isBot
+      ? hasPermission((await this.channelService.getAccessContext(session.user.id)).permissions, Permission.MOVE_MEMBERS)
+      : this.permissionService.checkPermission(session.user.id, Permission.MOVE_MEMBERS);
   }
 
   private closePermissionMutedAudio(voiceState: VoiceParticipantState): void {
@@ -5707,6 +5824,12 @@ export class WebSocketServer {
     // moved does not need to see it: VIEW_CHANNEL only gates seeing a room and
     // joining it by oneself, so being brought in by someone allowed is fine.
     if (!(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
+    const afkChannelId = await this.channelService.getAfkChannelId();
+    if (payload.channelId === afkChannelId) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED,
+        'Ninguém é levado ao canal AFK: ele só recebe quem fica inativo em uma chamada.', requestId);
+      return;
+    }
 
     // Bots never enter private rooms through someone else, and still need voice
     // publish permission. Humans without SPEAK enter permission-muted.
@@ -5720,19 +5843,73 @@ export class WebSocketServer {
       return;
     }
 
-    const joinResult = await this.signalingService.joinVoiceChannel(payload.targetSessionId, previous.userId, payload.channelId);
-    if (!joinResult.success || !joinResult.voiceState) {
-      this.sendError(session.ws, joinResult.errorCode || ProtocolErrorCode.BAD_REQUEST, joinResult.errorMessage || 'Não foi possível mover o usuário.', requestId);
+    // Leaving the AFK room trades its server mute for an ordinary one, which only the member undoes.
+    const moved = await this.moveVoiceSession(target, previous, payload.channelId,
+      previous.channelId === afkChannelId ? true : undefined, requestId);
+    if (!moved.success) {
+      this.sendError(session.ws, moved.errorCode || ProtocolErrorCode.BAD_REQUEST, moved.errorMessage || 'Não foi possível mover o usuário.', requestId);
       return;
     }
-    const targetCanSpeak = await this.channelService.canUserAccessChannel(previous.userId, payload.channelId, Permission.SPEAK);
-    joinResult.voiceState = await this.applyPermissionMuted(payload.targetSessionId, !target.isBot && !targetCanSpeak) ?? joinResult.voiceState;
+    if (this.audit) {
+      this.recordAudit(session, 'voice.move', {
+        target: auditRef.member({ ...target.user, isBot: target.isBot === true || target.user.isBot === true }),
+        related: { from: await this.auditChannel(previous.channelId), to: await this.auditChannel(payload.channelId) },
+      });
+    }
+  }
+
+  /** A client reports it went idle: it is moved to the AFK room, where the server mutes it (`afk-channel`). */
+  private async handleVoiceAfk(session: ClientSession, payload: unknown, requestId?: string): Promise<void> {
+    if (!session.user || !session.sessionId || session.isBot) return;
+    const parsed = voiceAfkSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Pedido de canal AFK inválido.', requestId);
+      return;
+    }
+    const afkChannelId = await this.channelService.getAfkChannelId();
+    const previous = this.signalingService.getVoiceState(session.sessionId);
+    // A late report must not move someone who changed rooms meanwhile, and a
+    // server without an AFK room, or a member already in it, has nothing to do.
+    if (!afkChannelId || !previous || previous.channelId !== parsed.data.channelId
+      || previous.channelId === afkChannelId || !this.isCurrentSession(session)) return;
+    const moved = await this.moveVoiceSession(session, previous, afkChannelId, undefined, requestId);
+    if (!moved.success) {
+      this.sendError(session.ws, moved.errorCode ?? ProtocolErrorCode.BAD_REQUEST,
+        moved.errorMessage ?? 'Não foi possível ir para o canal AFK.', requestId);
+    }
+  }
+
+  /**
+   * Moves one connection to another voice room on the server's authority,
+   * whatever the room's user limit. The moved client follows ADMIN_MOVE_USER,
+   * the old room sees it leave and the new one sees it arrive.
+   */
+  private async moveVoiceSession(
+    target: ClientSession,
+    previous: VoiceParticipantState,
+    channelId: string,
+    selfMuted: boolean | undefined,
+    requestId?: string,
+  ): Promise<{ success: boolean; errorCode?: ProtocolErrorCode; errorMessage?: string }> {
+    if (!target.user) return { success: false };
+    const joinResult = await this.signalingService.joinVoiceChannel(
+      previous.sessionId, previous.userId, channelId, selfMuted, undefined, false, { bypassUserLimit: true });
+    if (!joinResult.success || !joinResult.voiceState) {
+      return { success: false, errorCode: joinResult.errorCode, errorMessage: joinResult.errorMessage };
+    }
+    // Resolved once inside: being in a room is what lets someone moved in see it.
+    const voiceState = await this.applyPermissionMuted(previous.sessionId, await this.resolvePermissionMuted(target, channelId))
+      ?? joinResult.voiceState;
 
     this.closeSfuSession(previous.sessionId, previous.channelId);
     // The destination has to be in the member's list before they are told to
     // follow the move, or their client would have no room to join.
     await this.syncVoicePresenceVisibility();
-    this.broadcast({ type: MessageType.ADMIN_MOVE_USER, requestId, payload });
+    this.broadcast({
+      type: MessageType.ADMIN_MOVE_USER,
+      requestId,
+      payload: { targetSessionId: previous.sessionId, channelId } satisfies AdminMoveUserPayload,
+    });
     this.broadcast({
       type: MessageType.VOICE_USER_LEFT,
       requestId,
@@ -5740,23 +5917,18 @@ export class WebSocketServer {
     });
     // The arrival is scoped like any other join, so a private room's activity
     // stays with the members who can see it (#384).
-    await this.broadcastToChannel(payload.channelId, {
+    await this.broadcastToChannel(channelId, {
       type: MessageType.VOICE_USER_JOINED,
       requestId,
       payload: {
-        channelId: payload.channelId,
+        channelId,
         userId: previous.userId,
         sessionId: previous.sessionId,
-        voiceState: joinResult.voiceState,
+        voiceState,
         user: this.voiceRosterUser(target.user),
       } satisfies VoiceUserJoinedPayload,
     });
-    if (this.audit) {
-      this.recordAudit(session, 'voice.move', {
-        target: auditRef.member({ ...target.user, isBot: target.isBot === true || target.user.isBot === true }),
-        related: { from: await this.auditChannel(previous.channelId), to: await this.auditChannel(payload.channelId) },
-      });
-    }
+    return { success: true };
   }
 
   private async handleMemberKick(session: ClientSession, payload: MemberKickPayload, requestId?: string): Promise<void> {
@@ -6288,6 +6460,7 @@ export class WebSocketServer {
     const channels = await this.channelService.listChannels();
     const categories = await this.channelService.listCategories();
     const channelsById = new Map(channels.map((channel) => [channel.id, channel]));
+    const afkChannelId = await this.channelService.getAfkChannelId();
 
     const contexts = new Map<string, ChannelAccessContext>();
     const userIds = new Set<string>();
@@ -6350,7 +6523,8 @@ export class WebSocketServer {
         if (!canView || (session.isBot && !canSpeak)) {
           this.evictFromVoiceChannel(voiceState.sessionId, voiceState.channelId);
         } else {
-          const updated = await this.applyPermissionMuted(voiceState.sessionId, !canSpeak);
+          const afkMuted = !session.isBot && voiceState.channelId === afkChannelId;
+          const updated = await this.applyPermissionMuted(voiceState.sessionId, !canSpeak || afkMuted);
           if (updated && updated !== voiceState) {
             await this.broadcastToChannel(updated.channelId, {
               type: MessageType.VOICE_STATE_CHANGED,

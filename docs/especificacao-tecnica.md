@@ -1772,17 +1772,15 @@ Isso também ajuda a manter o Mesh sob controle.
 
 # 69. Limite de usuários por canal
 
-Cada canal poderá possuir:
+Cada canal de voz poderá possuir:
 
 ```text
 maxParticipants
 ```
 
-Exemplo:
-
-```text
-10
-```
+`0` significa sem limite, que é o padrão; os demais valores vão de 1 a 99.
+Quem tem `MOVE_MEMBERS` (inclusive administradores e o dono) pode entrar ou
+mover alguém para uma sala cheia. O canal AFK não aceita limite.
 
 ---
 

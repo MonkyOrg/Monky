@@ -39,6 +39,8 @@
 .permission-three-state .selected[data-permission-state="allow"] { color: var(--success); background: color-mix(in srgb, var(--success) 15%, transparent); }
 .channel-permission-controls:disabled { opacity: .65; }
 .channel-permission-controls:disabled button { cursor: not-allowed; }
+.channel-settings-card #input-channel-user-limit { max-width: 140px; font-variant-numeric: tabular-nums; }
+.channel-settings-card #input-channel-user-limit[aria-invalid="true"] { border-color: var(--danger); }
 @media (max-width: 700px) {
   .channel-settings-card .settings-sidebar { width: 120px; min-width: 120px; flex-basis: 120px; padding: 12px 6px; }
   .channel-settings-card .settings-tab-btn { gap: 5px; padding: 8px 6px; font-size: 11px; }

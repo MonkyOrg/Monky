@@ -163,7 +163,7 @@ if (!process.versions.electron) {
 }
 
 async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profilesOnly, pickerOnly) {
-  const [{ WebRtcManager }, { SfuClientEngine }, { NetworkClient }, codecs, { settingsStore: settings },
+  const [{ WebRtcManager }, { SfuClientEngine }, { NetworkClient, ProtocolRequestError }, codecs, { settingsStore: settings },
     { voiceStore: voice }, { videoService }, { appEvents }, { VideoDiagnosticsSampler }] = await Promise.all([
     import('/core/WebRtcManager.ts'), import('/core/webrtc/SfuClientEngine.ts'), import('/core/NetworkClient.ts'),
     import('/core/webrtc/codecPreferences.ts'), import('/stores/settingsStore.ts'),
@@ -1627,6 +1627,69 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
         && audio.getRawMicrophoneStream() === latestRaw && latestRaw.getTracks().every(track => track.readyState === 'live')
         && publications.length === beforeNewCapture + 1 && publications.at(-1).key === b.key,
       'A late old getUserMedia result is stopped without disturbing the newer foreground call');
+
+      // A switch the server turns away, such as into a room that filled up meanwhile, keeps the call in
+      // the room it came from: the server still holds the session there.
+      const { t } = await import('/i18n/index.ts');
+      const afkToastShown = () => [...document.querySelectorAll('.chat-copy-toast')]
+        .some(toast => toast.textContent.includes(t('afk.leftMutedToast')));
+      const beforeRefusal = messages.length;
+      const refusedSwitch = joinCallOnSession(b.key, 'full-room');
+      const refusedResult = refusedSwitch.then(() => null, error => error);
+      await until(() => pending.length === 1, 'The switch to a full room must request admission');
+      pending.shift().reject(new ProtocolRequestError('Este canal de voz está cheio.', 'CHANNEL_FULL'));
+      await until(() => pending.length === 1, 'A refused switch must ask to go back to the room it came from');
+      check(pending[0].key === b.key && pending[0].payload.channelId === 'room'
+        && !messages.slice(beforeRefusal).some(message => message.type === MessageType.VOICE_LEAVE),
+      'A refused switch returns to the previous room instead of leaving the call');
+      pending.shift().resolve(reply(b, 'room'));
+      const refusal = await refusedResult;
+      check(refusal?.code === 'CHANNEL_FULL' && voice.voiceSessionKey === b.key && voice.currentVoiceChannelId === 'room'
+        && audio.getRawMicrophoneStream()?.getAudioTracks()[0].readyState === 'live' && publications.at(-1).key === b.key,
+      'The member keeps the call, with a live microphone, and still learns that the room was full');
+
+      // Out of the AFK room, arriving muted is part of the request; a refused exit keeps the member
+      // there with their own mute untouched, and only an admitted one mutes them and says so.
+      const plainB = b.serverStore.serverDetails;
+      b.serverStore.serverDetails = { ...plainB, afkChannelId: 'afk',
+        protocol: { version: 1, minimumVersion: 1, features: ['afk-channel'] } };
+      voice.setMuted(false);
+      const intoAfk = joinCallOnSession(b.key, 'afk');
+      await until(() => pending.length === 1, 'The AFK room must request admission');
+      pending.shift().resolve(reply(b, 'afk', true));
+      await intoAfk;
+      const refusedExit = joinCallOnSession(b.key, 'full-room');
+      const refusedExitResult = refusedExit.then(() => null, error => error);
+      await until(() => pending.length === 1, 'Leaving the AFK room must request admission');
+      check(pending[0].payload.channelId === 'full-room' && pending[0].payload.isMuted === true,
+        'Leaving the AFK room asks to arrive muted');
+      pending.shift().reject(new ProtocolRequestError('Este canal de voz está cheio.', 'CHANNEL_FULL'));
+      await until(() => pending.length === 1, 'A refused exit must ask to go back to the AFK room');
+      check(pending[0].payload.channelId === 'afk', 'A refused exit returns to the AFK room');
+      pending.shift().resolve(reply(b, 'afk', true));
+      check((await refusedExitResult)?.code === 'CHANNEL_FULL' && voice.currentVoiceChannelId === 'afk'
+        && !voice.isMuted && !afkToastShown(), 'A refused exit keeps the member in the AFK room without touching their own mute');
+      const exit = joinCallOnSession(b.key, 'room');
+      await until(() => pending.length === 1, 'Leaving the AFK room for a free room must request admission');
+      pending.shift().resolve(reply(b, 'room'));
+      await exit;
+      check(voice.currentVoiceChannelId === 'room' && voice.isMuted && settings.isMuted && !publications.at(-1).enabled
+        && afkToastShown(), 'Arriving from the AFK room keeps the microphone muted until the member unmutes it');
+      b.serverStore.serverDetails = plainB;
+      voice.setMuted(false);
+
+      // When even the way back is refused, the call ends as before instead of lingering in either room.
+      const beforeDoubleRefusal = messages.length;
+      const doublyRefused = joinCallOnSession(b.key, 'full-room');
+      const doublyRefusedResult = doublyRefused.then(() => null, error => error);
+      await until(() => pending.length === 1, 'The double refusal must request admission');
+      pending.shift().reject(new ProtocolRequestError('Este canal de voz está cheio.', 'CHANNEL_FULL'));
+      await until(() => pending.length === 1, 'The double refusal must try the previous room');
+      pending.shift().reject(new ProtocolRequestError('Canal não encontrado', 'CHANNEL_NOT_FOUND'));
+      check((await doublyRefusedResult)?.code === 'CHANNEL_FULL' && !voice.currentVoiceChannelId && !audio.getRawMicrophoneStream()
+        && messages.slice(beforeDoubleRefusal).some(message => message.key === b.key
+          && message.type === MessageType.VOICE_LEAVE && message.payload.channelId === 'room'),
+      'If the previous room refuses too, the call ends without lingering in either room');
 
       const invalid = joinCallOnSession(a.key, 'room');
       const invalidResult = invalid.then(() => null, error => error);

@@ -334,13 +334,24 @@ export const LIMITS = {
     // three orders of magnitude below MAX_AVATAR_SIZE on purpose: this field is
     // never a place to put bulk data, and the server has no maxPayload of its own.
     MAX_ACTIVITY_ICON_LENGTH: 32 * 1024,
+    // "Pedir para ver a partida" (#763): how long the player has to answer, and
+    // how long the same person waits before asking the same player again.
+    GAME_SHARE_REQUEST_TIMEOUT_MS: 30000,
+    GAME_SHARE_REQUEST_COOLDOWN_MS: 60000,
     MAX_AVATAR_SIZE: 5 * 1024 * 1024, // 5 MB
     MAX_USERS_DEFAULT: 20,
     // Sentinel stored in `max_users` when the owner chose not to cap membership
     // (#403). The column is NOT NULL, so "no limit" needs a value rather than
     // NULL; 0 is safe because a server capped at zero members is meaningless.
     MAX_USERS_UNLIMITED: 0,
-    MAX_PARTICIPANTS_PER_CHANNEL_DEFAULT: 10,
+    // Voice channel user limit. 0 means no limit, which is how every channel
+    // starts: servers before `voice-user-limit` capped each room at a hidden 10
+    // that nobody could see or change. Two digits fit the sidebar badge.
+    VOICE_USER_LIMIT_NONE: 0,
+    VOICE_USER_LIMIT_MAX: 99,
+    // Inactivity before a member is moved to the AFK channel. The server only
+    // accepts the steps listed in AFK_TIMEOUT_OPTIONS_SECONDS.
+    AFK_TIMEOUT_DEFAULT_SECONDS: 15 * 60,
     MIN_NICKNAME_LENGTH: 2,
     MAX_NICKNAME_LENGTH: 32,
     MIN_CHANNEL_NAME_LENGTH: 2,
@@ -666,6 +677,7 @@ export enum MessageType {
     VOICE_RECONNECTED = 'VOICE_RECONNECTED',
     VOICE_LEAVE = 'VOICE_LEAVE',
     VOICE_STATE_UPDATE = 'VOICE_STATE_UPDATE',
+    VOICE_AFK = 'VOICE_AFK',
     ADMIN_MUTE_USER = 'ADMIN_MUTE_USER',
     ADMIN_DEAFEN_USER = 'ADMIN_DEAFEN_USER',
     ADMIN_GET_VOICE_RESTRICTIONS = 'ADMIN_GET_VOICE_RESTRICTIONS',
@@ -695,6 +707,18 @@ export enum MessageType {
     USER_UPDATE_VISIBILITY = 'USER_UPDATE_VISIBILITY',
     /** Client -> server: publish (or clear, with null) the game being played (#675). */
     USER_UPDATE_ACTIVITY = 'USER_UPDATE_ACTIVITY',
+    /** Client -> server: ask a player in the same voice channel to share their game window (#763). */
+    GAME_SHARE_REQUEST = 'GAME_SHARE_REQUEST',
+    /** Server -> requester: the ask reached the player; carries the id the answer will refer to (#763). */
+    GAME_SHARE_REQUEST_SENT = 'GAME_SHARE_REQUEST_SENT',
+    /** Server -> player: someone asked to watch the game (#763). */
+    GAME_SHARE_REQUESTED = 'GAME_SHARE_REQUESTED',
+    /** Client -> server: the player's answer (#763). */
+    GAME_SHARE_RESPONSE = 'GAME_SHARE_RESPONSE',
+    /** Server -> requester: accepted or not; a refusal and a timeout look the same on purpose (#763). */
+    GAME_SHARE_ANSWERED = 'GAME_SHARE_ANSWERED',
+    /** Server -> player: the ask is over (answered elsewhere, expired, already sharing), close the prompt (#763). */
+    GAME_SHARE_CLOSED = 'GAME_SHARE_CLOSED',
     SERVER_GET_INVITE_INFO = 'SERVER_GET_INVITE_INFO',
     // SFU Client <-> Server Messages (#515)
     SFU_GET_ROUTER_RTP_CAPABILITIES = 'SFU_GET_ROUTER_RTP_CAPABILITIES',

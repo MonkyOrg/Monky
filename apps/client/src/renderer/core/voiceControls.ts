@@ -9,6 +9,7 @@ import { sessionManager } from './SessionManager';
 import { serverStore } from '../stores/serverStore';
 import { participantManager } from './ParticipantManager';
 import { t } from '../i18n';
+import { afkChannelIdOf } from '../utils/voiceRooms';
 
 export function isViewingCallServer(): boolean {
   return !voiceStore.voiceSessionKey || voiceStore.voiceSessionKey === sessionManager.getActiveKey();
@@ -39,7 +40,7 @@ export function getVoiceControlModeration(): {
   const { serverMuted, serverDeafened } = serverStore.voiceRestrictions;
   const permissionMuted = voiceStore.permissionMuted;
   const deafenReason = serverDeafened ? t('permissions.serverDeafened') : null;
-  const permissionReason = permissionMuted ? t('permissions.permissionMuted') : null;
+  const permissionReason = permissionMuted ? t(isCallInAfkChannel() ? 'afk.muted' : 'permissions.permissionMuted') : null;
   return {
     serverMuted,
     serverDeafened,
@@ -47,6 +48,13 @@ export function getVoiceControlModeration(): {
     muteReason: permissionReason ?? deafenReason ?? (serverMuted ? t('permissions.serverMuted') : null),
     deafenReason,
   };
+}
+
+/** Whether the call sits in its server's AFK room, where the server mutes every microphone. */
+export function isCallInAfkChannel(): boolean {
+  const key = voiceStore.voiceSessionKey;
+  const store = key ? sessionManager.get(key)?.serverStore : serverStore;
+  return !!voiceStore.currentVoiceChannelId && voiceStore.currentVoiceChannelId === afkChannelIdOf(store?.serverDetails);
 }
 
 export function toggleMicrophoneMute(): void {

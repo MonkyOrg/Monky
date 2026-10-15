@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, shell, systemPreferences } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, powerMonitor, screen, shell, systemPreferences } from 'electron';
 import { execFile } from 'child_process';
 import fs from 'fs';
 import http from 'http';
@@ -1371,6 +1371,10 @@ export function setupIpcHandlers(
       return [];
     }
   });
+
+  // Input anywhere in the system counts, not only in Monky's window: someone
+  // playing a game in the foreground is not idle in the call.
+  ipcMain.handle('system:get-idle-seconds', () => powerMonitor.getSystemIdleTime());
 
   ipcMain.handle('app:open-external', async (_, url: string) => {
     try {

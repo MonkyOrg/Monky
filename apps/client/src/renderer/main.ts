@@ -40,6 +40,7 @@ import { sessionManager } from './core/SessionManager';
 import { gamePresence } from './core/GamePresenceController';
 import { gameShareRequests } from './core/GameShareRequests';
 import { gameShareSuggestion } from './core/GameShareSuggestion';
+import { afkMonitor } from './core/AfkMonitor';
 import type { LocalExecutionTaskNotice } from './core/LocalExecutionController';
 import { currentEventOrigin, emitOutsideRouting, isForegroundEvent } from './core/sessionRouting';
 import { presentServerShutdownNotice } from './core/serverShutdownNotice';
@@ -73,6 +74,7 @@ import { showIdentityImportDialog } from './views/IdentityDialogs';
 import { getLanguage, initI18n, t } from './i18n';
 import { translateProtocolError } from './i18n/protocolErrors';
 import { toAbsoluteServerIconUrl } from './utils/avatar';
+import { afkChannelIdOf } from './utils/voiceRooms';
 import { installImageFallback } from './utils/imageFallback';
 import { clientLog } from './core/ClientLogService';
 import { startResponsivenessMonitor } from './core/ResponsivenessMonitor';
@@ -190,6 +192,7 @@ class App {
     gamePresence.start();
     gameShareRequests.start();
     gameShareSuggestion.start();
+    afkMonitor.start();
     this.homeView = new HomeView();
     this.mainView = new MainView(this.appContainer, this.homeView);
     appEvents.on<string>('dm.open', (peer) => {
@@ -202,6 +205,7 @@ class App {
       gamePresence.dispose();
       gameShareRequests.dispose();
       gameShareSuggestion.dispose();
+      afkMonitor.dispose();
       this.homeView.destroy();
       void sessionManager.dispose().catch((error: unknown) => {
         clientLog.error('CONNECTION', 'Failed to dispose sessions after page retirement', {
@@ -778,7 +782,7 @@ class App {
         payload.attachmentStorage, payload.maxUsers, payload.turnEnabled, payload.allowEveryoneMention,
         payload.allowMessageEdit, payload.voiceMode, payload.showRoleBadgesToEveryone, payload.maxMessageLength,
         payload.messageDeleteUndoSeconds, payload.recentSoundCacheEnabled, payload.recentSoundCacheLimit,
-        payload.dmRelayEnabled);
+        payload.dmRelayEnabled, { channelId: payload.afkChannelId, timeoutSeconds: payload.afkTimeoutSeconds });
       serverStore.setTurnAvailability(payload.turnAvailability);
       const origin = currentEventOrigin();
       if (!origin) return;
@@ -1102,6 +1106,8 @@ class App {
       // Being moved only makes sense on the server hosting the call; obeying it
       // elsewhere would silently drag the call to another server (#400).
       if (!serverStore.isMySession(payload.targetSessionId) || !this.eventOwnsCall()) return;
+      // The server muted the microphone in there; say why before the call follows.
+      if (payload.channelId === afkChannelIdOf(serverStore.serverDetails)) showInfoToast(t('afk.movedToast'), 8000);
       if (isForegroundEvent()) {
         void this.mainView.rejoinVoiceChannel(payload.channelId);
       } else {

@@ -29,6 +29,9 @@ import {
   ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX,
   userActivitySchema,
   userUpdateActivitySchema,
+  voiceAfkSchema,
+  AFK_TIMEOUT_OPTIONS_SECONDS,
+  isAfkTimeoutSeconds,
 } from '../src/index.js';
 import './botInteractions.test.js';
 import './botSettings.test.js';
@@ -252,6 +255,23 @@ console.assert(
   'Nome curto demais deve ser rejeitado na edição'
 );
 console.log('✔ Schemas de criação e edição de canal verificados (#384)');
+
+// Limite de pessoas do canal de voz: 0 é "sem limite", que é o padrão de todo canal.
+assert.equal(channelCreateSchema.parse({ name: 'sala', type: 'VOICE' }).maxParticipants, LIMITS.VOICE_USER_LIMIT_NONE);
+assert.equal(channelUpdateSchema.parse({ channelId: 'c1' }).maxParticipants, undefined, 'Edição parcial não mexe no limite');
+for (const limit of [0, 1, LIMITS.VOICE_USER_LIMIT_MAX]) {
+  assert.equal(channelUpdateSchema.safeParse({ channelId: 'c1', maxParticipants: limit }).success, true, `limite ${limit}`);
+}
+for (const limit of [-1, 1.5, LIMITS.VOICE_USER_LIMIT_MAX + 1, '6']) {
+  assert.equal(channelUpdateSchema.safeParse({ channelId: 'c1', maxParticipants: limit }).success, false, `limite ${limit}`);
+}
+assert.equal(voiceAfkSchema.safeParse({ channelId: 'c1' }).success, true);
+assert.equal(voiceAfkSchema.safeParse({ channelId: '' }).success, false);
+assert.equal(voiceAfkSchema.safeParse({ channelId: 'c1', target: 'c2' }).success, false, 'o pedido de AFK só nomeia a sala atual');
+assert.deepEqual(AFK_TIMEOUT_OPTIONS_SECONDS.filter(isAfkTimeoutSeconds), [...AFK_TIMEOUT_OPTIONS_SECONDS]);
+assert.equal(isAfkTimeoutSeconds(LIMITS.AFK_TIMEOUT_DEFAULT_SECONDS), true, 'o padrão é uma das opções oferecidas');
+for (const value of [0, 120, '900', null]) assert.equal(isAfkTimeoutSeconds(value), false, `inatividade ${String(value)}`);
+console.log('✔ Limite de pessoas e canal AFK verificados');
 
 // Presença de jogo e convites de partida (#675)
 console.assert(

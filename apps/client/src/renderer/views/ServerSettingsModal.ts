@@ -13,13 +13,14 @@ import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { enableBackdropClose } from '../utils/modal';
 import { getAvatarUrl } from '../utils/avatar';
+import { afkChannelIdOf } from '../utils/voiceRooms';
 import logoUrl from '../assets/Logo.png';
 import { pickAndCropImage } from './ImageCropModal';
 import { attachInputEmojiPicker } from '../utils/inputEmojiPicker';
 import { showConfirm } from './Dialog';
 import { ServerGeneralTab } from './serverSettings/tabs/ServerGeneralTab';
 import { ServerSecurityTab } from './serverSettings/tabs/ServerSecurityTab';
-import { ServerVoiceVideoTab, turnBlockedReason } from './serverSettings/tabs/ServerVoiceVideoTab';
+import { ServerVoiceVideoTab, afkChannelName, turnBlockedReason } from './serverSettings/tabs/ServerVoiceVideoTab';
 import { ServerStorageTab } from './serverSettings/tabs/ServerStorageTab';
 import { ServerNotificationsTab } from './serverSettings/tabs/ServerNotificationsTab';
 import { ServerMembersTab } from './serverSettings/tabs/ServerMembersTab';
@@ -237,6 +238,19 @@ export class ServerSettingsModal {
       (value) => ({ recentSoundCacheLimit: Number(value) }));
     this.bindSetting('#checkbox-dm-relay-enabled', 'dmRelay', 'serverSettings.dmRelayEnabled',
       () => String(details()?.dmRelayEnabled !== false), (value) => ({ dmRelayEnabled: value === 'true' }));
+    // Turning the AFK channel on creates it with the name typed below; renaming applies once it exists.
+    this.bindSetting('#checkbox-afk-channel', 'afkChannel', 'serverSettings.afkChannel',
+      () => String(!!afkChannelIdOf(details())),
+      (value) => value === 'true' ? {
+        afkChannelEnabled: true,
+        afkChannelName: root.querySelector<HTMLInputElement>('#input-afk-channel-name')?.value.trim()
+          || t('serverSettings.afkChannelDefaultName'),
+      } : { afkChannelEnabled: false });
+    this.bindSetting('#input-afk-channel-name', 'afkChannelName', 'serverSettings.afkChannelName',
+      afkChannelName, (value) => afkChannelIdOf(details()) ? { afkChannelName: value.trim() } : null);
+    this.bindSetting('#select-afk-timeout', 'afkTimeout', 'serverSettings.afkTimeout',
+      () => String(details()?.afkTimeoutSeconds ?? LIMITS.AFK_TIMEOUT_DEFAULT_SECONDS),
+      (value) => ({ afkTimeoutSeconds: Number(value) }));
     this.bindSetting('#checkbox-allow-everyone-mention', 'everyone', 'serverSettings.allowEveryoneMention',
       () => String(details()?.allowEveryoneMention !== false), (value) => ({ allowEveryoneMention: value === 'true' }));
     this.bindSetting('#checkbox-allow-message-edit', 'messageEdit', 'serverSettings.allowMessageEdit',
@@ -366,6 +380,16 @@ export class ServerSettingsModal {
         });
         if (!confirmed) return;
       }
+      // Turning the AFK channel off deletes the room and drops whoever is in it.
+      if (patch.afkChannelEnabled === false && afkChannelIdOf(persisted)) {
+        const confirmed = await showConfirm({
+          title: t('serverSettings.afkDisableTitle'),
+          message: t('serverSettings.afkDisableMessage', { name: afkChannelName() }),
+          confirmLabel: t('serverSettings.afkDisableConfirm'),
+          cancelLabel: t('common.cancel'), variant: 'danger',
+        });
+        if (!confirmed) return;
+      }
       const stopProgress = patch.turnEnabled && !persisted.turnAvailability?.supported
         ? this.trackInstallProgress(context) : null;
       try {
@@ -433,6 +457,8 @@ export class ServerSettingsModal {
     if (!s) return;
     const limitGroup = root.querySelector<HTMLElement>('#max-users-group');
     if (limitGroup) setSurfaceVisible(limitGroup, !!root.querySelector<HTMLInputElement>('#checkbox-limit-members')?.checked);
+    const afkOptions = root.querySelector<HTMLElement>('#server-afk-options');
+    if (afkOptions) setSurfaceVisible(afkOptions, !!root.querySelector<HTMLInputElement>('#checkbox-afk-channel')?.checked);
     if (!operations.isPending('voiceMode')) this.syncVoiceCards(s.voiceMode ?? 'p2p');
     const voiceCards = root.querySelector('#server-voice-mode-cards');
     voiceCards?.setAttribute('aria-busy', String(operations.isPending('voiceMode')));

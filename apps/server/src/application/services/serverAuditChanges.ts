@@ -77,7 +77,7 @@ export function channelCreationChanges(channel: ChannelSummary, names: AuditName
   return auditDiff([
     ['type', undefined, channel.type],
     ['category', undefined, names.category(channel.categoryId) ?? undefined],
-    ['userLimit', undefined, channel.type === 'VOICE' ? channel.maxParticipants ?? undefined : undefined],
+    ['userLimit', undefined, channel.type === 'VOICE' && channel.maxParticipants ? channel.maxParticipants : undefined],
     ['private', undefined, channel.isPrivate || undefined],
   ]);
 }
@@ -182,6 +182,8 @@ function serverSettings(server: ServerRecord) {
     maxFileSize: server.maxAttachmentFileBytes ?? null,
     maxStorage: server.maxAttachmentStorageBytes ?? null,
     maxBots: server.maxBots ?? LIMITS.MAX_BOTS_DEFAULT,
+    afkChannel: Boolean(server.afkChannelId),
+    afkTimeout: server.afkTimeoutSeconds ?? LIMITS.AFK_TIMEOUT_DEFAULT_SECONDS,
   };
 }
 
@@ -209,6 +211,8 @@ export function serverSettingsChanges(before: ServerRecord, after: ServerRecord)
       ['maxFileSize', previous.maxFileSize, next.maxFileSize],
       ['maxStorage', previous.maxStorage, next.maxStorage],
       ['maxBots', previous.maxBots, next.maxBots],
+      ['afkChannel', previous.afkChannel, next.afkChannel],
+      ['afkTimeout', previous.afkTimeout, next.afkTimeout],
     ]),
     ...(hadPassword !== hasPassword ? [{ field: 'password', before: hadPassword, after: hasPassword }]
       : hasPassword && before.passwordHash !== after.passwordHash ? [{ field: 'password' }] : []),

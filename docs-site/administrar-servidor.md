@@ -16,7 +16,7 @@ disponíveis dependem do seu acesso.
 | --- | --- |
 | Geral | Nome, imagem e banner, habilitação de eventos, limites, modo de voz e informações do processo servidor |
 | Segurança | Senha de entrada |
-| Recursos de Voz e Vídeo | Permissão de Soundboard, cache de áudios recentes, relay de mensagens diretas e relay TURN integrado |
+| Recursos de Voz e Vídeo | Permissão de Soundboard, cache de áudios recentes, relay de mensagens diretas, canal AFK e relay TURN integrado |
 | Armazenamento | Limites e uso de anexos |
 | Notificações | Menções, edição de mensagens e avisos publicados no chat |
 | Membros | Consultar membros e administrar acessos conforme suas permissões |
@@ -75,6 +75,29 @@ Em **Recursos de Voz e Vídeo**, o switch **Permitir mensagens diretas por este 
 controla se clientes atualizados podem usar este servidor apenas como ponte
 para DMs criptografadas ponta a ponta. O servidor não armazena o conteúdo nem
 a fila dessas mensagens.
+
+### Canal AFK
+
+Em **Recursos de Voz e Vídeo**, o switch **Canal AFK** cria um canal de voz
+para quem se ausenta durante uma chamada. Com ele ligado, defina o **Nome do
+canal** e o tempo em **Mover após ficar inativo por**: 1, 5, 15, 30 ou 60
+minutos, com 15 minutos por padrão.
+
+Quem passa esse tempo em uma chamada sem usar o teclado ou o mouse do
+computador e sem falar é movido automaticamente para o canal AFK. Compartilhar
+a tela, ligar a câmera ou assistir a uma transmissão contam como atividade. A
+detecção acontece no aplicativo de cada pessoa, que precisa estar atualizado.
+
+No canal AFK, todos os microfones ficam bloqueados pelo servidor, inclusive os
+de donos e administradores. Ninguém entra nele por conta própria nem pode ser
+movido para ele manualmente. Quem tem **Mover membros** pode tirar alguém de
+lá. Ao sair do canal AFK, por qualquer caminho, a pessoa continua com o
+microfone mutado, agora por um mute pessoal que só ela pode desfazer.
+
+O canal AFK aparece na lista com um ícone de lua e pode ser arrastado para
+qualquer posição ou categoria, como os demais. Ele não pode ser excluído pela
+lista de canais: para removê-lo, desligue o switch, que pede confirmação e
+apaga o canal com o chat dele; quem estiver nele sai da chamada.
 
 ## Canais
 
@@ -295,6 +318,21 @@ permissão nos cargos ou nas pessoas que devem entrar; dono e administradores se
 acessar. **Gerenciar canais**, sozinho, não ignora uma negação local.
 Não é uma senha separada do servidor.
 Revise os cargos antes de compartilhar conteúdo sensível.
+Na lista, um canal privado mostra um cadeado no canto do próprio ícone.
+
+### Limite de pessoas
+
+Em **Editar canal → Geral**, canais de voz têm o campo **Limite de pessoas**.
+Deixe-o em branco para não limitar, que é o padrão, ou informe um número de 1
+a 99. Com um limite, a lista de canais mostra ao lado do nome quantos
+participantes estão na sala e o máximo, como `02 | 06`. Bots na sala também
+contam.
+
+Com a sala cheia, ninguém mais entra por conta própria. Donos,
+administradores e quem tem **Mover membros** podem entrar mesmo assim ou
+trazer outra pessoa para a sala; enquanto o limite estiver excedido, a
+contagem fica vermelha. Quem cai por instabilidade de rede consegue voltar
+para a sala em que estava, mesmo cheia. O canal AFK não tem limite.
 
 ### Comandos de bots no canal
 
@@ -391,6 +429,9 @@ desfaz o segundo. Os ícones vermelhos de restrição indicam o bloqueio
 administrativo; a pessoa ainda pode manter seu próprio microfone mutado
 depois de ser liberada.
 
+O [canal AFK](#canal-afk) bloqueia o microfone de quem está nele enquanto a
+pessoa permanecer lá. Ao sair, esse bloqueio vira um mute pessoal.
+
 ## Auditoria
 
 Abra **nome do servidor › Auditoria** para ver o que foi feito no servidor, do
@@ -411,7 +452,8 @@ anterior e o novo:
 - **Membros**: primeira entrada no servidor, expulsões e troca de apelido.
 - **Voz**: silenciar e ensurdecer pelo servidor, desconectar da sala e mover
   alguém, com a sala de origem e a de destino.
-- **Servidor**: alterações em **Geral**, como nome, limites, modo de voz e relay.
+- **Servidor**: alterações em **Geral**, como nome, limites, modo de voz e relay,
+  além do canal AFK e do seu tempo de inatividade.
   Senha e ícone aparecem apenas como alterados.
 - **Eventos e ao vivo**: criar, editar, iniciar, encerrar, cancelar e excluir
   eventos; publicar, atualizar e encerrar ações ao vivo, formulários e enquetes
