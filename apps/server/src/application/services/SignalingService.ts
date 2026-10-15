@@ -130,6 +130,7 @@ export class SignalingService {
     initialMuted?: boolean,
     initialDeafened?: boolean,
     permissionMuted = false,
+    { bypassUserLimit = false }: { bypassUserLimit?: boolean | (() => Promise<boolean>) } = {},
   ): Promise<{
     success: boolean;
     errorCode?: ProtocolErrorCode;
@@ -147,17 +148,21 @@ export class SignalingService {
       };
     }
 
-    // Check channel capacity (excluding this session's own possibly-lingering
-    // state, e.g. when reconnecting into the same channel during the grace period).
-    const currentInChannel = this.getParticipantsInChannel(channelId);
-    const othersInChannel = currentInChannel.filter((p) => p.sessionId !== sessionId);
-    if (othersInChannel.length >= channel.maxParticipants) {
+    // The user limit counts other connections only, and never turns away one
+    // already inside: whoever was moved into a full room re-announces itself
+    // with its own join right after. 0 means the room has no limit. Who may
+    // exceed it is only asked when the room is full, and nothing awaits
+    // between the final count and the admission below.
+    const isFull = () => channel.maxParticipants > 0 && this.voiceStates.get(sessionId)?.channelId !== channelId
+      && this.getParticipantsInChannel(channelId).filter((p) => p.sessionId !== sessionId).length >= channel.maxParticipants;
+    if (isFull() && !(typeof bypassUserLimit === 'function' ? await bypassUserLimit() : bypassUserLimit)) {
       return {
         success: false,
         errorCode: ProtocolErrorCode.CHANNEL_FULL,
         errorMessage: `Canal de voz está cheio (${channel.maxParticipants} participantes max).`,
       };
     }
+    const othersInChannel = this.getParticipantsInChannel(channelId).filter((p) => p.sessionId !== sessionId);
 
     // If this session was already in another voice channel, leave first
     const previousState = this.voiceStates.get(sessionId);

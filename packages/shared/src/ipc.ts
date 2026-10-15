@@ -814,6 +814,8 @@ export interface IpcInvokeChannels {
   'game-presence:get-current': { args: []; returnType: UserActivity | null };
   /** Window source ids of the running game, for sharing it from the suggestion (#763). */
   'game-share:find-windows': { args: []; returnType: string[] };
+  /** Seconds since the last keyboard or mouse input anywhere in the system, for the AFK channel. */
+  'system:get-idle-seconds': { args: []; returnType: number };
 
   // Sistema / App
   'app:set-language': { args: [language: string]; returnType: void };

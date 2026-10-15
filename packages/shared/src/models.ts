@@ -128,6 +128,12 @@ export interface ChannelSummary {
   type: ChannelType;
   position: number;
   createdAt: number;
+  /**
+   * Voice user limit, from 1 to LIMITS.VOICE_USER_LIMIT_MAX; 0 or absent means
+   * none. Only meaningful with `voice-user-limit`: older servers capped every
+   * room at a hidden 10. Members with Move Members, and administrators, still
+   * join a full room or bring someone into it.
+   */
   maxParticipants?: number;
   /**
    * Effective access: inherited from the category unless overridden.
@@ -417,6 +423,14 @@ export interface ServerDetails {
    * - 'sfu': Centralized Selective Forwarding Unit media routing via the server.
    */
   voiceMode?: VoiceMode;
+  /**
+   * The voice channel idle members are moved to (`afk-channel`), or null when
+   * the server has none. Nobody enters it on purpose, and the server mutes the
+   * microphone of whoever is inside.
+   */
+  afkChannelId?: string | null;
+  /** Seconds without activity before a member in a call is moved to the AFK channel. */
+  afkTimeoutSeconds?: number;
   /**
    * CPU and RAM of the machine actually running the server (#515).
    *

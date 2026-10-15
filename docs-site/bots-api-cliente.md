@@ -91,7 +91,7 @@ export class BotClient extends EventEmitter {
 
 ## `BotManifest` {#botmanifest}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1314)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1390)
 
 ```ts
 export interface BotManifest {

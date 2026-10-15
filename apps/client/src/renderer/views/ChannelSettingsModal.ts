@@ -1,5 +1,5 @@
 import {
-  MessageType, Permission, CHANNEL_PERMISSIONS, EVERYONE_ROLE_ID, channelOverwrites, channelPrivacy, withChannelPrivacy, channelPermissionTargetKey, resolveChannelPermissions,
+  MessageType, Permission, CHANNEL_PERMISSIONS, EVERYONE_ROLE_ID, LIMITS, channelOverwrites, channelPrivacy, withChannelPrivacy, channelPermissionTargetKey, resolveChannelPermissions,
   type ChannelCategory, type ChannelSummary, type ChannelPermissionOverwrite, type ChannelAccessRules,
 } from '@monky/shared';
 import { getActiveNetworkClient } from '../core/NetworkClient';
@@ -17,7 +17,8 @@ import { showErrorToast } from './CopyToast';
 import { ResourceAudiencePicker } from './ResourceAudiencePicker';
 import { getAvatarUrl } from '../utils/avatar';
 import { isHexColor } from '../utils/colors';
-import { renderChannelCategorySelect, renderChannelBotCommandsField, readChannelBotCommandsField } from './channelFormFields';
+import { renderChannelCategorySelect, renderChannelBotCommandsField, readChannelBotCommandsField, renderChannelUserLimitField } from './channelFormFields';
+import { afkChannelIdOf, parseVoiceUserLimitInput } from '../utils/voiceRooms';
 import './channelSettings.css';
 
 type Target = { kind: 'channel'; value: ChannelSummary } | { kind: 'category'; value: ChannelCategory };
@@ -71,6 +72,10 @@ export class ChannelSettingsModal {
       userIds: overwrites.flatMap(entry => entry.userId !== undefined ? [entry.userId] : []),
     });
     const picker = new ResourceAudiencePicker(store, 'channel-permission-targets', audienceValue(), 'adaptive', 'permission-targets');
+    // Voice rooms only, never the AFK room, and only where the server understands the limit.
+    const showsUserLimit = target.kind === 'channel' && target.value.type === 'VOICE'
+      && !!store.serverDetails?.protocol?.features.includes('voice-user-limit')
+      && target.value.id !== afkChannelIdOf(store.serverDetails);
     let pending = false;
     let closed = false;
     let confirming = false;
@@ -101,6 +106,7 @@ export class ChannelSettingsModal {
                   <button type="button" id="btn-emoji-channel-name" class="btn-input-emoji" aria-label="${t('chat.emojiPickerTitle')}">
                     <span class="material-symbols-outlined md-18">mood</span></button>
                 </div></div>
+              ${showsUserLimit ? renderChannelUserLimitField(target.value.maxParticipants ?? LIMITS.VOICE_USER_LIMIT_NONE) : ''}
               ${target.kind === 'channel' ? renderChannelCategorySelect(target.value.categoryId ?? null) +
                 renderChannelBotCommandsField(target.value.botCommandsEnabled) : ''}
             </section>
@@ -137,6 +143,9 @@ export class ChannelSettingsModal {
     const name = root.querySelector<HTMLInputElement>('#input-channel-name')!;
     const categorySelect = root.querySelector<HTMLSelectElement>('#input-channel-category');
     const privacy = root.querySelector<HTMLInputElement>('#input-channel-private')!;
+    root.querySelector<HTMLInputElement>('#input-channel-user-limit')?.addEventListener('input', event => {
+      if (event.target instanceof HTMLInputElement) event.target.removeAttribute('aria-invalid');
+    }, options);
     const detachedEmoji = attachInputEmojiPicker(name, root.querySelector<HTMLElement>('#btn-emoji-channel-name')!);
     const isCurrent = () => !closed && isForegroundEvent() &&
       getActiveServerStore() === store && getActiveNetworkClient() === client &&
@@ -323,13 +332,23 @@ export class ChannelSettingsModal {
         showErrorToast(t('channelPermissions.changed')); return;
       }
       if (name.value.trim().length < 2) { showErrorToast(t('channelPermissions.invalidName')); name.focus({ preventScroll: true }); return; }
+      const userLimitInput = root.querySelector<HTMLInputElement>('#input-channel-user-limit');
+      const userLimit = userLimitInput ? parseVoiceUserLimitInput(userLimitInput.value) : undefined;
+      if (userLimitInput && userLimit === null) {
+        userLimitInput.setAttribute('aria-invalid', 'true');
+        showErrorToast(t('channelModal.userLimitInvalid', { max: LIMITS.VOICE_USER_LIMIT_MAX }));
+        userLimitInput.focus({ preventScroll: true });
+        return;
+      }
       const changedRules = {
         ...(JSON.stringify(overwrites) !== initialOverwrites ? { permissionOverwrites: overwrites } : {}),
         ...(privacySnapshot.isPrivate !== target.value.isPrivate ? { isPrivate: privacySnapshot.isPrivate } : {}),
       };
+      const changedLimit = target.kind === 'channel' && userLimit != null
+        && userLimit !== (target.value.maxParticipants ?? LIMITS.VOICE_USER_LIMIT_NONE) ? { maxParticipants: userLimit } : {};
       const payload = target.kind === 'channel'
         ? { channelId: target.value.id, name: name.value.trim(), categoryId: categorySelect?.value || null,
-          inheritCategoryPermissions: inherited,
+          inheritCategoryPermissions: inherited, ...changedLimit,
           botCommandsEnabled: readChannelBotCommandsField(root), ...(inherited ? {} : changedRules) }
         : { categoryId: target.value.id, name: name.value.trim(), ...changedRules };
       pending = true;

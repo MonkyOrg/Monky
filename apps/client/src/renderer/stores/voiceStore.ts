@@ -71,6 +71,11 @@ export class VoiceStore {
     return (this.watchedScreenShares.get(sessionId)?.size ?? 0) > 0;
   }
 
+  /** Whether this call is watching anyone's screen share at all. */
+  public isWatchingAnyScreenShare(): boolean {
+    return this.watchedScreenShares.size > 0;
+  }
+
   public getScreenWatchers(): ReadonlyArray<readonly [string, readonly string[]]> {
     return [...this.watchedScreenShares].map(([sessionId, ids]) => [sessionId, [...ids]] as const);
   }

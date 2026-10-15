@@ -5,6 +5,7 @@ import { soundboardService, SoundItem } from '../core/SoundboardService';
 import { settingsStore } from '../stores/settingsStore';
 import { serverStore } from '../stores/serverStore';
 import { voiceStore } from '../stores/voiceStore';
+import { isCallInAfkChannel } from '../core/voiceControls';
 import { sessionManager } from '../core/SessionManager';
 import { favoritesStore, soundFavoriteKey } from '../stores/favoritesStore';
 import { appEvents } from '../core/EventBus';
@@ -56,7 +57,7 @@ export class SoundboardModal {
     const restriction = permissionStore.serverDetails?.allowSoundboard === false ? 'soundboard.disabledByAdmin'
       : !(voiceChannelId ? permissionStore.hasPermission(Permission.USE_SOUNDBOARD, voiceChannelId) : serverGrantsSoundboard)
         ? (voiceChannelId && serverGrantsSoundboard ? 'soundboard.noChannelPermission' : 'soundboard.noPermission')
-        : voiceChannelId && voiceStore.permissionMuted ? 'soundboard.noSpeakPermission' : null;
+        : voiceChannelId && voiceStore.permissionMuted ? (isCallInAfkChannel() ? 'afk.muted' : 'soundboard.noSpeakPermission') : null;
 
     this.modalEl = document.createElement('div');
     this.modalEl.className = 'modal-backdrop';

@@ -37,6 +37,20 @@ export function readChannelBotCommandsField(root: HTMLElement): boolean {
   return root.querySelector<HTMLInputElement>('#input-channel-bot-commands')?.checked ?? true;
 }
 
+/**
+ * The voice user limit, as a free numeric field: blank means no limit. A text
+ * input keeps the app's look, without the native number spinner.
+ */
+export function renderChannelUserLimitField(limit: number): string {
+  return `<div class="form-group" id="channel-user-limit-group">
+    <label for="input-channel-user-limit">${t('channelModal.userLimitLabel')}</label>
+    <input id="input-channel-user-limit" type="text" inputmode="numeric" autocomplete="off" maxlength="2"
+      placeholder="${escapeHtml(t('channelModal.userLimitPlaceholder'))}" value="${limit > 0 ? limit : ''}"
+      aria-describedby="channel-user-limit-hint">
+    <div class="channel-privacy-hint" id="channel-user-limit-hint">${t('channelModal.userLimitHint')}</div>
+  </div>`;
+}
+
 export function attachChannelBotCommandsField(_root: HTMLElement): () => void {
   return () => undefined;
 }

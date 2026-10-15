@@ -149,6 +149,9 @@ export const voiceReconnectSchema = z.object({
   isMuted: z.boolean().optional(),
   isDeafened: z.boolean().optional(),
 });
+export const voiceAfkSchema = z.object({
+  channelId: messageReferenceSchema,
+}).strict();
 export const chatHistoryRequestSchema = z.object({
   channelId: messageReferenceSchema,
   limit: z.number().int().positive().optional(),
@@ -316,6 +319,11 @@ export const channelPermissionOverwritesSchema = z.array(z.union([
   .max(101)
   .refine(entries => new Set(entries.map(channelPermissionTargetKey)).size === entries.length, 'Alvo duplicado');
 
+// 0 means no limit; servers before `voice-user-limit` also rejected 0.
+export const voiceUserLimitSchema = z.number().int()
+  .min(LIMITS.VOICE_USER_LIMIT_NONE, 'Limite de pessoas inválido')
+  .max(LIMITS.VOICE_USER_LIMIT_MAX, `O limite de pessoas não pode passar de ${LIMITS.VOICE_USER_LIMIT_MAX}`);
+
 export const channelCreateSchema = z.object({
   permissionOverwrites: channelPermissionOverwritesSchema.optional(),
   categoryId: z.string().min(1).nullable().optional().default(null),
@@ -323,7 +331,7 @@ export const channelCreateSchema = z.object({
   botCommandsEnabled: z.boolean().optional().default(true),
   name: channelNameSchema,
   type: z.enum(['VOICE', 'TEXT', 'FORUM']),
-  maxParticipants: z.number().int().min(1).max(50).optional().default(LIMITS.MAX_PARTICIPANTS_PER_CHANNEL_DEFAULT),
+  maxParticipants: voiceUserLimitSchema.optional().default(LIMITS.VOICE_USER_LIMIT_NONE),
   isPrivate: z.boolean().optional().default(false),
   allowedRoleIds: channelAllowedRoleIdsSchema.optional().default([]),
 });
@@ -337,7 +345,7 @@ export const channelUpdateSchema = z.object({
   botCommandsEnabled: z.boolean().optional(),
   channelId: z.string().min(1, 'Canal inválido'),
   name: channelNameSchema.optional(),
-  maxParticipants: z.number().int().min(1).max(50).optional(),
+  maxParticipants: voiceUserLimitSchema.optional(),
   isPrivate: z.boolean().optional(),
   allowedRoleIds: channelAllowedRoleIdsSchema.optional(),
 });

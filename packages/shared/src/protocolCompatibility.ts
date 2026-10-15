@@ -26,9 +26,13 @@ import { PROTOCOL_VERSION } from './constants.js';
 // manage bots; clients without it never receive the field their strict summary schema would reject.
 // screen-shares-8: a session may publish up to SCREEN_SHARE_LIMITS.maximum screens; clients without it are sent
 // only the first SCREEN_SHARE_LIMITS.legacy of each person, which is what their native roster accepts.
+// voice-user-limit: a voice channel's maxParticipants is an optional limit shown next to its name, 0 meaning
+// none. Older servers capped every room at a hidden 10, so clients only offer the setting when it is negotiated.
+// afk-channel: ServerDetails.afkChannelId/afkTimeoutSeconds, the AFK settings and VOICE_AFK. Servers refuse entry into
+// the AFK room on purpose; older clients list it as an ordinary room and, as on any refused switch there, leave their call.
 export const MIN_CLIENT_PROTOCOL = 35;
 export const MIN_BOT_PROTOCOL = 24;
-export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8'] as const;
+export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8', 'voice-user-limit', 'afk-channel'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];
 export const protocolOfferSchema = z.object({
   minimumVersion: z.number().int().positive(),
@@ -44,7 +48,8 @@ export function createProtocolOffer(kind: 'client' | 'bot'): ProtocolOffer {
       feature !== 'native-live-forms' && feature !== 'recent-sounds' && feature !== 'dm-relay' &&
       feature !== 'role-deny' && feature !== 'role-grants' && feature !== 'game-activity' && feature !== 'game-share-request' &&
       feature !== 'channel-tree-order' && feature !== 'poll-voters' && feature !== 'poll-edit' &&
-      feature !== 'server-audit' && feature !== 'bot-manifest-url' && feature !== 'screen-shares-8')) };
+      feature !== 'server-audit' && feature !== 'bot-manifest-url' && feature !== 'screen-shares-8' &&
+      feature !== 'voice-user-limit' && feature !== 'afk-channel')) };
 }
 export function negotiateProtocol(version: unknown, offer: unknown, kind: 'client' | 'bot'): ProtocolAgreement | null {
   const minimumVersion = kind === 'bot' ? MIN_BOT_PROTOCOL : MIN_CLIENT_PROTOCOL;

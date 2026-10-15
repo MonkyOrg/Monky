@@ -16,7 +16,7 @@ depend on your access.
 | --- | --- |
 | General | Name, image and banner, event activation, limits, voice mode and server process information |
 | Security | Entry password |
-| Voice & Video | Soundboard access, recent audio cache, direct-message relay and the integrated TURN relay |
+| Voice & Video | Soundboard access, recent audio cache, direct-message relay, the AFK channel and the integrated TURN relay |
 | Storage | Attachment limits and usage |
 | Notifications | Mentions, message editing and notices published in chat |
 | Members | Inspect members and manage access according to your permissions |
@@ -72,6 +72,29 @@ Under **Voice & Video**, the **Allow direct messages through this server** switc
 controls whether updated clients may use this server only as a bridge for
 end-to-end encrypted DMs. The server does not store the content or queue for
 those messages.
+
+### AFK channel
+
+Under **Voice & Video**, the **AFK channel** switch creates a voice channel for
+people who step away during a call. Once it is on, set the **Channel name** and
+the time in **Move after being idle for**: 1, 5, 15, 30 or 60 minutes, with 15
+minutes by default.
+
+Anyone who spends that long in a call without using the computer's keyboard or
+mouse and without speaking is moved to the AFK channel automatically. Sharing
+the screen, turning the camera on or watching a stream count as activity.
+Detection runs in each person's app, which must be up to date.
+
+In the AFK channel, the server blocks every microphone, owners' and
+administrators' included. Nobody joins it on their own or can be moved into it
+manually. Someone with **Move members** can take a person out of it. Leaving
+the AFK channel by any route keeps the microphone muted, now through a personal
+mute that only that person can undo.
+
+The AFK channel shows a moon icon in the list and can be dragged to any
+position or category, like any other channel. It cannot be deleted from the
+channel list: to remove it, turn the switch off, which asks for confirmation
+and deletes the channel along with its chat; anyone in it leaves the call.
 
 ## Channels
 
@@ -285,6 +308,21 @@ for roles or members that may enter; owners and administrators always retain acc
 **Manage channels** alone cannot bypass a local denial.
 It is not a separate server password.
 Review roles before sharing sensitive content.
+In the list, a private channel shows a padlock on the corner of its own icon.
+
+### User limit
+
+In **Edit Channel → General**, voice channels have a **User limit** field.
+Leave it blank for no limit, which is the default, or enter a number from 1 to
+99. With a limit, the channel list shows next to the name how many
+participants are in the room and the maximum, such as `02 | 06`. Bots in the
+room count too.
+
+When the room is full, nobody else joins on their own. Owners, administrators
+and anyone with **Move members** can still join or bring someone else in; while
+the limit is exceeded, the count turns red. Someone dropped by an unstable
+network can return to the room they were in, even when it is full. The AFK
+channel has no limit.
 
 ### Bot commands in a channel
 
@@ -380,6 +418,9 @@ does not override the latter. Red restriction icons indicate administrative
 blocks; a person may still keep their own microphone muted after being
 unblocked.
 
+The [AFK channel](#afk-channel) blocks the microphone of anyone in it for as
+long as they stay there. On leaving, that block becomes a personal mute.
+
 ## Audit log
 
 Open **server name › Audit log** to see what was done on the server, newest
@@ -400,7 +441,8 @@ and the new value:
 - **Voice**: server mute and deafen, disconnecting from a room and moving
   someone, with the room they left and the one they entered.
 - **Server**: changes under **General**, such as name, limits, voice mode and
-  relay. Password and icon only show that they changed.
+  relay, plus the AFK channel and its idle time. Password and icon only show
+  that they changed.
 - **Events and live**: creating, editing, starting, ending, cancelling and
   deleting events; posting, updating and ending live actions, forms and featured
   polls. Ordinary polls only appear when someone changes another person's poll.

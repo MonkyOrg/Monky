@@ -55,6 +55,15 @@ and explains why in its placeholder without an additional warning.
 
 Click a **voice channel** to join the call. Whoever speaks gets a green ring around the avatar. The bottom bar has microphone, headphones/deafen and disconnect. The panel shows average ping and lets you leave only the call.
 
+Private channels show a padlock on the corner of their own icon. A voice channel
+with a [user limit](/en/administrar-servidor#user-limit) shows next to its name
+how many participants are in it and the maximum; once the room is full, only
+people allowed to move members get in. If the server has an
+[AFK channel](/en/administrar-servidor#afk-channel), marked with a moon, anyone
+idle in a call is moved there with the microphone muted by the server. Nobody
+joins it on their own; after leaving, the microphone stays muted until you
+unmute it.
+
 Every voice channel also has persistent chat. Hover the channel row and use the
 round speech-bubble button beside the three-dot menu to open the stage and
 right-side chat without joining the call. On the stage, the same button in the

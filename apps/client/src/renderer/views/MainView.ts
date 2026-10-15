@@ -1,4 +1,4 @@
-import { MessageType, Permission, UserSummary, type ChannelDeletedPayload, type ChannelSummary } from '@monky/shared';
+import { MessageType, Permission, ProtocolErrorCode, UserSummary, type ChannelDeletedPayload, type ChannelSummary } from '@monky/shared';
 import { categoryModal } from './CategoryModal';
 import './channelCategories.css';
 import { escapeHtml } from '../utils/html';
@@ -6,7 +6,7 @@ import { activityIconSrc } from '../utils/activityIcon';
 import { animateEnter, cancelSurfaceMotion, hideWithMotion, positionAnchoredSurface, showWithMotion } from '../utils/surfaceMotion';
 import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { appEvents } from '../core/EventBus';
-import { networkClient } from '../core/NetworkClient';
+import { networkClient, ProtocolRequestError } from '../core/NetworkClient';
 import { sessionManager } from '../core/SessionManager';
 import { isForegroundEvent } from '../core/sessionRouting';
 import { callClient, isVoiceAdmissionPending, joinCallOnSession, leaveCurrentCall, rejoinCallOnSession, showHome } from '../core/serverConnection';
@@ -36,7 +36,7 @@ import { serverSettingsModal } from './ServerSettingsModal';
 import { serverMonitorModal } from './ServerMonitorModal';
 import { serverAuditModal } from './ServerAuditModal';
 import { canOpenServerAudit } from '../core/ServerAuditSource';
-import { showErrorToast } from './CopyToast';
+import { showErrorToast, showInfoToast } from './CopyToast';
 import { recentSoundsModal } from './RecentSoundsModal';
 import '../styles/connectionTransition.css';
 import { inviteModal } from './InviteModal';
@@ -45,6 +45,8 @@ import { showConfirm, showAlert } from './Dialog';
 import { setButtonLoading, withButtonLoading } from '../utils/buttonLoading';
 import { checkServerOnline } from '../utils/serverStatus';
 import { warnIfMoveBlocked } from '../utils/channelAccess';
+import { afkChannelIdOf, renderVoiceUserLimitBadge, voiceUserLimitOf } from '../utils/voiceRooms';
+import { renderChannelIcon, showChannelIconLoading } from './channelIcon';
 import { captureHostedServerLeaveState, promptShutdownAfterLeave } from '../utils/hostedServer';
 import { userContextMenu } from './UserContextMenu';
 import { soundboardModal } from './SoundboardModal';
@@ -1323,13 +1325,13 @@ export class MainView {
 
     const textChannels = serverStore.serverDetails.channels.filter((c) => (c.type === 'TEXT' || c.type === 'FORUM') && !c.forumId);
     const voiceChannels = serverStore.serverDetails.channels.filter((c) => c.type === 'VOICE');
+    const afkChannelId = afkChannelIdOf(serverStore.serverDetails);
 
     if (textListEl) {
       textListEl.innerHTML = textChannels.map((c) => `
         <div class="channel-item ${(c.id === serverStore.activeTextChannelId || c.id === serverStore.getChannel(serverStore.activeTextChannelId ?? '')?.forumId) && this.activeContentView === 'chat' ? 'active' : ''}" data-channel-id="${c.id}" data-channel-type="${c.type}">
-          <span class="material-symbols-outlined md-16 channel-icon" style="color: var(--text-muted);">${c.type === 'FORUM' ? 'forum' : 'tag'}</span>
+          ${renderChannelIcon(c.type === 'FORUM' ? 'FORUM' : 'TEXT', { isPrivate: c.isPrivate, color: 'var(--text-muted)' })}
           <span class="channel-name">${escapeHtml(c.name)}</span>
-          ${c.isPrivate ? `<span class="material-symbols-outlined md-16 channel-private-icon" title="${t('main.privateChannelBadge')}">lock_person</span>` : ''}
           ${chatStore.hasMention(c.id)
             ? `<span class="channel-mention-badge" title="${t('main.mentionBadge')}">@</span>`
             : chatStore.hasUnread(c.id)
@@ -1353,23 +1355,26 @@ export class MainView {
         const isRestricted = showRestrictedIcon && !isActive;
         const hasMention = chatStore.hasMention(c.id);
         const hasUnread = chatStore.hasUnread(c.id);
+        const isAfk = c.id === afkChannelId;
+        const userLimit = voiceUserLimitOf(serverStore.serverDetails, c);
 
         return `
           <div class="voice-channel-group" data-channel-id="${c.id}" style="display: flex; flex-direction: column;">
-            <div class="channel-item ${isViewing ? 'active' : ''} ${isRestricted ? 'restricted' : ''}" data-channel-id="${c.id}" data-channel-type="VOICE">
-              <span class="material-symbols-outlined md-16 channel-icon" style="color: ${isActive ? 'var(--success)' : 'var(--text-muted)'};">volume_up</span>
+            <div class="channel-item ${isViewing ? 'active' : ''} ${isRestricted ? 'restricted' : ''}" data-channel-id="${c.id}" data-channel-type="VOICE"${isAfk ? ' data-afk-channel' : ''}>
+              ${renderChannelIcon('VOICE', { isPrivate: c.isPrivate, afk: isAfk, color: isActive ? 'var(--success)' : 'var(--text-muted)' })}
               <span class="channel-name">${escapeHtml(c.name)}</span>
-              ${c.isPrivate ? `<span class="material-symbols-outlined md-16 channel-private-icon" title="${t('main.privateChannelBadge')}">lock_person</span>` : ''}
               ${showRestrictedIcon ? `<span class="material-symbols-outlined md-16 channel-restricted-icon" title="${t('main.voiceChannelRestricted')}">lock</span>` : ''}
-              ${isActive ? `<span style="font-size: 11px; color: var(--success); font-weight: 600;">(${t('common.you')})</span>` : ''}
-              <span class="voice-channel-actions">
-                ${serverStore.hasPermission(Permission.READ_MESSAGES, c.id) ? `<button type="button" class="voice-chat-btn ${hasMention ? 'has-mention' : hasUnread ? 'has-unread' : ''}"
-                  data-voice-chat-channel="${c.id}" title="${t('voiceChat.open')}" aria-label="${t('voiceChat.open')}">
-                  <span class="material-symbols-outlined md-16" aria-hidden="true">chat_bubble</span>
-                </button>` : ''}
-                <button class="channel-menu-btn" data-menu-channel="${c.id}" title="${t('common.moreOptions')}">
-                  <span class="material-symbols-outlined md-16">more_vert</span>
-                </button>
+              <span class="voice-channel-trailing">
+                ${userLimit !== null ? renderVoiceUserLimitBadge(inVoice.length, userLimit) : ''}
+                <span class="voice-channel-actions">
+                  ${serverStore.hasPermission(Permission.READ_MESSAGES, c.id) ? `<button type="button" class="voice-chat-btn ${hasMention ? 'has-mention' : hasUnread ? 'has-unread' : ''}"
+                    data-voice-chat-channel="${c.id}" title="${t('voiceChat.open')}" aria-label="${t('voiceChat.open')}">
+                    <span class="material-symbols-outlined md-16" aria-hidden="true">chat_bubble</span>
+                  </button>` : ''}
+                  <button class="channel-menu-btn" data-menu-channel="${c.id}" title="${t('common.moreOptions')}">
+                    <span class="material-symbols-outlined md-16">more_vert</span>
+                  </button>
+                </span>
               </span>
             </div>
 
@@ -1544,11 +1549,12 @@ export class MainView {
       });
     });
 
-    // Voice channel drop targets for user drag-and-drop (#248, #357)
+    // Voice channel drop targets for user drag-and-drop (#248, #357). The AFK
+    // room is not one: nobody is brought there by hand.
     if (serverStore.hasPermission(Permission.MOVE_MEMBERS)) {
       this.container.querySelectorAll('.voice-channel-group').forEach((item) => {
         const el = item as HTMLElement;
-        if (!el.dataset.channelId) return;
+        if (!el.dataset.channelId || el.dataset.channelId === afkChannelId) return;
         el.addEventListener('dragover', (e: Event) => {
           const de = e as DragEvent;
           if (de.dataTransfer?.types.includes('text/monky-session-id')) {
@@ -1602,6 +1608,12 @@ export class MainView {
         if (type === 'TEXT' || type === 'FORUM') {
           this.activateTextChannel(channelId);
         } else if (type === 'VOICE') {
+          // Nobody enters the AFK room on purpose; whoever is already in it just opens its stage.
+          if (item.hasAttribute('data-afk-channel') && !(channelId === voiceStore.currentVoiceChannelId
+            && voiceStore.voiceSessionKey === sessionManager.getActiveKey())) {
+            showInfoToast(t('afk.joinBlocked'), 5000);
+            return;
+          }
           if (channelId !== voiceStore.currentVoiceChannelId && this.arePermissionsResolved() && !serverStore.hasPermission(Permission.VIEW_CHANNEL, channelId)) {
             item.classList.add('restricted-feedback');
             window.setTimeout(() => item.classList.remove('restricted-feedback'), 600);
@@ -1609,11 +1621,8 @@ export class MainView {
             return;
           }
           // Show a loading spinner on the channel while the voice join happens (#48).
-          const iconEl = item.querySelector('.channel-icon');
-          if (iconEl) {
-            iconEl.textContent = 'progress_activity';
-            iconEl.classList.add('channel-loading');
-          }
+          const iconEl = item.querySelector<HTMLElement>('.channel-icon');
+          if (iconEl) showChannelIconLoading(iconEl);
           item.classList.add('joining');
           const sessionKey = sessionManager.getActiveKey();
           try {
@@ -2303,7 +2312,13 @@ export class MainView {
           editChannelModal.open(channelId);
         },
       });
-      items.push({
+      // The AFK room is removed by turning it off in the server settings.
+      items.push(channelId === afkChannelIdOf(serverStore.serverDetails) ? {
+        label: t('afk.deleteDisabled'),
+        icon: 'delete',
+        disabled: true,
+        onClick: () => undefined,
+      } : {
         label: t('main.deleteChannel'),
         icon: 'delete',
         danger: true,
@@ -2338,9 +2353,24 @@ export class MainView {
     if (voiceStore.currentVoiceChannelId === channelId && voiceStore.voiceSessionKey === session.key) {
       return !isVoiceAdmissionPending(session.key, channelId);
     }
+    if (channelId === afkChannelIdOf(session.serverStore.serverDetails)) {
+      if (!silent) showInfoToast(t('afk.joinBlocked'), 5000);
+      return false;
+    }
 
     if (this.arePermissionsResolved() && !session.serverStore.hasPermission(Permission.VIEW_CHANNEL, channelId)) {
       if (!silent) this.showVoicePermissionDenied();
+      return false;
+    }
+
+    // The server turns a full room away too, but only after the current call
+    // was already left behind; refusing here keeps the member where they are.
+    const channel = session.serverStore.getChannel(channelId);
+    const userLimit = channel ? voiceUserLimitOf(session.serverStore.serverDetails, channel) : null;
+    if (userLimit !== null && this.arePermissionsResolved() && !session.serverStore.hasPermission(Permission.MOVE_MEMBERS)
+      && session.participants.getInVoiceChannel(channelId)
+        .filter((participant) => !session.serverStore.isMySession(participant.user.sessionId)).length >= userLimit) {
+      if (!silent) showErrorToast(t('protocolError.channelFull'));
       return false;
     }
 
@@ -2348,6 +2378,11 @@ export class MainView {
       await joinCallOnSession(session.key, channelId);
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') return false;
+      // A room that filled up while the request was on its way: same notice as the check above.
+      if (error instanceof ProtocolRequestError && error.code === ProtocolErrorCode.CHANNEL_FULL) {
+        if (!silent) showErrorToast(error.message);
+        return false;
+      }
       await showAlert({
         title: t('voiceJoin.failedTitle'),
         message: error instanceof Error ? error.message : String(error),

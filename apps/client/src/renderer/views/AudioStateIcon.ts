@@ -1,6 +1,8 @@
 import { isReceivingBotVoice, type VoiceParticipantState } from '@monky/shared';
 import { t } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { serverStore } from '../stores/serverStore';
+import { afkChannelIdOf } from '../utils/voiceRooms';
 
 type AudioIcon = 'mic' | 'mic_off' | 'keyboard_voice' | 'headphones' | 'headset_off';
 type IconSize = 12 | 14 | 18 | 24;
@@ -21,6 +23,8 @@ export function updateAudioStateIcon(container: HTMLElement, icon: AudioIcon, bl
 }
 
 export function renderAudioMuteIndicators(state: {
+  /** The participant's room: in the AFK room the server mute is labelled as such. */
+  channelId?: string;
   isMuted: boolean;
   isDeafened: boolean;
   serverMuted?: boolean;
@@ -36,8 +40,10 @@ export function renderAudioMuteIndicators(state: {
   const micMuted = state.isMuted || state.isDeafened || micBlocked;
   const audioBlocked = !!(state.serverDeafened || receiveDenied);
   const audioMuted = state.isDeafened || audioBlocked;
+  const inAfkChannel = !!state.channelId && state.channelId === afkChannelIdOf(serverStore.serverDetails);
   const micLabel = publishDenied ? t('botVoice.publishDenied') : state.serverDeafened ? t('permissions.serverDeafened')
-    : state.permissionMuted ? t('permissions.permissionMuted') : state.serverMuted ? t('permissions.serverMuted') : t('main.micMuted');
+    : state.permissionMuted ? t(inAfkChannel ? 'afk.muted' : 'permissions.permissionMuted')
+    : state.serverMuted ? t('permissions.serverMuted') : t('main.micMuted');
   const audioLabel = receiveDenied ? t('botVoice.receiveDenied')
     : t(state.serverDeafened ? 'permissions.serverDeafened' : 'main.audioMuted');
   return (showMicrophone && micMuted ? renderAudioStateIcon(micBlocked ? 'mic' : 'mic_off', micBlocked, size, micLabel) : '')

@@ -2,6 +2,7 @@ import { ChannelSummary } from '@monky/shared';
 import { serverStore } from '../stores/serverStore';
 import { showAlert } from '../views/Dialog';
 import { t } from '../i18n';
+import { afkChannelIdOf } from './voiceRooms';
 
 /**
  * The channel that blocks moving the target member there (#390).
@@ -28,6 +29,11 @@ export function findBlockedMoveTarget(userId: string, channelId: string): Channe
  * on screen, which reads as a broken drag rather than a denied one.
  */
 export function warnIfMoveBlocked(userId: string, nickname: string, channelId: string): boolean {
+  // Only members the server finds idle go to the AFK room; nobody is brought there by hand.
+  if (channelId === afkChannelIdOf(serverStore.serverDetails)) {
+    void showAlert({ title: t('afk.moveBlockedTitle'), message: t('afk.moveBlocked'), variant: 'warning' });
+    return true;
+  }
   const blocked = findBlockedMoveTarget(userId, channelId);
   if (!blocked) return false;
 
