@@ -95,6 +95,12 @@ export interface BotScreenBridge {
      */
     onClose(handler: (event: BotScreenCloseEvent) => void | Promise<void>): () => void;
     /**
+     * Runs at once with whether the person can see the view, then on every change. The view stays
+     * open but hidden while they browse elsewhere in Monky, scroll it off the stage or minimize the
+     * window. Not called once the view is closing.
+     */
+    onVisibilityChange(handler: (visible: boolean) => void): () => void;
+    /**
      * Data kept on this computer, when the bot has `device_storage` and the person allows it.
      * Missing in clients released before bot storage.
      */

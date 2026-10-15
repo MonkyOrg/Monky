@@ -18,7 +18,17 @@ monkyScreen.onBeforeClose(() => true);
 stopAsking();
 stopSaving();
 
+// The view stays open while its person browses elsewhere; a game may pause meanwhile.
+let paused = false;
+const stopWatching = monkyScreen.onVisibilityChange((visible) => { paused = !visible; });
+stopWatching();
+void paused;
+// Older clients lack the hook.
+monkyScreen.onVisibilityChange?.(() => {});
+
 // @ts-expect-error The miniapp asks in its own UI; the answer is only whether to close.
 monkyScreen.onBeforeClose(() => 'Save first?');
 // @ts-expect-error Revocations never wait for onBeforeClose.
 monkyScreen.onBeforeClose(({ reason }) => reason === 'revoked');
+// @ts-expect-error Visibility is a plain boolean, not an event object.
+monkyScreen.onVisibilityChange(({ visible }) => visible);

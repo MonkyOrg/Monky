@@ -36,6 +36,8 @@ if (!process.versions.electron) {
   let timeout;
   let leaks = 0;
   let popups = 0;
+  // A stuck await raises no error of its own: the global timeout names the step it interrupted.
+  let lastStep = 'startup';
   // What miniapp lifecycle hooks report to "their own server", even after their document is gone.
   const hookEvents = [];
   const windows = [];
@@ -67,6 +69,7 @@ if (!process.versions.electron) {
     app.exit(code);
   };
   const waitFor = async (check, description) => {
+    lastStep = `waiting for ${description}`;
     for (let i = 0; i < 250; i++) {
       if (await check()) return;
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -95,6 +98,7 @@ if (!process.versions.electron) {
     }
   };
   const run = async (window, script) => {
+    lastStep = `renderer snippet ${script.slice(0, 200)}`;
     try { return await window.webContents.executeJavaScript(script, true); }
     catch (error) {
       console.error('Failed miniapp renderer snippet:', script.slice(0, 1500));
@@ -198,7 +202,7 @@ if (!process.versions.electron) {
     });
     const url = `http://127.0.0.1:${http.address().port}/__screens__`;
     const leak = `http://127.0.0.1:${http.address().port}/__leak`;
-    timeout = setTimeout(() => { console.error('Voice screen DOM regression timed out'); void finish(1); }, 160000);
+    timeout = setTimeout(() => { console.error(`Voice screen DOM regression timed out; last step: ${lastStep}`); void finish(1); }, 160000);
     for (const [id, locale] of [['alice', 'pt-BR'], ['spectator', 'en']]) {
       const window = new BrowserWindow({
         show: false, width: 1280, height: 1000,
@@ -667,30 +671,40 @@ if (!process.versions.electron) {
       return parentBlocked && !window.receivedBridge && !window.monkyScreen && !window.api && !window.require;
     })()`), true, 'The navigated page remains visible without receiving the privileged bridge');
     assert.equal(await run(aliceWindow, '!!document.querySelector("[data-bot-screen-id=game] iframe")'), true);
+    const navigatedToken = await navigated.executeJavaScript('window.navigatedToken = Math.random()');
 
     await run(aliceWindow, 'document.querySelector(".voice-stage-container").requestFullscreen()');
     await waitFor(async () => await run(aliceWindow, '!!document.fullscreenElement'), 'fullscreen before a delayed focus exit');
     await run(aliceWindow, 'window.screenFixture.deferFullscreenExit(); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=focus]").click()');
     await waitFor(async () => await run(aliceWindow, 'window.screenFixture.isFullscreenExitPending()'), 'pending native exit');
     await run(aliceWindow, 'window.screenFixture.browseOtherServer(); window.screenFixture.restoreFullscreenExit()');
-    await waitFor(() => frames(aliceWindow).length === 0, 'switching away closes local viewing');
+    // Browsing another server parks the open view instead of closing it.
+    await waitFor(async () => await run(aliceWindow, '!!document.querySelector(".bot-screen-parking [data-bot-screen-id=game] iframe")'), 'switching servers parks the open view');
     assert.equal(await run(aliceWindow, '!document.querySelector(".stage-focus-error") && document.querySelector("#server-name-title").textContent === "Other server"'), true, 'A late fullscreen completion cannot repaint or reopen the retired voice stage');
+    assert.equal(await navigated.executeJavaScript('window.navigatedToken'), navigatedToken, 'A parked view keeps even a page it navigated to');
+    assert.deepEqual(await run(aliceWindow, `(() => {
+      const area = document.querySelector(".bot-screen-parking");
+      return [area.hidden, area.inert, area.getAttribute("aria-hidden"), !!document.querySelector("#main-center-stage [data-bot-screen-id]")];
+    })()`), [true, true, 'true', false], 'The parked tile waits hidden and inert, outside the server on screen');
     await run(aliceWindow, 'window.screenFixture.backgroundSnapshot()');
-    await waitFor(async () => await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=game]")?.getAttribute("aria-label").includes("Background voice game")'), 'background voice invitation');
+    const gameReturn = JSON.stringify('[data-bot-screen-background=game] button');
+    await waitFor(async () => await run(aliceWindow, `document.querySelector(${gameReturn})?.getAttribute("aria-label") === "Back to miniapp: Background voice game"`), 'background notice follows the voice room');
+    assert.equal(await run(aliceWindow, 'document.querySelector("[data-bot-screen-background=game] .screenshare-notice-text").textContent'),
+      'Background voice game is still open in the background.');
+    assert.equal(await run(aliceWindow, '!!document.querySelector("[data-watch-bot-screen=game]")'), false, 'An open view is not invited again');
     assert.equal(await run(aliceWindow, '!!document.querySelector("[data-watch-bot-screen=second]")'), false, 'Background voice updates do not undo another explicit exit');
     assert.equal(await run(aliceWindow, 'document.querySelector("#server-name-title").textContent'), 'Other server');
     assert.equal(await run(aliceWindow, 'window.screenFixture.backgroundNotificationsSafe()'), true);
-    assert.equal(await run(aliceWindow, 'document.querySelector("#screenshare-notice-slot").textContent.includes("WRONG SERVER")'), false);
-    await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=game]").click()');
-    await approveMiniapp(aliceWindow);
-    await waitFor(() => frames(aliceWindow).length === 1, 'opening background call activates its own server');
-    alice = await gameFrame(aliceWindow);
-    assert.equal(await alice.executeJavaScript('monkyScreen.viewer.id'), 'alice');
-    assert.equal(await run(aliceWindow, 'document.querySelector("#server-name-title").textContent'), 'Voice server');
-    assert.equal(await run(aliceWindow, 'document.querySelectorAll("#stage-participants-area .stage-focused-main").length === 1 && !!document.querySelector(".stage-focused-main[data-bot-screen-slot=game]")'), true, 'Background invitations activate the exact voice server and arrive focused');
+    assert.equal(await run(aliceWindow, '[...document.querySelectorAll("#screenshare-notice-slot, #bot-screen-background-slot")].some(slot => slot.textContent.includes("WRONG SERVER"))'), false);
+    await run(aliceWindow, `document.querySelector(${gameReturn}).click()`);
+    await waitFor(async () => await run(aliceWindow, 'document.querySelector("#server-name-title").textContent === "Voice server" && !!document.querySelector("#stage-bot-screens [data-bot-screen-id=game] iframe")'), 'Back to miniapp activates the call server');
+    assert.equal(await run(aliceWindow, '!!document.querySelector(".modal-backdrop:not([data-ui-closing]) .dialog-card")'), false, 'Coming back is not a new opening: no permission review');
+    assert.equal(await navigated.executeJavaScript('window.navigatedToken'), navigatedToken, 'The view comes back without reloading');
+    assert.equal(await run(aliceWindow, 'document.querySelectorAll("#stage-participants-area .stage-focused-main").length === 1 && !!document.querySelector(".stage-focused-main[data-bot-screen-slot=game]")'), true, 'Back to miniapp arrives focused on it');
+    await waitFor(async () => await run(aliceWindow, '!document.querySelector("[data-bot-screen-background]")'), 'the background notice leaves once the view is back');
 
     await run(aliceWindow, 'window.screenFixture.delayReload(); window.screenFixture.leave(); window.screenFixture.resolveReload()');
-    await waitFor(() => frames(aliceWindow).length === 0, 'leave tears down frame immediately');
+    await waitFor(() => !aliceWindow.webContents.mainFrame.frames.some(frame => frameUrl(frame) === destination), 'leave tears down frame immediately');
     assert.equal(await run(aliceWindow, 'document.querySelectorAll("[data-watch-bot-screen]").length'), 0);
     assert.equal(await run(aliceWindow, 'window.screenFixture.cachedScreens()'), 0, 'late responses cannot restore left-room screens');
     assert.equal(await run(aliceWindow, 'window.screenFixture.screenCount()'), 4, 'leave never erases the bot-owned game');
@@ -781,7 +795,8 @@ if (!process.versions.electron) {
       `O miniapp "${noticeScreen.title}" foi encerrado.`, 'Another device ending the same account miniapp still notifies this viewer in PT-BR');
     assert.equal(await run(aliceWindow, '!!document.querySelector(".chat-copy-toast:not([data-ui-closing]) b")'), false, 'Miniapp titles cannot inject toast markup');
     await run(aliceWindow, 'window.screenFixture.browseOtherServer()');
-    assert.equal(await run(aliceWindow, '!!document.querySelector(".chat-copy-toast:not([data-ui-closing])")'), false, 'Leaving the stage clears its toast and timer');
+    assert.equal(await run(aliceWindow, '!!document.querySelector(".chat-copy-toast:not([data-ui-closing])")'), true, 'The notice is about the call: browsing elsewhere keeps it');
+    await waitFor(async () => await run(aliceWindow, '!document.querySelector(".chat-copy-toast:not([data-ui-closing])")'), 'the notice expires on its own');
     for (const mode of ['invitation-only', 'local-leave', 'bot-closed']) {
       const screen = { ...noticeScreen, instanceId: mode, createdAt: noticeScreen.createdAt + 1 };
       await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(screen)})`);
@@ -1014,15 +1029,138 @@ if (!process.versions.electron) {
     for (const id of ['hooks', 'second']) await run(aliceWindow, `document.querySelector("[data-bot-screen-id=${id}] [data-bot-screen-action=close]").click()`);
     await waitUntil(() => frames(aliceWindow).length === 0, 'both views closed', 3000);
 
-    // Home replaces the whole layout; an open miniapp still closes through its lifecycle and frees its slot.
+    // Browsing elsewhere keeps an open miniapp: parked off stage, hidden but connected and still playing.
+    const parkedHooks = JSON.stringify(`.bot-screen-parking ${hookTile} iframe`);
+    const dockedHooks = JSON.stringify(`#stage-bot-screens ${hookTile} iframe`);
+    const hooksReturn = JSON.stringify('[data-bot-screen-background=hooks] button');
+    const textChannel = 'document.querySelector(".channel-item[data-channel-id=chat]").click()';
+    const pressEnter = async (window) => {
+      await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r',
+      });
+      await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13,
+      });
+    };
+    const watchVisibility = async () => {
+      await hooks.frame.executeJavaScript(`window.visibility = []; window.revisions = [];
+        monkyScreen.onVisibilityChange((visible) => window.visibility.push(visible));
+        monkyScreen.onState((_state, revision) => window.revisions.push(revision));`);
+    };
+    const visible = async (expected, description) => waitFor(async () =>
+      await hooks.frame.executeJavaScript('window.visibility.at(-1)') === expected, description);
+    await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(hooksScreen('hooks-5', 104))})`);
     hooks = await openHooks();
+    await watchVisibility();
+    assert.deepEqual(await hooks.frame.executeJavaScript('window.visibility'), [true], 'onVisibilityChange answers at once');
+    const audible = await hooks.frame.executeJavaScript('window.audible()');
+    assert.ok(audible > 0);
+
+    await run(aliceWindow, textChannel);
+    await waitFor(async () => await run(aliceWindow, `!!document.querySelector(${parkedHooks})`), 'a text channel parks the open view');
+    await visible(false, 'the miniapp learns it is in the background');
+    assert.equal(await hooks.frame.executeJavaScript('window.gameToken'), hooks.token, 'Parking keeps the same document');
+    assert.equal(await hooks.frame.executeJavaScript('window.hookLog.join()'), '', 'Browsing is not a close: no hook runs');
+    assert.equal(await hooks.frame.executeJavaScript('window.audible()'), audible, 'It keeps playing at the chosen volume');
+    assert.deepEqual(await run(aliceWindow, `(() => {
+      const row = document.querySelector("[data-bot-screen-background=hooks]");
+      const button = row.querySelector("button");
+      return [row.querySelector(".screenshare-notice-text").textContent, button.textContent, button.getAttribute("aria-label"),
+        !!document.querySelector("[data-watch-bot-screen=hooks]")];
+    })()`), ['Hooks continua aberto em segundo plano.', 'Voltar ao miniapp', 'Voltar ao miniapp: Hooks', false],
+    'One line per open miniapp, with the way back, instead of a new invitation');
+    await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify({ ...hooksScreen('hooks-5', 104), revision: 1, state: { count: 1 } })})`);
+    await waitFor(async () => (await hooks.frame.executeJavaScript('window.revisions')).includes(1), 'state reaches a parked view');
+    assert.equal(await hooks.frame.executeJavaScript('monkyScreen.sendAction("parked", {})'), true);
+    await waitFor(async () => await run(aliceWindow, 'window.screenFixture.actions.some(entry => entry.id === "hooks" && entry.action === "parked")'), 'a parked view still acts');
+
+    // Back through the notice, from the keyboard: the same document, focused, without a new review.
+    // The channel's composer takes focus a few frames after opening; like a person, move back to the notice.
+    await waitFor(async () => {
+      if (await run(aliceWindow, `!!document.querySelector(${dockedHooks})`)) return true;
+      const focused = await run(aliceWindow, `(() => {
+        const button = document.querySelector(${hooksReturn});
+        button?.focus();
+        return !!button && document.activeElement === button;
+      })()`);
+      if (focused) {
+        aliceWindow.webContents.focus();
+        await pressEnter(aliceWindow);
+      }
+      return false;
+    }, 'Back to miniapp from the keyboard');
+    await waitFor(async () => await run(aliceWindow, '!!document.querySelector(".stage-focused-main[data-bot-screen-slot=hooks]")'), 'back on stage, focused');
+    await visible(true, 'back on stage');
+    assert.equal(await hooks.frame.executeJavaScript('window.gameToken'), hooks.token);
+    assert.equal(await run(aliceWindow, '!!document.querySelector(".modal-backdrop:not([data-ui-closing]) .dialog-card")'), false, 'Coming back needs no new permission review');
+    await waitFor(async () => await run(aliceWindow, '!document.querySelector("[data-bot-screen-background]")'), 'the notice leaves once the view is back');
+
+    // Home replaces the whole layout, but not the document.
     await run(aliceWindow, 'window.screenFixture.goHome()');
-    await waitUntil(() => hookEvents.includes(`revoked|${hooks.token}|0|false`), 'going Home runs onClose', 5000);
-    await waitUntil(() => frames(aliceWindow).length === 0, 'Home releases the miniapp document', 3000);
-    await run(aliceWindow, 'window.screenFixture.leaveHome()');
+    await waitFor(async () => await run(aliceWindow, `!!document.querySelector(${parkedHooks}) && !!document.querySelector(".main-layout--home [data-bot-screen-background=hooks]")`), 'Home parks the open view');
+    await visible(false, 'hidden at Home');
+    await run(aliceWindow, `document.querySelector(${hooksReturn}).click()`);
+    await waitFor(async () => await run(aliceWindow, `!!document.querySelector(${dockedHooks})`), 'back from Home');
+    await visible(true, 'visible after Home');
+    assert.equal(await hooks.frame.executeJavaScript('window.gameToken'), hooks.token);
+
+    // Another room's stage previews that room: the call's miniapps wait off stage meanwhile.
+    await run(aliceWindow, 'window.screenFixture.viewRoom("other")');
+    await waitFor(async () => await run(aliceWindow, `!!document.querySelector(${parkedHooks}) && !!document.querySelector("[data-bot-screen-background=hooks]")`), 'another room parks the open view');
+    await visible(false, 'hidden behind another room');
+    await run(aliceWindow, 'window.screenFixture.viewRoom("voice")');
+    await waitFor(async () => await run(aliceWindow, `!!document.querySelector(${dockedHooks})`), 'back to the call room');
+
+    // Cut off by the filmstrip, or a window that is minimized or in the tray, is not visible either.
+    await run(aliceWindow, 'document.querySelector("#stage-grid [data-kind=camera]").click()');
+    aliceWindow.setContentSize(800, 600);
+    await waitFor(async () => await run(aliceWindow, `innerWidth === 800 && document.querySelector("${hookTile}").classList.contains("stage-mini-card")`), 'a narrow filmstrip');
+    const strip = '.stage-focused-strip';
+    await run(aliceWindow, `document.querySelector("${strip}").scrollLeft = document.querySelector("${strip}").scrollWidth`);
+    await visible(true, 'in view at the end of the filmstrip');
+    await run(aliceWindow, `document.querySelector("${strip}").scrollLeft = 0`);
+    assert.equal(await run(aliceWindow, `document.querySelector("[data-bot-screen-slot=hooks]").getBoundingClientRect().left >= document.querySelector("${strip}").getBoundingClientRect().right`), true, 'Fixture: the miniapp is past the visible strip');
+    await visible(false, 'clipped out of the filmstrip');
+    await run(aliceWindow, `document.querySelector("${strip}").scrollLeft = document.querySelector("${strip}").scrollWidth`);
+    await visible(true, 'scrolled back into view');
+    aliceWindow.webContents.send('window:inactive');
+    await visible(false, 'a minimized window hides the view');
+    aliceWindow.webContents.send('window:active');
+    await visible(true, 'a restored window shows it again');
+    aliceWindow.setContentSize(1280, 1000);
+    const changes = await hooks.frame.executeJavaScript('window.visibility');
+    assert.ok(changes.every((value, index) => index === 0 || value !== changes[index - 1]), `Only changes are reported: ${changes.join()}`);
+
+    // Leaving the call from elsewhere revokes the parked view at once; its onClose still runs.
+    await hooks.frame.executeJavaScript('window.closeMs = 0');
+    await run(aliceWindow, textChannel);
+    await waitFor(async () => await run(aliceWindow, `!!document.querySelector(${parkedHooks})`), 'parked before leaving the call');
+    assert.equal(await run(aliceWindow, 'window.screenFixture.leave(); !document.querySelector("[data-bot-screen-background]") && !document.querySelector(".bot-screen-parking [data-bot-screen-id]")'), true,
+      'A revoked view leaves no tile or line behind');
+    await waitUntil(() => hookEvents.includes(`revoked|${hooks.token}|0|false`), 'a parked view saves on revocation', 5000);
+    await waitUntil(() => frames(aliceWindow).length === 0, 'the revoked document is released once onClose settles', 3000);
+
+    // Switching rooms revokes it too.
+    await run(aliceWindow, 'window.screenFixture.join("voice")');
+    await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(hooksScreen('hooks-6', 105))})`);
     hooks = await openHooks();
-    await run(aliceWindow, `document.querySelector(${hookClose}).click()`);
-    await waitUntil(() => frames(aliceWindow).length === 0, 'the view reopened after Home closes normally', 3000);
+    await run(aliceWindow, textChannel);
+    await waitFor(async () => await run(aliceWindow, `!!document.querySelector(${parkedHooks})`), 'parked before switching rooms');
+    await run(aliceWindow, 'window.screenFixture.join("other")');
+    await waitUntil(() => hookEvents.includes(`revoked|${hooks.token}|0|false`), 'switching rooms revokes the parked view', 5000);
+    await waitUntil(() => frames(aliceWindow).length === 0, 'the old room document is released', 3000);
+
+    // Someone else ending it reaches onClose as ended, with the same notice as on stage.
+    await run(aliceWindow, 'window.screenFixture.join("voice")');
+    await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(hooksScreen('hooks-7', 106))})`);
+    hooks = await openHooks();
+    await run(aliceWindow, textChannel);
+    await waitFor(async () => await run(aliceWindow, `!!document.querySelector(${parkedHooks})`), 'parked before ending');
+    await run(aliceWindow, `window.screenFixture.remove(${JSON.stringify({ id: 'hooks', instanceId: 'hooks-7', channelId: 'voice', reason: 'ended', endedByUserId: 'remote' })})`);
+    await waitUntil(() => hookEvents.includes(`ended|${hooks.token}|0|false`), 'ended while parked', 5000);
+    assert.equal(await run(aliceWindow, 'document.querySelector(".chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label")?.textContent'),
+      'O miniapp "Hooks" foi encerrado.', 'A view open in the background still learns it ended');
+    await waitUntil(() => frames(aliceWindow).length === 0, 'the ended document is released', 3000);
 
     for (const window of windows) {
       assert.deepEqual(await run(window, 'window.screenFixture.errors'), [], 'No unhandled renderer lifecycle errors');
@@ -1030,7 +1168,7 @@ if (!process.versions.electron) {
       await waitFor(() => frames(window).length === 0, 'final teardown');
     }
     assert.deepEqual(nativeErrors, [], 'No native client-log errors during stage lifecycle');
-    console.log('Voice stage DOM: creator/admin END, live permission revocation, duplicate/delayed END, shared removal, stale-instance and background isolation; lifecycle hooks (onBeforeClose answers, Close now, stuck documents, muted onClose grace off stage, saves on close); existing local leave/watch, fullscreen, locale, seats, sandbox and teardown passed.');
+    console.log('Voice stage DOM: creator/admin END, live permission revocation, duplicate/delayed END, shared removal, stale-instance and background isolation; lifecycle hooks (onBeforeClose answers, Close now, stuck documents, muted onClose grace off stage, saves on close); browsing elsewhere (text channel, Home, other server and room parked without reloading, state/actions/audio while parked, visibility, back to miniapp, revoked/ended while parked); existing local leave/watch, fullscreen, locale, seats, sandbox and teardown passed.');
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
 }
@@ -1292,7 +1430,8 @@ async function setupVoiceStage(id, locale, adminPermission) {
       sessionManager.activate(other.key);
     },
     goHome() { sessionManager.showHome(); view.render(); },
-    leaveHome() { sessionManager.activate(session.key); },
+    // The stage of another room, as its voice chat shows it, without joining that room.
+    viewRoom(channelId) { view.voiceStageView.setChannel(channelId); },
     backgroundSnapshot() {
       const previous = screens.get('game');
       receive({ ...previous, title: 'Background voice game', revision: previous.revision + 1 });

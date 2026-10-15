@@ -166,6 +166,12 @@ Antes de fechar, o miniapp pode fazer uma pergunta, como se você quer salvar a
 partida. Responda no próprio miniapp ou clique em **Fechar agora** (ou
 **Encerrar agora**) para não esperar. Sair da sala nunca espera o miniapp.
 
+Você pode navegar pelo Monky, como um canal de texto, o Início ou outro
+servidor, sem fechar o miniapp: enquanto você estiver na chamada, ele continua
+aberto em segundo plano, e um aviso na barra lateral oferece **Voltar ao
+miniapp** para retomá-lo no palco. O som continua no volume escolhido, e o
+próprio miniapp pode pausar enquanto você está longe. Sair da sala o fecha.
+
 Com a visualização aberta, o card ganha o mesmo controle de volume de uma
 transmissão de tela, no canto inferior direito: passe o mouse sobre o botão
 (ou chegue com **Tab**) para ajustar de 0 a 200% e clique nele para mutar.

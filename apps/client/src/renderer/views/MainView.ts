@@ -4,6 +4,7 @@ import './channelCategories.css';
 import { escapeHtml } from '../utils/html';
 import { activityIconSrc } from '../utils/activityIcon';
 import { animateEnter, cancelSurfaceMotion, hideWithMotion, positionAnchoredSurface, showWithMotion } from '../utils/surfaceMotion';
+import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { appEvents } from '../core/EventBus';
 import { networkClient, ProtocolRequestError } from '../core/NetworkClient';
@@ -28,6 +29,7 @@ import { bindFooterControlsMotion } from './FooterControlsMotion';
 import { renderAudioMuteIndicators, renderAudioStateIcon, updateAudioStateIcon } from './AudioStateIcon';
 import { getVoiceControlModeration, isViewingCallServer, toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
 import { VoiceStageView } from './VoiceStageView';
+import { BotScreenDock } from './BotScreenDock';
 import { createChannelModal } from './CreateChannelModal';
 import { editChannelModal } from './EditChannelModal';
 import { settingsModal } from './SettingsModal';
@@ -83,6 +85,11 @@ export class MainView {
   private viewedVoiceChannelId: string | null = null;
   private viewedVoiceSessionKey: string | null = null;
   public voiceStageView: VoiceStageView | null = null;
+  /**
+   * The call's miniapps outlive the stage: browsing elsewhere parks them instead of closing them.
+   * Created with the first stage, so constructing the view alone still binds nothing.
+   */
+  private botScreenDock: BotScreenDock | null = null;
   private unbindEvents: Array<() => void> = [];
   private activeContentView: 'chat' | 'stage' = 'chat';
   private sidebarPingInterval: number | null = null;
@@ -138,8 +145,8 @@ export class MainView {
     this.stopSidebarPing();
 
     if (home) {
-      // The Home layout replaces the stage's DOM: close its miniapps first, so their onClose runs
-      // and they release their documents, instead of dying with the detached markup.
+      // The Home layout replaces the stage's DOM: its open miniapps wait off stage first, instead
+      // of dying with the detached markup.
       this.voiceStageView?.destroy();
       this.renderHomeShell();
       return;
@@ -224,6 +231,7 @@ export class MainView {
           <div class="user-control-bar">
             <div id="soundboard-players-slot" class="sb-notice-slot"></div>
             <div id="screenshare-notice-slot"></div>
+            <div id="bot-screen-background-slot"></div>
             <div id="overlay-notice-slot"></div>
             <div id="game-share-notice-slot"></div>
             <div id="voice-connection-row-slot"></div>
@@ -322,7 +330,8 @@ export class MainView {
       this.chatView = new ChatView(centerStageEl);
       this.chatInForum = false;
       this.chatView.onOpenForum = id => this.activateTextChannel(id);
-      this.voiceStageView = new VoiceStageView(centerStageEl);
+      this.botScreenDock ??= new BotScreenDock();
+      this.voiceStageView = new VoiceStageView(centerStageEl, this.botScreenDock);
     }
     const voiceStageView = this.voiceStageView;
     if (!voiceStageView) throw new Error('The voice stage view was not initialized');
@@ -429,6 +438,7 @@ export class MainView {
     // cached signature (#282).
     this.screenShareNoticeSignature = null;
     this.updateScreenShareNotice();
+    this.updateBotScreenBackgroundNotice(false);
     this.updateOverlayNotice();
     gameShareSuggestion.render(false);
 
@@ -456,6 +466,7 @@ export class MainView {
           <div class="user-control-bar">
             <div id="soundboard-players-slot" class="sb-notice-slot"></div>
             <div id="screenshare-notice-slot"></div>
+            <div id="bot-screen-background-slot"></div>
             <div id="overlay-notice-slot"></div>
             <div id="game-share-notice-slot"></div>
             <div id="voice-connection-row-slot"></div>
@@ -524,6 +535,7 @@ export class MainView {
     this.updateVoiceConnectionRow();
     this.screenShareNoticeSignature = null;
     this.updateScreenShareNotice();
+    this.updateBotScreenBackgroundNotice(false);
     this.updateOverlayNotice();
     gameShareSuggestion.render(false);
     const soundboardSlot = document.getElementById('soundboard-players-slot');
@@ -721,7 +733,7 @@ export class MainView {
     const isSelfSharing = voiceStore.isScreenSharing && !gameShareSuggestion.isLive();
     const voice = getBotVoiceContext();
     const screens = voice ? voice.session.botScreenStore.list(voice.channelId)
-      .filter((screen) => !this.voiceStageView?.isWatchingBotScreen(screen.id)
+      .filter((screen) => !this.botScreenDock?.isWatching(screen.id)
         && !voice.session.botScreenStore.isInvitationDismissed(screen.id)) : [];
     const loadFailed = voice?.session.botScreenStore.loadFailed ?? false;
     // The count re-renders the stop button when a second screen turns it into a menu.
@@ -859,6 +871,80 @@ export class MainView {
       document.getElementById('screenshare-notice-btn')?.addEventListener('click', () => {
         this.openVoiceStage(single ? sharers[0].id : undefined);
       });
+    }
+  }
+
+  /**
+   * One line per open miniapp waiting off stage while its person browses elsewhere, with the way
+   * back to it. A line slides out when its miniapp returns to the stage, but disappears at once when
+   * the view closed: a revoked or ended miniapp must not linger.
+   */
+  private updateBotScreenBackgroundNotice(animate = true): void {
+    const slot = document.getElementById('bot-screen-background-slot');
+    const dock = this.botScreenDock;
+    if (!slot) return;
+    const parked = dock?.parked() ?? [];
+    const rows = new Map([...slot.querySelectorAll<HTMLElement>('[data-bot-screen-background]')]
+      .map((row) => [row.dataset.botScreenBackground ?? '', row]));
+    for (const [id, row] of rows) {
+      if (parked.some((view) => view.snapshot.id === id && view.snapshot.instanceId === row.dataset.botScreenInstance)) continue;
+      rows.delete(id);
+      if (dock?.isWatching(id) && row.dataset.botScreenInstance === dock.get(id)?.snapshot.instanceId) {
+        setSurfaceVisible(row, false, 'panel', undefined, () => row.remove());
+      } else {
+        cancelVisibilityMotion(row);
+        row.remove();
+      }
+    }
+    for (const view of parked) {
+      const { id, instanceId, title } = view.snapshot;
+      let row = rows.get(id);
+      if (!row) {
+        row = document.createElement('div');
+        // Stacked like the "watching" notice: the sentence and its action do not fit on one line.
+        row.className = 'screenshare-notice screenshare-notice--stacked bot-screen-background';
+        row.dataset.botScreenBackground = id;
+        row.dataset.botScreenInstance = instanceId;
+        const icon = document.createElement('span');
+        icon.className = 'material-symbols-outlined md-16 screenshare-notice-icon';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = 'apps';
+        const text = document.createElement('span');
+        text.className = 'screenshare-notice-text';
+        const actions = document.createElement('div');
+        actions.className = 'screenshare-notice-actions';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'screenshare-notice-btn';
+        button.addEventListener('click', () => {
+          const current = this.botScreenDock?.get(id);
+          if (!current?.isWatching || current.snapshot.instanceId !== instanceId) return;
+          this.openVoiceStage(undefined, id);
+        });
+        actions.append(button);
+        row.append(icon, text, actions);
+        row.hidden = animate;
+        slot.append(row);
+      }
+      const text = row.querySelector<HTMLElement>('.screenshare-notice-text');
+      const button = row.querySelector<HTMLButtonElement>('button');
+      const label = t('botScreen.backgroundNotice', { title });
+      if (text && text.textContent !== label) {
+        text.textContent = label;
+        text.title = label;
+      }
+      if (button) {
+        const action = t('botScreen.returnToView');
+        const name = t('botScreen.returnTo', { title });
+        if (button.textContent !== action) button.textContent = action;
+        if (button.getAttribute('aria-label') !== name) button.setAttribute('aria-label', name);
+      }
+      // Coming back while its exit plays reverses it instead of stacking a second line.
+      if (animate) setSurfaceVisible(row, true, 'panel');
+      else {
+        cancelVisibilityMotion(row);
+        row.hidden = false;
+      }
     }
   }
 
@@ -3034,8 +3120,14 @@ export class MainView {
     // so the icon, colour and status text track the live state (#553).
     const u16 = appEvents.on('voice.connection_changed', () => this.updateVoiceConnectionRow());
     const u17 = appEvents.on('server.voice_restrictions_updated', updateDeafenControl);
-    const u18 = appEvents.on('voice.bot_screens_updated', () => this.updateScreenShareNotice());
-    const u19 = appEvents.on('stage.bot_screens_changed', () => this.updateScreenShareNotice());
+    const u18 = appEvents.on('voice.bot_screens_updated', () => {
+      this.updateScreenShareNotice();
+      this.updateBotScreenBackgroundNotice();
+    });
+    const u19 = appEvents.on('stage.bot_screens_changed', () => {
+      this.updateScreenShareNotice();
+      this.updateBotScreenBackgroundNotice();
+    });
     const u20 = appEvents.on('session.voice_context_updated', () => {
       this.updateScreenShareNotice();
       this.updateParticipantSpeaking();
@@ -3104,5 +3196,7 @@ export class MainView {
     this.userCardObserver = null;
     this.chatView?.destroy();
     this.voiceStageView?.destroy();
+    this.botScreenDock?.dispose();
+    this.botScreenDock = null;
   }
 }

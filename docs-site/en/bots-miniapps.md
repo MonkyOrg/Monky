@@ -17,7 +17,7 @@ This example extends the [tutorial](/en/bots-desenvolvimento) and requires
 
 A screen is an HTML/CSS/JavaScript miniapp displayed **on the voice stage**. People in the room receive an invitation in the same corner as screen-sharing notices and choose whether to view it. There is no miniapp chat card or automatic opening. Unlike private `ctx.prompt()` forms, it accepts multiple participants and remains active after its command handler finishes. MonkyBot's `/jogo-da-velha` demonstrates two players and spectators; its rules remain in the bot, not in a viewer's JavaScript.
 
-The tile stays on the stage alongside cameras and screen shares, even when its view is closed. **Open miniapp** starts local viewing and focuses the miniapp on the stage, just like opening its invitation, for any participant. **Leave miniapp** ends it and returns the tile to its closed state without closing the miniapp for anyone else. Before that, the miniapp may ask something, such as whether to save the game (see [View lifecycle](#ciclo-de-vida-da-visualizacao)). Focusing or returning to the grid only changes the layout: it does not reload the screen or change player seats. Opening a screen to watch is not the same as joining its game.
+The tile stays on the stage alongside cameras and screen shares, even when its view is closed. **Open miniapp** starts local viewing and focuses the miniapp on the stage, just like opening its invitation, for any participant. **Leave miniapp** ends it and returns the tile to its closed state without closing the miniapp for anyone else. Before that, the miniapp may ask something, such as whether to save the game (see [View lifecycle](#ciclo-de-vida-da-visualizacao)). Focusing or returning to the grid only changes the layout: it does not reload the screen or change player seats. Browsing Monky does not close the view either: while the person stays in the call, the miniapp stays open in the background (see [In the background](#segundo-plano)). Opening a screen to watch is not the same as joining its game.
 
 **End miniapp** is a separate action: it removes the instance, tile, and
 invitations for everyone and closes all open views. It is available only to the
@@ -63,6 +63,7 @@ Inside the isolated document, the `window.monkyScreen` bridge provides:
 | `sendAction(action, payload)` | Sends an intent bound to the current revision; returns whether the bridge accepted sending it, not whether the bot accepted the action |
 | `onBeforeClose(handler)` | Runs before a close this person asked for; returning `false` keeps the view open. See [View lifecycle](#ciclo-de-vida-da-visualizacao) |
 | `onClose(handler)` | Runs on every close, with the view already hidden and muted, for up to 5 seconds |
+| `onVisibilityChange(handler)` | Tells at once, and again on every change, whether the person can see the view. See [In the background](#segundo-plano) |
 | `storage` | Data kept on this computer, when the bot has `device_storage` and the person allows it; see [Bot storage](/en/bots-armazenamento#nos-computadores). Missing in older clients |
 
 Read `window.monkyScreen.viewer.locale` inside the `onState()` callback to translate each person's controls. Changing the app language also triggers this callback without changing shared state/revision or recreating the iframe. Do not derive the controls' language from public state or the screen creator's language.
@@ -122,7 +123,7 @@ document loads: Monky only waits for hooks it already knows about. The
 | `leave` | The person clicked **Leave miniapp** or **Close now** |
 | `end` | The person ended the miniapp for everyone |
 | `ended` | The miniapp no longer exists: someone else ended it, or the bot closed it, disconnected or lost access to the room |
-| `revoked` | This view lost access: the person left or switched rooms or servers, left the stage, disconnected or lost permission |
+| `revoked` | This view lost access: the person left the room or joined another one, even on another server, disconnected or lost permission. Browsing Monky does not close the view |
 
 While `onBeforeClose` answers, the tile's button becomes **Close now** (or
 **End now**), and a filmstrip tile comes into focus so the question is
@@ -168,6 +169,42 @@ downloads in it: save to the bot's service or, if the person allowed it, to
 keep a periodic save for the cases without a hook. A download the person starts from a miniapp button
 before `onBeforeClose` answers, on the other hand, reaches the browser before
 the view closes and carries on afterwards.
+
+### In the background {#segundo-plano}
+
+Browsing Monky does not close the view. If the person stays in the call and
+opens a text channel, Home, another server or another room's stage, the
+miniapp stays open in the background: hidden, but with the same document,
+receiving state and sending actions. A notice in the sidebar takes them back to
+the stage without reloading or asking for permission again. Leaving the room,
+joining another one, disconnecting or losing permission still close the view
+as `revoked`.
+
+`onVisibilityChange((visible) => ...)` tells whether the person can see the
+view. The handler runs as soon as it is registered, with the current value, and
+then on every change. `visible` is `false` while the miniapp is in the
+background, while its tile is outside the visible part of the stage (scrolled
+out of the filmstrip, for example) and while the Monky window is minimized or
+in the tray, and it turns back to `true` when the view shows again. Prefer this
+hook to the `visibilitychange` event: with Monky minimized, the page stays
+`visible`. Once the view starts closing, the handler no longer runs, since
+`onClose` already says the view is gone.
+
+While hidden, the document is not drawn: `requestAnimationFrame` stops and
+timers drop to about once per second, so a game driven by them freezes mid-play.
+Its audio carries on at the chosen volume, like a screen share watched off
+stage: `<audio>`, `<video>` and Web Audio keep playing. Pause the game, and its
+sound, while the person cannot see it.
+
+```js
+const screen = window.monkyScreen;
+
+// Clients released before the hooks lack this method.
+screen.onVisibilityChange?.((visible) => {
+  if (visible) game.resume();
+  else game.pause(); // sound included
+});
+```
 
 ## Miniapp web capabilities
 

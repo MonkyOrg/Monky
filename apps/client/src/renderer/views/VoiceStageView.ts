@@ -1,4 +1,4 @@
-import { MessageType, SCREEN_SHARE_LIMITS, getScreenShareQualities, screenShareQualitySchema, type BotScreen, type BotScreenRemoved, type NativeScreenSource } from '@monky/shared';
+import { MessageType, SCREEN_SHARE_LIMITS, getScreenShareQualities, screenShareQualitySchema, type BotScreen, type NativeScreenSource } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
@@ -38,12 +38,10 @@ import { showCopyToast } from './CopyToast';
 import { t } from '../i18n';
 import { reportCameraError, setLocalCameraState } from '../core/CameraPublication';
 import { isCameraOperationCancelled } from '../utils/cameraEffects';
-import { getBotVoiceContext, type BotVoiceContext } from '../utils/botVoice';
 import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
-import { BotScreenView } from './BotScreenView';
+import { BotScreenDock, type BotScreenStage } from './BotScreenDock';
 import { ScreenViewersView } from './ScreenViewersView';
-import type { VoiceBotScreensUpdated } from '../stores/botScreenStore';
-import { showInfoToast, showErrorToast } from './CopyToast';
+import { showErrorToast } from './CopyToast';
 
 /**
  * A single renderable tile on the stage. A participant contributes one tile per
@@ -135,14 +133,34 @@ export class VoiceStageView {
   private participantStructure: string | null = null;
   private cameraToggleEpoch = 0;
   private cameraTogglePending = false;
-  private botScreens = new Map<string, BotScreenView>();
   private screenViewers: ScreenViewersView[] = [];
-  private botVoiceContext: BotVoiceContext | null = null;
   private botScreenLayoutObserver: ResizeObserver | null = null;
-  private clearMiniappToast: (() => void) | null = null;
+  /** The call's miniapp tiles are borrowed from the dock while this stage shows their room. */
+  private readonly botScreenStage: BotScreenStage = {
+    open: (id) => this.watchBotScreen(id),
+    toggleFocus: (id) => {
+      const key = `miniapp:${id}`;
+      if (this.focusedTileKeys.includes(key)) this.setFocusedTiles([]);
+      else this.toggleFocus(key);
+    },
+    revealQuestion: (id) => {
+      // A filmstrip frame ignores the pointer, so the miniapp's question would be unanswerable.
+      const key = `miniapp:${id}`;
+      if (this.focusedTileKeys.length > 0 && !this.focusedTileKeys.includes(key)) this.toggleFocus(key);
+    },
+    changed: () => this.renderParticipants(),
+  };
+  /** A stage used on its own, without MainView's dock, owns its miniapps and closes them with it. */
+  private ownBotScreenDock: BotScreenDock | null = null;
 
-  constructor(container: HTMLElement) {
+  constructor(container: HTMLElement, private readonly sharedBotScreenDock: BotScreenDock | null = null) {
     this.container = container;
+  }
+
+  private get botScreenDock(): BotScreenDock {
+    if (this.sharedBotScreenDock) return this.sharedBotScreenDock;
+    this.ownBotScreenDock ??= new BotScreenDock();
+    return this.ownBotScreenDock;
   }
 
   private isJoinedHere(): boolean {
@@ -162,7 +180,7 @@ export class VoiceStageView {
   public setChannel(channelId: string | null): void {
     if (channelId === this.currentChannelId && this.renderedJoined === this.isJoinedHere()
         && this.container.querySelector('.voice-stage-container')) {
-      this.refreshBotScreens();
+      this.syncBotScreens();
       this.setChatOpen(this.chatOpen);
       this.restorePictureInPicture();
       return;
@@ -171,7 +189,7 @@ export class VoiceStageView {
     this.focusEpoch++;
     this.pendingScreenFocus.clear();
     this.clearFocusError();
-    this.closeBotScreens();
+    this.releaseBotScreens();
     if (channelId !== this.currentChannelId) this.stopTelemetryMonitor();
     this.currentChannelId = channelId;
     this.focusedTileKeys = [];
@@ -183,20 +201,21 @@ export class VoiceStageView {
     this.restorePictureInPicture();
   }
 
-  public hasOpenBotScreen(): boolean { return [...this.botScreens.values()].some((view) => view.isWatching); }
-
-  public isWatchingBotScreen(id: string): boolean { return this.botScreens.get(id)?.isWatching ?? false; }
+  /** Whether this stage holds an open miniapp, whose document a re-render must keep. */
+  public hasOpenBotScreen(): boolean {
+    return this.botScreenDock.viewsOn(this.botScreenStage).some((view) => view.isWatching);
+  }
 
   public watchBotScreen(id: string): void {
-    this.refreshBotScreens();
-    const view = this.botScreens.get(id);
+    this.syncBotScreens();
+    const view = this.botScreenDock.isDockedTo(this.botScreenStage) ? this.botScreenDock.get(id) : undefined;
     if (!view) return;
     const open = async () => {
-      if (this.botScreens.get(id) !== view) return;
+      if (this.botScreenDock.get(id) !== view) return;
       try {
         await view.open();
-        if (this.botScreens.get(id) !== view) return;
-        if (view.isWatching) this.botVoiceContext?.session.botScreenStore.setInvitationDismissed(id, false);
+        if (this.botScreenDock.get(id) !== view) return;
+        if (view.isWatching) this.botScreenDock.call?.session.botScreenStore.setInvitationDismissed(id, false);
         this.positionBotScreens();
         appEvents.emit('stage.bot_screens_changed');
       } catch (error: unknown) {
@@ -207,103 +226,33 @@ export class VoiceStageView {
     this.setFocusedTiles([`miniapp:${id}`], { afterRender: open });
   }
 
-  private closeBotScreen(id: string): void {
-    const view = this.botScreens.get(id);
-    if (!view?.isWatching) return;
-    this.botVoiceContext?.session.botScreenStore.setInvitationDismissed(id, true);
-    view.leave('leave');
-    this.positionBotScreens();
-    appEvents.emit('stage.bot_screens_changed');
-  }
-
-  /** The server's reason reaches the miniapp's onClose; a later refresh would only know it vanished. */
-  private removeBotScreen(removed: BotScreenRemoved): void {
-    const view = this.botScreens.get(removed.id);
-    if (!view || view.snapshot.instanceId !== removed.instanceId || view.snapshot.channelId !== removed.channelId) return;
-    view.destroy(view.closeReasonFor(removed));
-    this.botScreens.delete(removed.id);
-    this.focusedTileKeys = this.focusedTileKeys.filter((key) => key !== `miniapp:${removed.id}`);
-  }
-
-  private closeBotScreens(): void {
-    this.clearMiniappToast?.();
-    this.clearMiniappToast = null;
+  /** The stage is going away or showing something else; open miniapps stay open off stage. */
+  private releaseBotScreens(): void {
     this.botScreenLayoutObserver?.disconnect();
-    for (const view of this.botScreens.values()) view.destroy();
-    const changed = this.botScreens.size > 0;
-    this.botScreens.clear();
-    this.botVoiceContext = null;
-    this.focusedTileKeys = this.focusedTileKeys.filter((key) => !key.startsWith('miniapp:'));
-    if (changed) appEvents.emit('stage.bot_screens_changed');
+    (this.sharedBotScreenDock ?? this.ownBotScreenDock)?.release(this.botScreenStage);
   }
 
-  private notifyMiniappEnded({ key, removed }: VoiceBotScreensUpdated): void {
-    if (removed?.reason !== 'ended') return;
-    const context = getBotVoiceContext();
-    const previous = this.botVoiceContext;
-    const view = this.botScreens.get(removed.id);
-    if (!context || !previous || context.session !== previous.session || context.session.key !== key ||
-        context.user.sessionId !== previous.user.sessionId || context.channelId !== removed.channelId ||
-        this.currentChannelId !== removed.channelId || context.session.serverStore !== getActiveServerStore() ||
-        !view?.isWatching || view.isEnding || view.snapshot.instanceId !== removed.instanceId) return;
-    this.clearMiniappToast?.();
-    this.clearMiniappToast = showInfoToast(t('botScreen.endedNotice', { title: view.snapshot.title }));
-  }
-
-  private refreshBotScreens(): void {
-    const context = getBotVoiceContext();
-    const previous = this.botVoiceContext;
-    if (!context || context.channelId !== this.currentChannelId ||
-        context.session.serverStore !== getActiveServerStore()) {
-      this.closeBotScreens();
-      return;
-    }
-    if (previous && (context.session !== previous.session || context.channelId !== previous.channelId ||
-        context.user.sessionId !== previous.user.sessionId)) this.closeBotScreens();
+  /** Borrows the call's miniapp tiles while this stage shows the call's room on its server. */
+  private syncBotScreens(): void {
     const host = this.container.querySelector<HTMLElement>('#stage-bot-screens');
-    if (!host) return;
-    this.botVoiceContext = context;
-    const screens = context.session.botScreenStore.list(context.channelId);
-    for (const [id, view] of this.botScreens) {
-      if (!screens.some((screen) => screen.id === id && screen.instanceId === view.snapshot.instanceId)) {
-        // Gone from the room's current list (or replaced by a new instance) while access remained.
-        view.destroy('ended');
-        this.botScreens.delete(id);
-        this.focusedTileKeys = this.focusedTileKeys.filter((key) => key !== `miniapp:${id}`);
-      }
-    }
-    for (const screen of screens) {
-      let view = this.botScreens.get(screen.id);
-      if (!view) {
-        view = new BotScreenView(screen, context,
-          () => this.watchBotScreen(screen.id),
-          () => this.closeBotScreen(screen.id),
-          () => {
-            const key = `miniapp:${screen.id}`;
-            if (this.focusedTileKeys.includes(key)) this.setFocusedTiles([]);
-            else this.toggleFocus(key);
-          },
-          () => {
-            // A filmstrip frame ignores the pointer, so the miniapp's question would be unanswerable.
-            const key = `miniapp:${screen.id}`;
-            if (this.focusedTileKeys.length > 0 && !this.focusedTileKeys.includes(key)) this.toggleFocus(key);
-          });
-        this.botScreens.set(screen.id, view);
-      } else view.update(screen);
-      if (view.element.parentElement !== host) host.append(view.element);
-    }
-    host.hidden = this.botScreens.size === 0;
+    const call = this.botScreenDock.call;
+    const here = !!host && !!call && call.channelId === this.currentChannelId &&
+      call.session.serverStore === getActiveServerStore() && !sessionManager.isHome();
+    if (host && here) this.botScreenDock.dock(this.botScreenStage, host);
+    else this.releaseBotScreens();
+    if (host) host.hidden = this.botScreenDock.viewsOn(this.botScreenStage).length === 0;
   }
 
   private syncBotScreenLayout(): void {
     const area = this.container.querySelector<HTMLElement>('#stage-content-area');
     if (!area) return;
-    for (const [id, view] of this.botScreens) {
-      view.setLayout(this.focusedTileKeys.includes(`miniapp:${id}`),
-        this.focusedTileKeys.length > 0 && !this.focusedTileKeys.includes(`miniapp:${id}`));
+    const views = this.botScreenDock.viewsOn(this.botScreenStage);
+    for (const view of views) {
+      const key = `miniapp:${view.snapshot.id}`;
+      view.setLayout(this.focusedTileKeys.includes(key), this.focusedTileKeys.length > 0 && !this.focusedTileKeys.includes(key));
     }
     this.botScreenLayoutObserver?.disconnect();
-    if (this.botScreens.size > 0) {
+    if (views.length > 0) {
       this.botScreenLayoutObserver ??= new ResizeObserver(() => this.positionBotScreens());
       this.botScreenLayoutObserver.observe(area);
       for (const slot of area.querySelectorAll('[data-bot-screen-slot]')) this.botScreenLayoutObserver.observe(slot);
@@ -315,13 +264,18 @@ export class VoiceStageView {
     const area = this.container.querySelector<HTMLElement>('#stage-content-area');
     if (!area) return;
     const bounds = area.getBoundingClientRect();
-    for (const [id, view] of this.botScreens) {
+    for (const view of this.botScreenDock.viewsOn(this.botScreenStage)) {
       if (document.fullscreenElement === view.element) {
         Object.assign(view.element.style, { left: '0', top: '0', width: '100vw', height: '100vh', clipPath: 'none' });
+        this.botScreenDock.setOnScreen(view, true);
         continue;
       }
-      const slot = area.querySelector<HTMLElement>(`[data-bot-screen-slot="${CSS.escape(id)}"]`);
-      if (!slot) { view.element.hidden = true; continue; }
+      const slot = area.querySelector<HTMLElement>(`[data-bot-screen-slot="${CSS.escape(view.snapshot.id)}"]`);
+      if (!slot) {
+        view.element.hidden = true;
+        this.botScreenDock.setOnScreen(view, false);
+        continue;
+      }
       const rect = slot.getBoundingClientRect();
       const viewport = (slot.closest('.stage-focused-strip, .stage-grid') ?? area).getBoundingClientRect();
       const top = Math.max(bounds.top, viewport.top);
@@ -330,6 +284,7 @@ export class VoiceStageView {
       const left = Math.max(bounds.left, viewport.left);
       view.element.hidden = rect.width === 0 || rect.height === 0 || rect.right <= left ||
         rect.left >= right || rect.bottom <= top || rect.top >= bottom;
+      this.botScreenDock.setOnScreen(view, !view.element.hidden);
       // Grid/focus/filmstrip own the slots. Anchoring the live views here avoids
       // reparenting an iframe, which destroys its browsing context in Chromium.
       Object.assign(view.element.style, {
@@ -379,7 +334,7 @@ export class VoiceStageView {
 
     if (!this.currentChannelId || !serverStore.serverDetails) {
       this.pendingScreenFocus.clear();
-      this.closeBotScreens();
+      this.releaseBotScreens();
       this.container.innerHTML = `
         <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); gap: 12px;">
           <span class="material-symbols-outlined md-36" style="color: var(--text-dim); font-size: 48px;">volume_up</span>
@@ -490,7 +445,8 @@ export class VoiceStageView {
     `;
     if (!this.hasOpenBotScreen() ||
         !replaceAroundLiveChild(this.container, markup, '.voice-stage-container', '#stage-content-area')) {
-      this.closeBotScreens();
+      // Open miniapps wait off stage for the new markup; renderParticipants() brings them back.
+      this.releaseBotScreens();
       this.container.innerHTML = markup;
     }
 
@@ -676,8 +632,8 @@ export class VoiceStageView {
       }
       if (!isCamOn && shareIds.length === 0) tiles.push({ p, kind: 'voice', key: `${sidOf(p)}:voice` });
     }
-    for (const [id, view] of this.botScreens) {
-      tiles.push({ kind: 'miniapp', key: `miniapp:${id}`, screen: view.snapshot });
+    for (const view of this.botScreenDock.viewsOn(this.botScreenStage)) {
+      tiles.push({ kind: 'miniapp', key: `miniapp:${view.snapshot.id}`, screen: view.snapshot });
     }
     return tiles;
   }
@@ -872,7 +828,7 @@ export class VoiceStageView {
   }
 
   public renderParticipants(): void {
-    this.refreshBotScreens();
+    this.syncBotScreens();
     const area = this.container.querySelector<HTMLElement>('#stage-participants-area');
     if (!area || !this.currentChannelId) return;
 
@@ -2499,11 +2455,8 @@ export class VoiceStageView {
     const u14 = appEvents.on('voice.connection_changed', () => this.startPingMonitor());
     const u15 = appEvents.on('server.voice_restrictions_updated', () => this.updateControlsUI());
     const u16 = appEvents.on('camera.state_changed', () => this.refreshLocalCameraVideo());
-    const u17 = appEvents.on<VoiceBotScreensUpdated | undefined>('voice.bot_screens_updated', (update) => {
-      if (update) this.notifyMiniappEnded(update);
-      if (update?.removed && update.key === this.botVoiceContext?.session.key) this.removeBotScreen(update.removed);
-      this.renderParticipants();
-    });
+    // The dock handles the miniapp lifecycle first (it subscribed earlier); this only redraws the tiles.
+    const u17 = appEvents.on('voice.bot_screens_updated', () => this.renderParticipants());
     const u18 = appEvents.on('voice.channel_changed', () => {
       this.focusEpoch++;
       this.pendingScreenFocus.clear();
@@ -2585,6 +2538,9 @@ export class VoiceStageView {
     this.stopPingMonitor();
     this.stopTelemetryMonitor();
     this.unbindListeners();
-    this.closeBotScreens();
+    this.releaseBotScreens();
+    // Without MainView, nothing else could show this stage's miniapps again.
+    this.ownBotScreenDock?.dispose();
+    this.ownBotScreenDock = null;
   }
 }

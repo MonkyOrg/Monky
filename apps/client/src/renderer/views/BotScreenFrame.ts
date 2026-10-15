@@ -32,10 +32,11 @@ interface FrameSeed {
   depth: number;
   volume: number;
   storageBytes: number;
+  visible: boolean;
 }
 
 type FrameUpdate = { type: 'state'; state: BotScreenJson; revision: number } | { type: 'locale'; locale: SupportedLanguage }
-  | { type: 'volume'; volume: number } | MiniappStorageStatusMessage
+  | { type: 'volume'; volume: number } | { type: 'visibility'; visible: boolean } | MiniappStorageStatusMessage
   | { type: 'beforeClose'; id: string; reason: BotScreenBeforeCloseReason } | { type: 'close'; reason: BotScreenCloseReason };
 
 /** Lifecycle messages from the bridge; actions keep their own `{ action, payload, revision }` shape. */
@@ -50,6 +51,7 @@ type FrameHandOff = { type: 'monky-screen-handoff'; id: string };
 
 type BeforeCloseHandler = Parameters<BotScreenBridge['onBeforeClose']>[0];
 type CloseHandler = Parameters<BotScreenBridge['onClose']>[0];
+type VisibilityHandler = Parameters<BotScreenBridge['onVisibilityChange']>[0];
 
 interface PendingBeforeClose {
   id: string;
@@ -89,6 +91,11 @@ function screenBootstrap(seed: FrameSeed, installVolume: typeof installMiniappVo
   const listeners = new Set<(state: BotScreenJson, revision: number) => void>();
   const beforeCloseHandlers = new Set<BeforeCloseHandler>();
   const closeHandlers = new Set<CloseHandler>();
+  const visibilityHandlers = new Set<VisibilityHandler>();
+  // The parent knows whether the view is on stage; the page knows whether it is shown at all.
+  let shown = seed.visible;
+  const isVisible = (): boolean => shown && document.visibilityState === 'visible';
+  let visible = isVisible();
   // The parent only waits for the hooks it was told about.
   let announced = 'false,false';
   let closing = false;
@@ -103,6 +110,16 @@ function screenBootstrap(seed: FrameSeed, installVolume: typeof installMiniappVo
     announced = `${beforeClose},${close}`;
     port.postMessage({ type: 'hooks', beforeClose, close } satisfies FrameControl);
   };
+  // A closing view is already hidden: onClose says so, so visibility goes quiet.
+  const reportVisibility = (): void => {
+    const next = isVisible();
+    if (closing || next === visible) return;
+    visible = next;
+    for (const handler of [...visibilityHandlers]) {
+      try { handler(next); } catch (error: unknown) { console.error(error); }
+    }
+  };
+  document.addEventListener('visibilitychange', reportVisibility);
   const runBeforeClose = async (id: string, reason: BotScreenBeforeCloseReason): Promise<void> => {
     if (closing) return;
     // Acknowledge first: the parent tells a stuck document from one asking its person something.
@@ -182,6 +199,13 @@ function screenBootstrap(seed: FrameSeed, installVolume: typeof installMiniappVo
         announce();
       };
     },
+    onVisibilityChange(handler: VisibilityHandler): () => void {
+      if (typeof handler !== 'function') throw new TypeError('Expected a visibility handler.');
+      visibilityHandlers.add(handler);
+      // At once, like onState: a miniapp opened off screen can start paused.
+      if (!closing) handler(visible);
+      return () => { visibilityHandlers.delete(handler); };
+    },
   });
   Object.defineProperty(window, 'monkyScreen', { value: api, writable: false, configurable: false });
   const connect = (event: MessageEvent<unknown>): void => {
@@ -206,6 +230,11 @@ function screenBootstrap(seed: FrameSeed, installVolume: typeof installMiniappVo
         setVolume?.(event.data.volume);
         return;
       }
+      if (event.data.type === 'visibility') {
+        shown = event.data.visible;
+        reportVisibility();
+        return;
+      }
       if (event.data.type === 'locale') {
         if (locale === event.data.locale) return;
         locale = event.data.locale;
@@ -228,11 +257,11 @@ function screenBootstrap(seed: FrameSeed, installVolume: typeof installMiniappVo
   window.addEventListener('message', connect);
 }
 
-export function botScreenDocument(screen: BotScreen, viewer: BotScreenViewer, volume = 1): string {
+export function botScreenDocument(screen: BotScreen, viewer: BotScreenViewer, volume = 1, visible = true): string {
   const seed: FrameSeed = {
     viewer, state: screen.state, revision: screen.revision,
     actionBytes: BOT_SCREEN_LIMITS.actionBytes, storageBytes: MINIAPP_STORAGE_OBJECT_BYTES,
-    depth: BOT_SCREEN_LIMITS.jsonDepth, volume: frameVolume(volume),
+    depth: BOT_SCREEN_LIMITS.jsonDepth, volume: frameVolume(volume), visible,
   };
   const serialized = JSON.stringify(seed).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="x-dns-prefetch-control" content="off"><meta http-equiv="Content-Security-Policy" content="${BOT_SCREEN_CSP}">` +
@@ -257,33 +286,42 @@ function frameControl(data: object): FrameControl | null {
   return data.type === 'closed' && keys === 'type' ? { type: 'closed' } : null;
 }
 
-let holdingArea: HTMLElement | null = null;
+const offStageAreas = new Map<string, HTMLElement>();
 
-/**
- * Parks a closing frame off stage, so re-rendering or leaving the stage cannot cut its onClose
- * short. `moveBefore()` keeps the browsing context alive, where `append()` would reload it.
- */
-function park(element: HTMLIFrameElement): boolean {
-  if (!element.isConnected) return false;
-  let area = holdingArea;
+/** A hidden, inert container outside the stage that miniapp documents can wait in. */
+export function offStageArea(className: string): HTMLElement {
+  let area = offStageAreas.get(className);
   if (!area?.isConnected) {
     area = document.createElement('div');
-    area.className = 'bot-screen-holding';
+    area.className = className;
     area.hidden = true;
     area.inert = true;
     area.setAttribute('aria-hidden', 'true');
     document.body.append(area);
-    holdingArea = area;
+    offStageAreas.set(className, area);
   }
-  const host: ParentNode & { moveBefore?: (node: Node, child: Node | null) => void } = area;
-  if (typeof host.moveBefore !== 'function') return false;
+  return area;
+}
+
+/**
+ * `moveBefore()` keeps a browsing context alive, where `append()` would reload it. False when the
+ * node cannot be moved that way: either side is disconnected or the engine lacks `moveBefore()`.
+ */
+export function moveWithoutReload(node: Element, parent: Element): boolean {
+  const host: Element & { moveBefore?: (node: Node, child: Node | null) => void } = parent;
+  if (!node.isConnected || !parent.isConnected || typeof host.moveBefore !== 'function') return false;
   try {
-    host.moveBefore(element, null);
+    host.moveBefore(node, null);
     return true;
   } catch (error: unknown) {
-    console.warn('[Bot screens] Could not keep a closing miniapp off stage.', error);
+    console.warn('[Bot screens] Could not move a live miniapp.', error);
     return false;
   }
+}
+
+/** Parks a closing frame off stage, so re-rendering or leaving the stage cannot cut its onClose short. */
+function park(element: HTMLIFrameElement): boolean {
+  return element.isConnected && moveWithoutReload(element, offStageArea('bot-screen-holding'));
 }
 
 /** One port is bound to one isolated origin and one captured server/channel/screen. */
@@ -306,6 +344,7 @@ export class BotScreenFrame {
   private snapshot: BotScreen;
   private locale: SupportedLanguage;
   private volume: number;
+  private visible: boolean;
   private documentUrl: string | null = null;
   private storage: BotScreenStorageState = { status: 'unavailable', usage: null };
   private storageScopeId: string | null = null;
@@ -318,7 +357,7 @@ export class BotScreenFrame {
   constructor(screen: BotScreen, viewer: BotScreenViewer, private consent: BotScreenDocumentConsent,
     private onAction: (action: BotScreenAction) => void,
     private onError: (error: unknown) => void, volume = 1,
-    private onStorage: (state: BotScreenStorageState) => void = () => undefined) {
+    private onStorage: (state: BotScreenStorageState) => void = () => undefined, visible = true) {
     if (!botScreenDocumentConsentSchema.safeParse(consent).success || consent.screenId !== screen.id ||
         consent.instanceId !== screen.instanceId || consent.botId !== screen.botId) {
       this.channel.port1.close();
@@ -339,6 +378,7 @@ export class BotScreenFrame {
     this.snapshot = screen;
     this.locale = viewer.locale;
     this.volume = frameVolume(volume);
+    this.visible = visible;
     this.element = document.createElement('iframe');
     this.element.className = 'bot-screen-frame';
     this.element.name = `monky-bot-screen-${crypto.randomUUID()}`;
@@ -348,7 +388,7 @@ export class BotScreenFrame {
     this.element.setAttribute('allow', "camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'; fullscreen *; autoplay *; encrypted-media *; gamepad *; usb 'none'; serial 'none'; hid 'none'");
     this.channel.port1.onmessage = this.onMessage;
     this.channel.port1.start();
-    void this.loadDocument(botScreenDocument(screen, viewer, this.volume)).catch(error => {
+    void this.loadDocument(botScreenDocument(screen, viewer, this.volume, this.visible)).catch(error => {
       if (!this.destroyed) this.onError(error);
     });
   }
@@ -411,6 +451,13 @@ export class BotScreenFrame {
     if (this.destroyed || this.closing || next === this.volume) return;
     this.volume = next;
     if (this.connected) this.channel.port1.postMessage({ type: 'volume', volume: next } satisfies FrameUpdate);
+  }
+
+  /** Whether the view is on screen: on stage, not cut off by the layout, in a window that is shown. */
+  setVisible(visible: boolean): void {
+    if (this.destroyed || this.closing || visible === this.visible) return;
+    this.visible = visible;
+    if (this.connected) this.channel.port1.postMessage({ type: 'visibility', visible } satisfies FrameUpdate);
   }
 
   /** Whether a close this person asks for must first wait for the miniapp's onBeforeClose. */
@@ -511,6 +558,8 @@ export class BotScreenFrame {
     // The document started with the volume of its creation; it may have changed while loading.
     this.channel.port1.postMessage({ type: 'volume', volume: this.volume } satisfies FrameUpdate);
     this.channel.port1.postMessage(storageStatusMessage(this.storage.status) satisfies FrameUpdate);
+    // So may its place: the person can browse elsewhere while it loads.
+    this.channel.port1.postMessage({ type: 'visibility', visible: this.visible } satisfies FrameUpdate);
   };
 
   private onMessage = (event: MessageEvent<unknown>): void => {
