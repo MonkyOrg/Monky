@@ -161,6 +161,10 @@ card ficam no **palco de voz**, não como um site externo que se abre sozinho.
 visualização. **Encerrar miniapp**, disponível para quem o criou ou para um
 administrador autorizado, encerra aquela instância para todos.
 
+Antes de fechar, o miniapp pode fazer uma pergunta, como se você quer salvar a
+partida. Responda no próprio miniapp ou clique em **Fechar agora** (ou
+**Encerrar agora**) para não esperar. Sair da sala nunca espera o miniapp.
+
 Com a visualização aberta, o card ganha o mesmo controle de volume de uma
 transmissão de tela, no canto inferior direito: passe o mouse sobre o botão
 (ou chegue com **Tab**) para ajustar de 0 a 200% e clique nele para mutar.

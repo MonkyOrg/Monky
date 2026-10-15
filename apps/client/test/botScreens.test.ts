@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { BOT_SCREEN_LIMITS, BOT_SCREEN_PERMISSION_POLICY_VERSION, botScreenDocumentConsentSchema, MessageType, ProtocolErrorCode, type BotScreen, type BotScreenDocumentConsent, type BotScreenRemoved, type SlashCommand, type VoiceParticipantState } from '@monky/shared';
+import vm from 'node:vm';
+import { BOT_SCREEN_LIMITS, BOT_SCREEN_PERMISSION_POLICY_VERSION, botScreenDocumentConsentSchema, MessageType, ProtocolErrorCode, type BotScreen, type BotScreenBridge, type BotScreenDocumentConsent, type BotScreenRemoved, type SlashCommand, type VoiceParticipantState } from '@monky/shared';
 import { EventBus, appEvents } from '../src/renderer/core/EventBus';
 import { sessionManager, type ServerSession } from '../src/renderer/core/SessionManager';
 import { bindBotScreenEvents } from '../src/renderer/core/botScreenEvents';
@@ -134,6 +135,105 @@ test('miniapp documents start at the saved volume and embed a self-contained vol
   assert.doesNotThrow(() => new Function(script), 'The serialized bootstrap and volume control parse in the miniapp');
   assert.ok(head.includes('HTMLMediaElement.prototype') && head.includes('AudioNode.prototype'),
     'The volume control is installed before the bot scripts');
+});
+
+const isBridge = (value: unknown): value is BotScreenBridge => typeof value === 'object' && value !== null &&
+  'onBeforeClose' in value && 'onClose' in value && 'sendAction' in value && 'onState' in value;
+
+test('the miniapp bridge announces lifecycle hooks, answers close requests and goes quiet once closing', async () => {
+  const document = botScreenDocument(snapshot(), { id: 'alice', nickname: 'Alice', locale: 'en' });
+  const script = /<script>([\s\S]*)<\/script>/.exec(document.slice(0, document.indexOf('<body>')))?.[1];
+  assert.ok(script);
+  const scope = new EventTarget();
+  // Window messages to the parent; the bridge posts its download hand-off this way, not on the port.
+  const handOffs: unknown[] = [];
+  const parent = {
+    // Like a real postMessage, the parent receives a structured clone (here, from the test's realm).
+    postMessage: (message: unknown, targetOrigin: string) => { handOffs.push([structuredClone(message), targetOrigin]); },
+  };
+  const errors: unknown[] = [];
+  vm.runInNewContext(script, {
+    window: scope, parent, structuredClone, TextEncoder,
+    // Outside a browser the volume control cannot install; that warning is expected here.
+    console: { warn: () => {}, error: (error: unknown) => { errors.push(error); } },
+  });
+  const bridge: unknown = Object.getOwnPropertyDescriptor(scope, 'monkyScreen')?.value;
+  assert.ok(isBridge(bridge));
+  assert.throws(() => Reflect.apply(bridge.onClose, bridge, ['not a function']), /Expected a close handler/);
+  assert.throws(() => Reflect.apply(bridge.onBeforeClose, bridge, [null]), /Expected a before-close handler/);
+
+  const { port1, port2 } = new MessageChannel();
+  const received: unknown[] = [];
+  port1.onmessage = (event: MessageEvent<unknown>) => { received.push(event.data); };
+  port1.start();
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+  const take = async (): Promise<unknown> => {
+    for (let attempt = 0; !received.length; attempt++) {
+      assert.ok(attempt < 200, 'Expected a message from the bridge');
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    return received.shift();
+  };
+  try {
+    const closes: string[] = [];
+    let release = (): void => {};
+    bridge.onClose(async ({ reason }) => {
+      closes.push(reason);
+      await new Promise<void>((resolve) => { release = () => resolve(); });
+    });
+    await settle();
+    assert.deepEqual(received, [], 'Nothing is announced before the parent connects');
+    scope.dispatchEvent(Object.assign(new Event('message'), { source: parent, data: 'monky-screen-connect', ports: [port2] }));
+    assert.deepEqual(await take(), { type: 'hooks', beforeClose: false, close: true }, 'Hooks registered while loading are announced on connect');
+
+    const asked: string[] = [];
+    const answers: Array<boolean | undefined> = [false, undefined];
+    const offAsk = bridge.onBeforeClose(({ reason }) => {
+      asked.push(reason);
+      return answers.shift();
+    });
+    assert.deepEqual(await take(), { type: 'hooks', beforeClose: true, close: true });
+    const offBroken = bridge.onBeforeClose(() => { throw new Error('A broken hook'); });
+    await settle();
+    assert.deepEqual(received, [], 'Only a change in the kinds of hooks is announced');
+
+    port1.postMessage({ type: 'beforeClose', id: 'first', reason: 'leave' });
+    assert.deepEqual(await take(), { type: 'beforeCloseAck', id: 'first' }, 'The bridge acknowledges before asking anything');
+    assert.deepEqual(await take(), { type: 'beforeCloseResult', id: 'first', proceed: false }, 'false keeps the view open');
+    assert.deepEqual(handOffs, [], 'Staying open needs no hand-off');
+    port1.postMessage({ type: 'beforeClose', id: 'second', reason: 'end' });
+    assert.deepEqual(await take(), { type: 'beforeCloseAck', id: 'second' });
+    assert.deepEqual(await take(), { type: 'beforeCloseResult', id: 'second', proceed: true });
+    assert.deepEqual(handOffs, [[{ type: 'monky-screen-handoff', id: 'second' }, '*']],
+      'Agreeing to close also hands off over the window, after anything the answer started');
+    assert.deepEqual(asked, ['leave', 'end'], 'Handlers run in order and stop at the first false');
+    assert.equal(errors.length, 1, 'A throwing hook is reported in the miniapp console and cannot hold its person');
+
+    offAsk();
+    offBroken();
+    assert.deepEqual(await take(), { type: 'hooks', beforeClose: false, close: true });
+    assert.equal(bridge.sendAction('move', { cell: 1 }), true);
+    assert.deepEqual(await take(), { action: 'move', payload: { cell: 1 }, revision: 0 });
+
+    const revisions: number[] = [];
+    bridge.onState((_state, revision) => { revisions.push(revision); });
+    port1.postMessage({ type: 'close', reason: 'revoked' });
+    await settle();
+    assert.deepEqual(closes, ['revoked']);
+    assert.deepEqual(received, [], 'The parent waits until every onClose handler settles');
+    assert.equal(bridge.sendAction('late', {}), false, 'A closing view has no bridge');
+    port1.postMessage({ type: 'state', state: { count: 9 }, revision: 9 });
+    port1.postMessage({ type: 'beforeClose', id: 'third', reason: 'leave' });
+    bridge.onBeforeClose(() => true);
+    release();
+    assert.deepEqual(await take(), { type: 'closed' });
+    await settle();
+    assert.deepEqual(revisions, [0], 'Nothing but the close reaches a closing view');
+    assert.deepEqual(received, [], 'A closing view neither answers nor announces again');
+    assert.equal(handOffs.length, 1, 'A closing view hands nothing else off');
+  } finally {
+    port1.close();
+  }
 });
 
 test('like a sharer screen audio, a bot miniapp mute covers the call and ends with it', () => {

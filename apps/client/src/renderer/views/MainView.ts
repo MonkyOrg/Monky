@@ -138,6 +138,9 @@ export class MainView {
     this.stopSidebarPing();
 
     if (home) {
+      // The Home layout replaces the stage's DOM: close its miniapps first, so their onClose runs
+      // and they release their documents, instead of dying with the detached markup.
+      this.voiceStageView?.destroy();
       this.renderHomeShell();
       return;
     }

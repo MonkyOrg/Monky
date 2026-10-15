@@ -6,7 +6,7 @@ const clientRoot = path.resolve(__dirname, '..');
 if (!process.versions.electron) {
   const { test } = require('node:test');
   const assert = require('node:assert/strict');
-  test('voice-stage miniapps are opt-in, session-bound and preserve opaque frames across live UI updates', { timeout: 120000 }, async () => {
+  test('voice-stage miniapps are opt-in, session-bound and preserve opaque frames across live UI updates', { timeout: 180000 }, async () => {
     const profile = path.join(clientRoot, 'dist-test', `screen-profile-${process.pid}`);
     fs.mkdirSync(profile, { recursive: true });
     const env = { ...process.env, MONKY_SCREEN_PROFILE: profile };
@@ -36,6 +36,8 @@ if (!process.versions.electron) {
   let timeout;
   let leaks = 0;
   let popups = 0;
+  // What miniapp lifecycle hooks report to "their own server", even after their document is gone.
+  const hookEvents = [];
   const windows = [];
   const nativeErrors = [];
   const owns = event => windows.some(window => !window.isDestroyed()
@@ -176,6 +178,12 @@ if (!process.versions.electron) {
               response.end('web resource');
               return;
             }
+            if (request.url.startsWith('/__hook?')) {
+              hookEvents.push(decodeURIComponent(request.url.slice('/__hook?'.length)));
+              response.setHeader('Access-Control-Allow-Origin', '*');
+              response.end('saved');
+              return;
+            }
             if (request.url !== '/__screens__') return next();
             response.setHeader('Content-Type', 'text/html');
             response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/footerControls.css"></head><body><div id="app"></div></body></html>');
@@ -190,7 +198,7 @@ if (!process.versions.electron) {
     });
     const url = `http://127.0.0.1:${http.address().port}/__screens__`;
     const leak = `http://127.0.0.1:${http.address().port}/__leak`;
-    timeout = setTimeout(() => { console.error('Voice screen DOM regression timed out'); void finish(1); }, 100000);
+    timeout = setTimeout(() => { console.error('Voice screen DOM regression timed out'); void finish(1); }, 160000);
     for (const [id, locale] of [['alice', 'pt-BR'], ['spectator', 'en']]) {
       const window = new BrowserWindow({
         show: false, width: 1280, height: 1000,
@@ -793,13 +801,236 @@ if (!process.versions.electron) {
       await waitFor(() => frames(aliceWindow).length === 0, 'non-notifying fixture teardown');
     }
     await waitFor(async () => await run(spectatorWindow, '!document.querySelector(".chat-copy-toast:not([data-ui-closing])")'), 'viewer notice expires automatically');
+
+    // Lifecycle hooks: the miniapp decides what happens around a close; its person can always leave.
+    const hookUrl = `http://127.0.0.1:${http.address().port}/__hook`;
+    const reportOnClose = `monkyScreen.onClose(async ({ reason }) => {
+        window.hookLog.push('close:' + reason);
+        const observed = [reason, window.gameToken, window.audible(), monkyScreen.sendAction('late', {})].join('|');
+        await new Promise((resolve) => setTimeout(resolve, window.closeMs));
+        await fetch(${JSON.stringify(hookUrl)} + '?' + encodeURIComponent(observed));
+      });`;
+    const hooksHtml = (withClose) => `<p>Hooks</p><script>
+      window.gameId = 'hooks'; window.gameToken = Math.random(); window.hookLog = [];
+      window.beforeCloseMode = 'proceed'; window.closeMs = 0;
+      const realm = document.createElement('iframe');
+      realm.hidden = true;
+      document.body.append(realm);
+      const nativeVolume = Object.getOwnPropertyDescriptor(realm.contentWindow.HTMLMediaElement.prototype, 'volume').get;
+      const probe = new Audio();
+      probe.volume = 0.8;
+      window.audible = () => Math.round(nativeVolume.call(probe) * 1000) / 1000;
+      window.saveAndAnswer = (proceed) => {
+        const link = document.createElement('a');
+        link.download = 'save-state.json';
+        link.href = URL.createObjectURL(new Blob([JSON.stringify({ token: window.gameToken })], { type: 'application/json' }));
+        document.body.append(link);
+        link.click();
+        window.answer(proceed);
+      };
+      monkyScreen.onBeforeClose(({ reason }) => {
+        window.hookLog.push('before:' + reason);
+        if (window.beforeCloseMode === 'cancel') return false;
+        if (window.beforeCloseMode === 'ask') return new Promise((resolve) => { window.answer = resolve; });
+      });
+      ${withClose ? reportOnClose : ''}
+    </script>`;
+    const hooksScreen = (instanceId, createdAt, withClose = true) => ({
+      id: 'hooks', instanceId, creatorUserId: 'alice', botId: 'bot', channelId: 'voice', title: 'Hooks',
+      revision: 0, createdAt, state: { count: 0 }, html: hooksHtml(withClose),
+    });
+    const hookTile = '[data-bot-screen-id=hooks]';
+    const hookClose = JSON.stringify(`${hookTile} [data-bot-screen-action=close]`);
+    const hookEnd = JSON.stringify(`${hookTile} [data-bot-screen-action=end]`);
+    const busyHooks = 'document.querySelector("[data-bot-screen-id=hooks]")?.getAttribute("aria-busy") === "true"';
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    let readyActions = 0;
+    const openHooks = async (exclude = []) => {
+      const opener = `document.querySelector("[data-watch-bot-screen=hooks]") ?? (document.querySelector("${hookTile} .bot-screen-placeholder")?.hidden === false
+        ? document.querySelector("${hookTile} [data-bot-screen-action=open]") : null)`;
+      await waitFor(async () => await run(aliceWindow, `!!(${opener})`), 'a way to open hooks');
+      await run(aliceWindow, `(${opener}).click()`);
+      await approveMiniapp(aliceWindow);
+      let opened;
+      await waitFor(async () => {
+        for (const frame of frames(aliceWindow)) {
+          try {
+            const [gameId, token] = await frame.executeJavaScript('[window.gameId, window.gameToken]');
+            if (gameId === 'hooks' && !exclude.includes(token)) {
+              opened = { frame, token };
+              return true;
+            }
+          } catch (error) {
+            if (!isDisposedFrameError(error)) throw error;
+          }
+        }
+        return false;
+      }, 'hooks frame');
+      // An action follows the hook announcement on the same port: once it arrives, the stage knows the hooks.
+      const ready = `ready${++readyActions}`;
+      await waitFor(async () => await opened.frame.executeJavaScript(`monkyScreen.sendAction(${JSON.stringify(ready)}, {})`), 'hooks bridge connected');
+      await waitFor(async () => await run(aliceWindow, `window.screenFixture.actions.some(entry => entry.id === "hooks" && entry.action === ${JSON.stringify(ready)})`), 'hooks announced');
+      return opened;
+    };
+    const waitUntil = async (check, description, timeoutMs) => {
+      for (const deadline = Date.now() + timeoutMs; !check(); await sleep(25)) {
+        assert.ok(Date.now() < deadline, `Timed out: ${description}`);
+      }
+    };
+
+    await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(hooksScreen('hooks-1', 100))})`);
+    let hooks = await openHooks();
+    assert.ok(await hooks.frame.executeJavaScript('window.audible()') > 0, 'The probe plays while the view is open');
+    await hooks.frame.executeJavaScript('window.beforeCloseMode = "cancel"');
+    await run(aliceWindow, `document.querySelector(${hookClose}).click()`);
+    await waitFor(async () => await hooks.frame.executeJavaScript('window.hookLog.join()') === 'before:leave', 'onBeforeClose asked about leaving');
+    await waitFor(async () => await run(aliceWindow, `!(${busyHooks})`), 'the miniapp answered');
+    assert.equal(await hooks.frame.executeJavaScript('window.gameToken'), hooks.token, 'Answering false keeps the same live view');
+    assert.equal(await run(aliceWindow, `document.querySelector(${hookClose}).getAttribute("aria-label")`), 'Sair do miniapp');
+
+    // In the filmstrip a frame ignores the pointer, so a pending question brings the miniapp into focus.
+    await run(aliceWindow, `document.querySelector("${hookTile} [data-bot-screen-action=focus]").click()`);
+    await waitFor(async () => await run(aliceWindow, '!document.querySelector("#stage-participants-area .stage-focused-main")'), 'grid layout');
+    await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=second] [data-bot-screen-action=focus]").click()');
+    await waitFor(async () => await run(aliceWindow, `document.querySelector("${hookTile}").classList.contains("stage-mini-card")`), 'hooks in the filmstrip');
+    await hooks.frame.executeJavaScript('window.beforeCloseMode = "ask"; window.closeMs = 1500');
+    await run(aliceWindow, `document.querySelector(${hookClose}).click()`);
+    await waitFor(async () => await run(aliceWindow, `${busyHooks} && document.querySelector("${hookTile}").classList.contains("stage-focused-main")`), 'pending question in focus');
+    assert.deepEqual(await run(aliceWindow, `(() => {
+      const tile = document.querySelector("${hookTile}");
+      return [tile.querySelector("[data-bot-screen-action=close]").getAttribute("aria-label"),
+        tile.querySelector(".bot-screen-notice").textContent, tile.querySelector("[data-bot-screen-action=end]").disabled];
+    })()`), ['Fechar agora', 'Hooks está confirmando antes de fechar.', true], 'A pending question is explained and always escapable');
+    await sleep(3500);
+    assert.equal(await run(aliceWindow, `${busyHooks} && !!document.querySelector("${hookTile} iframe")`), true, 'A miniapp that answered the request may ask for as long as its person needs');
+    await run(aliceWindow, `document.querySelector(${hookClose}).click()`);
+    await waitFor(async () => await run(aliceWindow, `!document.querySelector("${hookTile} iframe") && !(${busyHooks})`), 'Close now');
+    assert.deepEqual(await run(aliceWindow, `(() => {
+      const area = document.querySelector(".bot-screen-holding");
+      return [!!area?.querySelector("iframe"), area?.hidden, area?.inert, area?.getAttribute("aria-hidden"),
+        !document.querySelector("${hookTile} .bot-screen-placeholder").hidden];
+    })()`), [true, true, true, 'true', true], 'The tile closes at once while the document waits off stage, hidden and inert');
+    assert.equal(await hooks.frame.executeJavaScript('window.gameToken'), hooks.token, 'Parking keeps the document instead of reloading it');
+    assert.equal(await hooks.frame.executeJavaScript('window.hookLog.join()'), 'before:leave,before:leave,close:leave');
+    await waitUntil(() => hookEvents.includes(`leave|${hooks.token}|0|false`), 'onClose reports from a muted view without a bridge', 5000);
+    await waitUntil(() => frames(aliceWindow).length === 0, 'document released once onClose settles', 3000);
+
+    // End: a false answer keeps the miniapp for everyone; proceeding ends it and reports `end`.
+    hooks = await openHooks();
+    await hooks.frame.executeJavaScript('window.beforeCloseMode = "cancel"');
+    await run(aliceWindow, `document.querySelector(${hookEnd}).click()`);
+    await waitFor(async () => await hooks.frame.executeJavaScript('window.hookLog.join()') === 'before:end', 'onBeforeClose asked about ending');
+    await waitFor(async () => await run(aliceWindow, `!(${busyHooks})`), 'the end answer');
+    assert.equal(await run(aliceWindow, 'window.screenFixture.sent.some(entry => entry.type === "BOT_SCREEN_END" && entry.payload.id === "hooks")'), false, 'Answering false sends no END');
+    await hooks.frame.executeJavaScript('window.beforeCloseMode = "proceed"');
+    await run(aliceWindow, `document.querySelector(${hookEnd}).click()`);
+    await waitUntil(() => hookEvents.includes(`end|${hooks.token}|0|false`), 'END reaches onClose as end', 5000);
+    assert.equal(await run(aliceWindow, 'window.screenFixture.sent.filter(entry => entry.type === "BOT_SCREEN_END" && entry.payload.id === "hooks").length'), 1);
+    await waitUntil(() => frames(aliceWindow).length === 0, 'ended document released', 3000);
+
+    // A stuck document cannot hold its person: without an acknowledgement the view closes.
+    await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(hooksScreen('hooks-2', 101))})`);
+    hooks = await openHooks();
+    const busyUntil = await hooks.frame.executeJavaScript('window.busyUntil = Date.now() + 4800; setTimeout(() => { while (Date.now() < window.busyUntil); }, 100); window.busyUntil');
+    await sleep(500);
+    const askedAt = Date.now();
+    await run(aliceWindow, `document.querySelector(${hookClose}).click()`);
+    for (const deadline = askedAt + 4500; await run(aliceWindow, `!!document.querySelector("${hookTile} iframe")`); await sleep(25)) {
+      assert.ok(Date.now() < deadline, 'A stuck miniapp cannot hold the view open');
+    }
+    const closedAt = Date.now();
+    assert.ok(closedAt - askedAt >= 2800, `The stage first waited for an acknowledgement (${closedAt - askedAt} ms)`);
+    assert.ok(closedAt < busyUntil, 'The view closed while its document was still stuck');
+    await waitUntil(() => hookEvents.includes(`leave|${hooks.token}|0|false`), 'the recovered document still ran onClose', 6000);
+    await waitUntil(() => frames(aliceWindow).length === 0, 'stuck document released', 3000);
+
+    // Revocations never wait for a question; onClose gets its grace period, which survives the stage teardown.
+    hooks = await openHooks();
+    await hooks.frame.executeJavaScript('window.beforeCloseMode = "ask"; window.closeMs = 60000');
+    await run(aliceWindow, `document.querySelector(${hookClose}).click()`);
+    await waitFor(async () => await run(aliceWindow, busyHooks), 'a question pending before the revocation');
+    await waitFor(async () => await hooks.frame.executeJavaScript('typeof window.answer === "function"'), 'the miniapp is asking');
+    const revokedAt = Date.now();
+    await run(aliceWindow, 'window.screenFixture.leave()');
+    await waitFor(async () => await run(aliceWindow, `!document.querySelector("${hookTile}") && !!document.querySelector(".bot-screen-holding iframe")`), 'leaving the room closes at once');
+    assert.equal(await hooks.frame.executeJavaScript('window.hookLog.join()'), 'before:leave,close:revoked', 'The closing document survived the stage teardown');
+    assert.equal(await hooks.frame.executeJavaScript('window.gameToken'), hooks.token);
+    await waitUntil(() => frames(aliceWindow).length === 0, 'the grace period ends a document whose onClose never settles', 8000);
+    assert.ok(Date.now() - revokedAt >= 4500, 'onClose had its grace period');
+    assert.equal(hookEvents.some(event => event.startsWith('revoked|')), false, 'An unfinished onClose is cut at the limit');
+
+    // The person saves from inside the miniapp; the download survives even an immediate close (no onClose).
+    await run(aliceWindow, 'window.screenFixture.join("voice")');
+    await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(hooksScreen('hooks-3', 102, false))})`);
+    hooks = await openHooks();
+    const downloads = [];
+    const onDownload = (_event, item) => {
+      const entry = { name: item.getFilename(), state: 'progressing', path: path.join(app.getPath('userData'), `hooks-download-${downloads.length}.json`) };
+      item.setSavePath(entry.path);
+      item.once('done', (_done, state) => { entry.state = state; });
+      downloads.push(entry);
+    };
+    aliceWindow.webContents.session.on('will-download', onDownload);
+    try {
+      await hooks.frame.executeJavaScript('window.beforeCloseMode = "ask"');
+      await run(aliceWindow, `document.querySelector(${hookClose}).click()`);
+      await waitFor(async () => await hooks.frame.executeJavaScript('typeof window.answer === "function"'), 'the save question');
+      await hooks.frame.executeJavaScript('window.saveAndAnswer(true)', true);
+      await waitUntil(() => frames(aliceWindow).length === 0, 'closed after saving', 5000);
+      await waitUntil(() => downloads[0]?.state === 'completed', 'the download started before closing completes', 5000)
+        .catch((error) => { throw new Error(`${error.message}: ${JSON.stringify(downloads)}`); });
+      assert.equal(downloads[0].name, 'save-state.json');
+      assert.deepEqual(JSON.parse(fs.readFileSync(downloads[0].path, 'utf8')), { token: hooks.token });
+    } finally {
+      aliceWindow.webContents.session.removeListener('will-download', onDownload);
+    }
+
+    // A closing document gives way to a view being opened within the window's two documents.
+    await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(hooksScreen('hooks-4', 103))})`);
+    hooks = await openHooks();
+    const parkedToken = hooks.token;
+    await hooks.frame.executeJavaScript('window.beforeCloseMode = "proceed"; window.closeMs = 60000');
+    // The stage closes only after the bridge's hand-off; without it, after a short fallback.
+    await run(aliceWindow, 'window.blockHandOff = (event) => { if (event.data?.type === "monky-screen-handoff") event.stopImmediatePropagation(); }; addEventListener("message", window.blockHandOff, true)');
+    const proceededAt = Date.now();
+    await run(aliceWindow, `document.querySelector(${hookClose}).click()`);
+    await sleep(400);
+    assert.equal(await run(aliceWindow, `${busyHooks} && !!document.querySelector("${hookTile} iframe")`), true,
+      'Agreeing to close waits for the hand-off of downloads the answer may have started');
+    await waitFor(async () => await run(aliceWindow, `!document.querySelector("${hookTile} iframe") && !!document.querySelector(".bot-screen-holding iframe")`), 'closing document parked');
+    assert.ok(Date.now() - proceededAt >= 900, 'A missing hand-off only delays the close by its fallback');
+    await run(aliceWindow, 'removeEventListener("message", window.blockHandOff, true); delete window.blockHandOff');
+    hooks = await openHooks([parkedToken]);
+    assert.equal(frames(aliceWindow).length, 2, 'Reopening does not wait for the closing document');
+    await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=second] [data-bot-screen-action=open]").click()');
+    await approveMiniapp(aliceWindow);
+    await gameFrame(aliceWindow, 'second');
+    const liveTokens = [];
+    for (const frame of frames(aliceWindow)) {
+      try { liveTokens.push(await frame.executeJavaScript('window.gameToken')); } catch (error) { if (!isDisposedFrameError(error)) throw error; }
+    }
+    assert.equal(liveTokens.length, 2, 'The closing document was released for the new view');
+    assert.equal(liveTokens.includes(parkedToken), false);
+    for (const id of ['hooks', 'second']) await run(aliceWindow, `document.querySelector("[data-bot-screen-id=${id}] [data-bot-screen-action=close]").click()`);
+    await waitUntil(() => frames(aliceWindow).length === 0, 'both views closed', 3000);
+
+    // Home replaces the whole layout; an open miniapp still closes through its lifecycle and frees its slot.
+    hooks = await openHooks();
+    await run(aliceWindow, 'window.screenFixture.goHome()');
+    await waitUntil(() => hookEvents.includes(`revoked|${hooks.token}|0|false`), 'going Home runs onClose', 5000);
+    await waitUntil(() => frames(aliceWindow).length === 0, 'Home releases the miniapp document', 3000);
+    await run(aliceWindow, 'window.screenFixture.leaveHome()');
+    hooks = await openHooks();
+    await run(aliceWindow, `document.querySelector(${hookClose}).click()`);
+    await waitUntil(() => frames(aliceWindow).length === 0, 'the view reopened after Home closes normally', 3000);
+
     for (const window of windows) {
       assert.deepEqual(await run(window, 'window.screenFixture.errors'), [], 'No unhandled renderer lifecycle errors');
       assert.equal(await run(window, 'window.screenFixture.destroy()'), true, 'view and lifecycle listeners are removed');
       await waitFor(() => frames(window).length === 0, 'final teardown');
     }
     assert.deepEqual(nativeErrors, [], 'No native client-log errors during stage lifecycle');
-    console.log('Voice stage DOM: creator/admin END, live permission revocation, duplicate/delayed END, shared removal, stale-instance and background isolation; existing local leave/watch, fullscreen, locale, seats, sandbox and teardown passed.');
+    console.log('Voice stage DOM: creator/admin END, live permission revocation, duplicate/delayed END, shared removal, stale-instance and background isolation; lifecycle hooks (onBeforeClose answers, Close now, stuck documents, muted onClose grace off stage, saves on close); existing local leave/watch, fullscreen, locale, seats, sandbox and teardown passed.');
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
 }
@@ -992,7 +1223,7 @@ async function setupVoiceStage(id, locale, adminPermission) {
   const listenerCount = () => [...appEvents.listeners.values()].reduce((sum, entries) => sum + entries.size, 0);
   const before = listenerCount();
   const offScreens = bindBotScreenEvents();
-  const view = new MainView(document.getElementById('app'));
+  const view = new MainView(document.getElementById('app'), { suspend() {}, render() {} });
   const offLanguage = appEvents.on('i18n.language_changed', () => view.render(true));
   // The application, rather than MainView, owns session navigation rendering.
   const offNavigation = appEvents.on('session.changed', ({ key }) => {
@@ -1060,6 +1291,8 @@ async function setupVoiceStage(id, locale, adminPermission) {
       other.botScreenStore.upsert({ ...screens.get('game'), title: 'WRONG SERVER', state: { count: 999 }, revision: 99 });
       sessionManager.activate(other.key);
     },
+    goHome() { sessionManager.showHome(); view.render(); },
+    leaveHome() { sessionManager.activate(session.key); },
     backgroundSnapshot() {
       const previous = screens.get('game');
       receive({ ...previous, title: 'Background voice game', revision: previous.revision + 1 });

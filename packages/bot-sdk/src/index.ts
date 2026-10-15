@@ -2068,6 +2068,7 @@ export type {
 export type {
   BotSelector, BotSelectorCreate, BotSelectorPatch, BotSelectorPublic, BotSelectorRespondedPayload,
   BotScreen, BotScreenRef, BotScreenCreate, BotScreenPatch, BotScreenActionEvent, BotScreenJson, BotScreenRemoved,
+  BotScreenBridge, BotScreenViewer, BotScreenBeforeCloseEvent, BotScreenBeforeCloseReason, BotScreenCloseEvent, BotScreenCloseReason,
 } from '@monky/shared';
 export type {
   BotForm, BotFormField, BotFormValues, BotManifest, BotLocale, CommandLocalization, CommandLocalizations,

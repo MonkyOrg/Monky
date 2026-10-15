@@ -7,8 +7,9 @@ e `miniapps`; ele não precisa de `publish_voice`.
 
 **Referência:** [BotScreen](/bots-api-midia#botscreen),
 [BotScreenCreate](/bots-api-midia#botscreencreate),
-[BotScreenPatch](/bots-api-midia#botscreenpatch) e
-[BotScreenActionEvent](/bots-api-midia#botscreenactionevent).
+[BotScreenPatch](/bots-api-midia#botscreenpatch),
+[BotScreenActionEvent](/bots-api-midia#botscreenactionevent) e
+[BotScreenBridge](/bots-api-midia#botscreenbridge).
 
 <AppScreenshot src="/screenshots/miniapp-pt.png" alt="Miniapp de exemplo em foco no palco de voz do Monky." caption="O cliente hospeda a visualização isolada; o bot continua responsável pelo estado e pelas regras." />
 
@@ -16,7 +17,7 @@ e `miniapps`; ele não precisa de `publish_voice`.
 
 Uma tela é um miniapp HTML/CSS/JavaScript apresentado **no palco de voz**. Quem está na sala recebe um convite no mesmo canto dos avisos de compartilhamento de tela e escolhe se quer visualizar. Não há card de miniapp no chat nem abertura automática. Diferentemente dos formulários privados de `ctx.prompt()`, ele aceita vários participantes e continua ativo depois que o handler do comando termina. O `/jogo-da-velha` do MonkyBot demonstra dois jogadores e espectadores; as regras continuam no bot, não no JavaScript de quem está vendo a tela.
 
-O cartão permanece no palco junto de câmeras e compartilhamentos, mesmo com a visualização fechada. **Abrir miniapp** inicia a visualização local e coloca o miniapp em foco no palco, assim como abrir pelo convite, para qualquer participante. **Sair do miniapp** a encerra e devolve o cartão ao estado fechado, sem encerrar o miniapp para os demais. Focar ou voltar à grade só altera o layout: não recarrega a tela nem muda quem ocupa as vagas de jogador. Abrir uma tela para assistir não equivale a entrar na partida.
+O cartão permanece no palco junto de câmeras e compartilhamentos, mesmo com a visualização fechada. **Abrir miniapp** inicia a visualização local e coloca o miniapp em foco no palco, assim como abrir pelo convite, para qualquer participante. **Sair do miniapp** a encerra e devolve o cartão ao estado fechado, sem encerrar o miniapp para os demais. Antes disso, o miniapp pode perguntar algo, como se a pessoa quer salvar a partida (veja [Ciclo de vida da visualização](#ciclo-de-vida-da-visualizacao)). Focar ou voltar à grade só altera o layout: não recarrega a tela nem muda quem ocupa as vagas de jogador. Abrir uma tela para assistir não equivale a entrar na partida.
 
 **Encerrar miniapp** é outra ação: remove a instância, o cartão e os convites
 para todos e fecha as visualizações abertas. Só aparece para quem invocou o
@@ -59,6 +60,8 @@ No documento isolado, o bridge `window.monkyScreen` fornece:
 | `viewer` | Contexto local imutável com `id`, `nickname` e `locale` (`pt-BR` ou `en`) da pessoa que abriu a tela |
 | `onState((state, revision) => ...)` | Entrega o estado inicial e as atualizações; retorna uma função de unsubscribe |
 | `sendAction(action, payload)` | Envia uma intenção vinculada à revisão atual; retorna se o bridge aceitou o envio, não se o bot aceitou a ação |
+| `onBeforeClose(handler)` | Roda antes de um fechamento pedido por esta pessoa; devolver `false` mantém a visualização aberta. Veja [Ciclo de vida da visualização](#ciclo-de-vida-da-visualizacao) |
+| `onClose(handler)` | Roda em todo fechamento, com a visualização já escondida e muda, por até 5 segundos |
 
 Leia `window.monkyScreen.viewer.locale` dentro do callback de `onState()` para traduzir os controles de cada pessoa. Trocar o idioma no aplicativo também aciona esse callback, sem mudar o estado/revisão compartilhados nem recriar o iframe. Não escolha o idioma dos controles a partir do estado público ou do idioma de quem criou a tela.
 
@@ -97,6 +100,71 @@ visualização local e revoga ações. **Sair do miniapp** não envia END, não 
 o estado compartilhado e não libera automaticamente uma vaga de jogador.
 
 **Estado compartilhado, sem segredos:** os participantes autorizados que estão naquela sala de voz recebem o HTML e o estado JSON. O servidor também verifica a presença na sala para listar e interagir; estar em outro canal ou em voz em outro dispositivo não autoriza esta conexão. Interações exigem `USE_BOT_COMMANDS`. Não inclua tokens, caminhos locais ou informações secretas de um jogador. A tela não recebe Node.js, preload, IPC nem acesso ao DOM do cliente.
+
+## Ciclo de vida da visualização {#ciclo-de-vida-da-visualizacao}
+
+Os ganchos `onBeforeClose` e `onClose` avisam o miniapp de que a visualização
+desta pessoa vai fechar. O Monky só informa o evento; o miniapp decide o que
+fazer, como perguntar se a pessoa quer salvar a partida.
+
+| Gancho | Quando roda | Como o Monky espera |
+|--------|-------------|---------------------|
+| `onBeforeClose(({ reason }) => ...)` | Antes de **Sair do miniapp** (`leave`) ou **Encerrar miniapp** (`end`), quando esta pessoa pede | A visualização continua aberta e pode perguntar o que quiser. Os handlers rodam em ordem; o primeiro que devolver `false`, direto ou por uma promise, mantém o miniapp aberto |
+| `onClose(({ reason }) => ...)` | Em todo fechamento, inclusive depois de um `onBeforeClose` | Até 5 segundos, com a visualização já escondida e muda, sem estado novo e sem `sendAction`. Os handlers rodam em paralelo |
+
+Os dois devolvem uma função que cancela o registro. Registre-os enquanto o
+documento carrega: o Monky só espera os ganchos que já conhece. O `reason` do
+`onClose` diz por que a visualização fechou:
+
+| `reason` | Situação |
+|----------|----------|
+| `leave` | A pessoa clicou em **Sair do miniapp** ou em **Fechar agora** |
+| `end` | A pessoa encerrou o miniapp para todos |
+| `ended` | O miniapp deixou de existir: outra pessoa o encerrou, o bot o fechou, desconectou ou perdeu o acesso à sala |
+| `revoked` | Esta visualização perdeu o acesso: a pessoa saiu ou trocou de sala ou de servidor, saiu do palco, desconectou ou perdeu permissão |
+
+Enquanto o `onBeforeClose` responde, o botão do cartão vira **Fechar agora**
+(ou **Encerrar agora**), e um cartão em miniatura entra em foco para a pergunta
+ficar legível e clicável. A pessoa sempre consegue sair: o bridge confirma o
+recebimento do pedido sozinho e, se o documento não confirmar em 3 segundos por
+estar travado, o Monky fecha a visualização. Depois da confirmação não há limite
+de tempo enquanto a pessoa responde. Uma exceção em um handler aparece no
+console do miniapp e não impede o fechamento.
+
+Em qualquer fechamento, a tela some, o áudio silencia e as ações são cortadas
+na hora; revogações e encerramentos feitos por outras pessoas fazem isso sem
+esperar o `onBeforeClose`. Só então o `onClose` roda, invisível, por no máximo
+5 segundos; se não terminar, o documento é descartado. Como no ajuste de volume, o silêncio não alcança
+iframes filhos, como players incorporados: pare-os no começo do `onClose`. Nesse
+intervalo o documento mantém a própria rede, e o serviço do bot continua
+responsável por autorizar o que recebe. Sair do Monky ou recarregá-lo não dá
+tempo a nenhum gancho: só há o evento síncrono `pagehide` do navegador. Um
+travamento do aplicativo não avisa nada.
+
+```js
+const tela = window.monkyScreen;
+let progressoPendente = false;
+
+// Clientes anteriores aos ganchos não têm esses métodos.
+tela.onBeforeClose?.(async () => {
+  if (!progressoPendente) return;
+  const escolha = await perguntarNoMiniapp(); // 'salvar' | 'descartar' | 'voltar'
+  if (escolha === 'voltar') return false;
+  if (escolha === 'salvar') await salvar();
+  progressoPendente = false;
+});
+
+tela.onClose?.(async () => {
+  // Sem tela e sem som: salve sem perguntar.
+  if (progressoPendente) await salvar();
+});
+```
+
+Como o `onClose` roda sem tela, não pergunte nada à pessoa nem inicie downloads
+nele: salve no serviço do bot e mantenha também um salvamento periódico para os
+casos sem gancho. Já um download que a pessoa inicia num botão do miniapp antes
+de o `onBeforeClose` responder chega ao navegador antes de a visualização fechar
+e continua depois disso.
 
 ## Recursos web do miniapp
 
@@ -150,7 +218,7 @@ limita `<audio>`/`<video>` a 100%. `OfflineAudioContext` não é alterado.
 Iframes filhos, como players incorporados, e páginas para onde o frame navegar
 não recebem o ajuste; toque o áudio no próprio documento do miniapp.
 
-Autentique conexões externas a partir de uma ação recebida pelo bot, sem confiar em um `userId` enviado pelo browser e sem publicar tokens no estado compartilhado. Encerre conexões, Workers, áudio e timers ao sair da visualização. Se o app utiliza um serviço externo, verifique sua disponibilidade e mostre um erro claro antes de iniciar a atividade.
+Autentique conexões externas a partir de uma ação recebida pelo bot, sem confiar em um `userId` enviado pelo browser e sem publicar tokens no estado compartilhado. Encerre conexões, Workers, áudio e timers ao sair da visualização, no `onClose` (ou no `pagehide`, em clientes anteriores aos ganchos). Se o app utiliza um serviço externo, verifique sua disponibilidade e mostre um erro claro antes de iniciar a atividade.
 
 Quando o próprio bot serve os recursos do miniapp numa porta dele, declare-a em
 [`monkyBot.requirements`](/bots-distribuicao#portas-configuracoes-e-verificacao)
