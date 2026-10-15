@@ -10,7 +10,7 @@ import { spawn, spawnSync } from 'node:child_process';
 const require = createRequire(import.meta.url);
 const { WebSocket } = require('ws');
 const { MonkyServer } = require('../apps/server/dist/server.js');
-const { BotClient, BOT_CAPABILITIES, LIMITS, MessageType, PROTOCOL_VERSION } = require('../packages/bot-sdk/dist/index.js');
+const { BotClient, BotRequestError, BOT_CAPABILITIES, BOT_STORAGE_LIMITS, LIMITS, MessageType, PROTOCOL_VERSION } = require('../packages/bot-sdk/dist/index.js');
 const { rtcSignalSchema } = require('@monky/shared');
 
 function identity() {
@@ -610,6 +610,48 @@ try {
   await owner.request(MessageType.CHANNEL_DELETE, { channelId: privateScreens });
   assert.equal((await privateRemoved)[0].id, privateCall.invocationId);
   assert.deepEqual(sdkErrors, []);
+
+  // Bot storage through the real SDK and server: an object at the per-object limit must fit one
+  // message both ways, and a full storage pauses autosaves instead of failing the activity.
+  const storage = bot.storage('e2e');
+  const largest = Buffer.alloc(BOT_STORAGE_LIMITS.objectBytes, 0x5a);
+  largest[0] = 1;
+  largest[largest.length - 1] = 2;
+  assert.equal((await storage.put('nes/rom-hash/largest', largest)).sizeBytes, largest.byteLength);
+  assert.ok(Buffer.from((await storage.get('nes/rom-hash/largest')).data).equals(largest),
+    'An object at the per-object limit travels in a single message both ways');
+  await assert.rejects(storage.put('nes/rom-hash/too-big', Buffer.alloc(BOT_STORAGE_LIMITS.objectBytes + 1)));
+  assert.equal(await storage.delete('nes/rom-hash/largest'), true);
+  const save = Buffer.from(Array.from({ length: 300 * 1024 }, (_, index) => index % 251));
+  const saved = await storage.put('nes/rom-hash/slot-1', save, { contentType: 'application/octet-stream' });
+  assert.deepEqual([saved.key, saved.sizeBytes, saved.contentType], ['nes/rom-hash/slot-1', save.byteLength, 'application/octet-stream']);
+  assert.ok(Buffer.from((await storage.get('nes/rom-hash/slot-1')).data).equals(save));
+  await storage.put('notes/today', 'olá');
+  assert.equal(Buffer.from((await storage.get('notes/today')).data).toString('utf8'), 'olá');
+  assert.equal(await storage.get('nes/missing'), null);
+  assert.deepEqual((await storage.list({ prefix: 'nes/' })).objects.map((object) => object.key), ['nes/rom-hash/slot-1']);
+  const limited = await owner.request(MessageType.BOT_STORAGE_LIMIT_UPDATE, { botId, maxBytes: 1024 * 1024 });
+  assert.deepEqual([limited.server.usage.maxBytes, limited.server.usage.objectCount], [1024 * 1024, 2]);
+  const fullWarning = owner.wait((message) => message.type === MessageType.BOT_STORAGE_LEVEL &&
+    message.payload.botId === botId && message.payload.usage.level === 'full', 'full storage warning');
+  assert.equal(await storage.put('nes/rom-hash/auto', Buffer.alloc(800 * 1024), { autosave: true }), null,
+    'A full storage pauses autosaves instead of failing the activity');
+  await fullWarning;
+  const refused = await storage.put('nes/rom-hash/slot-2', Buffer.alloc(800 * 1024)).then(() => null, (error) => error);
+  assert.ok(refused instanceof BotRequestError && refused.code === 'STORAGE_FULL', String(refused));
+  assert.equal((await storage.usage()).level, 'full');
+  assert.equal(await storage.delete('nes/rom-hash/slot-1'), true);
+  assert.equal((await storage.usage()).level, 'ok');
+  await owner.wait((message) => message.type === MessageType.BOT_STORAGE_LEVEL &&
+    message.payload.botId === botId && message.payload.usage.level === 'ok', 'storage back to normal');
+  // Only people who manage bots see the server storage; warnings go out in order, so Bob's would have arrived.
+  assert.equal(bob.messages.some((message) => message.type === MessageType.BOT_STORAGE_LEVEL), false);
+  assert.deepEqual(await bob.request(MessageType.BOT_STORAGE_INFO_GET, { botId }),
+    { botId, server: null, device: { requested: true, granted: true } });
+  assert.equal((await owner.request(MessageType.BOT_STORAGE_CLEAR, { botId })).server.usage.objectCount, 0);
+  assert.equal((await storage.list()).objects.length, 0);
+  assert.deepEqual(sdkErrors, []);
+  console.log('Bot storage E2E: objects at the size limit both ways, binary and text round trips, manager limit, paused autosaves, STORAGE_FULL and manager-only server usage passed.');
 
   const firstRoom = (await owner.request(MessageType.CHANNEL_CREATE, { name: 'music-one', type: 'VOICE' })).channel.id;
   const secondRoom = (await owner.request(MessageType.CHANNEL_CREATE, { name: 'music-two', type: 'VOICE' })).channel.id;
