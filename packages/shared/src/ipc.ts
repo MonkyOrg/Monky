@@ -430,6 +430,8 @@ export const trayVoiceStatusSchema = z.object({
   selfDeafened: z.boolean(),
   // Why the microphone toggle does nothing, if it does not: a role that cannot speak, or the AFK channel.
   micLock: z.enum(['permission', 'afk']).nullable(),
+  // Watching someone's screen share or an open miniapp: the tray monkey puts on 3D glasses.
+  isWatching: z.boolean(),
 }).strict();
 export type TrayVoiceStatus = z.infer<typeof trayVoiceStatusSchema>;
 

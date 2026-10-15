@@ -433,12 +433,16 @@ class App {
         selfMuted: voiceStore.isMuted,
         selfDeafened: voiceStore.isDeafened,
         micLock: voiceStore.permissionMuted ? (isCallInAfkChannel() ? 'afk' : 'permission') : null,
+        isWatching: voiceStore.isWatchingAnyScreenShare() || this.mainView.isWatchingAnyBotScreen(),
       });
     };
 
     appEvents.on('voice.state_updated', syncTrayVoiceStatus);
     appEvents.on('voice.speaking_changed', syncTrayVoiceStatus);
     appEvents.on('voice.channel_changed', syncTrayVoiceStatus);
+    // Watching someone's screen or a miniapp puts 3D glasses on the tray monkey.
+    appEvents.on('voice.screen_watch_changed', syncTrayVoiceStatus);
+    appEvents.on('stage.bot_screens_changed', syncTrayVoiceStatus);
 
     // Initial sync
     syncTrayVoiceStatus();

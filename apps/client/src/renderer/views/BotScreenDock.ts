@@ -63,6 +63,9 @@ export class BotScreenDock {
 
   isWatching(id: string): boolean { return this.views.get(id)?.isWatching ?? false; }
 
+  /** Whether any of the call's miniapps is open, on stage or waiting off stage. */
+  isWatchingAny(): boolean { return [...this.views.values()].some((view) => view.isWatching); }
+
   isDockedTo(stage: BotScreenStage): boolean { return this.stage === stage; }
 
   /** The tiles placed on this stage, in creation order. */
