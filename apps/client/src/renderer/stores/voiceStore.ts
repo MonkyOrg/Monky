@@ -48,6 +48,8 @@ export class VoiceStore {
   }>();
   public static readonly SCREEN_WATCH_HANDOFF_MS = 15_000;
   private mutedScreenAudioSessions = new Set<string>();
+  /** Like a sharer's screen audio, the mute of a bot covers all of its miniapps for the call. */
+  private mutedMiniappBots = new Set<string>();
   private screenQualities = new Map<string, Map<string, ScreenShareQuality>>();
 
   public getScreenQuality(sessionId: string, shareId: string): ScreenShareQuality {
@@ -152,11 +154,23 @@ export class VoiceStore {
     emitOutsideRouting(() => appEvents.emit('voice.screen_audio_mute_changed', { sessionId, muted }));
   }
 
+  public isMiniappMuted(botId: string): boolean {
+    return this.mutedMiniappBots.has(botId);
+  }
+
+  public setMiniappMuted(botId: string, muted: boolean): void {
+    if (this.isMiniappMuted(botId) === muted) return;
+    if (muted) this.mutedMiniappBots.add(botId);
+    else this.mutedMiniappBots.delete(botId);
+    emitOutsideRouting(() => appEvents.emit('voice.miniapp_mute_changed', { botId, muted }));
+  }
+
   private clearScreenWatching(): void {
     for (const [sessionId] of this.getScreenWatchers()) this.retainScreenShares(sessionId, []);
     this.screenWatchHandoffs.clear();
     this.screenShareRosters.clear();
     this.mutedScreenAudioSessions.clear();
+    this.mutedMiniappBots.clear();
     this.screenQualities.clear();
   }
 

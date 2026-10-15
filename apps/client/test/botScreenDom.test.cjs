@@ -139,6 +139,19 @@ if (!process.versions.electron) {
     assert.ok(initializedFrame);
     return initializedFrame;
   };
+  // A pristine nested realm reads what a probe <audio> really outputs inside the miniapp.
+  const probeVolume = `(() => {
+    if (!window.volumeProbe) {
+      const realm = document.createElement("iframe");
+      realm.hidden = true;
+      document.body.append(realm);
+      const native = Object.getOwnPropertyDescriptor(realm.contentWindow.HTMLMediaElement.prototype, "volume").get;
+      window.volumeProbe = new Audio();
+      window.volumeProbe.volume = 0.8;
+      window.readProbeVolume = () => Math.round(native.call(window.volumeProbe) * 1000) / 1000;
+    }
+    return [window.volumeProbe.volume, window.readProbeVolume()];
+  })()`;
 
   app.whenReady().then(async () => {
     const { createServer } = await import('vite');
@@ -222,6 +235,12 @@ if (!process.versions.electron) {
       assert.equal(await run(window, '!!document.querySelector("#screenshare-notice-btn")'), true, 'remote screen invitation survives');
     }
     const [aliceWindow, spectatorWindow] = windows;
+    assert.deepEqual(await run(aliceWindow, `(${verifyVolumeHook.toString()})()`), {
+      chosen: [0.8, 0.4, 0.25, 0.125], errors: ['IndexSizeError', 'IndexSizeError', 'TypeError'], afterErrors: [0.8, 0.4],
+      played: [1, 0.5], attached: [1, 0.5], external: [0.6, 0.3], chained: true, routed: true, outputs: [1, 0.5],
+      disconnected: 'InvalidAccessError', offline: [true, 1], graphed: [0.3, 0.6, 0.6],
+      amplified: [1, 0.5, 1, 1, 0.6, 2], muted: [0, 0, 0.6, 0, 0, 0.7], ignored: 0, restored: [0.8, 0.25, 0.8, 1, 0.7],
+    }, 'The miniapp volume scales media up to 100% and live Web Audio up to 200%, once per source, including native controls');
     await run(aliceWindow, 'window.screenFixture.selfShare(); document.querySelector("#screenshare-self-stop-btn").click()');
     await waitFor(async () => await run(aliceWindow, '!window.screenFixture.isSelfSharing()'), 'self screen-share stop');
     assert.equal(await run(aliceWindow, 'window.screenFixture.sent.some(entry => entry.type === "VOICE_STATE_UPDATE" && entry.payload.isScreenSharing === false)'), true);
@@ -372,6 +391,116 @@ if (!process.versions.electron) {
     await approveMiniapp(aliceWindow);
     await waitFor(() => frames(aliceWindow).length === 2, 'second app opt-in without opening other apps');
     assert.equal(await run(aliceWindow, 'document.querySelectorAll("#stage-participants-area .stage-focused-main").length === 1 && !!document.querySelector("#stage-participants-area .stage-focused-main[data-bot-screen-slot=second]")'), true, 'Choosing another invitation focuses only that miniapp');
+    assert.equal(await run(aliceWindow, `[...document.querySelectorAll("[data-bot-screen-id]")].map(tile =>
+      tile.dataset.botScreenId + ":" + tile.querySelector(".stage-card-controls").hidden).sort().join()`),
+    'fourth:true,game:false,second:false,third:true', 'Only open views, which can play audio, offer a volume control');
+    assert.deepEqual(await run(aliceWindow, `(() => {
+      const shape = wrapper => JSON.stringify([...wrapper.querySelectorAll("*")]
+        .map(node => node.tagName + "." + [...node.classList].sort().join(".")).sort());
+      const corner = wrapper => {
+        const tile = wrapper.closest("[data-tile-key], [data-bot-screen-id]").getBoundingClientRect();
+        const bar = wrapper.closest(".stage-card-controls").getBoundingClientRect();
+        return [Math.round(tile.right - bar.right), Math.round(tile.bottom - bar.bottom)];
+      };
+      const screen = document.querySelector("#stage-participants-area [data-kind=screen] .stage-volume-wrapper");
+      const miniapp = document.querySelector("[data-bot-screen-id=second] .stage-volume-wrapper");
+      const slider = miniapp.querySelector("input");
+      return [shape(miniapp) === shape(screen), JSON.stringify(corner(miniapp)) === JSON.stringify(corner(screen)),
+        slider.min, slider.max, slider.value, getComputedStyle(slider).writingMode];
+    })()`), [true, true, '0', '200', '100', 'vertical-lr'], 'A miniapp reuses the screen share volume control, in the same corner and range');
+    assert.equal(await run(aliceWindow, `(() => {
+      const tile = document.querySelector("[data-bot-screen-id=game]");
+      return tile.classList.contains("stage-mini-card") &&
+        getComputedStyle(tile.querySelector(".stage-card-controls")).display !== "none" &&
+        getComputedStyle(tile.querySelector(".stage-volume-btn")).display !== "none";
+    })()`), true, 'Like screen share thumbnails, a filmstrip miniapp keeps its volume button');
+    const second = await gameFrame(aliceWindow, 'second');
+    for (const frame of [alice, second]) {
+      assert.deepEqual(await frame.executeJavaScript(probeVolume), [0.8, 0.8], 'An unadjusted miniapp keeps its own levels');
+    }
+    const secondVolume = '[data-bot-screen-id=second] [data-bot-screen-volume]';
+    const secondMute = `${secondVolume} [data-bot-screen-action=mute]`;
+    const secondSlider = `${secondVolume} input`;
+    const botMutes = JSON.stringify(`[data-bot-screen-id=game] [data-bot-screen-action=mute], ${secondMute}`);
+    await run(aliceWindow, `(() => {
+      const slider = document.querySelector(${JSON.stringify(secondSlider)});
+      slider.value = "50";
+      slider.dispatchEvent(new Event("input", { bubbles: true }));
+    })()`);
+    for (const frame of [alice, second]) {
+      await waitFor(async () => (await frame.executeJavaScript(probeVolume))[1] === 0.4, 'saved level reaches every view of the bot');
+    }
+    assert.deepEqual(await alice.executeJavaScript(probeVolume), [0.8, 0.4], 'The miniapp keeps reading the volume it chose');
+    assert.deepEqual(await run(aliceWindow, `[
+      document.querySelector("[data-bot-screen-id=game] [data-bot-screen-volume] input").value,
+      document.querySelector(${JSON.stringify(secondSlider)}).getAttribute("aria-valuetext"),
+      JSON.parse(localStorage.getItem("monky_settings")).miniappVolumes.bot,
+    ]`), ['50', '50%', 50], 'Like a sharer, a bot has one saved volume shown on all of its tiles');
+    await run(aliceWindow, `document.querySelector(${JSON.stringify(secondMute)}).click()`);
+    for (const frame of [alice, second]) {
+      await waitFor(async () => (await frame.executeJavaScript(probeVolume))[1] === 0, 'muting the bot silences all of its views');
+    }
+    const muteState = `[...document.querySelectorAll(${botMutes})].map(button => [button.getAttribute("aria-pressed"),
+      button.querySelector(".material-symbols-outlined").textContent, button.title,
+      button.closest(".stage-volume-wrapper").classList.contains("screen-audio-muted")])`;
+    assert.deepEqual(await run(aliceWindow, muteState), [
+      ['true', 'volume_off', 'Áudio do miniapp mutado (clique para desmutar)', true],
+      ['true', 'volume_off', 'Áudio do miniapp mutado (clique para desmutar)', true],
+    ], 'Like a sharer, a bot is muted on every tile at once');
+    const pointerTo = async (selector) => {
+      const point = selector ? await run(aliceWindow, `(() => {
+        const rect = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      })()`) : { x: 2, y: 2 };
+      await aliceWindow.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
+    };
+    const popupOpen = `getComputedStyle(document.querySelector(${JSON.stringify(`${secondVolume} .stage-volume-popup`)})).display !== "none"`;
+    await pointerTo(secondMute);
+    await new Promise(resolve => setTimeout(resolve, 250));
+    assert.equal(await run(aliceWindow, popupOpen), false, 'Like a screen share, a muted miniapp keeps its slider closed');
+    await run(aliceWindow, `document.querySelector(${JSON.stringify(secondMute)}).click()`);
+    await waitFor(async () => await run(aliceWindow, popupOpen), 'unmuting under the pointer opens the slider');
+    for (const frame of [alice, second]) {
+      await waitFor(async () => (await frame.executeJavaScript(probeVolume))[1] === 0.4, 'unmuting the bot restores all of its views');
+    }
+    assert.deepEqual((await run(aliceWindow, muteState)).map(state => state[0]), ['false', 'false']);
+    assert.equal(await run(aliceWindow, `(() => {
+      const tile = document.querySelector("[data-bot-screen-id=second]").getBoundingClientRect();
+      const button = document.querySelector(${JSON.stringify(secondMute)}).getBoundingClientRect();
+      const popup = document.querySelector(${JSON.stringify(`${secondVolume} .stage-volume-popup`)}).getBoundingClientRect();
+      return popup.bottom <= button.top + 1 && popup.top >= tile.top && popup.left >= tile.left && popup.right <= tile.right;
+    })()`), true, 'Like a screen share, the vertical slider opens above the button, inside the tile');
+    await pointerTo(null);
+    await waitFor(async () => !(await run(aliceWindow, popupOpen)), 'leaving the control closes the slider');
+    const key = async (key, keyCode) => {
+      for (const type of ['rawKeyDown', 'keyUp']) {
+        await aliceWindow.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+          type, key, code: key, windowsVirtualKeyCode: keyCode,
+        });
+      }
+    };
+    await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=second] [data-bot-screen-action=end]").focus()');
+    aliceWindow.webContents.focus();
+    await key('Tab', 9);
+    await waitFor(async () => await run(aliceWindow, `document.activeElement === document.querySelector(${JSON.stringify(secondMute)})`) &&
+      await run(aliceWindow, popupOpen), 'keyboard focus on the volume button opens the slider');
+    await key('Tab', 9);
+    assert.equal(await run(aliceWindow, `document.activeElement === document.querySelector(${JSON.stringify(secondSlider)})`), true, 'Tab reaches the slider');
+    await key('ArrowUp', 38);
+    let keyboardVolume = 50;
+    await waitFor(async () => {
+      keyboardVolume = await run(aliceWindow, `document.querySelector(${JSON.stringify(secondSlider)}).valueAsNumber`);
+      return keyboardVolume !== 50;
+    }, 'keyboard volume adjustment');
+    assert.equal(Math.abs(keyboardVolume - 50), 1, 'An arrow key moves the slider by one step');
+    const keyboardLevel = Math.round(0.8 * keyboardVolume / 100 * 1000) / 1000;
+    for (const frame of [alice, second]) {
+      await waitFor(async () => (await frame.executeJavaScript(probeVolume))[1] === keyboardLevel, 'keyboard level reaches every view of the bot');
+    }
+    await key('Escape', 27);
+    await waitFor(async () => !(await run(aliceWindow, popupOpen)) &&
+      await run(aliceWindow, `document.activeElement === document.querySelector(${JSON.stringify(secondMute)})`), 'Escape closes the slider and returns focus');
+    assert.equal(await run(aliceWindow, 'JSON.parse(localStorage.getItem("monky_settings")).miniappVolumes.bot'), keyboardVolume);
     await run(aliceWindow, 'document.querySelector("#stage-participants-area [data-kind=screen] .stage-stopwatch-btn").click()');
     assert.equal(await run(aliceWindow, '!!document.querySelector("[data-kind=screen] .screen-locked") && !!document.querySelector(".stage-focused-main[data-bot-screen-slot=second]")'), true, 'Stopping an unfocused share applies its gate without changing miniapp focus');
     await run(aliceWindow, 'document.querySelector("#stage-participants-area [data-kind=screen] .stage-watch-btn").click()');
@@ -490,6 +619,7 @@ if (!process.versions.electron) {
     alice = await gameFrame(aliceWindow);
     await waitFor(async () => await alice.executeJavaScript('window.lastState?.count === 1'), 'reopen restores shared state');
     assert.deepEqual(await alice.executeJavaScript('window.lastState.players'), ['alice', 'bob'], 'Opening or closing a view never changes player/spectator roles');
+    assert.deepEqual(await alice.executeJavaScript(probeVolume), [0.8, keyboardLevel], 'A reopened view starts at the saved volume of its bot');
 
     const requestsBefore = leaks;
     await alice.executeJavaScript('window.name = ""; location.href = "file:///not-a-monky-resource"');
@@ -672,6 +802,90 @@ if (!process.versions.electron) {
     console.log('Voice stage DOM: creator/admin END, live permission revocation, duplicate/delayed END, shared removal, stale-instance and background isolation; existing local leave/watch, fullscreen, locale, seats, sandbox and teardown passed.');
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
+}
+
+async function verifyVolumeHook() {
+  const { installMiniappVolume } = await import('/views/botScreenVolume.ts');
+  // A fresh realm stands in for the miniapp document; its pristine copy reads the real output.
+  const frame = document.createElement('iframe');
+  frame.hidden = true;
+  document.body.append(frame);
+  const realm = frame.contentWindow;
+  const nativeVolume = Object.getOwnPropertyDescriptor(realm.HTMLMediaElement.prototype, 'volume').get;
+  const nativeDisconnect = realm.AudioNode.prototype.disconnect;
+  const createGain = realm.BaseAudioContext.prototype.createGain;
+  const outputs = [];
+  realm.BaseAudioContext.prototype.createGain = function () {
+    const gain = createGain.call(this);
+    outputs.push(gain);
+    return gain;
+  };
+  const setVolume = installMiniappVolume(realm, 0.5);
+  const level = element => Math.round(nativeVolume.call(element) * 1000) / 1000;
+  const direct = (node, destination) => {
+    try { nativeDisconnect.call(node, destination); return true; } catch { return false; }
+  };
+  const failure = action => {
+    try { action(); return null; } catch (error) { return error.name; }
+  };
+  const result = {};
+  const chosen = new realm.Audio();
+  chosen.volume = 0.8;
+  const quiet = new realm.Audio();
+  quiet.volume = 0.25;
+  result.chosen = [chosen.volume, level(chosen), quiet.volume, level(quiet)];
+  result.errors = [1.5, -0.1, Number.NaN].map(value => failure(() => { chosen.volume = value; }));
+  result.afterErrors = [chosen.volume, level(chosen)];
+  const played = new realm.Audio();
+  void played.play().catch(() => {});
+  result.played = [played.volume, level(played)];
+  const attached = realm.document.createElement('audio');
+  const started = new Promise(resolve => attached.addEventListener('loadstart', resolve, { once: true }));
+  attached.src = 'data:,';
+  realm.document.body.append(attached);
+  await started;
+  result.attached = [attached.volume, level(attached)];
+  // Native media controls change the volume in the browser, without the patched accessor.
+  const nativeSet = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume').set;
+  const external = async (element, value) => {
+    const changed = new Promise(resolve => element.addEventListener('volumechange', resolve, { once: true }));
+    nativeSet.call(element, value);
+    await changed;
+  };
+  await external(attached, 0.3);
+  attached.dispatchEvent(new realm.Event('play'));
+  result.external = [attached.volume, level(attached)];
+
+  const context = new realm.AudioContext();
+  const source = context.createConstantSource();
+  result.chained = source.connect(context.destination) === context.destination;
+  context.createOscillator().connect(context.destination);
+  result.routed = !direct(source, context.destination);
+  result.outputs = [outputs.length, outputs[0]?.gain.value];
+  source.disconnect(context.destination);
+  result.disconnected = failure(() => source.disconnect(context.destination));
+  const offline = new realm.OfflineAudioContext(1, 128, 44100);
+  const offlineSource = offline.createConstantSource();
+  offlineSource.connect(offline.destination);
+  result.offline = [direct(offlineSource, offline.destination), outputs.length];
+  const graphed = new realm.Audio();
+  graphed.volume = 0.6;
+  const beforeGraph = level(graphed);
+  context.createMediaElementSource(graphed).connect(context.destination);
+  result.graphed = [beforeGraph, level(graphed), graphed.volume];
+
+  setVolume(2);
+  result.amplified = [level(chosen), level(quiet), level(played), level(attached), level(graphed), outputs[0].gain.value];
+  setVolume(0);
+  await external(attached, 0.7);
+  result.muted = [level(chosen), level(quiet), level(graphed), outputs[0].gain.value, level(attached), attached.volume];
+  setVolume(Number.NaN);
+  result.ignored = outputs[0].gain.value;
+  setVolume(1);
+  result.restored = [level(chosen), level(quiet), chosen.volume, outputs[0].gain.value, level(attached)];
+  await context.close();
+  frame.remove();
+  return result;
 }
 
 async function setupVoiceStage(id, locale, adminPermission) {

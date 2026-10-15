@@ -160,6 +160,12 @@ card appear in the **voice stage**, not as an external site opening by itself.
 view. **End miniapp**, available to its creator or an authorized
 administrator, ends that instance for everyone.
 
+While the view is open, the card shows the same volume control as a screen
+share, in its bottom-right corner: hover the button (or reach it with **Tab**)
+to adjust from 0 to 200%, and click it to mute. Volume and mute apply to every
+miniapp of the same bot; the volume is saved on this computer and the mute
+lasts until you leave the room.
+
 ## Bots that receive voice
 
 A bot can receive microphones only if it requests **Listen to voice-room microphones** and an

@@ -8046,6 +8046,18 @@ input:focus, textarea:focus, select:focus {
   font-size: 11px;
 }
 
+/* The volume reuses the screen share control (.stage-volume-*). A miniapp's also
+   opens from the keyboard, and Escape or mute keep it closed. */
+.stage-bot-screen-card .stage-volume-wrapper.keyboard .stage-volume-popup {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stage-bot-screen-card .stage-volume-wrapper:is(.screen-audio-muted, .dismissed) .stage-volume-popup {
+  display: none;
+}
+
 .stage-bot-screen-card:fullscreen {
   width: 100vw;
   height: 100vh;
