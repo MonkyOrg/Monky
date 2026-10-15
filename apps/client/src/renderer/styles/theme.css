@@ -6856,6 +6856,8 @@ input:focus, textarea:focus, select:focus {
 }
 
 .emoji-picker-body {
+  /* Offset parent of the cells, so their offsets are positions in the scrolled list. */
+  position: relative;
   flex: 1;
   overflow-y: auto;
   padding: 0 8px 8px;
@@ -6906,6 +6908,15 @@ input:focus, textarea:focus, select:focus {
 }
 
 .emoji-picker-item:hover {
+  background-color: var(--bg-tertiary);
+}
+
+/* A cell whose glyph is still on its way (see EmojiPicker) keeps a quiet placeholder. */
+.emoji-picker-item:empty::before {
+  content: '';
+  width: 40%;
+  aspect-ratio: 1;
+  border-radius: 50%;
   background-color: var(--bg-tertiary);
 }
 

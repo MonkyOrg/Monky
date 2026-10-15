@@ -55,6 +55,19 @@ const GROUP_LABEL_KEYS: Record<EmojiGroupId, TranslationKey> = {
 /** Searching the whole catalog can match hundreds of emojis; only show the first ones. */
 const MAX_SEARCH_RESULTS = 240;
 
+/** Glyphs drawn beyond each edge of the visible area, as a fraction of its height. */
+const GLYPH_MARGIN = 0.5;
+
+/** Glyphs drawn per step while the renderer is idle. */
+const GLYPH_BATCH = 16;
+
+/**
+ * Whether this renderer has already drawn the first catalog glyphs. Until then
+ * the picker is shown before its glyphs: rasterizing the visible emojis for the
+ * first time takes long enough to visibly delay the frame that opens it.
+ */
+let glyphsWarm = false;
+
 /**
  * Emoji and sticker picker for the chat composer (#356).
  *
@@ -62,6 +75,13 @@ const MAX_SEARCH_RESULTS = 240;
  * picker works offline and adds no runtime dependency. Stickers are images from
  * a folder the user picks, listed through IPC and lazily read as they scroll
  * into view.
+ *
+ * Every catalog cell is created at once, so sizes, scrolling and category
+ * navigation stay exact, but a cell only receives its glyph near the visible
+ * area. Chromium lays out and rasterizes each color emoji slowly the first time
+ * a renderer draws it, and drawing the whole catalog at once froze the first
+ * opening of every session for about a second. The remaining glyphs are drawn
+ * while the renderer is idle.
  */
 export class EmojiPicker {
   private readonly options: EmojiPickerOptions;
@@ -71,6 +91,11 @@ export class EmojiPicker {
   private imageObserver: IntersectionObserver | null = null;
   private stickersLoading = false;
   private unbind: Array<() => void> = [];
+  /** Cells still waiting for their glyph, in document order. */
+  private pendingGlyphs: HTMLElement[] = [];
+  private glyphFrame = 0;
+  private glyphTimer = 0;
+  private glyphTask = 0;
 
   constructor(options: EmojiPickerOptions) {
     this.options = options;
@@ -149,6 +174,7 @@ export class EmojiPicker {
     this.options.anchor.setAttribute('aria-expanded', 'false');
     this.imageObserver?.disconnect();
     this.imageObserver = null;
+    this.stopGlyphs();
     this.unbind.forEach((off) => off());
     this.unbind = [];
     removeWithMotion(this.root);
@@ -228,7 +254,11 @@ export class EmojiPicker {
         recentEmojis.select(emoji);
         this.options.onSelectEmoji(emoji);
         const recent = this.bodyEl?.querySelector<HTMLElement>('[data-emoji-group="recent"]');
-        if (recent) recent.innerHTML = this.renderRecent();
+        if (recent) {
+          recent.innerHTML = this.renderRecent();
+          // A new recent row pushes the cells below, possibly into view.
+          this.revealGlyphs();
+        }
         return;
       }
 
@@ -240,6 +270,10 @@ export class EmojiPicker {
     };
     body?.addEventListener('click', onBodyClick);
     this.unbind.push(() => body?.removeEventListener('click', onBodyClick));
+
+    const onBodyScroll = () => this.revealGlyphs();
+    body?.addEventListener('scroll', onBodyScroll, { passive: true });
+    this.unbind.push(() => body?.removeEventListener('scroll', onBodyScroll));
 
     const onFooterClick = (e: Event) => {
       const target = e.target as HTMLElement;
@@ -331,6 +365,7 @@ export class EmojiPicker {
   }
 
   private renderResults(): void {
+    this.stopGlyphs();
     if (this.tab !== 'stickers') {
       this.imageObserver?.disconnect();
       this.imageObserver = null;
@@ -351,9 +386,11 @@ export class EmojiPicker {
 
   private renderRecent(): string {
     const catalog = new Map(EMOJI_CATALOG.flatMap((group) => group.emojis.map((entry) => [entry[0], entry] as const)));
+    // At most a few rows, always at the top: drawn at once, which also keeps the
+    // in-place refresh after a selection independent of the pending glyphs.
     const buttons = recentEmojis.get().flatMap((char) => {
       const entry = catalog.get(char);
-      return entry ? [this.renderEmojiButton(char, entry[1])] : [];
+      return entry ? [this.renderEmojiButton(char, entry[1], true)] : [];
     });
     const content = buttons.length
       ? `<div class="emoji-picker-grid">${buttons.join('')}</div>`
@@ -412,11 +449,90 @@ export class EmojiPicker {
     }
 
     body.innerHTML = html;
+    this.pendingGlyphs = [...body.querySelectorAll<HTMLElement>('.emoji-picker-item[data-emoji]:empty')];
     smoothScrollTo(body, { top: 0 });
+    if (glyphsWarm) this.revealGlyphs();
+    else this.revealAfterPaint();
+    this.scheduleGlyphs();
   }
 
-  private renderEmojiButton(char: string, name: string): string {
-    return `<button type="button" class="emoji-picker-item" data-emoji="${escapeHtml(char)}" title="${escapeHtml(name)}">${escapeHtml(char)}</button>`;
+  /** Cells without a glyph keep their exact size, so only their content arrives later. */
+  private renderEmojiButton(char: string, name: string, withGlyph = false): string {
+    const glyph = withGlyph ? escapeHtml(char) : '';
+    return `<button type="button" class="emoji-picker-item" data-emoji="${escapeHtml(char)}" title="${escapeHtml(name)}">${glyph}</button>`;
+  }
+
+  /** Draws the glyphs of the cells around the visible area. */
+  private revealGlyphs(): void {
+    const body = this.bodyEl;
+    const pending = this.pendingGlyphs;
+    if (!body || pending.length === 0) return;
+
+    // The body is the cells' offset parent, so offsets are in its scrolled
+    // content and only grow along the document order.
+    const margin = body.clientHeight * GLYPH_MARGIN;
+    const top = body.scrollTop - margin;
+    const bottom = body.scrollTop + body.clientHeight + margin;
+    let start = 0;
+    let end = pending.length;
+    while (start < end) {
+      const middle = (start + end) >> 1;
+      const cell = pending[middle];
+      if (cell.offsetTop + cell.offsetHeight < top) start = middle + 1;
+      else end = middle;
+    }
+    end = start;
+    while (end < pending.length && pending[end].offsetTop <= bottom) end++;
+    this.drawGlyphs(pending.splice(start, end - start));
+  }
+
+  /**
+   * Draws the visible glyphs right after the frame that shows the picker, so the
+   * first opening of a session gives feedback before the slow first raster.
+   * Not tied to idle time: a busy renderer must not leave the grid empty.
+   */
+  private revealAfterPaint(): void {
+    this.glyphFrame = requestAnimationFrame(() => {
+      this.glyphFrame = 0;
+      this.glyphTimer = window.setTimeout(() => {
+        this.glyphTimer = 0;
+        glyphsWarm = true;
+        this.revealGlyphs();
+      });
+    });
+  }
+
+  /** Draws the remaining glyphs while the renderer is idle, so scrolling later finds them ready. */
+  private scheduleGlyphs(): void {
+    if (this.glyphTask || this.pendingGlyphs.length === 0) return;
+    this.glyphTask = requestIdleCallback((deadline) => {
+      this.glyphTask = 0;
+      const body = this.bodyEl;
+      if (!body) return;
+      let spent = 0;
+      do {
+        const started = performance.now();
+        this.drawGlyphs(this.pendingGlyphs.splice(0, GLYPH_BATCH));
+        // Lays the batch out inside the idle period instead of in the next frame.
+        void body.scrollHeight;
+        spent = performance.now() - started;
+      } while (this.pendingGlyphs.length > 0 && deadline.timeRemaining() > spent);
+      this.scheduleGlyphs();
+    });
+  }
+
+  private drawGlyphs(cells: HTMLElement[]): void {
+    for (const cell of cells) cell.textContent = cell.dataset.emoji ?? '';
+  }
+
+  private stopGlyphs(): void {
+    cancelAnimationFrame(this.glyphFrame);
+    clearTimeout(this.glyphTimer);
+    cancelIdleCallback(this.glyphTask);
+    this.glyphFrame = 0;
+    this.glyphTimer = 0;
+    this.glyphTask = 0;
+    this.pendingGlyphs = [];
   }
 
   // --- stickers ----------------------------------------------------------
