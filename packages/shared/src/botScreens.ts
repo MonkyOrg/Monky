@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { BotLocale } from './botLocales.js';
 
 export const BOT_SCREEN_LIMITS = {
   htmlBytes: 128 * 1024,
@@ -106,3 +107,49 @@ export type BotScreenPatch = z.infer<typeof botScreenPatchSchema>;
 export type BotScreenAction = z.infer<typeof botScreenActionSchema>;
 export type BotScreenActionEvent = z.infer<typeof botScreenActionEventSchema>;
 export type BotScreenRemoved = z.infer<typeof botScreenRemovedSchema>;
+
+/** A close this viewer asked for: **Leave miniapp** (`leave`) or **End miniapp** for everyone (`end`). */
+export type BotScreenBeforeCloseReason = 'leave' | 'end';
+/**
+ * Why a view is closing. `ended`: the instance is gone (ended by someone else, closed by the bot,
+ * bot disconnected or without access to the room). `revoked`: this view lost access (left or
+ * switched rooms or servers, disconnected, lost permission or left the stage).
+ */
+export type BotScreenCloseReason = BotScreenBeforeCloseReason | 'ended' | 'revoked';
+
+export interface BotScreenBeforeCloseEvent {
+  readonly reason: BotScreenBeforeCloseReason;
+}
+
+export interface BotScreenCloseEvent {
+  readonly reason: BotScreenCloseReason;
+}
+
+/** The local person who opened the view; `locale` follows their language setting. */
+export interface BotScreenViewer {
+  readonly id: string;
+  readonly nickname: string;
+  readonly locale: BotLocale;
+}
+
+/**
+ * `window.monkyScreen` inside a miniapp document. Clients released before the lifecycle hooks
+ * lack `onBeforeClose`/`onClose`: call them as `monkyScreen.onClose?.(...)`.
+ */
+export interface BotScreenBridge {
+  readonly viewer: BotScreenViewer;
+  /** Delivers the current state at once and every update; returns an unsubscribe function. */
+  onState(callback: (state: BotScreenJson, revision: number) => void): () => void;
+  /** Whether the bridge accepted the intent, not whether the bot accepted the action. */
+  sendAction(action: string, payload: BotScreenJson): boolean;
+  /**
+   * Runs, in registration order, before a close this person asked for; the view stays visible
+   * and may ask anything. Resolving `false` keeps it open. Revocations never wait for it.
+   */
+  onBeforeClose(handler: (event: BotScreenBeforeCloseEvent) => boolean | void | Promise<boolean | void>): () => void;
+  /**
+   * Runs on every close, while the view is already hidden, muted and cut from state and actions.
+   * The document is kept for at most 5 seconds so the handlers can finish, e.g. saving.
+   */
+  onClose(handler: (event: BotScreenCloseEvent) => void | Promise<void>): () => void;
+}

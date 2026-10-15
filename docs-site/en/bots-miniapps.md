@@ -7,8 +7,9 @@ This example extends the [tutorial](/en/bots-desenvolvimento) and requires
 
 **Reference:** [BotScreen](/en/bots-api-midia#botscreen),
 [BotScreenCreate](/en/bots-api-midia#botscreencreate),
-[BotScreenPatch](/en/bots-api-midia#botscreenpatch) and
-[BotScreenActionEvent](/en/bots-api-midia#botscreenactionevent).
+[BotScreenPatch](/en/bots-api-midia#botscreenpatch),
+[BotScreenActionEvent](/en/bots-api-midia#botscreenactionevent) and
+[BotScreenBridge](/en/bots-api-midia#botscreenbridge).
 
 <AppScreenshot src="/screenshots/miniapp-en.png" alt="A demo miniapp focused in Monky's voice stage." caption="The client hosts the isolated view; the bot remains responsible for state and rules." />
 
@@ -16,7 +17,7 @@ This example extends the [tutorial](/en/bots-desenvolvimento) and requires
 
 A screen is an HTML/CSS/JavaScript miniapp displayed **on the voice stage**. People in the room receive an invitation in the same corner as screen-sharing notices and choose whether to view it. There is no miniapp chat card or automatic opening. Unlike private `ctx.prompt()` forms, it accepts multiple participants and remains active after its command handler finishes. MonkyBot's `/jogo-da-velha` demonstrates two players and spectators; its rules remain in the bot, not in a viewer's JavaScript.
 
-The tile stays on the stage alongside cameras and screen shares, even when its view is closed. **Open miniapp** starts local viewing and focuses the miniapp on the stage, just like opening its invitation, for any participant. **Leave miniapp** ends it and returns the tile to its closed state without closing the miniapp for anyone else. Focusing or returning to the grid only changes the layout: it does not reload the screen or change player seats. Opening a screen to watch is not the same as joining its game.
+The tile stays on the stage alongside cameras and screen shares, even when its view is closed. **Open miniapp** starts local viewing and focuses the miniapp on the stage, just like opening its invitation, for any participant. **Leave miniapp** ends it and returns the tile to its closed state without closing the miniapp for anyone else. Before that, the miniapp may ask something, such as whether to save the game (see [View lifecycle](#ciclo-de-vida-da-visualizacao)). Focusing or returning to the grid only changes the layout: it does not reload the screen or change player seats. Opening a screen to watch is not the same as joining its game.
 
 **End miniapp** is a separate action: it removes the instance, tile, and
 invitations for everyone and closes all open views. It is available only to the
@@ -60,6 +61,8 @@ Inside the isolated document, the `window.monkyScreen` bridge provides:
 | `viewer` | Frozen local context with `id`, `nickname`, and `locale` (`pt-BR` or `en`) for the person opening the screen |
 | `onState((state, revision) => ...)` | Delivers initial state and updates; returns an unsubscribe function |
 | `sendAction(action, payload)` | Sends an intent bound to the current revision; returns whether the bridge accepted sending it, not whether the bot accepted the action |
+| `onBeforeClose(handler)` | Runs before a close this person asked for; returning `false` keeps the view open. See [View lifecycle](#ciclo-de-vida-da-visualizacao) |
+| `onClose(handler)` | Runs on every close, with the view already hidden and muted, for up to 5 seconds |
 
 Read `window.monkyScreen.viewer.locale` inside the `onState()` callback to translate each person's controls. Changing the app language also triggers this callback without changing shared state/revision or recreating the iframe. Do not derive the controls' language from public state or the screen creator's language.
 
@@ -97,6 +100,72 @@ closes local viewing and revokes actions. **Leave miniapp** does not send END,
 erase shared state, or automatically release a player seat.
 
 **Shared state, no secrets:** authorized participants currently in that voice room receive the HTML and JSON state. The server also checks room membership when listing screens or acting; another channel or another device in voice does not authorize this connection. Actions require `USE_BOT_COMMANDS`. Never include tokens, local paths, or a player's secret information. Screens receive no Node.js, preload, IPC, or access to the client's DOM.
+
+## View lifecycle {#ciclo-de-vida-da-visualizacao}
+
+The `onBeforeClose` and `onClose` hooks tell the miniapp that this person's
+view is about to close. Monky only reports the event; the miniapp decides what
+to do, such as asking whether the person wants to save the game.
+
+| Hook | When it runs | How Monky waits |
+|------|--------------|-----------------|
+| `onBeforeClose(({ reason }) => ...)` | Before **Leave miniapp** (`leave`) or **End miniapp** (`end`), when this person asks for it | The view stays open and may ask anything. Handlers run in order; the first one returning `false`, directly or through a promise, keeps the miniapp open |
+| `onClose(({ reason }) => ...)` | On every close, including after an `onBeforeClose` | Up to 5 seconds, with the view already hidden and muted, without new state or `sendAction`. Handlers run in parallel |
+
+Both return a function that removes the registration. Register them while the
+document loads: Monky only waits for hooks it already knows about. The
+`onClose` `reason` tells why the view closed:
+
+| `reason` | Situation |
+|----------|-----------|
+| `leave` | The person clicked **Leave miniapp** or **Close now** |
+| `end` | The person ended the miniapp for everyone |
+| `ended` | The miniapp no longer exists: someone else ended it, or the bot closed it, disconnected or lost access to the room |
+| `revoked` | This view lost access: the person left or switched rooms or servers, left the stage, disconnected or lost permission |
+
+While `onBeforeClose` answers, the tile's button becomes **Close now** (or
+**End now**), and a filmstrip tile comes into focus so the question is
+readable and clickable. The person can always leave: the bridge acknowledges
+the request by itself, and if the document does not acknowledge it within 3
+seconds because it is stuck, Monky closes the view. After the acknowledgement,
+there is no time limit while the person answers. An exception in a handler is
+logged in the miniapp's console and does not prevent the close.
+
+On every close, the screen disappears, the audio is silenced and actions are
+cut off at once; revocations and ends by other people do so without waiting
+for `onBeforeClose`. Only then does `onClose` run, invisibly, for at most 5
+seconds; if it does not finish, the document is discarded. As with the volume
+adjustment, the silence
+does not reach child iframes such as embedded players: stop them at the start
+of `onClose`. In that window the document keeps its own network access, and the
+bot's service remains responsible for authorizing what it receives. Quitting
+or reloading Monky leaves no time for any hook: there is only the browser's
+synchronous `pagehide` event. An app crash gives no notice at all.
+
+```js
+const screen = window.monkyScreen;
+let unsavedProgress = false;
+
+// Clients released before the hooks lack these methods.
+screen.onBeforeClose?.(async () => {
+  if (!unsavedProgress) return;
+  const choice = await askInsideTheMiniapp(); // 'save' | 'discard' | 'stay'
+  if (choice === 'stay') return false;
+  if (choice === 'save') await save();
+  unsavedProgress = false;
+});
+
+screen.onClose?.(async () => {
+  // No screen and no sound: save without asking.
+  if (unsavedProgress) await save();
+});
+```
+
+Since `onClose` runs without a screen, do not ask the person anything or start
+downloads in it: save to the bot's service, and also keep a periodic save for
+the cases without a hook. A download the person starts from a miniapp button
+before `onBeforeClose` answers, on the other hand, reaches the browser before
+the view closes and carries on afterwards.
 
 ## Miniapp web capabilities
 
@@ -149,7 +218,7 @@ caps `<audio>`/`<video>` at 100%. `OfflineAudioContext` is left unchanged.
 Child iframes, such as embedded players, and pages the frame navigates to do
 not receive the adjustment; play audio in the miniapp document itself.
 
-Authenticate external connections through an action received by the bot; never trust a browser-supplied `userId` or publish tokens in shared state. Close connections, Workers, audio, and timers when leaving the view. If an app relies on an external service, check its availability and show an explicit error before starting the activity.
+Authenticate external connections through an action received by the bot; never trust a browser-supplied `userId` or publish tokens in shared state. Close connections, Workers, audio, and timers when leaving the view, in `onClose` (or `pagehide`, on clients released before the hooks). If an app relies on an external service, check its availability and show an explicit error before starting the activity.
 
 When the bot itself serves the miniapp's resources from its own port, declare it
 in [`monkyBot.requirements`](/en/bots-distribuicao#portas-configuracoes-e-verificacao)

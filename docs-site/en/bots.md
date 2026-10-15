@@ -160,6 +160,10 @@ card appear in the **voice stage**, not as an external site opening by itself.
 view. **End miniapp**, available to its creator or an authorized
 administrator, ends that instance for everyone.
 
+Before closing, the miniapp may ask you something, such as whether to save
+the game. Answer in the miniapp itself, or click **Close now** (or **End
+now**) to skip waiting. Leaving the room never waits for the miniapp.
+
 While the view is open, the card shows the same volume control as a screen
 share, in its bottom-right corner: hover the button (or reach it with **Tab**)
 to adjust from 0 to 200%, and click it to mute. Volume and mute apply to every

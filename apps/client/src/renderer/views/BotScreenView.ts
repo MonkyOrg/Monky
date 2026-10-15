@@ -1,4 +1,7 @@
-import { BOT_SCREEN_PERMISSION_POLICY_VERSION, MessageType, Permission, botScreenSchema, botScreenRemovedSchema, type BotScreen, type BotScreenAction } from '@monky/shared';
+import {
+  BOT_SCREEN_PERMISSION_POLICY_VERSION, MessageType, Permission, botScreenSchema, botScreenRemovedSchema,
+  type BotScreen, type BotScreenAction, type BotScreenBeforeCloseReason, type BotScreenCloseReason, type BotScreenRemoved,
+} from '@monky/shared';
 import { appEvents } from '../core/EventBus';
 import { getLanguage, t, type TranslationKey } from '../i18n';
 import { settingsStore } from '../stores/settingsStore';
@@ -31,6 +34,8 @@ export class BotScreenView {
   private focused = false;
   private requestId: string | null = null;
   private endRequestId: string | null = null;
+  /** A close this person asked for, waiting for the miniapp's onBeforeClose. */
+  private confirming: BotScreenBeforeCloseReason | null = null;
   private pendingConsent: AbortController | null = null;
   private unbind: Array<() => void>;
 
@@ -40,6 +45,7 @@ export class BotScreenView {
     onOpen: () => void,
     onClose: () => void,
     onFocus: () => void,
+    private onConfirmClose: () => void,
   ) {
     if (!this.canRead()) throw new Error(t('protocolError.botVoiceRequired'));
     this.element.className = 'stage-card stage-bot-screen-card';
@@ -63,14 +69,25 @@ export class BotScreenView {
     this.endButton.className = 'btn btn-danger';
     this.openButton.addEventListener('click', (event) => { event.stopPropagation(); onOpen(); });
     this.focus.addEventListener('click', (event) => { event.stopPropagation(); onFocus(); });
-    this.close.addEventListener('click', (event) => { event.stopPropagation(); onClose(); });
-    this.endButton.addEventListener('click', (event) => { event.stopPropagation(); void this.end(); });
+    this.close.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (this.confirming === 'leave') this.frame?.forceClose();
+      else if (this.confirming) return;
+      else if (!this.frame?.asksBeforeClose) onClose();
+      else void this.confirmClose('leave').then((confirmed) => { if (confirmed) onClose(); });
+    });
+    this.endButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (this.confirming === 'end') this.frame?.forceClose();
+      else void this.end();
+    });
     this.fullscreen.addEventListener('click', (event) => { event.stopPropagation(); void this.toggleFullscreen(); });
     this.element.addEventListener('click', (event) => {
       if (event.target instanceof Element && event.target.closest('button, iframe')) return;
       onFocus();
     });
     this.notice.className = 'bot-screen-notice';
+    this.notice.setAttribute('aria-live', 'polite');
     this.error.className = 'bot-error';
     this.error.setAttribute('role', 'alert');
     this.error.hidden = true;
@@ -147,12 +164,14 @@ export class BotScreenView {
     }
   }
 
-  leave(): void {
+  /** Closes the local view; the frame's onClose hooks learn why. */
+  leave(reason: BotScreenCloseReason = 'revoked'): void {
     this.pendingConsent?.abort();
     this.pendingConsent = null;
     if (this.requestId) this.context.session.client.cancelRequest(this.requestId);
     this.requestId = null;
-    this.frame?.destroy();
+    this.confirming = null;
+    this.frame?.retire(reason);
     this.frame = null;
     this.volumeControl.close();
     this.placeholder.hidden = false;
@@ -179,14 +198,38 @@ export class BotScreenView {
     if (focusChanged) this.localize();
   }
 
-  destroy(): void {
+  destroy(reason: BotScreenCloseReason = 'revoked'): void {
     if (this.destroyed) return;
     this.destroyed = true;
     if (this.endRequestId) this.context.session.client.cancelRequest(this.endRequestId);
     this.endRequestId = null;
-    this.leave();
+    this.leave(reason);
     for (const unbind of this.unbind) unbind();
     this.element.remove();
+  }
+
+  /** What this viewer's onClose is told about a removal by the server. */
+  closeReasonFor(removed: BotScreenRemoved): BotScreenCloseReason {
+    if (removed.reason === 'view_revoked') return 'revoked';
+    return removed.reason === 'ended' && this.endRequestId !== null && removed.endedByUserId === this.context.user.id
+      ? 'end' : 'ended';
+  }
+
+  /** Lets an onBeforeClose hook answer first. Revocations never come through here. */
+  private async confirmClose(reason: BotScreenBeforeCloseReason): Promise<boolean> {
+    const frame = this.frame;
+    if (!frame || this.confirming) return false;
+    this.confirming = reason;
+    this.localize();
+    this.onConfirmClose();
+    try {
+      return await frame.requestBeforeClose(reason) && this.frame === frame && !this.destroyed;
+    } finally {
+      if (this.confirming === reason) {
+        this.confirming = null;
+        if (!this.destroyed) this.localize();
+      }
+    }
   }
 
   private canRead(): boolean {
@@ -218,19 +261,26 @@ export class BotScreenView {
       }
     };
     label(this.openButton, 'botScreen.openView', 'smart_display');
-    label(this.close, 'botScreen.close', 'visibility_off');
-    this.close.title = t('botScreen.permissionRevokeHint');
-    label(this.endButton, this.endRequestId ? 'botScreen.ending' : 'botScreen.end', 'stop_circle');
-    this.endButton.title = t('botScreen.endHint');
+    const confirmingLeave = this.confirming === 'leave';
+    const confirmingEnd = this.confirming === 'end';
+    label(this.close, confirmingLeave ? 'botScreen.closeNow' : 'botScreen.close', confirmingLeave ? 'close' : 'visibility_off');
+    this.close.title = t(confirmingLeave ? 'botScreen.closeNowHint' : 'botScreen.permissionRevokeHint');
+    this.close.disabled = confirmingEnd;
+    label(this.endButton, confirmingEnd ? 'botScreen.endNow' : this.endRequestId ? 'botScreen.ending' : 'botScreen.end', 'stop_circle');
+    this.endButton.title = t(confirmingEnd ? 'botScreen.endNowHint' : 'botScreen.endHint');
     this.endButton.hidden = !this.canEnd();
-    this.endButton.disabled = this.endRequestId !== null;
+    this.endButton.disabled = this.endRequestId !== null || confirmingLeave;
     label(this.focus, this.focused ? 'botScreen.unfocus' : 'botScreen.focus', this.focused ? 'grid_view' : 'center_focus_strong');
     label(this.fullscreen, 'stage.fullscreen', 'fullscreen', false);
     this.close.hidden = !this.isWatching;
     // Only an open view plays audio.
     this.volumeControl.element.hidden = !this.isWatching;
     this.volumeControl.localize();
-    this.notice.textContent = t('botScreen.publicNotice');
+    if (this.confirming) this.element.setAttribute('aria-busy', 'true');
+    else this.element.removeAttribute('aria-busy');
+    // A live region: only an actual change may be announced.
+    const notice = this.confirming ? t('botScreen.confirmingClose', { title: this.screen.title }) : t('botScreen.publicNotice');
+    if (this.notice.textContent !== notice) this.notice.textContent = notice;
     this.placeholderHint.textContent = t('botScreen.viewHint');
   }
 
@@ -264,12 +314,14 @@ export class BotScreenView {
   }
 
   private async end(): Promise<void> {
-    if (this.endRequestId || !this.canRead()) return;
+    if (this.endRequestId || this.confirming || !this.canRead()) return;
     if (!this.canEnd()) {
       this.error.textContent = t('botChat.commandsPermissionDenied');
       this.error.hidden = false;
       return;
     }
+    // This person's open miniapp may ask its own question (e.g. to save) before ending for everyone.
+    if (this.frame?.asksBeforeClose && (!await this.confirmClose('end') || this.endRequestId !== null || !this.canEnd())) return;
     const { session } = this.context;
     const ref = { id: this.screen.id, instanceId: this.screen.instanceId };
     if (session.botScreenStore.get(ref.id)?.instanceId !== ref.instanceId) return;

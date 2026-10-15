@@ -11,7 +11,7 @@ Complete public signatures of the Monky bot SDK, generated from the TypeScript e
 
 ## `BotScreen` {#botscreen}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L102)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L103)
 
 ```ts
 export type BotScreen = {
@@ -30,7 +30,7 @@ export type BotScreen = {
 
 ## `BotScreenActionEvent` {#botscreenactionevent}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L107)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L108)
 
 ```ts
 export type BotScreenActionEvent = {
@@ -44,6 +44,48 @@ export type BotScreenActionEvent = {
     actionId: string;
     screenId: string;
 };
+```
+
+## `BotScreenBeforeCloseEvent` {#botscreenbeforecloseevent}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L120)
+
+```ts
+export interface BotScreenBeforeCloseEvent {
+    readonly reason: BotScreenBeforeCloseReason;
+}
+```
+
+## `BotScreenBeforeCloseReason` {#botscreenbeforeclosereason}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L112)
+
+```ts
+export type BotScreenBeforeCloseReason = "leave" | "end";
+```
+
+## `BotScreenBridge` {#botscreenbridge}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L139)
+
+```ts
+export interface BotScreenBridge {
+    readonly viewer: BotScreenViewer;
+    /** Delivers the current state at once and every update; returns an unsubscribe function. */
+    onState(callback: (state: BotScreenJson, revision: number) => void): () => void;
+    /** Whether the bridge accepted the intent, not whether the bot accepted the action. */
+    sendAction(action: string, payload: BotScreenJson): boolean;
+    /**
+     * Runs, in registration order, before a close this person asked for; the view stays visible
+     * and may ask anything. Resolving `false` keeps it open. Revocations never wait for it.
+     */
+    onBeforeClose(handler: (event: BotScreenBeforeCloseEvent) => boolean | void | Promise<boolean | void>): () => void;
+    /**
+     * Runs on every close, while the view is already hidden, muted and cut from state and actions.
+     * The document is kept for at most 5 seconds so the handlers can finish, e.g. saving.
+     */
+    onClose(handler: (event: BotScreenCloseEvent) => void | Promise<void>): () => void;
+}
 ```
 
 ## `BotScreenClient` {#botscreenclient}
@@ -61,9 +103,27 @@ export class BotScreenClient {
 }
 ```
 
+## `BotScreenCloseEvent` {#botscreencloseevent}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L124)
+
+```ts
+export interface BotScreenCloseEvent {
+    readonly reason: BotScreenCloseReason;
+}
+```
+
+## `BotScreenCloseReason` {#botscreenclosereason}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L118)
+
+```ts
+export type BotScreenCloseReason = "ended" | BotScreenBeforeCloseReason | "revoked";
+```
+
 ## `BotScreenCreate` {#botscreencreate}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L104)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L105)
 
 ```ts
 export type BotScreenCreate = {
@@ -78,7 +138,7 @@ export type BotScreenCreate = {
 
 ## `BotScreenJson` {#botscreenjson}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L16)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L17)
 
 ```ts
 export type BotScreenJson = string | number | boolean | BotScreenJson[] | {
@@ -88,7 +148,7 @@ export type BotScreenJson = string | number | boolean | BotScreenJson[] | {
 
 ## `BotScreenPatch` {#botscreenpatch}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L105)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L106)
 
 ```ts
 export type BotScreenPatch = {
@@ -99,7 +159,7 @@ export type BotScreenPatch = {
 
 ## `BotScreenRef` {#botscreenref}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L103)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L104)
 
 ```ts
 export type BotScreenRef = {
@@ -110,7 +170,7 @@ export type BotScreenRef = {
 
 ## `BotScreenRemoved` {#botscreenremoved}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L108)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L109)
 
 ```ts
 export type BotScreenRemoved = {
@@ -140,6 +200,18 @@ export type BotScreenRemoved = {
     reason: "view_revoked";
     instanceId: string;
 };
+```
+
+## `BotScreenViewer` {#botscreenviewer}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L129)
+
+```ts
+export interface BotScreenViewer {
+    readonly id: string;
+    readonly nickname: string;
+    readonly locale: BotLocale;
+}
 ```
 
 ## `BotVoiceAudioReceiver` {#botvoiceaudioreceiver}

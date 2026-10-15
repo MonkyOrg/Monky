@@ -1,4 +1,4 @@
-import { MessageType, SCREEN_SHARE_LIMITS, getScreenShareQualities, screenShareQualitySchema, type BotScreen, type NativeScreenSource } from '@monky/shared';
+import { MessageType, SCREEN_SHARE_LIMITS, getScreenShareQualities, screenShareQualitySchema, type BotScreen, type BotScreenRemoved, type NativeScreenSource } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
@@ -211,9 +211,18 @@ export class VoiceStageView {
     const view = this.botScreens.get(id);
     if (!view?.isWatching) return;
     this.botVoiceContext?.session.botScreenStore.setInvitationDismissed(id, true);
-    view.leave();
+    view.leave('leave');
     this.positionBotScreens();
     appEvents.emit('stage.bot_screens_changed');
+  }
+
+  /** The server's reason reaches the miniapp's onClose; a later refresh would only know it vanished. */
+  private removeBotScreen(removed: BotScreenRemoved): void {
+    const view = this.botScreens.get(removed.id);
+    if (!view || view.snapshot.instanceId !== removed.instanceId || view.snapshot.channelId !== removed.channelId) return;
+    view.destroy(view.closeReasonFor(removed));
+    this.botScreens.delete(removed.id);
+    this.focusedTileKeys = this.focusedTileKeys.filter((key) => key !== `miniapp:${removed.id}`);
   }
 
   private closeBotScreens(): void {
@@ -257,7 +266,8 @@ export class VoiceStageView {
     const screens = context.session.botScreenStore.list(context.channelId);
     for (const [id, view] of this.botScreens) {
       if (!screens.some((screen) => screen.id === id && screen.instanceId === view.snapshot.instanceId)) {
-        view.destroy();
+        // Gone from the room's current list (or replaced by a new instance) while access remained.
+        view.destroy('ended');
         this.botScreens.delete(id);
         this.focusedTileKeys = this.focusedTileKeys.filter((key) => key !== `miniapp:${id}`);
       }
@@ -272,6 +282,11 @@ export class VoiceStageView {
             const key = `miniapp:${screen.id}`;
             if (this.focusedTileKeys.includes(key)) this.setFocusedTiles([]);
             else this.toggleFocus(key);
+          },
+          () => {
+            // A filmstrip frame ignores the pointer, so the miniapp's question would be unanswerable.
+            const key = `miniapp:${screen.id}`;
+            if (this.focusedTileKeys.length > 0 && !this.focusedTileKeys.includes(key)) this.toggleFocus(key);
           });
         this.botScreens.set(screen.id, view);
       } else view.update(screen);
@@ -2486,6 +2501,7 @@ export class VoiceStageView {
     const u16 = appEvents.on('camera.state_changed', () => this.refreshLocalCameraVideo());
     const u17 = appEvents.on<VoiceBotScreensUpdated | undefined>('voice.bot_screens_updated', (update) => {
       if (update) this.notifyMiniappEnded(update);
+      if (update?.removed && update.key === this.botVoiceContext?.session.key) this.removeBotScreen(update.removed);
       this.renderParticipants();
     });
     const u18 = appEvents.on('voice.channel_changed', () => {
