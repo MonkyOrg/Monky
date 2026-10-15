@@ -55,6 +55,8 @@ and explains why in its placeholder without an additional warning.
 
 Click a **voice channel** to join the call. Whoever speaks gets a green ring around the avatar. The bottom bar has microphone, headphones/deafen and disconnect. The panel shows average ping and lets you leave only the call.
 
+On Windows, during a call, Monky's thumbnail on the taskbar also shows microphone, deafen and leave call buttons. Hover over the Monky icon to use them without opening the window.
+
 Private channels show a padlock on the corner of their own icon. A voice channel
 with a [user limit](/en/administrar-servidor#user-limit) shows next to its name
 how many participants are in it and the maximum; once the room is full, only
