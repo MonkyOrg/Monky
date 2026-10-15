@@ -308,8 +308,14 @@ export class MarkdownInput extends HTMLElement {
         focusState, typingFormats, preview,
         this.configuration.of(this.editorAttributes()),
         EditorView.focusChangeEffect.of((_state, value) => focused.of(value)),
-        EditorState.changeFilter.of(transaction => !transaction.docChanged || this.maxLength < 0
-          || transaction.newDoc.length <= this.maxLength || transaction.newDoc.length < transaction.startState.doc.length),
+        EditorState.changeFilter.of(transaction => {
+          if (!transaction.docChanged || this.maxLength < 0 || transaction.newDoc.length <= this.maxLength
+            || transaction.newDoc.length < transaction.startState.doc.length) return true;
+          // Typing simply stops at the limit, but a rejected paste or drop would
+          // otherwise discard the whole clipboard without saying why.
+          if (transaction.isUserEvent('input.paste') || transaction.isUserEvent('input.drop')) this.reportTooLong();
+          return false;
+        }),
         EditorState.transactionFilter.of(transaction => {
           const flags = transaction.startState.field(typingFormats);
           if (flags === null || this.composition || transaction.annotation(formattedInput)
@@ -394,6 +400,13 @@ export class MarkdownInput extends HTMLElement {
           });
         }),
       ],
+    });
+  }
+
+  private reportTooLong(): void {
+    const max = this.maxLength;
+    queueMicrotask(() => {
+      if (this.isConnected) void showAlert({ message: t('chat.messageTooLong', { max }), variant: 'danger' });
     });
   }
 

@@ -39,7 +39,17 @@ O **X** de uma conversa só a tira da lista; ela volta quando chegar uma nova
 mensagem.
 
 Nas DMs você pode usar formatação, emojis, respostas, edição, exclusão,
-reações e anexos. O Monky mostra quando a outra pessoa está digitando.
+reações e anexos. O campo de mensagem é o mesmo dos canais de texto, com a barra
+de **Opções de formatação**, o botão direito com **Recortar**, **Copiar**,
+**Colar**, **Colar como texto sem formatação** e **Selecionar tudo**, e o
+contador de caracteres. Uma DM aceita até **4.000 caracteres**; colar um texto
+maior mostra esse limite em vez de não fazer nada. O botão direito numa mensagem
+oferece **Emoji**, **Responder** e **Copiar mensagem** (com formatação, em
+Markdown ou sem formatação) e, nas suas, **Editar mensagem** e **Apagar
+mensagem**. Os detalhes estão em [Chat](/usando-o-app#chat); enquetes e
+figurinhas continuam exclusivas dos servidores.
+
+O Monky mostra quando a outra pessoa está digitando.
 Mensagens seguidas da mesma pessoa no mesmo dia ficam agrupadas sob um único
 nome e foto; passe o mouse sobre uma delas para ver o horário. Uma mensagem
 que ainda não foi entregue aparece semitransparente e fica normal assim que

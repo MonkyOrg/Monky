@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Copiar e colar nas mensagens privadas agora funciona como nos servidores: o campo de mensagem ganhou o botão de formatação, o menu do botão direito e o contador de caracteres, e as mensagens também têm o menu com Copiar. Colar algo acima do limite agora avisa em vez de sumir.",
+  "en": "Copy and paste in direct messages now works just like in servers: the message box gets the formatting button, the right-click menu and the character counter, and messages get the Copy menu too. Pasting past the limit now warns you instead of vanishing."
+}

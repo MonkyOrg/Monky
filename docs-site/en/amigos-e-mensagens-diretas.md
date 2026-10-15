@@ -38,7 +38,17 @@ is online. A conversation's **X** only removes it from the list; it comes back
 when a new message arrives.
 
 DMs support formatting, emojis, replies, editing, deleting, reactions and
-attachments. Monky shows when the other person is typing. Consecutive
+attachments. The message box is the same as in text channels, with the
+**Formatting options** bar, a right-click menu with **Cut**, **Copy**,
+**Paste**, **Paste as plain text** and **Select all**, and the character
+counter. A DM takes up to **4,000 characters**; pasting longer text shows that
+limit instead of doing nothing. Right-clicking a message offers **Emoji**,
+**Reply** and **Copy message** (with formatting, as Markdown or as plain text)
+and, on your own messages, **Edit message** and **Delete message**. See
+[Chat](/en/usando-o-app#chat) for the details; polls and stickers remain
+server-only.
+
+Monky shows when the other person is typing. Consecutive
 messages from the same person on the same day are grouped under a single name
 and picture; hover one to see its time. A message that has not been delivered
 yet appears semi-transparent and turns solid once it reaches your friend.
