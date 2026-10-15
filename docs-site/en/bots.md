@@ -165,6 +165,12 @@ Before closing, the miniapp may ask you something, such as whether to save
 the game. Answer in the miniapp itself, or click **Close now** (or **End
 now**) to skip waiting. Leaving the room never waits for the miniapp.
 
+You can browse Monky, such as a text channel, Home or another server, without
+closing the miniapp: while you are in the call, it stays open in the
+background, and a notice in the sidebar offers **Back to miniapp** to return
+to it on the stage. Its sound keeps playing at the volume you chose, and the
+miniapp itself may pause while you are away. Leaving the room closes it.
+
 While the view is open, the card shows the same volume control as a screen
 share, in its bottom-right corner: hover the button (or reach it with **Tab**)
 to adjust from 0 to 200%, and click it to mute. Volume and mute apply to every

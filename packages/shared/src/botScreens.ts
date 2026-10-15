@@ -114,7 +114,7 @@ export type BotScreenBeforeCloseReason = 'leave' | 'end';
 /**
  * Why a view is closing. `ended`: the instance is gone (ended by someone else, closed by the bot,
  * bot disconnected or without access to the room). `revoked`: this view lost access (left or
- * switched rooms or servers, disconnected, lost permission or left the stage).
+ * switched rooms, disconnected or lost permission). Browsing elsewhere in Monky keeps the view open.
  */
 export type BotScreenCloseReason = BotScreenBeforeCloseReason | 'ended' | 'revoked';
 
@@ -135,7 +135,7 @@ export interface BotScreenViewer {
 
 /**
  * `window.monkyScreen` inside a miniapp document. Clients released before the lifecycle hooks
- * lack `onBeforeClose`/`onClose`: call them as `monkyScreen.onClose?.(...)`.
+ * lack `onBeforeClose`/`onClose`/`onVisibilityChange`: call them as `monkyScreen.onClose?.(...)`.
  */
 export interface BotScreenBridge {
   readonly viewer: BotScreenViewer;
@@ -154,6 +154,12 @@ export interface BotScreenBridge {
    * keeps working meanwhile.
    */
   onClose(handler: (event: BotScreenCloseEvent) => void | Promise<void>): () => void;
+  /**
+   * Runs at once with whether the person can see the view, then on every change. The view stays
+   * open but hidden while they browse elsewhere in Monky, scroll it off the stage or minimize the
+   * window. Not called once the view is closing.
+   */
+  onVisibilityChange(handler: (visible: boolean) => void): () => void;
   /**
    * Data kept on this computer, when the bot has `device_storage` and the person allows it.
    * Missing in clients released before bot storage.

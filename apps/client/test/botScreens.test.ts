@@ -243,12 +243,14 @@ test('screen init JSON cannot break out into the trusted or author script docume
 test('miniapp documents start at the saved volume and embed a self-contained volume control', () => {
   const viewer = { id: 'alice', nickname: 'Alice', locale: 'en' } as const;
   const seedVolume = (volume?: number) =>
-    Number(/"depth":\d+,"volume":([^,}]+)\}/.exec(botScreenDocument(snapshot(), viewer, volume))?.[1]);
+    Number(/"depth":\d+,"volume":([^,}]+),/.exec(botScreenDocument(snapshot(), viewer, volume))?.[1]);
   assert.equal(seedVolume(), 1, 'Unadjusted miniapps keep their own levels');
   assert.equal(seedVolume(0.35), 0.35);
   assert.equal(seedVolume(0), 0, 'A muted tile opens silently');
   assert.equal(seedVolume(5), 2, 'Amplification is capped at 200%');
   assert.equal(seedVolume(Number.NaN), 1);
+  assert.ok(botScreenDocument(snapshot(), viewer).includes('"visible":true}'), 'A view opens visible by default');
+  assert.ok(botScreenDocument(snapshot(), viewer, 1, false).includes('"visible":false}'), 'A view opened off screen starts hidden');
   const document = botScreenDocument(snapshot(), viewer, 0.5);
   const head = document.slice(0, document.indexOf('<body>'));
   const script = /<script>([\s\S]*)<\/script>/.exec(head)?.[1] ?? '';
@@ -258,7 +260,10 @@ test('miniapp documents start at the saved volume and embed a self-contained vol
 });
 
 const isBridge = (value: unknown): value is BotScreenBridge => typeof value === 'object' && value !== null &&
-  'onBeforeClose' in value && 'onClose' in value && 'sendAction' in value && 'onState' in value;
+  'onBeforeClose' in value && 'onClose' in value && 'onVisibilityChange' in value && 'sendAction' in value && 'onState' in value;
+
+/** What the bootstrap reads of the miniapp's own page. */
+const miniappPage = () => Object.assign(new EventTarget(), { visibilityState: 'visible' as DocumentVisibilityState });
 
 test('the miniapp bridge announces lifecycle hooks, answers close requests and goes quiet once closing', async () => {
   const document = botScreenDocument(snapshot(), { id: 'alice', nickname: 'Alice', locale: 'en' });
@@ -273,7 +278,7 @@ test('the miniapp bridge announces lifecycle hooks, answers close requests and g
   };
   const errors: unknown[] = [];
   vm.runInNewContext(script, {
-    window: scope, parent, structuredClone, TextEncoder,
+    window: scope, parent, document: miniappPage(), structuredClone, TextEncoder,
     // Outside a browser the volume control cannot install; that warning is expected here.
     console: { warn: () => {}, error: (error: unknown) => { errors.push(error); } },
   });
@@ -351,6 +356,77 @@ test('the miniapp bridge announces lifecycle hooks, answers close requests and g
     assert.deepEqual(revisions, [0], 'Nothing but the close reaches a closing view');
     assert.deepEqual(received, [], 'A closing view neither answers nor announces again');
     assert.equal(handOffs.length, 1, 'A closing view hands nothing else off');
+  } finally {
+    port1.close();
+  }
+});
+
+test('the miniapp bridge reports visibility at once and on each change, and goes quiet once closing', async () => {
+  const document = botScreenDocument(snapshot(), { id: 'alice', nickname: 'Alice', locale: 'en' }, 1, false);
+  const script = /<script>([\s\S]*)<\/script>/.exec(document.slice(0, document.indexOf('<body>')))?.[1];
+  assert.ok(script);
+  const scope = new EventTarget();
+  const page = miniappPage();
+  const parent = {};
+  const errors: unknown[] = [];
+  vm.runInNewContext(script, {
+    window: scope, parent, document: page, structuredClone, TextEncoder,
+    console: { warn: () => {}, error: (error: unknown) => { errors.push(error); } },
+  });
+  const bridge: unknown = Object.getOwnPropertyDescriptor(scope, 'monkyScreen')?.value;
+  assert.ok(isBridge(bridge));
+  assert.throws(() => Reflect.apply(bridge.onVisibilityChange, bridge, ['not a function']), /Expected a visibility handler/);
+  const { port1, port2 } = new MessageChannel();
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+  const setPage = (state: DocumentVisibilityState) => {
+    page.visibilityState = state;
+    page.dispatchEvent(new Event('visibilitychange'));
+  };
+  try {
+    const seen: boolean[] = [];
+    const off = bridge.onVisibilityChange((visible) => { seen.push(visible); });
+    assert.deepEqual(seen, [false], 'Called at once: a view opened off screen starts hidden, even before connecting');
+    scope.dispatchEvent(Object.assign(new Event('message'), { source: parent, data: 'monky-screen-connect', ports: [port2] }));
+    port1.postMessage({ type: 'visibility', visible: true });
+    await settle();
+    assert.deepEqual(seen, [false, true], 'Back on stage');
+    port1.postMessage({ type: 'visibility', visible: true });
+    await settle();
+    assert.deepEqual(seen, [false, true], 'Only changes are reported');
+
+    setPage('hidden');
+    assert.deepEqual(seen, [false, true, false], 'A hidden page hides the view');
+    port1.postMessage({ type: 'visibility', visible: false });
+    await settle();
+    setPage('visible');
+    assert.deepEqual(seen, [false, true, false], 'Shown again only when both the page and the stage show it');
+    port1.postMessage({ type: 'visibility', visible: true });
+    await settle();
+    assert.deepEqual(seen, [false, true, false, true]);
+
+    bridge.onVisibilityChange((visible) => { if (!visible) throw new Error('A broken handler'); });
+    const later: boolean[] = [];
+    bridge.onVisibilityChange((visible) => { later.push(visible); });
+    port1.postMessage({ type: 'visibility', visible: false });
+    await settle();
+    assert.equal(errors.length, 1, 'A throwing handler is reported in the miniapp console');
+    assert.deepEqual(later, [true, false], 'and cannot keep the next handler from learning it');
+
+    off();
+    port1.postMessage({ type: 'visibility', visible: true });
+    await settle();
+    assert.deepEqual(seen, [false, true, false, true, false], 'Unsubscribing stops the reports');
+    assert.deepEqual(later, [true, false, true]);
+
+    port1.postMessage({ type: 'close', reason: 'revoked' });
+    await settle();
+    port1.postMessage({ type: 'visibility', visible: false });
+    await settle();
+    setPage('hidden');
+    const afterClose: boolean[] = [];
+    bridge.onVisibilityChange((visible) => { afterClose.push(visible); });
+    assert.deepEqual(later, [true, false, true], 'A closing view is already hidden: onClose says so');
+    assert.deepEqual(afterClose, [], 'Nor does a handler registered while closing hear anything');
   } finally {
     port1.close();
   }

@@ -54,6 +54,8 @@ export class BotScreenView {
   /** A close this person asked for, waiting for the miniapp's onBeforeClose. */
   private confirming: BotScreenBeforeCloseReason | null = null;
   private pendingConsent: AbortController | null = null;
+  /** Whether its person can see the tile; frames learn it through onVisibilityChange. */
+  private stageVisible = false;
   private unbind: Array<() => void>;
 
   constructor(
@@ -211,7 +213,7 @@ export class BotScreenView {
         if (this.frame !== frame) return;
         this.deviceStorage = state.status === 'granted' ? state.usage : null;
         this.renderStorageBadge();
-      });
+      }, this.stageVisible);
       this.frame = frame;
       this.body.append(frame.element);
       this.placeholder.hidden = true;
@@ -314,6 +316,22 @@ export class BotScreenView {
     this.element.className = `${focused ? 'stage-focused-main' : miniature ? 'stage-mini-card stage-mini-card--video' : 'stage-card stage-card--video'} stage-bot-screen-card`;
     this.focus.setAttribute('aria-pressed', String(focused));
     if (focusChanged) this.localize();
+  }
+
+  setStageVisible(visible: boolean): void {
+    this.stageVisible = visible;
+    this.frame?.setVisible(visible);
+  }
+
+  /**
+   * Off stage while its person browses elsewhere. The view keeps running, but nothing on the
+   * tile can be answered: a pending permission review is cancelled rather than left behind.
+   */
+  park(): void {
+    this.pendingConsent?.abort();
+    this.pendingConsent = null;
+    this.volumeControl.close();
+    this.setStageVisible(false);
   }
 
   destroy(reason: BotScreenCloseReason = 'revoked'): void {
