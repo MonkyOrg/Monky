@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Clicou num som do soundboard e nada aconteceu? Agora o botão mostra que ele está carregando até o áudio começar. E se o som não puder tocar, um aviso conta o motivo em vez de deixar você no vácuo.",
+  "en": "Clicked a soundboard sound and nothing happened? Its button now shows it loading until the audio starts. And if the sound can't play, a notice tells you why instead of leaving you hanging."
+}

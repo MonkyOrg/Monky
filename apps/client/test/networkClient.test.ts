@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
-import { MessageType, PROTOCOL_VERSION, MIN_CLIENT_PROTOCOL, type ProtocolMessage } from '@monky/shared';
-import { NetworkClient, type ConnectionStatus, type NetworkDisconnectedPayload, type ServerShutdownNotice } from '../src/renderer/core/NetworkClient';
+import { MessageType, PROTOCOL_VERSION, MIN_CLIENT_PROTOCOL, ProtocolErrorCode, type ProtocolMessage } from '@monky/shared';
+import { NetworkClient, ProtocolRequestError, type ConnectionStatus, type NetworkDisconnectedPayload, type ServerShutdownNotice } from '../src/renderer/core/NetworkClient';
 import { appEvents } from '../src/renderer/core/EventBus';
 import { setForegroundContext, setSessionEventRouter } from '../src/renderer/core/sessionRouting';
 
@@ -363,6 +363,30 @@ test('a synchronous socket send failure does not leave a request or timeout behi
   await f.connected();
   f.lastSocket().send = () => { throw new Error('Fixture socket send failed'); };
   await assert.rejects(f.client.sendRequest(MessageType.SFU_GET_PRODUCERS, { channelId: 'room' }), /socket send failed/);
+  assert.equal(f.client['pendingRequests'].size, 0);
+});
+
+// The soundboard follows its own SOUNDBOARD_PLAY to the moment the relayed copy
+// is audible: bus listeners start playing the reply, and the requester then
+// finds that playback by the very payload object it resolves with.
+test('a reply that settles a request reaches bus listeners first, as the same payload', async context => {
+  const f = fixture(context);
+  await f.connected();
+  const relayed: unknown[] = [];
+  context.after(appEvents.on(`message.${MessageType.SOUNDBOARD_PLAYED}`, payload => relayed.push(payload)));
+  const reply = f.client.sendRequest(MessageType.SOUNDBOARD_PLAY, { channelId: 'room' }, undefined, 60_000);
+  const request = f.lastSocket().sent.at(-1);
+  assert.ok(request && request.type === MessageType.SOUNDBOARD_PLAY);
+  f.lastSocket().receive({ type: MessageType.SOUNDBOARD_PLAYED, requestId: request.requestId, payload: { channelId: 'room', userId: 'self' } });
+  assert.equal(relayed.length, 1, 'The relayed clip is dispatched before the requester resumes');
+  assert.equal(await reply, relayed[0]);
+
+  const refused = f.client.sendRequest(MessageType.SOUNDBOARD_PLAY, { channelId: 'room' });
+  const second = f.lastSocket().sent.at(-1);
+  f.lastSocket().receive({ type: MessageType.SERVER_ERROR, requestId: second?.requestId,
+    payload: { code: ProtocolErrorCode.PERMISSION_DENIED, message: 'Sem permissão' } });
+  await assert.rejects(refused, (error: unknown) => error instanceof ProtocolRequestError && error.code === ProtocolErrorCode.PERMISSION_DENIED);
+  assert.equal(relayed.length, 1, 'A refusal is not mistaken for a relayed clip');
   assert.equal(f.client['pendingRequests'].size, 0);
 });
 

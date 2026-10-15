@@ -287,7 +287,7 @@ export class SoundboardModal {
                 ${renderFavoriteToggle(soundFavoriteKey(s.filePath), s.name, favoritesStore.isSoundFavorite(s.filePath))}
                 <!-- Play Sound Button -->
                 <button type="button" class="sb-sound-btn" data-filepath="${escapeHtml(s.filePath)}" data-soundname="${escapeHtml(s.name)}" title="${escapeHtml(t('soundboard.playSoundTitle', { name: s.name, size: (s.sizeBytes / 1024).toFixed(0) }))}" style="flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 28px 8px 6px; background: transparent; border: none; color: var(--text-primary); cursor: pointer; text-align: center; outline: none; width: 100%;">
-                  <span class="material-symbols-outlined sb-sound-icon" style="color: var(--accent-primary); font-size: 26px;">${isPlaying ? 'volume_up' : 'play_circle'}</span>
+                  <span class="material-symbols-outlined sb-sound-icon" aria-hidden="true" style="color: var(--accent-primary); font-size: 26px;">${isPlaying ? 'volume_up' : 'play_circle'}</span>
                   <span style="font-size: 12px; font-weight: 600; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; width: 100%; word-break: break-word;">
                     ${escapeHtml(s.name)}
                   </span>
@@ -345,7 +345,7 @@ export class SoundboardModal {
                      below stop the click from reaching it. -->
                 <div style="flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; padding: 2px 0;">
                   <div style="width: 28px; height: 28px; border-radius: 50%; background: ${isPlaying ? 'var(--accent-primary)' : 'rgba(255,255,255,0.06)'}; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
-                    <span class="material-symbols-outlined sb-sound-icon" style="color: ${isPlaying ? '#ffffff' : 'var(--accent-primary)'}; font-size: 18px;">${isPlaying ? 'volume_up' : 'play_arrow'}</span>
+                    <span class="material-symbols-outlined sb-sound-icon" aria-hidden="true" style="color: ${isPlaying ? '#ffffff' : 'var(--accent-primary)'}; font-size: 18px;">${isPlaying ? 'volume_up' : 'play_arrow'}</span>
                   </div>
                   <span style="font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;">
                     ${escapeHtml(s.name)}
@@ -849,14 +849,7 @@ export class SoundboardModal {
 
   private setupPlaybackListeners(): void {
     const onPlaybackStarted = () => this.updateActiveButtons();
-
-    const onPlaybackEnded = () => {
-      if (soundboardService.getActivePlaybacks().length === 0) {
-        this.clearActiveButtons();
-      } else {
-        this.updateActiveButtons();
-      }
-    };
+    const onPlaybackEnded = () => this.updateActiveButtons();
 
     const onSoundPlayed = (payload: { soundName: string }) => {
       this.highlightPlayedSound(payload.soundName);
@@ -871,6 +864,7 @@ export class SoundboardModal {
       appEvents.off('soundboard.playback_ended', onPlaybackEnded);
       appEvents.off('soundboard.played', onSoundPlayed);
     });
+    this.unbindEvents.push(appEvents.on('soundboard.loading_changed', () => this.updateActiveButtons()));
     this.unbindEvents.push(favoritesStore.subscribe(kind => {
       if (kind === 'sounds') this.refreshGrid('reorder');
     }));
@@ -907,36 +901,34 @@ export class SoundboardModal {
     }
   }
 
+  /**
+   * Paints each sound's state from the service. A sound we asked for shows a
+   * spinner until it is audible, even when someone else is already playing the
+   * same clip: the click is what the person is waiting on.
+   */
   private updateActiveButtons(): void {
     if (!this.modalEl) return;
     const playingNames = soundboardService.getPlayingSoundNames();
+    const loadingPaths = soundboardService.getLoadingSoundPaths();
     const buttons = this.modalEl.querySelectorAll('#sb-sounds-container .sb-sound-btn');
     buttons.forEach((btn) => {
       const soundName = btn.getAttribute('data-soundname');
+      const filePath = btn.getAttribute('data-filepath');
       const icon = btn.querySelector('.sb-sound-icon');
-      const isPlaying = soundName ? playingNames.has(soundName) : false;
+      const isLoading = filePath ? loadingPaths.has(filePath) : false;
+      const isPlaying = !isLoading && (soundName ? playingNames.has(soundName) : false);
       const isList = btn.classList.contains('sb-sound-list-btn');
 
       btn.classList.toggle('is-playing', isPlaying);
+      btn.classList.toggle('is-loading', isLoading);
+      if (isLoading) btn.setAttribute('aria-busy', 'true');
+      else btn.removeAttribute('aria-busy');
       const parentContainer = btn.closest('.sb-sound-card, .sb-sound-row');
       if (parentContainer) parentContainer.classList.toggle('is-playing', isPlaying);
 
       if (icon) {
-        icon.textContent = isPlaying ? 'volume_up' : (isList ? 'play_arrow' : 'play_circle');
+        icon.textContent = isLoading ? 'progress_activity' : isPlaying ? 'volume_up' : (isList ? 'play_arrow' : 'play_circle');
       }
-    });
-  }
-
-  private clearActiveButtons(): void {
-    if (!this.modalEl) return;
-    const buttons = this.modalEl.querySelectorAll('#sb-sounds-container .sb-sound-btn');
-    buttons.forEach((btn) => {
-      btn.classList.remove('is-playing');
-      const parentContainer = btn.closest('.sb-sound-card, .sb-sound-row');
-      if (parentContainer) parentContainer.classList.remove('is-playing');
-      const isList = btn.classList.contains('sb-sound-list-btn');
-      const icon = btn.querySelector('.sb-sound-icon');
-      if (icon) icon.textContent = isList ? 'play_arrow' : 'play_circle';
     });
   }
 

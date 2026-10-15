@@ -737,6 +737,8 @@ export const en: TranslationMap = {
   'soundboard.copySaved': 'Copy saved: {name}. The original was preserved.',
   'soundboard.editorPreview': 'Local preview',
   'soundboard.previewFailed': 'Could not play the preview. Check your audio output and try again.',
+  'soundboard.playFailed': 'Could not play “{name}”.',
+  'soundboard.playFailedReason': 'Could not play “{name}”. {reason}',
   'soundboard.editSummary': 'Result: {duration} s · {channels} channel(s) · {size} MiB',
   'soundboard.fileError.invalid_request': 'Check the name and times: start must precede end within the audio; fades must be non-negative and add up to no more than the selection. Do not use reserved names or folder separators.',
   'soundboard.fileError.no_folder': 'The folder is unauthorized or unavailable. Select it again using Change folder.',

@@ -699,6 +699,8 @@ export const ptBR = {
   'soundboard.copySaved': 'Cópia salva: {name}. O original foi mantido.',
   'soundboard.editorPreview': 'Prévia local',
   'soundboard.previewFailed': 'Não foi possível reproduzir a prévia. Confira a saída de áudio e tente novamente.',
+  'soundboard.playFailed': 'Não foi possível tocar “{name}”.',
+  'soundboard.playFailedReason': 'Não foi possível tocar “{name}”. {reason}',
   'soundboard.editSummary': 'Resultado: {duration} s · {channels} canal(is) · {size} MiB',
   'soundboard.fileError.invalid_request': 'Confira o nome e os tempos: início menor que fim, dentro do áudio; fades não negativos cuja soma não ultrapasse o trecho. Não use nomes reservados ou separadores de pasta.',
   'soundboard.fileError.no_folder': 'A pasta não está autorizada ou está indisponível. Selecione-a novamente pelo botão Trocar pasta.',

@@ -285,6 +285,30 @@ async function runDom(fixture) {
   };
   const exactStatus = text => document.querySelector('#sb-file-status')?.textContent === text;
   const name = fileName => soundboardService.getSounds().find(sound => sound.fileName === fileName);
+  // Play controls by file, in the open (not closing) soundboard: the grid card's button or the whole list row.
+  const activeCard = () => document.querySelector('.modal-backdrop:not([data-ui-closing]) .soundboard-modal-card');
+  const soundButton = fileName => [...activeCard().querySelectorAll('.sb-sound-btn')]
+    .find(element => element.dataset.filepath === name(fileName).filePath);
+  const soundGlyph = fileName => soundButton(fileName).querySelector('.sb-sound-icon').textContent;
+  const spinMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'reconnect-spin';
+  const showsLoading = fileName => {
+    const button = soundButton(fileName), icon = button.querySelector('.sb-sound-icon');
+    return button.classList.contains('is-loading') && !button.classList.contains('is-playing')
+      && button.getAttribute('aria-busy') === 'true' && icon.textContent === 'progress_activity'
+      && icon.getAttribute('aria-hidden') === 'true' && getComputedStyle(icon).animationName === spinMotion();
+  };
+  const showsIdle = fileName => {
+    const button = soundButton(fileName);
+    return !button.classList.contains('is-loading') && !button.classList.contains('is-playing') && !button.hasAttribute('aria-busy')
+      && soundGlyph(fileName) === (button.classList.contains('sb-sound-list-btn') ? 'play_arrow' : 'play_circle');
+  };
+  const showsPlaying = fileName => {
+    const button = soundButton(fileName);
+    return button.classList.contains('is-playing') && !button.classList.contains('is-loading')
+      && !button.hasAttribute('aria-busy') && soundGlyph(fileName) === 'volume_up';
+  };
+  const errorToast = () => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+  const dismissToast = () => errorToast()?.querySelector('.chat-copy-toast-close').click();
   const key = (handle, keyName, count = 1, shiftKey = false) => {
     for (let index = 0; index < count; index++) document.querySelector(`[data-handle="${handle}"]`)
       .dispatchEvent(new KeyboardEvent('keydown', { key: keyName, shiftKey, bubbles: true }));
@@ -462,15 +486,33 @@ async function runDom(fixture) {
   check(root().querySelector('.sb-notice-bar')?.dataset.sound === 'other', 'Reopened modal hydrates existing player without restarting');
   continuing.audio.loop = false; continuing.audio.currentTime = 2.9;
   await until(() => soundboardService.getActivePlaybacks(true).length === 0 && !root().querySelector('.sb-notice-bar'), 'Natural end must clear controller and view');
-  // Simulate a voice connection without networking: only the controller's send spy is used.
+  // Simulate a voice connection without networking: the controller's spies
+  // record what is sent, and the test plays the server's part per request.
   const sent = [];
+  const replies = [];
   const priorGet = sessionManager.get;
   const priorGetActive = sessionManager.getActive;
-  const session = { client: { send: (...args) => sent.push(args) }, serverStore: {
+  const session = { client: {
+    send: (...args) => sent.push(args),
+    sendRequest: (...args) => {
+      sent.push(args);
+      return new Promise((resolve, reject) => replies.push({ payload: args[1], resolve, reject }));
+    },
+  }, serverStore: {
     currentUser: { id: 'self' },
     serverDetails: { allowSoundboard: true, recentSoundCacheEnabled: true, protocol: { features: ['recent-sounds'] } },
     hasPermission: () => true,
   } };
+  // The server answers SOUNDBOARD_PLAY by relaying the clip to the channel, the
+  // sender included; NetworkClient settles the request, then dispatches that
+  // same payload on the bus.
+  const relay = () => {
+    const { payload, resolve } = replies.shift();
+    const echo = { channelId: payload.channelId, userId: 'self', userName: 'QA', soundName: payload.soundName,
+      audioBase64: payload.audioBase64, mimeType: payload.mimeType };
+    resolve(echo);
+    appEvents.emit(`message.${shared.MessageType.SOUNDBOARD_PLAYED}`, echo);
+  };
   sessionManager.get = () => session;
   sessionManager.getActive = () => session;
   try {
@@ -483,8 +525,17 @@ async function runDom(fixture) {
     sent.length = 0;
     voiceStore.currentVoiceChannelId = 'qa-channel';
     voiceStore.voiceSessionKey = 'qa-session';
-    await soundboardService.playSound(name('tone.wav').filePath);
+    const broadcast = soundboardService.playSound(name('tone.wav').filePath);
+    await until(() => replies.length === 1, 'Call playback never reached the server');
     check(sent.length === 1 && sent[0][0] === shared.MessageType.SOUNDBOARD_PLAY && sent[0][1].channelId === 'qa-channel', 'Normal playback still broadcasts exact soundboard message');
+    await wait(50);
+    check(!soundboardService.getActivePlaybacks(true).length && soundboardService.getLoadingSoundPaths().has(name('tone.wav').filePath),
+      'In a call nothing plays before the server relays the clip, and the sound stays loading meanwhile');
+    relay();
+    check(await broadcast === true && soundboardService.getActivePlaybacks().some(entry => entry.userId === 'self'),
+      'Call playback resolves once the relayed clip is audible here');
+    check(soundboardService.getLoadingSoundPaths().size === 0, 'An audible sound is no longer loading');
+    soundboardService.stopSound();
     const incoming = await window.api.readSoundboardSound(name('tone.wav').filePath);
     await soundboardService.handleIncomingSound({ userId: 'self', userName: 'QA', soundName: 'tone', audioBase64: incoming.base64, mimeType: incoming.mimeType });
     await until(() => soundboardService.getActivePlaybacks().some(entry => entry.userId === 'self'), 'Own incoming audio did not play');
@@ -517,6 +568,62 @@ async function runDom(fixture) {
     voiceStore.setPermissionMuted(false);
     await reopen();
     check(!restriction(), 'Allowed playback shows no restriction');
+    // From the click until the relayed clip is audible, the library shows the sound loading.
+    const { ProtocolRequestError } = await import('/core/NetworkClient.ts');
+    for (const mode of ['grid', 'list']) {
+      activeCard().querySelector(`#sb-btn-view-${mode}`).click();
+      soundButton('tone.wav').click();
+      check(showsLoading('tone.wav'), `${mode}: clicking a sound in a call shows it loading at once`);
+      await until(() => replies.length === 1, `${mode}: the clicked sound never reached the server`);
+      await wait(50);
+      check(showsLoading('tone.wav') && !soundboardService.getActivePlaybacks(true).length,
+        `${mode}: the spinner stays while the server has not relayed the clip`);
+      relay();
+      await until(() => showsPlaying('tone.wav'), `${mode}: the spinner must give way to the playing state once audible`);
+      soundboardService.stopSoundFromUi('self');
+      check(showsIdle('tone.wav'), `${mode}: stopping returns the sound to its play glyph`);
+      soundButton('other.wav').click();
+      await until(() => replies.length === 1, `${mode}: the refused sound never reached the server`);
+      replies.shift().reject(new ProtocolRequestError('Áudio muito grande', shared.ProtocolErrorCode.BAD_REQUEST));
+      await until(() => !soundButton('other.wav').classList.contains('is-loading'), `${mode}: a refused sound must not keep spinning`);
+      check(showsIdle('other.wav') && !soundboardService.getActivePlaybacks(true).length, `${mode}: a refused sound ends idle and silent`);
+      check(errorToast()?.getAttribute('role') === 'alert' && errorToast().querySelector('.chat-copy-toast-label').textContent
+        === t('soundboard.playFailedReason', { name: 'other', reason: 'Áudio muito grande' }),
+      `${mode}: the server's refusal is explained in the shared error toast`);
+      dismissToast();
+    }
+    soundButton('other.wav').click();
+    await until(() => replies.length === 1, 'The sound never reached the server before the connection dropped');
+    replies.shift().reject(new Error(t('network.connectionClosed')));
+    await until(() => showsIdle('other.wav'), 'A sound lost with the connection must not keep spinning');
+    check(errorToast()?.querySelector('.chat-copy-toast-label').textContent === t('soundboard.playFailed', { name: 'other' }),
+      'Losing the connection mid-request reports the sound as not played');
+    dismissToast();
+    sent.length = 0;
+    soundButton('other.wav').click();
+    check(showsLoading('other.wav'), 'The sound shows loading while its file is still being read');
+    soundboardService.stopAllFromUi();
+    check(showsIdle('other.wav'), 'Stopping everything during the read clears the spinner at once');
+    await wait(150);
+    check(!replies.length && !sent.length, 'A sound stopped before leaving is never sent, so the channel has nothing to stop');
+    soundButton('other.wav').click();
+    await until(() => replies.length === 1, 'The sound to cancel never reached the server');
+    soundboardService.stopAllFromUi();
+    check(showsIdle('other.wav'), 'Stopping everything clears the spinner of a sound already sent');
+    check(sent.at(-1)[0] === shared.MessageType.SOUNDBOARD_STOP, 'A sound already on its way is stopped for the whole channel');
+    // The server relays the clip and then the stop, in the order it received them.
+    relay();
+    appEvents.emit(`message.${shared.MessageType.SOUNDBOARD_STOPPED}`, { channelId: 'qa-channel', userId: 'self' });
+    await wait(150);
+    check(!soundboardService.getActivePlaybacks(true).length && !errorToast() && showsIdle('other.wav'),
+      'A cancelled sound neither plays nor reports a failure');
+    soundButton('tone.wav').click();
+    await until(() => replies.length === 1, 'The sound never reached the server before reopening');
+    await reopen();
+    check(showsLoading('tone.wav'), 'Reopening the soundboard shows the sound still on its way');
+    relay();
+    await until(() => showsPlaying('tone.wav'), 'The reopened soundboard follows the sound until it plays');
+    soundboardService.stopSoundFromUi('self');
     const before = sent.length;
     const preview = shared.encodeSoundboardEdit(originalChannels, 48000, { start: 0, end: 1, fadeIn: 0.1, fadeOut: 0.1 });
     await soundboardService.previewEditedSound(preview.bytes, 'private');
@@ -528,10 +635,28 @@ async function runDom(fixture) {
     voiceStore.currentVoiceChannelId = null; voiceStore.voiceSessionKey = null;
     soundboardService.stopSound();
   }
+  // Outside a call the clip is only read and decoded here: quicker, yet the click still shows it loading.
+  for (const mode of ['grid', 'list']) {
+    activeCard().querySelector(`#sb-btn-view-${mode}`).click();
+    soundButton('tone.wav').click();
+    check(showsLoading('tone.wav'), `${mode}: a local preview also shows loading from the click`);
+    await until(() => showsPlaying('tone.wav'), `${mode}: the local preview must replace its spinner with the playing state`);
+    soundButton('corrupt.mp3').click();
+    check(showsLoading('corrupt.mp3'), `${mode}: an undecodable sound shows loading from the click too`);
+    await until(() => !soundButton('corrupt.mp3').classList.contains('is-loading'), `${mode}: an undecodable sound must not keep spinning`);
+    check(showsIdle('corrupt.mp3') && showsIdle('tone.wav') && !soundboardService.getActivePlaybacks(true).length,
+      `${mode}: an undecodable sound ends idle and silent, after replacing the previous preview`);
+    check(errorToast()?.getAttribute('role') === 'alert'
+      && errorToast().querySelector('.chat-copy-toast-label').textContent === t('soundboard.playFailed', { name: 'corrupt' }),
+    `${mode}: the failure is explained in the shared error toast`);
+    dismissToast();
+  }
   window.soundboardFilesQa = {
     waveformState,
     async menuNativePrepare() {
-      await soundboardService.playSound(name('tone.wav').filePath);
+      const started = soundboardService.playSound(name('tone.wav').filePath);
+      check(showsLoading('tone.wav'), `Loading glyph ${spinMotion() === 'none' ? 'holds still under reduced motion' : 'spins'} from the click`);
+      check(await started, 'Native menu fixture sound starts');
       soundboardService.stopSound();
       check(!!root().querySelector('.sb-notice-bar.is-leaving'), 'Native menu fixture exercises pending playback-bar teardown');
       // Removing playback bars can scroll the compact library and intentionally dismiss its menu.

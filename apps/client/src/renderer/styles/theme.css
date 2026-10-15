@@ -12858,6 +12858,23 @@ button:hover .role-option-check:not(.checked) {
   transform: scale(1.15);
 }
 
+/* A sound this client asked for that is not audible yet: in a call the clip
+   first makes a round trip through the server, so the play glyph turns into a
+   spinner (progress_activity) from the click until the audio starts. */
+.sb-sound-btn.is-loading {
+  cursor: progress !important;
+}
+
+.sb-sound-btn.is-loading .sb-sound-icon {
+  animation: reconnect-spin 1s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sb-sound-btn.is-loading .sb-sound-icon {
+    animation: none;
+  }
+}
+
 /* Settings Profile Avatar with Hover Overlay (#71) */
 .settings-avatar-wrapper {
   position: relative;
