@@ -314,6 +314,23 @@ function runTests() {
   store3.setUserVolume('sess-test-overflow', 250);
   assert(store3.getUserVolume('sess-test-overflow') === 200, 'setUserVolume 250% é clamped para 200%');
 
+  // Volume dos miniapps: salvo por bot, na mesma faixa da transmissão de tela
+  assert(store3.getMiniappVolume('bot-a') === 100, 'Miniapp sem volume salvo começa em 100%');
+  store3.setMiniappVolume('bot-a', 40.4);
+  store3.setMiniappVolume('bot-b', 260);
+  assert(store3.getMiniappVolume('bot-a') === 40, 'setMiniappVolume arredonda e guarda o volume do bot');
+  assert(store3.getMiniappVolume('bot-b') === 200, 'setMiniappVolume limita a amplificação a 200%');
+  assert(JSON.parse(storageMap.get('monky_settings')!).miniappVolumes['bot-a'] === 40, 'Volume do miniapp é persistido');
+  store3.setMiniappVolume('bot-b', 100);
+  assert(!Object.hasOwn(store3.miniappVolumes, 'bot-b') && store3.getMiniappVolume('bot-b') === 100,
+    'Voltar a 100% remove o bot dos volumes salvos');
+  assert(new SettingsStore().getMiniappVolume('bot-a') === 40, 'Volume do miniapp é restaurado ao reabrir');
+  for (let index = 0; index < 300; index++) store3.setMiniappVolume(`bot-${index}`, 50);
+  assert(Object.keys(store3.miniappVolumes).length === 256 && store3.getMiniappVolume('bot-0') === 100 &&
+    store3.getMiniappVolume('bot-299') === 50, 'Volumes de miniapps guardam apenas os 256 bots mais recentes');
+  storageMap.set('monky_settings', JSON.stringify({ miniappVolumes: ['invalid'] }));
+  assert(Object.keys(new SettingsStore().miniappVolumes).length === 0, 'Volumes de miniapps inválidos são descartados');
+
   // --- Seleção de release do atualizador automático (#354) ---
   console.log('\n--- Testando seleção de release do atualizador ---');
 

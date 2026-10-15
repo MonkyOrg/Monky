@@ -119,6 +119,43 @@ test('screen init JSON cannot break out into the trusted or author script docume
   assert.ok(document.includes('"locale":"en"'));
 });
 
+test('miniapp documents start at the saved volume and embed a self-contained volume control', () => {
+  const viewer = { id: 'alice', nickname: 'Alice', locale: 'en' } as const;
+  const seedVolume = (volume?: number) =>
+    Number(/"depth":\d+,"volume":([^,}]+)\}/.exec(botScreenDocument(snapshot(), viewer, volume))?.[1]);
+  assert.equal(seedVolume(), 1, 'Unadjusted miniapps keep their own levels');
+  assert.equal(seedVolume(0.35), 0.35);
+  assert.equal(seedVolume(0), 0, 'A muted tile opens silently');
+  assert.equal(seedVolume(5), 2, 'Amplification is capped at 200%');
+  assert.equal(seedVolume(Number.NaN), 1);
+  const document = botScreenDocument(snapshot(), viewer, 0.5);
+  const head = document.slice(0, document.indexOf('<body>'));
+  const script = /<script>([\s\S]*)<\/script>/.exec(head)?.[1] ?? '';
+  assert.doesNotThrow(() => new Function(script), 'The serialized bootstrap and volume control parse in the miniapp');
+  assert.ok(head.includes('HTMLMediaElement.prototype') && head.includes('AudioNode.prototype'),
+    'The volume control is installed before the bot scripts');
+});
+
+test('like a sharer screen audio, a bot miniapp mute covers the call and ends with it', () => {
+  const changes: unknown[] = [];
+  const off = appEvents.on('voice.miniapp_mute_changed', (change) => changes.push(change));
+  try {
+    voiceStore.setChannel('voice', 'miniapp-mute');
+    voiceStore.setMiniappMuted('bot', true);
+    voiceStore.setMiniappMuted('bot', true);
+    assert.equal(voiceStore.isMiniappMuted('bot'), true);
+    assert.equal(voiceStore.isMiniappMuted('other-bot'), false, 'Another bot keeps playing');
+    voiceStore.setChannel('voice', 'miniapp-mute');
+    assert.equal(voiceStore.isMiniappMuted('bot'), true, 'Rejoining the same room keeps the mute');
+    voiceStore.setChannel(null);
+    assert.equal(voiceStore.isMiniappMuted('bot'), false, 'Leaving the call clears the mute');
+    assert.deepEqual(changes, [{ botId: 'bot', muted: true }], 'Only real changes are announced');
+  } finally {
+    off();
+    voiceStore.reset();
+  }
+});
+
 test('viewer updates describe only the exact removed instance and never replay duplicate notices', () => {
   const store = new BotScreenStore('toast-lifetime');
   store.bus = new EventBus();

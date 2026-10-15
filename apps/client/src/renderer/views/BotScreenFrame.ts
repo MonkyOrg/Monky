@@ -1,5 +1,6 @@
 import { BOT_SCREEN_LIMITS, botScreenActionSchema, botScreenDocumentConsentSchema, type BotScreen, type BotScreenAction, type BotScreenDocumentConsent, type BotScreenJson } from '@monky/shared';
 import type { SupportedLanguage } from '../i18n';
+import { installMiniappVolume } from './botScreenVolume';
 
 export interface BotScreenViewer { id: string; nickname: string; locale: SupportedLanguage }
 
@@ -18,12 +19,22 @@ interface FrameSeed {
   revision: number;
   actionBytes: number;
   depth: number;
+  volume: number;
 }
 
-type FrameUpdate = { type: 'state'; state: BotScreenJson; revision: number } | { type: 'locale'; locale: SupportedLanguage };
+type FrameUpdate = { type: 'state'; state: BotScreenJson; revision: number } | { type: 'locale'; locale: SupportedLanguage }
+  | { type: 'volume'; volume: number };
+
+/** 0 mutes, 1 keeps the miniapp's own levels and 2 doubles its Web Audio output. */
+function frameVolume(volume: number): number {
+  return Number.isFinite(volume) ? Math.min(2, Math.max(0, volume)) : 1;
+}
 
 /** Self-contained because its source executes in a separate, unprivileged origin. */
-function screenBootstrap(seed: FrameSeed): void {
+function screenBootstrap(seed: FrameSeed, installVolume: typeof installMiniappVolume): void {
+  let setVolume: ((volume: number) => void) | null = null;
+  try { setVolume = installVolume(window, seed.volume); }
+  catch (error: unknown) { console.warn('[Monky] The miniapp volume control is unavailable.', error); }
   let state = seed.state;
   let revision = seed.revision;
   let port: MessagePort | null = null;
@@ -68,6 +79,10 @@ function screenBootstrap(seed: FrameSeed): void {
     port = event.ports[0]!;
     window.removeEventListener('message', connect);
     port.onmessage = (event: MessageEvent<FrameUpdate>) => {
+      if (event.data.type === 'volume') {
+        setVolume?.(event.data.volume);
+        return;
+      }
       if (event.data.type === 'locale') {
         if (locale === event.data.locale) return;
         locale = event.data.locale;
@@ -88,14 +103,14 @@ function screenBootstrap(seed: FrameSeed): void {
   window.addEventListener('message', connect);
 }
 
-export function botScreenDocument(screen: BotScreen, viewer: BotScreenViewer): string {
+export function botScreenDocument(screen: BotScreen, viewer: BotScreenViewer, volume = 1): string {
   const seed: FrameSeed = {
     viewer, state: screen.state, revision: screen.revision,
-    actionBytes: BOT_SCREEN_LIMITS.actionBytes, depth: BOT_SCREEN_LIMITS.jsonDepth,
+    actionBytes: BOT_SCREEN_LIMITS.actionBytes, depth: BOT_SCREEN_LIMITS.jsonDepth, volume: frameVolume(volume),
   };
   const serialized = JSON.stringify(seed).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="x-dns-prefetch-control" content="off"><meta http-equiv="Content-Security-Policy" content="${BOT_SCREEN_CSP}">` +
-    `<script>(${screenBootstrap.toString()})(${serialized});</script></head><body>${screen.html}</body></html>`;
+    `<script>(${screenBootstrap.toString()})(${serialized},${installMiniappVolume.toString()});</script></head><body>${screen.html}</body></html>`;
 }
 
 /** One port is bound to one isolated origin and one captured server/channel/screen. */
@@ -109,11 +124,12 @@ export class BotScreenFrame {
   private count = 0;
   private snapshot: BotScreen;
   private locale: SupportedLanguage;
+  private volume: number;
   private documentUrl: string | null = null;
 
   constructor(screen: BotScreen, viewer: BotScreenViewer, private consent: BotScreenDocumentConsent,
     private onAction: (action: BotScreenAction) => void,
-    private onError: (error: unknown) => void) {
+    private onError: (error: unknown) => void, volume = 1) {
     if (!botScreenDocumentConsentSchema.safeParse(consent).success || consent.screenId !== screen.id ||
         consent.instanceId !== screen.instanceId || consent.botId !== screen.botId) {
       this.channel.port1.close();
@@ -128,6 +144,7 @@ export class BotScreenFrame {
     BotScreenFrame.active.add(this);
     this.snapshot = screen;
     this.locale = viewer.locale;
+    this.volume = frameVolume(volume);
     this.element = document.createElement('iframe');
     this.element.className = 'bot-screen-frame';
     this.element.name = `monky-bot-screen-${crypto.randomUUID()}`;
@@ -137,7 +154,7 @@ export class BotScreenFrame {
     this.element.setAttribute('allow', "camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'; fullscreen *; autoplay *; encrypted-media *; gamepad *; usb 'none'; serial 'none'; hid 'none'");
     this.channel.port1.onmessage = this.onMessage;
     this.channel.port1.start();
-    void this.loadDocument(botScreenDocument(screen, viewer)).catch(error => {
+    void this.loadDocument(botScreenDocument(screen, viewer, this.volume)).catch(error => {
       if (!this.destroyed) this.onError(error);
     });
   }
@@ -164,6 +181,13 @@ export class BotScreenFrame {
     if (this.destroyed || locale === this.locale) return;
     this.locale = locale;
     if (this.connected) this.channel.port1.postMessage({ type: 'locale', locale } satisfies FrameUpdate);
+  }
+
+  setVolume(volume: number): void {
+    const next = frameVolume(volume);
+    if (this.destroyed || next === this.volume) return;
+    this.volume = next;
+    if (this.connected) this.channel.port1.postMessage({ type: 'volume', volume: next } satisfies FrameUpdate);
   }
 
   destroy(): void {
@@ -196,6 +220,8 @@ export class BotScreenFrame {
     this.element.contentWindow?.postMessage('monky-screen-connect', '*', [this.channel.port2]);
     this.channel.port1.postMessage({ type: 'state', state: this.snapshot.state, revision: this.snapshot.revision } satisfies FrameUpdate);
     this.channel.port1.postMessage({ type: 'locale', locale: this.locale } satisfies FrameUpdate);
+    // The document started with the volume of its creation; it may have changed while loading.
+    this.channel.port1.postMessage({ type: 'volume', volume: this.volume } satisfies FrameUpdate);
   };
 
   private onMessage = (event: MessageEvent<unknown>): void => {

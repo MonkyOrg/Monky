@@ -111,6 +111,7 @@ export class SettingsStore {
   /** Folder the user picked for custom chat stickers (#356). */
   public stickersFolderPath: string = '';
   public screenAudioVolumes: Record<string, number> = {}; // per-connection screen audio volume (#75), keyed by sessionId (#363)
+  public miniappVolumes: Record<string, number> = {}; // miniapp audio volume, keyed by the bot offering it; 100% is not stored
   public screenShareTelemetryEnabled: boolean = false;
   public screenShareReceiver: ScreenShareReceiver = 'native';
   public screenSharePreviewPauseWhenUnfocused: boolean = true;
@@ -245,6 +246,9 @@ export class SettingsStore {
         }
         if (!this.screenAudioVolumes || typeof this.screenAudioVolumes !== 'object') {
           this.screenAudioVolumes = {};
+        }
+        if (!this.miniappVolumes || typeof this.miniappVolumes !== 'object' || Array.isArray(this.miniappVolumes)) {
+          this.miniappVolumes = {};
         }
         if (typeof this.screenShareTelemetryEnabled !== 'boolean') {
           this.screenShareTelemetryEnabled = false;
@@ -554,6 +558,21 @@ export class SettingsStore {
     appEvents.emit('screen_audio_volume.changed', { sessionId, volume: clamped });
   }
 
+  /** Like a sharer's screen audio, every miniapp from the same bot shares one volume. */
+  public getMiniappVolume(botId: string): number {
+    if (!botId) return 100;
+    return this.readVolume(this.miniappVolumes, botId);
+  }
+
+  public setMiniappVolume(botId: string, volume: number): void {
+    if (!botId) return;
+    const clamped = Math.max(0, Math.min(200, Math.round(volume)));
+    const entries = Object.entries(this.miniappVolumes).filter(([id]) => id !== botId);
+    if (clamped !== 100) entries.push([botId, clamped]);
+    this.miniappVolumes = Object.fromEntries(entries.slice(-MAX_BOT_PREFERENCE_SCOPES));
+    this.save();
+  }
+
   /** Keep only valid { id: ChatSoundMode } entries, dropping 'inherit'/garbage (#153). */
   private sanitizeModeMap(map: unknown): Record<string, ChatSoundMode> {
     const result: Record<string, ChatSoundMode> = {};
@@ -739,6 +758,7 @@ export class SettingsStore {
         soundboardLoudnessLimit: this.soundboardLoudnessLimit,
         stickersFolderPath: this.stickersFolderPath,
         screenAudioVolumes: this.screenAudioVolumes,
+        miniappVolumes: this.miniappVolumes,
         screenShareTelemetryEnabled: this.screenShareTelemetryEnabled,
         screenShareReceiver: this.getScreenShareReceiver(),
         screenSharePreviewPauseWhenUnfocused: this.screenSharePreviewPauseWhenUnfocused,

@@ -1,9 +1,12 @@
 import { BOT_SCREEN_PERMISSION_POLICY_VERSION, MessageType, Permission, botScreenSchema, botScreenRemovedSchema, type BotScreen, type BotScreenAction } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
 import { getLanguage, t, type TranslationKey } from '../i18n';
+import { settingsStore } from '../stores/settingsStore';
+import { voiceStore } from '../stores/voiceStore';
 import { botRequestError } from '../utils/botInputs';
 import { getBotVoiceContext, type BotVoiceContext } from '../utils/botVoice';
 import { BotScreenFrame } from './BotScreenFrame';
+import { BotScreenVolumeControl } from './BotScreenVolumeControl';
 import { showConfirm } from './Dialog';
 
 /** A persistent stage tile; viewing and layout never change the game's seats. */
@@ -16,6 +19,9 @@ export class BotScreenView {
   private endButton = document.createElement('button');
   private focus = document.createElement('button');
   private fullscreen = document.createElement('button');
+  private volumeControl = new BotScreenVolumeControl((percent) => this.setVolume(percent), () => {
+    voiceStore.setMiniappMuted(this.screen.botId, !voiceStore.isMiniappMuted(this.screen.botId));
+  });
   private notice = document.createElement('p');
   private body = document.createElement('div');
   private placeholder = document.createElement('div');
@@ -74,13 +80,18 @@ export class BotScreenView {
     this.placeholder.className = 'bot-screen-placeholder';
     this.placeholder.append(this.openButton, this.placeholderHint);
     this.body.append(this.placeholder);
-    this.element.append(header, this.notice, this.body, this.error);
+    // The volume overlays the tile's bottom-right corner; right after the toolbar in focus order.
+    this.element.append(header, this.volumeControl.element, this.notice, this.body, this.error);
     this.localize();
+    this.syncVolume();
     this.unbind = [
       appEvents.on('i18n.language_changed', () => this.localize()),
       appEvents.on('server.roles_updated', () => this.localize()),
       appEvents.on('server.updated', () => this.localize()),
       appEvents.on('session.voice_context_updated', () => this.localize()),
+      // Another tile of the same bot, or another window, may have changed the saved volume.
+      appEvents.on('settings.updated', () => this.syncVolume()),
+      appEvents.on('voice.miniapp_mute_changed', () => this.syncVolume()),
     ];
   }
 
@@ -126,7 +137,7 @@ export class BotScreenView {
         this.error.textContent = t('botScreen.openError');
         this.error.hidden = false;
         appEvents.emit('stage.bot_screens_changed');
-      });
+      }, this.outputVolume());
       this.frame = frame;
       this.body.append(frame.element);
       this.placeholder.hidden = true;
@@ -143,6 +154,7 @@ export class BotScreenView {
     this.requestId = null;
     this.frame?.destroy();
     this.frame = null;
+    this.volumeControl.close();
     this.placeholder.hidden = false;
     this.error.hidden = true;
     this.localize();
@@ -215,8 +227,30 @@ export class BotScreenView {
     label(this.focus, this.focused ? 'botScreen.unfocus' : 'botScreen.focus', this.focused ? 'grid_view' : 'center_focus_strong');
     label(this.fullscreen, 'stage.fullscreen', 'fullscreen', false);
     this.close.hidden = !this.isWatching;
+    // Only an open view plays audio.
+    this.volumeControl.element.hidden = !this.isWatching;
+    this.volumeControl.localize();
     this.notice.textContent = t('botScreen.publicNotice');
     this.placeholderHint.textContent = t('botScreen.viewHint');
+  }
+
+  private outputVolume(): number {
+    return voiceStore.isMiniappMuted(this.screen.botId) ? 0 : settingsStore.getMiniappVolume(this.screen.botId) / 100;
+  }
+
+  private syncVolume(): void {
+    this.volumeControl.update(settingsStore.getMiniappVolume(this.screen.botId), voiceStore.isMiniappMuted(this.screen.botId));
+    this.frame?.setVolume(this.outputVolume());
+  }
+
+  private setVolume(percent: number): void {
+    try {
+      settingsStore.setMiniappVolume(this.screen.botId, percent);
+    } catch (error: unknown) {
+      // The new level still applies to this session; it just won't be remembered.
+      console.warn('[Bot screens] Could not save the miniapp volume.', error);
+    }
+    this.syncVolume();
   }
 
   private async toggleFullscreen(): Promise<void> {

@@ -139,6 +139,17 @@ herda o bridge autenticado `monkyScreen`; para mantê-lo, use navegação intern
 no documento ou um iframe filho. Popups e navegação da janela do Monky continuam
 bloqueados. O armazenamento da origem é descartado ao fechar a visualização.
 
+Cada participante ajusta o volume do miniapp no próprio card, de 0 a 200%, e
+pode mutá-lo, com o mesmo controle de uma transmissão de tela. O botão fica
+sobre o canto inferior direito do miniapp: não coloque controles essenciais
+nesse canto. O Monky aplica o ajuste dentro do
+documento isolado, antes dos scripts do bot, a `<audio>`/`<video>` e à saída
+(`destination`) de cada `AudioContext`. O app continua lendo nos elementos o
+volume que definiu. Acima de 100%, só o Web Audio é amplificado: o navegador
+limita `<audio>`/`<video>` a 100%. `OfflineAudioContext` não é alterado.
+Iframes filhos, como players incorporados, e páginas para onde o frame navegar
+não recebem o ajuste; toque o áudio no próprio documento do miniapp.
+
 Autentique conexões externas a partir de uma ação recebida pelo bot, sem confiar em um `userId` enviado pelo browser e sem publicar tokens no estado compartilhado. Encerre conexões, Workers, áudio e timers ao sair da visualização. Se o app utiliza um serviço externo, verifique sua disponibilidade e mostre um erro claro antes de iniciar a atividade.
 
 Quando o próprio bot serve os recursos do miniapp numa porta dele, declare-a em
