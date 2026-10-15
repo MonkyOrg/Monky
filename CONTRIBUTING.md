@@ -397,7 +397,8 @@ o merge e costumam pegar de surpresa quem não as conhece:
 
 Um limite conhecido: **configuração de assinatura do macOS não é validável pelo
 CI**, porque o `Build check (mac)` roda `--dir`, que pula a assinatura por
-completo. Só a release exercita esse caminho.
+completo. Só a release exercita esse caminho; veja
+[Certificado de assinatura do macOS](#certificado-de-assinatura-do-macos).
 
 Os checks obrigatórios da `main` exigem que o PR esteja atualizado com a base.
 Quando outro PR entra primeiro, o resultado anterior não basta para liberar o
@@ -486,6 +487,39 @@ A validação do usuário só começa **depois que a release estiver publicada**
 nunca só após o merge. A otimização reduz trabalho duplicado na release; o PR
 continua executando todos os testes e pode precisar de nova execução ao atualizar
 a base.
+
+### Certificado de assinatura do macOS
+
+O macOS guarda as permissões concedidas ao Monky (Gravação de Tela, Microfone,
+Câmera) pela identidade de assinatura do app. Uma assinatura ad-hoc muda a cada
+build, e cada atualização perderia essas permissões. Por isso a release do macOS
+assina com o certificado dos secrets `MAC_CSC_LINK` e `MAC_CSC_KEY_PASSWORD`. Ele
+pode ser autoassinado; o que importa é ser **sempre o mesmo**.
+
+Para criá-lo, uma única vez, num Mac ou Linux com OpenSSL:
+
+```bash
+node scripts/create-mac-signing-certificate.js --out ~/Monky-mac-signing
+gh secret set MAC_CSC_LINK < ~/Monky-mac-signing/monky-mac-signing.p12.base64
+gh secret set MAC_CSC_KEY_PASSWORD < ~/Monky-mac-signing/monky-mac-signing-password.txt
+```
+
+- Guarde o `.p12` e a senha num gerenciador de senhas e apague a pasta. O
+  certificado vale por 20 anos; perdê-lo ou trocá-lo obriga todos os usuários
+  do macOS a autorizar o Monky de novo.
+- Trate-o como credencial: quem tiver a chave consegue assinar um app que o
+  macOS trata como o Monky, com as permissões já concedidas.
+- Sem o secret, a release do macOS sai ad-hoc, com um aviso no resumo do
+  workflow. Um certificado inválido faz o build do macOS falhar, em vez de
+  publicar uma versão que perderia as permissões.
+- Só o build do macOS recebe esses secrets: o electron-builder também assinaria o
+  instalador do Windows com o `CSC_LINK`, e o atualizador do Windows recusaria as
+  versões seguintes.
+- O Gatekeeper não reconhece esse certificado, então a primeira instalação
+  continua exigindo a liberação descrita em
+  [Download](docs-site/download.md#depois-de-baixar). Só um Apple Developer ID
+  com notarização muda isso. Sem ele, a assinatura dispensa o carimbo de tempo
+  da Apple, que só a notarização exige e que somaria vários minutos à release.
 
 > 🤖 Se você é um agente de IA trabalhando neste repositório, o fluxo completo e
 > obrigatório está em [`AGENTS.md`](AGENTS.md).

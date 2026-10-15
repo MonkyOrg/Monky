@@ -313,6 +313,8 @@ jobs:
           if [ -n "$MAC_CSC_LINK" ]; then
             export CSC_LINK="$MAC_CSC_LINK"
             export CSC_KEY_PASSWORD="$MAC_CSC_KEY_PASSWORD"
+          elif [ "${{ matrix.platform }}" = mac ]; then
+            echo "::warning title=macOS release without a signing certificate::MAC_CSC_LINK is not configured, so this release is ad-hoc signed and macOS users grant its permissions again after updating. Create the certificate with scripts/create-mac-signing-certificate.js."
           fi
           if [ -n "$MAC_APPLE_ID" ]; then
             export APPLE_ID="$MAC_APPLE_ID"
@@ -323,15 +325,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           npm_config_node_gyp: ${{ env.NODE_GYP_PATH || '' }}
-          # macOS ties the Screen Recording permission to the app's code signing
-          # identity. Without a stable Developer ID the app is ad-hoc signed, its
-          # identity changes on every build, and a permission granted before an
-          # update stops applying to the new binary (#327).
-          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-          MAC_APPLE_ID: ${{ secrets.APPLE_ID }}
-          MAC_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          MAC_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # macOS keeps the permissions a user granted (Screen Recording,
+          # Microphone, Camera) while the app's designated requirement stays the
+          # same. An ad-hoc signature pins it to a hash that changes on every
+          # build, so each update lost them (#327). A certificate pins it to the
+          # certificate, even a self-signed one from
+          # scripts/create-mac-signing-certificate.js, as long as releases keep
+          # using the same one. Only the macOS build receives these secrets:
+          # electron-builder also signs Windows installers with CSC_LINK, and the
+          # Windows updater would then reject releases signed differently.
+          MAC_CSC_LINK: ${{ matrix.platform == 'mac' && secrets.MAC_CSC_LINK || '' }}
+          MAC_CSC_KEY_PASSWORD: ${{ matrix.platform == 'mac' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+          MAC_APPLE_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_ID || '' }}
+          MAC_APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          MAC_APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
 
       # The artifact keeps a single root directory on purpose: upload-artifact
       # resolves the artifact root as the common ancestor of the search paths,

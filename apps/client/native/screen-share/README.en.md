@@ -141,8 +141,13 @@ prevents focus and can throttle composition/capture.
 
 Packaging verifies sources, binaries and licenses from the compiled GN graph.
 Signing refreshes hashes of signed binaries and reseals only the outer app;
-notarization runs afterward. Without Developer ID, local builds are ad-hoc, not
-notarized. Releases include `monky-native-macos-sources-<version>.tar.xz` and its
+notarization runs afterward. Without a certificate in `CSC_LINK` the build is
+ad-hoc and its identity changes with every version. Releases sign with the
+project certificate (`MAC_CSC_LINK`), even a self-signed one, and fail if it does
+not provide exactly one signing identity or if the app's identity depends on the
+binary's hash: that is what keeps macOS permissions across updates. Notarization
+requires a Developer ID; without one, signing skips Apple's timestamp.
+Releases include `monky-native-macos-sources-<version>.tar.xz` and its
 manifest alongside the matching Monky tag. The archive preserves SDK-internal
 relative links; downloadable tools and compiled outputs are excluded.
 The approved CI artifact includes both runtimes, licenses and sources; release

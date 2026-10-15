@@ -65,13 +65,18 @@ Gravação de Tela**, a chave continua ligada, mas ao tentar compartilhar a tela
 app insiste que falta autorização. Desligar e ligar a chave não adianta.
 
 O motivo: o macOS **não guarda essa permissão pelo nome do app**, e sim pela
-**assinatura de código** do binário. Como o Monky ainda não é assinado com um
-certificado Apple Developer ID, o sistema acaba identificando o app pelo
-conteúdo do próprio binário — que muda a cada versão. Depois de atualizar, o
-macOS enxerga um app com identidade nova, e a autorização concedida à versão
-anterior não se aplica a ele. Como o nome e o caminho continuam idênticos, a
-entrada antiga permanece listada e marcada — daí a impressão de que já está tudo
-liberado.
+**assinatura de código** do binário. Uma versão sem o certificado do projeto é
+identificada pelo conteúdo do próprio binário — que muda a cada versão. Depois
+de atualizar, o macOS enxerga um app com identidade nova, e a autorização
+concedida à versão anterior não se aplica a ele. Como o nome e o caminho
+continuam idênticos, a entrada antiga permanece listada e marcada — daí a
+impressão de que já está tudo liberado. O microfone e a câmera seguem a mesma
+regra.
+
+As versões assinadas com o certificado do projeto mantêm a mesma identidade de
+uma atualização para a outra, e as permissões continuam valendo. Na primeira
+atualização para uma versão assinada, o macOS ainda pede as autorizações uma
+última vez, porque a versão anterior não tinha o certificado.
 
 ### Como voltar a compartilhar a tela
 
@@ -98,10 +103,11 @@ Privacidade e Segurança › Gravação de Tela**, selecione o Monky, clique em
 novo.
 
 ::: tip Correção definitiva
-A solução real é assinar o app com um certificado **Apple Developer ID**, que
-mantém a mesma identidade entre versões e faz a permissão sobreviver às
-atualizações. Isso depende de uma conta paga do Apple Developer Program; o
-projeto já está preparado para usá-la assim que estiver disponível.
+A correção é a assinatura com o certificado do projeto, descrita acima: depois
+da autorização concedida à primeira versão assinada, as atualizações seguintes
+não pedem de novo. Um certificado **Apple Developer ID** não é necessário para
+isso; com a notarização da Apple, ele dispensaria a liberação do Gatekeeper na
+primeira instalação ([Depois de baixar](/download#depois-de-baixar)).
 :::
 
 ## Não consigo me conectar com alguém específico (CGNAT)
