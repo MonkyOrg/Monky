@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { randomUUID, sign } from 'node:crypto';
 import { setImmediate as immediate } from 'node:timers/promises';
 import { deriveClientIdFromPublicKey, LIMITS, MessageType, Permission, PROTOCOL_VERSION, ProtocolErrorCode } from '@monky/shared';
-import { createFixture, identity } from './testFixtures/bots';
+import { createFixture, identity, record } from './testFixtures/bots';
 import { PasswordService } from './infrastructure/security/PasswordService';
 import { RateLimiter } from './infrastructure/security/RateLimiter';
 
@@ -171,4 +171,31 @@ test('MANAGE_ROLES cannot promote directly, edit Admin, or grant it as a default
   await f.roleService.ensureDefaultRolesAssigned(moderator.id);
   assert.equal(await f.permissions.checkPermission(moderator.id, Permission.ADMINISTRATOR), false);
   assert.equal(await f.permissions.checkPermission(moderator.id, Permission.MANAGE_ROLES), true);
+});
+
+test('nicknames keep accents and emoji, are stored in NFC and refuse invisible characters (#567)', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  // Some keyboards send the accent as a separate combining mark.
+  const joao = await f.human('Joa\u0303o 🐒');
+  assert.equal(record(joao.auth.payload.currentUser).nickname, 'João 🐒');
+  assert.equal((await f.userRepo.findById(joao.id))?.nickname, 'João 🐒');
+
+  const lookalike = await authenticateWithIdentity(f, identity(), 'JOÃO 🐒');
+  assert.equal(lookalike.type, MessageType.SERVER_ERROR);
+  assert.equal(lookalike.payload.code, ProtocolErrorCode.NICKNAME_ALREADY_EXISTS);
+
+  const renamed = await joao.peer.request(MessageType.USER_CHANGE_NICKNAME, { newNickname: ' Ângela 👩🏽‍💻 ' });
+  assert.equal(renamed.type, MessageType.USER_UPDATED);
+  assert.equal(record(renamed.payload.user).nickname, 'Ângela 👩🏽‍💻');
+  await joao.peer.error(MessageType.USER_CHANGE_NICKNAME, { newNickname: 'Ad\u200Bmin' }, ProtocolErrorCode.NICKNAME_INVALID);
+  assert.equal((await f.userRepo.findById(joao.id))?.nickname, 'Ângela 👩🏽‍💻');
+
+  const peer = await f.connect();
+  const spoofed = await peer.request(MessageType.AUTH_CONNECT,
+    { protocolVersion: PROTOCOL_VERSION, nickname: '\u202Enimda', publicKey: identity().publicKey });
+  assert.equal(spoofed.type, MessageType.SERVER_ERROR);
+  assert.equal(spoofed.payload.code, ProtocolErrorCode.BAD_REQUEST);
+  // Up-to-date clients read the old text as "this server predates accents".
+  assert.notEqual(spoofed.payload.message, 'Nickname contém caracteres inválidos');
 });

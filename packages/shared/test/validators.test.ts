@@ -2,8 +2,13 @@ import assert from 'node:assert/strict';
 import {
   ADMIN_PERMISSIONS,
   DEFAULT_PERMISSIONS,
+  authConnectSchema,
+  getNicknameIssue,
   isValidMessageContent,
   isValidNickname,
+  nicknameSchema,
+  normalizeNickname,
+  type NicknameIssue,
   Permission,
   LIMITS,
   QUALITY_PRESETS,
@@ -34,11 +39,53 @@ import './nativeAudioIpc.test.js';
 console.log('=== Início dos Testes Unitários de @monky/shared ===');
 
 // Test Nickname validation
-console.assert(isValidNickname('Murilo') === true, 'Murilo deve ser válido');
-console.assert(isValidNickname('Joao_123') === true, 'Joao_123 deve ser válido');
-console.assert(isValidNickname('A') === false, '1 caractere deve ser inválido');
-console.assert(isValidNickname('a'.repeat(33)) === false, '33 caracteres deve ser inválido');
-console.assert(isValidNickname('Murilo<script>') === false, 'Caracteres especiais inválidos');
+assert.equal(isValidNickname('Murilo'), true, 'Murilo deve ser válido');
+assert.equal(isValidNickname('Joao_123'), true, 'Joao_123 deve ser válido');
+assert.equal(isValidNickname('A'), false, '1 caractere deve ser inválido');
+assert.equal(isValidNickname('a'.repeat(33)), false, '33 caracteres deve ser inválido');
+assert.equal(isValidNickname('Murilo<script>'), false, 'Caracteres especiais inválidos');
+
+// Qualquer idioma, acento e emoji, inclusive sequências com joiner, bandeiras e teclas (#567).
+for (const accepted of [
+  'João', 'José da Silva', "D'Ávila", 'Ângela 🐒', 'Ольга', '李雷', 'हिंदी', '한국어 이름', 'محمد', 'שלום',
+  '👨‍👩‍👧', '👩🏽‍💻 Ana', '🏳️‍🌈', '🏳️‍⚧️', '❤️‍🔥', '❤️', '☺️', '🇧🇷 Brasil', '1️⃣ Um', '™ Ana ★',
+]) {
+  assert.equal(getNicknameIssue(accepted), null, `${accepted} deve ser aceito`);
+}
+// Invisíveis e de controle deixariam um nome em branco ou dois nomes diferentes idênticos na tela.
+const refusedNicknames: Array<[string, NicknameIssue]> = [
+  ['Ad\u200Bmin', 'invalid_characters'],
+  ['Ad\u200Dmin', 'invalid_characters'],
+  ['Ad\u200Cmin', 'invalid_characters'],
+  ['Ad\u034Fmin', 'invalid_characters'],
+  ['Ad\uFE0Fmin', 'invalid_characters'],
+  ['Ana\u200E', 'invalid_characters'],
+  ['\u202Enimda', 'invalid_characters'],
+  ['Ana\u2066Bia', 'invalid_characters'],
+  ['Ana\u00ADBia', 'invalid_characters'],
+  ['\u3164\u3164', 'invalid_characters'],
+  ['\u2800\u2800', 'invalid_characters'],
+  ['Ana\u0000', 'invalid_characters'],
+  ['Ana\tBia', 'invalid_characters'],
+  ['Ana\u2028Bia', 'invalid_characters'],
+  ['Ana\uD800', 'invalid_characters'],
+  ['Ana\uE000', 'invalid_characters'],
+  ['Ana > Bia', 'invalid_characters'],
+  ['🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}', 'invalid_characters'],
+  ['  a  ', 'too_short'],
+  ['a'.repeat(33), 'too_long'],
+];
+for (const [refused, issue] of refusedNicknames) {
+  assert.equal(getNicknameIssue(refused), issue, `${JSON.stringify(refused)} deve ser recusado por ${issue}`);
+}
+const decomposed = 'Joa\u0303o';
+assert.equal(normalizeNickname(`  ${decomposed} `), 'João', 'apelido é guardado sem espaços nas pontas e em NFC');
+assert.equal(nicknameSchema.parse(decomposed), nicknameSchema.parse('João'), 'NFD e NFC são o mesmo nome');
+assert.equal(authConnectSchema.shape.nickname.parse(' Ângela 🐒 '), 'Ângela 🐒');
+const invisible = nicknameSchema.safeParse('Ad\u200Bmin');
+assert.equal(invisible.success, false);
+assert.notEqual(invisible.error?.errors[0]?.message, 'Nickname contém caracteres inválidos',
+  'a recusa nova não pode ser confundida com a de servidores antigos, que não aceitavam acentos');
 console.log('✔ Validações de Nickname passaram');
 
 // Test Message validation

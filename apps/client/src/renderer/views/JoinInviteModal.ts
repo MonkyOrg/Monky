@@ -1,4 +1,4 @@
-import { LIMITS, serverInviteSchema, type ServerInvite } from '@monky/shared';
+import { LIMITS, getNicknameIssue, normalizeNickname, serverInviteSchema, type ServerInvite } from '@monky/shared';
 import { getServerSessionForAddress, openServerSession, updateSessionAvatar } from '../core/serverConnection';
 import { connectionStore } from '../stores/connectionStore';
 import { recordProfileChange } from '../core/profileSync';
@@ -7,6 +7,7 @@ import { t } from '../i18n';
 import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { escapeHtml } from '../utils/html';
 import { enableBackdropClose } from '../utils/modal';
+import { nicknameError } from '../utils/nickname';
 
 export class JoinInviteModal {
   private completion: Promise<boolean> | null = null;
@@ -61,9 +62,8 @@ export class JoinInviteModal {
     let displayedNickname: string | null | undefined;
     const clearNicknameValidity = () => nickname?.setCustomValidity('');
     const syncNickname = (): string | null => {
-      const saved = connectionStore.savedNickname.trim();
-      const name = connectionStore.hasIdentity && saved.length >= LIMITS.MIN_NICKNAME_LENGTH
-        && saved.length <= LIMITS.MAX_NICKNAME_LENGTH ? saved : null;
+      const saved = normalizeNickname(connectionStore.savedNickname);
+      const name = connectionStore.hasIdentity && getNicknameIssue(saved) === null ? saved : null;
       if (name !== displayedNickname) {
         nickname?.removeEventListener('input', clearNicknameValidity);
         nickname = null;
@@ -126,9 +126,10 @@ export class JoinInviteModal {
         const identityNickname = syncNickname();
         if (!form.reportValidity()) return;
         const previousNickname = connectionStore.savedNickname;
-        const name = identityNickname ?? nickname?.value.trim() ?? '';
-        if (name.length < LIMITS.MIN_NICKNAME_LENGTH || name.length > LIMITS.MAX_NICKNAME_LENGTH) {
-          nickname?.setCustomValidity(t('invite.nicknameInvalid'));
+        const name = identityNickname ?? normalizeNickname(nickname?.value ?? '');
+        const error = nicknameError(name);
+        if (error) {
+          nickname?.setCustomValidity(error);
           nickname?.reportValidity();
           nickname?.focus();
           return;

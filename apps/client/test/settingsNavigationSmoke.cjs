@@ -1027,6 +1027,35 @@ async function runSettingsNavigationSmoke() {
     'Subsection navigation never exposes tabs unavailable to the current permissions');
   serverModal.close();
   check(!document.querySelector('.settings-section-nav'), 'Closing server settings cleans up its section navigation');
+
+  // Account nickname (#567): a refused name never reaches the save callback, and
+  // accents and emoji are saved trimmed and in NFC.
+  const { AccountTab } = await import('/views/settings/tabs/AccountTab.ts');
+  const account = new AccountTab();
+  const accountRoot = document.createElement('div');
+  accountRoot.innerHTML = account.renderHtml();
+  document.body.append(accountRoot);
+  const savedNicknames = [];
+  const nicknameErrors = [];
+  account.attachEvents(accountRoot, {
+    onSaveNickname: async name => { savedNicknames.push(name); },
+    onAvatarChanged: async () => {},
+    onReloadModal: () => {},
+    showError: message => nicknameErrors.push(message),
+  });
+  const nicknameInput = accountRoot.querySelector('#settings-nickname-input');
+  const saveNickname = accountRoot.querySelector('#btn-save-nickname');
+  nicknameInput.value = 'Ad\u200Bmin';
+  saveNickname.click();
+  check(nicknameErrors.at(-1) === language.t('identity.nicknameInvalidCharacters') && savedNicknames.length === 0,
+    'An invisible character in the nickname is explained and never saved');
+  nicknameInput.value = ' Joa\u0303o 🐒 ';
+  saveNickname.click();
+  await wait(0);
+  check(savedNicknames.length === 1 && savedNicknames[0] === 'João 🐒' && nicknameErrors.length === 1,
+    'An accented nickname with emoji is saved trimmed and in NFC');
+  account.cleanup();
+  accountRoot.remove();
   window.matchMedia = originalMatchMedia;
   return checks;
 }

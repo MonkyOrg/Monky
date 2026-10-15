@@ -1,4 +1,4 @@
-import { LIMITS, MessageType } from '@monky/shared';
+import { MessageType, getNicknameIssue, normalizeNickname } from '@monky/shared';
 import { connectionStore, type SavedServer } from '../stores/connectionStore';
 import { settingsStore } from '../stores/settingsStore';
 import { autoEntryServerKey } from '../utils/autoEntry';
@@ -49,12 +49,12 @@ export class AutoEntryService {
       });
     }
     const identity = { clientId: connectionStore.clientId, publicKey: connectionStore.publicKey };
-    const nickname = connectionStore.savedNickname.trim();
+    const nickname = normalizeNickname(connectionStore.savedNickname);
     const ready = () => connectionStore.hasIdentity && !!identity.clientId && !!identity.publicKey
       && connectionStore.clientId === identity.clientId && connectionStore.publicKey === identity.publicKey
       && settingsStore.onboardingCompleted === true
-      && connectionStore.savedNickname.trim() === nickname
-      && nickname.length >= LIMITS.MIN_NICKNAME_LENGTH && nickname.length <= LIMITS.MAX_NICKNAME_LENGTH;
+      && normalizeNickname(connectionStore.savedNickname) === nickname
+      && getNicknameIssue(nickname) === null;
     if (!ready()) {
       this.reportNotice(t('autoEntry.prerequisites'));
       return;

@@ -301,7 +301,6 @@ export const ptBR = {
   'invite.invalidLink': 'Convite inválido ou não suportado. Cole um link de convite completo gerado pelo Monky.',
   'invite.readFailed': 'Não foi possível abrir o convite. Cole o link novamente na tela de entrada.',
   'invite.copyFailed': 'Não foi possível criar ou copiar o convite. Confira o endereço e a permissão da área de transferência.',
-  'invite.nicknameInvalid': 'Informe um apelido com 2 a 32 caracteres, sem contar espaços nas pontas.',
   'invite.identityNickname': 'Nome da sua identidade: {name}',
   'invite.nicknameSetupHint': 'Defina o nome da sua identidade para entrar.',
   'invite.clipboardText': 'Convite para o Monky!\nServidor: {server}\nIP / Host: {host}\nPorta: {port}{passwordLine}\n\nBaixe o Monky:\nhttps://monkyorg.github.io/Monky/download.html\n\nCole esses dados na aba "{tab}" do aplicativo!',
@@ -958,7 +957,10 @@ export const ptBR = {
   'identity.onboardingImport': 'Importar identidade existente',
   'identity.profileTitle': 'Agora crie seu perfil',
   'identity.profileDesc': 'Esse nome e avatar são globais no Monky e serão usados em todos os servidores conectados.',
-  'identity.profileNicknameHint': 'Use de {min} a {max} caracteres. Você pode incluir emojis.',
+  'identity.profileNicknameHint': 'Use de {min} a {max} caracteres. Você pode incluir acentos e emojis.',
+  'identity.nicknameTooShort': 'O nickname precisa ter pelo menos {min} caracteres.',
+  'identity.nicknameTooLong': 'O nickname pode ter no máximo {max} caracteres.',
+  'identity.nicknameInvalidCharacters': 'O nickname não pode ter caracteres invisíveis ou de controle, nem < e >. Acentos e emojis são bem-vindos.',
   'identity.profileContinue': 'Entrar na Home',
 
   // ── Home ────────────────────────────────────────────────────────────────
@@ -1807,7 +1809,8 @@ export const ptBR = {
   // ── Erros do servidor por código (protocolErrors.ts) ─────────────────────
   'protocolError.authInvalidPassword': 'Senha incorreta.',
   'protocolError.nicknameAlreadyExists': 'Este nickname já está em uso neste servidor.',
-  'protocolError.nicknameInvalid': 'Nickname inválido. Use de 2 a 32 caracteres.',
+  'protocolError.nicknameInvalid': 'Nickname inválido. Use de 2 a 32 caracteres, sem caracteres invisíveis nem < e >.',
+  'protocolError.nicknameServerOutdated': 'Este servidor ainda não aceita acentos nem emojis no nickname. Peça a quem administra o servidor para atualizar o Monky ou use um nickname sem esses caracteres.',
   'protocolError.channelNotFound': 'Canal não encontrado.',
   'protocolError.channelFull': 'Este canal de voz está cheio.',
   'protocolError.messageTooLong': 'Mensagem muito longa.',
