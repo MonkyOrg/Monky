@@ -2308,13 +2308,81 @@ input:focus, textarea:focus, select:focus {
   flex-shrink: 0;
 }
 
-/* Padlock marking a channel restricted to selected roles (#384). A distinct
-   glyph from .channel-restricted-icon, which means "you cannot speak here" and
-   would otherwise show a second identical lock on the same channel. */
-.channel-private-icon {
-  color: var(--text-muted);
+/* A private channel wears a padlock on the corner of its own glyph, as on
+   Discord, instead of a second icon after the name. The glyph is cut where the
+   padlock sits, so both read as one icon on any row background, and the
+   padlock takes the glyph's color. The warning lock of .channel-restricted-icon
+   keeps its own meaning: "you cannot join this room by yourself". */
+.channel-icon--private {
+  position: relative;
+  display: inline-flex;
   flex-shrink: 0;
-  opacity: 0.75;
+  width: 16px;
+  height: 16px;
+}
+
+.channel-icon--private .channel-icon-glyph {
+  mask: linear-gradient(#000 0 0) right top / 8.5px 9.5px no-repeat, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+.channel-icon-lock {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 8px;
+  height: 9px;
+}
+
+/* The end of a voice room row: its "00 | 06" user limit and its buttons share
+   one grid cell, sized by the larger, so the name never shifts. At rest the
+   limit shows; on hover or keyboard focus it gives way to the buttons. */
+.voice-channel-trailing {
+  display: inline-grid;
+  flex-shrink: 0;
+  align-items: center;
+  justify-items: end;
+}
+
+.voice-channel-trailing > * {
+  grid-area: 1 / 1;
+}
+
+/* Who is inside, then the limit. Above the limit the count turns red. */
+.voice-user-limit {
+  display: inline-flex;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+
+.channel-item:hover .voice-user-limit,
+.channel-item:focus-within .voice-user-limit {
+  opacity: 0;
+}
+
+.voice-user-limit-count,
+.voice-user-limit-max {
+  padding: 0 5px;
+}
+
+.voice-user-limit-count {
+  background: var(--bg-input);
+}
+
+.voice-user-limit-max {
+  background: var(--bg-tertiary);
+}
+
+.voice-user-limit--over .voice-user-limit-count {
+  color: var(--danger);
 }
 
 /* Code block composer modal (#391). */

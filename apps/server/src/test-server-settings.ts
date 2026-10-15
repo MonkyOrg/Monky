@@ -57,6 +57,7 @@ function fixture() {
     return { success: true, name: record.name, hasPassword: false, voiceMode: record.voiceMode, turnEnabled: record.turnEnabled, dmRelayEnabled: record.dmRelayEnabled };
   };
   server['authService'] = auth;
+  server['channelService'] = { getAfkChannelId: async () => null } as unknown as WebSocketServer['channelService'];
   const turn = Object.create(CoturnManager.prototype) as CoturnManager;
   turn.start = async () => { running = true; return true; };
   turn.stop = async () => { running = false; };
@@ -142,6 +143,21 @@ test('DM relay setting persists, broadcasts, and requires negotiated support', a
   assert.equal(legacy.messages.at(-1)?.type, MessageType.SERVER_ERROR);
   assert.equal(legacy.messages.at(-1)?.requestId, 'legacy-dm');
   assert.equal((legacy.messages.at(-1)?.payload as { code: ProtocolErrorCode }).code, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+});
+
+test('AFK settings require negotiated support and reach no write when refused', async () => {
+  const legacy = fixture();
+  legacy.session.protocol = { version: 38, minimumVersion: 35, features: ['dm-relay'] };
+  for (const patch of [{ afkChannelEnabled: true }, { afkChannelName: 'AFK' }, { afkTimeoutSeconds: 300 }]) {
+    await legacy.server['handleServerUpdateSettings'](legacy.session, patch, 'legacy-afk');
+    assert.equal(legacy.messages.at(-1)?.type, MessageType.SERVER_ERROR);
+    assert.equal((legacy.messages.at(-1)?.payload as { code: ProtocolErrorCode }).code, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+  }
+  const current = fixture();
+  current.session.protocol = { version: 38, minimumVersion: 35, features: ['afk-channel'] };
+  await current.server['handleServerUpdateSettings'](current.session, { afkTimeoutSeconds: 45 }, 'invalid-afk');
+  assert.equal((current.messages.at(-1)?.payload as { code: ProtocolErrorCode }).code, ProtocolErrorCode.BAD_REQUEST);
+  assert.equal(legacy.writes() + current.writes(), 0);
 });
 
 test('SFU initialization failures reject the request before mode persistence and remain retryable', async () => {

@@ -1633,6 +1633,13 @@ async function installFixture() {
       check(!find('#mention-dropup').textContent.includes('Eligible'), 'Revoking a role refreshes an already open mention list');
       server.updateChannel(channel);
       check(find('#mention-dropup').textContent.includes('Outsider'), 'Making the channel public refreshes mention suggestions immediately');
+      server.knownMembers.set('mention-accented', { ...user, id: 'mention-accented', nickname: 'Ângela 🐒' });
+      type(input, 'Oi @Âng');
+      const dropup = find('#mention-dropup');
+      check(!dropup.hidden && dropup.style.display !== 'none' && !dropup.hasAttribute('data-ui-closing')
+        && dropup.textContent.includes('Ângela 🐒') && !dropup.textContent.includes('Outsider'),
+      'Typing accented letters keeps the mention list open and filters it (#567)');
+      server.knownMembers.delete('mention-accented');
       server.knownMembers.delete('mention-allowed');
       server.knownMembers.delete('mention-outsider');
       type(input, 'Before ');

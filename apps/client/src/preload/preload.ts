@@ -226,6 +226,7 @@ export interface ElectronApi {
   notifyLeaveComplete: (request: AppShutdownRequest) => Promise<void>;
   onTrayToggleMute: (cb: () => void) => () => void;
   onTrayToggleDeafen: (cb: () => void) => () => void;
+  onTrayLeaveCall: (cb: () => void) => () => void;
   getAutoStart: () => Promise<boolean>;
   setAutoStart: (enabled: boolean) => Promise<void>;
   setMinimizeToTray: (enabled: boolean) => Promise<void>;
@@ -234,6 +235,8 @@ export interface ElectronApi {
   setGamePresenceEnabled: (enabled: boolean) => Promise<void>;
   getCurrentGameActivity: () => Promise<UserActivity | null>;
   findGameWindows: () => Promise<string[]>;
+  /** Seconds since the last keyboard or mouse input in the whole system, for the AFK channel. */
+  getSystemIdleSeconds: () => Promise<number>;
   onGamePresenceChanged: (cb: (activity: UserActivity | null) => void) => () => void;
   openOverlay: (config: OverlayConfig) => Promise<{ success: boolean }>;
   closeOverlay: () => Promise<{ success: boolean }>;
@@ -604,6 +607,13 @@ const api: ElectronApi = {
       ipcRenderer.removeListener('tray:toggle-deafen', listener);
     };
   },
+  onTrayLeaveCall: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('tray:leave-call', listener);
+    return () => {
+      ipcRenderer.removeListener('tray:leave-call', listener);
+    };
+  },
   getAutoStart: () => ipcRenderer.invoke('app:get-auto-start'),
   setAutoStart: (enabled: boolean) => ipcRenderer.invoke('app:set-auto-start', enabled),
   setMinimizeToTray: (enabled: boolean) => ipcRenderer.invoke('app:set-minimize-to-tray', enabled),
@@ -611,6 +621,7 @@ const api: ElectronApi = {
   setGamePresenceEnabled: (enabled) => ipcRenderer.invoke('game-presence:set-enabled', enabled),
   getCurrentGameActivity: () => ipcRenderer.invoke('game-presence:get-current'),
   findGameWindows: () => ipcRenderer.invoke('game-share:find-windows'),
+  getSystemIdleSeconds: () => ipcRenderer.invoke('system:get-idle-seconds'),
   onGamePresenceChanged: (cb) => {
     const listener = (_e: Electron.IpcRendererEvent, activity: UserActivity | null) => cb(activity);
     ipcRenderer.on('game-presence:changed', listener);

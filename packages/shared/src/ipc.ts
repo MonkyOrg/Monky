@@ -395,12 +395,23 @@ export interface ScreenAudioDiagnostics {
   lastError?: string;
 }
 
-export interface TrayVoiceStatus {
-  inCall: boolean;
-  isMuted: boolean;
-  isDeafened: boolean;
-  isSpeaking: boolean;
-}
+/**
+ * Call state the renderer reports to the system shell: the tray icon and menu,
+ * and the call buttons on the Windows taskbar thumbnail.
+ */
+export const trayVoiceStatusSchema = z.object({
+  inCall: z.boolean(),
+  // Effective state, moderation included: what the tray icon shows.
+  isMuted: z.boolean(),
+  isDeafened: z.boolean(),
+  isSpeaking: z.boolean(),
+  // The person's own toggles, which the taskbar buttons switch, like the footer's.
+  selfMuted: z.boolean(),
+  selfDeafened: z.boolean(),
+  // Why the microphone toggle does nothing, if it does not: a role that cannot speak, or the AFK channel.
+  micLock: z.enum(['permission', 'afk']).nullable(),
+}).strict();
+export type TrayVoiceStatus = z.infer<typeof trayVoiceStatusSchema>;
 
 export interface UpdateCheckResult {
   ok: boolean;
@@ -814,6 +825,8 @@ export interface IpcInvokeChannels {
   'game-presence:get-current': { args: []; returnType: UserActivity | null };
   /** Window source ids of the running game, for sharing it from the suggestion (#763). */
   'game-share:find-windows': { args: []; returnType: string[] };
+  /** Seconds since the last keyboard or mouse input anywhere in the system, for the AFK channel. */
+  'system:get-idle-seconds': { args: []; returnType: number };
 
   // Sistema / App
   'app:set-language': { args: [language: string]; returnType: void };
@@ -979,8 +992,10 @@ export interface IpcEvents {
   'screen-audio:frame': [buffer: ArrayBuffer | Uint8Array];
   /** Falha assincrona da captura nativa (dispositivo caiu, stream derrubado pelo sistema). */
   'screen-audio:error': [message: string];
+  // Comandos de chamada vindos do sistema: menu da bandeja e miniatura da barra de tarefas (Windows).
   'tray:toggle-mute': [];
   'tray:toggle-deafen': [];
+  'tray:leave-call': [];
   'updater:progress': [percent: number];
   'updater:downloaded': [info: { manual: boolean }];
   'updater:error': [message: string];

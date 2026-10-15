@@ -10,6 +10,8 @@ export {
   OVERLAY_MINIMALIST_CARD_HEIGHT,
   LIMITS,
   RECONNECT_DELAYS_MS,
+  AFK_TIMEOUT_OPTIONS_SECONDS,
+  isAfkTimeoutSeconds,
   QUALITY_PRESETS,
   DEFAULT_CUSTOM_PROFILE,
   isMotionQualityPreset,
@@ -17,7 +19,7 @@ export {
   EVERYONE_MENTION_TOKENS,
   hasEveryoneMention,
 } from './constants.js';
-export type { QualityPresetType, QualityProfile } from './constants.js';
+export type { QualityPresetType, QualityProfile, AfkTimeoutSeconds } from './constants.js';
 
 export * from './models.js';
 export * from './serverCommunity.js';

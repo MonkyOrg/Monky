@@ -1,4 +1,4 @@
-import { LIMITS, type ServerDetails, type ServerUpdateSettingsPayload } from '@monky/shared';
+import { LIMITS, isAfkTimeoutSeconds, type ServerDetails, type ServerUpdateSettingsPayload } from '@monky/shared';
 
 type ValidationError =
   | 'serverSettings.deleteUndoInvalid'
@@ -14,13 +14,21 @@ type ValidationError =
   | 'serverSettings.turnUnknownSupport'
   | 'serverSettings.turnUnsupportedPlatform'
   | 'serverSettings.turnNotInstalled'
-  | 'serverSettings.recentSoundsLimitInvalid';
+  | 'serverSettings.recentSoundsLimitInvalid'
+  | 'serverSettings.afkChannelNameInvalid'
+  | 'serverSettings.invalidValue';
 
 export function serverSettingsValidationError(
   patch: ServerUpdateSettingsPayload,
   persisted: ServerDetails,
   registeredMembers?: number,
 ): ValidationError | null {
+  if (patch.afkChannelEnabled !== undefined || patch.afkChannelName !== undefined || patch.afkTimeoutSeconds !== undefined) {
+    if (!persisted.protocol?.features.includes('afk-channel')) return 'chat.featureUpdateRequired';
+    if (patch.afkChannelName !== undefined && (patch.afkChannelName.trim().length < LIMITS.MIN_CHANNEL_NAME_LENGTH
+      || patch.afkChannelName.trim().length > LIMITS.MAX_CHANNEL_NAME_LENGTH)) return 'serverSettings.afkChannelNameInvalid';
+    if (patch.afkTimeoutSeconds !== undefined && !isAfkTimeoutSeconds(patch.afkTimeoutSeconds)) return 'serverSettings.invalidValue';
+  }
   if (patch.messageDeleteUndoSeconds !== undefined) {
     if (!persisted.protocol?.features.includes('message-delete-undo')) return 'chat.featureUpdateRequired';
     if (!Number.isSafeInteger(patch.messageDeleteUndoSeconds) || patch.messageDeleteUndoSeconds < 1

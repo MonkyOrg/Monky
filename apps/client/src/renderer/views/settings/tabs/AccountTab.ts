@@ -9,7 +9,8 @@ import { showIdentityExportDialog, showIdentityImportDialog } from '../../Identi
 import { showBackupExportDialog, showBackupImportDialog } from '../../BackupDialogs';
 import { showAlert } from '../../Dialog';
 import { attachInputEmojiPicker } from '../../../utils/inputEmojiPicker';
-import { DM_MAX_FILE_BYTES_OPTIONS, MessageType } from '@monky/shared';
+import { nicknameError } from '../../../utils/nickname';
+import { DM_MAX_FILE_BYTES_OPTIONS, MessageType, normalizeNickname } from '@monky/shared';
 import { dmStore } from '../../../stores/dmStore';
 import { formatBytes } from '../../../utils/attachment';
 
@@ -226,9 +227,12 @@ export class AccountTab {
     }
 
     btnSaveNickname?.addEventListener('click', async () => {
-      const nextNick = inputNickname?.value.trim();
-      if (!nextNick) {
-        callbacks.showError(t('protocolError.nicknameInvalid'));
+      // Checked before anything is applied: the name is saved locally and synced
+      // to the other devices, so a refused one would break every next connection.
+      const nextNick = normalizeNickname(inputNickname?.value ?? '');
+      const error = nicknameError(nextNick);
+      if (error) {
+        callbacks.showError(error);
         return;
       }
       await callbacks.onSaveNickname(nextNick);

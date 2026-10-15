@@ -15,6 +15,7 @@ import { getActiveNetworkClient, networkClient } from '../core/NetworkClient';
 import { showAlert } from './Dialog';
 import { downloadLightboxFile, lightboxModal } from './LightboxModal';
 import { warnIfMoveBlocked } from '../utils/channelAccess';
+import { afkChannelIdOf } from '../utils/voiceRooms';
 import { t } from '../i18n';
 import { animateEnter, ownSurface, removeWithMotion, topModal } from '../utils/surfaceMotion';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
@@ -41,8 +42,10 @@ export class UserContextMenu {
     // Kick and move still require a live voice connection; mute/deafen target the identity.
     const targetState = this.resolveVoiceTarget(user)?.voiceState;
     const targetPermissionMuted = !!targetState?.permissionMuted;
+    // Nobody is brought to the AFK room by hand: it only receives idle members.
+    const afkChannelId = afkChannelIdOf(serverStore.serverDetails);
     const voiceChannels = (serverStore.serverDetails?.channels ?? []).filter((channel) =>
-      channel.type === 'VOICE' && serverStore.hasPermission(Permission.MOVE_MEMBERS));
+      channel.type === 'VOICE' && channel.id !== afkChannelId && serverStore.hasPermission(Permission.MOVE_MEMBERS));
     const roleIds = new Set(serverStore.getUserRoleIds(user.id));
     const manageableRoles = serverStore.roles
       .filter((role) => !role.isDefault && !serverStore.isAdminRole(role))

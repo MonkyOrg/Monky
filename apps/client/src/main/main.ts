@@ -16,6 +16,7 @@ import {
 import { updateLog } from './updateLog';
 import { ServerManager } from './serverManager';
 import { TrayManager } from './trayManager';
+import { TaskbarCallControls } from './taskbarCallControls';
 import { ClientLogger } from './clientLogger';
 import { bindRendererDiagnostics } from './rendererDiagnostics';
 import { bindPerformanceDiagnostics } from './performanceDiagnostics';
@@ -94,6 +95,7 @@ app.once('will-quit', unbindBotScreenDocuments);
 const serverInviteInbox = new ServerInviteInbox();
 let overlayManager: OverlayManager | null = null;
 let trayManager: TrayManager | null = null;
+let taskbarCallControls: TaskbarCallControls | null = null;
 const serverManager = new ServerManager();
 let clientLogger: ClientLogger | null = null;
 let crashRecovery: CrashRecovery | null = null;
@@ -262,6 +264,7 @@ function getCrashRecovery(): CrashRecovery {
         for (const cleanup of [
           () => overlayManager?.close(),
           () => { trayManager?.destroy(); trayManager = null; },
+          () => { taskbarCallControls?.dispose(); taskbarCallControls = null; },
           () => dismissInstallSplash(),
         ]) {
           try { cleanup(); } catch (error: unknown) {
@@ -389,6 +392,9 @@ function createWindow(deferShow = false): void {
   if (!trayManager) {
     trayManager = new TrayManager(mainWindow, quitApplication);
   }
+  // Thumbnail toolbars exist only in the Windows taskbar, one per window.
+  taskbarCallControls?.dispose();
+  taskbarCallControls = process.platform === 'win32' ? new TaskbarCallControls(mainWindow) : null;
 
   if (!overlayManager) {
     overlayManager = new OverlayManager(mainWindow);
@@ -415,6 +421,7 @@ function createWindow(deferShow = false): void {
     },
     clientLogger,
     overlayManager,
+    taskbarCallControls,
     quitApplication,
   });
   localExecutionStopped = false;

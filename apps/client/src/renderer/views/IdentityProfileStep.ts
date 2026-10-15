@@ -1,4 +1,4 @@
-import { LIMITS } from '@monky/shared';
+import { LIMITS, getNicknameIssue, normalizeNickname } from '@monky/shared';
 import logoUrl from '../assets/Logo.png';
 import { t } from '../i18n';
 import { connectionStore } from '../stores/connectionStore';
@@ -6,12 +6,12 @@ import { stampProfileChange } from '../core/profileSync';
 import { getAvatarUrl } from '../utils/avatar';
 import { escapeHtml } from '../utils/html';
 import { attachInputEmojiPicker } from '../utils/inputEmojiPicker';
+import { nicknameError } from '../utils/nickname';
 import { pickAndCropImage } from './ImageCropModal';
 import { showAlert } from './Dialog';
 
 export function hasValidLocalProfile(): boolean {
-  const nickname = connectionStore.savedNickname.trim();
-  return nickname.length >= LIMITS.MIN_NICKNAME_LENGTH && nickname.length <= LIMITS.MAX_NICKNAME_LENGTH;
+  return getNicknameIssue(connectionStore.savedNickname) === null;
 }
 
 export function showIdentityProfileStep(container: HTMLElement): Promise<void> {
@@ -68,9 +68,10 @@ export function showIdentityProfileStep(container: HTMLElement): Promise<void> {
       });
       container.querySelector<HTMLFormElement>('#identity-profile-form')?.addEventListener('submit', async (event) => {
         event.preventDefault();
-        const nickname = input?.value.trim() ?? '';
-        if (nickname.length < LIMITS.MIN_NICKNAME_LENGTH || nickname.length > LIMITS.MAX_NICKNAME_LENGTH) {
-          await showAlert({ title: t('common.error'), message: t('protocolError.nicknameInvalid'), variant: 'danger' });
+        const nickname = normalizeNickname(input?.value ?? '');
+        const error = nicknameError(nickname);
+        if (error) {
+          await showAlert({ title: t('common.error'), message: error, variant: 'danger' });
           input?.focus();
           return;
         }

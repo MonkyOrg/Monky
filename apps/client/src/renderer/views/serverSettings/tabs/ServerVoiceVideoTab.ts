@@ -1,7 +1,18 @@
 import { serverStore } from '../../../stores/serverStore';
-import { t } from '../../../i18n';
+import { t, tCount } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
-import { LIMITS } from '@monky/shared';
+import { afkChannelIdOf } from '../../../utils/voiceRooms';
+import { AFK_TIMEOUT_OPTIONS_SECONDS, LIMITS } from '@monky/shared';
+
+/** The AFK room's current name, or the default offered before it exists. */
+export function afkChannelName(): string {
+  const id = afkChannelIdOf(serverStore.serverDetails);
+  return (id && serverStore.getChannel(id)?.name) || t('serverSettings.afkChannelDefaultName');
+}
+
+function afkTimeoutLabel(seconds: number): string {
+  return seconds >= 3600 ? t('serverSettings.afkTimeoutHour') : tCount('serverSettings.afkTimeoutMinutes', seconds / 60);
+}
 
 /**
  * Why the relay toggle is unusable on this server, or null when it works.
@@ -49,6 +60,9 @@ export class ServerVoiceVideoTab {
     const turnNotice = turnBlocked ? null : turnInstallNotice();
     const supportsRecentSounds = s.protocol?.features.includes('recent-sounds');
     const supportsDmRelay = s.protocol?.features.includes('dm-relay');
+    const supportsAfk = s.protocol?.features.includes('afk-channel');
+    const afkEnabled = !!afkChannelIdOf(s);
+    const afkTimeout = s.afkTimeoutSeconds ?? LIMITS.AFK_TIMEOUT_DEFAULT_SECONDS;
 
     return `
       <div data-settings-section="soundboard" data-settings-label="${escapeHtml(t('serverSettings.allowSoundboard'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
@@ -105,6 +119,37 @@ export class ServerVoiceVideoTab {
           <input id="checkbox-dm-relay-enabled" type="checkbox" ${s.dmRelayEnabled !== false ? 'checked' : ''}>
           <span class="toggle-slider"></span>
         </label>
+      </div>` : ''}
+
+      ${supportsAfk ? `
+      <div data-settings-section="afk-channel" data-settings-label="${escapeHtml(t('serverSettings.afkChannel'))}" style="background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-top: 10px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px;">
+          <div>
+            <label for="checkbox-afk-channel" style="font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 2px;">
+              <span class="material-symbols-outlined md-18" style="color: var(--accent-primary);">bedtime</span>
+              <span>${t('serverSettings.afkChannel')}</span>
+            </label>
+            <div style="font-size: 11px; color: var(--text-muted);">${t('serverSettings.afkChannelDesc')}</div>
+          </div>
+          <label class="toggle-switch" aria-label="${t('serverSettings.afkChannel')}">
+            <input id="checkbox-afk-channel" type="checkbox" ${afkEnabled ? 'checked' : ''}>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div id="server-afk-options" ${afkEnabled ? '' : 'hidden'}>
+          <label for="input-afk-channel-name" class="server-afk-field">
+            <span>${t('serverSettings.afkChannelName')}</span>
+            <input id="input-afk-channel-name" class="input-field" type="text" autocomplete="off"
+              minlength="${LIMITS.MIN_CHANNEL_NAME_LENGTH}" maxlength="${LIMITS.MAX_CHANNEL_NAME_LENGTH}" value="${escapeHtml(afkChannelName())}">
+          </label>
+          <label for="select-afk-timeout" class="server-afk-field">
+            <span>${t('serverSettings.afkTimeout')}</span>
+            <select id="select-afk-timeout">
+              ${AFK_TIMEOUT_OPTIONS_SECONDS.map((seconds) => `<option value="${seconds}" ${seconds === afkTimeout ? 'selected' : ''}>${escapeHtml(afkTimeoutLabel(seconds))}</option>`).join('')}
+            </select>
+          </label>
+          <div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">${t('serverSettings.afkTimeoutHint')}</div>
+        </div>
       </div>` : ''}
 
       <div id="server-turn-section" data-settings-section="turn-relay" data-settings-label="${escapeHtml(t('serverSettings.turnEnabled'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-top: 10px;">

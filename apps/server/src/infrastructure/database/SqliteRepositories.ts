@@ -35,7 +35,7 @@ export class SqliteServerRepository implements IServerRepository {
   }
 
   async getServer(): Promise<ServerRecord | null> {
-    const row = this.db.prepare('SELECT id, name, everyone_permissions as everyonePermissions, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, max_message_length as maxMessageLength, message_delete_undo_seconds as messageDeleteUndoSeconds, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, dm_relay_enabled as dmRelayEnabled, recent_sound_cache_enabled as recentSoundCacheEnabled, recent_sound_cache_limit as recentSoundCacheLimit, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots FROM server_meta LIMIT 1').get() as ServerRecord | undefined;
+    const row = this.db.prepare('SELECT id, name, everyone_permissions as everyonePermissions, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, max_message_length as maxMessageLength, message_delete_undo_seconds as messageDeleteUndoSeconds, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, dm_relay_enabled as dmRelayEnabled, recent_sound_cache_enabled as recentSoundCacheEnabled, recent_sound_cache_limit as recentSoundCacheLimit, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots, afk_channel_id as afkChannelId, afk_timeout_seconds as afkTimeoutSeconds FROM server_meta LIMIT 1').get() as ServerRecord | undefined;
     if (!row) return null;
     return {
       id: row.id,
@@ -61,6 +61,8 @@ export class SqliteServerRepository implements IServerRepository {
       turnEnabled: Boolean(row.turnEnabled),
       turnSecret: row.turnSecret ?? null,
       maxBots: row.maxBots ?? LIMITS.MAX_BOTS_DEFAULT,
+      afkChannelId: row.afkChannelId ?? null,
+      afkTimeoutSeconds: row.afkTimeoutSeconds ?? LIMITS.AFK_TIMEOUT_DEFAULT_SECONDS,
     };
   }
 
@@ -168,6 +170,14 @@ export class SqliteServerRepository implements IServerRepository {
     if (server.turnSecret !== undefined) {
       fields.push('turn_secret = ?');
       values.push(server.turnSecret);
+    }
+    if (server.afkChannelId !== undefined) {
+      fields.push('afk_channel_id = ?');
+      values.push(server.afkChannelId);
+    }
+    if (server.afkTimeoutSeconds !== undefined) {
+      fields.push('afk_timeout_seconds = ?');
+      values.push(server.afkTimeoutSeconds);
     }
 
     if (fields.length === 0) return;

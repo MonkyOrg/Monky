@@ -2758,8 +2758,9 @@ export class ChatView {
     const before = input.value.substring(0, caret);
     // A mention token is an "@" at start/after whitespace, followed by the
     // nickname typed so far (no spaces — nicknames may contain spaces but the
-    // full name is inserted on selection, ending the token).
-    const match = before.match(/(?:^|\s)@([\w.\-]*)$/);
+    // full name is inserted on selection, ending the token). Any other visible
+    // character counts, since nicknames take accents and emoji (#567).
+    const match = before.match(/(?:^|\s)@([^\s@]*)$/u);
     if (!match) {
       this.closeMentionDropup();
       return;

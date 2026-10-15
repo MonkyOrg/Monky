@@ -15,6 +15,7 @@ import {
   authConnectSchema,
   canAccessChannel,
   deriveClientIdFromPublicKey,
+  isAfkTimeoutSeconds,
   normalizePublicKeyHex,
 } from '@monky/shared';
 import { ServerRecord, UserRecord } from '../../domain/entities';
@@ -433,6 +434,9 @@ export class AuthService {
       messageDeleteUndoSeconds: server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,
       showRoleBadgesToEveryone: server.showRoleBadgesToEveryone !== false,
       voiceMode: server.voiceMode || 'p2p',
+      afkChannelId: server.afkChannelId && channels.some((channel) => channel.id === server.afkChannelId && channel.type === 'VOICE')
+        ? server.afkChannelId : null,
+      afkTimeoutSeconds: server.afkTimeoutSeconds ?? LIMITS.AFK_TIMEOUT_DEFAULT_SECONDS,
       hostSpecs: CapacityEstimator.getHostSpecs(),
       turnEnabled: Boolean(server.turnEnabled),
       maxBots: server.maxBots ?? LIMITS.MAX_BOTS_DEFAULT,
@@ -521,6 +525,7 @@ export class AuthService {
     maxAttachmentStorageBytes?: number;
     maxUsers?: number;
     turnEnabled?: boolean;
+    afkTimeoutSeconds?: number;
   }): Promise<{
     maxMessageLength?: number;
     success: boolean;
@@ -539,6 +544,7 @@ export class AuthService {
     attachmentStorage?: AttachmentStorageInfo;
     maxUsers?: number;
     turnEnabled?: boolean;
+    afkTimeoutSeconds?: number;
     errorMessage?: string;
   }> {
     const server = await this.serverRepo.getServer();
@@ -547,6 +553,12 @@ export class AuthService {
     }
 
     const updates: Partial<ServerRecord> = {};
+    if (payload.afkTimeoutSeconds !== undefined) {
+      if (!isAfkTimeoutSeconds(payload.afkTimeoutSeconds)) {
+        return { success: false, errorMessage: 'Escolha 1, 5, 15, 30 ou 60 minutos de inatividade para o canal AFK.' };
+      }
+      updates.afkTimeoutSeconds = payload.afkTimeoutSeconds;
+    }
     if (payload.messageDeleteUndoSeconds !== undefined) {
       if (!Number.isSafeInteger(payload.messageDeleteUndoSeconds) || payload.messageDeleteUndoSeconds < 1
         || payload.messageDeleteUndoSeconds > LIMITS.MAX_MESSAGE_DELETE_UNDO_SECONDS) {
@@ -714,6 +726,7 @@ export class AuthService {
       maxUsers: updatedServer?.maxUsers ?? server.maxUsers,
       maxMessageLength: updatedServer?.maxMessageLength ?? server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
       turnEnabled: Boolean(updatedServer?.turnEnabled),
+      afkTimeoutSeconds: updatedServer?.afkTimeoutSeconds ?? LIMITS.AFK_TIMEOUT_DEFAULT_SECONDS,
     };
   }
 }

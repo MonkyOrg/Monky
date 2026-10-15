@@ -32,6 +32,10 @@ export interface ServerRecord {
   maxAttachmentStorageBytes?: number | null;
   /** Whether the built-in TURN relay should run alongside the server (#425). */
   turnEnabled?: boolean;
+  /** Voice channel idle members are moved to; null when the server has none. */
+  afkChannelId?: string | null;
+  /** One of AFK_TIMEOUT_OPTIONS_SECONDS. */
+  afkTimeoutSeconds?: number;
   /** Maximum number of bots allowed on this server (#569). */
   maxBots?: number;
   /**
@@ -67,6 +71,7 @@ export interface ChannelRecord {
   type: ChannelType;
   position: number;
   createdAt: number;
+  /** Voice user limit; 0 means none. */
   maxParticipants: number;
   /** Effective privacy, including inherited category access. */
   isPrivate: boolean;

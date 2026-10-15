@@ -1,6 +1,6 @@
 import type { AuthSuccessPayload, VoiceReconnectPayload, VoiceUserJoinedPayload } from '@monky/shared';
 import { MessageType } from '@monky/shared';
-import { networkClient, RequestTimeoutError, type NetworkClient } from './NetworkClient';
+import { networkClient, ProtocolRequestError, RequestTimeoutError, type NetworkClient } from './NetworkClient';
 import { sessionManager, sessionKeyFor, type ServerSession } from './SessionManager';
 import { webRtcManager } from './WebRtcManager';
 import { voiceStore } from '../stores/voiceStore';
@@ -12,6 +12,8 @@ import { videoService } from './VideoService';
 import { screenAudioService } from './ScreenAudioService';
 import { currentEventOrigin } from './sessionRouting';
 import { stopLocalScreenShares } from './screenShareControls';
+import { afkChannelIdOf } from '../utils/voiceRooms';
+import { showInfoToast } from '../views/CopyToast';
 
 interface ClientIdentity {
   publicKey: string;
@@ -279,6 +281,11 @@ export async function joinCallOnSession(
   const previousKey = voiceStore.voiceSessionKey;
   const previousChannelId = voiceStore.currentVoiceChannelId;
   const changingChannel = previousKey !== sessionKey || previousChannelId !== channelId;
+  // Leaving the AFK room, whether pulled out or by oneself, trades its server
+  // mute for an ordinary one that only the member undoes: the microphone of
+  // someone who was away never opens by itself on arrival.
+  const previousAfkChannelId = previousKey ? afkChannelIdOf(sessionManager.get(previousKey)?.serverStore.serverDetails) : null;
+  const leavingAfk = !reconnect && changingChannel && !!previousChannelId && previousChannelId === previousAfkChannelId;
   if (!reconnect) appEvents.emit('voice.join_requested');
   const generation = ++voiceAdmissionGeneration;
   const ownsSession = () => sessionManager.get(sessionKey) === session
@@ -310,6 +317,7 @@ export async function joinCallOnSession(
   voiceStore.setChannel(channelId, sessionKey);
   voiceStore.setConnectionHealth('connecting');
   activeVoiceAdmission = { generation, sessionKey, channelId };
+  let admitted = false;
 
   try {
     if (stoppedScreens) await stoppedScreens;
@@ -321,7 +329,7 @@ export async function joinCallOnSession(
     const admission = (async () => {
       if (preceding) await preceding;
       assertCurrent();
-      const payload = { channelId, isMuted: voiceStore.isMuted, isDeafened: voiceStore.isDeafened };
+      const payload = { channelId, isMuted: voiceStore.isMuted || leavingAfk, isDeafened: voiceStore.isDeafened };
       try {
         const joined = await session.client.sendRequest<VoiceUserJoinedPayload>(
           reconnect ? MessageType.VOICE_RECONNECT : MessageType.VOICE_JOIN,
@@ -353,6 +361,11 @@ export async function joinCallOnSession(
     });
     const joined = await admission;
     assertCurrent();
+    admitted = true;
+    if (leavingAfk && !voiceStore.isMuted) {
+      voiceStore.setMuted(true);
+      showInfoToast(t('afk.leftMutedToast'), 6000);
+    }
     if (joined.participants) session.participants.reconcileVoiceChannel(channelId, joined.participants);
     webRtcManager.reconcileScreenSources();
     session.participants.updateVoiceState({
@@ -412,6 +425,15 @@ export async function joinCallOnSession(
   } catch (error) {
     if (!isCurrent()) throw cancelled();
     if (reconnect) throw error;
+    // The server answered and turned the new room away (full, the AFK room,
+    // hidden or deleted meanwhile), so it still holds this session in the room
+    // it came from. Going back there keeps the call that leaving would drop;
+    // only if even that is refused does the call end, as below.
+    if (!admitted && error instanceof ProtocolRequestError && previousKey === sessionKey && previousChannelId && changingChannel) {
+      voiceStore.setChannel(previousChannelId, sessionKey);
+      await joinCallOnSession(sessionKey, previousChannelId).catch(() => undefined);
+      throw error;
+    }
     session.client.send(MessageType.VOICE_LEAVE, { channelId });
     session.participants.removeVoiceState(mySessionId);
     audioProcessor.stopMicrophone();

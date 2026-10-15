@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, shell, systemPreferences } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, powerMonitor, screen, shell, systemPreferences } from 'electron';
 import { execFile } from 'child_process';
 import fs from 'fs';
 import http from 'http';
@@ -9,7 +9,7 @@ import { LanDiscovery } from './lanDiscovery';
 import { globalInputHook } from './globalInputHookProcess';
 import {
   AUDIO_PREVIEW_IPC, LIMITS, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS,
-  DESKTOP_SOURCES_IPC, desktopSourcesOptionsSchema, desktopSourcePreviewsRequestSchema,
+  DESKTOP_SOURCES_IPC, desktopSourcesOptionsSchema, desktopSourcePreviewsRequestSchema, trayVoiceStatusSchema,
   type AudioPreviewResult, type SoundDownloadResult, type SoundboardDownloadPermit, type SoundboardDownloadAvailability,
 } from '@monky/shared';
 import { SoundboardDownloads } from './soundboardDownload';
@@ -37,7 +37,8 @@ import { setupEventCalendarIpc } from './serverEventCalendarIpc';
 import { setupHostingSkillIpc } from './hostingSkills';
 import { setupRecentSoundSaveIpc } from './recentSoundSaveIpc';
 import { fetchLinkPreview } from './linkPreview';
-import { TrayManager, VoiceStatus } from './trayManager';
+import { TrayManager } from './trayManager';
+import type { TaskbarCallControls } from './taskbarCallControls';
 import type { DesktopSource, IpcInvokeChannels, OverlayBounds, OverlayConfig, OverlaySignalPayload, OverlaySyncState } from '@monky/shared';
 import { OverlayManager } from './overlayManager';
 import { SteamPresence } from './steamPresence';
@@ -255,6 +256,8 @@ export interface SetupIpcOptions {
   setMinimizeToTray?: (enabled: boolean) => void;
   clientLogger?: import('./clientLogger').ClientLogger;
   overlayManager?: OverlayManager;
+  /** Call buttons on the Windows taskbar thumbnail; absent on other systems. */
+  taskbarCallControls?: TaskbarCallControls | null;
   /** Graceful quit (leaves servers, stops the hosted server) used by logout. */
   quitApplication?: () => void;
 }
@@ -507,8 +510,15 @@ export function setupIpcHandlers(
     overlayManager.sendSyncState(state);
   });
 
-  ipcMain.handle('tray:update-voice-status', (_, status: VoiceStatus) => {
+  ipcMain.handle('tray:update-voice-status', (event, input: unknown) => {
+    // The taskbar buttons send their commands back to this window, so only its own frame reports the call.
+    if (mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
+      || event.senderFrame !== mainWindow.webContents.mainFrame) {
+      throw new Error('Invalid voice status sender.');
+    }
+    const status = trayVoiceStatusSchema.parse(input);
     trayManager?.updateVoiceStatus(status);
+    options?.taskbarCallControls?.update(status);
   });
 
   // Active UI language (#16): keeps native dialogs in the same language the
@@ -518,6 +528,7 @@ export function setupIpcHandlers(
     // The tray builds its labels eagerly, so it needs a redraw to pick the
     // new language up (#16).
     trayManager?.refresh();
+    options?.taskbarCallControls?.refresh();
   });
 
   ipcMain.handle('app:set-minimize-to-tray', (_event, enabled: boolean) => {
@@ -1371,6 +1382,10 @@ export function setupIpcHandlers(
       return [];
     }
   });
+
+  // Input anywhere in the system counts, not only in Monky's window: someone
+  // playing a game in the foreground is not idle in the call.
+  ipcMain.handle('system:get-idle-seconds', () => powerMonitor.getSystemIdleTime());
 
   ipcMain.handle('app:open-external', async (_, url: string) => {
     try {

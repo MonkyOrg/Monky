@@ -209,7 +209,8 @@ async function* runRegression(language, sharedModule) {
     turnAvailability: { supported: false, reason: 'not-installed', autoInstallable: true },
     allowSoundboard: true, recentSoundCacheEnabled: true, recentSoundCacheLimit: 20, dmRelayEnabled: true,
     allowEveryoneMention: true, allowMessageEdit: true, showRoleBadgesToEveryone: true,
-    messageDeleteUndoSeconds: 60, protocol: { version: 36, minimumVersion: 35, features: ['message-delete-undo', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants'] },
+    messageDeleteUndoSeconds: 60, protocol: { version: 36, minimumVersion: 35, features: ['message-delete-undo', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'afk-channel'] },
+    afkChannelId: null, afkTimeoutSeconds: 900,
     channels: [], members: [member('admin'), member('bob')],
     knownMembers: [member('admin'), member('bob'), { ...member('carol'), status: 'DISCONNECTED' }, { ...member('helper'), isBot: true }],
     voiceStates: {}, roles: [role], userRoles: [], ownerId: 'admin', myPermissions: 0xFFFFFFFF,
@@ -246,6 +247,18 @@ async function* runRegression(language, sharedModule) {
       }
       if (payload.allowSoundboard === false) s.recentSoundCacheEnabled = false;
       if (payload.voiceMode === 'sfu') s.turnEnabled = false;
+      // The AFK channel is an ordinary voice room created, renamed and deleted by these settings.
+      if (payload.afkChannelEnabled === true && !s.afkChannelId) {
+        s.afkChannelId = 'afk';
+        s.channels = [...s.channels, { id: 'afk', serverId: s.id, name: payload.afkChannelName, type: 'VOICE', position: 0,
+          createdAt: 1, isPrivate: false, allowedRoleIds: [], botCommandsEnabled: true, maxParticipants: 0 }];
+      } else if (payload.afkChannelEnabled === false) {
+        s.channels = s.channels.filter((channel) => channel.id !== s.afkChannelId);
+        s.afkChannelId = null;
+      } else if (payload.afkChannelName !== undefined) {
+        s.channels = s.channels.map((channel) => channel.id === s.afkChannelId ? { ...channel, name: payload.afkChannelName } : channel);
+      }
+      if (payload.afkTimeoutSeconds !== undefined) s.afkTimeoutSeconds = payload.afkTimeoutSeconds;
       if (payload.turnEnabled) s.turnAvailability = { supported: true };
       if ('password' in payload) s.hasPassword = Boolean(payload.password);
       if ('iconBase64' in payload) s.iconUrl = payload.iconBase64;
@@ -484,6 +497,63 @@ async function* runRegression(language, sharedModule) {
   await flush();
   check(store.serverDetails.dmRelayEnabled === false && !field('#checkbox-dm-relay-enabled').checked,
     'Acknowledged DM relay setting refreshes the switch');
+  const afkOptionsHidden = () => {
+    const options = document.querySelector('#server-afk-options');
+    return !options || options.hidden || options.hasAttribute('data-ui-closing');
+  };
+  check(field('[data-settings-section="afk-channel"]').textContent.includes(t('serverSettings.afkChannel'))
+    && !field('#checkbox-afk-channel').checked && afkOptionsHidden(), 'The AFK channel starts off, with its options hidden');
+  check(Boolean(field('#checkbox-afk-channel').closest('.toggle-switch')), 'The AFK channel uses a switch, not a bare checkbox');
+  change('#checkbox-afk-channel', true);
+  await flush();
+  check(JSON.stringify(pendingRequest('SERVER_UPDATE_SETTINGS').payload) === JSON.stringify({
+    afkChannelEnabled: true, afkChannelName: t('serverSettings.afkChannelDefaultName'),
+  }), 'Turning the AFK channel on creates it with the default name');
+  acknowledge('SERVER_UPDATE_SETTINGS');
+  await flush();
+  check(field('#checkbox-afk-channel').checked && !afkOptionsHidden()
+    && field('#input-afk-channel-name').value === t('serverSettings.afkChannelDefaultName')
+    && field('#select-afk-timeout').value === '900', 'Enabling reveals the name and the idle time, 15 minutes by default');
+  check([...field('#select-afk-timeout').options].map((option) => option.value).join() === '60,300,900,1800,3600',
+    'The idle time offers 1, 5, 15, 30 and 60 minutes');
+  change('#input-afk-channel-name', 'Dormindo');
+  await flush();
+  check(JSON.stringify(pendingRequest('SERVER_UPDATE_SETTINGS').payload) === JSON.stringify({ afkChannelName: 'Dormindo' }),
+    'Renaming the AFK channel sends only its name');
+  acknowledge('SERVER_UPDATE_SETTINGS');
+  await flush();
+  change('#select-afk-timeout', '300');
+  await flush();
+  check(pendingRequest('SERVER_UPDATE_SETTINGS').payload.afkTimeoutSeconds === 300, 'The idle time applies immediately');
+  acknowledge('SERVER_UPDATE_SETTINGS');
+  await flush();
+  const beforeInvalidAfk = requests.length;
+  change('#input-afk-channel-name', 'x');
+  await flush();
+  check(requests.length === beforeInvalidAfk && field('#input-afk-channel-name').value === 'Dormindo'
+    && field('#server-settings-banner').textContent.includes(t('serverSettings.afkChannelNameInvalid')),
+  'A too short AFK name is refused without sending and the persisted name returns');
+  change('#input-afk-channel-name', 'Dormindo agora');
+  await flush();
+  acknowledge('SERVER_UPDATE_SETTINGS');
+  await flush();
+  check(!field('#server-settings-banner').classList.contains('show'), 'Correcting the AFK name clears its error');
+  change('#checkbox-afk-channel', false);
+  await flush();
+  check(locked() && document.querySelector('.dialog-card')?.textContent.includes('Dormindo agora'),
+    'Turning the AFK channel off first asks, naming the room it deletes');
+  document.querySelector('.dialog-card [data-action="cancel"]').click();
+  await flush();
+  check(!locked() && field('#checkbox-afk-channel').checked && store.serverDetails.afkChannelId === 'afk'
+    && !requests.some((request) => !request.done && request.type === 'SERVER_UPDATE_SETTINGS'), 'Declining keeps the AFK channel');
+  change('#checkbox-afk-channel', false);
+  await flush();
+  document.querySelector('.dialog-card [data-action="confirm"]').click();
+  await flush();
+  check(pendingRequest('SERVER_UPDATE_SETTINGS').payload.afkChannelEnabled === false, 'Confirming turns the AFK channel off');
+  acknowledge('SERVER_UPDATE_SETTINGS');
+  await flush();
+  check(!field('#checkbox-afk-channel').checked && afkOptionsHidden() && !locked(), 'The AFK options hide again once it is off');
   change('#checkbox-turn-enabled', true);
   await flush();
   appEvents.emit('message.TURN_INSTALL_PROGRESS', { stage: 'configuring', percent: 100 });

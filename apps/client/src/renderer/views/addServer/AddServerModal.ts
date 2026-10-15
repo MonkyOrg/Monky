@@ -1,8 +1,9 @@
-import { LIMITS, MAX_SERVER_INVITE_LENGTH, parseServerInviteLink, type VoiceMode } from '@monky/shared';
+import { LIMITS, MAX_SERVER_INVITE_LENGTH, normalizeNickname, parseServerInviteLink, type VoiceMode } from '@monky/shared';
 import { connectionStore, type CreatedServer, type SavedServer } from '../../stores/connectionStore';
 import { settingsStore } from '../../stores/settingsStore';
 import { t } from '../../i18n';
 import { escapeHtml } from '../../utils/html';
+import { nicknameError } from '../../utils/nickname';
 import { enterModal, exitModal, handlesModalKey } from '../../utils/modalSurface';
 import { cancelModalStep, replaceModalStep } from '../../utils/modalSteps';
 import { setSurfaceVisible } from '../../utils/surfaceVisibility';
@@ -515,9 +516,10 @@ class AddServerModal {
 
   private async openAndSaveServer(host: string, port: number, password?: string): Promise<void> {
     if (!this.modalEl || this.connectionPending && this.screen === 'join') return;
-    const nickname = connectionStore.savedNickname.trim();
-    if (!nickname) {
-      this.showError(t('protocolError.nicknameInvalid'));
+    const nickname = normalizeNickname(connectionStore.savedNickname);
+    const nicknameProblem = nicknameError(nickname);
+    if (nicknameProblem) {
+      this.showError(nicknameProblem);
       return;
     }
     this.setConnectionPending(true);

@@ -56,6 +56,17 @@ sem exibir um alerta adicional.
 
 Clique em um **canal de voz** para entrar na chamada. Quem fala ganha um anel verde no avatar. A barra inferior tem microfone, fone/ensurdecer e desconectar. O painel mostra ping médio e permite sair só da chamada.
 
+No Windows, durante a chamada, a miniatura do Monky na barra de tarefas também mostra os botões de microfone, ensurdecer e sair da chamada. Passe o mouse sobre o ícone do Monky para usá-los sem abrir a janela.
+
+Canais privados mostram um cadeado no canto do próprio ícone. Um canal de voz
+com [limite de pessoas](/administrar-servidor#limite-de-pessoas) mostra ao lado
+do nome quantos participantes estão nele e o máximo; com a sala cheia, só entra
+quem tem permissão para mover membros. Se o servidor tiver um
+[canal AFK](/administrar-servidor#canal-afk), marcado com uma lua, quem fica
+inativo em uma chamada é movido para lá com o microfone mutado pelo servidor.
+Ninguém entra nele por conta própria; ao sair, o microfone continua mutado até
+você desmutá-lo.
+
 Cada canal de voz também possui um chat persistente. Passe o mouse sobre a linha
 do canal e use o botão redondo de balão, ao lado dos três pontos, para abrir o
 palco e o chat na lateral direita sem entrar na chamada. No palco, o mesmo balão

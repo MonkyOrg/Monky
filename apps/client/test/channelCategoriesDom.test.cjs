@@ -815,6 +815,122 @@ async function regression(locale) {
   check(document.querySelector('[aria-haspopup="menu"]'), 'channel movement is offered through contextual submenu');
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
 
+  // Private rooms wear the padlock on their own glyph instead of a second icon after the name.
+  const privateVoiceIcon = root.querySelector('.channel-item[data-channel-id="voice"] .channel-icon--private');
+  check(privateVoiceIcon?.querySelector('.channel-icon-glyph')?.textContent === 'volume_up' && privateVoiceIcon.querySelector('svg.channel-icon-lock'),
+    'a private voice room wears the padlock on its speaker');
+  check(root.querySelector('.channel-item[data-channel-id="text"] .channel-icon--private .channel-icon-glyph')?.textContent === 'tag',
+    'a private text room wears the padlock on its #');
+  check(![...root.querySelectorAll('.channel-item .material-symbols-outlined')].some(icon => icon.textContent.trim() === 'lock_person'),
+    'no second padlock follows the channel name');
+  const iconBox = privateVoiceIcon.getBoundingClientRect();
+  const lockBox = privateVoiceIcon.querySelector('svg.channel-icon-lock').getBoundingClientRect();
+  check(iconBox.width === 16 && lockBox.width === 8 && lockBox.right >= iconBox.right && lockBox.top <= iconBox.top,
+    'the padlock sits on the top right corner of the glyph');
+  const glyphStyle = getComputedStyle(privateVoiceIcon.querySelector('.channel-icon-glyph'));
+  check(glyphStyle.maskImage.includes('linear-gradient') && glyphStyle.maskComposite.includes('exclude'),
+    'the glyph is cut where the padlock sits');
+
+  // A limited voice room shows who is inside and its limit; above it, the count turns red.
+  const { participantManager } = await import('/core/ParticipantManager.ts');
+  store.setServerDetails({
+    ...details,
+    protocol: { version: 38, minimumVersion: 35, features: ['voice-user-limit', 'afk-channel'] },
+    afkChannelId: 'afk',
+    channels: [...details.channels.map(item => item.id === 'voice' ? { ...item, maxParticipants: 2 } : item),
+      { ...channel('afk', 'VOICE', null), isPrivate: false, allowedRoleIds: [], maxParticipants: 0 }],
+  }, user);
+  view.renderChannels();
+  const limitBadge = () => root.querySelector('.channel-item[data-channel-id="voice"] .voice-user-limit');
+  check(limitBadge()?.textContent === '0002' && !limitBadge().classList.contains('voice-user-limit--over'),
+    'a limited room shows nobody inside and its limit as two digits each');
+  const limitRow = root.querySelector('.channel-item[data-channel-id="voice"]');
+  const limitMenu = () => limitRow.querySelector('.channel-menu-btn');
+  check(limitBadge().parentElement.classList.contains('voice-channel-trailing') && limitBadge().parentElement === limitRow.lastElementChild
+    && limitBadge().getBoundingClientRect().left >= limitRow.querySelector('.channel-name').getBoundingClientRect().right
+    && Math.abs(limitBadge().getBoundingClientRect().right - limitMenu().getBoundingClientRect().right) < 1,
+  'the limit closes the row, in the same place as the buttons that replace it');
+  check(getComputedStyle(limitBadge()).opacity === '1' && getComputedStyle(limitMenu()).opacity === '0'
+    && getComputedStyle(limitBadge()).pointerEvents === 'none' && !limitBadge().hasAttribute('title'),
+  'at rest the limit shows, its buttons stay hidden and clicks reach the row');
+  limitMenu().focus();
+  await new Promise(resolve => setTimeout(resolve, 250));
+  check(limitRow.matches(':focus-within') && getComputedStyle(limitBadge()).opacity === '0'
+    && getComputedStyle(limitMenu()).opacity === '1', 'hovering or focusing the row trades the limit for its buttons');
+  limitMenu().blur();
+  const insiders = ['ana', 'bia', 'caio'].map(id => ({ id, clientId: id, nickname: id, status: 'ONLINE', joinedAt: 1, sessionId: `${id}:device` }));
+  for (const member of insiders) {
+    participantManager.addUser(member);
+    participantManager.updateVoiceState({
+      sessionId: member.sessionId, userId: member.id, channelId: 'voice', isMuted: false, isDeafened: false, serverMuted: false,
+      serverDeafened: false, isSpeaking: false, isCameraOn: false, isScreenSharing: false, isSharingScreenAudio: false,
+    });
+  }
+  view.renderChannels();
+  const overCount = limitBadge()?.querySelector('.voice-user-limit-count');
+  check(limitBadge()?.textContent === '0302' && limitBadge().classList.contains('voice-user-limit--over')
+    && getComputedStyle(overCount).color === 'rgb(242, 63, 67)'
+    && getComputedStyle(limitBadge().querySelector('.voice-user-limit-max')).color !== getComputedStyle(overCount).color,
+  'a room above its limit shows the count in red');
+  check(limitBadge().getAttribute('aria-label') === t('main.voiceUserLimitExceeded', { count: 3, limit: 2 }), 'the badge is named for assistive technology');
+  // Whoever may not exceed the limit is told the room is full before anything is sent.
+  const { sessionManager } = await import('/core/SessionManager.ts');
+  const originalGetActive = sessionManager.getActive;
+  sessionManager.getActive = () => ({ key: 'server', serverStore: store, participants: participantManager });
+  store.setCategories([{ ...category, isPrivate: false, allowedRoleIds: [] }, destination]);
+  store.myPermissions = 546576;
+  view.renderChannels();
+  const requestsBeforeFull = requests.length;
+  root.querySelector('.channel-item[data-channel-id="voice"]').click();
+  await flush();
+  check(requests.length === requestsBeforeFull && [...document.querySelectorAll('.chat-copy-toast')]
+    .some(toast => toast.textContent.includes(t('protocolError.channelFull'))),
+  'a full room turns away whoever may not exceed its limit, keeping their current call');
+  store.myPermissions = details.myPermissions;
+  store.setCategories(details.categories);
+  sessionManager.getActive = originalGetActive;
+  view.renderChannels();
+  for (const member of insiders) participantManager.removeUser(member.sessionId);
+
+  // Channel settings take the limit in an open field: blank removes it, anything else must be 1 to 99.
+  edit.open('voice');
+  check(field('#input-channel-user-limit')?.value === '2' && field('#input-channel-user-limit').type === 'text',
+    'a limited voice room edits its limit in an open text field, without a native spinner');
+  change('#input-channel-user-limit', '150');
+  const beforeInvalidLimit = requests.length;
+  field('#form-edit-channel').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await flush();
+  check(requests.length === beforeInvalidLimit && field('#input-channel-user-limit').getAttribute('aria-invalid') === 'true'
+    && document.querySelector('.chat-copy-toast-label')?.textContent === t('channelModal.userLimitInvalid', { max: 99 }),
+  'an out-of-range limit is refused with a toast before anything is sent');
+  change('#input-channel-user-limit', '');
+  field('#form-edit-channel').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await flush();
+  check(requests.at(-1).type === 'CHANNEL_UPDATE' && requests.at(-1).payload.maxParticipants === 0, 'clearing the field removes the limit');
+  for (const id of ['afk', 'text']) {
+    edit.open(id);
+    check(field('#input-channel-name') && !field('#input-channel-user-limit'), `${id} has no user limit field`);
+    edit.close();
+  }
+
+  // The AFK room is a moon without a limit, joined by nobody on purpose and never deleted from the list.
+  check(root.querySelector('.channel-item[data-channel-id="afk"] .channel-icon')?.textContent === 'bedtime'
+    && !root.querySelector('.channel-item[data-channel-id="afk"] .voice-user-limit'), 'the AFK room is drawn as a moon, without a limit');
+  const requestsBeforeAfk = requests.length;
+  root.querySelector('.channel-item[data-channel-id="afk"]').click();
+  await flush();
+  check(requests.length === requestsBeforeAfk && [...document.querySelectorAll('.chat-copy-toast')]
+    .some(toast => toast.textContent.includes(t('afk.joinBlocked'))), 'clicking the AFK room explains instead of joining');
+  view.openChannelMenu('afk', 10, 10);
+  check(menuItems().some(item => menuLabel(item) === t('afk.deleteDisabled') && item.disabled)
+    && !menuItems().some(item => menuLabel(item) === t('main.deleteChannel')), 'the AFK room is not deleted from the channel list');
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  view.openChannelMenu('voice', 10, 10);
+  check(menuItems().some(item => menuLabel(item) === t('main.deleteChannel') && !item.disabled), 'other rooms are still deleted from the list');
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  store.setServerDetails(details, user);
+  view.renderChannels();
+
   const moveToCategory = new DataTransfer();
   const looseChannel = root.querySelector('[data-channel-id="loose"]');
   const destinationTitle = root.querySelector('[data-category-id="destination"] > .category-title');

@@ -407,7 +407,9 @@ test('voice join snapshot is captured after async broadcast and includes peers w
   const sfu = new SfuManager();
   server['signalingService'] = service;
   server['sfuManager'] = sfu;
-  server['channelService'] = { canUserAccessChannel: async () => true } as unknown as WebSocketServer['channelService'];
+  server['channelService'] = {
+    canUserAccessChannel: async () => true, getAfkChannelId: async () => null,
+  } as unknown as WebSocketServer['channelService'];
   server['serverRepo'] = {
     getServer: async () => ({ id: 'server', name: 'Voice', passwordHash: '', createdAt: 1, maxUsers: 10, voiceMode: 'sfu' }),
     createServer: async () => {}, updateServer: async () => {},

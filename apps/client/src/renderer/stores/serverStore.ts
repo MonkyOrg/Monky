@@ -312,9 +312,12 @@ export class ServerStore {
     recentSoundCacheEnabled?: boolean,
     recentSoundCacheLimit?: number,
     dmRelayEnabled?: boolean,
+    afk?: { channelId?: string | null; timeoutSeconds?: number },
   ): void {
     if (this.serverDetails) {
       if (maxMessageLength !== undefined) this.serverDetails.maxMessageLength = maxMessageLength;
+      if (afk?.channelId !== undefined) this.serverDetails.afkChannelId = afk.channelId;
+      if (afk?.timeoutSeconds !== undefined) this.serverDetails.afkTimeoutSeconds = afk.timeoutSeconds;
       this.serverDetails.name = name;
       this.serverDetails.hasPassword = hasPassword;
       if (allowSoundboard !== undefined) {
