@@ -746,8 +746,10 @@ if (!process.versions.electron) {
     });
     const spectatorTitle = await run(spectatorWindow, 'window.screenFixture.snapshot().title');
     await run(spectatorWindow, 'document.querySelector("[data-bot-screen-id=game]").requestFullscreen()');
+    assert.equal(await run(spectatorWindow, 'window.screenFixture.trayWatching()'), true, 'Fixture: the tray shows the open miniapp');
     await run(spectatorWindow, `window.screenFixture.remove(${JSON.stringify(ended)})`);
     await waitFor(() => frames(spectatorWindow).length === 0, 'authoritative removal tears down another viewer');
+    assert.equal(await run(spectatorWindow, 'window.screenFixture.trayWatching()'), false, 'An authoritative removal takes the tray glasses off');
     await waitFor(async () => await run(spectatorWindow, '!document.fullscreenElement && !!document.querySelector(".chat-copy-toast:not([data-ui-closing])")'), 'an ended fullscreen miniapp leaves a visible viewer notice');
     assert.equal(await run(spectatorWindow, 'document.querySelector(".chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label").textContent'), `The miniapp "${spectatorTitle}" has ended.`);
     assert.equal(await run(spectatorWindow, 'document.querySelector(".chat-copy-toast:not([data-ui-closing])").getAttribute("role")'), 'status');
@@ -815,6 +817,15 @@ if (!process.versions.electron) {
       assert.equal(await run(aliceWindow, '!!document.querySelector(".chat-copy-toast:not([data-ui-closing])")'), false, `${mode} does not notify a viewer`);
       await waitFor(() => frames(aliceWindow).length === 0, 'non-notifying fixture teardown');
     }
+    const missedScreen = { ...noticeScreen, instanceId: 'missed-removal', createdAt: noticeScreen.createdAt + 2 };
+    await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(missedScreen)})`);
+    await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=toast-check]").click()');
+    await approveMiniapp(aliceWindow);
+    await waitFor(() => frames(aliceWindow).length === 1, 'miniapp open before a list without it');
+    assert.equal(await run(aliceWindow, 'window.screenFixture.trayWatching()'), true, 'Fixture: the tray shows the open miniapp');
+    await run(aliceWindow, 'window.screenFixture.reloadWithout("toast-check")');
+    await waitFor(() => frames(aliceWindow).length === 0, 'a reloaded list without the miniapp closes it');
+    assert.equal(await run(aliceWindow, 'window.screenFixture.trayWatching()'), false, 'A miniapp missing from a reloaded list takes the tray glasses off');
     await waitFor(async () => await run(spectatorWindow, '!document.querySelector(".chat-copy-toast:not([data-ui-closing])")'), 'viewer notice expires automatically');
 
     // Lifecycle hooks: the miniapp decides what happens around a close; its person can always leave.
@@ -1058,6 +1069,7 @@ if (!process.versions.electron) {
 
     await run(aliceWindow, textChannel);
     await waitFor(async () => await run(aliceWindow, `!!document.querySelector(${parkedHooks})`), 'a text channel parks the open view');
+    assert.equal(await run(aliceWindow, 'window.screenFixture.trayWatching()'), true, 'A parked miniapp is still open: the tray keeps its glasses');
     await visible(false, 'the miniapp learns it is in the background');
     assert.equal(await hooks.frame.executeJavaScript('window.gameToken'), hooks.token, 'Parking keeps the same document');
     assert.equal(await hooks.frame.executeJavaScript('window.hookLog.join()'), '', 'Browsing is not a close: no hook runs');
@@ -1137,6 +1149,7 @@ if (!process.versions.electron) {
     await waitFor(async () => await run(aliceWindow, `!!document.querySelector(${parkedHooks})`), 'parked before leaving the call');
     assert.equal(await run(aliceWindow, 'window.screenFixture.leave(); !document.querySelector("[data-bot-screen-background]") && !document.querySelector(".bot-screen-parking [data-bot-screen-id]")'), true,
       'A revoked view leaves no tile or line behind');
+    assert.equal(await run(aliceWindow, 'window.screenFixture.trayWatching()'), false, 'Leaving the call takes the tray glasses off');
     await waitUntil(() => hookEvents.includes(`revoked|${hooks.token}|0|false`), 'a parked view saves on revocation', 5000);
     await waitUntil(() => frames(aliceWindow).length === 0, 'the revoked document is released once onClose settles', 3000);
 
@@ -1148,6 +1161,7 @@ if (!process.versions.electron) {
     await waitFor(async () => await run(aliceWindow, `!!document.querySelector(${parkedHooks})`), 'parked before switching rooms');
     await run(aliceWindow, 'window.screenFixture.join("other")');
     await waitUntil(() => hookEvents.includes(`revoked|${hooks.token}|0|false`), 'switching rooms revokes the parked view', 5000);
+    assert.equal(await run(aliceWindow, 'window.screenFixture.trayWatching()'), false, 'Switching rooms takes the tray glasses off');
     await waitUntil(() => frames(aliceWindow).length === 0, 'the old room document is released', 3000);
 
     // Someone else ending it reaches onClose as ended, with the same notice as on stage.
@@ -1158,6 +1172,7 @@ if (!process.versions.electron) {
     await waitFor(async () => await run(aliceWindow, `!!document.querySelector(${parkedHooks})`), 'parked before ending');
     await run(aliceWindow, `window.screenFixture.remove(${JSON.stringify({ id: 'hooks', instanceId: 'hooks-7', channelId: 'voice', reason: 'ended', endedByUserId: 'remote' })})`);
     await waitUntil(() => hookEvents.includes(`ended|${hooks.token}|0|false`), 'ended while parked', 5000);
+    assert.equal(await run(aliceWindow, 'window.screenFixture.trayWatching()'), false, 'A miniapp ended in the background takes the tray glasses off');
     assert.equal(await run(aliceWindow, 'document.querySelector(".chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label")?.textContent'),
       'O miniapp "Hooks" foi encerrado.', 'A view open in the background still learns it ended');
     await waitUntil(() => frames(aliceWindow).length === 0, 'the ended document is released', 3000);
@@ -1168,7 +1183,7 @@ if (!process.versions.electron) {
       await waitFor(() => frames(window).length === 0, 'final teardown');
     }
     assert.deepEqual(nativeErrors, [], 'No native client-log errors during stage lifecycle');
-    console.log('Voice stage DOM: creator/admin END, live permission revocation, duplicate/delayed END, shared removal, stale-instance and background isolation; lifecycle hooks (onBeforeClose answers, Close now, stuck documents, muted onClose grace off stage, saves on close); browsing elsewhere (text channel, Home, other server and room parked without reloading, state/actions/audio while parked, visibility, back to miniapp, revoked/ended while parked); existing local leave/watch, fullscreen, locale, seats, sandbox and teardown passed.');
+    console.log('Voice stage DOM: creator/admin END, live permission revocation, duplicate/delayed END, shared removal, stale-instance and background isolation; lifecycle hooks (onBeforeClose answers, Close now, stuck documents, muted onClose grace off stage, saves on close); browsing elsewhere (text channel, Home, other server and room parked without reloading, state/actions/audio while parked, visibility, back to miniapp, revoked/ended while parked); tray glasses on open and parked views, off when they close; existing local leave/watch, fullscreen, locale, seats, sandbox and teardown passed.');
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
 }
@@ -1312,6 +1327,7 @@ async function setupVoiceStage(id, locale, adminPermission) {
   let resolveEnd;
   let lastRemoval;
   let safeNotifications = true;
+  let trayWatching = false;
   const actions = [];
   const sent = [];
   const nativeExitFullscreen = document.exitFullscreen;
@@ -1370,6 +1386,9 @@ async function setupVoiceStage(id, locale, adminPermission) {
   const offNotifications = appEvents.on('voice.bot_screens_updated', () => {
     safeNotifications &&= routing.isForegroundEvent() && routing.currentEventOrigin() === null;
   });
+  // Mirrors the tray, which puts its 3D glasses on and off by asking again on this event: every
+  // change to the call's open miniapps must report it, once the change has happened.
+  const offStageScreens = appEvents.on('stage.bot_screens_changed', () => { trayWatching = view.isWatchingAnyBotScreen(); });
   view.render();
   const receive = (snapshot) => {
     screens.set(snapshot.id, snapshot);
@@ -1389,6 +1408,9 @@ async function setupVoiceStage(id, locale, adminPermission) {
   window.screenFixture = {
     actions, sent, join, receive, remove, errors,
     lastRemoval: () => structuredClone(lastRemoval),
+    trayWatching: () => trayWatching,
+    // A list that silently lost a screen, as when its removal never reached this connection.
+    reloadWithout(screenId) { screens.delete(screenId); appEvents.emit('voice.bot_screens_reload'); },
     otherServerHasGame: () => !!other.botScreenStore.get('game'),
     delayEnd() { holdEnd = true; },
     endPending: () => typeof resolveEnd === 'function',
@@ -1463,7 +1485,7 @@ async function setupVoiceStage(id, locale, adminPermission) {
       finishFullscreenExit?.();
       window.removeEventListener('error', onError);
       window.removeEventListener('unhandledrejection', onRejection);
-      offLanguage(); offNavigation(); offNotifications(); view.destroy(); offScreens();
+      offLanguage(); offNavigation(); offNotifications(); offStageScreens(); view.destroy(); offScreens();
       voiceStore.reset(); await sessionManager.removeAll();
       return listenerCount() === before;
     },

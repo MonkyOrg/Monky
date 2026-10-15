@@ -14,6 +14,8 @@ const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
 }).outputText;
 const trayDir = path.join(clientRoot, 'build', 'tray');
 const poses = ['idle', 'call', 'talk', 'mute', 'deaf'];
+// In a call, watching someone's screen or a miniapp swaps each pose for one wearing 3D glasses.
+const icons = [...poses, 'call-3d', 'talk-3d', 'mute-3d', 'deaf-3d'];
 const tooltips = {
   idle: 'tray.tooltipIdle', call: 'tray.tooltipInCall', talk: 'tray.tooltipSpeaking',
   mute: 'tray.tooltipMuted', deaf: 'tray.tooltipDeafened',
@@ -47,7 +49,7 @@ function load(platform) {
   return { ...module.exports, window, loaded, trays, sent };
 }
 
-const states = [
+const poseStates = [
   [{ inCall: false, isMuted: false, isDeafened: false, isSpeaking: false }, 'idle'],
   [{ inCall: false, isMuted: true, isDeafened: true, isSpeaking: true }, 'idle'],
   [{ inCall: true, isMuted: false, isDeafened: false, isSpeaking: false }, 'call'],
@@ -56,26 +58,36 @@ const states = [
   [{ inCall: true, isMuted: true, isDeafened: true, isSpeaking: true }, 'deaf'],
   [{ inCall: true, isMuted: false, isDeafened: true, isSpeaking: false }, 'deaf'],
 ];
+// [status, pose, icon]: every pose without and with watching; out of a call nothing is being watched.
+const states = poseStates.flatMap(([status, pose]) => [
+  [{ ...status, isWatching: false }, pose, pose],
+  [{ ...status, isWatching: true }, pose, pose === 'idle' ? 'idle' : `${pose}-3d`],
+]);
 
 test('each voice state maps to one monkey pose, with deafened and muted winning over speaking', () => {
   const { trayPoseFor } = load(process.platform);
   for (const [status, pose] of states) assert.equal(trayPoseFor(status), pose, JSON.stringify(status));
 });
 
+test('watching keeps the pose and only adds the 3D glasses in a call', () => {
+  const { trayIconFor } = load(process.platform);
+  for (const [status, , icon] of states) assert.equal(trayIconFor(status), icon, JSON.stringify(status));
+});
+
 for (const [platform, extension] of [['win32', '.ico'], ['darwin', '.png'], ['linux', '.png']]) {
   test(`${platform} tray loads every pose once from build/tray as ${extension} and swaps it per state`, () => {
     const tray = load(platform);
     const manager = new tray.TrayManager(tray.window, () => {});
-    assert.deepEqual(tray.loaded, poses.map(pose => path.join(trayDir, `${pose}${extension}`)));
+    assert.deepEqual(tray.loaded, icons.map(icon => path.join(trayDir, `${icon}${extension}`)));
     for (const file of tray.loaded) assert.ok(fs.existsSync(file), `Missing tray icon ${file}`);
     const [icon] = tray.trays;
     assert.equal(icon.images[0].file, path.join(trayDir, `idle${extension}`), 'Out of a call the tray starts idle');
-    for (const [status, pose] of states) {
+    for (const [status, pose, image] of states) {
       manager.updateVoiceStatus(status);
-      assert.equal(icon.images.at(-1).file, path.join(trayDir, `${pose}${extension}`), JSON.stringify(status));
-      assert.equal(icon.tooltips.at(-1), tooltips[pose]);
+      assert.equal(icon.images.at(-1).file, path.join(trayDir, `${image}${extension}`), JSON.stringify(status));
+      assert.equal(icon.tooltips.at(-1), tooltips[pose], 'The glasses keep the tooltip of the pose');
     }
-    assert.equal(tray.loaded.length, poses.length, 'State changes reuse the preloaded images');
+    assert.equal(tray.loaded.length, icons.length, 'State changes reuse the preloaded images');
     manager.destroy();
   });
 }
@@ -85,7 +97,7 @@ test('the in-call menu still toggles mute and deafen and reflects the current st
   const manager = new tray.TrayManager(tray.window, () => {});
   const labels = () => tray.trays[0].menu.template.filter(item => item.label).map(item => item.label);
   assert.deepEqual(labels(), ['tray.open', 'tray.quit']);
-  manager.updateVoiceStatus({ inCall: true, isMuted: true, isDeafened: true, isSpeaking: false });
+  manager.updateVoiceStatus({ inCall: true, isMuted: true, isDeafened: true, isSpeaking: false, isWatching: true });
   assert.deepEqual(labels(), ['tray.open', 'tray.unmuteMic', 'tray.undeafen', 'tray.quit']);
   for (const item of tray.trays[0].menu.template.filter(entry => entry.label?.startsWith('tray.un'))) item.click();
   assert.deepEqual(tray.sent, ['tray:toggle-mute', 'tray:toggle-deafen']);
@@ -98,7 +110,7 @@ function pngInfo(buffer, name) {
 }
 
 test('tray assets have the menu-bar sizes, the Windows small-icon frames and a transparent background', () => {
-  for (const pose of poses) {
+  for (const pose of icons) {
     for (const [file, size] of [[`${pose}.png`, 18], [`${pose}@2x.png`, 36]]) {
       assert.deepEqual(pngInfo(fs.readFileSync(path.join(trayDir, file)), file), { width: size, height: size, colorType: 6 });
     }
