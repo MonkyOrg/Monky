@@ -188,6 +188,9 @@ const CATALOGS = {
     'tray.deafen': 'Mutar Áudio (Ensurdecer)',
     'tray.undeafen': 'Desmutar Áudio (Ouvir)',
     'tray.quit': 'Fechar Monky',
+    'taskbar.leaveCall': 'Sair da Chamada',
+    'taskbar.micLocked': 'Sem permissão para falar neste canal',
+    'taskbar.micAfk': 'Mutado no canal AFK',
   },
   en: {
     'calendar.save': 'Export event to calendar',
@@ -365,6 +368,9 @@ const CATALOGS = {
     'tray.deafen': 'Mute Audio (Deafen)',
     'tray.undeafen': 'Unmute Audio (Listen)',
     'tray.quit': 'Quit Monky',
+    'taskbar.leaveCall': 'Leave Call',
+    'taskbar.micLocked': 'You don\'t have permission to speak in this channel',
+    'taskbar.micAfk': 'Muted in the AFK channel',
   },
 } as const;
 

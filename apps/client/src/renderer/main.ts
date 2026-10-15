@@ -48,7 +48,7 @@ import { soundEffects } from './core/SoundEffects';
 import type { CommunityStartNotice } from './core/CommunityFeed';
 import { soundboardService } from './core/SoundboardService';
 import { keybindService } from './core/KeybindService';
-import { toggleAudioDeafen, toggleMicrophoneMute, toggleSoundboardMute, updateLocalSpeaking } from './core/voiceControls';
+import { isCallInAfkChannel, toggleAudioDeafen, toggleMicrophoneMute, toggleSoundboardMute, updateLocalSpeaking } from './core/voiceControls';
 import { updateService } from './core/UpdateService';
 import { videoService } from './core/VideoService';
 import { webRtcManager } from './core/WebRtcManager';
@@ -430,6 +430,9 @@ class App {
         isMuted: voiceStore.getEffectiveMuted(),
         isDeafened: voiceStore.getEffectiveDeafened(),
         isSpeaking: voiceStore.isSpeaking,
+        selfMuted: voiceStore.isMuted,
+        selfDeafened: voiceStore.isDeafened,
+        micLock: voiceStore.permissionMuted ? (isCallInAfkChannel() ? 'afk' : 'permission') : null,
       });
     };
 
@@ -440,13 +443,18 @@ class App {
     // Initial sync
     syncTrayVoiceStatus();
 
-    // Tray context menu actions
+    // Tray context menu and Windows taskbar thumbnail actions
     window.api?.onTrayToggleMute(() => {
       toggleMicrophoneMute();
     });
 
     window.api?.onTrayToggleDeafen(() => {
       toggleAudioDeafen();
+    });
+
+    // Same path as the hang-up button in the sidebar's voice connection row.
+    window.api?.onTrayLeaveCall(() => {
+      this.mainView.voiceStageView?.leaveVoice();
     });
   }
 

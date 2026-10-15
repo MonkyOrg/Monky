@@ -56,6 +56,8 @@ sem exibir um alerta adicional.
 
 Clique em um **canal de voz** para entrar na chamada. Quem fala ganha um anel verde no avatar. A barra inferior tem microfone, fone/ensurdecer e desconectar. O painel mostra ping médio e permite sair só da chamada.
 
+No Windows, durante a chamada, a miniatura do Monky na barra de tarefas também mostra os botões de microfone, ensurdecer e sair da chamada. Passe o mouse sobre o ícone do Monky para usá-los sem abrir a janela.
+
 Canais privados mostram um cadeado no canto do próprio ícone. Um canal de voz
 com [limite de pessoas](/administrar-servidor#limite-de-pessoas) mostra ao lado
 do nome quantos participantes estão nele e o máximo; com a sala cheia, só entra

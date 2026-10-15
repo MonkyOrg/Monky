@@ -226,6 +226,7 @@ export interface ElectronApi {
   notifyLeaveComplete: (request: AppShutdownRequest) => Promise<void>;
   onTrayToggleMute: (cb: () => void) => () => void;
   onTrayToggleDeafen: (cb: () => void) => () => void;
+  onTrayLeaveCall: (cb: () => void) => () => void;
   getAutoStart: () => Promise<boolean>;
   setAutoStart: (enabled: boolean) => Promise<void>;
   setMinimizeToTray: (enabled: boolean) => Promise<void>;
@@ -604,6 +605,13 @@ const api: ElectronApi = {
     ipcRenderer.on('tray:toggle-deafen', listener);
     return () => {
       ipcRenderer.removeListener('tray:toggle-deafen', listener);
+    };
+  },
+  onTrayLeaveCall: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('tray:leave-call', listener);
+    return () => {
+      ipcRenderer.removeListener('tray:leave-call', listener);
     };
   },
   getAutoStart: () => ipcRenderer.invoke('app:get-auto-start'),

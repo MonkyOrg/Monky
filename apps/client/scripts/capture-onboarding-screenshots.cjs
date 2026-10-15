@@ -312,6 +312,7 @@ async function setupFixture(language) {
     onAppBeforeQuit: unsubscribe,
     onTrayToggleMute: unsubscribe,
     onTrayToggleDeafen: unsubscribe,
+    onTrayLeaveCall: unsubscribe,
     updateTrayVoiceStatus: noop,
     setWindowInServer: noop,
     stopLanDiscovery: noop,
