@@ -3615,7 +3615,7 @@ async function runDomSmoke(sharedModule) {
   events.appEvents.emit('server.roles_updated');
   check(!find('[data-message-action="emoji"]').disabled && getComputedStyle(find('[data-message-action="emoji"]')).opacity === '1', 'Restoring permission must restore full emoji opacity');
   find('[data-message-action="more"]').click();
-  check(activeAll('.floating-context-menu [role="menuitem"]').length === 4, 'Other authors offer emoji, reply, copy and moderator delete but not edit');
+  check(activeAll('.floating-context-menu [role="menuitem"]').length === 6, 'Other authors offer emoji, reply, copy, forward, select and moderator delete but not edit');
   key(document.activeElement, 'ArrowDown');
   check(document.activeElement.textContent.includes('Responder'), 'Arrow keys must navigate message menu');
   key(document.activeElement, 'Escape');

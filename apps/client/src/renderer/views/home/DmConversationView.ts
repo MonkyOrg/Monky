@@ -8,7 +8,7 @@ import {
   type DmPeerView,
   type MessageReply,
 } from '@monky/shared';
-import { t } from '../../i18n';
+import { t, tCount } from '../../i18n';
 import { dmStore } from '../../stores/dmStore';
 import { ownAvatarSource } from '../../core/profileSync';
 import { connectionStore } from '../../stores/connectionStore';
@@ -31,6 +31,11 @@ import { mountServerInviteCards, openServerInviteLink } from '../ServerInviteCar
 import type { MarkdownInput } from '../MarkdownInput';
 import '../MarkdownInput';
 import { dmFailureMessage } from './dmErrors';
+import { MessageSelection, type MessageSelectionAction } from '../MessageSelection';
+import { forwardDestinations, openForwardModal } from '../ForwardMessagesModal';
+import type { ForwardItem } from '../../core/MessageForwarder';
+import { downloadFilesWithChoice, type DownloadableFile } from '../../utils/fileDownloads';
+import { archiveDate, renderForwardedBadge } from '../../utils/messageForward';
 
 interface StagedFile {
   id: string;
@@ -73,6 +78,12 @@ export class DmConversationView {
     content: (messageId) => this.messageClipboard(messageId),
     image: (messageId) => this.messageClipboardImage(messageId),
   });
+  private readonly selection = new MessageSelection({
+    feed: () => this.query('[data-dm-feed]'),
+    host: () => this.query('.chat-input-container'),
+    selectable: (row) => !!this.selectableMessage(row.dataset.messageId ?? ''),
+    actions: (ids) => this.selectionActions(ids),
+  });
 
   constructor(readonly peer: string) {}
 
@@ -110,6 +121,7 @@ export class DmConversationView {
 
   public destroy(): void {
     if (!this.container) return;
+    this.selection.stop();
     dmStore.leave(this.peer);
     this.unsubscribers.splice(0).forEach((unsubscribe) => unsubscribe());
     this.listeners?.abort();
@@ -306,6 +318,7 @@ export class DmConversationView {
     feed.innerHTML = `${older}${intro}${messages.map((message, index) => this.renderMessage(message, messages[index - 1])).join('')}`;
     this.bindFeed(feed);
     this.loadImages(feed);
+    this.selection.sync();
     const firstAfter = feed.querySelector<HTMLElement>('.chat-message-row')?.dataset.messageId;
     if (forceScroll || (nearBottom && this.pinnedToBottom)) {
       feed.scrollTop = feed.scrollHeight;
@@ -385,6 +398,7 @@ export class DmConversationView {
             <span class="chat-timestamp">${time}</span>
             ${grouped ? '' : editedBadge}
           </div>
+          ${message.forwarded ? renderForwardedBadge(message.forwarded, formatMessageTime) : ''}
           ${pending ? `<span class="chat-delivery-sr" role="status">${escapeHtml(t('dm.deliveryPending'))}</span>` : ''}
           ${message.replyTo ? this.renderReplyReference(message.replyTo) : ''}
           ${message.content.trim() ? `<div class="chat-message-text">${renderMarkdown(message.content, { currentNickname: connectionStore.savedNickname })}${grouped ? editedBadge : ''}</div>` : ''}
@@ -727,6 +741,10 @@ export class DmConversationView {
       if (!this.editing) items.push({ label: t('chat.replyMessage'), icon: 'reply', onClick: () => this.startReply(messageId) });
     }
     items.push(this.copy.menuItem(messageId));
+    if (this.forwardableMessage(message)) {
+      items.push({ label: t('chat.forwardMessage'), icon: 'forward', onClick: () => void this.forwardSelected([messageId]) });
+    }
+    items.push({ label: t('chat.selectMessages'), icon: 'checklist', onClick: () => this.selection.start(messageId) });
     if (writable && mine) items.push({ label: t('chat.editMessage'), icon: 'edit', onClick: () => this.startEdit(messageId) });
     if (mine) {
       items.push({ label: t('chat.deleteMessage'), icon: 'delete', danger: true, onClick: () => void this.confirmDelete(messageId) });
@@ -929,6 +947,117 @@ export class DmConversationView {
       variant: 'danger',
     });
     if (confirmed) await this.report(dmStore.deleteMessage(this.peer, messageId));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Selection
+  // ---------------------------------------------------------------------------
+
+  private selectableMessage(messageId: string): DmMessageView | undefined {
+    const message = this.message(messageId);
+    return message && !message.deleted ? message : undefined;
+  }
+
+  private isMine(message: DmMessageView): boolean {
+    return message.author === dmStore.snapshot.me?.publicKey;
+  }
+
+  /** Files are forwarded as they are, so every one of them must already be on this computer. */
+  private forwardableMessage(message: DmMessageView): boolean {
+    if (message.deleted) return false;
+    if (message.attachments.some((attachment) => attachment.state !== 'ready' && attachment.state !== 'local')) return false;
+    return message.content.trim().length > 0 || message.attachments.length > 0;
+  }
+
+  private selectedMessages(ids: string[]): DmMessageView[] {
+    return ids.flatMap((id) => {
+      const message = this.selectableMessage(id);
+      return message ? [message] : [];
+    });
+  }
+
+  private selectionActions(ids: string[]): MessageSelectionAction[] {
+    const messages = this.selectedMessages(ids);
+    const writable = this.canWrite();
+    const files: DownloadableFile[] = messages.flatMap((message) => message.attachments.flatMap((attachment) =>
+      attachment.state === 'ready' || attachment.state === 'local'
+        ? [{ dm: { peer: this.peer, messageId: message.id, fileId: attachment.fileId }, fileName: attachment.name }] : []));
+    return [
+      {
+        id: 'reply', icon: 'reply', label: t('chat.replyMessage'),
+        unavailable: !writable ? t('chat.sendPermissionDenied')
+          : this.editing ? t('chat.selectionReplyWhileEditing')
+            : messages.length > 1 ? t('dm.selectionReplyOne') : undefined,
+        run: () => {
+          this.selection.stop();
+          if (messages[0]) this.startReply(messages[0].id);
+        },
+      },
+      {
+        id: 'forward', icon: 'forward', label: t('chat.forwardAction'),
+        unavailable: messages.every((message) => this.forwardableMessage(message)) ? undefined : t('dm.selectionForwardPending'),
+        run: () => this.forwardSelected(messages.map((message) => message.id)),
+      },
+      {
+        id: 'copy', icon: 'content_copy', label: t('chat.copyMessage'),
+        run: async () => {
+          await this.copy.copyMessages(messages.map((message) => ({
+            messageId: message.id,
+            heading: `${this.authorInfo(message.author).name} — ${formatMessageTime(message.createdAt)}`,
+          })));
+          this.selection.stop();
+        },
+      },
+      {
+        id: 'download', icon: 'download', label: t('common.download'),
+        unavailable: files.length ? undefined : t('chat.selectionNoFiles'),
+        run: () => downloadFilesWithChoice(files, [this.nickname(), archiveDate()].join(' - ')),
+      },
+      {
+        id: 'delete', icon: 'delete', label: t('chat.deleteMessage'), danger: true,
+        unavailable: messages.every((message) => this.isMine(message)) ? undefined : t('chat.selectionDeleteDenied'),
+        run: () => this.deleteSelected(messages.map((message) => message.id)),
+      },
+    ];
+  }
+
+  private async forwardSelected(ids: string[]): Promise<void> {
+    const messages = this.selectedMessages(ids).filter((message) => this.forwardableMessage(message));
+    if (messages.length === 0) return;
+    const peer = this.peer;
+    const items: ForwardItem[] = messages.map((message) => ({
+      content: message.content,
+      attachments: message.attachments.map((attachment) => ({
+        name: attachment.name, mime: attachment.mime, size: attachment.size,
+        load: async () => {
+          const blob = await dmStore.readAttachment(peer, message.id, attachment.fileId);
+          if (!blob) throw new Error(t('chat.forwardReadFailed'));
+          return blob;
+        },
+      })),
+      // A private conversation is never named in the badge.
+      sourceLabel: null,
+      createdAt: message.createdAt,
+    }));
+    const destinations = forwardDestinations({ kind: 'dm', peer });
+    if (await openForwardModal({ items, ...destinations })) this.selection.stop();
+  }
+
+  private async deleteSelected(ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    const confirmed = await showConfirm({
+      title: tCount('chat.deleteMessagesTitle', ids.length),
+      message: tCount('chat.deleteMessagesConfirm', ids.length),
+      confirmLabel: t('chat.deleteMessage'),
+      variant: 'danger',
+    });
+    if (!confirmed || !this.container) return;
+    let failed = 0;
+    for (const messageId of ids) {
+      if (await dmStore.deleteMessage(this.peer, messageId)) failed++;
+    }
+    this.selection.stop();
+    if (failed > 0) showErrorToast(t('chat.deleteSomeFailed', { failed, total: ids.length }), 7000);
   }
 
   private stageFiles(files: File[]): void {

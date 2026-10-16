@@ -226,6 +226,21 @@ export class AttachmentService {
     return valid.map((r) => this.toMeta({ ...r, messageId }));
   }
 
+  /**
+   * Pending uploads of `userId` for `channelId`, in the requested order, or
+   * null when any of them is unknown, foreign, already linked or evicted.
+   */
+  public async getPending(attachmentIds: string[], userId: string, channelId: string): Promise<AttachmentMeta[] | null> {
+    const byId = new Map((await this.attachmentRepo.findByIds(attachmentIds)).map((r) => [r.id, r]));
+    const pending: AttachmentMeta[] = [];
+    for (const id of attachmentIds) {
+      const r = byId.get(id);
+      if (!r || r.userId !== userId || r.channelId !== channelId || r.messageId != null || r.evicted) return null;
+      pending.push(this.toMeta(r));
+    }
+    return pending;
+  }
+
   /** Attachments grouped by message id, for history hydration. */
   public async getForMessages(messageIds: string[]): Promise<Map<string, AttachmentMeta[]>> {
     const map = new Map<string, AttachmentMeta[]>();

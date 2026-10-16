@@ -1629,7 +1629,7 @@ input:focus, textarea:focus, select:focus {
 /* Grouped rows reveal their time in the avatar gutter only on hover, like the header they omit. */
 .dm-grouped-time {
   position: absolute;
-  left: 0;
+  left: 8px;
   top: 4px;
   width: 40px;
   text-align: center;
@@ -3963,8 +3963,10 @@ input:focus, textarea:focus, select:focus {
   line-height: 1.4;
   user-select: text;
   -webkit-user-select: text;
-  padding: 2px 0;
-  border-radius: var(--radius-sm);
+  /* The background reaches 8px past the content on each side, so hover and selection never touch the avatar or text. */
+  padding: 2px 8px;
+  margin-inline: -8px;
+  border-radius: var(--radius-md);
   transition: background-color 0.12s ease;
 }
 
@@ -3974,7 +3976,7 @@ input:focus, textarea:focus, select:focus {
 
 .chat-message-jump-highlight {
   position: absolute;
-  inset: -4px -8px;
+  inset: -4px 0;
   z-index: 2;
   border: 1px solid color-mix(in srgb, var(--accent-primary) 38%, transparent);
   border-left: 3px solid var(--accent-primary);
@@ -4265,6 +4267,241 @@ input:focus, textarea:focus, select:focus {
   font-size: 10px;
   color: var(--text-muted);
   font-style: italic;
+}
+
+/* Where a forwarded message came from; never who wrote the original. */
+.chat-forwarded {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 0;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-muted);
+}
+.chat-forwarded-time::before {
+  content: '·';
+  margin-right: 4px;
+}
+
+/* Selection mode: clicking picks a message, so its content stops reacting to the pointer. */
+.chat-messages-feed.is-selecting-messages .chat-message-row {
+  cursor: pointer;
+  padding: 4px 12px 4px 46px;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background-color 0.12s ease;
+}
+.chat-messages-feed.is-selecting-messages .chat-message-row > * { pointer-events: none; }
+.chat-messages-feed.is-selecting-messages .chat-message-toolbar,
+.chat-messages-feed.is-selecting-messages .dm-grouped-time { display: none; }
+.chat-messages-feed.is-selecting-messages .chat-message-row::before {
+  content: 'radio_button_unchecked';
+  position: absolute;
+  left: 14px;
+  top: 6px;
+  font-family: 'Material Symbols Outlined';
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text-muted);
+  font-feature-settings: 'liga';
+}
+.chat-messages-feed.is-selecting-messages .chat-message-row.is-selected {
+  background-color: color-mix(in srgb, var(--accent-primary) 14%, transparent);
+}
+.chat-messages-feed.is-selecting-messages .chat-message-row.is-selected::before {
+  content: 'check_circle';
+  color: var(--accent-primary);
+  font-variation-settings: 'FILL' 1;
+}
+.chat-messages-feed.is-selecting-messages .chat-message-row.is-unselectable {
+  cursor: default;
+  opacity: 0.55;
+}
+.chat-messages-feed.is-selecting-messages .chat-message-row.is-unselectable::before { content: none; }
+.chat-messages-feed.is-selecting-messages .chat-message-row:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: -2px;
+}
+.chat-messages-feed.is-drag-selecting { cursor: ns-resize; }
+
+/* The action bar takes the composer's place until the selection ends. */
+.message-selection-host--active > :not(.message-selection-bar) { display: none !important; }
+.message-selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+}
+.message-selection-count {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.message-selection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.message-selection-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-card-secondary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+.message-selection-action:hover:not([aria-disabled="true"]) {
+  border-color: var(--accent-primary);
+  background: var(--bg-hover);
+}
+.message-selection-action:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+.message-selection-action[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.message-selection-action--danger:not([aria-disabled="true"]) { color: var(--danger); }
+.message-selection-action--danger:hover:not([aria-disabled="true"]) { border-color: var(--danger); }
+.message-selection-cancel { padding: 0 8px; }
+@media (max-width: 960px) {
+  .message-selection-action { padding: 0 10px; }
+  .message-selection-action-label { display: none; }
+}
+
+/* "Forward to…" picker: selectable cards for channels and friends. */
+.forward-modal { max-width: 480px; }
+/* The magnifier sits inside the field, so it overrides the modal's block labels. */
+.community-modal .forward-search {
+  position: relative;
+  display: block;
+  margin: 0;
+}
+.forward-search > .material-symbols-outlined {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.community-modal .forward-search .input-field {
+  width: 100%;
+  padding-left: 38px;
+}
+.forward-lists {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: min(52vh, 420px);
+  margin-top: 14px;
+  padding-right: 4px;
+  overflow-y: auto;
+}
+.forward-section-heading {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.forward-destinations {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.forward-destination {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 1.5px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+.forward-destination[hidden] { display: none; }
+.forward-destination:hover:not([aria-disabled="true"]):not(:disabled) {
+  background: var(--bg-hover);
+}
+.forward-destination:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+.forward-destination[aria-pressed="true"] {
+  border-color: var(--accent-primary);
+  background: color-mix(in srgb, var(--accent-primary) 12%, transparent);
+}
+.forward-destination[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.forward-destination-avatar {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.forward-destination-icon {
+  flex: none;
+  width: 28px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.forward-destination-copy {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+.forward-destination-copy strong {
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.forward-destination-copy small {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.forward-destination-check {
+  color: var(--accent-primary);
+  opacity: 0;
+  font-variation-settings: 'FILL' 1;
+  transition: opacity 0.12s ease;
+}
+.forward-destination[aria-pressed="true"] .forward-destination-check { opacity: 1; }
+.forward-empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.forward-progress {
+  min-height: 18px;
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
 }
 
 /* A deleted message keeps its slot with a placeholder rather than vanishing,

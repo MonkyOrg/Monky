@@ -221,6 +221,7 @@ import { DmRelayService } from '../../application/services/DmRelayService';
 import { GameShareRequestService } from '../../application/services/GameShareRequestService';
 import { NativePollError, NativePollService } from '../../application/services/NativePollService';
 import { projectLegacyPolls } from './pollProjection';
+import { projectLegacyForwards } from './forwardProjection';
 import { IServerRepository } from '../../domain/repositories';
 import type { NativePollRecord } from '../../domain/entities';
 import { scanServerNetworkInterfaces } from '../discovery/ServerIpScanner';
@@ -2638,6 +2639,8 @@ export class WebSocketServer {
       payload.blocks,
       payload.clientMessageId,
       canSend,
+      // Peers without message-forward never asked for the badge; their field is ignored.
+      session.protocol?.features.includes('message-forward') ? payload.forward : undefined,
     );
     if (!result.success) {
       this.sendError(
@@ -6313,8 +6316,9 @@ export class WebSocketServer {
     if (ws.readyState === WebSocket.OPEN && (!session || this.canDeliverBotEvent(session, message))) {
       const projected = session?.user ? this.projectScreenMessage(session, message) : message;
       if (!projected) return;
-      ws.send(JSON.stringify(session && !session.protocol?.features.includes('poll-voters')
-        ? projectLegacyPolls(projected) : projected));
+      const polls = session && !session.protocol?.features.includes('poll-voters') ? projectLegacyPolls(projected) : projected;
+      ws.send(JSON.stringify(session && !session.protocol?.features.includes('message-forward')
+        ? projectLegacyForwards(polls) : polls));
     }
   }
 

@@ -29,13 +29,14 @@ import { NativeThumbnailCapturer, loadThumbnailRuntime, createMacScreenProvider,
 import { DesktopSourcePreviews } from './desktopSourcePreviews';
 import type { NativeWindowInfo, NativeMonitorInfo, NativeWindowState } from '@monky/screen-audio';
 import { deleteIdentity, exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
-import { exportDirectMessages, importDirectMessages, resetDirectMessages, setupDmIpc, wipeDirectMessages } from './dm/dmIpc';
+import { exportDirectMessages, importDirectMessages, resetDirectMessages, setupDmIpc, wipeDirectMessages, writeDmAttachment } from './dm/dmIpc';
 import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';
 import { HostServerOptions, ServerManager } from './serverManager';
 import { mt, setMainLanguage } from './i18n';
 import { setupEventCalendarIpc } from './serverEventCalendarIpc';
 import { setupHostingSkillIpc } from './hostingSkills';
 import { setupRecentSoundSaveIpc } from './recentSoundSaveIpc';
+import { setupFileBatchDownloadIpc } from './fileBatchDownloadIpc';
 import { fetchLinkPreview } from './linkPreview';
 import { TrayManager } from './trayManager';
 import type { TaskbarCallControls } from './taskbarCallControls';
@@ -408,6 +409,10 @@ export function setupIpcHandlers(
   const disposeEventCalendar = setupEventCalendarIpc(mainWindow, sanitizeDownloadFileName);
   const disposeHostingSkill = setupHostingSkillIpc(mainWindow);
   const disposeRecentSoundSave = setupRecentSoundSaveIpc(mainWindow, sanitizeDownloadFileName);
+  const disposeFileBatchDownload = setupFileBatchDownloadIpc(mainWindow, sanitizeDownloadFileName, async (file, destination) => {
+    if ('url' in file) await downloadToFile(file.url, destination);
+    else await writeDmAttachment(file.dm.peer, file.dm.messageId, file.dm.fileId, destination);
+  });
   const disposeDirectMessages = setupDmIpc(mainWindow, sanitizeDownloadFileName);
   ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, async (event): Promise<string | null> => {
     if (!ownsSoundDownload(event)) throw new Error(mt('error.defaultSoundboardFolder'));
@@ -1631,6 +1636,7 @@ export function setupIpcHandlers(
     disposeEventCalendar();
     disposeHostingSkill();
     disposeRecentSoundSave();
+    disposeFileBatchDownload();
     disposeDirectMessages();
     for (const channel of Object.values(AUDIO_PREVIEW_IPC)) ipcMain.removeHandler(channel);
     ipcMain.removeHandler('app:save-csv-file');

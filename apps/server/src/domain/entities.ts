@@ -99,6 +99,8 @@ export interface MessageRecord {
   revision?: number;
   deletedByUserId?: string | null;
   deleteUndoUntil?: number | null;
+  /** Set when the message was forwarded (message-forward); resolved by the server at send time. */
+  forwarded?: import('@monky/shared').MessageForward;
 }
 
 export interface NativePollRecord {

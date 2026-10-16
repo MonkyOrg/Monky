@@ -194,7 +194,9 @@ async function* regression(language) {
     && repeatedHighlight.effect.getComputedTiming().duration >= 900
     && jumpRow.querySelectorAll(':scope > .chat-message-jump-highlight').length === 1
     && getComputedStyle(jumpRow.querySelector('.chat-message-jump-highlight')).borderLeftWidth === '3px'
-    && getComputedStyle(jumpRow.querySelector('.chat-message-jump-highlight')).left === '-8px',
+    // The row keeps 8px around its content, and the highlight covers exactly that box.
+    && getComputedStyle(jumpRow).paddingLeft === '8px'
+    && getComputedStyle(jumpRow.querySelector('.chat-message-jump-highlight')).left === '0px',
   'Message jump highlight is visible, repeatable, spaced and uses the shared motion timing');
   repeatedHighlight.cancel();
   await flush();

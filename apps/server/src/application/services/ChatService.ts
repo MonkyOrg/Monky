@@ -25,7 +25,10 @@ import {
   botMessageLocalizationsSchema,
   botMessagePreviewLocalizations,
   type BotMessageLocalizations,
+  MESSAGE_FORWARD_SOURCE_MAX_LENGTH,
+  type MessageForward,
 } from '@monky/shared';
+import { z } from 'zod';
 import { BotRecord, MentionRecord, MessageRecord } from '../../domain/entities';
 import {
   IChannelRepository,
@@ -46,6 +49,8 @@ export type BotMessageResult =
 function isMessageChannel(type: string): boolean {
   return type === 'TEXT' || type === 'VOICE';
 }
+
+const forwardRequestSchema = z.object({ sourceMessageId: messageReferenceSchema.optional() }).strict();
 
 export class ChatService {
   constructor(
@@ -155,6 +160,38 @@ export class ChatService {
       (allowDeleted || !original.deletedAt) && await this.canViewMessage(viewerUserId, original);
   }
 
+  /**
+   * Resolves the "Forwarded" badge (message-forward). A same-server original is
+   * named only when the sender can read it and the new message carries exactly
+   * its text and files, so the badge cannot be attached to fabricated content.
+   * Access is checked before content so a mismatch reveals nothing of unreadable
+   * messages. Returns null when the original cannot back the forward.
+   */
+  private async resolveForward(
+    userId: string,
+    channelId: string,
+    sourceMessageId: string | undefined,
+    content: string,
+    attachmentIds: string[],
+  ): Promise<MessageForward | null> {
+    if (sourceMessageId === undefined) return { source: null, createdAt: null };
+    const source = await this.messageRepo.findById(sourceMessageId);
+    if (!source || source.isSystem || source.deletedAt) return null;
+    const sourceChannel = await this.channelRepo.findById(source.channelId);
+    if (!sourceChannel || !isMessageChannel(sourceChannel.type) ||
+        !await this.canUserAccessChannel(userId, source.channelId) || !await this.canViewMessage(userId, source)) return null;
+    if (source.content !== content) return null;
+    const originals = ((await this.attachmentService.getForMessages([source.id])).get(source.id) ?? [])
+      .filter(file => !file.evicted);
+    const copies = await this.attachmentService.getPending(attachmentIds, userId, channelId);
+    if (!copies || copies.length !== originals.length || copies.some((copy, index) => {
+      const original = originals[index];
+      return copy.originalName !== original.originalName || copy.sizeBytes !== original.sizeBytes ||
+        copy.mimeType !== original.mimeType;
+    })) return null;
+    return { source: `#${sourceChannel.name}`.slice(0, MESSAGE_FORWARD_SOURCE_MAX_LENGTH), createdAt: source.createdAt };
+  }
+
   private async resolveBlocks(record: MessageRecord, viewerUserId?: string): Promise<ResolvedMessageBlock[] | undefined> {
     if (!record.blocks || record.deletedAt) return undefined;
     const resolved: ResolvedMessageBlock[] = [];
@@ -261,6 +298,7 @@ export class ChatService {
     rawBlocks?: unknown,
     clientMessageId?: string,
     canSend: () => boolean = () => true,
+    forward?: unknown,
   ): Promise<{
     success: boolean;
     errorCode?: ProtocolErrorCode;
@@ -286,6 +324,10 @@ export class ChatService {
         new Set(attachmentIds).size !== attachmentIds.length ||
         attachmentIds.some(id => !messageReferenceSchema.safeParse(id).success))) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Anexos inválidos.' };
+    }
+    const parsedForward = forwardRequestSchema.optional().safeParse(forward);
+    if (!parsedForward.success) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Encaminhamento inválido.' };
     }
     const channel = await this.channelRepo.findById(channelId);
     if (!channel || !isMessageChannel(channel.type) || !(await this.canUserAccessChannel(userId, channelId))) {
@@ -334,6 +376,13 @@ export class ChatService {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem de referência indisponível.' };
     }
 
+    const forwarded = parsedForward.data
+      ? await this.resolveForward(userId, channelId, parsedForward.data.sourceMessageId, parseResult.data, attachmentIds ?? [])
+      : undefined;
+    if (forwarded === null) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem encaminhada indisponível.' };
+    }
+
     const user = await this.userRepo.findById(userId);
     if (!user) {
       return {
@@ -353,6 +402,7 @@ export class ChatService {
       replyToMessageId,
       createdAt: now,
       isSystem: false,
+      forwarded,
     };
 
     const mentions = await this.collectMentions(user.id, channelId, messageRecord);
@@ -380,6 +430,7 @@ export class ChatService {
       attachments: attachments.length > 0 ? attachments : undefined,
       reply: await this.resolveReply(messageRecord, userId),
       blocks: await this.resolveBlocks(messageRecord, userId),
+      ...(messageRecord.forwarded ? { forwarded: messageRecord.forwarded } : {}),
     };
 
     return {
@@ -676,6 +727,7 @@ export class ChatService {
         reply: await this.resolveReply(m, viewerUserId),
         blocks: await this.resolveBlocks(m, viewerUserId),
         poll: pollsByMessage.get(m.id),
+        ...(m.forwarded ? { forwarded: m.forwarded } : {}),
       };
     }));
   }

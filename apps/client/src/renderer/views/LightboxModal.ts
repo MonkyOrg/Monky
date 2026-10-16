@@ -1,25 +1,18 @@
 import { t } from '../i18n';
 import { animateEnter, removeWithMotion, topModal } from '../utils/surfaceMotion';
 import { initializeCustomVideoPlayers } from '../utils/videoPlayer';
-import { showErrorToast } from './CopyToast';
 import { playChatMedia } from '../core/ChatMediaOutput';
 import { ImageClipboard } from '../utils/imageClipboard';
 import { isButtonLoading, withButtonLoading } from '../utils/buttonLoading';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
+import { downloadFilesWithChoice, downloadSingleFile } from '../utils/fileDownloads';
 
 /**
  * Handler de download que o lightbox espera. Fica aqui porque todo mundo que
- * abre o visualizador precisa exatamente disto — o chat e o menu de contexto
- * mantinham a mesma dezena de linhas duplicada, cada uma com sua cópia do
- * aviso de falha (#406). A falha usa o toast compartilhado, que fica acima do
- * próprio visualizador; um diálogo ficaria escondido atrás dele.
+ * abre o visualizador precisa exatamente disto (#406).
  */
 export async function downloadLightboxFile(url: string, fileName: string): Promise<void> {
-  if (!window.api?.downloadFile) return;
-  const result = await window.api.downloadFile(url, fileName);
-  if (!result.success && result.error) {
-    showErrorToast(t('chat.downloadFailedMessage', { error: result.error }), 7000);
-  }
+  await downloadSingleFile(url, fileName);
 }
 
 export interface LightboxMedia {
@@ -29,6 +22,8 @@ export interface LightboxMedia {
   senderName: string;
   timestamp: string;
   source: HTMLElement;
+  /** Media shown together in one carousel: downloading one offers the whole group. */
+  group?: { key: string; archiveName: string };
 }
 
 export class LightboxModal {
@@ -119,7 +114,11 @@ export class LightboxModal {
     };
 
     const download = (item: LightboxMedia) => {
-      void withButtonLoading(downloadButton, () => onDownload(item.url, item.fileName));
+      const group = item.group;
+      const members = group ? items.filter((other) => other.group?.key === group.key) : [];
+      void withButtonLoading(downloadButton, () => group && members.length > 1
+        ? downloadFilesWithChoice(members, group.archiveName, item)
+        : onDownload(item.url, item.fileName));
     };
 
     // Right-clicking the media offers the toolbar actions for the item under the pointer.

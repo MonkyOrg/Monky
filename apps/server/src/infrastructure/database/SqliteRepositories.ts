@@ -506,6 +506,9 @@ export class SqliteChannelRepository implements IChannelRepository {
 }
 
 interface SqliteMessageRow {
+  forwarded: number;
+  forwardSource: string | null;
+  forwardCreatedAt: number | null;
   revision: number;
   deletedByUserId: string | null;
   deleteUndoUntil: number | null;
@@ -528,7 +531,7 @@ interface SqliteMessageRow {
 
 /** Columns every message read shares, so the three queries cannot drift (#504). */
 const MESSAGE_COLUMNS =
-  'id, channel_id as channelId, user_id as userId, content, blocks_json as blocksJson, created_at as createdAt, is_system as isSystem, edited_at as editedAt, deleted_at as deletedAt, revision, deleted_by_user_id as deletedByUserId, delete_undo_until as deleteUndoUntil, author_bot_id as authorBotId, author_bot_name as authorBotName, author_bot_avatar_path as authorBotAvatarPath, bot_command_json as botCommandJson, reply_to_message_id as replyToMessageId, bot_localizations_json as botLocalizationsJson';
+  'id, channel_id as channelId, user_id as userId, content, blocks_json as blocksJson, created_at as createdAt, is_system as isSystem, edited_at as editedAt, deleted_at as deletedAt, revision, deleted_by_user_id as deletedByUserId, delete_undo_until as deleteUndoUntil, author_bot_id as authorBotId, author_bot_name as authorBotName, author_bot_avatar_path as authorBotAvatarPath, bot_command_json as botCommandJson, reply_to_message_id as replyToMessageId, bot_localizations_json as botLocalizationsJson, forwarded, forward_source as forwardSource, forward_created_at as forwardCreatedAt';
 
 function toMessageRecord(r: SqliteMessageRow): MessageRecord {
   if (r.authorBotId && !r.authorBotName) throw new Error('Stored bot message is missing its author name.');
@@ -552,6 +555,7 @@ function toMessageRecord(r: SqliteMessageRow): MessageRecord {
     revision: r.revision,
     deletedByUserId: r.deletedByUserId,
     deleteUndoUntil: r.deleteUndoUntil,
+    forwarded: r.forwarded ? { source: r.forwardSource, createdAt: r.forwardCreatedAt } : undefined,
   };
 }
 
@@ -642,13 +646,14 @@ export class SqliteMessageRepository implements IMessageRepository {
 
   private insertMessage(message: MessageRecord, idempotent = false): void {
     this.db.prepare(
-      'INSERT INTO messages (id, channel_id, user_id, content, created_at, is_system, author_bot_id, author_bot_name, author_bot_avatar_path, bot_command_json, reply_to_message_id, bot_localizations_json, blocks_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' +
+      'INSERT INTO messages (id, channel_id, user_id, content, created_at, is_system, author_bot_id, author_bot_name, author_bot_avatar_path, bot_command_json, reply_to_message_id, bot_localizations_json, blocks_json, forwarded, forward_source, forward_created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' +
       (idempotent ? ' ON CONFLICT(id) DO NOTHING' : '')
     ).run(message.id, message.channelId, message.botAuthor?.ownerUserId ?? message.userId, message.content, message.createdAt, message.isSystem ? 1 : 0,
       message.botAuthor?.id ?? null, message.botAuthor?.name ?? null, message.botAuthor?.avatarPath ?? null,
       message.botCommand ? JSON.stringify(message.botCommand) : null, message.replyToMessageId ?? null,
       message.botAuthor && message.localizations ? JSON.stringify(message.localizations) : null,
-      message.blocks ? JSON.stringify(message.blocks) : null);
+      message.blocks ? JSON.stringify(message.blocks) : null,
+      message.forwarded ? 1 : 0, message.forwarded?.source ?? null, message.forwarded?.createdAt ?? null);
   }
 
   async findById(messageId: string): Promise<MessageRecord | null> {
