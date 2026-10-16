@@ -433,6 +433,11 @@ base is `git merge-base origin/main HEAD`. Pass options after `--`:
   `npm run ci:local -- --only dom`;
 - `--package` includes `electron-builder --dir`.
 
+Run only what the change requires. The full run takes tens of minutes and is
+meant for broad changes and changes to the protocol, shared contracts, the
+build or CI itself. For everything else, use `--only` with the steps that cover
+the changed files; a documentation-only change needs just `--only docs`.
+
 Steps that only run on a disposable runner, such as the real clipboard and the
 artifact export, show as **PULADO (só CI)**. If the branch only changes
 documentation, every stage except `docs` shows as skipped, as in CI. Without

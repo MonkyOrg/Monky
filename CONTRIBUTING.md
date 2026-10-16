@@ -428,6 +428,11 @@ termina listando o que falhou, com o caminho do log de cada passo. A base padrã
   `npm run ci:local -- --only dom`;
 - `--package` inclui o `electron-builder --dir`.
 
+Rode só o que a mudança exige. A execução completa leva dezenas de minutos e
+vale para mudanças amplas, de protocolo, de contratos compartilhados, de build
+ou do próprio CI. Nas demais, use `--only` com os passos que cobrem os arquivos
+alterados; mudança só de documentação precisa apenas de `--only docs`.
+
 Passos que só rodam num runner descartável, como o clipboard real e a exportação
 do artefato, aparecem como **PULADO (só CI)**. Se a branch só muda documentação,
 todos os estágios menos `docs` aparecem como pulados, como no CI. Sem `npm run prepare:native-screen`,
