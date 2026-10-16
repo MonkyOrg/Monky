@@ -311,6 +311,11 @@ only) and **Download**, the same actions as the corner buttons. While the menu
 is open, the keyboard acts on it: `Escape` closes just the menu, and clicking
 outside it doesn't close the viewer either.
 
+If copying or downloading fails, the error notice appears in front of the
+viewer, which stays open. A window opened over it, such as the notice that the
+server was shut down, is also visible and receives the keyboard: the first
+`Escape` closes the window and the second, the viewer.
+
 **Reply** keeps a reference to the original message with its author and preview. Replies support text, attachments, code and stickers; public bot messages can also receive replies. Cancel with the `×` in the composer or `Escape`. The reference stays with the channel draft. Clicking the preview jumps to the original, loading a history window if needed; **Back to latest messages** returns to recent conversation. Previews reflect edits and show **Message deleted** when the original is deleted, without retaining its content. Private bot messages cannot be referenced.
 
 ## Mentions

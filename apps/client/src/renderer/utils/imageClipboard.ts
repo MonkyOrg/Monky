@@ -1,7 +1,6 @@
 import { LIMITS } from '@monky/shared';
 import { t } from '../i18n';
-import { showAlert } from '../views/Dialog';
-import { showCopyToast } from '../views/CopyToast';
+import { showCopyToast, showErrorToast } from '../views/CopyToast';
 
 async function imagePng(source: string, signal: AbortSignal): Promise<Blob> {
   const url = new URL(source);
@@ -89,7 +88,8 @@ export class ImageClipboard {
     } catch (error: unknown) {
       if (controller.signal.aborted) return;
       console.warn('[ImageClipboard] Could not copy the image:', error);
-      if (this.pending === controller) void showAlert({ message: t('chat.copyImageFailed'), variant: 'danger' });
+      // A toast stays above every surface, including the media viewer that may have started the copy.
+      if (this.pending === controller) this.clearFeedback = showErrorToast(t('chat.copyImageFailed'));
     } finally {
       controller.abort();
       if (this.pending === controller) this.pending = null;

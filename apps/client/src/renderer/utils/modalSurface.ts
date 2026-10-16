@@ -11,13 +11,24 @@ interface ModalState {
 
 const active = new Map<HTMLElement, ModalState>();
 const suspended = new Map<HTMLElement, { inert: boolean; card: HTMLElement | null; hidden: boolean }>();
+const MEDIA_VIEWER_SELECTOR = '.attachment-lightbox:not([data-ui-closing])';
+
+const follows = (earlier: Node, later: Node): boolean =>
+  !!(earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING);
 
 /** Keep one scrim while a child dialog replaces its parent's card. */
 export function enterModal(element: HTMLElement): void {
   const ownCard = element.querySelector<HTMLElement>(':scope > .modal-card');
   if (ownCard) ownCard.dataset.uiMotion = '';
-  const parent = [...document.querySelectorAll<HTMLElement>(ACTIVE_MODAL_SELECTOR)]
-    .filter(candidate => candidate !== element).at(-1) ?? null;
+  // The media viewer is not a modal, but it covers the app and the modal that opened it.
+  // Anything opened after it, such as an error or an update prompt, must stay visible above it.
+  const viewer = [...document.querySelectorAll<HTMLElement>(MEDIA_VIEWER_SELECTOR)].at(-1);
+  const aboveViewer = !!viewer && follows(viewer, element);
+  if (aboveViewer) element.style.zIndex = 'calc(var(--z-media-viewer) + 1)';
+  const candidate = [...document.querySelectorAll<HTMLElement>(ACTIVE_MODAL_SELECTOR)]
+    .filter(other => other !== element).at(-1) ?? null;
+  // A modal beneath the viewer keeps its card: the viewer separates them, so they cannot share one scrim.
+  const parent = candidate && aboveViewer && viewer && !follows(viewer, candidate) ? null : candidate;
   active.set(element, {
     parent, focus: document.activeElement, background: element.style.background,
     filter: element.style.backdropFilter,
@@ -69,10 +80,14 @@ export function exitModal(element: HTMLElement, immediate = false): void {
     }
   }
   const focus = state?.focus;
+  const top = topModal();
+  const viewer = focus instanceof HTMLElement ? focus.closest(MEDIA_VIEWER_SELECTOR) : null;
   if (focus instanceof HTMLElement && focus.isConnected && !focus.closest('[inert], [hidden], [data-ui-closing]')
-    && (!topModal() || ownsSurface(topModal()!, focus))) focus.focus({ preventScroll: true });
+    && (!top || ownsSurface(top, focus) || (!!viewer && follows(top, viewer)))) focus.focus({ preventScroll: true });
 }
 
 export function handlesModalKey(element: HTMLElement | null, event: KeyboardEvent): boolean {
-  return !!element && !event.defaultPrevented && topModal() === element && !hasOwnedSurface(element);
+  return !!element && !event.defaultPrevented && topModal() === element && !hasOwnedSurface(element)
+    // A media viewer opened from this modal covers it and owns the keyboard until it closes.
+    && ![...document.querySelectorAll(MEDIA_VIEWER_SELECTOR)].some(viewer => follows(element, viewer));
 }

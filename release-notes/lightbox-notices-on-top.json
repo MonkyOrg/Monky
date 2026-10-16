@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Com uma imagem ou vídeo ampliado, os avisos agora aparecem na frente do visualizador. Antes, se copiar ou baixar falhasse, o erro ficava escondido atrás dele. A tecla Esc também fecha primeiro o aviso e só depois o visualizador.",
+  "en": "With an image or video enlarged, notices now show up in front of the viewer. Before, if copying or downloading failed, the error stayed hidden behind it. Esc also closes the notice first, and only then the viewer."
+}
