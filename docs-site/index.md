@@ -20,6 +20,9 @@ hero:
     - theme: alt
       text: Desenvolver um bot
       link: /bots-desenvolvimento
+    - theme: alt
+      text: Entrar no servidor da comunidade
+      link: https://monkyorg.github.io/Monky/convite/#~EYmDv64PTW9ua3kgQ29tbXVuaXR5
 features:
   - title: Usar o aplicativo
     details: Entre em um servidor, converse por texto ou voz e compartilhe sua tela. Guias ilustrados, sem precisar programar.
@@ -42,6 +45,17 @@ você ou alguém do seu grupo hospeda. Não exige uma conta central: sua
 identidade fica no seu dispositivo.
 
 <AppScreenshot src="/screenshots/conversa-pt.png" alt="Monky com canais de texto e voz, uma conversa e a lista de membros de um servidor demonstrativo." caption="O aplicativo em uso. As capturas deste guia usam o cliente oficial no Windows, com perfis e dados demonstrativos." />
+
+## Servidor da comunidade
+
+Quer conhecer o Monky antes de montar o seu? Entre no **Monky Community**, o
+servidor aberto da comunidade: tire dúvidas, teste voz e compartilhamento de
+tela e experimente o MonkyBot. Ele não tem senha.
+
+[Entrar no Monky Community](https://monkyorg.github.io/Monky/convite/#~EYmDv64PTW9ua3kgQ29tbXVuaXR5)
+
+O convite abre o Monky instalado. Se ainda não tiver o aplicativo, a página do
+convite oferece o download.
 
 ## Encontre o que precisa
 
