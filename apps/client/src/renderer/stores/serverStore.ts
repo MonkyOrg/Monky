@@ -144,7 +144,10 @@ export class ServerStore {
 
   public setCategories(categories: ChannelCategory[]): void {
     if (!this.serverDetails) return;
-    this.serverDetails.categories = [...categories].sort((a, b) => a.position - b.position || a.createdAt - b.createdAt);
+    const sorted = [...categories].sort((a, b) => a.position - b.position || a.createdAt - b.createdAt);
+    // Servers resend the list after any permission change; an identical copy must not redraw the sidebar.
+    if (JSON.stringify(sorted) === JSON.stringify(this.serverDetails.categories ?? [])) return;
+    this.serverDetails.categories = sorted;
     this.bus.emit('server.updated');
   }
 
@@ -194,6 +197,8 @@ export class ServerStore {
 
     const index = this.serverDetails.channels.findIndex((c) => c.id === channel.id);
     if (index === -1) return;
+    // Older servers resend every channel when a role changes; unchanged ones must not redraw the sidebar.
+    if (JSON.stringify(this.serverDetails.channels[index]) === JSON.stringify(channel)) return;
 
     this.serverDetails.channels[index] = channel;
     this.sortChannels();
@@ -589,6 +594,25 @@ export class ServerStore {
 
 export function createServerStore(): ServerStore {
   return new ServerStore();
+}
+
+const PERMISSIONS = Object.values(Permission).filter((value): value is Permission => typeof value === 'number');
+
+/**
+ * What the current member can reach, as a comparable value: equal results mean
+ * no server or channel permission of theirs, nor their own roles (which decide
+ * private audiences), was granted or revoked.
+ */
+export function accessSignature(
+  server: Pick<ServerStore, 'serverDetails' | 'currentUser' | 'hasPermission'> & { userRoles?: UserRoleSummary[] },
+): string {
+  const user = server.currentUser;
+  if (!server.serverDetails || !user) return '';
+  const granted = (channelId?: string) =>
+    PERMISSIONS.reduce((mask, permission) => server.hasPermission(permission, channelId) ? mask | permission : mask, 0);
+  const channels = server.serverDetails.channels.map((channel) => `${channel.id}:${granted(channel.id)}`).sort();
+  const roleIds = [...(server.userRoles?.find((entry) => entry.userId === user.id)?.roleIds ?? [])].sort();
+  return JSON.stringify([granted(), roleIds, channels]);
 }
 
 let activeServerStore = createServerStore();
