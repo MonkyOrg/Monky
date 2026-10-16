@@ -14,24 +14,49 @@ export const vpsOracleFreeTutorial: TutorialDefinition = {
     {
       title: 'tutorial.vpsOracle.step2.title',
       content: 'tutorial.vpsOracle.step2.content',
-      images: [{ shot: 'illustration-oracle-instance', alt: 'tutorial.shotOracleInstanceAlt' }],
+      tip: 'tutorial.vpsOracle.step2.tip',
+      images: [
+        { shot: 'app-oracle-shape', alt: 'tutorial.shotOracleShapeAlt' },
+        { shot: 'app-oracle-network', alt: 'tutorial.shotOracleNetworkAlt' },
+        { shot: 'app-oracle-ssh', alt: 'tutorial.shotOracleSshAlt' },
+      ],
     },
     {
       title: 'tutorial.vpsOracle.step3.title',
       content: 'tutorial.vpsOracle.step3.content',
-      tip: 'tutorial.vpsOracle.step3.tip',
-      images: [{ shot: 'illustration-oracle-ingress', alt: 'tutorial.shotOracleIngressAlt' }],
+      images: [
+        { shot: 'app-oracle-security-list', alt: 'tutorial.shotOracleSecurityListAlt' },
+        { shot: 'app-oracle-ingress', alt: 'tutorial.shotOracleIngressAlt' },
+      ],
     },
     {
       title: 'tutorial.vpsOracle.step4.title',
       content: 'tutorial.vpsOracle.step4.content',
-      images: [{ shot: 'terminal-monky-install', alt: 'tutorial.shotInstallAlt' }, { shot: 'terminal-monky-create', alt: 'tutorial.shotMonkyCreateAlt' }],
+      tip: 'tutorial.vpsOracle.step4.tip',
+      images: [
+        { shot: 'app-oracle-ip', alt: 'tutorial.shotOracleIpAlt' },
+        { shot: 'terminal-oracle-firewall', alt: 'tutorial.shotOracleFirewallAlt' },
+      ],
     },
     {
       title: 'tutorial.vpsOracle.step5.title',
       content: 'tutorial.vpsOracle.step5.content',
+      images: [{ shot: 'terminal-monky-install', alt: 'tutorial.shotInstallAlt' }, { shot: 'terminal-monky-create', alt: 'tutorial.shotMonkyCreateAlt' }],
+    },
+    {
+      title: 'tutorial.vpsOracle.step6.title',
+      content: 'tutorial.vpsOracle.step6.content',
       images: [{ shot: 'add-server-join', alt: 'tutorial.shotJoinAlt' }],
-      tip: 'tutorial.vpsOracle.step5.tip',
+      tip: 'tutorial.vpsOracle.step6.tip',
+    },
+    {
+      title: 'tutorial.vpsOracle.step7.title',
+      content: 'tutorial.vpsOracle.step7.content',
+      tip: 'tutorial.vpsOracle.step7.tip',
+      images: [
+        { shot: 'terminal-monkybot', alt: 'tutorial.shotMonkyBotAlt' },
+        { shot: 'server-bots-link', alt: 'tutorial.shotBotsLinkAlt' },
+      ],
     },
   ],
 };
