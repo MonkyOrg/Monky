@@ -87,11 +87,22 @@ test('packaged macOS binaries require matching architecture, hashes and compiled
   assert.throws(() => verifyMacRuntime(f.directory, 'arm64'), /size or type changed/);
 });
 
-test('code signing refreshes native hashes before sealing the outer app without signing binaries twice', async t => {
-  const f = fixture(t), executions = [], chmods = [];
+const leaf = 'DEC3889A0A2B3B2FEF11F31ACAC90AB68BE5B108';
+const signedRequirement = `designated => identifier "com.monky.app" and certificate leaf = H"${leaf.toLowerCase()}"`;
+
+// Output of `security find-identity -p codesigning <keychain>`. An identity macOS
+// trusts is listed twice: once as matching and once as valid.
+function identityListing(matching, valid = []) {
+  const entries = (hashes, suffix) => hashes.map((hash, index) => `  ${index + 1}) ${hash} "Monky Code Signing"${suffix}`);
+  return ['Policy: Code Signing', '  Matching identities',
+    ...entries(matching, valid.length ? '' : ' (CSSMERR_TP_NOT_TRUSTED)'), `     ${matching.length} identities found`, '',
+    '  Valid identities only', ...entries(valid, ''), `     ${valid.length} valid identities found`].join('\n');
+}
+
+function loadSigner(f, { identities = '', requirement = signedRequirement } = {}) {
   const filename = path.resolve(__dirname, '..', 'scripts', 'signMac.cjs');
   const localRequire = createRequire(filename), module = { exports: {} };
-  const calls = [];
+  const calls = [], executions = [], chmods = [];
   const signAsync = async options => {
     calls.push(options);
     if (calls.length === 1) {
@@ -102,8 +113,13 @@ test('code signing refreshes native hashes before sealing the outer app without 
       verifyMacRuntime(f.directory, 'arm64');
     }
   };
+  const execute = (file, args, options) => {
+    executions.push([file, args, options]);
+    if (file === '/usr/bin/security') return identities;
+    if (args[0] === '--display') return requirement;
+  };
   const requireForTest = name => {
-    if (name === './buildTools.cjs') return { fingerprint, execute: (...args) => executions.push(args) };
+    if (name === './buildTools.cjs') return { fingerprint, execute };
     if (name === '@electron/osx-sign') return { signAsync };
     if (name === 'node:fs') return {
       ...fs,
@@ -116,10 +132,22 @@ test('code signing refreshes native hashes before sealing the outer app without 
   };
   vm.runInThisContext(`(function(require, module, exports) { ${fs.readFileSync(filename, 'utf8')}\n})`,
     { filename })(requireForTest, module, module.exports);
-  await module.exports({ app: f.app, identity: 'owned-signing-fixture', platform: 'darwin' },
+  const sign = options => module.exports({ app: f.app, platform: 'darwin', ...options },
     { appInfo: { productFilename: 'Fixture' } });
+  return { sign, calls, executions, chmods };
+}
+
+test('code signing refreshes native hashes before sealing the outer app without signing binaries twice', async t => {
+  t.mock.method(console, 'log', () => {});
+  const f = fixture(t), { sign, calls, executions, chmods } = loadSigner(f);
+  const optionsForFile = () => ({ hardenedRuntime: true });
+  await sign({ identity: 'owned-signing-fixture', optionsForFile });
   assert.equal(calls.length, 2);
-  assert.equal(executions.length, 6);
+  assert.deepEqual(calls.map(options => [options.identity, options.optionsForFile]),
+    [['owned-signing-fixture', optionsForFile], ['owned-signing-fixture', optionsForFile]],
+    'An identity electron-builder resolved, such as a Developer ID, keeps its timestamp for notarization.');
+  assert.equal(executions.length, 7);
+  assert.deepEqual(executions.at(-1), ['codesign', ['--display', '--requirements', '-', f.app], { capture: true }]);
   const executable = path.join(f.directory, 'monky-screen-mac');
   assert.deepEqual(chmods, [[executable, 0o755]]);
   if (process.platform !== 'win32') {
@@ -130,5 +158,55 @@ test('code signing refreshes native hashes before sealing the outer app without 
   for (const record of rtc.binaries) {
     assert.equal(record.buildSha256, f.records.find(before => before.name === record.name).sha256);
     assert.notEqual(record.buildSha256, record.sha256);
+  }
+});
+
+test('without a release certificate the app stays ad-hoc signed and the build warns that permissions will be asked again', async t => {
+  const warn = t.mock.method(console, 'warn', () => {});
+  const { sign, calls, executions } = loadSigner(fixture(t));
+  await sign({});
+  assert.deepEqual(calls.map(options => options.identity), ['-', '-']);
+  assert.equal(warn.mock.callCount(), 1);
+  assert.match(warn.mock.calls[0].arguments[0], /ad-hoc build, so macOS asks again for the permissions/);
+  assert.equal(executions.length, 6);
+  assert.ok(executions.every(([file, args]) => file === 'codesign' && args[0] === '--verify'));
+});
+
+test('the self-signed release certificate is selected by hash from the keychain electron-builder imported it into', async t => {
+  t.mock.method(console, 'log', () => {});
+  const keychain = '/tmp/monky-release-fixture.keychain';
+  const optionsForFile = file => ({ entitlements: `${file}.plist`, hardenedRuntime: true, timestamp: undefined });
+  for (const identities of [identityListing([leaf]), identityListing([leaf], [leaf])]) {
+    const f = fixture(t), { sign, calls, executions } = loadSigner(f, { identities });
+    await sign({ keychain, optionsForFile });
+    assert.deepEqual(executions[0], ['/usr/bin/security', ['find-identity', '-p', 'codesigning', keychain], { capture: true }]);
+    assert.deepEqual(calls.map(options => [options.identity, options.keychain, options.identityValidation]),
+      [[leaf, keychain, false], [leaf, keychain, false]]);
+    // Without notarization nothing reads Apple's timestamp, and requesting it per file slows every release.
+    for (const options of calls)
+      assert.deepEqual(options.optionsForFile(f.app), { entitlements: `${f.app}.plist`, hardenedRuntime: true, timestamp: 'none' });
+    assert.deepEqual(executions.at(-1), ['codesign', ['--display', '--requirements', '-', f.app], { capture: true }]);
+  }
+});
+
+test('a release keychain without exactly one signing identity fails the build instead of falling back to ad-hoc', async t => {
+  const other = '0123456789ABCDEF0123456789ABCDEF01234567';
+  for (const [identities, found] of [[identityListing([]), 0], [identityListing([leaf, other]), 2]]) {
+    const { sign, calls } = loadSigner(fixture(t), { identities });
+    await assert.rejects(sign({ keychain: '/tmp/monky-release-fixture.keychain' }),
+      new RegExp(`found ${found}\\. Check the certificate in CSC_LINK`));
+    assert.equal(calls.length, 0);
+  }
+});
+
+test('a certificate signature whose designated requirement only matches this build is rejected', async t => {
+  t.mock.method(console, 'log', () => {});
+  for (const [requirement, message] of [
+    ['# designated => cdhash H"0123456789abcdef0123456789abcdef01234567"', /updates would lose them/],
+    ['', /no designated requirement/],
+  ]) {
+    const { sign, chmods } = loadSigner(fixture(t), { identities: identityListing([leaf]), requirement });
+    await assert.rejects(sign({ keychain: '/tmp/monky-release-fixture.keychain' }), message);
+    assert.deepEqual(chmods, []);
   }
 });

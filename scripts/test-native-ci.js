@@ -672,6 +672,51 @@ test('release reuses approved artifacts but always versions, packages, signs and
   assert.ok(step(release.jobs.release, 'Sign checksums with Cosign (keyless)'));
 });
 
+test('release signs only the macOS build with the macOS certificate and warns when it is missing', () => {
+  const build = step(release.jobs.build, 'Build ${{ matrix.platform }} distributables');
+  // electron-builder signs Windows with WIN_CSC_LINK or else CSC_LINK, so the macOS certificate
+  // reaching the Windows build would change its signature and the Windows updater would reject it.
+  const secrets = Object.entries(build.env).filter(([, value]) => /secrets\.(?!GITHUB_TOKEN\b)/u.test(value));
+  assert.deepEqual(secrets.map(([name]) => name).sort(), ['MAC_APPLE_APP_SPECIFIC_PASSWORD', 'MAC_APPLE_ID',
+    'MAC_APPLE_TEAM_ID', 'MAC_CSC_KEY_PASSWORD', 'MAC_CSC_LINK']);
+  for (const [name, value] of secrets) {
+    assert.match(value, /^\$\{\{ matrix\.platform == 'mac' && secrets\.\w+ \|\| '' \}\}$/u, name);
+  }
+  for (const env of [release.env, release.jobs.build.env, build.env]) {
+    for (const name of ['CSC_LINK', 'CSC_KEY_PASSWORD', 'WIN_CSC_LINK', 'WIN_CSC_KEY_PASSWORD']) {
+      assert.equal(env?.[name], undefined, name);
+    }
+  }
+  const electronBuilder = /^\s*npx --no-install electron-builder .*$/mu;
+  assert.match(build.run, electronBuilder);
+  const bash = process.platform === 'win32'
+    ? path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'bin', 'bash.exe') : 'bash';
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-release-signing-'));
+  try {
+    for (const [platform, certificate, expected, warns] of [
+      ['mac', 'certificate', 'CSC_LINK=certificate CSC_KEY_PASSWORD=password', false],
+      ['mac', '', 'CSC_LINK=unset CSC_KEY_PASSWORD=unset', true],
+      ['win', '', 'CSC_LINK=unset CSC_KEY_PASSWORD=unset', false],
+    ]) {
+      const script = build.run.replaceAll('${{ matrix.platform }}', platform)
+        .replace(electronBuilder, 'echo "CSC_LINK=${CSC_LINK-unset} CSC_KEY_PASSWORD=${CSC_KEY_PASSWORD-unset}"');
+      const env = { ...process.env, MAC_CSC_LINK: certificate, MAC_CSC_KEY_PASSWORD: certificate && 'password', MAC_APPLE_ID: '' };
+      delete env.CSC_LINK;
+      delete env.CSC_KEY_PASSWORD;
+      const result = spawnSync(bash, ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script],
+        { cwd, encoding: 'utf8', env });
+      assert.ifError(result.error);
+      assert.equal(result.status, 0, result.stderr);
+      const label = `${platform} ${certificate ? 'with' : 'without'} certificate`;
+      assert.ok(result.stdout.split('\n').includes(expected), `${label}: ${result.stdout}`);
+      assert.equal(/^::warning title=[^:]+::MAC_CSC_LINK is not configured.*scripts\/create-mac-signing-certificate\.js/mu
+        .test(result.stdout), warns, `${label}: ${result.stdout}`);
+    }
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test('the extracted DOM lane preserves every existing test command and its ordering', () => {
   assert.deepEqual(commands.map(command => command.join(' ')), [
     'npm run test:bots:ui --workspace=apps/client',

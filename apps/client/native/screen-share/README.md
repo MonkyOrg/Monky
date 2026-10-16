@@ -143,8 +143,13 @@ bloqueada impede foco e pode limitar o compositor/captura.
 
 O empacotamento verifica fontes, binários e licenças do grafo GN compilado. A
 assinatura atualiza hashes dos binários assinados e sela novamente somente o app;
-a notarização ocorre depois. Sem Developer ID, o build local é ad-hoc, não
-notarizado. A release inclui `monky-native-macos-sources-<versão>.tar.xz` e
+a notarização ocorre depois. Sem certificado em `CSC_LINK`, o build é ad-hoc e
+sua identidade muda a cada versão. A release assina com o certificado do projeto
+(`MAC_CSC_LINK`), ainda que autoassinado, e falha se ele não fornecer exatamente
+uma identidade de assinatura ou se a identidade do app depender do hash do
+binário: é isso que mantém as permissões do macOS entre atualizações. Notarizar
+exige Developer ID; sem ele, a assinatura dispensa o carimbo de tempo da Apple.
+A release inclui `monky-native-macos-sources-<versão>.tar.xz` e
 manifesto, além do código Monky da mesma tag. O arquivo preserva links relativos
 internos do SDK; ferramentas baixáveis e saídas compiladas ficam de fora.
 O artefato aprovado do CI inclui os dois runtimes, licenças e fontes; a release

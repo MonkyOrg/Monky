@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "No macOS, atualizar o Monky não obriga mais a liberar de novo a gravação de tela, o microfone e as demais permissões do sistema. A primeira versão com a nova assinatura ainda pede tudo uma última vez; depois, as atualizações mantêm o que você já liberou.",
+  "en": "On macOS, updating Monky no longer makes you allow screen recording, the microphone and the other system permissions all over again. The first version with the new signature still asks one last time; after that, updates keep what you already allowed."
+}

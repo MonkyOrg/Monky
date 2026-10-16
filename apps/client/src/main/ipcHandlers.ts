@@ -281,11 +281,13 @@ function getMacBundleId(): string {
 }
 
 /**
- * macOS ties the Screen Recording permission to the app's code signature. Monky
- * ships unsigned, so every update produces a different identity and the previous
+ * macOS ties the Screen Recording permission to the app's code signature. An
+ * ad-hoc build gets a new identity with every update, so the previous
  * authorization stops applying — while System Settings keeps showing the old
- * entry as enabled, so the system never asks again (#327). Detect that state and
- * offer to clear the stale entry, which makes macOS prompt on the next attempt.
+ * entry as enabled, so the system never asks again (#327). Releases signed with
+ * the project certificate keep their identity, but the first of them still
+ * differs from the ad-hoc version before it. Detect that state and offer to
+ * clear the stale entry, which makes macOS prompt on the next attempt.
  */
 async function ensureScreenRecordingPermission(mainWindow: BrowserWindow): Promise<boolean> {
   if (process.platform !== 'darwin') return true;

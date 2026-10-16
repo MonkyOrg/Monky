@@ -66,13 +66,18 @@ missing when you try to share your screen. Turning the toggle off and on again
 does not help.
 
 The reason: macOS **does not store that permission by app name**, it stores it
-against the binary's **code signature**. Since Monky is not signed with an Apple
-Developer ID certificate yet, the system ends up identifying the app by the
-contents of the binary itself — which change with every version. After an update
-macOS sees an app with a new identity, and the permission granted to the
-previous version no longer applies to it. Because the name and the path stay
-identical, the old entry remains listed and checked — hence the impression that
-everything is already allowed.
+against the binary's **code signature**. A version without the project
+certificate is identified by the contents of the binary itself — which change
+with every version. After an update macOS sees an app with a new identity, and
+the permission granted to the previous version no longer applies to it. Because
+the name and the path stay identical, the old entry remains listed and checked —
+hence the impression that everything is already allowed. The microphone and the
+camera follow the same rule.
+
+Versions signed with the project certificate keep the same identity from one
+update to the next, and the permissions keep applying. On the first update to a
+signed version macOS still asks for the permissions one last time, because the
+previous version did not have the certificate.
 
 ### How to share your screen again
 
@@ -98,10 +103,11 @@ Privacy & Security › Screen Recording**, select Monky, click **−** to remove
 then repeat step 3 so it gets added again.
 
 ::: tip Definitive fix
-The real solution is signing the app with an **Apple Developer ID** certificate,
-which keeps the same identity across versions and makes the permission survive
-updates. That depends on a paid Apple Developer Program account; the project is
-already wired to use one as soon as it is available.
+The fix is signing with the project certificate, described above: once you
+grant the permission to the first signed version, later updates do not ask
+again. An **Apple Developer ID** certificate is not needed for that; with
+Apple's notarization, it would spare the Gatekeeper authorization of the first
+installation ([After downloading](/en/download#after-downloading)).
 :::
 
 ## I can't connect with a specific person (CGNAT)
