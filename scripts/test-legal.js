@@ -59,7 +59,8 @@ test('standalone CLI bundles the patched ISC H264 dependency instead of reinstal
 });
 
 test('standalone CLI bundles the H264 parser runtime dependency closure, since npm never fetches it', t => {
-  const destination = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-h264-closure-'));
+  // macOS tmpdir is a symlink (/var -> /private/var) and require.resolve returns real paths.
+  const destination = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'monky-h264-closure-')));
   t.after(() => fs.rmSync(destination, { recursive: true, force: true }));
   const bundled = bundleH264Dependency(destination);
   assert.ok(bundled.debug && bundled.ms, 'debug and its ms dependency must travel with the parser.');
