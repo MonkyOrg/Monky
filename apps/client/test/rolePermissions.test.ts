@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { DEFAULT_PERMISSIONS, Permission, type Role, type UserSummary } from '@monky/shared';
-import { createServerStore } from '../src/renderer/stores/serverStore';
+import { DEFAULT_PERMISSIONS, Permission, type ChannelCategory, type ChannelSummary, type Role, type UserSummary } from '@monky/shared';
+import { accessSignature, createServerStore } from '../src/renderer/stores/serverStore';
 import { EventBus } from '../src/renderer/core/EventBus';
 
 const member: UserSummary = { id: 'member', clientId: 'member-key', nickname: 'Member', status: 'ONLINE', joinedAt: 1 };
@@ -43,4 +43,29 @@ test('servers without role-deny keep the former full-mask intersection even befo
 test('without negotiated protocol details the role shape decides the format', () => {
   assert.equal(storeWith(undefined, [role('a', Permission.KICK_MEMBERS, 0)]).roleModel, 'deny');
   assert.equal(storeWith(undefined, [role('a', DEFAULT_PERMISSIONS)]).roleModel, 'legacy');
+});
+
+test('a role change redraws once, and resent unchanged channels or categories do not redraw again', () => {
+  const store = storeWith(['role-deny', 'role-grants'], []);
+  const channel: ChannelSummary = { id: 'general', serverId: 'server', name: 'General', type: 'TEXT', position: 0, createdAt: 1,
+    isPrivate: false, allowedRoleIds: [], botCommandsEnabled: true };
+  const category: ChannelCategory = { id: 'lobby', serverId: 'server', name: 'Lobby', position: 0, createdAt: 1, isPrivate: false, allowedRoleIds: [] };
+  store.addChannel(channel);
+  store.setCategories([category]);
+  let redraws = 0;
+  store.bus.on('server.updated', () => { redraws++; });
+
+  const access = accessSignature(store);
+  store.updateRoles([role('mod', Permission.KICK_MEMBERS)], [{ userId: 'someone-else', roleIds: ['mod'] }]);
+  store.setCategories([{ ...category }]);
+  store.updateChannel({ ...channel });
+  assert.equal(redraws, 1, 'only the role list itself redraws the sidebar');
+  assert.equal(accessSignature(store), access, 'another member\'s role leaves this member\'s access as it was');
+
+  store.updateChannel({ ...channel, name: 'Renamed' });
+  store.setCategories([{ ...category, name: 'Hall' }]);
+  assert.equal(redraws, 3, 'real edits still redraw');
+
+  store.updateRoles([role('mod', Permission.KICK_MEMBERS)], [{ userId: member.id, roleIds: ['mod'] }]);
+  assert.notEqual(accessSignature(store), access, 'a role of one\'s own changes the access signature');
 });

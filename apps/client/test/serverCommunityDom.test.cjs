@@ -2933,6 +2933,24 @@ async function* regression(locale, inviteModule) {
   await flush();
   check(racing.snapshot.events.length === 0, 'Stale private snapshots are not restored');
   racing.dispose();
+  const keptListeners = new Set(), keptPending = [];
+  const kept = new CommunityFeed({ ...client,
+    onEvent: listener => { keptListeners.add(listener); return () => keptListeners.delete(listener); },
+    sendRequest: () => new Promise(resolve => keptPending.push(resolve)) }, server);
+  const keptLoad = kept.load();
+  keptPending[0](snapshot);
+  await keptLoad; await flush();
+  const shownSnapshot = kept.snapshot;
+  for (const listener of keptListeners) listener('message.ROLES_LIST', {});
+  check(shownSnapshot && kept.snapshot === shownSnapshot && keptPending.length === 2,
+    'Another member\'s role change keeps the banner and toolbar up while the community refreshes');
+  keptPending[1](snapshot);
+  await flush();
+  allowed = !allowed;
+  for (const listener of keptListeners) listener('message.ROLES_LIST', {});
+  check(kept.snapshot === null, 'Losing access still clears the community snapshot at once');
+  allowed = !allowed;
+  kept.dispose();
   const searchRequests = [];
   const searchClient = { ...client,
     onEvent: () => () => {},

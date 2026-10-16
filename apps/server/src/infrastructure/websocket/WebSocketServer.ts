@@ -5498,7 +5498,13 @@ export class WebSocketServer {
     return false;
   }
 
-  private async broadcastRolesState(requestId?: string): Promise<void> {
+  /**
+   * `channelsChanged` resends every visible channel. Only deleting a role or a
+   * member edits channel rows (rules naming them go with it); resending them on
+   * any other role change, or on every sign-in, made every client redraw its
+   * whole sidebar.
+   */
+  private async broadcastRolesState(requestId?: string, channelsChanged = false): Promise<void> {
     this.botSettingsPermissionVersion++;
     const state = await this.roleService.getRoleState();
     await this.refreshScreenRoles();
@@ -5527,7 +5533,7 @@ export class WebSocketServer {
     // grant or revoke access. Reconciling here covers every role mutation at
     // once — create, update, delete, assign and unassign all end up in this
     // method (#384).
-    await this.reconcileChannelVisibility(true);
+    await this.reconcileChannelVisibility(channelsChanged);
     await this.community?.refresh();
   }
 
@@ -5733,7 +5739,7 @@ export class WebSocketServer {
       return;
     }
     if (deleted) this.recordAudit(session, 'role.delete', { target: auditRef.role(deleted) });
-    await this.broadcastRolesState(requestId);
+    await this.broadcastRolesState(requestId, true);
   }
 
   /** Assigning a role someone already has, or removing one they lack, changes nothing and is not recorded. */
@@ -6082,8 +6088,9 @@ export class WebSocketServer {
     // live session of the kicked user.
     this.closeSessionsOfUser(targetUserId);
 
-    // Role assignments were removed with the user, so refresh role state.
-    await this.broadcastRolesState();
+    // Role assignments were removed with the user, so refresh role state. Any
+    // channel rule naming them went too, so channels are resent as well.
+    await this.broadcastRolesState(undefined, true);
 
     Logger.info('NETWORK', `User ${result.nickname} was kicked from the server by ${session.user.nickname}`);
   }

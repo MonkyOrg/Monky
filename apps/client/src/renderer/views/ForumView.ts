@@ -1,6 +1,6 @@
 import { LIMITS, MessageType, Permission, type AttachmentMeta, type ForumListResult, type ForumPost, type ForumPostSaved } from '@monky/shared';
 import type { NetworkClient } from '../core/NetworkClient';
-import type { ServerStore } from '../stores/serverStore';
+import { accessSignature, type ServerStore } from '../stores/serverStore';
 import { t, getLanguage } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { openCommunityModal } from './CommunityModal';
@@ -37,9 +37,12 @@ export class ForumView {
   private lazyObserver: IntersectionObserver | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   private composerClose: ((immediate?: boolean) => void) | null = null;
+  /** Access and forum settings the listed posts were loaded under. */
+  private access: string;
 
   constructor(private readonly root: HTMLElement, private readonly client: NetworkClient, private readonly server: ServerStore,
     readonly channelId: string, private readonly openPost: (id: string) => void, headerHost?: HTMLElement) {
+    this.access = this.accessKey();
     root.innerHTML = `<section class="forum-view"><header class="content-header">
       <h2><span class="material-symbols-outlined md-20">forum</span>${escapeHtml(server.getChannel(channelId)?.name ?? t('forum.title'))}</h2></header>
       <div class="forum-list-content"><div class="forum-create-shell"><div class="forum-create-bar">
@@ -101,15 +104,22 @@ export class ForumView {
       if (event === 'network.status' && payload !== 'CONNECTED') { this.destroy(); root.replaceChildren(); return; }
       if ([MessageType.CHANNEL_DELETED, MessageType.CHANNEL_UPDATED, MessageType.CATEGORIES_UPDATED, MessageType.ROLES_LIST]
         .some(type => event === `message.${type}`)) {
+        // Answers to requests sent before this change are discarded either way. Only lost access or an
+        // edit to this forum also drops the shown list and its modals; otherwise they stay until the refresh below.
+        const access = this.accessKey();
+        const accessChanged = access !== this.access;
+        this.access = access;
         this.generation++;
-        this.loaded = false;
-        this.loading = null;
-        this.next = 0;
-        this.more = false;
-        this.posts = [];
-        this.renderPosts();
-        this.syncLazyState();
-        for (const close of [...this.modals]) close(true);
+        if (accessChanged) {
+          this.loaded = false;
+          this.loading = null;
+          this.next = 0;
+          this.more = false;
+          this.posts = [];
+          this.renderPosts();
+          this.syncLazyState();
+          for (const close of [...this.modals]) close(true);
+        }
         if (!server.getChannel(channelId) || !server.hasPermission(Permission.READ_MESSAGES, channelId)) return;
       }
       if ([MessageType.FORUM_POST_SAVED, MessageType.CHAT_MESSAGE, MessageType.CHAT_MESSAGE_UPDATED,
@@ -121,6 +131,10 @@ export class ForumView {
       }
     });
     void this.load();
+  }
+
+  private accessKey(): string {
+    return JSON.stringify([accessSignature(this.server), this.server.getChannel(this.channelId) ?? null]);
   }
 
   private async load(append = false, animateReorder = false): Promise<void> {

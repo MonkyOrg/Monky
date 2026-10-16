@@ -2,7 +2,7 @@ import {
   MessageType, communitySnapshotSchema, eventStartedSchema, type CommunitySnapshot,
 } from '@monky/shared';
 import type { NetworkClient } from './NetworkClient';
-import type { ServerStore } from '../stores/serverStore';
+import { accessSignature, type ServerStore } from '../stores/serverStore';
 import { appEvents } from './EventBus';
 
 export interface CommunityStartNotice { title: string; serverName: string }
@@ -16,6 +16,8 @@ export class CommunityFeed {
   private readonly unbind: () => void;
   private disposed = false;
   private generation = 0;
+  /** Access the shown snapshot was fetched with (see `accessSignature`). */
+  private access = '';
   private loading = false;
   private reload = false;
   private eventRequest: string | null = null;
@@ -47,6 +49,7 @@ export class CommunityFeed {
         if (result.success) {
           this.generation++;
           this.snapshot = result.data;
+          this.access = accessSignature(this.server);
           this.server.communityEventsEnabled = result.data.settings.eventsEnabled;
           this.error = false;
           this.emit();
@@ -70,9 +73,16 @@ export class CommunityFeed {
       }
       if ([MessageType.CHANNEL_DELETED, MessageType.CHANNEL_UPDATED, MessageType.CATEGORIES_UPDATED, MessageType.ROLES_LIST]
         .some((type) => event === `message.${type}`)) {
+        // Stores already applied the change. Only lost access must clear what is shown at once;
+        // otherwise the banner and toolbar stay up while the fresh copy loads.
+        const access = accessSignature(this.server);
+        const revalidate = this.snapshot !== null && access === this.access;
+        this.access = access;
         this.generation++;
-        this.snapshot = null;
-        this.emit();
+        if (!revalidate) {
+          this.snapshot = null;
+          this.emit();
+        }
         void this.load();
       }
     });
@@ -98,6 +108,7 @@ export class CommunityFeed {
       const parsed = communitySnapshotSchema.parse(result);
       if (this.disposed || generation !== this.generation) return;
       this.snapshot = parsed;
+      this.access = accessSignature(this.server);
       this.server.communityEventsEnabled = parsed.settings.eventsEnabled;
       this.error = false;
     } catch (error) {

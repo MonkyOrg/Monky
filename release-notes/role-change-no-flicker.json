@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Alterar o cargo de alguém ou alguém entrar no servidor não faz mais os canais, os canais de voz e o banner do servidor piscarem para todo mundo. Agora só é redesenhado o que de fato mudou.",
+  "en": "Changing someone's role or someone joining the server no longer makes the channels, voice channels and server banner flicker for everyone. Only what actually changed is redrawn now."
+}

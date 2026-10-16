@@ -665,3 +665,27 @@ test('individual voice speaking denial mutes only its member and individual rule
   await f.userRepo.delete(member.id);
   assert.deepEqual((await f.channelRepo.findById(channelId))?.permissionOverwrites, []);
 });
+
+test('a role change only resends channels it edited, so other members do not redraw every channel', async t => {
+  const f = await createApprovedBotFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Sidebar owner');
+  const member = await f.human('Sidebar member');
+  const viewer = await f.human('Sidebar viewer');
+  const roles = records(record((await owner.peer.request(MessageType.ROLE_CREATE, { name: 'Sidebar', permissions: 0 })).payload).roles);
+  const roleId = text(roles.find(role => role.name === 'Sidebar')?.id);
+  // Each reconciliation sends the categories first and any channel right after, in the same pass.
+  const reconciled = async (marker: number) => {
+    await viewer.peer.wait(message => message.type === MessageType.CATEGORIES_UPDATED, marker);
+    await viewer.peer.barrier();
+    return viewer.peer.messages.slice(marker).filter(message => message.type === MessageType.CHANNEL_UPDATED).length;
+  };
+  for (const type of [MessageType.ROLE_ASSIGN, MessageType.ROLE_UNASSIGN]) {
+    const marker = viewer.peer.messages.length;
+    await owner.peer.request(type, { userId: member.id, roleId });
+    assert.equal(await reconciled(marker), 0, `${type} must not resend unchanged channels`);
+  }
+  const marker = viewer.peer.messages.length;
+  await owner.peer.request(MessageType.ROLE_DELETE, { roleId });
+  assert.ok(await reconciled(marker) > 0, 'deleting a role edits the channels that allowed it, so they are resent');
+});
