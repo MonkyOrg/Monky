@@ -1,3 +1,7 @@
+---
+description: "Hospede um servidor do Monky pelo próprio aplicativo: porta, senha, canais iniciais e modo de voz P2P ou SFU."
+---
+
 # Criar Seu Servidor
 
 Na Home, clique no botão **+** no trilho de servidores e escolha

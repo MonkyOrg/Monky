@@ -1,3 +1,7 @@
+---
+description: "Defina comandos de bots do Monky com parâmetros tipados, traduções e autocomplete paginado."
+---
+
 # Comandos e autocomplete
 
 Defina como seu bot é descoberto, quais valores recebe e quando uma busca

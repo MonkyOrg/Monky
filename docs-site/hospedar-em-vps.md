@@ -1,3 +1,7 @@
+---
+description: "Mantenha um servidor do Monky no ar 24 horas em uma VPS Linux com o Monky CLI, sem interface gráfica."
+---
+
 # Hospedar em VPS
 
 Para manter o servidor no ar 24/7, rode só o servidor em uma máquina Linux —

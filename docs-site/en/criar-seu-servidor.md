@@ -1,3 +1,7 @@
+---
+description: "Host a Monky server from the app itself: port, password, starting channels and P2P or SFU voice mode."
+---
+
 # Create Your Server
 
 In Home, click the **+** button on the server rail and choose **Create my

@@ -1,3 +1,7 @@
+---
+description: "Store Monky bot data on the server or on participants' computers, with the admin's approval."
+---
+
 # Bot storage
 
 A bot can keep data in two places, each with its own capability. Both start

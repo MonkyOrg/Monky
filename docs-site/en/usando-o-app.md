@@ -1,3 +1,7 @@
+---
+description: "Channels, forums, voice, camera, screen sharing, events, chat, stickers and soundboard in everyday Monky use."
+---
+
 # Using the App
 
 After connecting, the left sidebar organizes servers and channels, the center
@@ -157,6 +161,20 @@ allowed to watch, and does not prove attention to the screen. Two connections
 from the same person appear separately. It refreshes approximately every two
 seconds; failed requests show an unavailable state rather than a stale count.
 The local preview is not counted as a viewer.
+
+### Sharing a game {#sharing-a-game}
+
+On Windows, with a Steam game open and you in a voice channel, Monky shows a
+shortcut with the game's name above your controls. **Share** asks for
+confirmation and streams only the game window, with its audio, to the people
+in the channel; **Stop** ends it.
+The shortcut depends on **Suggest sharing my game**, in
+[My Profile → Game activity](/en/configuracoes#game-activity).
+
+If someone in the same call shows the game they are playing, their card offers
+**Ask to watch the match** while they are not streaming. They receive the
+request with **Share** and **Not now**, and nothing is streamed unless they
+accept. The call's server must run a version that supports this request.
 
 ## Events
 

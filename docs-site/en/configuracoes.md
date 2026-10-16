@@ -1,3 +1,7 @@
+---
+description: "Tune your profile, microphone, camera, noise suppression, streaming quality, shortcuts, notifications and Monky updates."
+---
+
 # Settings
 
 Open the **gear icon** on Home or the bottom bar. These are your app's
@@ -36,6 +40,19 @@ optionally, **Conversation history** to bring your direct messages. Under
 **Direct messages**, choose the **Maximum received file size**: your friends see
 this limit and cannot send you larger files. See
 [Friends and direct messages](/en/amigos-e-mensagens-diretas).
+
+### Game activity
+
+On Windows, Monky recognizes the game open on **Steam**. Only the game's name
+and icon leave your computer; the process list and executable paths stay on it.
+
+- **Show the game I am playing** (off by default): people in your servers see
+  the game when they click you and in the voice channel list.
+- **Suggest sharing my game** (on by default): in a voice channel, shows a
+  shortcut above your controls to stream the game. Works even without showing
+  the game to others.
+
+See [Sharing a game](/en/usando-o-app#sharing-a-game).
 
 ### Log out
 

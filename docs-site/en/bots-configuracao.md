@@ -1,3 +1,7 @@
+---
+description: "Declare per-server settings and personal preferences in Monky bots."
+---
+
 # Settings and preferences
 
 Declare reusable options without confusing shared behavior, personal

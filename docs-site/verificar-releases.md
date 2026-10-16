@@ -1,3 +1,7 @@
+---
+description: "Confira a assinatura Sigstore e o hash SHA-256 de um arquivo da release do Monky antes de instalar."
+---
+
 # Verificar Releases
 
 O pipeline oficial publica uma lista de hashes SHA-256 assinada com

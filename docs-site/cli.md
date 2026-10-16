@@ -1,3 +1,7 @@
+---
+description: "Referência do Monky CLI: crie, inicie, atualize e administre servidores do Monky pela linha de comando."
+---
+
 # Monky CLI
 
 Ferramenta de linha de comando para criar e administrar servidores Monky.

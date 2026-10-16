@@ -1,3 +1,7 @@
+---
+description: "Join a Monky server through an invite link, the local network, a saved server or by typing its address and port."
+---
+
 # Join a Server
 
 In Home, click the **+** button on the server rail and choose **Join a server**.

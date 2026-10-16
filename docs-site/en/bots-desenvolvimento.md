@@ -1,3 +1,7 @@
+---
+description: "Build your first Monky bot in TypeScript with the bot SDK, from project setup to a /ping command."
+---
+
 # Your first bot
 
 Create a TypeScript bot that appears in Monky and responds to `/ping`. This
@@ -254,12 +258,14 @@ selected in the application.
 | Typed parameters, translations and paginated autocomplete | [Commands](/en/bots-comandos) | `commands` |
 | Private forms and multi-step questions | [Interactions](/en/bots-interacoes) | `commands` |
 | Public messages, reactions and persistent polls | [Interactions](/en/bots-interacoes) | `send_messages`, `read_messages` and/or `selectors`, depending on the operation |
+| Live actions with native forms and selectors | [Live actions](/en/bots-interacoes#native-live-actions) | `commands` and `live_actions` |
 | Personal preferences and per-server behavior | [Settings](/en/bots-configuracao) | Server scopes and permissions |
 | Audio previews and Soundboard downloads | [Audio](/en/bots-audio) | `commands`; downloads also require `sound_download` |
 | Publish P2P or SFU audio | [Voice](/en/bots-voz) | `publish_voice` |
 | Receive P2P or SFU microphones | [Voice reception](/en/bots-voz#receive-microphones) | `receive_voice` and connection opt-in |
 | Authorized tasks on the user's computer | [Local execution](/en/bots-execucao-local) | `local_execution` |
 | Shared HTML screens in voice rooms | [Miniapps](/en/bots-miniapps) | `miniapps` |
+| Bot data on the server and on computers | [Storage](/en/bots-armazenamento) | `server_storage` and/or `device_storage` |
 | CLI, installable package and updates | [Distribution](/en/bots-distribuicao) | Package configuration |
 
 Add only the capabilities you need to `requestedCapabilities`. Grants require

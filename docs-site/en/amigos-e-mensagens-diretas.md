@@ -1,3 +1,7 @@
+---
+description: "Add friends and exchange end-to-end encrypted direct messages, with no central server keeping your conversations."
+---
+
 # Friends and direct messages
 
 Friends and direct messages (DMs) live on **Home**. Monky has no central

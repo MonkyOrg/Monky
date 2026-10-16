@@ -1,4 +1,5 @@
 ---
+description: "Baixe a versão mais recente do Monky para Windows ou macOS, escolha o arquivo certo e veja como instalar e atualizar."
 title: Download
 ---
 

@@ -1,3 +1,7 @@
+---
+description: "Configure um relay TURN para que voz e vídeo funcionem quando participantes estão atrás de CGNAT ou de redes restritivas."
+---
+
 # Relay de mídia (TURN)
 
 Por padrão, a voz e o vídeo do Monky trafegam **direto entre os participantes**

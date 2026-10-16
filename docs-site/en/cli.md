@@ -1,3 +1,7 @@
+---
+description: "Monky CLI reference: create, start, update and manage Monky servers from the command line."
+---
+
 # Monky CLI
 
 This is the **server CLI**, not the CLI generated for a bot. To package

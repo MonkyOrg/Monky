@@ -1,3 +1,7 @@
+---
+description: "Set up a TURN relay so voice and video work when participants are behind CGNAT or restrictive networks."
+---
+
 # Media relay (TURN)
 
 By default Monky's voice and video travel **straight between participants**

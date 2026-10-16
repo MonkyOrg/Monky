@@ -1,3 +1,7 @@
+---
+description: "Declare configurações por servidor e preferências pessoais em bots do Monky."
+---
+
 # Configurações e preferências
 
 Declare opções reutilizáveis sem confundir comportamento compartilhado,

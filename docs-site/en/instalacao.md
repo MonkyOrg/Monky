@@ -1,4 +1,5 @@
 ---
+description: "Download the latest Monky for Windows or macOS, pick the right file and learn how to install and update it."
 title: Installation
 search: false
 aside: false

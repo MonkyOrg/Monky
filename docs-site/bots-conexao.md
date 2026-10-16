@@ -1,3 +1,7 @@
+---
+description: "Conecte um bot do Monky manualmente ou pelo modo Marketplace e preserve a identidade dele entre atualizações."
+---
+
 # Conexão e identidade
 
 Use uma conexão manual para desenvolvimento e o modo Marketplace para

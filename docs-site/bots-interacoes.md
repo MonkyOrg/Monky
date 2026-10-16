@@ -1,3 +1,7 @@
+---
+description: "Formulários privados, seletores, votações, reações e ações ao vivo em bots do Monky."
+---
+
 # Formulários, seletores e mensagens
 
 Use respostas privadas para conversar com quem chamou e controles públicos

@@ -1,3 +1,7 @@
+---
+description: "Peça operações autorizadas no computador de quem usou o comando, com consentimento, em bots do Monky."
+---
+
 # Execução no cliente
 
 Solicite operações conhecidas do Monky no computador de quem iniciou a ação,

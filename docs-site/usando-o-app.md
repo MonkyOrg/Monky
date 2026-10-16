@@ -1,3 +1,7 @@
+---
+description: "Canais, fóruns, voz, câmera, compartilhamento de tela, eventos, chat, figurinhas e soundboard no dia a dia do Monky."
+---
+
 # Usando o App
 
 Depois de conectar, a lateral esquerda organiza servidores e canais; o centro
@@ -159,6 +163,20 @@ autorizadas, e não comprova atenção à tela. Duas conexões da mesma pessoa
 aparecem separadamente. A atualização ocorre aproximadamente a cada dois
 segundos; se a consulta falhar, o card informa a indisponibilidade em vez de
 mostrar uma contagem desatualizada. A prévia local não conta como espectador.
+
+### Compartilhar um jogo {#compartilhar-um-jogo}
+
+No Windows, com um jogo da Steam aberto e você em um canal de voz, o Monky
+mostra acima dos seus controles um atalho com o nome do jogo. **Compartilhar**
+pede uma confirmação e transmite só a janela do jogo, com o áudio dele, para
+quem está no canal; **Parar** encerra. O atalho depende de **Sugerir compartilhar o jogo**, em
+[Meu Perfil → Atividade de jogo](/configuracoes#atividade-de-jogo).
+
+Se alguém na mesma chamada mostra o jogo que está jogando, o card dessa pessoa
+oferece **Pedir para ver a partida** enquanto ela não estiver transmitindo. Ela
+recebe o pedido com **Compartilhar** e **Agora não**, e nada é transmitido sem
+que ela aceite. O servidor da chamada precisa ser de uma versão com suporte a
+esse pedido.
 
 ## Eventos
 

@@ -1,3 +1,7 @@
+---
+description: "Organize canais, cargos, permissões, moderação, bots e limites do seu servidor no Monky."
+---
+
 # Administrar um servidor
 
 Este guia reúne o que é **compartilhado por um servidor**: canais, cargos,

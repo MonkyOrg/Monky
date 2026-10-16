@@ -1,3 +1,7 @@
+---
+description: "How Monky bots declare capabilities, how admins approve them and what happens when they change."
+---
+
 # Capabilities and lifecycle
 
 Read this before adding a feature to an existing bot. Declaring, approving

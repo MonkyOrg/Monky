@@ -1,3 +1,7 @@
+---
+description: "Add bots to a Monky server, review their permissions and use commands, polls, music and miniapps without coding."
+---
+
 # Use bots {#bots}
 
 Bots add commands, polls, music and miniapps to your server. This guide is

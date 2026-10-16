@@ -1,3 +1,7 @@
+---
+description: "Referência do SDK de bots do Monky: métodos, eventos, ciclo de vida e assinaturas TypeScript completas."
+---
+
 # Referência do SDK de bots {#referencia-da-api-de-bots}
 
 Consulte aqui o contrato público do **SDK de bots do Monky** (`@monky/bot-sdk`).

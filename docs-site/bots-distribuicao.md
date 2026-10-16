@@ -1,3 +1,7 @@
+---
+description: "Empacote, instale e atualize um bot do Monky com o CLI fornecido pelo SDK de bots."
+---
+
 # Empacotar e distribuir
 
 Este guia é para o autor e para o operador de um bot que usa o **CLI fornecido

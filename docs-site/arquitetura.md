@@ -1,4 +1,5 @@
 ---
+description: "Como o Monky funciona por dentro: processos, identidade criptográfica, sinalização WebRTC, P2P mesh, SFU e dados locais."
 aside: false
 pageClass: pagina-arquitetura
 ---

@@ -1,3 +1,7 @@
+---
+description: "Publish audio and receive microphones in P2P or SFU calls with a Monky bot."
+---
+
 # Publish and receive voice
 
 Use this guide to transmit and receive audio your bot is authorized to use.

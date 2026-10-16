@@ -1,3 +1,7 @@
+---
+description: "Adicione bots a um servidor do Monky, revise as permissões e use comandos, votações, música e miniapps sem programar."
+---
+
 # Usar bots {#bots}
 
 Bots acrescentam comandos, votações, música e miniapps ao seu servidor.

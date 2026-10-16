@@ -1,3 +1,7 @@
+---
+description: "Fix server connection, call audio/video and bot issues in Monky, including CGNAT, antivirus and macOS."
+---
+
 # Troubleshooting
 
 First identify the failing stage: **server connection**, **call media** or
