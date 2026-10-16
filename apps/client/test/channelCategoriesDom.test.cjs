@@ -854,7 +854,8 @@ async function regression(locale) {
     && getComputedStyle(limitBadge()).pointerEvents === 'none' && !limitBadge().hasAttribute('title'),
   'at rest the limit shows, its buttons stay hidden and clicks reach the row');
   limitMenu().focus();
-  await new Promise(resolve => setTimeout(resolve, 250));
+  // A fixed delay raced the opacity transition on slow macOS runners.
+  await Promise.allSettled(limitRow.getAnimations({ subtree: true }).map(animation => animation.finished));
   check(limitRow.matches(':focus-within') && getComputedStyle(limitBadge()).opacity === '0'
     && getComputedStyle(limitMenu()).opacity === '1', 'hovering or focusing the row trades the limit for its buttons');
   limitMenu().blur();
