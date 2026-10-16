@@ -432,6 +432,10 @@ export const trayVoiceStatusSchema = z.object({
   micLock: z.enum(['permission', 'afk']).nullable(),
   // Watching someone's screen share or an open miniapp: the tray monkey puts on 3D glasses.
   isWatching: z.boolean(),
+  // A soundboard sound of the person's own playing in the call: the tray monkey holds a megaphone.
+  isPlayingSound: z.boolean(),
+  // The person's camera or screen share is on: the tray monkey gets a REC frame.
+  isRecording: z.boolean(),
 }).strict();
 export type TrayVoiceStatus = z.infer<typeof trayVoiceStatusSchema>;
 

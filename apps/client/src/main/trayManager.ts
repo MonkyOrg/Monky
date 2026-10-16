@@ -9,13 +9,23 @@ export interface VoiceStatus {
   isSpeaking: boolean;
   /** Someone's screen share or an open miniapp. */
   isWatching: boolean;
+  /** A soundboard sound of ours playing in the call. */
+  isPlayingSound: boolean;
+  /** Our camera or screen share is on. */
+  isRecording: boolean;
 }
 
 /** Monkey pose drawn in the tray for each voice state (`build/tray/{pose}.*`). */
 export type TrayPose = 'idle' | 'call' | 'talk' | 'mute' | 'deaf';
 
-/** Tray image: a pose, or an in-call pose wearing 3D cinema glasses (`build/tray/{pose}-3d.*`). */
-export type TrayIcon = TrayPose | `${Exclude<TrayPose, 'idle'>}-3d`;
+type InCallPose = Exclude<TrayPose, 'idle'> | 'call-mega' | 'talk-mega';
+
+/**
+ * Tray image (`build/tray/{icon}.*`): idle, or an in-call pose that may hold a
+ * megaphone instead of the mic (`-mega`), wear 3D cinema glasses (`-3d`) and
+ * have a REC frame (`-rec`).
+ */
+export type TrayIcon = 'idle' | `${InCallPose}${'' | '-3d'}${'' | '-rec'}`;
 
 const TRAY_TOOLTIPS: Record<TrayPose, MainTranslationKey> = {
   idle: 'tray.tooltipIdle',
@@ -34,10 +44,16 @@ export function trayPoseFor(status: VoiceStatus): TrayPose {
   return 'call';
 }
 
-/** While watching, the monkey keeps the pose and puts on 3D glasses. Watching only happens in a call. */
+/**
+ * In a call the pose gains what is going on: a megaphone while our soundboard
+ * plays (muted and deafened keep their hands on the mouth and ears), 3D glasses
+ * while watching, and a REC frame while our camera or screen share is on.
+ */
 export function trayIconFor(status: VoiceStatus): TrayIcon {
   const pose = trayPoseFor(status);
-  return pose !== 'idle' && status.isWatching ? `${pose}-3d` : pose;
+  if (pose === 'idle') return pose;
+  const base: InCallPose = status.isPlayingSound && (pose === 'call' || pose === 'talk') ? `${pose}-mega` : pose;
+  return `${base}${status.isWatching ? '-3d' : ''}${status.isRecording ? '-rec' : ''}`;
 }
 
 const TRAY_ICON_DIR = path.join(__dirname, '../../build/tray');
@@ -67,30 +83,31 @@ export class TrayManager {
     isDeafened: false,
     isSpeaking: false,
     isWatching: false,
+    isPlayingSound: false,
+    isRecording: false,
   };
 
-  // Loaded once: switching poses while speaking only swaps already-decoded images.
-  private readonly icons: Record<TrayIcon, NativeImage>;
+  // Each image is loaded the first time it shows and then kept, so switching poses while speaking
+  // only swaps already-decoded images, without loading every combination up front.
+  private readonly icons = new Map<TrayIcon, NativeImage>();
 
   constructor(mainWindow: BrowserWindow, onQuitApp: () => void) {
     this.mainWindow = mainWindow;
     this.onQuitApp = onQuitApp;
-    this.icons = {
-      idle: loadTrayIcon('idle'),
-      call: loadTrayIcon('call'),
-      talk: loadTrayIcon('talk'),
-      mute: loadTrayIcon('mute'),
-      deaf: loadTrayIcon('deaf'),
-      'call-3d': loadTrayIcon('call-3d'),
-      'talk-3d': loadTrayIcon('talk-3d'),
-      'mute-3d': loadTrayIcon('mute-3d'),
-      'deaf-3d': loadTrayIcon('deaf-3d'),
-    };
     this.createTray();
   }
 
+  private icon(icon: TrayIcon): NativeImage {
+    let image = this.icons.get(icon);
+    if (!image) {
+      image = loadTrayIcon(icon);
+      this.icons.set(icon, image);
+    }
+    return image;
+  }
+
   private createTray(): void {
-    this.tray = new Tray(this.icons.idle);
+    this.tray = new Tray(this.icon('idle'));
     this.tray.setToolTip('Monky');
 
     // Single click / double click to restore window
@@ -132,7 +149,7 @@ export class TrayManager {
     if (!this.tray || this.tray.isDestroyed()) return;
 
     // 1. Pose and tooltip for the current voice state
-    this.tray.setImage(this.icons[trayIconFor(this.voiceStatus)]);
+    this.tray.setImage(this.icon(trayIconFor(this.voiceStatus)));
     this.tray.setToolTip(mt(TRAY_TOOLTIPS[trayPoseFor(this.voiceStatus)]));
 
     // 2. Build context menu

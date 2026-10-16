@@ -15,7 +15,7 @@ const ON_DARK = [0xff, 0xff, 0xff];
 const ON_LIGHT = [0x1a, 0x1a, 0x1a];
 const IN_CALL = {
   inCall: true, isMuted: false, isDeafened: false, isSpeaking: false,
-  selfMuted: false, selfDeafened: false, micLock: null, isWatching: false,
+  selfMuted: false, selfDeafened: false, micLock: null, isWatching: false, isPlayingSound: false, isRecording: false,
 };
 const REGISTRY = (value) =>
   `\r\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize\r\n    SystemUsesLightTheme    REG_DWORD    ${value}\r\n\r\n`;
@@ -265,5 +265,11 @@ test('the main process only accepts a complete voice status', () => {
   assert.equal(shared.trayVoiceStatusSchema.parse({ ...IN_CALL, isWatching: true }).isWatching, true);
   const { isWatching: _isWatching, ...unknownWatching } = IN_CALL;
   assert.throws(() => shared.trayVoiceStatusSchema.parse(unknownWatching));
+  for (const key of ['isPlayingSound', 'isRecording']) {
+    assert.equal(shared.trayVoiceStatusSchema.parse({ ...IN_CALL, [key]: true })[key], true);
+    const { [key]: _flag, ...unknown } = IN_CALL;
+    assert.throws(() => shared.trayVoiceStatusSchema.parse(unknown), key);
+    assert.throws(() => shared.trayVoiceStatusSchema.parse({ ...IN_CALL, [key]: 'yes' }), key);
+  }
   assert.throws(() => shared.trayVoiceStatusSchema.parse({ ...IN_CALL, extra: true }));
 });
