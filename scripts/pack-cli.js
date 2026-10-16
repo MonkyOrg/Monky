@@ -54,7 +54,7 @@ export function buildSharedPackageJson(sharedPkg) {
   };
 }
 
-export function buildCliPackageJson(serverPkg, sharedPkg, version) {
+export function buildCliPackageJson(serverPkg, sharedPkg, version, bundledH264) {
   const dependencies = {
     // npm installs a bundled package as-is but does NOT resolve its own
     // dependencies, so @monky/shared's deps are hoisted here. Node then finds
@@ -62,8 +62,7 @@ export function buildCliPackageJson(serverPkg, sharedPkg, version) {
     ...sharedPkg.dependencies,
     ...serverPkg.dependencies,
     '@monky/shared': sharedPkg.version,
-    'h264-profile-level-id': '2.3.3',
-    debug: '^4.4.3',
+    ...bundledH264,
   };
   return {
     name: serverPkg.name,
@@ -79,10 +78,27 @@ export function buildCliPackageJson(serverPkg, sharedPkg, version) {
     // supports-color) declare `>=22`, so the CLI cannot honestly claim Node 20.
     engines: { node: '>=22' },
     dependencies,
-    bundleDependencies: ['@monky/shared', 'h264-profile-level-id'],
+    bundleDependencies: ['@monky/shared', ...Object.keys(bundledH264)],
   };
 }
 
+function findInstalledPackage(requesterDir, name) {
+  for (const directory of createRequire(path.join(requesterDir, 'package.json')).resolve.paths(name) ?? []) {
+    const candidate = path.join(directory, name);
+    if (fs.existsSync(path.join(candidate, 'package.json'))) return fs.realpathSync(candidate);
+  }
+  return null;
+}
+
+/**
+ * Copies the patched H264 parser AND its runtime dependency closure into the
+ * staging node_modules, returning `{ name: version }` for every copied package.
+ *
+ * npm treats every dependency reachable from a bundled package as part of the
+ * bundle and never fetches it, even when the outer package also declares it.
+ * Bundling only the parser therefore left `debug`/`ms` out of clean installs,
+ * breaking mediasoup, which resolves the same deduplicated `debug`.
+ */
 export function bundleH264Dependency(staging, dependencyRoot) {
   const require = createRequire(import.meta.url);
   const source = dependencyRoot ?? path.dirname(require.resolve('h264-profile-level-id/package.json'));
@@ -91,7 +107,38 @@ export function bundleH264Dependency(staging, dependencyRoot) {
   if (manifest.version !== '2.3.3' || h264.parseProfileLevelId('4d003c')?.level !== 60) {
     throw new Error('CLI packaging requires the maintained H264 Level 6 dependency patch. Run npm install.');
   }
-  fs.cpSync(source, path.join(staging, 'node_modules', 'h264-profile-level-id'), { recursive: true });
+
+  const bundled = {};
+  const sources = new Map();
+  const queue = [['h264-profile-level-id', fs.realpathSync(source), false]];
+  while (queue.length) {
+    const [name, packageDir, optional] = queue.shift();
+    if (!packageDir) {
+      if (optional) continue;
+      throw new Error(`Missing installed dependency "${name}" required by the bundled H264 parser. Run npm install.`);
+    }
+    if (sources.has(name)) {
+      // The bundle is flat, so two different copies of one name cannot coexist.
+      if (sources.get(name) !== packageDir) {
+        throw new Error(`Conflicting installed copies of "${name}" in the bundled H264 dependency tree.`);
+      }
+      continue;
+    }
+    const pkg = readJson(path.join(packageDir, 'package.json'));
+    sources.set(name, packageDir);
+    bundled[name] = pkg.version;
+    fs.cpSync(packageDir, path.join(staging, 'node_modules', name), {
+      recursive: true,
+      dereference: true,
+      filter: (file) => !path.relative(packageDir, file).split(path.sep).includes('node_modules'),
+    });
+    for (const [deps, isOptional] of [[pkg.dependencies, false], [pkg.optionalDependencies, true]]) {
+      for (const child of Object.keys(deps ?? {})) {
+        queue.push([child, findInstalledPackage(packageDir, child), isOptional]);
+      }
+    }
+  }
+  return bundled;
 }
 
 function main() {
@@ -137,11 +184,11 @@ function main() {
     JSON.stringify(buildSharedPackageJson(sharedPkg), null, 2) + '\n'
   );
 
+  const bundledH264 = bundleH264Dependency(staging);
   fs.writeFileSync(
     path.join(staging, 'package.json'),
-    JSON.stringify(buildCliPackageJson(serverPkg, sharedPkg, version), null, 2) + '\n'
+    JSON.stringify(buildCliPackageJson(serverPkg, sharedPkg, version, bundledH264), null, 2) + '\n'
   );
-  bundleH264Dependency(staging);
 
   // The CLI reference lives in the documentation site, which is also what the
   // published package shows on npm.

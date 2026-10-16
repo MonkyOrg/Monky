@@ -189,6 +189,10 @@ jobs:
         run: |
           node scripts/pack-bot-sdk.js 0.0.0-ci
           node scripts/test-bot-sdk-package.js release/monky-bot-sdk-0.0.0-ci.tgz
+      - name: Exercise an isolated CLI installation
+        run: |
+          node scripts/pack-cli.js 0.0.0-ci
+          node scripts/test-cli-package.js release/monky-cli-0.0.0-ci.tgz
       - name: Export verified CLI build
         run: node scripts/ci-build-artifact.js collect cli "${{ runner.temp }}/ci-build-cli"
       - name: Upload reusable CLI build

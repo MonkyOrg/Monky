@@ -61,7 +61,7 @@ function plan({ base, head, title = '', packageApp = false, platform = process.p
   const steps = [
     shell('build', 'npm run build'),
     ...['Build shared contracts', 'Test bot contracts and SDK', 'Test server, client state and real bot conversations',
-      'Exercise an isolated SDK installation'].flatMap(name => lines(bots, name).map(command => shell('bots', command))),
+      'Exercise an isolated SDK installation', 'Exercise an isolated CLI installation'].flatMap(name => lines(bots, name).map(command => shell('bots', command))),
     shell('docs', 'node --test scripts/test-client-release-notes.js'),
     shell('docs', `node scripts/check-client-release-notes.js --base ${base} --head ${head} --merge-base`),
     shell('docs', 'node scripts/check-protocol-bump.js', { env: { BASE_SHA: base, HEAD_SHA: head, PR_TITLE: title } }),

@@ -629,7 +629,7 @@ test('CI uploads only inventoried build outputs after testing, namespaced by imm
   assert.deepEqual(ci.permissions, { contents: 'read' });
   assert.equal(step(ci.jobs['bot-tests'], 'Setup Python 3.11 (artifact regression tests)').with['python-version'], '3.11');
   for (const [job, variant, exportName, uploadName, tested] of [
-    [ci.jobs['bot-tests'], 'cli', 'Export verified CLI build', 'Upload reusable CLI build', 'Exercise an isolated SDK installation'],
+    [ci.jobs['bot-tests'], 'cli', 'Export verified CLI build', 'Upload reusable CLI build', 'Exercise an isolated CLI installation'],
     [ci.jobs['package-win'], 'win', 'Export verified desktop build', 'Upload reusable desktop build',
       'Exercise shortcut capture and worker recovery'],
     [ci.jobs['package-mac'], 'mac', 'Export verified desktop build', 'Upload reusable desktop build',
@@ -679,6 +679,13 @@ test('release reuses approved artifacts but always versions, packages, signs and
   assert.match(step(release.jobs.build, 'Build ${{ matrix.platform }} distributables').run, /electron-builder/);
   assert.match(step(release.jobs.release, 'Verify corresponding sources before publishing binaries').run, /check-native-source-release/);
   assert.ok(step(release.jobs.release, 'Sign checksums with Cosign (keyless)'));
+  // A tarball that packs but cannot install cleanly (39.3.7 lacked debug) must never be uploaded.
+  const cli = release.jobs.cli.steps;
+  const installCheck = step(release.jobs.cli, 'Exercise isolated CLI installation');
+  assert.match(installCheck.run, /test-cli-package\.js "release\/monky-cli-\$\{\{ needs\.version\.outputs\.version \}\}\.tgz"/);
+  assert.match(installCheck.if, /^steps\.pack\.outputs\.packed == 'true'/);
+  assert.ok(cli.indexOf(installCheck) > cli.indexOf(step(release.jobs.cli, 'Pack CLI')));
+  assert.ok(cli.indexOf(installCheck) < cli.indexOf(step(release.jobs.cli, 'Upload CLI artifact')));
 });
 
 test('release signs only the macOS build with the macOS certificate and warns when it is missing', () => {
@@ -853,7 +860,7 @@ test('ci:local mirrors CI commands from ci.yml and the DOM runner, skipping only
     const labels = steps.map(candidate => candidate.label);
     for (const command of commands.map(command => command.join(' '))) assert.ok(labels.includes(command), command);
     for (const name of ['Test bot contracts and SDK', 'Test server, client state and real bot conversations',
-      'Exercise an isolated SDK installation']) {
+      'Exercise an isolated SDK installation', 'Exercise an isolated CLI installation']) {
       for (const line of step(ci.jobs['bot-tests'], name).run.split('\n').map(text => text.trim())
         .filter(text => text && !text.startsWith('#')))
         assert.ok(labels.includes(line.replace(/^xvfb-run -a /u, '')), line);

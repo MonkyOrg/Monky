@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Instalar o Monky CLI do zero voltou a funcionar. Numa máquina nova, qualquer comando parava com \"Cannot find module 'debug'\" porque o pacote vinha sem duas dependências; agora elas vêm junto.",
+  "en": "Installing the Monky CLI from scratch works again. On a new machine, every command stopped with \"Cannot find module 'debug'\" because the package lacked two dependencies; they now ship with it."
+}
