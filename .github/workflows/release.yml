@@ -429,6 +429,10 @@ jobs:
           node scripts/pack-cli.js "${{ needs.version.outputs.version }}"
           echo "packed=true" >> "$GITHUB_OUTPUT"
 
+      - name: Exercise isolated CLI installation
+        if: steps.pack.outputs.packed == 'true' && hashFiles('scripts/test-cli-package.js') != ''
+        run: node scripts/test-cli-package.js "release/monky-cli-${{ needs.version.outputs.version }}.tgz"
+
       - name: Upload CLI artifact
         if: steps.pack.outputs.packed == 'true'
         uses: actions/upload-artifact@v4
