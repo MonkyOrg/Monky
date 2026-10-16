@@ -10,16 +10,20 @@
 
 Inputs (1024 px, all drawn on the same head, so they line up pixel for pixel):
   idle.png, call.png (the logo), talk.png, mute.png, deaf.png
-  call-3d.jpg  the logo wearing 3D cinema glasses; only the glasses are taken from it
+  call-3d.jpg         the logo wearing 3D cinema glasses; only the glasses are taken from it
+  call-megaphone.jpg  the logo without the boom mic, holding a megaphone; only the megaphone and the
+                      hand are taken from it
 
-Outputs, for the 5 poses and the in-call poses wearing the glasses (call-3d, talk-3d, mute-3d, deaf-3d):
+Outputs, as {pose}[-mega][-3d][-rec]: idle, and every in-call pose (call, talk, mute, deaf, and call-mega
+and talk-mega holding the megaphone) with and without the glasses and with and without the REC frame:
   {key}.ico             Windows: PNG frames of 16, 20, 24, 28, 32, 36, 40, 48 and 64 px
   {key}.png, @2x.png    macOS: 18 and 36 px
 
 The Windows tray draws the icon in a fixed square (16 px at 100% scale), so each pose is split into
 layers and the ears, headset cups and hands are pulled towards the head, which then fills more of the
 square. The headset grey and the brown fur are lightened to stand out on dark taskbars. Every frame is
-rendered straight from 1024 px with premultiplied alpha, plus a light unsharp mask up to 24 px.
+rendered straight from 1024 px with premultiplied alpha, plus a light unsharp mask up to 24 px. The REC
+frame is drawn at each final size instead, so its thin lines stay on whole pixels.
 
 Usage:
   uv run scripts/generate-tray-icons.py [--out DIR]
@@ -43,8 +47,8 @@ SOURCES = ROOT / 'images' / 'tray'
 DEFAULT_OUT = ROOT / 'apps' / 'client' / 'build' / 'tray'
 
 POSES = ['idle', 'call', 'talk', 'mute', 'deaf']
-GLASSES_POSES = ['call', 'talk', 'mute', 'deaf']
-KEYS = POSES + [pose + '-3d' for pose in GLASSES_POSES]
+IN_CALL = ['call', 'talk', 'mute', 'deaf', 'call-mega', 'talk-mega']
+KEYS = ['idle'] + [base + glasses + rec for rec in ('', '-rec') for glasses in ('', '-3d') for base in IN_CALL]
 ICO_SIZES = [16, 20, 24, 28, 32, 36, 40, 48, 64]  # order checked by apps/client/test/trayManager.test.cjs
 MAC_SIZES = [(18, ''), (36, '@2x')]
 
@@ -57,6 +61,8 @@ Y0 = 405            # row where the hangers meet the cups
 # Reframing, in 1024 px units: the cups and hangers move in by CUPS, the ears by EARS (EARS_IDLE
 # without a headset), the deaf hands by HANDS, and the top of the headband arc drops by ARC_DROP.
 CUPS, EARS, EARS_IDLE, HANDS, ARC_DROP = 20, 84, 56, 72, 30
+BOOM_Y = 715                # below this row the right headset piece is the mic boom and capsule
+MEGAPHONE_SHIFT = (-20, -8) # the megaphone follows the right cup in, and rises to fit the square
 
 # Windows: one square for every pose, so the head stays put when the state changes.
 WIN_SIDE = 861
@@ -81,6 +87,10 @@ def load(pose):
 
 def load_glasses_source():
     return np.array(Image.open(SOURCES / 'call-3d.jpg').convert('RGB')).astype(np.float64)
+
+
+def load_megaphone_source():
+    return np.array(Image.open(SOURCES / 'call-megaphone.jpg').convert('RGB')).astype(np.float64)
 
 
 def premul(im):
@@ -342,6 +352,65 @@ def pose_glasses(name):
     return G + Pt * (1 - G[..., 3:4] / 255.0)
 
 
+# ---------------------------------------------------------------- megaphone
+def _ellipse(d):
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d))
+
+
+def _largest(m):
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m.astype(np.uint8), 8)
+    return lab == 1 + np.argmax(st[1:, cv2.CC_STAT_AREA])
+
+
+def extract_megaphone():
+    """The megaphone and the hand holding it (with their outline), cut out of call-megaphone.jpg,
+    which matches call.png pixel for pixel apart from the mic it no longer has."""
+    src = load_megaphone_source()
+    call, idle = load('call'), load('idle')
+    yy, xx = np.mgrid[0:1024, 0:1024]
+    _, Ho = headset_masks(call.astype(np.int32))
+    ref = np.where((Ho & (yy >= BOOM_Y))[..., None], idle, call)       # the logo without the mic
+    D = np.abs(src - ref[..., :3] * ref[..., 3:4] / 255.0).max(-1) > 50
+    R = (xx >= 580) & (yy >= 570)
+    hsv = cv2.cvtColor((src / 255.0).astype(np.float32), cv2.COLOR_RGB2HSV)
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    red = ((h < 18) | (h > 340)) & (s > 0.50) & (v > 0.35)
+    grey = (s < 0.15) & (v > 0.45)
+    core = cv2.morphologyEx(((red | grey) & R).astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(core, 8)
+    keep = np.zeros(core.shape, bool)
+    for i in range(1, n):
+        if st[i, cv2.CC_STAT_AREA] > 3000: keep |= lab == i
+    # the hand: what differs from the logo, without the thin outline of the mic that is gone
+    M = cv2.morphologyEx((D & R).astype(np.uint8), cv2.MORPH_OPEN, _ellipse(11)).astype(bool) | keep
+    M = fill_holes(_largest(cv2.morphologyEx(M.astype(np.uint8), cv2.MORPH_CLOSE, _ellipse(21))))
+    d = cv2.distanceTransform((~M).astype(np.uint8), cv2.DIST_L2, 5)
+    M = M | ((src.max(-1) < 110) & (d <= 14) & R) | (d <= 2)              # the dark outline
+    M = cv2.morphologyEx(M.astype(np.uint8), cv2.MORPH_CLOSE, _ellipse(7))
+    M = fill_holes(_largest(cv2.morphologyEx(M, cv2.MORPH_OPEN, _ellipse(5))))
+    alpha = np.clip(cv2.distanceTransform(M.astype(np.uint8), cv2.DIST_L2, 5) / 1.5, 0, 1)
+    G = np.zeros((1024, 1024, 4))
+    G[..., :3] = src * alpha[..., None]; G[..., 3] = alpha * 255
+    return shift(G, *MEGAPHONE_SHIFT)
+
+
+@lru_cache(maxsize=None)
+def megaphone_layer():
+    return extract_megaphone().astype(np.float32)
+
+
+def drop_mic(L):
+    """Take the boom and capsule off the right headset piece, and show the face of idle under them."""
+    out = dict(L)
+    yy = np.mgrid[0:1024, 0:1024][0]
+    boom = (L['over_R'][..., 3] > 0) & (yy >= BOOM_Y)
+    out['over_R'] = np.where(boom[..., None], 0, L['over_R'])
+    # the dark rim of the capsule went with the face: replace a margin around it too
+    zone = cv2.dilate(boom.astype(np.uint8), _ellipse(25)).astype(bool) & (yy >= BOOM_Y)
+    out['head'] = np.where(zone[..., None], layers('idle')['head'].astype(np.float64), L['head'])
+    return out
+
+
 # ---------------------------------------------------------------- composition
 def shift(P, dx, dy=0):
     out = np.zeros_like(P)
@@ -409,9 +478,11 @@ def lift_fur(L, amount=0.18):
     return out
 
 
-def compose(name, glasses=None):
+def compose(name, glasses=None, megaphone=False):
     """The reframed pose at 1024 px, premultiplied, drawn back to front."""
-    L = lift_fur(lift_headset({k: v.astype(np.float64) for k, v in layers(name).items()}))
+    L = {k: v.astype(np.float64) for k, v in layers(name).items()}
+    if megaphone: L = drop_mic(L)
+    L = lift_fur(lift_headset(L))
     ears = EARS_IDLE if name == 'idle' else EARS
     hands = HANDS if name == 'deaf' else 0
     out = np.zeros((1024, 1024, 4))
@@ -421,6 +492,7 @@ def compose(name, glasses=None):
     out = over(out, warp_band(L['band'], CUPS, ARC_DROP))
     out = over(out, shift(L['over_L'], CUPS)); out = over(out, warp_over_R(L['over_R'], CUPS))
     out = over(out, shift(L['hands_L'], hands)); out = over(out, shift(L['hands_R'], -hands))
+    if megaphone: out = over(out, megaphone_layer().astype(np.float64))
     return clean(out)
 
 
@@ -440,6 +512,34 @@ def render(P, size, box):
     out = resize(P, size, box)
     if size <= 24: out = usm(out)
     return clean(out)
+
+
+REC_RED = (229, 57, 53)
+REC_GREY = (138, 138, 138)
+REC_SS = 8  # supersampling of the REC frame
+
+
+def rec_frame(P):
+    """The REC frame on a rendered icon: grey corner brackets behind the monkey, and a red dot over its
+    top-left corner, with a thin transparent gap so it reads on any taskbar."""
+    size = P.shape[0]; n = size * REC_SS
+    t = max(1, round(size / 16)) * REC_SS                    # whole pixels
+    arm = round(size * 0.3) * REC_SS
+    br = np.zeros((n, n), np.uint8)
+    for cx, cy in ((n, 0), (0, n), (n, n)):                  # the dot takes the top-left corner
+        x0 = 0 if cx == 0 else n - arm; y0 = 0 if cy == 0 else n - t
+        br[y0:y0 + t, x0:x0 + arm] = 255
+        x0 = 0 if cx == 0 else n - t; y0 = 0 if cy == 0 else n - arm
+        br[y0:y0 + arm, x0:x0 + t] = 255
+    r = size * 0.13 * REC_SS; c = r
+    dot = np.zeros((n, n), np.uint8); cv2.circle(dot, (round(c), round(c)), round(r), 255, -1, cv2.LINE_AA)
+    gap = np.zeros((n, n), np.uint8)
+    cv2.circle(gap, (round(c), round(c)), round(r + max(1, size / 24) * REC_SS), 255, -1, cv2.LINE_AA)
+    down = lambda m: cv2.resize(m.astype(np.float32) / 255.0, (size, size), interpolation=cv2.INTER_AREA).astype(np.float64)
+    a_br, a_dot, a_gap = down(br), down(dot), down(gap)
+    layer = lambda a, col: np.concatenate([a[..., None] * np.array(col, float), a[..., None] * 255], -1)
+    out = over(layer(a_br, REC_GREY), P) * (1 - a_gap[..., None])
+    return clean(over(out, layer(a_dot, REC_RED)))
 
 
 def to_rgba(P):
@@ -465,11 +565,12 @@ def main():
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     for key in KEYS:
-        pose = key[:-len('-3d')] if key.endswith('-3d') else key
-        P = compose(pose, pose_glasses(pose) if key.endswith('-3d') else None)
-        (args.out / f'{key}.ico').write_bytes(ico_bytes([to_rgba(render(P, size, WIN_BOX)) for size in ICO_SIZES]))
+        pose = key.split('-')[0]; flags = key.split('-')[1:]
+        P = compose(pose, pose_glasses(pose) if '3d' in flags else None, megaphone='mega' in flags)
+        draw = (lambda Q: rec_frame(Q)) if 'rec' in flags else (lambda Q: Q)
+        (args.out / f'{key}.ico').write_bytes(ico_bytes([to_rgba(draw(render(P, size, WIN_BOX))) for size in ICO_SIZES]))
         for size, suffix in MAC_SIZES:
-            (args.out / f'{key}{suffix}.png').write_bytes(png_bytes(to_rgba(render(P, size, mac_box(pose)))))
+            (args.out / f'{key}{suffix}.png').write_bytes(png_bytes(to_rgba(draw(render(P, size, mac_box(pose))))))
         print('wrote', key, flush=True)
 
 
