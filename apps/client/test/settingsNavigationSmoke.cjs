@@ -777,11 +777,11 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
 
 async function runSettingsNavigationSmoke() {
   const [{ SettingsSectionNavigation }, { SettingsModal }, { ServerSettingsModal }, { EmojiPicker },
-    { serverStore }, language] = await Promise.all([
+    { serverStore }, language, { EMOJI_CATALOG }] = await Promise.all([
     import('/views/settings/SettingsSectionNavigation.ts'), import('/views/SettingsModal.ts'),
     import('/views/ServerSettingsModal.ts'), import('/views/EmojiPicker.ts'),
     import('/stores/serverStore.ts'),
-    import('/i18n/index.ts'),
+    import('/i18n/index.ts'), import('/emoji/emojiCatalog.ts'),
   ]);
   let checks = 0;
   const check = (value, message) => { if (!value) throw new Error(message); checks++; };
@@ -935,11 +935,36 @@ async function runSettingsNavigationSmoke() {
 
   const anchor = document.createElement('button');
   document.body.append(anchor);
-  const picker = new EmojiPicker({ container: document.body, anchor, emojiOnly: true, floating: true, onSelectEmoji: () => {} });
+  const selected = [];
+  const pickerOptions = { container: document.body, anchor, emojiOnly: true, floating: true, onSelectEmoji: emoji => selected.push(emoji) };
+  const picker = new EmojiPicker(pickerOptions);
+  let laterPicker = null;
   try {
     setReduced(false);
     await picker.open();
-    const pickerBody = document.querySelector('.emoji-picker-body');
+    let pickerBody = document.querySelector('.emoji-picker-body');
+    const drawn = cell => cell.textContent === cell.dataset.emoji;
+    const catalogCells = () => [...pickerBody.querySelectorAll('[data-emoji-group]:not([data-emoji-group="recent"]) [data-emoji]')];
+    const visibleCells = () => {
+      const view = pickerBody.getBoundingClientRect();
+      return [...pickerBody.querySelectorAll('[data-emoji]')].filter(cell => {
+        const box = cell.getBoundingClientRect();
+        return box.top >= view.top && box.bottom <= view.bottom;
+      });
+    };
+    const frames = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const catalogSize = EMOJI_CATALOG.reduce((total, group) => total + group.emojis.length, 0);
+    const openedCells = catalogCells();
+    check(openedCells.length === catalogSize && openedCells.every(cell => cell.getBoundingClientRect().height > 0),
+      'Opening lays out every catalog cell, so the list height and category offsets are exact');
+    check(openedCells.every(cell => !drawn(cell)) && visibleCells().length > 0
+      && visibleCells().every(cell => getComputedStyle(cell, '::before').backgroundColor !== 'rgba(0, 0, 0, 0)'),
+    'The first picker of a session appears at once, with placeholders, before rasterizing any emoji');
+    await frames();
+    check(visibleCells().length > 0 && visibleCells().every(drawn)
+      && visibleCells().every(cell => getComputedStyle(cell, '::before').content === 'none')
+      && !catalogCells().some(cell => cell.closest('[data-emoji-group="flags"]') && drawn(cell)),
+    'Right after that frame it draws the visible glyphs, not the whole catalog');
     const originalScroll = pickerBody.scrollTo;
     const calls = [];
     pickerBody.scrollTo = function (options) { calls.push(options); return originalScroll.call(this, options); };
@@ -948,11 +973,37 @@ async function runSettingsNavigationSmoke() {
     await settled(() => pickerBody.scrollTop > 0);
     check(pickerBody.scrollTop > 0 && pickerBody.scrollTop < pickerBody.scrollHeight - pickerBody.clientHeight, 'Emoji category navigation animates instead of jumping');
     await settled(() => pickerBody.scrollTop >= calls[0].top - 2);
+    await frames();
+    const flags = pickerBody.querySelector('[data-emoji-group="flags"]');
+    check(Math.abs(flags.getBoundingClientRect().top - pickerBody.getBoundingClientRect().top) <= 2,
+      'Category navigation lands exactly on the category while later glyphs are still pending');
+    check(visibleCells().length > 0 && visibleCells().every(drawn), 'Scrolling draws the glyphs it reveals');
+    for (let attempt = 0; attempt < 400 && !catalogCells().every(drawn); attempt++) await wait(50);
+    check(catalogCells().every(drawn), 'The remaining glyphs are drawn while the renderer is idle');
+    const search = document.querySelector('.emoji-picker-search-input');
+    search.value = 'coracao';
+    search.dispatchEvent(new Event('input'));
+    const results = [...pickerBody.querySelectorAll('[data-emoji]')];
+    check(results.length > 0 && visibleCells().length > 0 && visibleCells().every(drawn), 'Search results draw their visible glyphs at once');
+    results[0].click();
+    check(selected.at(-1) === results[0].dataset.emoji, 'A search result selects its emoji');
+    search.value = '';
+    search.dispatchEvent(new Event('input'));
+    const recent = pickerBody.querySelector('[data-emoji-group="recent"] [data-emoji]');
+    check(recent && recent.dataset.emoji === selected.at(-1) && drawn(recent), 'Recent emojis are drawn as soon as they are listed');
     setReduced(true);
     document.querySelector('[data-goto-group="smileys"]').click();
     check(calls.at(-1).behavior === 'instant', 'Emoji categories honor reduced motion');
+    picker.close();
+    laterPicker = new EmojiPicker(pickerOptions);
+    await laterPicker.open();
+    pickerBody = document.querySelector('.emoji-picker:not([data-ui-closing]) .emoji-picker-body');
+    const laterDrawn = catalogCells().filter(drawn).length;
+    check(laterDrawn > 0 && laterDrawn < 300 && visibleCells().length > 0 && visibleCells().every(drawn),
+      `Later pickers draw only the visible glyphs, within the opening click (${laterDrawn} drawn)`);
   } finally {
     picker.destroy();
+    laterPicker?.destroy();
     anchor.remove();
   }
 

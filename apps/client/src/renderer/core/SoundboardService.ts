@@ -3,17 +3,28 @@ import {
   Permission,
   SoundboardPlayedPayload,
   SoundboardStoppedPayload,
+  type SoundboardPlayPayload,
   type SoundboardSoundData,
 } from '@monky/shared';
 import { appEvents } from './EventBus';
 import { callClient } from './serverConnection';
 import { sessionManager } from './SessionManager';
+import { ProtocolRequestError } from './NetworkClient';
 import { settingsStore } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
 import { serverStore } from '../stores/serverStore';
 import { t } from '../i18n';
 import { SoundboardAudioOutput } from './SoundboardAudioOutput';
 import { setAudioOutputSink } from './AudioOutputSink';
+import { showErrorToast } from '../views/CopyToast';
+
+/**
+ * Safety net for a sound sent to the call. The server always answers, with the
+ * broadcast itself or an error, and a dropped connection rejects the request at
+ * once; this only bounds a server that never replies. It is generous because the
+ * reply carries the whole clip back (~4 MB of base64 each way at most).
+ */
+const PLAY_REQUEST_TIMEOUT_MS = 60_000;
 
 export interface SoundItem {
   name: string;
@@ -41,6 +52,17 @@ interface ManagedSoundPlayback extends ActiveSoundPlayback {
   showInGlobalPlayer: boolean;
 }
 
+/** How one attempt to play a clip ended: audible, broken, or stopped/replaced first. */
+export type PlaybackOutcome = 'started' | 'failed' | 'cancelled';
+
+/** A library sound this client asked to play that is not audible yet. */
+interface SoundRequest {
+  filePath: string;
+  controller: AbortController;
+  /** SOUNDBOARD_PLAY left: only a stop announced to the channel can still silence it. */
+  sent: boolean;
+}
+
 export class SoundboardService {
   private sounds: SoundItem[] = [];
   private loadGeneration = 0;
@@ -48,6 +70,13 @@ export class SoundboardService {
   private sinkId: string = settingsStore.selectedSpeakerId;
   private activePlaybacks: Map<string, ManagedSoundPlayback> = new Map();
   private pendingPlaybacks = new Map<string, PendingSoundPlayback>();
+  private readonly soundRequests = new Set<SoundRequest>();
+  /**
+   * Local playback of every received clip, by payload. A request's own echo is
+   * the very object `sendRequest` resolves with, so `playSound` can follow it
+   * to the moment it becomes audible here.
+   */
+  private readonly incomingPlaybacks = new WeakMap<SoundboardPlayedPayload, Promise<PlaybackOutcome>>();
   private intensity: number | null = null;
   private readonly audioOutput = new SoundboardAudioOutput((value) => {
     this.intensity = value;
@@ -62,7 +91,8 @@ export class SoundboardService {
   private setupListeners(): void {
     // Listen to network events when another user or server sends a soundboard play
     appEvents.on(`message.${MessageType.SOUNDBOARD_PLAYED}`, (payload: SoundboardPlayedPayload) => {
-      this.handleIncomingSound(payload);
+      const playback = this.handleIncomingSound(payload);
+      if (payload && typeof payload === 'object') this.incomingPlaybacks.set(payload, playback);
     });
 
     // Whoever started the sound stopped it, so the whole channel drops it (#499).
@@ -195,6 +225,11 @@ export class SoundboardService {
     return active;
   }
 
+  /** Library files this client asked to play that are not audible yet (`soundboard.loading_changed`). */
+  public getLoadingSoundPaths(): Set<string> {
+    return new Set([...this.soundRequests].map((request) => request.filePath));
+  }
+
   public getActivePlaybacks(includePaused = false): ActiveSoundPlayback[] {
     return Array.from(this.activePlaybacks.values()).filter(
       (p) => (includePaused || !p.audio.paused) && !p.audio.ended
@@ -252,11 +287,14 @@ export class SoundboardService {
   /**
    * Stops every sound at once (#517). Our own playback is announced to the
    * channel for the same reason a single stop is: the audio already travelled,
-   * so silence has to be asked for, not assumed.
+   * so silence has to be asked for, not assumed. A sound still on its way
+   * counts too: the server relays it before this stop, and the stop then
+   * silences it everywhere.
    */
   public stopAllFromUi(): void {
     const hasLocalPlayback = this.getActivePlaybacks(true).some((p) => this.isLocalPlayback(p.userId))
-      || [...this.pendingPlaybacks.keys()].some((userId) => this.isLocalPlayback(userId));
+      || [...this.pendingPlaybacks.keys()].some((userId) => this.isLocalPlayback(userId))
+      || [...this.soundRequests].some((request) => request.sent);
     if (hasLocalPlayback) this.broadcastStop();
     this.stopSound();
   }
@@ -284,6 +322,7 @@ export class SoundboardService {
       this.stopSoundForUser(userId);
       return;
     }
+    this.cancelSoundRequests();
     for (const id of new Set([...this.pendingPlaybacks.keys(), ...this.activePlaybacks.keys()])) this.stopSoundForUser(id);
     appEvents.emit('soundboard.playback_ended', {});
   }
@@ -316,7 +355,7 @@ export class SoundboardService {
       await setAudioOutputSink(audio, this.sinkId);
       await this.audioOutput.connect(audio, pending.controller.signal);
       if (this.pendingPlaybacks.get(userId) !== pending) return false;
-      return await this.playAudioForUser(audio, userId, t('common.you'), soundName, undefined, false);
+      return await this.playAudioForUser(audio, userId, t('common.you'), soundName, undefined, false) === 'started';
     } catch (err) {
       if (!pending.controller.signal.aborted) console.warn('[SoundboardService] Recent sound preview failed:', err);
       pending.controller.abort();
@@ -339,7 +378,7 @@ export class SoundboardService {
       await setAudioOutputSink(audio, this.sinkId);
       await this.audioOutput.connect(audio, pending.controller.signal);
       if (this.pendingPlaybacks.get(userId) !== pending) return false;
-      return await this.playAudioForUser(audio, userId, t('soundboard.editorPreview'), soundName, () => URL.revokeObjectURL(url));
+      return await this.playAudioForUser(audio, userId, t('soundboard.editorPreview'), soundName, () => URL.revokeObjectURL(url)) === 'started';
     } catch (error: unknown) {
       if (!pending.controller.signal.aborted) console.warn('[SoundboardService] Edited audio playback failed:', error);
       pending.controller.abort();
@@ -378,29 +417,41 @@ export class SoundboardService {
     return confirmed && folder === settingsStore.soundboardFolderPath;
   }
 
+  /**
+   * Plays a library sound: to the call when in one, otherwise as a local
+   * preview. Resolves `true` once the sound is audible here, `false` when it
+   * was refused, failed or was stopped first. Until then the file is listed by
+   * `getLoadingSoundPaths()`: in a call the whole clip first makes a round trip
+   * through the server, which can take seconds.
+   */
   public async playSound(filePath: string): Promise<boolean> {
     if (!window.api?.readSoundboardSound) return false;
 
     // Must be in a voice channel to broadcast sound to the room
-    const currentChannelId = voiceStore.currentVoiceChannelId;
+    const channelId = voiceStore.currentVoiceChannelId;
     const voiceKey = voiceStore.voiceSessionKey;
-    if (!currentChannelId || !voiceKey) {
-      console.warn('[SoundboardService] Cannot play sound: not in a voice channel');
-      try {
-        const soundData = await window.api.readSoundboardSound(filePath);
-        if (!soundData) return false;
-        const played = await this.playLocalPreview(filePath, soundData);
-        if (played) this.recordLocalPreview(soundData);
-        return played;
-      } catch (err) {
-        console.warn('[SoundboardService] Local preview failed:', err);
-        return false;
-      }
-    }
+    const call = channelId && voiceKey ? { channelId, voiceKey } : null;
+    if (!call) console.warn('[SoundboardService] Not in a voice channel: playing a local preview');
+    else if (!this.canPlayInCall(call.voiceKey, call.channelId)) return false;
 
+    const request = this.beginSoundRequest(filePath);
+    let outcome: PlaybackOutcome = 'failed';
+    let failure: unknown = null;
+    try {
+      outcome = call ? await this.sendSoundToCall(request, call.channelId) : await this.playLibraryPreview(request);
+    } catch (error: unknown) {
+      failure = error;
+    } finally {
+      this.endSoundRequest(request);
+    }
+    if (outcome === 'failed' && !request.controller.signal.aborted) this.reportPlayFailure(filePath, failure);
+    return outcome === 'started';
+  }
+
+  /** The checks the server repeats, made first so a refused sound never shows as loading. */
+  private canPlayInCall(voiceKey: string, channelId: string): boolean {
     // Check permissions on the server hosting the call (not necessarily the one in foreground)
-    const voiceSession = sessionManager.get(voiceKey);
-    const voiceServerStore = voiceSession?.serverStore ?? serverStore;
+    const voiceServerStore = sessionManager.get(voiceKey)?.serverStore ?? serverStore;
 
     if (voiceStore.permissionMuted) {
       console.warn('[SoundboardService] Cannot play sound: missing SPEAK permission in this channel');
@@ -412,31 +463,70 @@ export class SoundboardService {
       return false;
     }
 
-    if (!voiceServerStore.hasPermission(Permission.USE_SOUNDBOARD, voiceStore.currentVoiceChannelId)) {
+    if (!voiceServerStore.hasPermission(Permission.USE_SOUNDBOARD, channelId)) {
       console.warn('[SoundboardService] Missing USE_SOUNDBOARD permission on voice server');
       return false;
     }
+    return true;
+  }
 
-    try {
-      const soundData = await window.api.readSoundboardSound(filePath);
-      if (!soundData) {
-        console.warn('[SoundboardService] Failed to read sound file:', filePath);
-        return false;
-      }
+  private async sendSoundToCall(request: SoundRequest, channelId: string): Promise<PlaybackOutcome> {
+    const soundData = await window.api.readSoundboardSound(request.filePath);
+    if (request.controller.signal.aborted) return 'cancelled';
+    if (!soundData) throw new Error(`Failed to read sound file: ${request.filePath}`);
 
-      // Send to server hosting the call via callClient to broadcast to channel members
-      callClient().send(MessageType.SOUNDBOARD_PLAY, {
-        channelId: currentChannelId,
-        soundName: soundData.soundName,
-        audioBase64: soundData.base64,
-        mimeType: soundData.mimeType,
-      });
+    // Send to server hosting the call via callClient to broadcast to channel
+    // members. Its reply is that broadcast, our own copy included, which is
+    // then played here like everyone else's — or an error.
+    request.sent = true;
+    const payload: SoundboardPlayPayload = {
+      channelId,
+      soundName: soundData.soundName,
+      audioBase64: soundData.base64,
+      mimeType: soundData.mimeType,
+    };
+    const echo = await callClient().sendRequest<SoundboardPlayedPayload>(
+      MessageType.SOUNDBOARD_PLAY, payload, undefined, PLAY_REQUEST_TIMEOUT_MS,
+    );
+    return await (this.incomingPlaybacks.get(echo) ?? 'failed');
+  }
 
-      return true;
-    } catch (err) {
-      console.error('[SoundboardService] Error playing soundboard sound:', err);
-      return false;
-    }
+  private async playLibraryPreview(request: SoundRequest): Promise<PlaybackOutcome> {
+    const soundData = await window.api.readSoundboardSound(request.filePath);
+    if (request.controller.signal.aborted) return 'cancelled';
+    if (!soundData) throw new Error(`Failed to read sound file: ${request.filePath}`);
+    const outcome = await this.playLocalPreview(request.filePath, soundData);
+    if (outcome === 'started') this.recordLocalPreview(soundData);
+    return outcome;
+  }
+
+  private beginSoundRequest(filePath: string): SoundRequest {
+    const request: SoundRequest = { filePath, controller: new AbortController(), sent: false };
+    this.soundRequests.add(request);
+    appEvents.emit('soundboard.loading_changed');
+    return request;
+  }
+
+  private endSoundRequest(request: SoundRequest): void {
+    if (this.soundRequests.delete(request)) appEvents.emit('soundboard.loading_changed');
+  }
+
+  /** Clears the loading state at once; a sound already sent is silenced by the stop announced to the channel. */
+  private cancelSoundRequests(): void {
+    if (!this.soundRequests.size) return;
+    for (const request of this.soundRequests) request.controller.abort();
+    this.soundRequests.clear();
+    appEvents.emit('soundboard.loading_changed');
+  }
+
+  /** The click already showed the sound loading, so ending in silence has to be explained. */
+  private reportPlayFailure(filePath: string, error: unknown): void {
+    if (error) console.warn('[SoundboardService] Could not play soundboard sound:', error);
+    const name = this.sounds.find((sound) => sound.filePath === filePath)?.name
+      ?? filePath.split(/[\\/]/).pop() ?? filePath;
+    showErrorToast(error instanceof ProtocolRequestError
+      ? t('soundboard.playFailedReason', { name, reason: error.message })
+      : t('soundboard.playFailed', { name }));
   }
 
   private playAudioForUser(
@@ -446,7 +536,7 @@ export class SoundboardService {
     soundName: string,
     release?: () => void,
     showInGlobalPlayer = true,
-  ): Promise<boolean> {
+  ): Promise<PlaybackOutcome> {
     const playback: ManagedSoundPlayback = {
       userId,
       userName,
@@ -457,7 +547,7 @@ export class SoundboardService {
     };
     this.activePlaybacks.set(userId, playback);
 
-    let isCleanedUp = false;
+    let stopReason: 'ended' | 'failed' | 'stopped' | null = null;
 
     const onPlay = () => {
       appEvents.emit('soundboard.playback_started', {
@@ -500,8 +590,8 @@ export class SoundboardService {
     };
 
     const cleanup = (drain = false, failed = false) => {
-      if (isCleanedUp) return;
-      isCleanedUp = true;
+      if (stopReason) return;
+      stopReason = failed ? 'failed' : drain ? 'ended' : 'stopped';
       removeListeners();
       audio.pause();
       audio.src = '';
@@ -529,11 +619,14 @@ export class SoundboardService {
     audio.addEventListener('durationchange', onTimeUpdate);
     audio.addEventListener('seeked', onTimeUpdate);
 
-    return audio.play().then(() => !isCleanedUp).catch((err) => {
-      if (isCleanedUp) return false;
+    // A clip that already ended did sound; one stopped or replaced first did not.
+    const outcome = (): PlaybackOutcome =>
+      stopReason === 'failed' ? 'failed' : stopReason === 'stopped' ? 'cancelled' : 'started';
+    return audio.play().then(outcome, (err: unknown) => {
+      if (stopReason) return outcome();
       console.warn('[SoundboardService] Audio play error:', err);
       cleanup();
-      return false;
+      return 'failed';
     });
   }
 
@@ -564,32 +657,29 @@ export class SoundboardService {
     });
   }
 
-  private async playLocalPreview(filePath: string, providedData?: SoundboardSoundData): Promise<boolean> {
+  private async playLocalPreview(filePath: string, soundData: SoundboardSoundData): Promise<PlaybackOutcome> {
     const pending = this.beginPlayback('local', this.sounds.find(sound => sound.filePath === filePath)?.name);
     try {
-      const soundData = providedData ?? await window.api.readSoundboardSound(filePath);
-      if (!soundData) throw new Error('Could not read the soundboard file');
-      if (this.pendingPlaybacks.get('local') !== pending) return false;
-
       const audio = new Audio(soundData.dataUrl);
       pending.audio = audio;
       this.audioOutput.setVolume(this.getEffectiveVolume());
 
       await setAudioOutputSink(audio, this.sinkId);
       await this.audioOutput.connect(audio, pending.controller.signal);
-      if (this.pendingPlaybacks.get('local') !== pending) return false;
+      if (this.pendingPlaybacks.get('local') !== pending) return 'cancelled';
 
       return await this.playAudioForUser(audio, 'local', t('common.you'), soundData.soundName);
     } catch (err) {
-      if (!pending.controller.signal.aborted) console.warn('[SoundboardService] Local preview failed:', err);
+      if (pending.controller.signal.aborted) return 'cancelled';
+      console.warn('[SoundboardService] Local preview failed:', err);
       pending.controller.abort();
-      return false;
+      return 'failed';
     } finally {
       if (this.pendingPlaybacks.get('local') === pending) this.pendingPlaybacks.delete('local');
     }
   }
 
-  public async handleIncomingSound(payload: SoundboardPlayedPayload): Promise<void> {
+  public async handleIncomingSound(payload: SoundboardPlayedPayload): Promise<PlaybackOutcome> {
     appEvents.emit('soundboard.played', payload);
 
     const userId = payload.userId || 'unknown';
@@ -609,12 +699,14 @@ export class SoundboardService {
 
       await setAudioOutputSink(audio, this.sinkId);
       await this.audioOutput.connect(audio, pending.controller.signal);
-      if (this.pendingPlaybacks.get(userId) !== pending) return;
+      if (this.pendingPlaybacks.get(userId) !== pending) return 'cancelled';
 
-      await this.playAudioForUser(audio, userId, payload.userName, payload.soundName);
+      return await this.playAudioForUser(audio, userId, payload.userName, payload.soundName);
     } catch (err) {
-      if (!pending.controller.signal.aborted) console.warn('[SoundboardService] Failed to play incoming soundboard audio:', err);
+      if (pending.controller.signal.aborted) return 'cancelled';
+      console.warn('[SoundboardService] Failed to play incoming soundboard audio:', err);
       pending.controller.abort();
+      return 'failed';
     } finally {
       if (this.pendingPlaybacks.get(userId) === pending) this.pendingPlaybacks.delete(userId);
     }

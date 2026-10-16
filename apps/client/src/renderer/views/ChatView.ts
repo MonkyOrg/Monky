@@ -14,14 +14,12 @@ import { userContextMenu } from './UserContextMenu';
 import { contextMenu, type ContextMenuEntry, type ContextMenuItem } from './ContextMenu';
 import { getAvatarUrl } from '../utils/avatar';
 import { renderCodeBlock, renderMarkdown } from '../utils/markdown';
-import { markdownMessageClipboard, pasteMonkyClipboard, renderedMessageClipboard, selectedMessageClipboard,
-  setMessageClipboardData, writeMessageClipboard, type MessageClipboardContent, type MessageCopyMode } from '../utils/messageClipboard';
+import type { MessageClipboardContent, MessageCopyMode } from '../utils/messageClipboard';
 import { getLanguage, t } from '../i18n';
 import { uploadAttachment, UploadHandle } from '../core/AttachmentUploader';
 import { getAttachmentUrl, formatBytes, fileIconName } from '../utils/attachment';
 import { showAlert, showConfirm } from './Dialog';
-import { showCopyToast, showErrorToast, showInfoToast } from './CopyToast';
-import { ImageClipboard } from '../utils/imageClipboard';
+import { showErrorToast, showInfoToast } from './CopyToast';
 import { downloadLightboxFile, lightboxModal, LightboxMedia } from './LightboxModal';
 import { linkPreviewService } from '../core/LinkPreviewService';
 import { mountServerInviteCards, openServerInviteLink, renderComposeServerInvite, serverInviteFromLink } from './ServerInviteCard';
@@ -30,9 +28,8 @@ import { EmojiPicker } from './EmojiPicker';
 import { buildCodeMessage, codeBlockModal } from './CodeBlockModal';
 import { renderMessageBlockComposer } from './MessageBlockComposer';
 import { MarkdownInput } from './MarkdownInput';
-import { bindFormattingToolbar, renderFormattingToolbar } from './FormattingToolbar';
-import { bindEditorContextMenu } from './EditorContextMenu';
-import { bindChatComposerMotion } from './FooterControlsMotion';
+import { bindChatComposer, renderChatComposer, renderChatEditComposer } from './ChatComposer';
+import { bindCodeBlockCopyButtons, MessageCopy, messageClipboardContent } from './MessageCopy';
 import { stickerService } from '../core/StickerService';
 import { openFileInputPicker } from '../utils/buttonLoading';
 import { settingsStore } from '../stores/settingsStore';
@@ -133,9 +130,12 @@ export class ChatView {
   private pendingJumpId: string | null = null;
   /** Answers shown while a poll vote is in flight, keyed by poll id. */
   private readonly pendingPollVotes = new Map<string, string[]>();
-  private copyRequestId = 0;
-  private clearCopyFeedback: (() => void) | null = null;
-  private readonly imageClipboard = new ImageClipboard();
+  private readonly copy = new MessageCopy({
+    isActive: () => this.isCurrentSession(),
+    feed: () => this.container.querySelector<HTMLElement>('#chat-messages-feed'),
+    content: (messageId) => this.messageClipboard(messageId),
+    image: (messageId) => this.messageClipboardImage(messageId),
+  });
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -211,15 +211,7 @@ export class ChatView {
         <button type="button" id="chat-return-latest" class="btn btn-secondary" hidden>${t('chat.returnLatest')}</button>
 
         <div class="chat-input-container" ${readDenied ? 'hidden' : ''}>
-          <div id="chat-edit-composer" class="chat-edit-composer" hidden>
-            <div class="chat-edit-heading">
-              <span class="material-symbols-outlined md-18" aria-hidden="true">edit</span>
-              <strong id="chat-edit-label" role="status">${t('chat.editingMessage')}</strong>
-              <button type="button" id="btn-cancel-message-edit" class="btn btn-secondary">${t('common.cancel')}</button>
-            </div>
-            <p id="chat-edit-hint">${t('chat.editComposerHint')}</p>
-            <p id="chat-edit-error" class="chat-edit-error" role="alert" hidden></p>
-          </div>
+          ${renderChatEditComposer()}
           <div id="mention-dropup" class="mention-dropup" style="display: none;"></div>
           <div id="command-dropup" class="command-dropup" style="display: none;"></div>
           <div id="chat-attachment-tray" class="chat-attachment-tray" style="display: none;"></div>
@@ -227,39 +219,11 @@ export class ChatView {
           <div id="chat-send-permission-banner" class="chat-permission-banner" style="display: none;"></div>
           <div id="chat-command-notice" class="bot-error" role="alert" hidden></div>
           <div id="chat-command-composer" class="bot-command-composer" hidden></div>
-          <div class="chat-composer-surface">
-          ${renderFormattingToolbar()}
-          <div id="chat-reply-composer" class="chat-reply-composer" hidden></div>
-          <div id="chat-composer-blocks" aria-label="${t('chat.composerBlocks')}" hidden></div>
-          <div class="chat-input-wrapper">
-            <div class="chat-create-wrap">
-            <button id="btn-attach" type="button" class="chat-attach-btn" title="${t('chat.moreActions')}"
-              aria-label="${t('chat.moreActions')}" aria-expanded="false" aria-controls="chat-create-menu">
-              <span class="material-symbols-outlined md-22">add</span>
-            </button>
-            <div id="chat-create-menu" class="chat-create-menu" role="menu" hidden>
-              <button type="button" role="menuitem" data-chat-create="attachment">
-                <span class="material-symbols-outlined md-20">attach_file</span><span>${t('chat.attachFile')}</span>
-              </button>
-              <button type="button" role="menuitem" data-chat-create="poll">
-                <span class="material-symbols-outlined md-20">poll</span><span>${t('poll.create')}</span>
-              </button>
-            </div></div>
-            <input id="chat-file-input" type="file" multiple style="display: none;">
-            <button id="btn-emoji" type="button" class="chat-attach-btn" title="${t('chat.emojiPickerTitle')}">
-              <span class="material-symbols-outlined md-22">mood</span>
-            </button>
-            <button id="btn-format" type="button" class="chat-attach-btn" title="${t('chat.formatting')}" aria-label="${t('chat.formatting')}" aria-expanded="false" aria-controls="chat-format-toolbar">
-              <span class="material-symbols-outlined md-22">format_size</span>
-            </button>
-            <monky-markdown-input id="chat-message-input" class="chat-input-field" placeholder="${t(isVoiceChannel ? 'chat.voiceInputPlaceholder' : 'chat.inputPlaceholder', { channel: escapeHtml(channelName) })}" ${this.messageLengthLimit > 0 ? `maxlength="${this.messageLengthLimit}"` : ''}></monky-markdown-input>
-            <span id="chat-char-counter" class="chat-char-count">0/${this.messageLimitLabel}</span>
-            <button type="button" id="btn-send-message" class="btn btn-primary chat-send-btn">
-              <span class="material-symbols-outlined md-16" aria-hidden="true">send</span>
-              <span class="chat-send-label">${t('chat.send')}</span>
-            </button>
-          </div>
-          </div>
+          ${renderChatComposer({
+            kind: 'channel',
+            placeholder: t(isVoiceChannel ? 'chat.voiceInputPlaceholder' : 'chat.inputPlaceholder', { channel: channelName }),
+            maxLength: this.messageLengthLimit,
+          })}
         </div>
       </div>
     `;
@@ -386,31 +350,7 @@ export class ChatView {
 
     mountServerInviteCards(container, row => !!row.dataset.userId && row.dataset.userId === serverStore.currentUser?.id);
     linkPreviewService.initializePreviews(container);
-
-    // Copy button on code blocks (#391). Reading the rendered text back means
-    // the highlighting markup never leaks into what lands on the clipboard.
-    container.querySelectorAll('.md-code-copy').forEach((button) => {
-      button.addEventListener('click', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const code = button.closest('.md-code')?.querySelector('code')?.textContent ?? '';
-        if (!code) return;
-        try {
-          await navigator.clipboard.writeText(code);
-        } catch (err) {
-          console.warn('[ChatView] Could not copy code block', err);
-          return;
-        }
-        const label = button.querySelector('.md-code-copy-label');
-        if (!label) return;
-        label.textContent = t('chat.codeBlockCopied');
-        button.classList.add('md-code-copy--done');
-        window.setTimeout(() => {
-          label.textContent = t('chat.codeBlockCopy');
-          button.classList.remove('md-code-copy--done');
-        }, 1600);
-      });
-    });
+    bindCodeBlockCopyButtons(container);
 
     // Attach right-click context menu on message rows (when not selecting text)
     const rows = container.classList.contains('chat-message-row')
@@ -441,7 +381,7 @@ export class ChatView {
       });
       row.querySelector<HTMLButtonElement>('[data-message-action="copy"]')?.addEventListener('click', () => {
         const messageId = row.dataset.messageId ?? '';
-        const selection = this.selectedClipboard(messageId);
+        const selection = this.copy.selection(messageId);
         dismissToolbar();
         void this.copyMessage(messageId, 'formatted', selection);
       });
@@ -561,20 +501,7 @@ export class ChatView {
       });
       if (!this.messageEdit) items.push({ label: t('chat.replyMessage'), icon: 'reply', onClick: () => this.startReply(message.id) });
     }
-    const selection = this.selectedClipboard(message.id);
-    const modifier = navigator.platform.startsWith('Mac') ? 'Cmd' : 'Ctrl';
-    items.push({
-      label: t('chat.copyMessage'), icon: 'content_copy',
-      onClick: () => { void this.copyMessage(message.id, 'formatted', selection); },
-      submenu: [
-        { label: t('chat.copyFormatted'), shortcut: `${modifier}+C`,
-          onClick: () => { void this.copyMessage(message.id, 'formatted', selection); } },
-        { label: t('chat.copyMarkdown'),
-          onClick: () => { void this.copyMessage(message.id, 'markdown', selection); } },
-        { label: t('chat.copyPlain'), shortcut: `${modifier}+Shift+C`,
-          onClick: () => { void this.copyMessage(message.id, 'plain', selection); } },
-      ],
-    });
+    items.push(this.copy.menuItem(message.id));
     const poll = message.poll;
     if (poll) {
       // Polls are edited as polls, by their creator or a server manager, while they are open.
@@ -1072,17 +999,6 @@ export class ChatView {
     if (edit) this.closeCommandDropup();
   }
 
-  private isEditableTarget(target: EventTarget | null): boolean {
-    const el =
-      target instanceof HTMLElement
-        ? target
-        : target instanceof Node
-          ? target.parentElement
-          : null;
-    if (!el) return false;
-    return !!el.closest('textarea, input, select, monky-markdown-input, [contenteditable]:not([contenteditable="false"])');
-  }
-
   private isUserMentioned(content: string, currentNickname: string): boolean {
     if (!content) return false;
     // `@todos` reaches everyone in the channel, so it highlights the message the
@@ -1381,75 +1297,16 @@ export class ChatView {
     const stickerIds = extractStickerIds(messageText).filter((id) =>
       message.attachments?.some((attachment) => attachment.id === id && attachment.kind === 'image'));
     const content = stripStickerTokens(messageText, stickerIds);
-    if (!content.trim()) {
-      return { text: message.attachments?.map((entry) => entry.originalName).join('\n') || content };
-    }
-    const rendered = this.container.querySelector(
-      `.chat-message-row[data-message-id="${CSS.escape(messageId)}"] .chat-message-text`);
-    return rendered ? renderedMessageClipboard(rendered, content) : markdownMessageClipboard(content);
-  }
-
-  private selectedClipboard(messageId?: string): MessageClipboardContent | null {
-    const feed = this.container.querySelector<HTMLElement>('#chat-messages-feed');
-    const selection = window.getSelection();
-    if (!feed || !selection || selection.isCollapsed) return null;
-    if (messageId) {
-      const row = feed.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
-      if (!row || !selection.rangeCount || !selection.getRangeAt(0).intersectsNode(row)) return null;
-    }
-    return selectedMessageClipboard(feed, selection);
-  }
-
-  private keyboardClipboard(target: EventTarget | null): MessageClipboardContent | null {
-    if (!this.isCurrentSession() || !this.container.isConnected ||
-        this.isEditableTarget(target) || this.isEditableTarget(document.activeElement)) return null;
-    const feed = this.container.querySelector<HTMLElement>('#chat-messages-feed');
-    const element = target instanceof Element ? target : document.activeElement;
-    if (!feed || (element !== document.body && element !== document.documentElement && !feed.contains(element))) return null;
-    // An unsupported or out-of-chat selection must never fall back to copying a whole row.
-    const selection = window.getSelection();
-    if (selection && !selection.isCollapsed) {
-      return this.selectedClipboard();
-    }
-    const row = document.activeElement?.closest<HTMLElement>('.chat-message-row');
-    return row && feed.contains(row) ? this.messageClipboard(row.dataset.messageId ?? '') : null;
+    return messageClipboardContent(this.container, messageId, content,
+      message.attachments?.map((entry) => entry.originalName) ?? []);
   }
 
   private copyMessage(messageId: string, mode: MessageCopyMode = 'formatted', selection: MessageClipboardContent | null = null): Promise<void> {
-    if (!this.isCurrentSession()) return Promise.resolve();
-    if (!selection && mode === 'formatted') {
-      const image = this.messageClipboardImage(messageId);
-      if (image) return this.copyAttachmentImage(image);
-    }
-    const content = this.messageClipboard(messageId);
-    return content ? this.copyContent(selection ?? content, mode) : Promise.resolve();
+    return this.copy.copyMessage(messageId, mode, selection);
   }
 
-  private async copyContent(content: MessageClipboardContent, mode: MessageCopyMode, event?: ClipboardEvent): Promise<void> {
-    this.imageClipboard.cancel();
-    const requestId = ++this.copyRequestId;
-    this.clearCopyFeedback?.();
-    try {
-      if (event?.clipboardData) {
-        setMessageClipboardData(event.clipboardData, content, mode);
-        event.preventDefault();
-      } else {
-        await writeMessageClipboard(content, mode);
-      }
-    } catch (error) {
-      console.warn('[ChatView] Could not copy message', error);
-      if (requestId === this.copyRequestId) void showAlert({ message: t('chat.copyFailed'), variant: 'danger' });
-      return;
-    }
-    if (requestId !== this.copyRequestId) return;
-    this.clearCopyFeedback = showCopyToast(t('chat.messageCopied'));
-  }
-
-  private async copyAttachmentImage(image: HTMLImageElement): Promise<void> {
-    if (!this.isCurrentSession() || !image.isConnected) return;
-    this.copyRequestId++;
-    this.clearCopyFeedback?.();
-    await this.imageClipboard.copy(image.currentSrc || image.src);
+  private copyAttachmentImage(image: HTMLImageElement): Promise<void> {
+    return this.copy.copyImage(image);
   }
 
   private messageClipboardImage(messageId: string): HTMLImageElement | null {
@@ -1829,18 +1686,26 @@ export class ChatView {
     // Clear old unbinders
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
-    this.unbindEvents.push(bindChatComposerMotion(this.container));
 
     const input = this.container.querySelector<MarkdownInput>('#chat-message-input');
     const inputContainer = this.container.querySelector('.chat-input-container') as HTMLElement | null;
-    const inputWrapper = this.container.querySelector('.chat-input-wrapper') as HTMLElement | null;
     const charCounter = document.getElementById('chat-char-counter');
     const btnSend = document.getElementById('btn-send-message');
     this.composerInput = input;
     this.composerChannelId = this.currentChannelId;
-    this.unbindEvents.push(bindFormattingToolbar(this.container));
-    this.unbindEvents.push(bindEditorContextMenu(this.container));
     const isCurrentInput = () => input === this.composerInput && this.isCurrentComposer();
+    if (input) {
+      this.unbindEvents.push(bindChatComposer(this.container, {
+        input,
+        isActive: isCurrentInput,
+        pasteFiles: (files) => {
+          if (!serverStore.hasPermission(Permission.ATTACH_FILES, this.currentChannelId)) return false;
+          this.addFiles(files);
+          return true;
+        },
+        focus: () => this.focusChatInput(),
+      }));
+    }
     let displayedEdit = this.messageEdit;
     let displayedEditPending = displayedEdit?.pending;
     let displayedEditError = displayedEdit?.error;
@@ -1887,35 +1752,7 @@ export class ChatView {
       messagesFeed?.removeEventListener('click', restoreClick);
       messagesFeed?.removeEventListener('click', pollClick);
     });
-    const onCopyKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing || event.altKey ||
-          !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'c') return;
-      const content = this.keyboardClipboard(event.target);
-      if (!content) return;
-      event.preventDefault();
-      if (!event.shiftKey && window.getSelection()?.isCollapsed !== false) {
-        const id = document.activeElement?.closest<HTMLElement>('.chat-message-row')?.dataset.messageId;
-        const image = id && this.messageClipboardImage(id);
-        if (image) { void this.copyAttachmentImage(image); return; }
-      }
-      void this.copyContent(content, event.shiftKey ? 'plain' : 'formatted');
-    };
-    const onCopy = (event: ClipboardEvent) => {
-      if (event.defaultPrevented || !event.clipboardData) return;
-      const content = this.keyboardClipboard(event.target);
-      if (content && window.getSelection()?.isCollapsed !== false) {
-        const id = document.activeElement?.closest<HTMLElement>('.chat-message-row')?.dataset.messageId;
-        const image = id && this.messageClipboardImage(id);
-        if (image) { event.preventDefault(); void this.copyAttachmentImage(image); return; }
-      }
-      if (content) void this.copyContent(content, 'formatted', event);
-    };
-    document.addEventListener('keydown', onCopyKey);
-    document.addEventListener('copy', onCopy);
-    this.unbindEvents.push(() => {
-      document.removeEventListener('keydown', onCopyKey);
-      document.removeEventListener('copy', onCopy);
-    });
+    this.unbindEvents.push(this.copy.bind());
     const commandDropup = this.container.querySelector<HTMLElement>('#command-dropup');
     const onCommandFocusOut = (event: FocusEvent) => {
       if (event.relatedTarget instanceof Node && (input?.contains(event.relatedTarget) || commandDropup?.contains(event.relatedTarget))) return;
@@ -1940,16 +1777,6 @@ export class ChatView {
       if (!input) return;
       input.refresh();
     };
-
-    const focusFromInputShell = (e: MouseEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (!input || e.defaultPrevented) return;
-      if (this.isEditableTarget(target)) return;
-      if (target?.closest('button, select, summary, .mention-dropup, #chat-attachment-tray, #chat-command-composer')) return;
-      requestAnimationFrame(() => this.focusChatInput());
-    };
-    inputContainer?.addEventListener('mousedown', focusFromInputShell);
-    inputWrapper?.addEventListener('mousedown', focusFromInputShell);
 
     let composeLinkTimer: ReturnType<typeof setTimeout> | null = null;
     let pastePreviewTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2358,46 +2185,6 @@ export class ChatView {
         codeBlockModal.close();
       });
     }
-
-    // Paste files/images directly into the message box.
-    const onInputPaste = (e: ClipboardEvent) => {
-      if (!input || !isCurrentInput() || e.defaultPrevented) return;
-      if (e.target instanceof HTMLTextAreaElement && e.target.closest('.chat-code-input')) return;
-      const files = e.clipboardData?.files;
-      if (files && files.length > 0) {
-        if (!serverStore.hasPermission(Permission.ATTACH_FILES, this.currentChannelId)) return;
-        e.preventDefault();
-        this.addFiles(files);
-        return;
-      }
-      if (e.clipboardData && pasteMonkyClipboard(input, e.clipboardData)) e.preventDefault();
-    };
-    input?.addEventListener('paste', onInputPaste, true);
-    this.unbindEvents.push(() => input?.removeEventListener('paste', onInputPaste, true));
-
-    // Global paste handler: Ctrl+V anywhere on the page uploads files when a
-    // text channel is open (#181).
-    const onGlobalPaste = (e: Event) => {
-      const ce = e as ClipboardEvent;
-      // Never hijack normal paste into editable fields; only catch truly global
-      // pastes so text input keeps its native Ctrl+V behavior (#181).
-      if (this.isEditableTarget(ce.target)) return;
-      if (!this.currentChannelId) return;
-      const files = ce.clipboardData?.files;
-      if (files && files.length > 0) {
-        if (!serverStore.hasPermission(Permission.ATTACH_FILES, this.currentChannelId)) return;
-        e.preventDefault();
-        this.addFiles(files);
-        // Focus the input so the user can add a message to accompany the file.
-        this.focusChatInput();
-      }
-    };
-    document.addEventListener('paste', onGlobalPaste);
-    this.unbindEvents.push(() => document.removeEventListener('paste', onGlobalPaste));
-    this.unbindEvents.push(() => {
-      inputContainer?.removeEventListener('mousedown', focusFromInputShell);
-      inputWrapper?.removeEventListener('mousedown', focusFromInputShell);
-    });
 
     // Drag & drop onto the chat pane. Listeners live on the persistent container,
     // so they must be unbound on re-render to avoid stacking.
@@ -3477,9 +3264,7 @@ export class ChatView {
   private unbindListeners(): void {
     this.rememberComposerText();
     this.commandSelection++;
-    this.copyRequestId++;
-    this.imageClipboard.cancel();
-    this.clearCopyFeedback?.();
+    this.copy.cancel();
     contextMenu.close();
     this.pendingJumpId = null;
     this.publicSelectors?.destroy();

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O seletor de emojis não trava mais na primeira abertura. Antes ele demorava a aparecer, sem dar sinal de vida; agora surge na hora e os emojis chegam logo em seguida, nos canais, nas mensagens privadas e nas reações.",
+  "en": "The emoji picker no longer freezes the first time you open it. It used to take a while to show up, without a sign of life; now it appears right away and the emojis follow a moment later, in channels, direct messages and reactions."
+}

@@ -31,7 +31,7 @@ function copySafeNodes(source: Node, target: Node): void {
       continue;
     }
     if (!(child instanceof Element)) continue;
-    if (child.matches('.md-code-header, button, script, style, iframe, object, embed, svg, [hidden], [aria-hidden="true"]')) continue;
+    if (child.matches('.md-code-header, .chat-edited-badge, button, script, style, iframe, object, embed, svg, [hidden], [aria-hidden="true"]')) continue;
     const href = child.tagName === 'A' ? safeLink(child) : null;
     if (!allowedTags.has(child.tagName) || (child.tagName === 'A' && !href)) {
       copySafeNodes(child, target);

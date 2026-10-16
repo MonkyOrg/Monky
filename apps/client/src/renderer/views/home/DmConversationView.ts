@@ -6,6 +6,7 @@ import {
   type DmMessageView,
   type DmOutgoingFile,
   type DmPeerView,
+  type MessageReply,
 } from '@monky/shared';
 import { t } from '../../i18n';
 import { dmStore } from '../../stores/dmStore';
@@ -13,13 +14,19 @@ import { ownAvatarSource } from '../../core/profileSync';
 import { connectionStore } from '../../stores/connectionStore';
 import { formatBytes, fileIconName } from '../../utils/attachment';
 import { getAvatarUrl } from '../../utils/avatar';
+import { openFileInputPicker } from '../../utils/buttonLoading';
 import { escapeHtml } from '../../utils/html';
 import { renderMarkdown } from '../../utils/markdown';
-import { formatMessageClock, formatMessageTime } from '../../utils/messageReply';
+import type { MessageClipboardContent } from '../../utils/messageClipboard';
+import { formatMessageClock, formatMessageTime, renderReplyPreview } from '../../utils/messageReply';
+import { setSurfaceVisible } from '../../utils/surfaceVisibility';
+import { bindChatComposer, renderChatComposer, renderChatEditComposer } from '../ChatComposer';
+import { contextMenu, type ContextMenuEntry } from '../ContextMenu';
 import { showErrorToast } from '../CopyToast';
 import { showConfirm } from '../Dialog';
 import { EmojiPicker } from '../EmojiPicker';
 import { lightboxModal } from '../LightboxModal';
+import { bindCodeBlockCopyButtons, MessageCopy, messageClipboardContent } from '../MessageCopy';
 import { mountServerInviteCards, openServerInviteLink } from '../ServerInviteCard';
 import type { MarkdownInput } from '../MarkdownInput';
 import '../MarkdownInput';
@@ -42,7 +49,8 @@ function sameLocalDay(a: number, b: number): boolean {
 
 /**
  * One direct-message conversation (#743). History lives in the main process;
- * this view renders what `dmStore` holds and sends through it.
+ * this view renders what `dmStore` holds and sends through it. The composer,
+ * its menus and message copying are the ones server channels use.
  */
 export class DmConversationView {
   private container: HTMLElement | null = null;
@@ -50,6 +58,8 @@ export class DmConversationView {
   private listeners: AbortController | null = null;
   private replyTo: string | null = null;
   private editing: string | null = null;
+  /** Unsent text set aside while a sent message is being edited. */
+  private draft = '';
   private staged: StagedFile[] = [];
   private readonly blobUrls = new Map<string, string>();
   private readonly loadingBlobs = new Set<string>();
@@ -57,6 +67,12 @@ export class DmConversationView {
   private composerPicker: EmojiPicker | null = null;
   private pinnedToBottom = true;
   private sending = false;
+  private readonly copy = new MessageCopy({
+    isActive: () => !!this.container?.isConnected,
+    feed: () => this.query('[data-dm-feed]'),
+    content: (messageId) => this.messageClipboard(messageId),
+    image: (messageId) => this.messageClipboardImage(messageId),
+  });
 
   constructor(readonly peer: string) {}
 
@@ -71,7 +87,9 @@ export class DmConversationView {
     this.renderMessages(true);
     this.unsubscribers.push(
       dmStore.bus.on<{ peer: string }>('messages', (event) => {
-        if (event?.peer === this.peer) this.renderMessages(false);
+        if (event?.peer !== this.peer) return;
+        this.renderMessages(false);
+        if (this.replyTo) this.renderReplyComposer();
       }),
       dmStore.bus.on<{ peer: string }>('typing', (event) => {
         if (event?.peer === this.peer) this.renderTyping();
@@ -96,6 +114,8 @@ export class DmConversationView {
     this.unsubscribers.splice(0).forEach((unsubscribe) => unsubscribe());
     this.listeners?.abort();
     this.listeners = null;
+    this.copy.cancel();
+    contextMenu.close();
     this.picker?.destroy();
     this.picker = null;
     this.composerPicker?.destroy();
@@ -104,6 +124,10 @@ export class DmConversationView {
     this.blobUrls.clear();
     for (const file of this.staged) if (file.previewUrl) URL.revokeObjectURL(file.previewUrl);
     this.staged = [];
+    this.replyTo = null;
+    this.editing = null;
+    this.draft = '';
+    this.sending = false;
     this.container = null;
   }
 
@@ -122,7 +146,7 @@ export class DmConversationView {
   private renderShell(): string {
     return `
       <div class="chat-container dm-conversation" data-dm-peer="${escapeHtml(this.peer)}">
-        <div class="chat-drop-overlay" data-dm-drop>
+        <div class="chat-drop-overlay">
           <div class="drop-inner">
             <span class="material-symbols-outlined" style="font-size: 48px;">upload_file</span>
             <div class="drop-title">${t('chat.dropTitle')}</div>
@@ -134,33 +158,13 @@ export class DmConversationView {
         <div class="dm-typing" data-dm-typing aria-live="polite"></div>
         <div class="chat-input-container">
           <div class="chat-permission-banner dm-banner" data-dm-banner hidden></div>
-          <div class="chat-edit-composer" data-dm-edit hidden>
-            <div class="chat-edit-heading">
-              <span class="material-symbols-outlined md-18" aria-hidden="true">edit</span>
-              <strong role="status">${t('chat.editingMessage')}</strong>
-              <button type="button" class="btn btn-secondary" data-dm-cancel-edit>${t('common.cancel')}</button>
-            </div>
-            <p>${t('chat.editComposerHint')}</p>
-          </div>
-          <div class="chat-reply-composer" data-dm-reply hidden></div>
-          <div class="chat-attachment-tray" data-dm-tray hidden></div>
-          <div class="chat-composer-surface">
-            <div class="chat-input-wrapper">
-              <button type="button" class="chat-attach-btn" data-dm-attach title="${escapeHtml(t('chat.attachFile'))}" aria-label="${escapeHtml(t('chat.attachFile'))}">
-                <span class="material-symbols-outlined md-22">add</span>
-              </button>
-              <input type="file" multiple hidden data-dm-file-input>
-              <button type="button" class="chat-attach-btn" data-dm-emoji title="${escapeHtml(t('chat.emojiAction'))}" aria-label="${escapeHtml(t('chat.emojiAction'))}">
-                <span class="material-symbols-outlined md-22">mood</span>
-              </button>
-              <monky-markdown-input class="chat-input-field" data-dm-input maxlength="${DM_MAX_MESSAGE_LENGTH}"
-                placeholder="${escapeHtml(t('dm.inputPlaceholder', { nickname: this.nickname() }))}"></monky-markdown-input>
-              <button type="button" class="btn btn-primary chat-send-btn" data-dm-send>
-                <span class="material-symbols-outlined md-16" aria-hidden="true">send</span>
-                <span class="chat-send-label">${t('chat.send')}</span>
-              </button>
-            </div>
-          </div>
+          ${renderChatEditComposer()}
+          <div id="chat-attachment-tray" class="chat-attachment-tray" style="display: none;"></div>
+          ${renderChatComposer({
+            kind: 'direct',
+            placeholder: t('dm.inputPlaceholder', { nickname: this.nickname() }),
+            maxLength: DM_MAX_MESSAGE_LENGTH,
+          })}
           <div class="dm-offline-hint" data-dm-offline hidden></div>
         </div>
       </div>
@@ -186,8 +190,6 @@ export class DmConversationView {
         <span>${t('dm.encrypted')}</span>
       </div>
     `;
-    const input = this.input();
-    if (input) input.placeholder = t('dm.inputPlaceholder', { nickname: this.nickname() });
   }
 
   private canWrite(): boolean {
@@ -219,6 +221,7 @@ export class DmConversationView {
       this.cancelEdit();
       this.clearReply();
       this.clearStaged();
+      this.composerPicker?.close();
     }
     const offline = this.query('[data-dm-offline]');
     if (offline) {
@@ -226,6 +229,59 @@ export class DmConversationView {
       offline.hidden = !show;
       offline.textContent = show ? t('dm.offlineHint', { nickname: this.nickname() }) : '';
     }
+    this.syncComposer();
+  }
+
+  /** The same composer states as a server channel: editing swaps Send for Save and sets attachments aside. */
+  private syncComposer(): void {
+    const input = this.input();
+    if (!input) return;
+    const editing = this.editing !== null;
+    const saving = editing && this.sending;
+    this.query('.chat-input-container')?.classList.toggle('chat-input-container--editing', editing);
+    const banner = this.query('#chat-edit-composer');
+    if (banner) banner.hidden = !editing;
+    const cancel = this.query<HTMLButtonElement>('#btn-cancel-message-edit');
+    if (cancel) cancel.disabled = saving;
+    const placeholder = editing ? t('chat.editingMessage') : t('dm.inputPlaceholder', { nickname: this.nickname() });
+    // Each attribute change reconfigures the editor, so only real changes are written.
+    if (input.placeholder !== placeholder) input.placeholder = placeholder;
+    if (input.getAttribute('aria-label') !== placeholder) input.setAttribute('aria-label', placeholder);
+    const describedBy = editing ? 'chat-edit-hint chat-edit-error' : null;
+    if (input.getAttribute('aria-describedby') !== describedBy) {
+      if (describedBy) input.setAttribute('aria-describedby', describedBy);
+      else input.removeAttribute('aria-describedby');
+    }
+    if (input.readOnly !== saving) input.readOnly = saving;
+    input.classList.toggle('chat-input-field--readonly', saving);
+    this.query('.chat-input-wrapper')?.classList.toggle('chat-input-wrapper--disabled', saving);
+    this.container?.querySelectorAll<HTMLButtonElement>('#btn-emoji, #btn-format, [data-format]').forEach((button) => {
+      button.disabled = saving;
+    });
+    const attach = this.query<HTMLButtonElement>('#btn-attach');
+    if (attach) {
+      attach.style.display = editing ? 'none' : '';
+      attach.disabled = editing;
+    }
+    const send = this.query<HTMLButtonElement>('#btn-send-message');
+    if (send) {
+      send.disabled = this.sending;
+      send.setAttribute('aria-busy', String(saving));
+      const label = send.querySelector('.chat-send-label');
+      const text = t(saving ? 'chat.editSaving' : editing ? 'common.save' : 'chat.send');
+      if (label && label.textContent !== text) label.textContent = text;
+      const icon = send.querySelector('.material-symbols-outlined');
+      if (icon) icon.textContent = saving ? 'hourglass_empty' : editing ? 'check' : 'send';
+    }
+    this.updateCounter();
+  }
+
+  private updateCounter(): void {
+    const length = this.input()?.value.length ?? 0;
+    const counter = this.query('#chat-char-counter');
+    if (!counter) return;
+    counter.textContent = `${length}/${DM_MAX_MESSAGE_LENGTH}`;
+    counter.classList.toggle('code-char-count--over', length > DM_MAX_MESSAGE_LENGTH);
   }
 
   private renderTyping(): void {
@@ -463,12 +519,10 @@ export class DmConversationView {
   }
 
   private renderTray(): void {
-    const tray = this.query('[data-dm-tray]');
+    const tray = this.query('#chat-attachment-tray');
     if (!tray) return;
     if (this.staged.length === 0) {
-      tray.hidden = true;
-      tray.style.display = 'none';
-      tray.replaceChildren();
+      setSurfaceVisible(tray, false, 'panel', undefined, () => tray.replaceChildren());
       return;
     }
     tray.innerHTML = this.staged.map((entry) => `
@@ -483,28 +537,40 @@ export class DmConversationView {
         </button>
       </div>
     `).join('');
-    tray.hidden = false;
-    tray.style.display = 'flex';
+    setSurfaceVisible(tray, this.editing === null, 'panel', 'flex');
   }
 
   private renderReplyComposer(): void {
-    const element = this.query('[data-dm-reply]');
+    const element = this.query('#chat-reply-composer');
     if (!element) return;
-    const original = this.replyTo ? dmStore.conversation(this.peer)?.messages.find((message) => message.id === this.replyTo) : undefined;
+    const original = this.replyTo ? this.message(this.replyTo) : undefined;
     if (!original || this.editing) {
-      element.hidden = true;
-      element.replaceChildren();
+      delete element.dataset.reply;
+      setSurfaceVisible(element, false, 'panel', undefined, () => element.replaceChildren());
       return;
     }
-    const author = this.authorInfo(original.author);
-    const preview = original.content.trim() || (original.attachments[0]?.name ?? '');
-    element.innerHTML = `<div class="chat-quote">
-      <span><strong>${escapeHtml(t('dm.replyingTo', { nickname: author.name }))}</strong> ${escapeHtml(preview.length > 120 ? `${preview.slice(0, 120)}…` : preview)}</span>
-      <button type="button" data-dm-cancel-reply aria-label="${escapeHtml(t('chat.cancelReply'))}" title="${escapeHtml(t('chat.cancelReply'))}">
-        <span class="material-symbols-outlined md-18" aria-hidden="true">close</span>
-      </button>
-    </div>`;
-    element.hidden = false;
+    // Deliveries and reactions also refresh the conversation; only a change to the quoted message redraws it.
+    const key = `${original.id}:${original.editedAt ?? ''}:${original.deleted}`;
+    if (element.dataset.reply === key && !element.hidden && !element.hasAttribute('data-ui-closing')) return;
+    element.dataset.reply = key;
+    element.innerHTML = `<div class="chat-quote">${renderReplyPreview(this.replyPreview(original))}
+      <button type="button" aria-label="${escapeHtml(t('chat.cancelReply'))}" title="${escapeHtml(t('chat.cancelReply'))}"><span class="material-symbols-outlined md-18" aria-hidden="true">close</span></button></div>`;
+    element.querySelector('button')?.addEventListener('click', () => {
+      this.clearReply();
+      this.focusInput();
+    });
+    setSurfaceVisible(element, true);
+  }
+
+  private replyPreview(message: DmMessageView): MessageReply {
+    return {
+      messageId: message.id,
+      userNickname: this.authorInfo(message.author).name,
+      content: message.content,
+      deleted: message.deleted,
+      hasAttachments: message.attachments.length > 0,
+      createdAt: message.createdAt,
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -515,23 +581,47 @@ export class DmConversationView {
     const root = this.container!;
     const signal = this.listeners!.signal;
     const input = this.input();
-    const fileInput = this.query<HTMLInputElement>('[data-dm-file-input]');
+    const fileInput = this.query<HTMLInputElement>('#chat-file-input');
+    const attach = this.query<HTMLButtonElement>('#btn-attach');
+
+    if (input) {
+      this.unsubscribers.push(bindChatComposer(root, {
+        input,
+        isActive: () => this.container === root && root.isConnected,
+        pasteFiles: (files) => {
+          if (!this.canWrite() || this.editing) return false;
+          this.stageFiles([...files]);
+          return true;
+        },
+        focus: () => this.focusInput(),
+      }));
+    }
+    this.unsubscribers.push(this.copy.bind());
 
     root.addEventListener('click', (event) => this.onClick(event), { signal });
-    this.query('[data-dm-send]')?.addEventListener('click', () => void this.submit(), { signal });
-    this.query('[data-dm-attach]')?.addEventListener('click', () => fileInput?.click(), { signal });
+    this.query('[data-dm-feed]')?.addEventListener('contextmenu', (event) => this.onFeedContextMenu(event), { signal });
+    this.query('#btn-send-message')?.addEventListener('click', () => void this.submit(), { signal });
+    this.query('#btn-cancel-message-edit')?.addEventListener('click', () => {
+      this.cancelEdit();
+      this.focusInput();
+    }, { signal });
+    attach?.addEventListener('click', () => {
+      if (this.canWrite() && !this.editing) openFileInputPicker(fileInput, attach);
+    }, { signal });
     fileInput?.addEventListener('change', () => {
       if (fileInput.files) this.stageFiles([...fileInput.files]);
       fileInput.value = '';
     }, { signal });
-    this.query('[data-dm-emoji]')?.addEventListener('click', (event) => this.toggleComposerEmoji(event.currentTarget as HTMLElement), { signal });
+    this.query('#btn-emoji')?.addEventListener('click', (event) => this.toggleComposerEmoji(event.currentTarget as HTMLElement), { signal });
+    // The formatting bar leaves the code button to its composer: here it opens a code block in the editor.
+    this.query('#btn-code')?.addEventListener('click', () => this.insertCodeBlock(), { signal });
 
     input?.addEventListener('keydown', (event) => {
       if (event.isComposing || event.keyCode === 229) return;
       if (event.key === 'Escape') {
         if (this.editing) {
           event.preventDefault();
-          this.cancelEdit();
+          if (!this.sending) this.cancelEdit();
         } else if (this.replyTo) {
           event.preventDefault();
           this.clearReply();
@@ -553,14 +643,9 @@ export class DmConversationView {
       }
     }, { capture: true, signal });
     input?.addEventListener('input', () => {
+      this.updateCounter();
       if (!this.editing && input.value.trim()) dmStore.typing(this.peer);
     }, { signal });
-    input?.addEventListener('paste', (event) => {
-      const files = [...(event.clipboardData?.files ?? [])];
-      if (files.length === 0) return;
-      event.preventDefault();
-      this.stageFiles(files);
-    }, { capture: true, signal });
 
     const feed = this.query('[data-dm-feed]');
     feed?.addEventListener('scroll', () => {
@@ -568,13 +653,13 @@ export class DmConversationView {
       if (feed.scrollTop < 60) void dmStore.loadOlder(this.peer);
     }, { passive: true, signal });
 
-    const overlay = this.query('[data-dm-drop]');
+    const chat = this.query('.chat-container');
     let dragDepth = 0;
     root.addEventListener('dragenter', (event) => {
       if (!this.canWrite() || !event.dataTransfer?.types.includes('Files')) return;
       event.preventDefault();
       dragDepth += 1;
-      overlay?.classList.add('active');
+      chat?.classList.add('chat-drag-over');
     }, { signal });
     root.addEventListener('dragover', (event) => {
       if (!this.canWrite() || !event.dataTransfer?.types.includes('Files')) return;
@@ -582,11 +667,11 @@ export class DmConversationView {
     }, { signal });
     root.addEventListener('dragleave', () => {
       dragDepth = Math.max(0, dragDepth - 1);
-      if (dragDepth === 0) overlay?.classList.remove('active');
+      if (dragDepth === 0) chat?.classList.remove('chat-drag-over');
     }, { signal });
     root.addEventListener('drop', (event) => {
       dragDepth = 0;
-      overlay?.classList.remove('active');
+      chat?.classList.remove('chat-drag-over');
       if (!this.canWrite() || !event.dataTransfer?.files.length) return;
       event.preventDefault();
       this.stageFiles([...event.dataTransfer.files]);
@@ -603,14 +688,50 @@ export class DmConversationView {
     });
     // Only rows of this user's own messages carry a delivery state.
     mountServerInviteCards(feed, row => row.hasAttribute('data-delivery'));
-    feed.querySelectorAll<HTMLButtonElement>('.md-code-copy').forEach((button) => {
-      button.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const code = button.closest('.md-code')?.querySelector('code')?.textContent ?? '';
-        if (code) void navigator.clipboard.writeText(code).catch(() => undefined);
-      });
-    });
+    bindCodeBlockCopyButtons(feed);
+  }
+
+  /** Right-clicking a message offers the same actions as in a server channel. */
+  private onFeedContextMenu(event: MouseEvent): void {
+    const target = event.target instanceof Element ? event.target : null;
+    const row = target?.closest<HTMLElement>('.chat-message-row[data-message-id]');
+    const messageId = row?.dataset.messageId;
+    if (!row || !messageId) return;
+    const image = target?.closest<HTMLImageElement>('img.chat-attachment-image');
+    if (image?.src && row.contains(image)) {
+      event.preventDefault();
+      contextMenu.open(event.clientX, event.clientY, [{
+        label: t('chat.copyImage'), icon: 'content_copy',
+        onClick: () => { void this.copy.copyImage(image); },
+      }, ...this.messageMenuItems(messageId)]);
+      return;
+    }
+    // A selected fragment keeps the native selection behavior, as in server channels.
+    if (window.getSelection()?.toString().trim()) return;
+    const items = this.messageMenuItems(messageId);
+    if (items.length === 0) return;
+    event.preventDefault();
+    contextMenu.open(event.clientX, event.clientY, items);
+  }
+
+  private messageMenuItems(messageId: string): ContextMenuEntry[] {
+    const message = this.message(messageId);
+    if (!message || message.deleted) return [];
+    const writable = this.canWrite();
+    const mine = message.author === dmStore.snapshot.me?.publicKey;
+    const items: ContextMenuEntry[] = [];
+    if (writable) {
+      // The toolbar button anchors the picker, exactly as the hover action does.
+      items.push({ label: t('chat.emojiAction'), icon: 'add_reaction', onClick: () => this.query<HTMLButtonElement>(
+        `.chat-message-row[data-message-id="${CSS.escape(messageId)}"] [data-dm-action="react"]`)?.click() });
+      if (!this.editing) items.push({ label: t('chat.replyMessage'), icon: 'reply', onClick: () => this.startReply(messageId) });
+    }
+    items.push(this.copy.menuItem(messageId));
+    if (writable && mine) items.push({ label: t('chat.editMessage'), icon: 'edit', onClick: () => this.startEdit(messageId) });
+    if (mine) {
+      items.push({ label: t('chat.deleteMessage'), icon: 'delete', danger: true, onClick: () => void this.confirmDelete(messageId) });
+    }
+    return items;
   }
 
   private onClick(event: MouseEvent): void {
@@ -624,15 +745,6 @@ export class DmConversationView {
     }
     if (target.closest('[data-dm-unblock]')) {
       void this.report(dmStore.unblock(this.peer));
-      return;
-    }
-    if (target.closest('[data-dm-cancel-edit]')) {
-      this.cancelEdit();
-      return;
-    }
-    if (target.closest('[data-dm-cancel-reply]')) {
-      this.clearReply();
-      this.focusInput();
       return;
     }
     const unstage = target.closest<HTMLElement>('[data-dm-unstage]');
@@ -685,7 +797,7 @@ export class DmConversationView {
           this.startEdit(messageId);
           break;
         case 'copy':
-          this.copyMessage(messageId);
+          void this.copy.copyMessage(messageId, 'formatted', this.copy.selection(messageId));
           break;
         case 'delete':
           void this.confirmDelete(messageId);
@@ -738,12 +850,14 @@ export class DmConversationView {
       this.composerPicker.close();
       return;
     }
+    // Anchored inside the composer like the server picker, not floating over the page.
+    const container = this.query('.chat-input-container');
+    if (!container) return;
     this.composerPicker?.destroy();
     this.composerPicker = new EmojiPicker({
-      container: document.body,
+      container,
       anchor,
       emojiOnly: true,
-      floating: true,
       onSelectEmoji: (emoji) => {
         const input = this.input();
         if (!input) return;
@@ -752,6 +866,14 @@ export class DmConversationView {
       },
     });
     void this.composerPicker.open();
+  }
+
+  private insertCodeBlock(): void {
+    const input = this.input();
+    if (!input || input.readOnly || input.disabled || !this.canWrite()) return;
+    const selected = input.value.slice(input.selectionStart, input.selectionEnd);
+    input.insertText(`\`\`\`\n${selected}\n\`\`\``);
+    input.focus();
   }
 
   // ---------------------------------------------------------------------------
@@ -773,34 +895,30 @@ export class DmConversationView {
   }
 
   private startEdit(messageId: string): void {
-    const message = dmStore.conversation(this.peer)?.messages.find((entry) => entry.id === messageId);
+    const message = this.message(messageId);
     const input = this.input();
     if (!message || !input || !this.canWrite() || message.author !== dmStore.snapshot.me?.publicKey) return;
+    if (this.editing === null) this.draft = input.value;
     this.editing = messageId;
     this.replyTo = null;
+    this.composerPicker?.close();
     this.renderReplyComposer();
-    const edit = this.query('[data-dm-edit]');
-    if (edit) edit.hidden = false;
-    const tray = this.query('[data-dm-tray]');
-    if (tray) tray.style.display = 'none';
+    this.renderTray();
     input.value = message.content;
     input.setSelectionRange(message.content.length, message.content.length);
+    this.syncComposer();
     this.focusInput();
   }
 
+  /** Leaving an edit brings back whatever was being typed before it started. */
   private cancelEdit(): void {
     if (!this.editing) return;
     this.editing = null;
-    const edit = this.query('[data-dm-edit]');
-    if (edit) edit.hidden = true;
     const input = this.input();
-    if (input) input.value = '';
+    if (input) input.value = this.draft;
+    this.draft = '';
     this.renderTray();
-  }
-
-  private copyMessage(messageId: string): void {
-    const message = dmStore.conversation(this.peer)?.messages.find((entry) => entry.id === messageId);
-    if (message?.content) void navigator.clipboard.writeText(message.content).catch(() => undefined);
+    this.syncComposer();
   }
 
   private async confirmDelete(messageId: string): Promise<void> {
@@ -862,20 +980,26 @@ export class DmConversationView {
         await this.confirmDelete(messageId);
         return;
       }
+      if (content === this.message(messageId)?.content) {
+        this.cancelEdit();
+        return;
+      }
       this.sending = true;
+      this.syncComposer();
       try {
         const failure = await dmStore.editMessage(this.peer, messageId, content);
         if (failure) this.showFailure(failure);
-        else this.cancelEdit();
+        else if (this.editing === messageId) this.cancelEdit();
       } finally {
         this.sending = false;
+        this.syncComposer();
+        this.focusInput();
       }
       return;
     }
     if (!content && this.staged.length === 0) return;
     this.sending = true;
-    const sendButton = this.query<HTMLButtonElement>('[data-dm-send]');
-    if (sendButton) sendButton.disabled = true;
+    this.syncComposer();
     try {
       const files: DmOutgoingFile[] = [];
       for (const entry of this.staged) {
@@ -896,7 +1020,7 @@ export class DmConversationView {
       this.pinnedToBottom = true;
     } finally {
       this.sending = false;
-      if (sendButton) sendButton.disabled = false;
+      this.syncComposer();
       this.focusInput();
     }
   }
@@ -919,7 +1043,24 @@ export class DmConversationView {
   }
 
   private input(): MarkdownInput | null {
-    return this.query<MarkdownInput>('[data-dm-input]');
+    return this.query<MarkdownInput>('#chat-message-input');
+  }
+
+  private message(messageId: string): DmMessageView | undefined {
+    return dmStore.conversation(this.peer)?.messages.find((entry) => entry.id === messageId);
+  }
+
+  private messageClipboard(messageId: string): MessageClipboardContent | null {
+    const message = this.message(messageId);
+    if (!message || message.deleted || !this.container) return null;
+    return messageClipboardContent(this.container, messageId, message.content, message.attachments.map((entry) => entry.name));
+  }
+
+  /** A message without text copies its loaded image, as server channels do. */
+  private messageClipboardImage(messageId: string): HTMLImageElement | null {
+    const message = this.message(messageId);
+    if (!message || message.deleted || message.content.trim()) return null;
+    return this.query<HTMLImageElement>(`.chat-message-row[data-message-id="${CSS.escape(messageId)}"] img.chat-attachment-image[src]`);
   }
 
   private focusInput(): void {
