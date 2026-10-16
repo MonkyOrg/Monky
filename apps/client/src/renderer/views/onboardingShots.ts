@@ -22,19 +22,20 @@ export type OnboardingShot =
   | 'invite-hamachi'
   | 'invite-tailscale'
   | 'invite-zerotier'
+  | 'server-bots-link'
   | 'terminal-ipconfig'
   | 'terminal-gateway'
   | 'terminal-ip-unix'
   | 'terminal-ssh'
   | 'terminal-monky-install'
   | 'terminal-monky-create'
+  | 'terminal-oracle-firewall'
+  | 'terminal-monkybot'
   | 'illustration-lan'
   | 'illustration-router-menu'
   | 'illustration-router-rule'
   | 'illustration-public-ip'
   | 'illustration-vps-providers'
-  | 'illustration-oracle-instance'
-  | 'illustration-oracle-ingress'
   | 'site-radmin'
   | 'site-hamachi'
   | 'site-tailscale'
@@ -50,7 +51,13 @@ export type OnboardingShot =
   | 'app-tailscale-ip'
   | 'app-zerotier-create'
   | 'app-zerotier-join'
-  | 'app-zerotier-ip';
+  | 'app-zerotier-ip'
+  | 'app-oracle-shape'
+  | 'app-oracle-network'
+  | 'app-oracle-ssh'
+  | 'app-oracle-security-list'
+  | 'app-oracle-ingress'
+  | 'app-oracle-ip';
 
 interface ShotImage {
   url: string;

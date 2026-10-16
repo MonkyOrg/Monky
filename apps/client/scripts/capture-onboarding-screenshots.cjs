@@ -8,18 +8,19 @@
  *
  * Terminal shots are drawn here with sample addresses (documentation ranges and
  * private IPs, never this machine's) and the real `monky create` prompts;
- * steps outside Monky (home network, router, cloud console) are illustrations
- * from onboarding-illustrations.cjs.
+ * steps outside Monky that differ per person (home network, router) are
+ * illustrations from onboarding-illustrations.cjs.
  *
  * The download pages of the VPNs and of Oracle Cloud come from the live sites,
  * so they need the internet and only run on request (onboarding-sites.cjs):
  *   npm run screenshots:onboarding -- --sites        everything
  *   npm run screenshots:onboarding -- --sites-only   only the sites
  *
- * The VPN apps themselves were photographed once in Windows Sandbox, with
- * throwaway networks and account data redacted (onboarding-app-shots/); this
- * script only frames them (onboarding-app-shots.cjs). Retake them by hand if
- * an app's interface changes.
+ * The VPN apps themselves were photographed once in Windows Sandbox, and the
+ * Oracle Cloud console in a real Always Free account, with throwaway networks
+ * and account data redacted (onboarding-app-shots/); this script only frames
+ * them (onboarding-app-shots.cjs). Retake them by hand if an app's or the
+ * console's interface changes.
  */
 const fs = require('node:fs');
 const os = require('node:os');
@@ -37,6 +38,8 @@ const repoRoot = path.resolve(clientRoot, '..', '..');
 const outputDir = path.join(clientRoot, 'src', 'renderer', 'assets', 'onboarding');
 const LANGUAGES = ['pt-BR', 'en'];
 const INVITE_VARIANTS = ['lan', 'public', 'radmin', 'hamachi', 'tailscale', 'zerotier'];
+// MonkyBot's own avatar, as its manifest publishes it, for the Bots tab shot.
+const monkyBotAvatar = `data:image/png;base64,${fs.readFileSync(path.join(__dirname, 'onboarding-app-shots', 'monkybot-avatar.png')).toString('base64')}`;
 const WIDTH = 1100;
 const HEIGHT = 760;
 
@@ -212,6 +215,11 @@ if (!process.versions.electron) {
         await capture(`invite-${variant}-${language}.png`, () => evaluate(`(${markInviteShot.toString()})()`));
         await evaluate(`(${closeInviteShot.toString()})()`);
       }
+
+      phase = `${language} server bots`;
+      await evaluate(`(${openBotsShot.toString()})(${JSON.stringify(monkyBotAvatar)})`);
+      await capture(`server-bots-link-${language}.png`, () => evaluate(`(${botsShotRect.toString()})()`));
+      await evaluate(`document.querySelector('#bots-shot')?.remove()`);
 
       const terminals = terminalSpecs(language, cliCatalogs[language], latestVersion());
       for (const [name, spec] of Object.entries(terminals)) {
@@ -545,13 +553,6 @@ function terminalSpecs(language, cli, version) {
         out('Comece com:', 'dim'),
         out('  monky create    — criar um novo servidor'),
         out('  monky --help    — ver todos os comandos'),
-        out(),
-        vps('sudo ufw allow 3000/tcp'),
-        out('Rule added'),
-        out('Rule added (v6)'),
-        vps('sudo ufw allow 40000:49151/udp'),
-        out('Rule added'),
-        out('Rule added (v6)'),
       ])],
     },
     'terminal-monky-create': {
@@ -588,6 +589,46 @@ function terminalSpecs(language, cli, version) {
         confirm(cliText('create.startNow'), true, yes),
         elided,
         out(cliText('lifecycle.started'), 'ok'),
+      ])],
+    },
+    'terminal-oracle-firewall': {
+      // Oracle's Ubuntu images reject everything but SSH in iptables; ufw is not used there.
+      panes: [vpsPane([
+        vps('sudo iptables -I INPUT -p tcp --dport 3000 -j ACCEPT'),
+        vps('sudo iptables -I INPUT -p udp --dport 40000:49151 -j ACCEPT'),
+        vps('sudo iptables -I INPUT -p tcp --dport 40000:49151 -j ACCEPT'),
+        {
+          note: pt
+            ? '↑ As mesmas portas da Security List: TCP 3000 e a faixa 40000-49151 em UDP e TCP'
+            : '↑ The same ports as the Security List: TCP 3000 and the 40000-49151 range over UDP and TCP',
+        },
+        vps('sudo netfilter-persistent save', pt ? 'vale após reiniciar' : 'survives a reboot'),
+        out('run-parts: executing /usr/share/netfilter-persistent/plugins.d/15-ip4tables save'),
+        out('run-parts: executing /usr/share/netfilter-persistent/plugins.d/25-ip6tables save'),
+      ])],
+    },
+    'terminal-monkybot': {
+      // The installer only speaks Portuguese; the bot CLI follows the chosen language.
+      panes: [vpsPane([
+        vps('sudo iptables -I INPUT -p tcp --dport 7780:7781 -j ACCEPT', pt ? 'manifest e jogos' : 'manifest and games'),
+        vps('sudo netfilter-persistent save'),
+        elided,
+        vps('curl -fsSL https://monkyorg.github.io/install-monkybot.sh | bash'),
+        elided,
+        out('✅ Monky Bot instalado com sucesso!', 'ok'),
+        vps('monkybot setup'),
+        out(pt ? 'Escolha o modo de operação:' : 'Choose the operating mode:', 'bold'),
+        { s: [['cyan', '❯'], ['plain', pt ? ' Instalação por URL — recomendado' : ' Install by URL — recommended']] },
+        elided,
+        ask(pt ? 'Porta do manifest [7780]' : 'Manifest port [7780]'),
+        out(pt ? 'Informe o IP ou domínio público desta máquina.' : "Enter this machine's public IP or domain."),
+        { s: [['plain', pt ? 'Host público: ' : 'Public host: '], ['cmd', '203.0.113.10']], label: pt ? 'IP público da VM' : 'VM public IP' },
+        elided,
+        out(pt ? 'Configuração salva!' : 'Configuration saved!', 'ok'),
+        vps('monkybot start'),
+        out(pt ? 'MonkyBot iniciado em background.' : 'MonkyBot started in the background.'),
+        out(pt ? 'Modo: marketplace' : 'Mode: marketplace'),
+        { s: [['plain', 'Manifest: '], ['hl', 'http://203.0.113.10:7780/manifest']], label: pt ? 'Copie esta URL' : 'Copy this URL' },
       ])],
     },
   };
@@ -680,6 +721,58 @@ async function closeInviteShot() {
   const { inviteModal } = await import('/views/InviteModal.ts');
   inviteModal.close();
   await new Promise((resolve) => setTimeout(resolve, 400));
+}
+
+/**
+ * Runs in the renderer: draws the real Bots tab of Server Settings with the
+ * MonkyBot manifest URL typed in and MonkyBot already linked, as after the
+ * hosting tutorial. The tab is rendered by itself because the full settings
+ * modal needs a connected server.
+ */
+async function openBotsShot(avatar) {
+  const { ServerBotsTab } = await import('/views/serverSettings/tabs/ServerBotsTab.ts');
+  const { t } = await import('/i18n/index.ts');
+  document.querySelector('#bots-shot')?.remove();
+  const backdrop = document.createElement('div');
+  backdrop.id = 'bots-shot';
+  Object.assign(backdrop.style, { position: 'fixed', inset: '0', zIndex: '100000', background: '#1e1f22' });
+  const card = document.createElement('div');
+  card.id = 'bots-shot-card';
+  Object.assign(card.style, {
+    width: '660px', boxSizing: 'border-box', padding: '16px 18px 18px', background: 'var(--bg-primary)',
+    display: 'flex', flexDirection: 'column', gap: '14px',
+  });
+  const tab = new ServerBotsTab();
+  card.innerHTML = `<div style="display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 700; color: var(--text-primary);">
+      <span class="material-symbols-outlined md-18">smart_toy</span>${t('serverSettings.tabBots')}
+    </div>${tab.renderHtml()}`;
+  backdrop.appendChild(card);
+  document.body.appendChild(backdrop);
+  tab.root = card.querySelector('#server-bots-tab');
+  tab.bots = [{
+    id: 'monkybot', name: 'MonkyBot', avatarUrl: avatar, online: true, bound: true, profilePending: false,
+    createdAt: Date.now(), permissions: { reviewRequired: false },
+  }];
+  tab.renderBotList();
+  card.querySelector('#bot-manifest-url').value = 'http://203.0.113.10:7780/manifest';
+  const row = card.querySelector('#btn-install-bot').parentElement.getBoundingClientRect();
+  const cardBox = card.getBoundingClientRect();
+  const ring = document.createElement('div');
+  Object.assign(ring.style, {
+    position: 'absolute', left: `${row.left - cardBox.left - 5}px`, top: `${row.top - cardBox.top - 5}px`,
+    width: `${row.width + 10}px`, height: `${row.height + 10}px`, border: '3px solid #23a55a', borderRadius: '10px',
+    boxShadow: '0 0 0 4px rgba(35, 165, 90, 0.25), 0 0 18px rgba(35, 165, 90, 0.55)', boxSizing: 'border-box', pointerEvents: 'none',
+  });
+  card.style.position = 'relative';
+  card.appendChild(ring);
+  await document.fonts.ready;
+  await Promise.all([...card.querySelectorAll('img')].map((image) => image.decode().catch(() => {})));
+}
+
+/** Runs in the renderer: rectangle of the Bots tab drawn by `openBotsShot`. */
+function botsShotRect() {
+  const box = document.querySelector('#bots-shot-card').getBoundingClientRect();
+  return { x: 0, y: 0, width: Math.ceil(box.width), height: Math.ceil(box.height) };
 }
 
 /** Runs in the renderer: draws terminal windows on top of the page and returns their rectangle. */

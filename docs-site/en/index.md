@@ -20,6 +20,9 @@ hero:
     - theme: alt
       text: Develop a bot
       link: /en/bots-desenvolvimento
+    - theme: alt
+      text: Join the community server
+      link: https://monkyorg.github.io/Monky/en/convite/#~EYmDv64PTW9ua3kgQ29tbXVuaXR5
 features:
   - title: Use the app
     details: Join a server, chat over text or voice and share your screen. Illustrated guides, with no programming required.
@@ -42,6 +45,17 @@ by you or someone in your group. No central account is required: your identity
 stays on your device.
 
 <AppScreenshot src="/screenshots/conversa-en.png" alt="Monky showing text and voice channels, a conversation and a demo server's member list." caption="The app in use. Screenshots in this guide use the official Windows client with demo profiles and data." />
+
+## Community server
+
+Want to try Monky before setting up your own? Join **Monky Community**, the
+open community server: ask questions, test voice and screen sharing and try
+MonkyBot. It has no password.
+
+[Join Monky Community](https://monkyorg.github.io/Monky/en/convite/#~EYmDv64PTW9ua3kgQ29tbXVuaXR5)
+
+The invite opens your installed Monky. If you don't have the app yet, the
+invite page offers the download.
 
 ## Find what you need
 

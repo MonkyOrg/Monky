@@ -1,9 +1,10 @@
 /**
  * Illustrations for tutorial steps that happen outside Monky and cannot be
  * photographed the same way for everyone: a home network, a router panel,
- * a public IP lookup and cloud consoles. They are drawn as HTML with the
- * Monky fonts and icons, use documentation and private addresses only, and
- * say they are illustrations wherever a real screen differs by vendor.
+ * a public IP lookup and the choice of a VPS provider. They are drawn as HTML
+ * with the Monky fonts and icons, use documentation and private addresses
+ * only, and say they are illustrations wherever a real screen differs by
+ * vendor.
  *
  * Used by capture-onboarding-screenshots.cjs; each entry becomes
  * assets/onboarding/<name>-<language>.png.
@@ -71,19 +72,6 @@ const STYLE = `
   .ill-card h5 { margin: 0 0 10px; font-size: 13px; color: #9da7b3; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
   .ill-spec { display: flex; flex-wrap: wrap; gap: 8px; }
   .ill-spec span { padding: 5px 10px; border-radius: 6px; background: #242c38; font-weight: 600; }
-
-  .ill-console { font-size: 12.5px; }
-  .ill-console-top { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 16px; background: #312d2a; color: #fff; font-weight: 700; }
-  .ill-crumbs { padding: 10px 18px 0; color: #0b6bcb; font-size: 12px; }
-  .ill-console-main { padding: 8px 18px 18px; }
-  .ill-console-main h4 { margin: 4px 0 12px; font-size: 18px; font-weight: 600; color: #161513; }
-  .ill-section { margin-bottom: 10px; padding: 12px 14px; background: #fff; border: 1px solid #dcdcdc; border-radius: 6px; }
-  .ill-section h6 { margin: 0 0 8px; font-size: 13px; color: #161513; }
-  .ill-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 3px 0; }
-  .ill-row > span:first-child { min-width: 92px; color: #6f6f6f; }
-  .ill-badge { padding: 1px 8px; border-radius: 999px; background: #e3f1e6; color: #1e6b31; font-size: 11px; font-weight: 700; }
-  .ill-radio { display: inline-flex; align-items: center; gap: 6px; }
-  .ill-radio::before { content: ''; width: 12px; height: 12px; border-radius: 50%; border: 4px solid #0b6bcb; background: #fff; }
 `;
 
 const icon = (name) => `<span class="material-symbols-outlined icon" aria-hidden="true">${name}</span>`;
@@ -227,50 +215,6 @@ function vpsProviders(pt) {
       : 'Illustration: paid plans usually cost US$ 3 to 5 per month; Oracle has free VMs.');
 }
 
-function oracleConsole(crumbs, title, body) {
-  return browser('https://cloud.oracle.com', `<div class="ill-console">
-    <div class="ill-console-top">${icon('cloud')}Oracle Cloud</div>
-    <div class="ill-crumbs">${crumbs}</div>
-    <div class="ill-console-main"><h4>${title}</h4>${body}</div>
-  </div>`);
-}
-
-function oracleInstance(pt) {
-  const row = (name, value) => `<div class="ill-row"><span>${name}</span>${value}</div>`;
-  return oracleConsole('Compute › Instances › Create instance', 'Create compute instance', `
-    <div class="ill-section"><h6>Name</h6>${row('Name', '<span class="ill-input">monky-server</span>')}</div>
-    <div class="ill-section"><h6>Image and shape</h6>
-      ${row('Image', '<strong>Canonical Ubuntu 24.04</strong>')}
-      ${row('Shape', `<span class="ill-hl" style="padding:2px 8px;"><strong>VM.Standard.E2.1.Micro</strong> <span class="ill-badge">Always Free-eligible</span></span>
-        ${label(pt ? 'Escolha um shape Always Free' : 'Pick an Always Free shape')}`)}
-    </div>
-    <div class="ill-section"><h6>Add SSH keys</h6>
-      ${row('', '<span class="ill-radio">Generate a key pair for me</span>')}
-      ${row('', `<span class="ill-button secondary ill-hl" style="margin-top:0;">${icon('download')}Save private key</span>
-        ${label(pt ? 'Guarde a chave: é com ela que você entra via SSH' : 'Keep this key: you use it to log in over SSH')}`)}
-    </div>
-    <span class="ill-button" style="margin-top:2px;">Create</span>`)
-    + note(pt ? 'Ilustração simplificada do console da Oracle Cloud: os nomes dos campos são os do console em inglês.'
-      : 'Simplified illustration of the Oracle Cloud console.');
-}
-
-function oracleIngress(pt) {
-  return oracleConsole('Networking › Virtual Cloud Networks › vcn-monky › Default Security List', 'Ingress Rules', `
-    <span class="ill-button" style="margin:0 0 10px;">Add Ingress Rules</span>
-    <table class="ill-table">
-      <tr><th>Source</th><th>IP Protocol</th><th>Destination Port Range</th><th>Description</th></tr>
-      <tr><td>0.0.0.0/0</td><td>TCP</td><td>22</td><td>SSH</td></tr>
-      <tr class="ill-hl"><td>0.0.0.0/0</td><td>TCP</td><td>3000</td><td>Monky</td></tr>
-      <tr class="ill-hl"><td>0.0.0.0/0</td><td>UDP</td><td>40000-49151</td><td>Monky SFU</td></tr>
-    </table>
-    <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
-      ${label(pt ? 'TCP 3000: porta do Monky' : 'TCP 3000: Monky port')}
-      ${label(pt ? 'UDP 40000-49151: só no modo SFU' : 'UDP 40000-49151: SFU mode only')}
-    </div>`)
-    + note(pt ? 'Ilustração simplificada do console da Oracle Cloud. Depois, libere as mesmas portas no firewall da VM.'
-      : 'Simplified illustration of the Oracle Cloud console. Then open the same ports in the VM firewall.');
-}
-
 /** name → HTML, for one language. */
 function illustrationSpecs(language) {
   const pt = language === 'pt-BR';
@@ -280,8 +224,6 @@ function illustrationSpecs(language) {
     'illustration-router-rule': routerRule(pt),
     'illustration-public-ip': publicIp(pt),
     'illustration-vps-providers': vpsProviders(pt),
-    'illustration-oracle-instance': oracleInstance(pt),
-    'illustration-oracle-ingress': oracleIngress(pt),
   };
 }
 

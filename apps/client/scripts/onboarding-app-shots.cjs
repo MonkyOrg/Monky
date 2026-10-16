@@ -1,11 +1,15 @@
 /**
- * Pictures of the VPN apps for the hosting tutorials. The screenshots in
- * scripts/onboarding-app-shots were taken in Windows Sandbox with throwaway
- * networks; account data is redacted and IDs are samples. Here they get the
- * illustration frame, a ring on what the step talks about and a label.
+ * Pictures of the VPN apps and of the Oracle Cloud console for the hosting
+ * tutorials. The VPN screenshots in scripts/onboarding-app-shots were taken in
+ * Windows Sandbox with throwaway networks; the Oracle Cloud ones come from a
+ * real Always Free account, with the tenancy renamed and the public IP swapped
+ * for a documentation address. Account data is redacted and IDs are samples.
+ * Here they get the illustration frame, a ring on what the step talks about
+ * and a label.
  *
- * Radmin VPN and Hamachi follow the system language, so they have pt-BR and
- * en captures; Tailscale and ZeroTier only exist in English.
+ * Radmin VPN, Hamachi and the Oracle Cloud console follow the chosen language,
+ * so they have pt-BR and en captures; Tailscale and ZeroTier only exist in
+ * English.
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -13,7 +17,8 @@ const path = require('node:path');
 const SOURCE_DIR = path.join(__dirname, 'onboarding-app-shots');
 
 /**
- * `rings` use the screenshot's own pixels; `label` sits under the last ring.
+ * `rings` use the screenshot's own pixels, either one list for every language
+ * or one list per language; `label` sits under the last ring.
  * `scale` shrinks wide browser captures so they fit the 660px frame.
  */
 const APP_SHOTS = [
@@ -87,6 +92,48 @@ const APP_SHOTS = [
     parts: [{ source: 'zerotier-ip', scale: 0.85, rings: [[362, 242, 176, 26]] }],
     label: { 'pt-BR': 'Seu IP na rede ZeroTier', en: 'Your IP on the ZeroTier network' },
   },
+  {
+    name: 'app-oracle-shape', app: 'Oracle Cloud', icon: 'cloud', localized: true,
+    parts: [
+      {
+        source: 'oracle-shape-series', scale: 0.62,
+        rings: { 'pt-BR': [[556, 57, 254, 198], [24, 403, 896, 46]], en: [[556, 57, 254, 179], [24, 384, 896, 46]] },
+      },
+      { source: 'oracle-shape-size', scale: 0.62, rings: [[18, 18, 752, 110]] },
+    ],
+    label: { 'pt-BR': 'Ampere A1.Flex com 2 OCPUs e 12 GB: o máximo grátis', en: 'Ampere A1.Flex with 2 OCPUs and 12 GB: the free maximum' },
+  },
+  {
+    name: 'app-oracle-network', app: 'Oracle Cloud', icon: 'cloud', localized: true,
+    parts: [{ source: 'oracle-network', scale: 0.7, rings: [[14, 194, 300, 30], [14, 436, 250, 30]] }],
+    label: { 'pt-BR': 'Crie uma rede virtual e uma sub-rede pública novas', en: 'Create a new virtual cloud network and public subnet' },
+  },
+  {
+    name: 'app-oracle-ssh', app: 'Oracle Cloud', icon: 'cloud', localized: true,
+    parts: [{
+      source: 'oracle-ssh', scale: 0.74,
+      rings: { 'pt-BR': [[12, 116, 270, 34], [18, 323, 257, 51]], en: [[12, 116, 230, 34], [18, 304, 182, 51]] },
+    }],
+    label: { 'pt-BR': 'Guarde a chave privada: é com ela que você entra via SSH', en: 'Keep the private key: you use it to log in over SSH' },
+  },
+  {
+    name: 'app-oracle-security-list', app: 'Oracle Cloud', icon: 'cloud', localized: true,
+    parts: [{
+      source: 'oracle-security-lists', scale: 0.56,
+      rings: { 'pt-BR': [[789, 127, 86, 55], [35, 487, 243, 31]], en: [[689, 127, 72, 55], [35, 487, 243, 31]] },
+    }],
+    label: { 'pt-BR': 'Na sua rede: aba Segurança → Default Security List', en: 'In your network: Security tab → Default Security List' },
+  },
+  {
+    name: 'app-oracle-ingress', app: 'Oracle Cloud', icon: 'cloud', localized: true,
+    parts: [{ source: 'oracle-ingress-rules', scale: 0.56, rings: [[16, 468, 1015, 190]] }],
+    label: { 'pt-BR': 'Monky: 3000 e 40000-49151 · MonkyBot: 7780-7781', en: 'Monky: 3000 and 40000-49151 · MonkyBot: 7780-7781' },
+  },
+  {
+    name: 'app-oracle-ip', app: 'Oracle Cloud', icon: 'cloud', localized: true,
+    parts: [{ source: 'oracle-instance-ip', rings: [[8, 140, 520, 47]] }],
+    label: { 'pt-BR': 'O IP público que você passa aos amigos', en: 'The public IP you give your friends' },
+  },
 ];
 
 function sourcePath(source, language, localized) {
@@ -105,7 +152,8 @@ function appShotHtml(shot, language) {
     const [width, height] = pngSize(file);
     const scale = part.scale ?? 1;
     const data = `data:image/png;base64,${fs.readFileSync(file).toString('base64')}`;
-    const rings = part.rings.map(([x, y, w, h]) => `<div class="ill-hl" style="position:absolute; left:${Math.round(x * scale) - 3}px;
+    const ringList = Array.isArray(part.rings) ? part.rings : part.rings[language];
+    const rings = ringList.map(([x, y, w, h]) => `<div class="ill-hl" style="position:absolute; left:${Math.round(x * scale) - 3}px;
       top:${Math.round(y * scale) - 3}px; width:${Math.round(w * scale) + 6}px; height:${Math.round(h * scale) + 6}px;"></div>`).join('');
     return `<div style="position:relative; flex:0 0 auto; width:${Math.round(width * scale)}px; height:${Math.round(height * scale)}px;
         border-radius:8px; overflow:visible; box-shadow:0 10px 26px rgba(0,0,0,.45);">
@@ -116,7 +164,7 @@ function appShotHtml(shot, language) {
   const arrow = '<span class="material-symbols-outlined icon" aria-hidden="true" style="font-size:24px; color:#9da7b3;">arrow_downward</span>';
   return `<div class="ill-card" style="display:grid; gap:12px; justify-items:center; padding:16px 14px;">
     <div style="justify-self:start; display:flex; align-items:center; gap:8px; color:#9da7b3; font-size:12px; font-weight:600;">
-      <span class="material-symbols-outlined icon" aria-hidden="true">vpn_lock</span>${shot.app}
+      <span class="material-symbols-outlined icon" aria-hidden="true">${shot.icon ?? 'vpn_lock'}</span>${shot.app}
     </div>
     <div style="display:flex; flex-direction:column; align-items:center; gap:8px;">${parts.join(arrow)}</div>
     <span class="ill-label">↑ ${shot.label[language]}</span>
