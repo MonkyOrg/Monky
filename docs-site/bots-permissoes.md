@@ -1,3 +1,7 @@
+---
+description: "Como bots do Monky declaram capacidades, como administradores as aprovam e o que acontece ao mudá-las."
+---
+
 # Capacidades e ciclo de vida
 
 Leia este guia antes de adicionar um recurso a um bot existente. Declarar,

@@ -1,3 +1,7 @@
+---
+description: "Chat, voz, vídeo, compartilhamento de tela, soundboard, servidores próprios e bots: tudo o que o Monky oferece."
+---
+
 # O que o Monky oferece
 
 Monky é um aplicativo de comunicação com servidores que você pode hospedar.
@@ -15,6 +19,8 @@ Windows e macOS; não é preciso programar ou instalar um bot para conversar.
 - **Vídeo:** câmera, efeitos de fundo e compartilhamento de tela/janela;
   imagem e som do compartilhamento só são recebidos quando você escolhe
   assistir. O áudio disponível depende da plataforma e da fonte.
+- **Jogos:** no Windows, mostre o jogo aberto na Steam e transmita só a janela
+  dele com um clique; quem está na chamada pode pedir para ver a partida.
 - **Soundboard:** biblioteca local, favoritos, busca, atalhos e permissões
   controladas pelo servidor.
 

@@ -1,3 +1,7 @@
+---
+description: "Define Monky bot commands with typed parameters, translations and paginated autocomplete."
+---
+
 # Commands and autocomplete
 
 Define how people discover your bot, which values it receives and when

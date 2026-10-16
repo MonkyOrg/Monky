@@ -1,3 +1,7 @@
+---
+description: "Adicione amigos e troque mensagens diretas criptografadas de ponta a ponta, sem um servidor central guardando as conversas."
+---
+
 # Amigos e mensagens diretas
 
 Amizades e mensagens diretas (DMs) ficam na **Home**. O Monky não tem um

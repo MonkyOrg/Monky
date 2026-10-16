@@ -1,3 +1,7 @@
+---
+description: "Guarde dados de um bot do Monky no servidor ou nos computadores dos participantes, com aprovação do administrador."
+---
+
 # Armazenamento do bot
 
 Um bot pode guardar dados em dois lugares, cada um com a sua capacidade. Os

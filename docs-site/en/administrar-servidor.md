@@ -1,3 +1,7 @@
+---
+description: "Organize channels, roles, permissions, moderation, bots and limits on your Monky server."
+---
+
 # Manage a server
 
 This guide covers what is **shared by a server**: channels, roles,

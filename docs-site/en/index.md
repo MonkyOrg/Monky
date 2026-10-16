@@ -1,6 +1,8 @@
 ---
+description: "Chat, voice, video and screen sharing on servers you or your group host, with no central account. Free download for Windows and macOS."
 layout: home
-title: Documentation
+title: Monky
+titleTemplate: Chat, voice and video on servers you own
 hero:
   name: Monky
   text: Talk. Host. Build.

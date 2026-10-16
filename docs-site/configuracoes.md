@@ -1,3 +1,7 @@
+---
+description: "Ajuste perfil, microfone, câmera, supressão de ruído, qualidade da transmissão, atalhos, notificações e atualizações do Monky."
+---
+
 # Configurações
 
 Abra a **engrenagem** na Home ou na barra inferior. Estas são as
@@ -36,6 +40,20 @@ opcionalmente, **Histórico das conversas** para levar as mensagens diretas.
 Em **Mensagens diretas**, escolha o **Tamanho máximo de arquivo recebido**: seus
 amigos veem esse limite e não conseguem enviar arquivos maiores. Veja
 [Amigos e mensagens diretas](/amigos-e-mensagens-diretas).
+
+### Atividade de jogo
+
+No Windows, o Monky reconhece o jogo aberto na **Steam**. Só o nome e o ícone
+do jogo saem do seu computador; a lista de processos e os caminhos dos
+executáveis ficam nele.
+
+- **Mostrar o jogo que estou jogando** (desligado por padrão): quem está nos
+  seus servidores vê o jogo ao clicar em você e na lista do canal de voz.
+- **Sugerir compartilhar o jogo** (ligado por padrão): em um canal de voz,
+  mostra acima dos seus controles um atalho para transmitir o jogo. Funciona
+  mesmo sem mostrar o jogo para os outros.
+
+Veja [Compartilhar um jogo](/usando-o-app#compartilhar-um-jogo).
 
 ### Sair
 

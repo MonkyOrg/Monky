@@ -1,3 +1,7 @@
+---
+description: "Package, install and update a Monky bot with the CLI provided by the bot SDK."
+---
+
 # Package and distribute
 
 This guide is for authors and operators of bots using the **SDK-provided CLI**.

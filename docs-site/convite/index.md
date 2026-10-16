@@ -13,9 +13,6 @@ head:
     - name: robots
       content: noindex
   - - meta
-    - name: theme-color
-      content: '#5865f2'
-  - - meta
     - property: og:type
       content: website
   - - meta

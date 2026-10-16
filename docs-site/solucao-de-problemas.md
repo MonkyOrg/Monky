@@ -1,3 +1,7 @@
+---
+description: "Resolva falhas de conexão ao servidor, de voz e vídeo na chamada e de bots no Monky, incluindo CGNAT, antivírus e macOS."
+---
+
 # Solução de Problemas
 
 Primeiro identifique a etapa que falhou: **conexão ao servidor**, **mídia da

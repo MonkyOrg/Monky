@@ -1,3 +1,7 @@
+---
+description: "Channels, forums, voice, camera, screen sharing, events, chat, stickers and soundboard in everyday Monky use."
+---
+
 # Using the App
 
 After connecting, the left sidebar organizes servers and channels, the center
@@ -158,7 +162,23 @@ from the same person appear separately. It refreshes approximately every two
 seconds; failed requests show an unavailable state rather than a stale count.
 The local preview is not counted as a viewer.
 
+### Sharing a game {#sharing-a-game}
+
+On Windows, with a Steam game open and you in a voice channel, Monky shows a
+shortcut with the game's name above your controls. **Share** asks for
+confirmation and streams only the game window, with its audio, to the people
+in the channel; **Stop** ends it.
+The shortcut depends on **Suggest sharing my game**, in
+[My Profile → Game activity](/en/configuracoes#game-activity).
+
+If someone in the same call shows the game they are playing, their card offers
+**Ask to watch the match** while they are not streaming. They receive the
+request with **Share** and **Not now**, and nothing is streamed unless they
+accept. The call's server must run a version that supports this request.
+
 ## Events
+
+<AppScreenshot src="/screenshots/eventos-en.png" alt="Event list with covers, start date, location, interested count and the Interested and Start now buttons." caption="Events live in the sidebar shortcut. The cover, cropped to 5:2, identifies each one in the list." />
 
 When creating or editing an event, you can click or drag up to **5 images** at
 once. Each image goes through the 5:2 cropper and can be browsed, reordered, or
@@ -180,6 +200,8 @@ Events are calendar commitments with a date, time, location, and interested
 members. **Live Actions** are temporary interactions happening now. Their
 shortcuts are independent and appear only to people who can view or manage
 their content.
+
+<AppScreenshot src="/screenshots/acoes-ao-vivo-en.png" alt="Live action list with a poll in the general channel and a form in the planning channel, each with an Open button." caption="Ongoing polls and forms are listed together. The banner at the top of the sidebar cycles through the open actions." />
 
 People with **Emit live actions** can open **Live Actions → Create Live Action**
 and choose:

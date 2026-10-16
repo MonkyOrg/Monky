@@ -1,3 +1,7 @@
+---
+description: "From first launch to your first conversation: create your identity, back it up and join a server or create your own."
+---
+
 # Getting started
 
 This guide takes you from the first launch to your first conversation. You

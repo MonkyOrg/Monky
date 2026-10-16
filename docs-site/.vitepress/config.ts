@@ -1,5 +1,86 @@
-import { defineConfig } from 'vitepress';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { defineConfig, type HeadConfig, type PageData } from 'vitepress';
 import { withMermaid } from 'vitepress-plugin-mermaid';
+
+const SITE_URL = 'https://monkyorg.github.io/Monky/';
+const SITE_NAME = 'Monky';
+
+const descriptions = {
+  pt: 'Chat, voz, vídeo e compartilhamento de tela em servidores que você ou seu grupo hospeda, sem conta central. Guias do aplicativo, servidores e SDK de bots.',
+  en: 'Chat, voice, video and screen sharing on servers you or your group host, with no central account. App guides, servers and the bot SDK.',
+};
+
+/** Imagens de `public/og/`, geradas por `og/gerar.mjs`: uma por seção e idioma. */
+function previewSection(page: string): 'home' | 'download' | 'bots' | 'guias' {
+  if (page === 'index') return 'home';
+  if (page === 'download' || page === 'instalacao') return 'download';
+  if (page.startsWith('bots-')) return 'bots';
+  return 'guias';
+}
+
+const previewAlt = {
+  home: { pt: 'Mascote do Monky com chat, voz, tela e bots.', en: 'Monky mascot with chat, voice, screen and bots.' },
+  download: { pt: 'Mascote do Monky com o download para Windows e macOS.', en: 'Monky mascot with the Windows and macOS download.' },
+  guias: { pt: 'Mascote do Monky com os guias para usar e hospedar.', en: 'Monky mascot with the guides to use and host it.' },
+  bots: { pt: 'Mascote do Monky com um exemplo do SDK de bots.', en: 'Monky mascot with a bot SDK example.' },
+};
+
+function pageUrl(relativePath: string): string {
+  return SITE_URL + relativePath.replace(/(^|\/)index\.md$/, '$1').replace(/\.md$/, '.html');
+}
+
+/**
+ * Card de WhatsApp, Discord, Telegram e redes sociais (Open Graph). Sem isso
+ * cada app inventava a prévia a partir do `<title>`, e a home aparecia como
+ * "Documentação". Páginas que declaram o próprio Open Graph no frontmatter,
+ * como o convite, ficam com o delas.
+ */
+function previewHead(pageData: PageData, siteTitle: string, srcDir: string): HeadConfig[] {
+  const { frontmatter, relativePath } = pageData;
+  const declared = (frontmatter.head ?? []) as HeadConfig[];
+  if (declared.some(([, attrs]) => typeof attrs?.property === 'string' && attrs.property.startsWith('og:'))) return [];
+
+  const english = relativePath.startsWith('en/');
+  const lang = english ? 'en' : 'pt';
+  const page = relativePath.replace(/^en\//, '').replace(/\.md$/, '');
+  const section = previewSection(page.replace(/\/index$/, ''));
+  const template = frontmatter.titleTemplate;
+  const title = typeof template === 'string' ? `${pageData.title} | ${template}`
+    : pageData.title === siteTitle || template === false ? pageData.title : `${pageData.title} | ${siteTitle}`;
+  const description = pageData.description || descriptions[lang];
+  const url = pageUrl(relativePath);
+  const image = `${SITE_URL}og/${section}-${lang}.jpg`;
+
+  const head: HeadConfig[] = [
+    ['link', { rel: 'canonical', href: url }],
+    ['meta', { property: 'og:type', content: 'website' }],
+    ['meta', { property: 'og:site_name', content: SITE_NAME }],
+    ['meta', { property: 'og:locale', content: english ? 'en_US' : 'pt_BR' }],
+    ['meta', { property: 'og:url', content: url }],
+    ['meta', { property: 'og:title', content: title }],
+    ['meta', { property: 'og:description', content: description }],
+    ['meta', { property: 'og:image', content: image }],
+    ['meta', { property: 'og:image:type', content: 'image/jpeg' }],
+    ['meta', { property: 'og:image:width', content: '1200' }],
+    ['meta', { property: 'og:image:height', content: '630' }],
+    ['meta', { property: 'og:image:alt', content: previewAlt[section][lang] }],
+    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+  ];
+
+  // Só aponta a tradução quando ela existe, para não anunciar uma página 404.
+  const ptPath = relativePath.replace(/^en\//, '');
+  const enPath = `en/${ptPath}`;
+  if (existsSync(resolve(srcDir, ptPath)) && existsSync(resolve(srcDir, enPath))) {
+    head.push(
+      ['meta', { property: 'og:locale:alternate', content: english ? 'pt_BR' : 'en_US' }],
+      ['link', { rel: 'alternate', hreflang: 'pt-BR', href: pageUrl(ptPath) }],
+      ['link', { rel: 'alternate', hreflang: 'en', href: pageUrl(enPath) }],
+      ['link', { rel: 'alternate', hreflang: 'x-default', href: pageUrl(ptPath) }],
+    );
+  }
+  return head;
+}
 
 const ptSidebar = [
   {
@@ -144,11 +225,13 @@ const enSidebar = [
 ];
 
 export default withMermaid(defineConfig({
-  title: 'Monky Docs',
-  description: 'Guias do aplicativo, administração de servidores e desenvolvimento de bots para o Monky.',
+  title: SITE_NAME,
+  description: descriptions.pt,
   base: '/Monky/',
+  transformHead: ({ pageData, siteConfig }) => previewHead(pageData, siteConfig.site.title, siteConfig.srcDir),
   head: [
     ['link', { rel: 'icon', href: '/Monky/logo.png' }],
+    ['meta', { name: 'theme-color', content: '#5865f2' }],
     ['script', {}, `
 (function() {
   var b = '/Monky/', p = location.pathname;
@@ -203,7 +286,7 @@ export default withMermaid(defineConfig({
     en: {
       label: 'English',
       lang: 'en',
-      description: 'App guides, server administration and bot development for Monky.',
+      description: descriptions.en,
       themeConfig: {
         sidebar: enSidebar,
         nav: [

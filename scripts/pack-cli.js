@@ -147,7 +147,9 @@ function main() {
   // published package shows on npm.
   const readme = path.join(ROOT, 'docs-site', 'cli.md');
   if (fs.existsSync(readme)) {
-    fs.copyFileSync(readme, path.join(staging, 'README.md'));
+    // The frontmatter only feeds the site's <head>; on npm it would show as text.
+    const contents = fs.readFileSync(readme, 'utf8').replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n)+/, '');
+    fs.writeFileSync(path.join(staging, 'README.md'), contents);
   } else {
     console.warn(`[pack-cli] README not found at ${readme}`);
   }

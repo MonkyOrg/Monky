@@ -1,3 +1,7 @@
+---
+description: "Keep a Monky server online around the clock on a Linux VPS with the Monky CLI, no desktop required."
+---
+
 # Host on a VPS
 
 To keep the server up 24/7, run the server alone on a Linux machine — no

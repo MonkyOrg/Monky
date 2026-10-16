@@ -1,3 +1,7 @@
+---
+description: "Crie miniapps HTML que todos os participantes da chamada veem juntos no palco de voz do Monky."
+---
+
 # Miniapps compartilhados
 
 Use uma tela quando vários participantes precisam acompanhar o mesmo estado.

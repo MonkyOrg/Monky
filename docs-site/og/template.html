@@ -1,0 +1,218 @@
+<!doctype html>
+<!--
+  Modelo das imagens de prévia (Open Graph) do site. Não é publicado: o
+  `gerar.mjs` desta pasta abre este arquivo num Chrome/Edge headless, uma vez
+  por variante e idioma (`?variant=home&lang=pt`), e salva o JPEG em
+  `docs-site/public/og/`. As cores repetem os tokens do app
+  (`apps/client/src/renderer/styles/theme.css`).
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @font-face {
+    font-family: 'Inter';
+    font-weight: 100 900;
+    src: url('../../node_modules/vitepress/dist/client/theme-default/fonts/inter-roman-latin.woff2') format('woff2');
+  }
+  @font-face {
+    font-family: 'Material Symbols Outlined';
+    font-weight: 100 700;
+    src: url('../../node_modules/material-symbols/material-symbols-outlined.woff2') format('woff2');
+  }
+  :root {
+    --bg-app: #0b0e14;
+    --accent: #5865f2;
+    --text-primary: #f0f3f6;
+    --text-secondary: #9da7b3;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1200px; height: 630px; overflow: hidden; }
+  body {
+    position: relative;
+    font-family: 'Inter', sans-serif;
+    color: var(--text-primary);
+    background:
+      radial-gradient(520px 420px at 290px 330px, rgb(88 101 242 / 26%), transparent 70%),
+      radial-gradient(560px 360px at 1120px -40px, rgb(35 165 90 / 16%), transparent 70%),
+      linear-gradient(160deg, #0f131b, var(--bg-app) 60%);
+  }
+  .icon {
+    font-family: 'Material Symbols Outlined';
+    font-weight: normal;
+    font-style: normal;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    white-space: nowrap;
+    font-feature-settings: 'liga';
+    font-variation-settings: 'FILL' 1, 'wght' 500, 'GRAD' 0, 'opsz' 48;
+  }
+  .mascot {
+    position: absolute;
+    left: 70px;
+    top: 115px;
+    width: 400px;
+    height: 400px;
+    border-radius: 50%;
+    border: 3px solid rgb(88 101 242 / 70%);
+    background: rgb(22 27 34 / 85%);
+    box-shadow: 0 0 0 28px rgb(88 101 242 / 7%);
+  }
+  .mascot img {
+    position: absolute;
+    left: 40px;
+    top: 40px;
+    width: 320px;
+    height: 320px;
+  }
+  .badge {
+    position: absolute;
+    right: 10px;
+    bottom: 34px;
+    width: 104px;
+    height: 104px;
+    border-radius: 50%;
+    border: 10px solid var(--bg-app);
+    background: var(--accent);
+    display: grid;
+    place-items: center;
+  }
+  .badge .icon { font-size: 46px; color: #fff; }
+  .content {
+    position: absolute;
+    left: 540px;
+    right: 50px;
+    top: 0;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  h1 {
+    font-size: 132px;
+    font-weight: 800;
+    letter-spacing: -0.035em;
+    line-height: 1;
+  }
+  .subtitle {
+    margin-top: 18px;
+    font-size: 38px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text-secondary);
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 40px;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 18px 12px 14px;
+    border: 2px solid rgb(88 101 242 / 45%);
+    border-radius: 16px;
+    background: rgb(28 35 45 / 90%);
+    font-size: 25px;
+    font-weight: 600;
+  }
+  .chip .icon {
+    font-size: 28px;
+    color: #a2a8ff;
+  }
+  .code {
+    margin-top: 36px;
+    padding: 24px 28px;
+    border: 2px solid rgb(88 101 242 / 45%);
+    border-radius: 18px;
+    background: rgb(13 17 23 / 92%);
+    font-family: 'Cascadia Code', 'Consolas', monospace;
+    font-size: 24px;
+    line-height: 1.5;
+    white-space: pre;
+    /* A Cascadia desenha `=>` como seta; no exemplo o código precisa ser literal. */
+    font-variant-ligatures: none;
+  }
+  .code .k { color: #a2a8ff; }
+  .code .s { color: #7ee2a8; }
+  .code .p { color: var(--text-secondary); }
+</style>
+</head>
+<body>
+  <div class="mascot">
+    <img src="../public/logo.png" alt="">
+    <div class="badge"><span class="icon" id="badge"></span></div>
+  </div>
+  <div class="content">
+    <h1>Monky</h1>
+    <div class="subtitle" id="subtitle"></div>
+    <div id="extra"></div>
+  </div>
+<script>
+  const variants = {
+    home: {
+      badge: 'forum',
+      subtitle: { pt: 'Converse. Hospede. Crie.', en: 'Chat. Host. Build.' },
+      chips: [
+        ['chat', { pt: 'Chat', en: 'Chat' }],
+        ['mic', { pt: 'Voz', en: 'Voice' }],
+        ['screen_share', { pt: 'Tela', en: 'Screen' }],
+        ['smart_toy', { pt: 'Bots', en: 'Bots' }],
+      ],
+    },
+    download: {
+      badge: 'download',
+      subtitle: { pt: 'Baixe grátis', en: 'Free download' },
+      chips: [
+        ['desktop_windows', { pt: 'Windows', en: 'Windows' }],
+        ['laptop_mac', { pt: 'macOS', en: 'macOS' }],
+      ],
+    },
+    guias: {
+      badge: 'menu_book',
+      subtitle: { pt: 'Guias para usar e hospedar', en: 'Guides to use and host it' },
+      chips: [
+        ['chat', { pt: 'Usar o app', en: 'Use the app' }],
+        ['dns', { pt: 'Hospedar', en: 'Host' }],
+        ['smart_toy', { pt: 'Bots', en: 'Bots' }],
+      ],
+    },
+    bots: {
+      badge: 'smart_toy',
+      subtitle: { pt: 'SDK de bots em TypeScript', en: 'TypeScript bot SDK' },
+      code: '<span class="k">bot</span>.command({\n  name: <span class="s">\'ping\'</span>,\n'
+        + '  handler: (ctx) <span class="p">=&gt;</span> ctx.reply(<span class="s">\'pong\'</span>),\n});',
+    },
+  };
+
+  const params = new URLSearchParams(location.search);
+  const lang = params.get('lang') === 'en' ? 'en' : 'pt';
+  const variant = variants[params.get('variant')];
+  if (!variant) throw new Error(`Variante desconhecida: ${params.get('variant')}`);
+
+  document.documentElement.lang = lang === 'en' ? 'en' : 'pt-BR';
+  document.getElementById('badge').textContent = variant.badge;
+  document.getElementById('subtitle').textContent = variant.subtitle[lang];
+  const extra = document.getElementById('extra');
+  if (variant.chips) {
+    extra.className = 'chips';
+    for (const [icon, label] of variant.chips) {
+      const chip = document.createElement('span');
+      chip.className = 'chip';
+      const glyph = document.createElement('span');
+      glyph.className = 'icon';
+      glyph.textContent = icon;
+      chip.append(glyph, label[lang]);
+      extra.append(chip);
+    }
+  }
+  if (variant.code) {
+    extra.className = 'code';
+    extra.innerHTML = variant.code;
+  }
+</script>
+</body>
+</html>

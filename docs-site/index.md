@@ -1,6 +1,8 @@
 ---
+description: "Chat, voz, vídeo e compartilhamento de tela em servidores que você ou seu grupo hospeda, sem conta central. Baixe grátis para Windows e macOS."
 layout: home
-title: Documentação
+title: Monky
+titleTemplate: Chat, voz e vídeo em servidores seus
 hero:
   name: Monky
   text: Converse. Hospede. Crie.

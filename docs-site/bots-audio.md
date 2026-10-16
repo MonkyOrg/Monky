@@ -1,3 +1,7 @@
+---
+description: "Ofereça prévias de áudio e downloads para o soundboard a partir de um bot do Monky."
+---
+
 # Prévias e downloads de áudio
 
 Prévia, download e publicação em voz são operações distintas. Os exemplos

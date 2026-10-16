@@ -1,3 +1,7 @@
+---
+description: "Do primeiro acesso à primeira conversa: crie sua identidade, guarde um backup e entre em um servidor ou crie o seu."
+---
+
 # Primeiros passos
 
 Este guia leva você do primeiro acesso à sua primeira conversa. Você precisa

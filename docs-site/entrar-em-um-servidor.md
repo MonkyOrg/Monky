@@ -1,3 +1,7 @@
+---
+description: "Entre em um servidor do Monky por link de convite, pela rede local, por um servidor salvo ou digitando endereço e porta."
+---
+
 # Entrar Em Um Servidor
 
 Na Home, clique no botão **+** no trilho de servidores e escolha

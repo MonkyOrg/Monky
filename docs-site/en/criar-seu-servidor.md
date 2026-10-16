@@ -1,3 +1,7 @@
+---
+description: "Host a Monky server from the app itself: port, password, starting channels and P2P or SFU voice mode."
+---
+
 # Create Your Server
 
 In Home, click the **+** button on the server rail and choose **Create my
@@ -5,7 +9,7 @@ server**. Fill in the server name, local port, optional password, the starting
 text and voice channels and, if you want, a member limit. Monky uses the global
 nickname saved under **My Profile**.
 
-<AppScreenshot src="/screenshots/criar-servidor-en.png" :width="1000" :height="1640" alt="Server creation form with name, port, initial channels, member limit and voice mode." caption="The app hosts on your computer. Internet availability also depends on networking and firewall rules." />
+<AppScreenshot src="/screenshots/criar-servidor-en.png" alt="Create my server form with name, port, starting channels, member limit and the choice between P2P Mesh and SFU." caption="The app hosts on your computer. Internet availability also depends on networking and firewall rules." />
 
 Click **Create and Start Server**. The server starts on your machine, listens on every network interface on the chosen port, and opens for browsing. Joining a voice channel is a separate action.
 

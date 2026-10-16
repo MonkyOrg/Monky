@@ -1,3 +1,7 @@
+---
+description: "Request authorized operations on the computer of whoever ran the command, with consent, in Monky bots."
+---
+
 # Client-side execution
 
 Request known Monky operations on the initiating person's computer instead

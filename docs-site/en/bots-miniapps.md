@@ -1,3 +1,7 @@
+---
+description: "Build HTML miniapps that everyone in the call sees together on the Monky voice stage."
+---
+
 # Shared miniapps
 
 Use a screen when several participants need to follow the same state.

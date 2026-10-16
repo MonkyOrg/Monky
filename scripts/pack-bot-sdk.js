@@ -85,6 +85,8 @@ function main() {
     [path.join('en', 'bots-desenvolvimento.md'), 'README.en.md'],
   ]) {
     const contents = fs.readFileSync(path.join(ROOT, 'docs-site', source), 'utf8')
+      // The frontmatter only feeds the site's <head>; on npm it would show as text.
+      .replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n)+/, '')
       .replace(/\]\(\/(?!\/)/g, '](https://monkyorg.github.io/Monky/');
     fs.writeFileSync(path.join(staging, destination), contents);
   }

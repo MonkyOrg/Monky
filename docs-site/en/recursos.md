@@ -1,3 +1,7 @@
+---
+description: "Chat, voice, video, screen sharing, soundboard, self-hosted servers and bots: everything Monky offers."
+---
+
 # What Monky offers
 
 Monky is a communication app with servers you can host yourself. The user
@@ -15,6 +19,8 @@ and macOS; you do not need to program or install a bot to talk.
 - **Video:** camera, background effects and screen/window sharing; shared
   video and sound are received only when you choose to watch. Available
   audio depends on the platform and source.
+- **Games:** on Windows, show the game open on Steam and stream only its window
+  in one click; people in the call can ask to watch the match.
 - **Soundboard:** local library, favorites, search, keybinds and server-controlled
   permissions.
 

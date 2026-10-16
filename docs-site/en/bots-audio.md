@@ -1,3 +1,7 @@
+---
+description: "Offer audio previews and soundboard downloads from a Monky bot."
+---
+
 # Audio previews and downloads
 
 Previewing, downloading and publishing to voice are different operations.
