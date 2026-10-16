@@ -9,7 +9,7 @@ Na Home, clique no botão **+** no trilho de servidores e escolha
 os canais iniciais de texto e voz e, se quiser, um limite de membros. O Monky
 usa o nickname global salvo em **Meu Perfil**.
 
-<AppScreenshot src="/screenshots/criar-servidor-pt.png" :width="1000" :height="1640" alt="Formulário de criação de servidor com nome, porta, canais iniciais, limite de membros e modo de voz." caption="O aplicativo hospeda na sua máquina. A disponibilidade pela internet depende também da rede e do firewall." />
+<AppScreenshot src="/screenshots/criar-servidor-pt.png" alt="Formulário Criar meu servidor com nome, porta, canais iniciais, limite de membros e a escolha entre P2P Mesh e SFU." caption="O aplicativo hospeda na sua máquina. A disponibilidade pela internet depende também da rede e do firewall." />
 
 Clique em **Criar e Iniciar Servidor**. O servidor sobe na sua máquina, escuta em todas as interfaces de rede na porta escolhida e abre para visualização. Entrar em um canal de voz é uma ação separada.
 

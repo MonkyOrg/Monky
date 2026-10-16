@@ -180,6 +180,8 @@ esse pedido.
 
 ## Eventos
 
+<AppScreenshot src="/screenshots/eventos-pt.png" alt="Lista de eventos com capas, data de início, local, número de interessados e os botões Tenho interesse e Começar agora." caption="Eventos ficam no atalho da barra lateral. A capa recortada em 5:2 identifica cada um na lista." />
+
 Ao criar ou editar um evento, você pode clicar ou arrastar até **5 imagens** de
 uma vez. Cada imagem passa pelo recorte 5:2 e pode ser navegada, reordenada ou
 removida no mesmo editor. A primeira funciona como capa compacta nas listas; o
@@ -201,6 +203,8 @@ Eventos representam compromissos com data, horário, local e interessados.
 **Ações ao vivo** são interações temporárias que estão acontecendo agora. Os
 dois atalhos são independentes e aparecem somente para quem pode visualizar ou
 gerenciar seu conteúdo.
+
+<AppScreenshot src="/screenshots/acoes-ao-vivo-pt.png" alt="Lista de ações ao vivo com uma enquete no canal geral e um formulário no canal planejamento, cada uma com o botão Abrir." caption="Enquetes e formulários em andamento aparecem juntos. O banner no topo da barra lateral alterna entre as ações abertas." />
 
 Quem possui **Emitir ações ao vivo** pode abrir **Ações ao vivo → Criar ação ao
 vivo** e escolher:

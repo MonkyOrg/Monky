@@ -178,6 +178,8 @@ accept. The call's server must run a version that supports this request.
 
 ## Events
 
+<AppScreenshot src="/screenshots/eventos-en.png" alt="Event list with covers, start date, location, interested count and the Interested and Start now buttons." caption="Events live in the sidebar shortcut. The cover, cropped to 5:2, identifies each one in the list." />
+
 When creating or editing an event, you can click or drag up to **5 images** at
 once. Each image goes through the 5:2 cropper and can be browsed, reordered, or
 removed in the same editor. The first one is the compact cover in lists; the
@@ -198,6 +200,8 @@ Events are calendar commitments with a date, time, location, and interested
 members. **Live Actions** are temporary interactions happening now. Their
 shortcuts are independent and appear only to people who can view or manage
 their content.
+
+<AppScreenshot src="/screenshots/acoes-ao-vivo-en.png" alt="Live action list with a poll in the general channel and a form in the planning channel, each with an Open button." caption="Ongoing polls and forms are listed together. The banner at the top of the sidebar cycles through the open actions." />
 
 People with **Emit live actions** can open **Live Actions → Create Live Action**
 and choose:
