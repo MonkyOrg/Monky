@@ -127,12 +127,22 @@ if (!process.versions.electron) {
     });
     await waitFor(async () => await run(window, '!document.querySelector(".modal-backdrop:not([data-ui-closing]) .dialog-card")'), 'trusted permission confirmation');
   };
+  // A frame torn down while a script runs in it can leave executeJavaScript pending forever, as
+  // when a reopened miniapp replaces a closing one. The probe gives up and the next round
+  // reads the live frames again instead of hanging the whole regression.
+  const probeFrame = (frame, script) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(undefined), 2000);
+    frame.executeJavaScript(script).then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
   const gameFrame = async (window, id = 'game') => {
     let initializedFrame;
     await waitFor(async () => {
       for (const frame of frames(window)) {
         try {
-          if (await frame.executeJavaScript('window.gameId') === id) {
+          if (await probeFrame(frame, 'window.gameId') === id) {
             initializedFrame = frame;
             return true;
           }
