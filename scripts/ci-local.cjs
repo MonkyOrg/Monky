@@ -11,9 +11,11 @@ const { execFileSync, spawn } = require('node:child_process');
 const { parseArgs } = require('node:util');
 const { load } = require('js-yaml');
 const dom = require('./test-client-dom.cjs');
+const { docsOnly: isDocsOnly } = require('./ci-changes.cjs');
 
 const root = path.resolve(__dirname, '..');
 const ciOnly = 'PULADO (só CI)';
+const notApplicable = 'PULADO (PR só de documentação, como no CI)';
 
 function jobStep(job, name) {
   const found = job.steps.find(candidate => candidate.name === name);
@@ -49,7 +51,7 @@ function checkClean(before, after = gitStatus()) {
   if (created.length) throw new Error(`Os passos deixaram o checkout sujo (o CI recusa exportar o build): ${created.join(', ')}`);
 }
 
-function plan({ base, head, title = '', packageApp = false, platform = process.platform,
+function plan({ base, head, title = '', packageApp = false, platform = process.platform, docsOnly = false,
   ci = load(fs.readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8')),
   nativeReady = nativeRuntimeReady(platform), before = gitStatus() } = {}) {
   const shell = (stage, command, extra = {}) => ({ stage, label: command, command, ...extra });
@@ -81,7 +83,10 @@ function plan({ base, head, title = '', packageApp = false, platform = process.p
       command.includes('--system-clipboard') ? { skip: ciOnly } : {})),
     { stage: 'clean', label: 'checkout sem arquivos novos (exigido pela exportação do build no CI)', fn: () => checkClean(before) },
   ];
-  return steps;
+  return docsOnly
+    ? steps.map(candidate => (['docs', 'clean'].includes(candidate.stage) || candidate.skip ? candidate
+      : { ...candidate, skip: notApplicable }))
+    : steps;
 }
 
 function checkPairs(list, base, head) {
@@ -127,7 +132,8 @@ function options(argv) {
   const head = git('rev-parse', '--verify', `${values.head}^{commit}`);
   const base = values.base ? git('rev-parse', '--verify', `${values.base}^{commit}`)
     : git('merge-base', 'origin/main', head);
-  return { base, head, title: values.title, packageApp: values.package,
+  const changed = git('diff', '--no-renames', '--name-only', base, head).split(/\r?\n/u).filter(Boolean);
+  return { base, head, title: values.title, packageApp: values.package, docsOnly: isDocsOnly(changed),
     only: values.only ? new RegExp(values.only, 'u') : null,
     logs: path.resolve(values.logs ?? path.join(os.tmpdir(), 'monky-ci-local', new Date().toISOString().replace(/[:.]/gu, '-'))) };
 }
@@ -138,6 +144,7 @@ async function main(argv = process.argv.slice(2)) {
   delete env.ELECTRON_RUN_AS_NODE;
   fs.mkdirSync(config.logs, { recursive: true });
   console.log(`Base ${config.base.slice(0, 12)}, head ${config.head.slice(0, 12)}. Logs em ${config.logs}`);
+  if (config.docsOnly) console.log('Só documentação mudou: como no CI, roda apenas o estágio docs.');
   const results = [];
   for (const [index, step] of plan(config).entries()) {
     if (config.only && step.stage !== 'clean' && !config.only.test(`${step.stage} ${step.label}`)) continue;

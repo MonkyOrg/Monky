@@ -400,6 +400,15 @@ CI**, porque o `Build check (mac)` roda `--dir`, que pula a assinatura por
 completo. Só a release exercita esse caminho; veja
 [Certificado de assinatura do macOS](#certificado-de-assinatura-do-macos).
 
+**PR só de documentação** roda apenas o `Docs traduzidos em sincronia`. O job
+`Classificar mudanças` (`scripts/ci-changes.cjs`) compara o PR com a base e só
+o considera documentação quando todo arquivo alterado é Markdown da raiz ou de
+`docs/`, ou página, imagem ou fonte de diagrama de `docs-site/`. Ficam de fora o tema e os scripts do
+site e as páginas que viram README de pacote (`bots-desenvolvimento.md` e
+`cli.md`); `apps/`, `packages/`, `scripts/`, `.github/` e `release-notes/` nunca
+contam como documentação. Os demais checks obrigatórios aparecem aprovados como
+não aplicáveis. Na dúvida, e sempre em execução manual, o CI roda tudo.
+
 Os checks obrigatórios da `main` exigem que o PR esteja atualizado com a base.
 Quando outro PR entra primeiro, o resultado anterior não basta para liberar o
 merge: atualize a branch e aguarde o novo CI. Isso não apaga o histórico verde
@@ -420,7 +429,8 @@ termina listando o que falhou, com o caminho do log de cada passo. A base padrã
 - `--package` inclui o `electron-builder --dir`.
 
 Passos que só rodam num runner descartável, como o clipboard real e a exportação
-do artefato, aparecem como **PULADO (só CI)**. Sem `npm run prepare:native-screen`,
+do artefato, aparecem como **PULADO (só CI)**. Se a branch só muda documentação,
+todos os estágios menos `docs` aparecem como pulados, como no CI. Sem `npm run prepare:native-screen`,
 os testes nativos também aparecem como pulados, não como falha. No fim, ele
 confere que os passos não deixaram arquivos novos no checkout, porque o CI só
 exporta o build de um checkout limpo; essa conferência roda mesmo com `--only`. No CI, cada

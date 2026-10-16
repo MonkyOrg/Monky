@@ -163,10 +163,10 @@ test('camera graphics use supported CI backends without weakening macOS or chang
 test('DOM lanes run from the start on both systems, independently of native compilation, behind one gate', () => {
   const dom = ci.jobs['client-dom'];
   assert.equal(dom['runs-on'], 'windows-2022');
-  assert.equal(dom.needs, undefined);
+  assert.equal(dom.needs, 'changes', 'DOM lanes wait only for the change classification.');
   const mac = ci.jobs['client-dom-mac'];
   assert.equal(mac['runs-on'], 'macos-15');
-  assert.equal(mac.needs, undefined);
+  assert.equal(mac.needs, 'changes', 'DOM lanes wait only for the change classification.');
   for (const [job, shards, label] of [[dom, [1, 2, 3], 'Windows'], [mac, [1, 2], 'macOS']]) {
     assert.deepEqual(job.strategy.matrix.shard, shards);
     assert.equal(job.strategy['fail-fast'], false);
@@ -193,24 +193,33 @@ test('DOM lanes run from the start on both systems, independently of native comp
   assert.equal(gate.name, 'Build check (${{ matrix.platform }})');
   assert.deepEqual(gate.strategy.matrix.platform, ['win', 'mac']);
   assert.equal(gate.if, 'always()');
-  assert.deepEqual(gate.needs, ['package-win', 'package-mac', 'client-dom', 'client-dom-mac', 'mac-native-sources']);
+  assert.deepEqual(gate.needs, ['changes', 'package-win', 'package-mac', 'client-dom', 'client-dom-mac', 'mac-native-sources']);
   const check = step(gate, 'Require packaging, DOM and native hardware success');
   assert.deepEqual(check.env, {
+    DOCS_ONLY: '${{ needs.changes.outputs.docs-only }}',
     PACKAGE_WIN: '${{ needs.package-win.result }}', PACKAGE_MAC: '${{ needs.package-mac.result }}',
     DOM_WIN: '${{ needs.client-dom.result }}', DOM_MAC: '${{ needs.client-dom-mac.result }}',
     NATIVE_MAC: '${{ needs.mac-native-sources.result }}',
   });
   const bash = process.platform === 'win32'
     ? path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'bin', 'bash.exe') : 'bash';
-  const lanes = Object.keys(check.env);
-  for (const failed of [null, ...lanes]) for (const outcome of ['failure', 'skipped', 'cancelled']) {
+  const lanes = Object.keys(check.env).filter(name => name !== 'DOCS_ONLY');
+  const passes = (docsOnly, results) => {
+    const result = spawnSync(bash, ['--noprofile', '--norc', '-e', '-c', check.run],
+      { encoding: 'utf8', env: { ...process.env, DOCS_ONLY: docsOnly, ...results } });
+    assert.ifError(result.error);
+    return result.status === 0;
+  };
+  for (const docsOnly of ['', 'false']) for (const failed of [null, ...lanes]) for (const outcome of ['failure', 'skipped', 'cancelled']) {
     if (failed === null && outcome !== 'failure') continue;
     const env = Object.fromEntries(lanes.map(lane => [lane, lane === failed ? outcome : 'success']));
-    const result = spawnSync(bash, ['--noprofile', '--norc', '-e', '-c', check.run],
-      { encoding: 'utf8', env: { ...process.env, ...env } });
-    assert.ifError(result.error);
-    assert.equal(result.status === 0, failed === null, `${failed ?? 'all lanes'} ${outcome}`);
+    assert.equal(passes(docsOnly, env), failed === null, `${failed ?? 'all lanes'} ${outcome} (docs-only "${docsOnly}")`);
   }
+  const all = outcome => Object.fromEntries(lanes.map(lane => [lane, outcome]));
+  assert.ok(passes('true', all('skipped')), 'A documentation-only PR passes the gate as not applicable.');
+  assert.ok(!passes('', all('skipped')), 'Skipped lanes never pass a PR that was not classified as documentation-only.');
+  for (const lane of lanes) for (const outcome of ['success', 'failure', 'cancelled'])
+    assert.ok(!passes('true', { ...all('skipped'), [lane]: outcome }), `docs-only with ${lane} ${outcome}`);
 });
 
 test('CI exercises channel permissions and screen privacy alongside voice lifecycle tests', () => {
@@ -584,7 +593,7 @@ test('macOS native runtime is built once, sourced in parallel, validated on its 
     < ci.jobs['mac-native'].steps.indexOf(bundle));
 
   const sources = ci.jobs['mac-sources'];
-  assert.equal(sources.needs, undefined, 'Corresponding sources need the GN graph, not compiled objects.');
+  assert.equal(sources.needs, 'changes', 'Corresponding sources need the GN graph, not compiled objects.');
   const notices = step(sources, 'Generate notices from both GN target graphs');
   assert.match(notices.run, /buildMacRtc\.cjs --arch=\$architecture --configure/u);
   assert.match(notices.run, /notices\.cjs --mac --architectures=arm64,x64$/mu);
@@ -868,6 +877,12 @@ test('ci:local mirrors CI commands from ci.yml and the DOM runner, skipping only
         || candidate.label.includes('node-gyp rebuild --directory=apps/client/native/screen-audio')));
   }
   assert.ok(pairs(ci).some(([pt, en]) => pt === 'CONTRIBUTING.md' && en === 'CONTRIBUTING.en.md'));
+  for (const platform of ['win32', 'darwin']) {
+    const docsOnly = plan({ base: 'a', head: 'b', platform, nativeReady: true, docsOnly: true, before: new Set() });
+    assert.ok(docsOnly.some(candidate => candidate.stage === 'docs'));
+    for (const candidate of docsOnly)
+      assert.equal(!!candidate.skip, !['docs', 'clean'].includes(candidate.stage), `${candidate.stage} ${candidate.label}`);
+  }
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).scripts['ci:local'], 'node scripts/ci-local.cjs');
   const { checkClean } = require('./ci-local.cjs');
   const last = plan({ base: 'a', head: 'b', platform: 'win32', nativeReady: true, before: new Set() }).at(-1);
