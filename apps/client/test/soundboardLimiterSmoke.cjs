@@ -239,9 +239,9 @@ async function runSmoke(fixture) {
     soundDownloadAvailability: async folder => folder === fixture.folder ? 'ready' : 'no_folder',
     readSoundboardSound: async () => sound,
   };
-  const [{ settingsStore }, { soundboardService }, { SoundboardTab }, { appEvents }, language] = await Promise.all([
+  const [{ settingsStore }, { soundboardService }, { SoundboardTab }, { appEvents }, language, { serverStore }] = await Promise.all([
     import('/stores/settingsStore.ts'), import('/core/SoundboardService.ts'), import('/views/settings/tabs/SoundboardTab.ts'),
-    import('/core/EventBus.ts'), import('/i18n/index.ts'),
+    import('/core/EventBus.ts'), import('/i18n/index.ts'), import('/stores/serverStore.ts'),
   ]);
   const workletUrl = new URL('/audio/soundboardLimiter.worklet.js', window.location.href).href;
   const tab = new SoundboardTab();
@@ -322,6 +322,7 @@ async function runSmoke(fixture) {
       soundboardService.handleIncomingSound({ ...payload, userId: 'remote-two' }),
     ]);
     await until(() => soundboardService.getActivePlaybacks().length === 2, 'Concurrent soundboard playback did not start');
+    check(!soundboardService.isPlayingOwnSound(), 'Sounds from other members do not put the megaphone in the tray');
     const graph = soundboardService.audioOutput.graph;
     check(graph.context instanceof originalContext && graph.limiter instanceof AudioWorkletNode,
       'Incoming sounds use a real native audio context and limiter');
@@ -343,11 +344,21 @@ async function runSmoke(fixture) {
     check(soundboardService.getIntensity() === null, 'Stopping clears the cached meter instead of retaining its last reading');
     check(await soundboardService.playSound('authored.wav'), 'Local library preview starts outside a voice call');
     await until(() => soundboardService.getActivePlaybacks().length === 1, 'Local preview did not become active');
+    check(!soundboardService.isPlayingOwnSound(), 'A library preview outside the call does not put the megaphone in the tray');
     check(soundboardService.audioOutput.graph.limiter.parameters.get('enabled').value === 1,
       'Library previews use the same limiter as received clips');
     soundboardService.stopSound();
     await until(() => contexts.every(context => context.state === 'closed'), 'Preview cleanup left a live audio context');
     check(contexts.length >= 3, 'Readiness, received clips and preview lifecycles were exercised separately');
+    serverStore.currentUser = { id: 'own-user' };
+    await soundboardService.handleIncomingSound({ ...payload, userId: 'own-user' });
+    await until(() => soundboardService.getActivePlaybacks().length === 1, 'Own sound did not start');
+    check(soundboardService.isPlayingOwnSound(), 'A sound we sent to the call puts the megaphone in the tray');
+    soundboardService.activePlaybacks.get('own-user').audio.pause();
+    check(!soundboardService.isPlayingOwnSound(), 'Pausing our sound puts the microphone back');
+    soundboardService.stopSound();
+    serverStore.currentUser = null;
+    check(!soundboardService.isPlayingOwnSound(), 'Stopping our sound puts the microphone back');
     await soundboardService.handleIncomingSound({ ...payload, userId: 'short-tail', audioBase64: fixture.shortBase64 });
     const shortGraph = soundboardService.audioOutput.graph;
     const shortAudio = soundboardService.activePlaybacks.get('short-tail')?.audio;

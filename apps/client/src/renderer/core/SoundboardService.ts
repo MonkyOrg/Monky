@@ -236,6 +236,11 @@ export class SoundboardService {
     );
   }
 
+  /** Whether a sound we sent is playing in the call (a preview out of it is not): the tray megaphone. */
+  public isPlayingOwnSound(): boolean {
+    return this.getActivePlaybacks().some((p) => p.userId !== 'local' && this.isLocalPlayback(p.userId));
+  }
+
   public getGlobalPlayerPlaybacks(includePaused = false): ActiveSoundPlayback[] {
     return Array.from(this.activePlaybacks.values()).filter(
       (p) => p.showInGlobalPlayer && (includePaused || !p.audio.paused) && !p.audio.ended

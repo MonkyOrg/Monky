@@ -434,6 +434,8 @@ class App {
         selfDeafened: voiceStore.isDeafened,
         micLock: voiceStore.permissionMuted ? (isCallInAfkChannel() ? 'afk' : 'permission') : null,
         isWatching: voiceStore.isWatchingAnyScreenShare() || this.mainView.isWatchingAnyBotScreen(),
+        isPlayingSound: soundboardService.isPlayingOwnSound(),
+        isRecording: voiceStore.isCameraOn || voiceStore.isScreenSharing,
       });
     };
 
@@ -443,6 +445,10 @@ class App {
     // Watching someone's screen or a miniapp puts 3D glasses on the tray monkey.
     appEvents.on('voice.screen_watch_changed', syncTrayVoiceStatus);
     appEvents.on('stage.bot_screens_changed', syncTrayVoiceStatus);
+    // Our own soundboard sound puts a megaphone in its hand (a pause counts as stopping).
+    appEvents.on('soundboard.playback_started', syncTrayVoiceStatus);
+    appEvents.on('soundboard.playback_changed', syncTrayVoiceStatus);
+    appEvents.on('soundboard.playback_ended', syncTrayVoiceStatus);
 
     // Initial sync
     syncTrayVoiceStatus();
