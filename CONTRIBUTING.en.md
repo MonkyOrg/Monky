@@ -404,6 +404,16 @@ because `Build check (mac)` runs `--dir`, which skips signing entirely. Only the
 release exercises that path; see
 [macOS signing certificate](#macos-signing-certificate).
 
+A **documentation-only PR** runs only `Docs traduzidos em sincronia`. The
+`Classificar mudanças` job (`scripts/ci-changes.cjs`) compares the PR with its
+base and treats it as documentation only when every changed file is Markdown at
+the root or in `docs/`, or a page, image or diagram source in `docs-site/`. The site theme and
+scripts, and the pages shipped as package READMEs (`bots-desenvolvimento.md`
+and `cli.md`), are excluded; `apps/`, `packages/`, `scripts/`, `.github/` and
+`release-notes/` never count as documentation. The other required checks show
+as passed, marked not applicable. When in doubt, and always on manual runs, CI
+runs everything.
+
 Required checks on `main` require the PR to be up to date with its base.
 When another PR merges first, the previous result is no longer sufficient to
 allow merging: update the branch and wait for the new CI. This does not erase
@@ -429,7 +439,8 @@ build or CI itself. For everything else, use `--only` with the steps that cover
 the changed files; a documentation-only change needs just `--only docs`.
 
 Steps that only run on a disposable runner, such as the real clipboard and the
-artifact export, show as **PULADO (só CI)**. Without
+artifact export, show as **PULADO (só CI)**. If the branch only changes
+documentation, every stage except `docs` shows as skipped, as in CI. Without
 `npm run prepare:native-screen`, native tests are also reported as skipped,
 not failed. At the end it checks that the steps left no new files in the
 checkout, because CI only exports builds from a clean checkout; this check runs
