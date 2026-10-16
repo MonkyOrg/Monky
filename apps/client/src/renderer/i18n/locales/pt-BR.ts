@@ -486,7 +486,6 @@ export const ptBR = {
   'chat.dropSubtitle': 'Imagens, vídeos ou arquivos',
   'chat.attachmentEvicted': 'Anexo expirado (removido para liberar espaço)',
   'chat.tooManyAttachments': 'Máximo de {max} arquivos por mensagem.',
-  'chat.downloadFailedTitle': 'Falha no download',
   'chat.downloadFailedMessage': 'Não foi possível baixar o anexo. {error}',
   'chat.openMediaViewer': 'Abrir visualizador de mídia',
   'chat.videoSeek': 'Progresso do vídeo',

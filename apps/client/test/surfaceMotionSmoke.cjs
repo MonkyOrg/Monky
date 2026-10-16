@@ -413,6 +413,46 @@ async function* regression() {
   await settle(media);
   check(!media.isConnected, 'Lightbox teardown finishes without a ghost overlay');
 
+  // The viewer covers the modal that opened it; anything opened after the viewer is above it and owns the keyboard.
+  const hit = element => {
+    const rect = element.getBoundingClientRect();
+    return element.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
+  };
+  const opener = openCommunityModal('Opens the viewer');
+  opener.element.style.zIndex = '10003';
+  await settle(opener.element);
+  const layered = new LightboxModal();
+  const pixel = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="40" height="40"/%3E';
+  layered.open(['first', 'second'].map(fileName => ({ kind: 'image', url: pixel, fileName, senderName: '', timestamp: '', source: origin })),
+    0, async () => {});
+  const overlay = document.querySelector('.attachment-lightbox:not([data-ui-closing])');
+  await settle(overlay);
+  const viewerClose = overlay.querySelector('.lightbox-close');
+  check(hit(viewerClose), 'The viewer stays above a modal with a raised z-index that opened it');
+  viewerClose.focus();
+  const alertDone = dialog.showAlert({ message: 'Opened over the viewer', variant: 'danger' });
+  const alert = motion.topModal();
+  await settle(alert);
+  check(hit(alert.querySelector('.dialog-card [data-action="confirm"]')), 'A dialog opened over the viewer is visible and reachable');
+  check(!opener.element.inert && !opener.element.querySelector(':scope > .modal-card').hidden
+    && getComputedStyle(alert).backgroundColor !== 'rgba(0, 0, 0, 0)',
+  'The viewer separates the dialog from the modal beneath it, so they do not share one scrim');
+  key(document.activeElement, 'ArrowRight');
+  check(overlay.querySelector('.lightbox-counter').textContent === '1 / 2', 'Arrow keys belong to the dialog, not the viewer under it');
+  key(document.activeElement, 'Escape');
+  await alertDone;
+  check(alert.hasAttribute('data-ui-closing') && !overlay.hasAttribute('data-ui-closing') && !opener.element.hasAttribute('data-ui-closing'),
+    'One Escape closes only the dialog over the viewer');
+  check(document.activeElement === viewerClose, 'Closing the dialog returns focus into the viewer');
+  await settle(alert);
+  key(document.activeElement, 'Escape');
+  check(overlay.hasAttribute('data-ui-closing') && !opener.element.hasAttribute('data-ui-closing'),
+    'The next Escape closes the viewer, not the modal it covers');
+  await settle(overlay);
+  key(document.activeElement, 'Escape');
+  check(opener.element.hasAttribute('data-ui-closing'), 'With the viewer gone, Escape returns to the modal');
+  await settle(opener.element);
+
   const { renderCodeComposer, bindCodeComposer } = await import('/views/CodeComposer.ts');
   const codeRoot = document.createElement('div');
   codeRoot.innerHTML = renderCodeComposer({ code: 'const answer = 42;', language: 'javascript' });

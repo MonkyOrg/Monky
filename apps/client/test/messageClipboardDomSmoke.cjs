@@ -258,6 +258,42 @@ async function runLightboxZoomSmoke(window) {
     await dispatchClick(window, { x: download.x, y: download.y });
     check(await evaluate('window.zoomDownloads.join()') === 'Landscape' && !(await menuState()).open,
       'Download from the menu saves the right-clicked item and dismisses the menu');
+    await evaluate('window.messageClipboardFixture.setWriteMode("reject")');
+    try {
+      const copyPoint = await evaluate(`(() => {
+        const rect = document.querySelector('.attachment-lightbox:not([data-ui-closing]) .lightbox-copy').getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      })()`);
+      await dispatchClick(window, copyPoint);
+      const failure = async () => {
+        for (let index = 0; index < 150; index++) {
+          const value = await evaluate(`(() => {
+            const toast = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+            const close = toast?.querySelector('.chat-copy-toast-close');
+            if (!close) return null;
+            const rect = close.getBoundingClientRect();
+            const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+            return { x, y, label: toast.querySelector('.chat-copy-toast-label').textContent, role: toast.getAttribute('role'),
+              onTop: document.elementFromPoint(x, y)?.closest('button') === close,
+              dialog: !!document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card'),
+              viewerOpen: !!document.querySelector('.attachment-lightbox:not([data-ui-closing])') };
+          })()`);
+          if (value) return value;
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        return null;
+      };
+      const shown = await failure();
+      check(shown?.label === 'Could not copy the image. Check that it is available and try again.' && shown.role === 'alert'
+        && shown.onTop && !shown.dialog && shown.viewerOpen,
+      `A real click on Copy that fails shows the error above the viewer instead of hiding it behind: ${JSON.stringify(shown)}`);
+      await dispatchClick(window, { x: shown.x, y: shown.y });
+      await new Promise(resolve => setTimeout(resolve, 50));
+      check(await evaluate(`!document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')`) && (await menuState()).viewerOpen,
+        'A real click dismisses the error over the viewer without closing the viewer');
+    } finally {
+      await evaluate('window.messageClipboardFixture.setWriteMode("resolve")');
+    }
     await mouse({ type: 'mouseMoved', x: base.width / 2, y: base.height / 2 });
     await mouse({ type: 'mouseWheel', x: base.width / 2, y: base.height / 2, deltaX: 0, deltaY: -100 });
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -1046,6 +1082,7 @@ async function installFixture(systemClipboard = false) {
 
   window.messageClipboardFixture = {
     prepare, prepareImages, settle, select, clearSelection, focusRow, preparePaste,
+    setWriteMode(mode) { writeMode = mode; },
     async testReaderLocales() {
       let count = 0;
       const check = (condition, message) => { if (!condition) throw new Error(message); count++; };
@@ -1183,11 +1220,78 @@ async function installFixture(systemClipboard = false) {
 
       await prepareImages('en');
       writeMode = 'reject';
+      const copyFailed = 'Could not copy the image. Check that it is available and try again.';
+      const failure = () => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+      const waitForFailure = async (text, message) => {
+        for (let index = 0; index < 150 && failure()?.querySelector('.chat-copy-toast-label').textContent !== text; index++) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        expect(failure()?.querySelector('.chat-copy-toast-label').textContent === text, `${message}: ${failure()?.textContent}`);
+      };
+      // The toast lets clicks through, so its close button is the part that must be hit-testable.
+      const failureOnTop = () => {
+        const close = failure()?.querySelector('.chat-copy-toast-close');
+        const rect = close?.getBoundingClientRect();
+        return !!rect && document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.closest('button') === close;
+      };
+      const noDialog = () => !document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card');
       await view.copyAttachmentImage(find('[data-message-id="photo"] .chat-attachment-image'));
-      expect(!document.querySelector('.chat-copy-toast:not([data-ui-closing])')
-        && find('.modal-backdrop:not([data-ui-closing]) .dialog-card .dialog-message').textContent.startsWith('Could not copy the image.'),
-        'Clipboard rejection is explicit, without a link fallback or success toast');
-      dismissAlert();
+      await waitForFailure(copyFailed, 'Clipboard rejection is reported in the shared error toast');
+      expect(failure().getAttribute('role') === 'alert' && noDialog()
+        && !document.querySelector('.chat-copy-toast:not(.chat-copy-toast--danger):not([data-ui-closing])'),
+      'Clipboard rejection is an accessible alert, without a dialog, link fallback or success toast');
+
+      const activeViewer = '.attachment-lightbox:not([data-ui-closing])';
+      const viewerFailure = async (trigger, message) => {
+        trigger();
+        await waitForFailure(copyFailed, message);
+        expect(failureOnTop() && noDialog() && !!document.querySelector(activeViewer),
+          `${message}: the failure is visible above the open viewer, which stays open`);
+      };
+      failure().querySelector('.chat-copy-toast-close').click();
+      expect(!failure(), 'The error toast can be dismissed before it expires');
+      const viewerTrigger = find('[data-message-id="photo"] .chat-attachment-lightbox-trigger');
+      viewerTrigger.click();
+      await viewerFailure(() => find(`${activeViewer} .lightbox-copy`).click(), 'Viewer copy button failure');
+      await viewerFailure(() => {
+        clearSelection();
+        find(`${activeViewer} .lightbox-copy`).dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true }));
+      }, 'Viewer Ctrl+C failure');
+      await viewerFailure(() => {
+        find(`${activeViewer} .lightbox-media--image`)
+          .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 60, clientY: 60 }));
+        find('.floating-context-menu:not([data-ui-closing]) [role="menuitem"]').click();
+      }, 'Viewer menu copy failure');
+      expect(document.querySelectorAll('.chat-copy-toast:not([data-ui-closing])').length === 1, 'Repeated failures replace rather than stack');
+      find(`${activeViewer} .lightbox-copy`).dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+      expect(!failure() && !!document.querySelector(activeViewer), 'Moving to another item retires the failure about the previous one');
+      writeMode = 'resolve';
+
+      const apiDescriptor = Object.getOwnPropertyDescriptor(window, 'api');
+      const downloads = [];
+      Object.defineProperty(window, 'api', { configurable: true, writable: true, value: {
+        ...window.api, downloadFile: async (url, fileName) => { downloads.push(fileName); return { success: false, error: 'Disk full.' }; },
+      } });
+      try {
+        const download = find(`${activeViewer} .lightbox-download`);
+        download.click();
+        await waitForFailure('Could not download the attachment. Disk full.', 'Viewer download failure is reported in the shared error toast');
+        expect(downloads.length === 1 && failureOnTop() && noDialog() && !!document.querySelector(activeViewer),
+          'A failed download from the viewer is visible above it, and the viewer stays open');
+        expect(!download.disabled && download.getAttribute('aria-busy') !== 'true',
+          'The download button leaves its loading state without waiting for the user to acknowledge the failure');
+      } finally {
+        if (apiDescriptor) Object.defineProperty(window, 'api', apiDescriptor);
+        else delete window.api;
+      }
+      lightboxModal.close();
+      failure()?.querySelector('.chat-copy-toast-close').click();
+      writeMode = 'reject';
+      find(`[data-message-id="photo"] .chat-attachment-lightbox-trigger`).click();
+      find(`${activeViewer} .lightbox-copy`).click();
+      await waitForFailure(copyFailed, 'Viewer copy fails again before closing');
+      lightboxModal.close();
+      expect(!failure(), 'Closing the viewer retires its copy failure, like its copy confirmation');
       writeMode = 'resolve';
       for (const url of ['file:///not-an-allowed-source.png', `${window.clipboardImageOrigin}/missing.png`,
         `${window.clipboardImageOrigin}/too-large.png`]) {

@@ -54,6 +54,8 @@
 
 :root {
   color-scheme: dark;
+  /* The media viewer covers the app and any modal that opened it; dialogs opened over it go one layer above. */
+  --z-media-viewer: 10050;
   --motion-modal-duration: 200ms;
   --motion-popover-duration: 140ms;
   --motion-panel-duration: 200ms;
@@ -7934,7 +7936,7 @@ input:focus, textarea:focus, select:focus {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 10050;
+  z-index: var(--z-media-viewer);
   overflow: hidden;
 }
 

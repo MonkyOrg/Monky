@@ -321,6 +321,11 @@ imagem** (só em imagens) e **Baixar**, as mesmas ações dos botões do canto.
 Enquanto o menu está aberto, o teclado age nele: `Escape` fecha só o menu, e
 clicar fora dele também não fecha o visualizador.
 
+Se copiar ou baixar falhar, o aviso de erro aparece na frente do visualizador,
+que continua aberto. Uma janela aberta por cima dele, como o aviso de que o
+servidor foi desligado, também fica visível e recebe o teclado: o primeiro
+`Escape` fecha a janela e o segundo, o visualizador.
+
 **Responder** mantém uma referência à mensagem original, com autor e prévia. A resposta pode incluir texto, anexos, código ou figurinha; mensagens públicas de bots também podem receber respostas. Cancele pelo `×` no campo de composição ou com `Escape`. A referência acompanha o rascunho do canal. Clicar na prévia leva à mensagem original, carregando uma janela do histórico se necessário; **Voltar às mensagens recentes** retorna ao fim da conversa. A prévia acompanha edições e mostra **Mensagem apagada** se o original for excluído, sem preservar seu conteúdo. Mensagens privadas de bots não podem ser usadas como referência.
 
 ## Menções

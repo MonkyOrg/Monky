@@ -1,7 +1,7 @@
 import { t } from '../i18n';
-import { animateEnter, removeWithMotion } from '../utils/surfaceMotion';
+import { animateEnter, removeWithMotion, topModal } from '../utils/surfaceMotion';
 import { initializeCustomVideoPlayers } from '../utils/videoPlayer';
-import { showAlert } from './Dialog';
+import { showErrorToast } from './CopyToast';
 import { playChatMedia } from '../core/ChatMediaOutput';
 import { ImageClipboard } from '../utils/imageClipboard';
 import { isButtonLoading, withButtonLoading } from '../utils/buttonLoading';
@@ -11,17 +11,14 @@ import { ContextMenu, type ContextMenuItem } from './ContextMenu';
  * Handler de download que o lightbox espera. Fica aqui porque todo mundo que
  * abre o visualizador precisa exatamente disto — o chat e o menu de contexto
  * mantinham a mesma dezena de linhas duplicada, cada uma com sua cópia do
- * aviso de falha (#406).
+ * aviso de falha (#406). A falha usa o toast compartilhado, que fica acima do
+ * próprio visualizador; um diálogo ficaria escondido atrás dele.
  */
 export async function downloadLightboxFile(url: string, fileName: string): Promise<void> {
   if (!window.api?.downloadFile) return;
   const result = await window.api.downloadFile(url, fileName);
   if (!result.success && result.error) {
-    await showAlert({
-      title: t('chat.downloadFailedTitle'),
-      message: t('chat.downloadFailedMessage', { error: result.error }),
-      variant: 'danger',
-    });
+    showErrorToast(t('chat.downloadFailedMessage', { error: result.error }), 7000);
   }
 }
 
@@ -380,6 +377,9 @@ export class LightboxModal {
     const onKey = (e: KeyboardEvent) => {
       // Like a native menu, an open media menu owns the keyboard.
       if (mediaMenu.isOpen()) return;
+      // So does a dialog opened over the viewer: one Escape closes only that dialog.
+      const dialog = topModal();
+      if (dialog && overlay.compareDocumentPosition(dialog) & Node.DOCUMENT_POSITION_FOLLOWING) return;
       const target = e.target as HTMLElement | null;
       const isFormField = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
 
