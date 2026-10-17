@@ -4,6 +4,7 @@ import DefaultTheme from 'vitepress/theme';
 import { useData, useRoute } from 'vitepress';
 import { SERVER_INVITE_FRAGMENT_PREFIX } from '../../../packages/shared/src/serverInvites';
 import ServerInvite from './components/ServerInvite.vue';
+import FaqNotice from './components/FaqNotice.vue';
 
 const DefaultLayout = DefaultTheme.Layout;
 const { frontmatter, lang } = useData();
@@ -29,7 +30,11 @@ onBeforeUnmount(() => window.removeEventListener('hashchange', updateHash));
     <h1>{{ english ? 'Monky invitation' : 'Convite para o Monky' }}</h1>
     <ServerInvite :lang="english ? 'en' : 'pt-BR'" />
   </main>
-  <DefaultLayout v-else />
+  <DefaultLayout v-else>
+    <template #home-features-after>
+      <FaqNotice />
+    </template>
+  </DefaultLayout>
 </template>
 
 <style scoped>

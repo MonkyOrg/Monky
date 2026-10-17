@@ -36,6 +36,13 @@ features:
     details: Build commands, forms, polls, audio and miniapps with Monky's TypeScript bot SDK. Tutorials and a complete API reference.
     link: /en/bots-desenvolvimento
     linkText: Create your first bot
+faqNotice:
+  title: Before you create your server
+  details: Monky doesn't work like Discord. The server runs on your computer, not in a cloud, and goes offline when you quit Monky or turn off your PC. For friends on another network to join, you need to open a port, use a VPN or host on a VPS.
+  link: /en/faq
+  linkText: Read the FAQ
+  hookLink: /en/faq#don-t-know-what-a-vpn-or-a-vps-is
+  hookText: Don't know what a VPN or a VPS is?
 ---
 
 ## A place for your group
@@ -62,6 +69,7 @@ invite page offers the download.
 | I want to… | Start here |
 | --- | --- |
 | Download the app | [Download for Windows and macOS](/en/download) |
+| Understand how Monky works before creating a server | [FAQ](/en/faq) |
 | Join my friends | [Identity and getting started](/en/primeiros-passos) |
 | Adjust my microphone or camera | [App settings](/en/configuracoes) |
 | Add or use an existing bot | [Bots for users and administrators](/en/bots) |

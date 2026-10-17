@@ -4,6 +4,12 @@ description: "Hospede um servidor do Monky pelo próprio aplicativo: porta, senh
 
 # Criar Seu Servidor
 
+::: warning O servidor roda no seu computador
+Não funciona como no Discord: ele sai do ar quando você sai do Monky ou
+desliga o computador, e amigos de outra rede precisam de porta liberada, VPN
+ou VPS para entrar. Veja as [perguntas frequentes](/faq).
+:::
+
 Na Home, clique no botão **+** no trilho de servidores e escolha
 **Criar meu servidor**. Preencha nome do servidor, porta local, senha opcional,
 os canais iniciais de texto e voz e, se quiser, um limite de membros. O Monky
