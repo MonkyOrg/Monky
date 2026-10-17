@@ -15,6 +15,7 @@ import {
   type DmSelfProfile,
   type DmSelfProfileInput,
   type DmSnapshot,
+  type MessageForward,
 } from '@monky/shared';
 import { EventBus } from '../core/EventBus';
 import { DmTransport } from '../core/DmTransport';
@@ -226,8 +227,11 @@ export class DmStore {
     }
   }
 
-  sendMessage(peer: string, content: string, files: DmOutgoingFile[] = [], replyTo: string | null = null): Promise<DmFailure | null> {
-    return this.run((api) => api.sendMessage({ peer, content, files, replyTo }));
+  sendMessage(
+    peer: string, content: string, files: DmOutgoingFile[] = [], replyTo: string | null = null,
+    forwarded: MessageForward | null = null,
+  ): Promise<DmFailure | null> {
+    return this.run((api) => api.sendMessage({ peer, content, files, replyTo, ...(forwarded ? { forwarded } : {}) }));
   }
 
   editMessage(peer: string, messageId: string, content: string): Promise<DmFailure | null> {

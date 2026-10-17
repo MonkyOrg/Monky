@@ -1,10 +1,13 @@
 import { createHash } from 'crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import {
   DM_DEFAULT_MAX_FILE_BYTES,
   DM_MAX_ATTACHMENTS,
   DM_MAX_FILE_BYTES_LIMIT,
   DM_MAX_MESSAGE_LENGTH,
   DM_PROFILE_AVATAR_MAX_LENGTH,
+  sanitizeDmForward,
   type DmAttachmentState,
   type DmAttachmentView,
   type DmConversationPage,
@@ -25,6 +28,7 @@ import {
   type DmSendMessageInput,
   type DmSettings,
   type DmSnapshot,
+  type MessageForward,
 } from '@monky/shared';
 import {
   DmKeyring,
@@ -182,6 +186,8 @@ interface StoredMessage {
   reactions: StoredReactions;
   attachments: StoredAttachment[];
   delivery: DmDeliveryState | null;
+  /** Absent in stores written before forwarding existed. */
+  forwarded?: MessageForward | null;
 }
 
 interface StoredConversation {
@@ -557,6 +563,7 @@ export class DmService {
             receivedBytes: file.receivedBytes,
           })),
       delivery: message.author === this.me ? delivery ?? 'delivered' : null,
+      forwarded: message.deleted ? null : message.forwarded ?? null,
     };
   }
 
@@ -1028,6 +1035,7 @@ export class DmService {
       }
     }
     const replyTo = input.replyTo && this.findMessage(peer, input.replyTo) ? input.replyTo : null;
+    const forwarded = sanitizeDmForward(input.forwarded);
     const attachments: StoredAttachment[] = files.map((file) => {
       const data = Buffer.from(file.data);
       const meta = sanitizeAttachmentMeta({
@@ -1053,6 +1061,7 @@ export class DmService {
       reactions: {},
       attachments,
       delivery: 'pending',
+      forwarded,
     };
     const meta = this.meta(peer);
     meta.hidden = false;
@@ -1063,6 +1072,8 @@ export class DmService {
       content,
       replyTo,
       attachments: attachments.map(({ fileId, name, size, mime, sha256 }) => ({ fileId, name, size, mime, sha256 })),
+      // Optional so the body of a plain message stays as older clients expect; they ignore the field.
+      ...(forwarded ? { forwarded } : {}),
     };
     const item = this.queueEnvelope(record, 'msg', body, id, ts);
     this.changed(peer);
@@ -1109,6 +1120,7 @@ export class DmService {
     }
     message.attachments = [];
     message.reactions = {};
+    message.forwarded = null;
   }
 
   deleteMessage(peerKey: string, messageId: string): DmDispatch {
@@ -1626,6 +1638,7 @@ export class DmService {
             replyTo: message.replyTo,
             reactions: message.reactions,
             attachments: message.attachments.map(({ fileId, name, size, mime, sha256 }) => ({ fileId, name, size, mime, sha256 })),
+            ...(message.forwarded ? { forwarded: message.forwarded } : {}),
           };
           const length = utf8Length(JSON.stringify(wire)) + 1;
           if (length > MAX_SEALED_ITEM_BYTES - 2_000) continue;
@@ -1696,6 +1709,7 @@ export class DmService {
           reactions: deleted ? {} : reactions,
           attachments,
           delivery: author === this.me ? 'delivered' : null,
+          forwarded: deleted ? null : sanitizeDmForward(raw.forwarded),
         };
         if (!this.insertMessage(peer, message)) continue;
         this.observeStamp(createdAt);
@@ -2040,6 +2054,7 @@ export class DmService {
           reactions: {},
           attachments,
           delivery: author === this.me ? 'delivered' : null,
+          forwarded: sanitizeDmForward(data.forwarded),
         };
         if (!this.insertMessage(peer, message)) return [];
         this.observeStamp(message.createdAt);
@@ -2384,6 +2399,15 @@ export class DmService {
     return { name: ref.file.name, mime: ref.file.mime, data };
   }
 
+  /** Decrypts a ready/local attachment into `destination` (absolute path), creating or overwriting it. */
+  async writeAttachmentTo(peerKey: string, messageId: string, fileId: string, destination: string): Promise<void> {
+    if (typeof destination !== 'string' || !path.isAbsolute(destination) || destination.includes('\0')) {
+      throw new Error('Invalid destination for the DM attachment: an absolute file path is required.');
+    }
+    const file = this.readAttachment(peerKey, messageId, fileId);
+    await fs.writeFile(destination, file.data);
+  }
+
   // ---------------------------------------------------------------------------
   // Export / import
   // ---------------------------------------------------------------------------
@@ -2445,6 +2469,7 @@ export class DmService {
             reactions: isRecord(raw.reactions) ? (raw.reactions as StoredReactions) : {},
             attachments,
             delivery: author === this.me ? 'delivered' : null,
+            forwarded: raw.deleted === true ? null : sanitizeDmForward(raw.forwarded),
           });
         }
         meta.hidden = false;

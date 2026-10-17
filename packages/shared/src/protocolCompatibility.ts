@@ -32,9 +32,11 @@ import { PROTOCOL_VERSION } from './constants.js';
 // the AFK room on purpose; older clients list it as an ordinary room and, as on any refused switch there, leave their call.
 // Protocol 39 adds bot-storage: the server_storage and device_storage capabilities and BOT_STORAGE_*. Peers
 // without it never see those capability names, which their strict enum rejects, and keep them untouched.
+// Protocol 40 adds message-forward: CHAT_SEND accepts `forward` and messages carry `forwarded`. Only peers that
+// negotiated it receive the field; older servers ignore `forward`, so clients only offer the badge when negotiated.
 export const MIN_CLIENT_PROTOCOL = 35;
 export const MIN_BOT_PROTOCOL = 24;
-export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8', 'voice-user-limit', 'afk-channel', 'bot-storage'] as const;
+export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8', 'voice-user-limit', 'afk-channel', 'bot-storage', 'message-forward'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];
 export const protocolOfferSchema = z.object({
   minimumVersion: z.number().int().positive(),
@@ -51,7 +53,7 @@ export function createProtocolOffer(kind: 'client' | 'bot'): ProtocolOffer {
       feature !== 'role-deny' && feature !== 'role-grants' && feature !== 'game-activity' && feature !== 'game-share-request' &&
       feature !== 'channel-tree-order' && feature !== 'poll-voters' && feature !== 'poll-edit' &&
       feature !== 'server-audit' && feature !== 'bot-manifest-url' && feature !== 'screen-shares-8' &&
-      feature !== 'voice-user-limit' && feature !== 'afk-channel')) };
+      feature !== 'voice-user-limit' && feature !== 'afk-channel' && feature !== 'message-forward')) };
 }
 export function negotiateProtocol(version: unknown, offer: unknown, kind: 'client' | 'bot'): ProtocolAgreement | null {
   const minimumVersion = kind === 'bot' ? MIN_BOT_PROTOCOL : MIN_CLIENT_PROTOCOL;

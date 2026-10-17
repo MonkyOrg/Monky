@@ -12,6 +12,7 @@ import type { ReleaseCompatibilityResult } from './releaseCompatibility.js';
 import type { ServerInviteResult } from './serverInvites.js';
 import type { EventCalendarExport, EventCalendarSaveResult } from './serverEventCalendar.js';
 import type { HostingSkillId, HostingSkillSaveResult } from './hostingSkills.js';
+import type { FileBatchDownloadRequest, FileBatchDownloadResult } from './fileDownloads.js';
 import type { NativeScreenCommand, NativeScreenCommandResult, NativeScreenEvent, NativeScreenReply, BrowserOcclusionEngine } from './nativeScreenIpc.js';
 import type { NativeScreenCaptureMode } from './screenSharing.js';
 import type {
@@ -870,6 +871,7 @@ export interface IpcInvokeChannels {
   'app:set-auto-start': { args: [enabled: boolean]; returnType: void };
   'app:set-minimize-to-tray': { args: [enabled: boolean]; returnType: void };
   'app:download-file': { args: [url: string, fileName: string]; returnType: { success: boolean; error?: string } };
+  'app:download-files': { args: [request: FileBatchDownloadRequest]; returnType: FileBatchDownloadResult };
   'app:save-recent-sound': { args: [input: RecentSoundSaveInput]; returnType: RecentSoundSaveResult };
   'community:save-event-calendar': { args: [input: EventCalendarExport]; returnType: EventCalendarSaveResult };
   'onboarding:save-hosting-skill': { args: [id: HostingSkillId]; returnType: HostingSkillSaveResult };

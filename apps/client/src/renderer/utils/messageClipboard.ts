@@ -124,6 +124,38 @@ export function markdownMessageClipboard(markdown: string): MessageClipboardCont
   return renderedMessageClipboard(template.content, markdown);
 }
 
+/**
+ * Several messages copied together, each under its author and time and separated
+ * by a blank line. The result carries no per-message paste metadata, so pasting
+ * it into the composer never expands back into one of the originals.
+ */
+export function combinedMessageClipboard(parts: { heading: string; content: MessageClipboardContent }[]): MessageClipboardContent {
+  const clean = document.createElement('div');
+  parts.forEach((part, index) => {
+    if (index > 0) {
+      const gap = document.createElement('p');
+      gap.append(document.createElement('br'));
+      clean.append(gap);
+    }
+    const heading = document.createElement('p');
+    const strong = document.createElement('strong');
+    strong.textContent = part.heading;
+    heading.append(strong);
+    clean.append(heading);
+    const section = document.createElement('div');
+    if (part.content.html) {
+      const template = document.createElement('template');
+      template.innerHTML = part.content.html;
+      copySafeNodes(template.content, section);
+    } else {
+      section.textContent = part.content.text;
+    }
+    clean.append(section);
+  });
+  const markdown = parts.map((part) => `**${part.heading}**\n${part.content.markdown ?? part.content.text}`).join('\n\n');
+  return clipboardContent(clean, markdown);
+}
+
 function messageTextAt(node: Node): Element | null {
   return (node instanceof Element ? node : node.parentElement)?.closest('.chat-message-text') ?? null;
 }

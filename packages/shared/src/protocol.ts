@@ -443,6 +443,13 @@ export interface ChatSendPayload {
   // Ids of files already uploaded via POST /attachments to be linked to this
   // message (#11). `content` may be empty when the message is only attachments.
   attachmentIds?: string[];
+  /**
+   * Marks the message as forwarded (message-forward). With `sourceMessageId` the
+   * original must be a readable message of this server whose text and files
+   * match; the server then names its channel. Without it the original came from
+   * outside the server (a DM) and the badge names no source.
+   */
+  forward?: { sourceMessageId?: string };
 }
 
 // Client asks the server for a short-lived token authorizing an HTTP upload (#11).

@@ -6,6 +6,7 @@
  * the renderer (transport over the server sessions + UI).
  */
 
+import { MESSAGE_FORWARD_SOURCE_MAX_LENGTH, type MessageForward } from './models.js';
 import type { DmRelayItem, DmRelayKind } from './protocol.js';
 export type { DmRelayItem, DmRelayKind } from './protocol.js';
 
@@ -122,6 +123,8 @@ export interface DmMessageView {
   replyTo: string | null;
   reactions: DmReactionView[];
   attachments: DmAttachmentView[];
+  /** "Forwarded" badge; null when the message was not forwarded or was deleted. */
+  forwarded: MessageForward | null;
   /** Only for own messages. */
   delivery: DmDeliveryState | null;
 }
@@ -165,6 +168,35 @@ export interface DmSendMessageInput {
   content: string;
   replyTo?: string | null;
   files?: DmOutgoingFile[];
+  /** Marks the message as forwarded; travels inside the encrypted body. */
+  forwarded?: MessageForward | null;
+}
+
+/**
+ * Validates a forward marker that came from the renderer, a peer or a backup.
+ * `source` is a string (control characters stripped, trimmed, capped; empty
+ * becomes null) or null; `createdAt` is a non-negative safe integer or null.
+ * A missing field counts as null; any other shape means "not forwarded".
+ */
+export function sanitizeDmForward(value: unknown): MessageForward | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = 'source' in value ? value.source : undefined;
+  const createdAt = 'createdAt' in value ? value.createdAt : undefined;
+  if (source !== undefined && source !== null && typeof source !== 'string') return null;
+  if (
+    createdAt !== undefined
+    && createdAt !== null
+    && !(typeof createdAt === 'number' && Number.isSafeInteger(createdAt) && createdAt >= 0)
+  ) {
+    return null;
+  }
+  const cleanSource = typeof source === 'string'
+    ? source.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, MESSAGE_FORWARD_SOURCE_MAX_LENGTH).trim()
+    : '';
+  return {
+    source: cleanSource || null,
+    createdAt: typeof createdAt === 'number' ? createdAt : null,
+  };
 }
 
 export interface DmObservedPeer {

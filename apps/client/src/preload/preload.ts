@@ -4,7 +4,7 @@ import {
   createNativeScreenPresentation, registerNativeAudioPortReceiver, type NativeScreenPresentationController,
 } from '@monky/screen-share';
 import * as nativeAudioProtocol from '@monky/shared';
-import { BOT_SCREEN_DOCUMENT_IPC, BOT_STORAGE_CHANGED, BOT_STORAGE_IPC, SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, DESKTOP_SOURCES_IPC, EVENT_CALENDAR_IPC, HOSTING_SKILL_IPC, type BotScreenDocumentConsent, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
+import { BOT_SCREEN_DOCUMENT_IPC, BOT_STORAGE_CHANGED, BOT_STORAGE_IPC, SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, DESKTOP_SOURCES_IPC, EVENT_CALENDAR_IPC, HOSTING_SKILL_IPC, FILE_BATCH_DOWNLOAD_IPC, type BotScreenDocumentConsent, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
 import type {
   BotDeviceStorageDecision, BotDeviceStorageDocumentState, BotDeviceStorageEntry, BotDeviceStorageRequest,
   BotDeviceStorageResponse, BotDeviceStorageScope,
@@ -227,6 +227,7 @@ export interface ElectronApi {
   editorCommand: (command: EditorCommand) => Promise<{ success: boolean }>;
   fetchLinkPreview: (url: string) => Promise<LinkPreviewData | null>;
   downloadFile: (url: string, fileName: string) => Promise<{ success: boolean; error?: string }>;
+  downloadFiles: (request: IpcInvokeChannels['app:download-files']['args'][0]) => Promise<IpcInvokeChannels['app:download-files']['returnType']>;
   saveRecentSound: (input: IpcInvokeChannels['app:save-recent-sound']['args'][0]) => Promise<IpcInvokeChannels['app:save-recent-sound']['returnType']>;
   saveCsvFile: (content: string, fileName: string) => Promise<{ success: boolean; error?: string }>;
   saveEventCalendar: (input: IpcInvokeChannels['community:save-event-calendar']['args'][0]) => Promise<IpcInvokeChannels['community:save-event-calendar']['returnType']>;
@@ -594,6 +595,7 @@ const api: ElectronApi = {
   editorCommand: (command) => ipcRenderer.invoke(EDITOR_COMMAND_IPC, command),
   fetchLinkPreview: (url) => ipcRenderer.invoke('link-preview:fetch', url),
   downloadFile: (url, fileName) => ipcRenderer.invoke('app:download-file', url, fileName),
+  downloadFiles: (request) => ipcRenderer.invoke(FILE_BATCH_DOWNLOAD_IPC, request),
   saveRecentSound: (input) => ipcRenderer.invoke('app:save-recent-sound', input),
   saveCsvFile: (content, fileName) => ipcRenderer.invoke('app:save-csv-file', content, fileName),
   saveEventCalendar: (input) => ipcRenderer.invoke(EVENT_CALENDAR_IPC, input),

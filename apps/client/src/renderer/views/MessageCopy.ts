@@ -1,6 +1,7 @@
 import { t } from '../i18n';
 import { ImageClipboard } from '../utils/imageClipboard';
 import {
+  combinedMessageClipboard,
   markdownMessageClipboard,
   renderedMessageClipboard,
   selectedMessageClipboard,
@@ -91,6 +92,17 @@ export class MessageCopy {
     }
     const content = this.source.content(messageId);
     return content ? this.copyContent(selection ?? content, mode) : Promise.resolve();
+  }
+
+  /** Selected messages: one is copied as usual, several go together under their authors and times. */
+  public copyMessages(entries: { messageId: string; heading: string }[]): Promise<void> {
+    if (!this.source.isActive() || entries.length === 0) return Promise.resolve();
+    if (entries.length === 1) return this.copyMessage(entries[0].messageId);
+    const parts = entries.flatMap((entry) => {
+      const content = this.source.content(entry.messageId);
+      return content ? [{ heading: entry.heading, content }] : [];
+    });
+    return parts.length ? this.copyContent(combinedMessageClipboard(parts), 'formatted') : Promise.resolve();
   }
 
   public async copyContent(content: MessageClipboardContent, mode: MessageCopyMode, event?: ClipboardEvent): Promise<void> {

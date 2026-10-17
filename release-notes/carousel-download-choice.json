@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Ao baixar uma mídia de um carrossel, o Monky pergunta se você quer só a atual ou todas, e, se forem todas, se prefere arquivos separados em uma pasta ou um único ZIP.",
+  "en": "When downloading media from a carousel, Monky asks whether you want only the current one or all of them, and for all of them whether you prefer separate files in a folder or a single ZIP."
+}

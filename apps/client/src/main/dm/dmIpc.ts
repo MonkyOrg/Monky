@@ -5,6 +5,7 @@ import path from 'node:path';
 import {
   DM_EVENT,
   DM_IPC,
+  sanitizeDmForward,
   type DmEvent,
   type DmExportMode,
   type DmFailure,
@@ -101,6 +102,18 @@ function text(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
+/**
+ * Writes a DM attachment of the active identity to `destination` (absolute path,
+ * created or overwritten). For main-process features such as batch downloads.
+ * Throws when DMs are unavailable, the message/file does not exist or the file
+ * is not downloaded yet (state other than ready/local).
+ */
+export async function writeDmAttachment(peer: string, messageId: string, fileId: string, destination: string): Promise<void> {
+  const dm = currentService();
+  if (!dm) throw new Error('Direct messages are unavailable: no identity is loaded.');
+  await dm.writeAttachmentTo(text(peer), text(messageId), text(fileId), text(destination));
+}
+
 export function setupDmIpc(mainWindow: BrowserWindow, sanitizeFileName: (name: string) => string): () => void {
   const owns = (event: IpcMainInvokeEvent): boolean =>
     !mainWindow.isDestroyed()
@@ -151,6 +164,7 @@ export function setupDmIpc(mainWindow: BrowserWindow, sanitizeFileName: (name: s
       peer: text(value.peer),
       content: text(value.content),
       replyTo: typeof value.replyTo === 'string' ? value.replyTo : null,
+      forwarded: sanitizeDmForward(value.forwarded),
       files: files
         .filter((file): file is Record<string, unknown> => !!file && typeof file === 'object')
         .map((file) => ({

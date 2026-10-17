@@ -4,8 +4,17 @@ import os from 'node:os';
 import path from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { test } from 'node:test';
-import { DM_PROFILE_AVATAR_MAX_LENGTH, LIMITS, type DmDispatch, type DmEvent, type DmRelayItem } from '@monky/shared';
-import { DmKeyring, verifyDmCertificate } from '../src/main/dm/dmCrypto';
+import {
+  DM_PROFILE_AVATAR_MAX_LENGTH,
+  LIMITS,
+  MESSAGE_FORWARD_SOURCE_MAX_LENGTH,
+  sanitizeDmForward,
+  type DmDispatch,
+  type DmEvent,
+  type DmRelayItem,
+} from '@monky/shared';
+import { DmKeyring, newDmId, verifyDmCertificate } from '../src/main/dm/dmCrypto';
+import { DmPersistence } from '../src/main/dm/dmPersistence';
 import { DmError, DmService, DM_FILE_CHUNK_BYTES } from '../src/main/dm/dmService';
 
 interface Identity {
@@ -588,4 +597,218 @@ test('server-stamped sender must match the envelope', () => {
   assert.deepEqual(bob.service.ingest({ from: carol.identity.publicKey, kind: item.kind, data: item.data }), {});
   assert.equal(bob.service.getConversation(carol.identity.publicKey).messages.length, 0);
   assert.equal(bob.service.getConversation(alice.identity.publicKey).messages.length, 0);
+});
+
+function forwardedOf(device: Device, other: Identity, id: string) {
+  return device.service.getConversation(other.publicKey, null, 500).messages.find((message) => message.id === id)?.forwarded;
+}
+
+test('forwarded DMs carry the marker to the friend and own devices, survive edits and clear on delete', () => {
+  const aliceIdentity = createIdentity();
+  const alice1 = createDevice('Alice', aliceIdentity);
+  const alice2 = createDevice('Alice', aliceIdentity);
+  const bob = createDevice('Bob', createIdentity());
+  const devices = [alice1, alice2, bob];
+  const bobKey = bob.identity.publicKey;
+  befriend(devices, alice1, bob);
+  relay(devices, alice2, alice2.service.hello(false));
+
+  const marker = { source: '#geral · Servidor', createdAt: 1_700_000_000_000 };
+  relay(devices, alice1, alice1.service.sendMessage({ peer: bobKey, content: 'encaminhada', forwarded: marker }));
+  relay(devices, alice1, alice1.service.sendMessage({ peer: bobKey, content: 'normal' }));
+  const [sent, plain] = alice1.service.getConversation(bobKey).messages;
+  assert.deepEqual(sent.forwarded, marker);
+  assert.equal(plain.forwarded, null);
+  assert.deepEqual(forwardedOf(bob, aliceIdentity, sent.id), marker);
+  assert.equal(forwardedOf(bob, aliceIdentity, plain.id), null);
+  assert.deepEqual(forwardedOf(alice2, bob.identity, sent.id), marker, 'own-device copy keeps the marker');
+  const incoming = bob.events.find((event) => event.type === 'incoming-message' && event.message.id === sent.id);
+  assert.ok(incoming && incoming.type === 'incoming-message');
+  assert.deepEqual(incoming.message.forwarded, marker);
+
+  relay(devices, alice1, alice1.service.editMessage(bobKey, sent.id, 'encaminhada e editada'));
+  assert.deepEqual(forwardedOf(bob, aliceIdentity, sent.id), marker, 'edits keep the marker');
+  assert.deepEqual(forwardedOf(alice1, bob.identity, sent.id), marker);
+
+  // A device that was offline gets the marker through the own-device history sync.
+  const alice3 = createDevice('Alice', aliceIdentity);
+  relay([...devices, alice3], alice3, alice3.service.hello(false));
+  assert.deepEqual(forwardedOf(alice3, bob.identity, sent.id), marker);
+  assert.equal(forwardedOf(alice3, bob.identity, plain.id), null);
+
+  relay(devices, alice1, alice1.service.deleteMessage(bobKey, sent.id));
+  assert.equal(forwardedOf(bob, aliceIdentity, sent.id), null);
+  assert.equal(forwardedOf(alice1, bob.identity, sent.id), null);
+});
+
+test('forward markers from the renderer or a peer are validated', () => {
+  assert.deepEqual(sanitizeDmForward({ source: null, createdAt: null }), { source: null, createdAt: null });
+  assert.deepEqual(sanitizeDmForward({}), { source: null, createdAt: null });
+  assert.deepEqual(sanitizeDmForward({ source: '  #geral\u0000\n ', createdAt: 0 }), { source: '#geral', createdAt: 0 });
+  assert.deepEqual(sanitizeDmForward({ source: '   ' }), { source: null, createdAt: null });
+  assert.equal(sanitizeDmForward({ source: 'x'.repeat(5000) })?.source?.length, MESSAGE_FORWARD_SOURCE_MAX_LENGTH);
+  for (const invalid of [
+    undefined,
+    null,
+    true,
+    'forwarded',
+    [],
+    { source: 42 },
+    { source: { text: '#geral' } },
+    { createdAt: -1 },
+    { createdAt: 1.5 },
+    { createdAt: Number.NaN },
+    { createdAt: Number.POSITIVE_INFINITY },
+    { createdAt: '1700000000000' },
+  ]) {
+    assert.equal(sanitizeDmForward(invalid), null, JSON.stringify(invalid) ?? String(invalid));
+  }
+
+  const aliceIdentity = createIdentity();
+  const bobIdentity = createIdentity();
+  const alice = createDevice('Alice', aliceIdentity);
+  const bob = createDevice('Bob', bobIdentity);
+  befriend([alice, bob], alice, bob);
+
+  // The service validates its own input too, not only the IPC layer.
+  const dispatch = alice.service.sendMessage({
+    peer: bobIdentity.publicKey,
+    content: 'entrada inválida',
+    forwarded: { source: '#geral', createdAt: -1 },
+  });
+  relay([alice, bob], alice, dispatch);
+  assert.equal(bob.service.getConversation(aliceIdentity.publicKey).messages[0].forwarded, null);
+
+  // A modified client may put anything in the encrypted body: the receiver sanitizes it.
+  const aliceKeyring = new DmKeyring(aliceIdentity.publicKey, aliceIdentity.privateKey);
+  const bobCertificate = new DmKeyring(bobIdentity.publicKey, bobIdentity.privateKey).certificate();
+  const sendRaw = (forwarded: unknown): string => {
+    const id = newDmId();
+    const data = aliceKeyring.seal(bobIdentity.publicKey, bobCertificate, { id, type: 'msg', ts: Date.now() }, {
+      content: 'de um cliente modificado',
+      replyTo: null,
+      attachments: [],
+      forwarded,
+    });
+    bob.service.ingest({ from: aliceIdentity.publicKey, kind: 'envelope', data });
+    return id;
+  };
+  assert.equal(forwardedOf(bob, aliceIdentity, sendRaw({ source: '#geral', createdAt: -5 })), null);
+  assert.equal(forwardedOf(bob, aliceIdentity, sendRaw('encaminhada')), null);
+  assert.equal(forwardedOf(bob, aliceIdentity, sendRaw([{ source: '#geral' }])), null);
+  assert.deepEqual(forwardedOf(bob, aliceIdentity, sendRaw({ source: `\u0007 ${'y'.repeat(900)}`, createdAt: 5, extra: true })), {
+    source: 'y'.repeat(MESSAGE_FORWARD_SOURCE_MAX_LENGTH),
+    createdAt: 5,
+  });
+  // An older client sends no marker at all.
+  assert.equal(forwardedOf(bob, aliceIdentity, sendRaw(undefined)), null);
+});
+
+test('forward markers persist, survive export/import and older stores load without them', () => {
+  const aliceIdentity = createIdentity();
+  const alice = createDevice('Alice', aliceIdentity);
+  const bob = createDevice('Bob', createIdentity());
+  const bobKey = bob.identity.publicKey;
+  befriend([alice, bob], alice, bob);
+  const marker = { source: null, createdAt: 1_650_000_000_000 };
+  relay([alice, bob], alice, alice.service.sendMessage({ peer: bobKey, content: 'de uma conversa privada', forwarded: marker }));
+  relay([alice, bob], alice, alice.service.sendMessage({ peer: bobKey, content: 'sem marcador' }));
+  alice.service.flush();
+  const [forwarded, plain] = alice.service.getConversation(bobKey).messages;
+
+  const reloaded = createDevice('Alice', aliceIdentity, alice.dir);
+  assert.deepEqual(forwardedOf(reloaded, bob.identity, forwarded.id), marker);
+
+  const backup = JSON.parse(JSON.stringify(alice.service.exportData(true)));
+  const restored = createDevice('Alice', aliceIdentity);
+  restored.service.importData(backup);
+  assert.deepEqual(forwardedOf(restored, bob.identity, forwarded.id), marker);
+  assert.equal(forwardedOf(restored, bob.identity, plain.id), null);
+
+  // Backups are sanitized like peer data; a backup from before forwarding has no field.
+  const tampered = JSON.parse(JSON.stringify(backup));
+  tampered.conversations[0].messages[0].forwarded = { source: 'x'.repeat(1000), createdAt: -1 };
+  delete tampered.conversations[0].messages[1].forwarded;
+  const restoredTampered = createDevice('Alice', aliceIdentity);
+  restoredTampered.service.importData(tampered);
+  assert.equal(forwardedOf(restoredTampered, bob.identity, forwarded.id), null);
+  assert.equal(forwardedOf(restoredTampered, bob.identity, plain.id), null);
+
+  // A conversation file written by an older version has no `forwarded` on its messages.
+  const store = new DmPersistence(alice.dir, new DmKeyring(aliceIdentity.publicKey, aliceIdentity.privateKey).storageKey());
+  const file = DmPersistence.peerFileName(bobKey);
+  const legacy = store.readJson<{ messages: Array<Record<string, unknown>> }>(file);
+  assert.ok(legacy);
+  for (const message of legacy.messages) delete message.forwarded;
+  store.writeJsonNow(file, legacy);
+  const legacyDevice = createDevice('Alice', aliceIdentity, alice.dir);
+  const messages = legacyDevice.service.getConversation(bobKey).messages;
+  assert.equal(messages.length, 2);
+  assert.ok(messages.every((message) => message.forwarded === null));
+});
+
+test('attachments can be written to a file path only when they are on this device', async () => {
+  const alice = createDevice('Alice', createIdentity());
+  const bob = createDevice('Bob', createIdentity());
+  const devices = [alice, bob];
+  befriend(devices, alice, bob);
+  const aliceKey = alice.identity.publicKey;
+  const bobKey = bob.identity.publicKey;
+  const outDir = fs.mkdtempSync(path.join(tempRoot, 'attachment-out-'));
+  const content = Buffer.alloc(DM_FILE_CHUNK_BYTES * 2 + 77);
+  for (let index = 0; index < content.length; index += 1) content[index] = (index * 7) % 256;
+
+  // Only the message envelope reaches Bob: his copy of the file stays pending.
+  const dispatch = alice.service.sendMessage({
+    peer: bobKey,
+    content: 'arquivo',
+    files: [{ name: 'dados.bin', mime: 'application/octet-stream', data: new Uint8Array(content) }],
+  });
+  const requests: DmDispatch[] = (dispatch.peers?.[bobKey] ?? []).map((item) =>
+    bob.service.ingest({ from: aliceKey, kind: item.kind, data: item.data }));
+  const pending = bob.service.getConversation(aliceKey).messages[0];
+  const fileId = pending.attachments[0].fileId;
+  assert.equal(pending.attachments[0].state, 'pending');
+  const pendingTarget = path.join(outDir, 'pendente.bin');
+  await assert.rejects(
+    bob.service.writeAttachmentTo(aliceKey, pending.id, fileId, pendingTarget),
+    (error: unknown) => error instanceof DmError && error.code === 'not-found'
+  );
+  assert.equal(fs.existsSync(pendingTarget), false);
+
+  // The sender's own copy is local and is written (overwriting whatever was there).
+  const own = alice.service.getConversation(bobKey).messages[0];
+  const ownTarget = path.join(outDir, 'enviado.bin');
+  fs.writeFileSync(ownTarget, 'conteúdo antigo bem mais longo que nada');
+  await alice.service.writeAttachmentTo(bobKey, own.id, fileId, ownTarget);
+  assert.ok(fs.readFileSync(ownTarget).equals(content));
+
+  // Once downloaded, the receiver can write it too, decrypted.
+  for (const request of requests) relay(devices, bob, request);
+  assert.equal(bob.service.getConversation(aliceKey).messages[0].attachments[0].state, 'ready');
+  const receivedTarget = path.join(outDir, 'recebido.bin');
+  await bob.service.writeAttachmentTo(aliceKey, pending.id, fileId, receivedTarget);
+  assert.ok(fs.readFileSync(receivedTarget).equals(content));
+
+  await assert.rejects(
+    bob.service.writeAttachmentTo(aliceKey, newDmId(), fileId, path.join(outDir, 'x.bin')),
+    (error: unknown) => error instanceof DmError && error.code === 'not-found'
+  );
+  await assert.rejects(
+    bob.service.writeAttachmentTo(aliceKey, pending.id, newDmId(), path.join(outDir, 'y.bin')),
+    (error: unknown) => error instanceof DmError && error.code === 'not-found'
+  );
+  await assert.rejects(
+    bob.service.writeAttachmentTo('nao-e-uma-chave', pending.id, fileId, path.join(outDir, 'z.bin')),
+    (error: unknown) => error instanceof DmError
+  );
+  await assert.rejects(bob.service.writeAttachmentTo(aliceKey, pending.id, fileId, 'relativo.bin'), /absolute file path/);
+  await assert.rejects(bob.service.writeAttachmentTo(aliceKey, pending.id, fileId, ''), /absolute file path/);
+  assert.equal(fs.existsSync('relativo.bin'), false);
+
+  relay(devices, alice, alice.service.deleteMessage(bobKey, own.id));
+  await assert.rejects(
+    bob.service.writeAttachmentTo(aliceKey, pending.id, fileId, path.join(outDir, 'apagado.bin')),
+    (error: unknown) => error instanceof DmError && error.code === 'not-found'
+  );
 });

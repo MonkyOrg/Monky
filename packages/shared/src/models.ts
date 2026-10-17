@@ -191,6 +191,16 @@ export interface BotCommandContext {
   invokerAvatarUrl?: string | null;
 }
 
+/** Where a forwarded message came from, as shown in its "Forwarded" badge. */
+export interface MessageForward {
+  /** `#channel` (and, in a DM, the server name); null when the original was in a private conversation. */
+  source: string | null;
+  /** When the original was sent; null when unknown. */
+  createdAt: number | null;
+}
+
+export const MESSAGE_FORWARD_SOURCE_MAX_LENGTH = 200;
+
 /** Resolved by the server from the original, never supplied by the sender. */
 export interface MessageReply {
   createdAt?: number;
@@ -204,6 +214,11 @@ export interface MessageReply {
 }
 
 export interface ChatMessage {
+  /**
+   * Marks a message forwarded from elsewhere (message-forward). In a channel the
+   * server fills it from the original; the original author is never shown.
+   */
+  forwarded?: MessageForward;
   botComponents?: import('./botCarousels.js').BotMessageComponent[];
   blocks?: import('./messageBlocks.js').ResolvedMessageBlock[];
   localizations?: import('./botMessages.js').BotMessageLocalizations;

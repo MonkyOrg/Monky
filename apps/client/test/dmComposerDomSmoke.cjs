@@ -153,13 +153,15 @@ async function runSmoke(window, setPhase) {
   await fixture('clearSelection()');
   // The avatar is not text, so macOS does not select a word on the native right-click.
   await click('.chat-message-row[data-message-id="peer-rich"] .chat-author-avatar', 'right');
-  check(JSON.stringify((await fixture('menuItems()')).map(item => item.label)) === JSON.stringify(['Emoji', 'Responder', 'Copiar mensagem']),
-    'Right-clicking a friend message offers react, reply and copy');
+  check(JSON.stringify((await fixture('menuItems()')).map(item => item.label))
+    === JSON.stringify(['Emoji', 'Responder', 'Copiar mensagem', 'Encaminhar', 'Selecionar mensagens']),
+    'Right-clicking a friend message offers react, reply, copy, forward and select');
   await fixture('closeMenus()');
   await click('.chat-message-row[data-message-id="mine"] .chat-author-avatar', 'right');
   const ownMenu = (await fixture('menuItems()')).map(item => item.label);
-  check(JSON.stringify(ownMenu) === JSON.stringify(['Emoji', 'Responder', 'Copiar mensagem', 'Editar mensagem', 'Apagar mensagem']),
-    `Right-clicking an own message also offers edit and delete: ${JSON.stringify(ownMenu)}`);
+  check(JSON.stringify(ownMenu) === JSON.stringify([
+    'Emoji', 'Responder', 'Copiar mensagem', 'Encaminhar', 'Selecionar mensagens', 'Editar mensagem', 'Apagar mensagem',
+  ]), `Right-clicking an own message also offers edit and delete: ${JSON.stringify(ownMenu)}`);
   await fixture('closeMenus()');
   checks += await fixture('testMessageCopy()');
 

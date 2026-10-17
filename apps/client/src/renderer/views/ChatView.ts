@@ -15,7 +15,7 @@ import { contextMenu, type ContextMenuEntry, type ContextMenuItem } from './Cont
 import { getAvatarUrl } from '../utils/avatar';
 import { renderCodeBlock, renderMarkdown } from '../utils/markdown';
 import type { MessageClipboardContent, MessageCopyMode } from '../utils/messageClipboard';
-import { getLanguage, t } from '../i18n';
+import { getLanguage, t, tCount } from '../i18n';
 import { uploadAttachment, UploadHandle } from '../core/AttachmentUploader';
 import { getAttachmentUrl, formatBytes, fileIconName } from '../utils/attachment';
 import { showAlert, showConfirm } from './Dialog';
@@ -31,7 +31,8 @@ import { MarkdownInput } from './MarkdownInput';
 import { bindChatComposer, renderChatComposer, renderChatEditComposer } from './ChatComposer';
 import { bindCodeBlockCopyButtons, MessageCopy, messageClipboardContent } from './MessageCopy';
 import { stickerService } from '../core/StickerService';
-import { openFileInputPicker } from '../utils/buttonLoading';
+import { openFileInputPicker, withButtonLoading } from '../utils/buttonLoading';
+import { downloadFilesWithChoice, type DownloadableFile } from '../utils/fileDownloads';
 import { settingsStore } from '../stores/settingsStore';
 import { extractStickerIds, stickerToken, stripStickerTokens } from '../utils/stickers';
 import { formatCommandContext, parseTypedCommand } from '../utils/botInputs';
@@ -61,6 +62,10 @@ import { translateProtocolError } from '../i18n/protocolErrors';
 import { highlightMessageJump } from '../utils/messageJumpHighlight';
 import { restoreScrollWithMotion, smoothScrollIntoView, smoothScrollTo } from '../utils/scroll';
 import { imageCarouselNavigationButton, moveImageCarousel, renderImageCarousel } from './ImageCarousel';
+import { MessageSelection, type MessageSelectionAction } from './MessageSelection';
+import { forwardDestinations, openForwardModal } from './ForwardMessagesModal';
+import { fetchAttachment, type ForwardItem } from '../core/MessageForwarder';
+import { archiveDate, renderForwardedBadge } from '../utils/messageForward';
 
 /** How close to the end the feed must be to keep following new messages (#270). */
 const BOTTOM_SCROLL_THRESHOLD_PX = 48;
@@ -135,6 +140,12 @@ export class ChatView {
     feed: () => this.container.querySelector<HTMLElement>('#chat-messages-feed'),
     content: (messageId) => this.messageClipboard(messageId),
     image: (messageId) => this.messageClipboardImage(messageId),
+  });
+  private readonly selection = new MessageSelection({
+    feed: () => this.container.querySelector<HTMLElement>('#chat-messages-feed'),
+    host: () => this.container.querySelector<HTMLElement>('.chat-input-container'),
+    selectable: (row) => !!this.selectableMessage(row.dataset.messageId ?? ''),
+    actions: (ids) => this.selectionActions(ids),
   });
 
   constructor(container: HTMLElement) {
@@ -282,6 +293,7 @@ export class ChatView {
 
     feed.innerHTML = this.renderMessagesWithDividers(messages);
     this.bindMessageElementEvents(feed);
+    this.selection.sync();
 
     this.pinnedToBottom = shouldScroll;
     if (shouldScroll) {
@@ -325,6 +337,7 @@ export class ChatView {
     }
 
     feed.appendChild(fragment);
+    this.selection.sync();
 
     this.pinnedToBottom = shouldScroll;
     if (shouldScroll) {
@@ -502,6 +515,10 @@ export class ChatView {
       if (!this.messageEdit) items.push({ label: t('chat.replyMessage'), icon: 'reply', onClick: () => this.startReply(message.id) });
     }
     items.push(this.copy.menuItem(message.id));
+    if (this.forwardableMessage(message)) {
+      items.push({ label: t('chat.forwardMessage'), icon: 'forward', onClick: () => void this.forwardSelected([message.id]) });
+    }
+    items.push({ label: t('chat.selectMessages'), icon: 'checklist', onClick: () => this.selection.start(message.id) });
     const poll = message.poll;
     if (poll) {
       // Polls are edited as polls, by their creator or a server manager, while they are open.
@@ -525,6 +542,132 @@ export class ChatView {
       });
     }
     return items;
+  }
+
+  private selectableMessage(messageId: string): ChatMessage | undefined {
+    if (!this.currentChannelId) return undefined;
+    const message = this.store.getMessages(this.currentChannelId).find((entry) => entry.id === messageId);
+    return message && !message.isSystem && !message.isEphemeral && !message.deletedAt && !this.store.getOutgoing(message.id)
+      ? message : undefined;
+  }
+
+  /** Text and files can be sent again as they are; polls, bot widgets and stickers cannot. */
+  private forwardableMessage(message: ChatMessage): boolean {
+    if (message.deletedAt || message.isSystem || message.isEphemeral || message.poll || message.botComponents?.length) return false;
+    if (extractStickerIds(message.content).length > 0) return false;
+    return message.content.trim().length > 0 || !!message.attachments?.some((attachment) => attachment.url && !attachment.evicted);
+  }
+
+  private selectedMessages(ids: string[]): ChatMessage[] {
+    return ids.flatMap((id) => {
+      const message = this.selectableMessage(id);
+      return message ? [message] : [];
+    });
+  }
+
+  private archiveName(): string {
+    const channel = serverStore.getChannel(this.currentChannelId ?? '')?.name;
+    return [channel, archiveDate()].filter(Boolean).join(' - ');
+  }
+
+  private selectionActions(ids: string[]): MessageSelectionAction[] {
+    const messages = this.selectedMessages(ids);
+    const channelId = this.currentChannelId;
+    const canSend = !!channelId && this.server.hasPermission(Permission.SEND_MESSAGES, channelId);
+    const replyBlocks = !!this.server.serverDetails?.protocol?.features.includes('chat-blocks');
+    const me = this.server.currentUser?.id;
+    const canModerate = this.server.hasPermission(Permission.MANAGE_SERVER);
+    const files: DownloadableFile[] = messages.flatMap((message) => (message.attachments ?? []).flatMap((attachment) =>
+      attachment.url && !attachment.evicted ? [{ url: getAttachmentUrl(attachment.url), fileName: attachment.originalName }] : []));
+    return [
+      {
+        id: 'reply', icon: 'reply', label: t('chat.replyMessage'),
+        unavailable: !canSend ? t('chat.sendPermissionDenied')
+          : this.messageEdit ? t('chat.selectionReplyWhileEditing')
+            : messages.length > 1 && !replyBlocks ? t('chat.selectionReplyOne') : undefined,
+        run: () => {
+          this.selection.stop();
+          // With chat-blocks every reply becomes its own quote in the composer.
+          for (const message of messages) this.startReply(message.id);
+          this.focusChatInput();
+        },
+      },
+      {
+        id: 'forward', icon: 'forward', label: t('chat.forwardAction'),
+        unavailable: messages.every((message) => this.forwardableMessage(message)) ? undefined : t('chat.selectionForwardUnsupported'),
+        run: () => this.forwardSelected(messages.map((message) => message.id)),
+      },
+      {
+        id: 'copy', icon: 'content_copy', label: t('chat.copyMessage'),
+        run: async () => {
+          await this.copy.copyMessages(messages.map((message) => ({
+            messageId: message.id, heading: `${message.userNickname} — ${this.formatDateTime(message.createdAt)}`,
+          })));
+          this.selection.stop();
+        },
+      },
+      {
+        id: 'download', icon: 'download', label: t('common.download'),
+        unavailable: files.length ? undefined : t('chat.selectionNoFiles'),
+        run: () => downloadFilesWithChoice(files, this.archiveName()),
+      },
+      {
+        id: 'delete', icon: 'delete', label: t('chat.deleteMessage'), danger: true,
+        unavailable: messages.every((message) => message.userId === me || canModerate) ? undefined : t('chat.selectionDeleteDenied'),
+        run: () => this.deleteSelected(messages.map((message) => message.id)),
+      },
+    ];
+  }
+
+  private async forwardSelected(ids: string[]): Promise<void> {
+    const messages = this.selectedMessages(ids).filter((message) => this.forwardableMessage(message));
+    if (messages.length === 0) return;
+    const channel = serverStore.getChannel(this.currentChannelId ?? '')?.name;
+    const source = [channel ? `#${channel}` : '', this.server.serverDetails?.name ?? ''].filter(Boolean).join(' · ') || null;
+    const items: ForwardItem[] = messages.map((message) => ({
+      content: message.content,
+      attachments: (message.attachments ?? []).flatMap((attachment) => {
+        const url = attachment.url;
+        return url && !attachment.evicted ? [{
+          name: attachment.originalName, mime: attachment.mimeType, size: attachment.sizeBytes,
+          load: () => fetchAttachment(getAttachmentUrl(url)),
+        }] : [];
+      }),
+      sourceMessageId: message.id,
+      sourceLabel: source,
+      createdAt: message.createdAt,
+    }));
+    if (await openForwardModal({ items, ...forwardDestinations({ kind: 'channel', channelId: this.currentChannelId ?? '' }) })) {
+      this.selection.stop();
+    }
+  }
+
+  private async deleteSelected(ids: string[]): Promise<void> {
+    const channelId = this.currentChannelId;
+    if (!channelId || ids.length === 0 || !this.isCurrentComposer()) return;
+    const connectionId = this.client.getConnectionId();
+    const confirmed = await showConfirm({
+      title: tCount('chat.deleteMessagesTitle', ids.length),
+      message: tCount('chat.deleteMessagesConfirm', ids.length),
+      confirmLabel: t('chat.deleteMessage'),
+      variant: 'danger',
+    });
+    if (!confirmed || !this.isCurrentComposer() || this.currentChannelId !== channelId ||
+        this.client.getConnectionId() !== connectionId || this.client.getStatus() !== 'CONNECTED') return;
+    let failed = 0;
+    // There is no bulk delete in the protocol: one request each, as the single-message action does.
+    for (const messageId of ids) {
+      try {
+        const result = await this.client.sendRequest<ChatMessageUpdatedPayload>(MessageType.CHAT_DELETE, { channelId, messageId });
+        if (this.server.hasPermission(Permission.READ_MESSAGES, channelId)) this.store.updateMessage(result.message);
+      } catch {
+        failed++;
+      }
+    }
+    this.selection.stop();
+    if (failed > 0 && this.isCurrentSession()) {
+      showErrorToast(t('chat.deleteSomeFailed', { failed, total: ids.length }), 7000);
+    }
   }
 
   /** Edit text and the new-message draft occupy separate, session-owned slots. */
@@ -714,6 +857,7 @@ export class ChatView {
     const pollBars = capturePollBars(row);
     row.replaceWith(newRow);
     this.bindMessageElementEvents(newRow);
+    this.selection.sync();
     restorePollFocus(newRow, focusedPollControl);
     animatePollBars(newRow, pollBars);
   }
@@ -1138,6 +1282,7 @@ export class ChatView {
             ${me?.id === m.userId && !isBot ? this.renderDelivery(m.id) : ''}
             ${m.editedAt ? `<span class="chat-edited-badge" title="${escapeHtml(t('chat.editedAtTitle', { time: this.formatDateTime(m.editedAt) }))}">${t('chat.messageEdited')}</span>` : ''}
           </div>
+          ${m.forwarded ? renderForwardedBadge(m.forwarded, (value) => this.formatDateTime(value)) : ''}
           ${m.reply && !m.blocks?.length ? this.renderReplyReference(m.reply) : ''}
           ${textHtml}
           ${pollHtml}
@@ -1604,7 +1749,11 @@ export class ChatView {
         e.stopPropagation();
         const url = button.getAttribute('data-download-url');
         const name = button.getAttribute('data-file-name') || 'attachment';
-        if (url) void this.downloadAttachment(url, name);
+        if (!url) return;
+        const carousel = this.carouselMedia(button as HTMLElement);
+        void withButtonLoading(button as HTMLButtonElement, () => carousel
+          ? downloadFilesWithChoice(carousel.files, carousel.archiveName, { url, fileName: name })
+          : this.downloadAttachment(url, name));
       });
     });
 
@@ -1657,6 +1806,22 @@ export class ChatView {
     void showAlert({ message: t(reasonKey), variant: 'danger' });
   }
 
+  /** Media that share a message's carousel: downloading one of them offers all. */
+  private carouselMedia(element: HTMLElement): { key: string; files: DownloadableFile[]; archiveName: string } | null {
+    const carousel = element.closest<HTMLElement>('.chat-attachment-carousel');
+    const key = element.closest<HTMLElement>('.chat-message-row')?.dataset.messageId;
+    if (!carousel || !key) return null;
+    const media = [...carousel.querySelectorAll<HTMLElement>('[data-lightbox-kind]')];
+    const files = media.flatMap((node) => {
+      const url = node.getAttribute('data-lightbox-url');
+      return url ? [{ url, fileName: node.getAttribute('data-lightbox-name') || 'attachment' }] : [];
+    });
+    if (files.length < 2) return null;
+    const channel = serverStore.getChannel(this.currentChannelId ?? '')?.name ?? '';
+    const sender = media[0].getAttribute('data-lightbox-sender') || '';
+    return { key, files, archiveName: [channel, sender].filter(Boolean).join(' - ') || 'Monky' };
+  }
+
   private openLightboxFromSource(source: HTMLElement): void {
     const feed = document.getElementById('chat-messages-feed');
     if (!feed) return;
@@ -1669,7 +1834,9 @@ export class ChatView {
         const senderName = node.getAttribute('data-lightbox-sender') || '';
         const timestamp = node.getAttribute('data-lightbox-timestamp') || '';
         if ((kind === 'image' || kind === 'video') && url) {
-          return { kind, url, fileName, senderName, timestamp, source: node } as LightboxMedia;
+          const carousel = this.carouselMedia(node);
+          const group = carousel ? { key: carousel.key, archiveName: carousel.archiveName } : undefined;
+          return { kind, url, fileName, senderName, timestamp, source: node, group } as LightboxMedia;
         }
         return null;
       })
@@ -3280,6 +3447,8 @@ export class ChatView {
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
     this.container.querySelectorAll<HTMLElement>('[data-ui-motion]').forEach(cancelVisibilityMotion);
+    // After the sweep above, which would otherwise cancel the bar's exit and leave it behind.
+    this.selection.stop();
     this.container.querySelectorAll<MarkdownInput>('monky-markdown-input').forEach(input => input.destroy());
     this.composerInput = null;
     this.composerChannelId = null;

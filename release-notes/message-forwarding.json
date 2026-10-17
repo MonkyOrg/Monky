@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Mensagens podem ser encaminhadas para canais do servidor e conversas de amigos, vários destinos de uma vez, e chegam marcadas como Encaminhada. Servidor e Monky precisam estar atualizados para a marca aparecer.",
+  "en": "Messages can be forwarded to server channels and friends' conversations, several destinations at once, and arrive marked as Forwarded. Both the server and Monky must be updated for the mark to show."
+}
