@@ -89,6 +89,7 @@ const ptSidebar = [
       { text: 'Início', link: '/' },
       { text: 'Download', link: '/download' },
       { text: 'Primeiros Passos', link: '/primeiros-passos' },
+      { text: 'Perguntas frequentes', link: '/faq' },
       { text: 'O que o Monky oferece', link: '/recursos' },
     ],
   },
@@ -160,6 +161,7 @@ const enSidebar = [
       { text: 'Home', link: '/en/' },
       { text: 'Download', link: '/en/download' },
       { text: 'Getting Started', link: '/en/primeiros-passos' },
+      { text: 'FAQ', link: '/en/faq' },
       { text: 'What Monky offers', link: '/en/recursos' },
     ],
   },
@@ -263,6 +265,7 @@ export default withMermaid(defineConfig({
         sidebar: ptSidebar,
         nav: [
           { text: 'Guias', link: '/primeiros-passos' },
+          { text: 'FAQ', link: '/faq' },
           { text: 'Servidores', link: '/criar-seu-servidor' },
           { text: 'SDK de bots', link: '/bots-desenvolvimento' },
           { text: 'Download', link: '/download' },
@@ -291,6 +294,7 @@ export default withMermaid(defineConfig({
         sidebar: enSidebar,
         nav: [
           { text: 'Guides', link: '/en/primeiros-passos' },
+          { text: 'FAQ', link: '/en/faq' },
           { text: 'Servers', link: '/en/criar-seu-servidor' },
           { text: 'Bot SDK', link: '/en/bots-desenvolvimento' },
           { text: 'Download', link: '/en/download' },

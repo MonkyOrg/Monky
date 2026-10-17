@@ -4,6 +4,12 @@ description: "Host a Monky server from the app itself: port, password, starting 
 
 # Create Your Server
 
+::: warning The server runs on your computer
+Monky doesn't work like Discord: the server goes offline when you quit Monky or
+turn off your computer, and friends on another network need an open port, a
+VPN or a VPS to join. See the [FAQ](/en/faq).
+:::
+
 In Home, click the **+** button on the server rail and choose **Create my
 server**. Fill in the server name, local port, optional password, the starting
 text and voice channels and, if you want, a member limit. Monky uses the global
