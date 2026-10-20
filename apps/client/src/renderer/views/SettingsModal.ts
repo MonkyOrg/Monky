@@ -256,8 +256,8 @@ export class SettingsModal {
         void this.open();
       },
       showError: (msg: string) => this.showError(msg),
-      onVisibilityChanged: (appearOffline: boolean) => {
-        sessionManager.setAppearOffline(appearOffline);
+      onPresenceChanged: (status) => {
+        sessionManager.setPresenceStatus(status);
       },
       onGameActivityChanged: () => {
         void gamePresence.refresh();

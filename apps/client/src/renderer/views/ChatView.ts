@@ -104,6 +104,9 @@ export class ChatView {
   private readonly client = getActiveNetworkClient();
   private readonly server = getActiveServerStore();
   private currentChannelId: string | null = null;
+  // A history reload asked for by a reconnection, not by the reader: it must
+  // not throw them back to the bottom or rebuild a feed that did not change.
+  private resyncSnapshot: string | null = null;
   private composerInput: MarkdownInput | null = null;
   private composerChannelId: string | null = null;
   private unbindEvents: Array<() => void> = [];
@@ -254,6 +257,21 @@ export class ChatView {
       channelId: this.currentChannelId,
       limit: LIMITS.MAX_HISTORY_MESSAGES_INITIAL,
     });
+  }
+
+  public get channelId(): string | null {
+    return this.currentChannelId;
+  }
+
+  /**
+   * Catches the open channel up after the socket came back, keeping the DOM,
+   * the draft and the reading position: only messages missed meanwhile change.
+   */
+  public resyncAfterReconnect(): void {
+    if (!this.currentChannelId || !this.container.querySelector('#chat-messages-feed')) return;
+    this.resyncSnapshot = JSON.stringify(chatStore.getMessages(this.currentChannelId));
+    this.syncComposerPermissionState();
+    this.loadHistory();
   }
 
   private renderMessages(options: { forceScroll?: boolean } = {}): void {
@@ -2520,10 +2538,10 @@ export class ChatView {
       if (input && (this.mentionActive || input.hasFocus)) this.updateMentionDropup(input);
     };
     const u1 = appEvents.on('server.updated', refreshComposerSettings);
-    const u2 = appEvents.on('server.roles_updated', () => {
-      refreshComposerSettings();
-      this.loadHistory();
-    });
+    // The server re-sends the role list whenever anyone logs in. Reloading the
+    // history on every one of them rebuilt the feed and threw the reader back
+    // to the bottom; a real change of read access is already handled above.
+    const u2 = appEvents.on('server.roles_updated', refreshComposerSettings);
     const u3 = appEvents.on('chat.message_added', (msg: ChatMessage) => {
       if (msg.channelId === this.currentChannelId) {
         // Sending a message always brings the author back to the end (#270).
@@ -2539,6 +2557,12 @@ export class ChatView {
     });
     const u4 = appEvents.on('chat.history_loaded', (data: { channelId: string; aroundMessageId?: string }) => {
       if (data.channelId === this.currentChannelId) {
+        const snapshot = data.aroundMessageId ? null : this.resyncSnapshot;
+        this.resyncSnapshot = null;
+        if (snapshot !== null) {
+          if (snapshot !== JSON.stringify(chatStore.getMessages(data.channelId))) this.renderMessages();
+          return;
+        }
         const jumpId = data.aroundMessageId === this.pendingJumpId ? this.pendingJumpId : null;
         if (jumpId) this.pendingJumpId = null;
         if (returnLatest) returnLatest.hidden = !data.aroundMessageId;

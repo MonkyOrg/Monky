@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Quem é levado ao canal AFK em servidores SFU não fica mais \"conectando\" para sempre. Sem ninguém falando, a chamada aparece conectada, e o ping passa a ser medido assim que houver áudio.",
+  "en": "Members moved to the AFK channel on SFU servers no longer stay \"connecting\" forever. With nobody talking, the call shows as connected, and ping is measured as soon as there is audio."
+}

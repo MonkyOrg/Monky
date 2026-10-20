@@ -4,6 +4,10 @@ import { animateEnter, ownSurface, removeWithMotion, topModal } from '../utils/s
 export interface ContextMenuItem {
   label: string;
   icon?: string;
+  /** Extra classes for the icon, e.g. to colour a status. */
+  iconClass?: string;
+  /** Marks the current choice of a single-choice menu (menuitemradio). */
+  checked?: boolean;
   danger?: boolean;
   shortcut?: string;
   disabled?: boolean;
@@ -61,9 +65,14 @@ export class ContextMenu {
       btn.setAttribute('role', 'menuitem');
       btn.className = 'server-dropdown-item' + ('danger' in item && item.danger ? ' danger' : '');
       btn.disabled = 'disabled' in item && item.disabled === true;
+      const checked = 'checked' in item ? item.checked : undefined;
+      if (checked !== undefined) {
+        btn.setAttribute('role', 'menuitemradio');
+        btn.setAttribute('aria-checked', String(checked));
+      }
       if (item.icon) {
         const icon = document.createElement('span');
-        icon.className = 'material-symbols-outlined md-18';
+        icon.className = 'material-symbols-outlined md-18' + ('iconClass' in item && item.iconClass ? ` ${item.iconClass}` : '');
         icon.setAttribute('aria-hidden', 'true');
         icon.textContent = item.icon;
         btn.appendChild(icon);
@@ -91,6 +100,12 @@ export class ContextMenu {
         shortcut.className = 'context-menu-trailing';
         shortcut.textContent = item.shortcut;
         btn.appendChild(shortcut);
+      } else if (checked) {
+        const mark = document.createElement('span');
+        mark.className = 'material-symbols-outlined md-18 context-menu-trailing';
+        mark.setAttribute('aria-hidden', 'true');
+        mark.textContent = 'check';
+        btn.appendChild(mark);
       }
       btn.addEventListener('pointerenter', () => {
         if (menu === this.menuEl && btn !== this.submenuTrigger) this.closeSubmenu();

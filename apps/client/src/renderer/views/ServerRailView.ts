@@ -20,6 +20,7 @@ import {
   confirmStopHostedServer,
 } from '../utils/hostedServer';
 import { toAbsoluteServerIconUrl } from '../utils/avatar';
+import { initialImageState } from '../utils/imageFallback';
 import { t } from '../i18n';
 import { contextMenu, type ContextMenuEntry } from './ContextMenu';
 import { appEvents } from '../core/EventBus';
@@ -317,12 +318,24 @@ export class ServerRailView {
           ${busy ? 'disabled' : ''}
           style="padding: 0;"
         >
-          ${iconUrl ? `<img src="${escapeHtml(iconUrl)}" alt="" draggable="false" data-fallback="initial" data-fallback-initial="${escapeHtml(initial)}" style="width: 100%; height: 100%; object-fit: cover; border-radius: inherit; display: block;">` : `<span>${escapeHtml(initial)}</span>`}
+          ${this.renderServerIcon(iconUrl, initial)}
           <span class="server-rail-status-dot" data-status="${isCurrent || background ? 'online' : 'checking'}"></span>
           ${badge}
         </button>
       </div>
     `;
+  }
+
+  /**
+   * The initial is always painted, and the picture covers it only once it has
+   * loaded. A server that is offline or slow keeps its letter instead of an
+   * empty circle, even when the rail redraws before the request settles.
+   */
+  private renderServerIcon(iconUrl: string | null | undefined, initial: string): string {
+    const letter = `<span class="server-rail-initial" data-fallback-initial-slot>${escapeHtml(initial)}</span>`;
+    const state = iconUrl ? initialImageState(iconUrl) : 'failed';
+    if (!iconUrl || state === 'failed') return letter;
+    return `${letter}<img class="server-rail-icon" src="${escapeHtml(iconUrl)}" alt="" draggable="false" data-fallback="initial" data-fallback-initial="${escapeHtml(initial)}"${state === 'loaded' ? ' data-loaded="1"' : ''}>`;
   }
 
   private renderRootDropZone(index: number): string {

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "No editor da Soundboard, Sobrescrever original agora também aplica o novo nome digitado. Se só o nome mudou, o áudio é apenas renomeado, sem ser recodificado.",
+  "en": "In the Soundboard editor, Overwrite original now also applies the new name you typed. If only the name changed, the audio is just renamed, without re-encoding."
+}

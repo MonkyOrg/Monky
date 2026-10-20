@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Quando a imagem de um servidor não carrega, a inicial dele volta a aparecer na barra lateral em vez de um círculo vazio.",
+  "en": "When a server picture fails to load, its initial shows in the sidebar again instead of an empty circle."
+}

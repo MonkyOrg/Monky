@@ -1,5 +1,5 @@
 import { encodeSoundboardEdit } from '@monky/shared';
-import { decodeSoundboardEdit, soundboardFileMessage, soundboardFileValue, validateSoundboardName, SoundboardLibraryError } from '../core/SoundboardLibrary';
+import { decodeSoundboardEdit, finishSoundboardMutation, soundboardFileMessage, soundboardFileValue, validateSoundboardName, SoundboardLibraryError } from '../core/SoundboardLibrary';
 import { soundboardService, type SoundItem } from '../core/SoundboardService';
 import { t } from '../i18n';
 import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
@@ -85,8 +85,27 @@ export class SoundboardEditor {
       this.timeline = timeline;
       const values = () => timeline.values();
       const overwrite = form.querySelector<HTMLButtonElement>('[data-editor-overwrite]')!;
-      overwrite.disabled = !source.overwriteAvailable;
-      backdrop.querySelector<HTMLElement>('[data-overwrite-unavailable]')!.hidden = source.overwriteAvailable;
+      const overwriteNotice = backdrop.querySelector<HTMLElement>('[data-overwrite-unavailable]')!;
+      const originalName = sound.fileName.slice(0, sound.fileName.length - sound.ext.length);
+      const suggestedName = input('name').value;
+      // Overwriting renames the original only when the user typed a new name:
+      // the suggested "-edited" copy name must not leak onto the original.
+      const renameTo = () => {
+        const value = input('name').value;
+        return value !== suggestedName && value !== originalName ? value : null;
+      };
+      const audioChanged = () => {
+        const times = values();
+        return times.start > 0 || Math.round(times.end * decoded.sampleRate) < decoded.length || times.fadeIn > 0 || times.fadeOut > 0;
+      };
+      // A pure rename re-encodes nothing, so it needs no encoder for MP3/OGG.
+      const syncOverwrite = () => {
+        const renameOnly = !audioChanged() && renameTo() !== null;
+        overwrite.disabled = !source.overwriteAvailable && !renameOnly;
+        overwriteNotice.hidden = source.overwriteAvailable || renameOnly;
+      };
+      syncOverwrite();
+      input('name').addEventListener('input', syncOverwrite, { signal });
       let busy = false;
       const encode = () => {
         try { return encodeSoundboardEdit(channels, decoded.sampleRate, values()); }
@@ -114,6 +133,7 @@ export class SoundboardEditor {
         });
         status.textContent = '';
         status.setAttribute('role', 'status');
+        syncOverwrite();
       };
       fieldset.disabled = false;
       update();
@@ -121,10 +141,12 @@ export class SoundboardEditor {
         if (busy || signal.aborted) return;
         busy = true;
         try {
-          if (kind === 'copy') {
+          const newName = kind === 'overwrite' ? renameTo() : null;
+          if (kind === 'copy' || newName !== null) {
             const nameError = validateSoundboardName(input('name').value);
             if (nameError) throw new SoundboardLibraryError(nameError);
           }
+          const reencode = kind === 'copy' || audioChanged() || newName === null;
           const times = values();
           player.stop();
           player.setDisabled(true);
@@ -132,19 +154,33 @@ export class SoundboardEditor {
           timeline.setDisabled(true);
           status.textContent = t('common.loading');
           if (kind === 'overwrite') {
-            if (!source.overwriteAvailable) throw new SoundboardLibraryError(t('soundboard.fileError.encoder_unavailable'));
+            if (reencode && !source.overwriteAvailable) throw new SoundboardLibraryError(t('soundboard.fileError.encoder_unavailable'));
+            const newFileName = newName === null ? null : `${newName}${sound.ext}`;
             const confirmed = await showConfirm({
-              title: t('soundboard.overwrite'), message: t('soundboard.overwriteConfirm', { name: sound.fileName }),
+              title: t('soundboard.overwrite'),
+              message: newFileName === null ? t('soundboard.overwriteConfirm', { name: sound.fileName })
+                : reencode ? t('soundboard.overwriteRenameConfirm', { name: sound.fileName, newName: newFileName })
+                : t('soundboard.renameOnlyConfirm', { name: sound.fileName, newName: newFileName }),
               confirmLabel: t('soundboard.overwrite'), variant: 'danger', signal, requireUserGesture: true,
             });
             if (!confirmed || signal.aborted) { status.textContent = ''; return; }
           }
           const request = { folder, fileName: sound.fileName, sampleRate: decoded.sampleRate, channels, ...times };
-          const result = kind === 'overwrite'
-            ? await window.api.overwriteSoundboardAudio({ ...request, revision: source.revision })
-            : await window.api.saveSoundboardEdit({ ...request, newFileName: `${input('name').value}.wav` });
-          const saved = soundboardFileValue(result);
-          if (kind === 'overwrite') soundboardService.stopLocalFile(sound.name);
+          let saved;
+          if (kind === 'copy') {
+            saved = soundboardFileValue(await window.api.saveSoundboardEdit({ ...request, newFileName: `${input('name').value}.wav` }));
+          } else {
+            if (reencode) saved = soundboardFileValue(await window.api.overwriteSoundboardAudio({ ...request, revision: source.revision }));
+            soundboardService.stopLocalFile(sound.name);
+            if (newName !== null) {
+              saved = soundboardFileValue(await window.api.renameSoundboardFile({
+                folder, fileName: sound.fileName, newFileName: `${newName}${sound.ext}`,
+              }));
+              // Favorites and shortcuts follow the file to its new name.
+              await finishSoundboardMutation(sound, saved);
+            }
+          }
+          if (!saved) throw new SoundboardLibraryError(t('soundboard.fileError.io_failed'));
           await soundboardService.loadSounds();
           onSaved(saved.fileName, kind === 'overwrite');
           if (!signal.aborted) close();

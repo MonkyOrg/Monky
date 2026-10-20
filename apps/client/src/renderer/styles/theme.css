@@ -756,6 +756,27 @@ input:focus, textarea:focus, select:focus {
   clip-path: circle(50%);
 }
 
+/* The icon covers the server's initial only once it has actually loaded (#456):
+   an offline or slow server keeps its letter instead of an empty circle. */
+.server-rail-avatar > .server-rail-icon {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+  display: block;
+  opacity: 0;
+}
+
+.server-rail-avatar > .server-rail-icon[data-loaded] {
+  opacity: 1;
+}
+
+.server-rail-avatar:has(> .server-rail-icon[data-loaded]) > .server-rail-initial {
+  visibility: hidden;
+}
+
 /* Online/offline indicator on saved-server avatars in the sidebar rail (#37). */
 .server-rail-status-dot {
   position: absolute;
@@ -9801,6 +9822,47 @@ input:focus, textarea:focus, select:focus {
   gap: 4px;
 }
 
+.members-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 10px 8px 0;
+}
+
+.members-search-icon {
+  position: absolute;
+  left: 18px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.members-search-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 30px 0 34px;
+  font-size: 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+}
+
+.members-search-clear {
+  position: absolute;
+  right: 14px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: var(--text-muted);
+}
+
+.members-search-empty {
+  padding: 16px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
 .member-item {
   display: flex;
   align-items: center;
@@ -9865,6 +9927,61 @@ input:focus, textarea:focus, select:focus {
 .status-indicator.invisible {
   background-color: var(--bg-sidebar);
   box-shadow: inset 0 0 0 2px var(--text-primary);
+}
+
+/* "Volto já" (user-brb): the same yellow as other "not quite here" states. */
+.status-indicator.brb {
+  background-color: var(--warning);
+}
+
+/* The user card's dot is a button that opens the status menu. */
+.status-indicator-button {
+  padding: 0;
+  margin: 0;
+  appearance: none;
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+
+/* A bigger target than the 14px dot it draws. */
+.status-indicator-button::before {
+  content: '';
+  position: absolute;
+  inset: -5px;
+  border-radius: 50%;
+}
+
+.status-indicator-button:hover {
+  transform: scale(1.15);
+}
+
+.status-indicator-button:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-indicator-button { transition: none; }
+  .status-indicator-button:hover { transform: none; }
+}
+
+.presence-menu-icon--online { color: var(--success); font-variation-settings: 'FILL' 1; }
+.presence-menu-icon--brb { color: var(--warning); font-variation-settings: 'FILL' 1; }
+.presence-menu-icon--invisible { color: var(--text-muted); }
+
+/* BRB next to a name: in the member list, in the channel's voice list and on the stage. */
+.presence-brb-tag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  line-height: 1.4;
+  color: var(--warning);
+  background-color: color-mix(in srgb, var(--warning) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .user-avatar-container .status-indicator {

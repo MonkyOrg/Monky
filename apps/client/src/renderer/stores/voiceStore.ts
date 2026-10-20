@@ -186,6 +186,8 @@ export class VoiceStore {
    */
   public isReconnecting: boolean = false;
   public isConnecting: boolean = false;
+  /** Admitted with no media in either direction, so its connectivity is untested (`idle`). */
+  public isIdle: boolean = false;
 
   public setChannel(channelId: string | null, sessionKey: string | null = null): void {
     clientLog.info('CONNECTION', `Voice channel ${channelId ? 'joined' : 'left'}`, { channelId, sessionKey });
@@ -204,6 +206,7 @@ export class VoiceStore {
     if (channelId !== this.currentVoiceChannelId || sessionKey !== this.voiceSessionKey) {
       this.isConnecting = false;
       this.isReconnecting = false;
+      this.isIdle = false;
     }
     this.currentVoiceChannelId = channelId;
     if (channelId) {
@@ -217,6 +220,7 @@ export class VoiceStore {
       this.isSpeaking = false;
       this.isReconnecting = false;
       this.isConnecting = false;
+      this.isIdle = false;
     }
     emitOutsideRouting(() => {
       appEvents.emit('voice.channel_changed', channelId);
@@ -316,12 +320,14 @@ export class VoiceStore {
     if (health !== 'connected' && !this.currentVoiceChannelId) return;
     // Rebuilding transports during recovery is not a new initial connection.
     const connecting = health === 'connecting' && !this.isReconnecting;
-    const reconnecting = health !== 'connected' && !connecting;
-    if (this.isConnecting === connecting && this.isReconnecting === reconnecting) return;
+    const idle = health === 'idle';
+    const reconnecting = health !== 'connected' && !idle && !connecting;
+    if (this.isConnecting === connecting && this.isReconnecting === reconnecting && this.isIdle === idle) return;
     const wasReconnecting = this.isReconnecting;
     this.isConnecting = connecting;
     this.isReconnecting = reconnecting;
-    clientLog.info('CONNECTION', `Voice connection: ${connecting ? 'connecting' : reconnecting ? 'reconnecting' : 'connected'}`);
+    this.isIdle = idle;
+    clientLog.info('CONNECTION', `Voice connection: ${connecting ? 'connecting' : reconnecting ? 'reconnecting' : idle ? 'idle' : 'connected'}`);
     emitOutsideRouting(() => {
       if (wasReconnecting !== reconnecting) appEvents.emit('voice.reconnecting_changed', reconnecting);
       appEvents.emit('voice.connection_changed');
@@ -396,6 +402,7 @@ export class VoiceStore {
     this.screenAudioShareIds = [];
     this.isReconnecting = false;
     this.isConnecting = false;
+    this.isIdle = false;
     this.setMicrophoneState(false, false);
     emitOutsideRouting(() => {
       appEvents.emit('voice.state_updated');

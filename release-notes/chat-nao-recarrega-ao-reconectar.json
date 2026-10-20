@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O chat não recarrega mais sozinho: ele voltava ao fim e redesenhava todas as mensagens sempre que alguém entrava no servidor ou a conexão caía e voltava. Agora a conversa, o texto que você está digitando e a posição de leitura são mantidos.",
+  "en": "The chat no longer reloads by itself: it used to jump to the end and redraw every message whenever someone joined the server or the connection dropped and came back. Now the conversation, your draft and your reading position are kept."
+}
