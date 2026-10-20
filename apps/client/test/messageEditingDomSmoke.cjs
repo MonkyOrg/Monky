@@ -317,6 +317,9 @@ async function runNativeSmoke(window) {
     await fixture('setEditPermission(true)');
     await fixture('removeSendPermission()');
     check(!(await state()).saveDisabled, 'Author editing retains its existing independent permission policy even without SEND_MESSAGES');
+    const resent = await fixture('resendUnchangedRoles()');
+    check(resent.historyLoads === 0 && resent.rowKept,
+      'An unchanged role list (sent whenever anyone logs in) neither reloads the history nor rebuilds the feed');
     await fixture('selectText()');
     await click('#btn-format');
     await evaluate(`Promise.all(document.querySelector('.chat-format-panel').getAnimations().map(animation => animation.finished))`);
@@ -1236,7 +1239,7 @@ async function installFixture() {
   });
   const create = name => {
     const session = sessionManager.create(`message-editing-${name}`, 49102, user.nickname);
-    const state = { name, session, status: 'CONNECTED', epoch: 1, edits: [], sent: [], commands: [], deliveryRequests: [] };
+    const state = { name, session, status: 'CONNECTED', epoch: 1, edits: [], sent: [], commands: [], deliveryRequests: [], historyLoads: 0 };
     session.serverStore.setServerDetails(details(name), user);
     session.client.getStatus = () => state.status;
     session.client.ws = { readyState: WebSocket.OPEN, send() {}, close() {} };
@@ -1247,6 +1250,7 @@ async function installFixture() {
         type: 'CHAT_MESSAGE_UPDATED', requestId, payload: { message: { ...original, revision: payload.revision + 1, deletedAt: null } },
       }));
       if (type === 'CHAT_EDIT') state.edits.push({ payload, requestId, completed: false });
+      if (type === 'CHAT_LOAD_HISTORY') state.historyLoads++;
       if (type === 'CHAT_SEND') state.sent.push(payload);
       if (type === 'CHAT_SEND' && payload.clientMessageId) {
         const message = structuredClone(session.chatStore.getOutgoing(payload.clientMessageId).message);
@@ -1913,6 +1917,14 @@ async function installFixture() {
     removeSendPermission() {
       active.session.serverStore.myPermissions = Permission.VIEW_CHANNEL | Permission.READ_MESSAGES;
       active.session.serverStore.bus.emit('server.roles_updated');
+    },
+    // The server re-sends the same roles whenever anyone logs in.
+    resendUnchangedRoles() {
+      const before = active.historyLoads;
+      const feed = document.querySelector('#chat-messages-feed');
+      const firstRow = feed?.querySelector('.chat-message-row');
+      active.session.serverStore.bus.emit('server.roles_updated');
+      return { historyLoads: active.historyLoads - before, rowKept: !!firstRow && firstRow.isConnected };
     },
     async setChannel(channel) { view.setChannel(channel); await settle(); },
     async activate(name) { activate(name); await settle(); },

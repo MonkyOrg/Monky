@@ -2538,10 +2538,10 @@ export class ChatView {
       if (input && (this.mentionActive || input.hasFocus)) this.updateMentionDropup(input);
     };
     const u1 = appEvents.on('server.updated', refreshComposerSettings);
-    const u2 = appEvents.on('server.roles_updated', () => {
-      refreshComposerSettings();
-      this.loadHistory();
-    });
+    // The server re-sends the role list whenever anyone logs in. Reloading the
+    // history on every one of them rebuilt the feed and threw the reader back
+    // to the bottom; a real change of read access is already handled above.
+    const u2 = appEvents.on('server.roles_updated', refreshComposerSettings);
     const u3 = appEvents.on('chat.message_added', (msg: ChatMessage) => {
       if (msg.channelId === this.currentChannelId) {
         // Sending a message always brings the author back to the end (#270).
