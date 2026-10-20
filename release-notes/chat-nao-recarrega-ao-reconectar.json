@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Quando a conexão com o servidor cai e volta sozinha, o chat não é mais recarregado: a conversa, o texto que você estava digitando e a posição de leitura são mantidos, e só as mensagens perdidas são adicionadas.",
+  "en": "When the connection to the server drops and comes back on its own, the chat no longer reloads: the conversation, your draft and your reading position are kept, and only missed messages are added."
+}

@@ -13,9 +13,19 @@ import { nicknameError } from '../../../utils/nickname';
 import { DM_MAX_FILE_BYTES_OPTIONS, MessageType, normalizeNickname } from '@monky/shared';
 import { dmStore } from '../../../stores/dmStore';
 import { formatBytes } from '../../../utils/attachment';
+import { appEvents } from '../../../core/EventBus';
+import { currentPresenceStatus, type PresenceStatus } from '../../../core/SessionManager';
+import type { TranslationKey } from '../../../i18n';
+
+const PRESENCE_OPTIONS: ReadonlyArray<{ status: PresenceStatus; icon: string; label: TranslationKey; description: TranslationKey }> = [
+  { status: 'online', icon: 'circle', label: 'main.statusOnline', description: 'settings.presenceOnlineDesc' },
+  { status: 'brb', icon: 'schedule', label: 'main.statusBrb', description: 'settings.presenceBrbDesc' },
+  { status: 'invisible', icon: 'visibility_off', label: 'main.statusInvisible', description: 'settings.appearOfflineHint' },
+];
 
 export class AccountTab {
   private detachEmojiPicker: (() => void) | null = null;
+  private detachPresenceSync: (() => void) | null = null;
 
   public renderHtml(): string {
     return `
@@ -46,21 +56,18 @@ export class AccountTab {
         </div>
       </div>
 
-      <!-- Appear Offline (#561) -->
+      <!-- Status: online, "Volto já" or invisible (#561, user-brb) -->
       <div data-settings-section="visibility" data-settings-label="${escapeHtml(t('settings.appearOfflineSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
-        <label style="display: flex; align-items: center; gap: 6px;">
-          <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">visibility_off</span>
+        <label id="settings-presence-label" style="display: flex; align-items: center; gap: 6px;">
+          <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">radio_button_checked</span>
           ${t('settings.appearOfflineSection')}
         </label>
-        <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
-          <div style="flex: 1; margin-right: 12px;">
-            <div style="font-size: 13px; color: var(--text-primary);">${t('settings.appearOfflineLabel')}</div>
-            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('settings.appearOfflineHint')}</div>
-          </div>
-          <label class="toggle-switch">
-            <input type="checkbox" id="toggle-appear-offline" ${settingsStore.appearOffline ? 'checked' : ''}>
-            <span class="toggle-slider"></span>
-          </label>
+        <div class="input-mode-cards presence-cards" role="group" aria-labelledby="settings-presence-label">
+          ${PRESENCE_OPTIONS.map(({ status, icon, label, description }) => `
+          <button type="button" class="voice-mode-card input-mode-card" data-presence="${status}" aria-pressed="${currentPresenceStatus() === status}">
+            <span class="input-mode-card-title"><span class="material-symbols-outlined md-18 presence-menu-icon presence-menu-icon--${status}" aria-hidden="true">${icon}</span>${t(label)}</span>
+            <span class="input-mode-card-description">${t(description)}</span>
+          </button>`).join('')}
         </div>
       </div>
 
@@ -209,7 +216,7 @@ export class AccountTab {
       onAvatarChanged: (base64: string) => Promise<void>;
       onReloadModal: () => void;
       showError: (msg: string) => void;
-      onVisibilityChanged?: (appearOffline: boolean) => void;
+      onPresenceChanged?: (status: PresenceStatus) => void;
       /** Either game setting changed: detection and what servers see follow both. */
       onGameActivityChanged?: () => void;
     }
@@ -256,16 +263,23 @@ export class AccountTab {
       callbacks.onReloadModal();
     });
 
-    // Appear Offline toggle (#561)
-    const toggleAppearOffline = container.querySelector<HTMLInputElement>('#toggle-appear-offline');
-    toggleAppearOffline?.addEventListener('change', () => {
-      settingsStore.appearOffline = toggleAppearOffline.checked;
-      settingsStore.save();
-      // Notify the server of the visibility change if currently connected.
-      if (callbacks.onVisibilityChanged) {
-        callbacks.onVisibilityChanged(toggleAppearOffline.checked);
-      }
-    });
+    // Status cards: online, "Volto já" or invisible (#561, user-brb).
+    const presenceCards = [...container.querySelectorAll<HTMLButtonElement>('[data-presence]')];
+    const syncPresenceCards = () => {
+      const current = currentPresenceStatus();
+      for (const card of presenceCards) card.setAttribute('aria-pressed', String(card.dataset.presence === current));
+    };
+    for (const card of presenceCards) {
+      card.addEventListener('click', () => {
+        const status = PRESENCE_OPTIONS.find(option => option.status === card.dataset.presence)?.status;
+        if (!status) return;
+        callbacks.onPresenceChanged?.(status);
+        syncPresenceCards();
+      });
+    }
+    // Another device or the user card's menu may change it while this is open.
+    this.detachPresenceSync?.();
+    this.detachPresenceSync = appEvents.on('settings.updated', syncPresenceCards);
 
     const toggleGameActivity = container.querySelector<HTMLInputElement>('#toggle-game-activity');
     toggleGameActivity?.addEventListener('change', () => {
@@ -333,5 +347,7 @@ export class AccountTab {
   public cleanup(): void {
     this.detachEmojiPicker?.();
     this.detachEmojiPicker = null;
+    this.detachPresenceSync?.();
+    this.detachPresenceSync = null;
   }
 }

@@ -131,6 +131,8 @@ export class SettingsStore {
   public askShutdownOnLastLeave: boolean = true;
   // Appear offline to other users on all servers (#561).
   public appearOffline: boolean = false;
+  // "Volto já" status (user-brb). Never combined with appearOffline.
+  public brb: boolean = false;
   // Share the game being played with the channel (#675). Off by default: this
   // reads what is running on the machine, so it is never opt-out.
   public shareGameActivity: boolean = false;
@@ -326,6 +328,9 @@ export class SettingsStore {
         if (typeof this.appearOffline !== 'boolean') {
           this.appearOffline = false;
         }
+        if (typeof this.brb !== 'boolean' || this.appearOffline) {
+          this.brb = false;
+        }
         if (typeof this.shareGameActivity !== 'boolean') {
           this.shareGameActivity = false;
         }
@@ -462,6 +467,7 @@ export class SettingsStore {
     this.botLocalePreferences = {};
     this.botDownloadConfirmationExceptions = [];
     this.appearOffline = false;
+    this.brb = false;
     this.onboardingCompleted = false;
     this.save();
   }
@@ -776,6 +782,7 @@ export class SettingsStore {
         minimizeToTrayOnClose: this.minimizeToTrayOnClose,
         askShutdownOnLastLeave: this.askShutdownOnLastLeave,
         appearOffline: this.appearOffline,
+        brb: this.brb,
         shareGameActivity: this.shareGameActivity,
         suggestGameShare: this.suggestGameShare,
         chatSoundServerOverrides: this.chatSoundServerOverrides,

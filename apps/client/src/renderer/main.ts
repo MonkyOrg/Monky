@@ -649,6 +649,10 @@ class App {
       // Preserve the voice channel we were in so we can auto-rejoin after an
       // automatic reconnection (null on a fresh connect, so this no-ops then).
       const previousVoiceChannelId = ownsCall ? voiceStore.currentVoiceChannelId : null;
+      // Same server and identity as before the drop: the view on screen is
+      // still right, it only has to catch up.
+      const resumingView = serverStore.serverDetails?.id === payload.server.id
+        && serverStore.currentUser?.id === payload.currentUser.id;
 
       chatStore.setCommandUsageScope({ serverId: payload.server.id, callerId: payload.currentUser.id });
       serverStore.setServerDetails(payload.server, payload.currentUser);
@@ -698,7 +702,8 @@ class App {
       }
 
       if (isForegroundEvent()) {
-        this.mainView.render();
+        if (resumingView) this.mainView.refreshAfterReconnect();
+        else this.mainView.render();
       }
 
       // Persist the server icon on the saved server entry so the rail shows it
@@ -867,11 +872,23 @@ class App {
       if (payload.user.id === serverStore.currentUser?.id) {
         serverStore.updateCurrentUser(payload.user);
         const invisible = payload.user.invisible;
-        if (typeof invisible === 'boolean') {
+        // Another device changed the status: only servers that know "Volto já"
+        // say anything about it, so the others must not clear it here.
+        const brb = serverStore.serverDetails?.protocol?.features.includes('user-brb') ? payload.user.brb === true : undefined;
+        if (typeof invisible === 'boolean' || brb !== undefined) {
           emitOutsideRouting(() => {
-            if (settingsStore.appearOffline !== invisible) {
+            let changed = false;
+            if (typeof invisible === 'boolean' && settingsStore.appearOffline !== invisible) {
               settingsStore.appearOffline = invisible;
+              changed = true;
+            }
+            if (brb !== undefined && !settingsStore.appearOffline && settingsStore.brb !== brb) {
+              settingsStore.brb = brb;
+              changed = true;
+            }
+            if (changed) {
               settingsStore.save();
+              appEvents.emit('settings.updated');
             }
           });
         }

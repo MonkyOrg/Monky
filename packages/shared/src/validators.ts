@@ -245,6 +245,8 @@ export const authConnectSchema = z.object({
     .optional(),
   // Appear-offline visibility flag (#561). Optional for backward compatibility.
   appearOffline: z.boolean().optional(),
+  // "Be right back" status (user-brb); applied only when the feature is negotiated.
+  brb: z.boolean().optional(),
   // Bot token for bot authentication (#569). Mutually exclusive with the
   // challenge-response flow: when present the server skips the nonce handshake.
   botToken: z.string().min(1).max(128).optional(),
@@ -459,6 +461,10 @@ export const userActivitySchema = z.object({
 
 export const userUpdateActivitySchema = z.object({
   activity: userActivitySchema.nullable(),
+}).strict();
+
+export const userUpdateBrbSchema = z.object({
+  brb: z.boolean(),
 }).strict();
 
 export const gameShareRequestSchema = z.object({

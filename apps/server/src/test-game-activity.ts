@@ -97,3 +97,69 @@ test('game activity is refused from clients without the feature and from bots', 
   const bot = await f.bot(text(createdBot.payload.token));
   await bot.peer.error(MessageType.USER_UPDATE_ACTIVITY, { activity: game }, ProtocolErrorCode.PERMISSION_DENIED);
 });
+
+const withoutBrb = {
+  minimumVersion: MIN_CLIENT_PROTOCOL,
+  features: PROTOCOL_FEATURES.filter((feature) => feature !== 'user-brb'),
+};
+
+test('"Volto já" reaches peers that negotiated it, follows every device and hides behind appear-offline', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const alice = await f.human('Alice');
+  const bob = await f.human('Bob');
+  const legacy = await f.human('Legacy', identity(), undefined, false, PROTOCOL_VERSION, withoutBrb);
+  const isAliceUpdate = (message: { type: string; payload: Record<string, unknown> }) =>
+    message.type === MessageType.USER_UPDATED && text(updatedUser(message).id) === alice.id;
+
+  const bobStart = bob.peer.messages.length;
+  const legacyStart = legacy.peer.messages.length;
+  const own = await alice.peer.request(MessageType.USER_UPDATE_BRB, { brb: true });
+  assert.equal(updatedUser(own).brb, true);
+  assert.equal(updatedUser(await bob.peer.wait(isAliceUpdate, bobStart)).brb, true);
+  assert.equal(Object.hasOwn(updatedUser(await legacy.peer.wait(isAliceUpdate, legacyStart)), 'brb'), false);
+
+  // A newcomer sees it in the member list; a second device of Alice inherits it.
+  const carol = await f.human('Carol');
+  const members = record(carol.auth.payload.server).members;
+  assert.ok(Array.isArray(members));
+  assert.equal(members.map(record).find((member) => text(member.id) === alice.id)?.brb, true);
+
+  // Appear-offline masks the status along with the presence.
+  const hiddenStart = bob.peer.messages.length;
+  await alice.peer.request(MessageType.USER_UPDATE_VISIBILITY, { appearOffline: true });
+  const hidden = updatedUser(await bob.peer.wait((message) => isAliceUpdate(message)
+    && updatedUser(message).status === 'DISCONNECTED', hiddenStart));
+  assert.equal(Object.hasOwn(hidden, 'brb'), false);
+  await alice.peer.request(MessageType.USER_UPDATE_VISIBILITY, { appearOffline: false });
+
+  const clearStart = bob.peer.messages.length;
+  await alice.peer.request(MessageType.USER_UPDATE_BRB, { brb: false });
+  await bob.peer.wait((message) => isAliceUpdate(message) && !Object.hasOwn(updatedUser(message), 'brb'), clearStart);
+});
+
+test('a device that connects already "Volto já" applies it to the other devices of the person', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const keys = identity();
+  const desktop = await f.human('Alice', keys);
+  const desktopStart = desktop.peer.messages.length;
+  const laptop = await f.human('Alice', keys, undefined, false, PROTOCOL_VERSION, undefined, true);
+  assert.equal(record(laptop.auth.payload.currentUser).brb, true);
+  const update = await desktop.peer.wait((message) => message.type === MessageType.USER_UPDATED
+    && text(updatedUser(message).id) === desktop.id, desktopStart);
+  assert.equal(updatedUser(update).brb, true);
+});
+
+test('"Volto já" is refused from clients without the feature, from bots, and with a malformed payload', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Owner');
+  await owner.peer.error(MessageType.USER_UPDATE_BRB, { brb: 'yes' }, ProtocolErrorCode.BAD_REQUEST);
+  const legacy = await f.human('Legacy', identity(), undefined, false, PROTOCOL_VERSION, withoutBrb, true);
+  assert.equal(Object.hasOwn(record(legacy.auth.payload.currentUser), 'brb'), false, 'the login flag needs the feature too');
+  await legacy.peer.error(MessageType.USER_UPDATE_BRB, { brb: true }, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+  const createdBot = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const bot = await f.bot(text(createdBot.payload.token));
+  await bot.peer.error(MessageType.USER_UPDATE_BRB, { brb: true }, ProtocolErrorCode.PERMISSION_DENIED);
+});

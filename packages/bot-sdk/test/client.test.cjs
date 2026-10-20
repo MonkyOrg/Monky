@@ -1432,6 +1432,7 @@ test('new SDK reconnects using the known legacy bot contract without an update w
   assert.equal(offered[0].protocolOffer.features.includes('chat-blocks'), false);
   assert.equal(offered[0].protocolOffer.features.includes('message-delete-undo'), false);
   assert.equal(offered[0].protocolOffer.features.includes('message-forward'), false);
+  assert.equal(offered[0].protocolOffer.features.includes('user-brb'), false);
   assert.equal(errors.length, 0);
 });
 const soundDownloadRequest = { url: 'https://example.com/sound.mp3', fileName: 'sound.mp3', title: 'Sound' };

@@ -92,6 +92,12 @@ export interface UserSummary {
    * never receive this flag (they simply see status 'DISCONNECTED').
    */
   invisible?: boolean;
+  /**
+   * "Volto já" (user-brb): the person stepped away for a moment. Shown as a
+   * yellow status and a BRB tag next to their name; only peers that
+   * negotiated the feature receive it, and never while the person is invisible.
+   */
+  brb?: boolean;
   /** True when this account is a bot created via the bot management API (#569). */
   isBot?: boolean;
   /**

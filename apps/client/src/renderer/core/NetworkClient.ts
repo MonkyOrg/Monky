@@ -372,6 +372,7 @@ export class NetworkClient {
             password: password || '',
             deviceId: getDeviceId(),
             appearOffline: settingsStore.appearOffline || undefined,
+            brb: (!settingsStore.appearOffline && settingsStore.brb) || undefined,
           },
           authRequestId
         );
@@ -579,6 +580,7 @@ export class NetworkClient {
             ...this.lastConnectPayload, protocolVersion: fallback,
             protocolOffer: createProtocolOffer('client'), deviceId: getDeviceId(),
             appearOffline: settingsStore.appearOffline || undefined,
+            brb: (!settingsStore.appearOffline && settingsStore.brb) || undefined,
           }, requestId);
           return;
         }

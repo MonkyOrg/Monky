@@ -225,6 +225,8 @@ export enum MessageType {
   USER_UPDATE_VISIBILITY = 'USER_UPDATE_VISIBILITY',
   /** Client -> server: publish (or clear, with null) the game being played (#675). */
   USER_UPDATE_ACTIVITY = 'USER_UPDATE_ACTIVITY',
+  /** Client -> server: turn the "be right back" status on or off (user-brb). */
+  USER_UPDATE_BRB = 'USER_UPDATE_BRB',
   /** Client -> server: ask a player in the same voice channel to share their game window (#763). */
   GAME_SHARE_REQUEST = 'GAME_SHARE_REQUEST',
   /** Server -> requester: the ask reached the player; carries the id the answer will refer to (#763). */
@@ -410,6 +412,11 @@ export interface AuthConnectPayload {
    * member lists sent to other clients.
    */
   appearOffline?: boolean;
+  /**
+   * The user is "be right back" (user-brb). Servers without the feature drop
+   * the unknown field, so it is safe to send before negotiation.
+   */
+  brb?: boolean;
   /**
    * Bot authentication token (#569). Mutually exclusive with `publicKey` /
    * challenge-response: a bot sends its token here and the server verifies it
@@ -951,6 +958,11 @@ export interface UserUpdateVisibilityPayload {
  */
 export interface UserUpdateActivityPayload {
   activity: UserActivity | null;
+}
+
+/** Client -> server: "Volto já" on or off (user-brb). */
+export interface UserUpdateBrbPayload {
+  brb: boolean;
 }
 
 /** Client -> server: "Pedir para ver a partida" (#763). */

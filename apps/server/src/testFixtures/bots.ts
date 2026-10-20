@@ -282,10 +282,11 @@ export async function createFixture(options: {
     appearOffline = false,
     protocolVersion = PROTOCOL_VERSION,
     protocolOffer?: ProtocolOffer,
+    brb?: boolean,
   ) => {
     const peer = await connect();
     const challenge = await peer.request(MessageType.AUTH_CONNECT, {
-      protocolVersion, protocolOffer, nickname, publicKey: keys.publicKey, deviceId, appearOffline,
+      protocolVersion, protocolOffer, nickname, publicKey: keys.publicKey, deviceId, appearOffline, brb,
     });
     assert.equal(challenge.type, MessageType.AUTH_CHALLENGE);
     const signature = sign(null, Buffer.from(text(challenge.payload.nonce), 'hex'), keys.privateKey).toString('hex');

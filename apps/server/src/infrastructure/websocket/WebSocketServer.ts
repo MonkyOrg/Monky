@@ -233,7 +233,7 @@ import { RateLimiter } from '../security/RateLimiter';
 import { describeFailure, ServerResourceScope } from '../lifecycle/ServerResourceScope';
 import { BotInteractionHandler, BotInteractionSession } from './BotInteractionHandler';
 import { botVoiceJoinSchema, botVoiceChannelSchema, botVoiceSignalSchema } from '@monky/shared';
-import { userUpdateActivitySchema } from '@monky/shared';
+import { userUpdateActivitySchema, userUpdateBrbSchema } from '@monky/shared';
 
 const BOT_LOCAL_ALLOWED_MESSAGES = new Set<MessageType>([
   MessageType.BOT_LOCAL_SOURCE_REQUEST,
@@ -1094,6 +1094,9 @@ export class WebSocketServer {
       case MessageType.USER_UPDATE_ACTIVITY:
         this.handleUserUpdateActivity(session, payload as UserUpdateActivityPayload, requestId);
         break;
+      case MessageType.USER_UPDATE_BRB:
+        this.handleUserUpdateBrb(session, payload, requestId);
+        break;
 
       case MessageType.GAME_SHARE_REQUEST: {
         const error = this.gameShareRequests.request(session, payload, requestId);
@@ -1574,6 +1577,8 @@ export class WebSocketServer {
     const sessionId = result.user.sessionId!;
     session.sessionId = sessionId;
     session.invisible = result.appearOffline === true;
+    // "Volto já" only exists between peers that negotiated it (user-brb).
+    result.user.brb = !session.isBot && result.brb === true && session.protocol?.features.includes('user-brb') ? true : undefined;
     if (result.newMember) this.recordAudit(session, 'member.join', { target: auditRef.member(result.user) });
 
     // Prevent duplicate sessions for the *same device*. A lingering/zombie socket
@@ -1682,6 +1687,12 @@ export class WebSocketServer {
 
     if (this.getSessionsOfUser(result.user.id).some((other) => !!other.invisible !== !!session.invisible)) {
       this.handleUserUpdateVisibility(session, { appearOffline: session.invisible === true });
+    }
+    // The device that just connected carries the person's current choice, as
+    // with visibility; one that does not know the status cannot clear it.
+    if (session.protocol?.features.includes('user-brb') && this.getSessionsOfUser(result.user.id)
+      .some((other) => other !== session && !!other.user?.brb !== !!session.user?.brb)) {
+      this.applyBrb(session, session.user?.brb === true);
     }
 
     // Broadcast USER_JOINED to all other clients — unless the user is invisible (#561).
@@ -3478,8 +3489,12 @@ export class WebSocketServer {
    * per update and nothing on their side would ever show it.
    */
   private userForRecipient(recipient: ClientSession, user: UserSummary): UserSummary {
-    if (user.activity === undefined || recipient.protocol?.features.includes('game-activity')) return user;
-    return { ...user, activity: undefined };
+    const features = recipient.protocol?.features;
+    let shared = user;
+    if (shared.activity !== undefined && !features?.includes('game-activity')) shared = { ...shared, activity: undefined };
+    // Peers without user-brb keep seeing a plain online person.
+    if (shared.brb !== undefined && !features?.includes('user-brb')) shared = { ...shared, brb: undefined };
+    return shared;
   }
 
   /** Presence updates must not masquerade as a physical disconnect from voice. */
@@ -3491,7 +3506,7 @@ export class WebSocketServer {
       // Hiding has to hide the game too, or "aparecer offline" leaks what the
       // person is doing while claiming they are offline (#675).
       ...(invisible
-        ? { status: 'DISCONNECTED', sessionId: undefined, connectedAt: undefined, activity: undefined }
+        ? { status: 'DISCONNECTED', sessionId: undefined, connectedAt: undefined, activity: undefined, brb: undefined }
         : {}),
     };
     for (const recipient of this.sessions.values()) {
@@ -3576,6 +3591,36 @@ export class WebSocketServer {
     // another session (a nickname change, say) would carry a stale activity.
     for (const target of this.getSessionsOfUser(session.user.id)) {
       if (target.user) target.user = { ...target.user, activity };
+    }
+    this.broadcastUserUpdate(session.user, requestId);
+  }
+
+  /** "Volto já" on or off (user-brb), for every device of the person at once. */
+  private handleUserUpdateBrb(session: ClientSession, payload: unknown, requestId?: string): void {
+    if (!session.user) return;
+    if (session.isBot) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bots não usam o status Volto já.', requestId);
+      return;
+    }
+    if (!session.protocol?.features.includes('user-brb')) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE,
+        'O status Volto já exige um cliente e servidor atualizados.', requestId);
+      return;
+    }
+    const parsed = userUpdateBrbSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Status inválido.', requestId);
+      return;
+    }
+    this.applyBrb(session, parsed.data.brb, requestId);
+  }
+
+  private applyBrb(session: ClientSession, brb: boolean, requestId?: string): void {
+    if (!session.user) return;
+    // Every device carries it, or a later broadcast from another one (a
+    // nickname change, say) would bring back a stale status.
+    for (const target of this.getSessionsOfUser(session.user.id)) {
+      if (target.user) target.user = { ...target.user, brb: brb || undefined };
     }
     this.broadcastUserUpdate(session.user, requestId);
   }

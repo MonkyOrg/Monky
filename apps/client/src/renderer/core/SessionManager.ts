@@ -1,5 +1,6 @@
 import { MessageType, type UserActivity } from '@monky/shared';
 import { CommunityFeed } from './CommunityFeed';
+import { settingsStore } from '../stores/settingsStore';
 import { BotScreenStore, setActiveBotScreenStore } from '../stores/botScreenStore';
 import { appEvents } from './EventBus';
 import { clientLog } from './ClientLogService';
@@ -57,6 +58,13 @@ export interface ServerSession {
   port: number;
   nickname: string;
   password?: string;
+}
+
+/** What the person chose to show everyone: online, "Volto já" or invisible. */
+export type PresenceStatus = 'online' | 'brb' | 'invisible';
+
+export function currentPresenceStatus(): PresenceStatus {
+  return settingsStore.appearOffline ? 'invisible' : settingsStore.brb ? 'brb' : 'online';
 }
 
 export function sessionKeyFor(host: string, port: number): string {
@@ -131,6 +139,35 @@ export class SessionManager {
         session.client.send(MessageType.USER_UPDATE_VISIBILITY, { appearOffline });
       }
     }
+  }
+
+  /** Publishes "Volto já" to every connected server that negotiated it (user-brb). */
+  public setBrb(brb: boolean): void {
+    for (const session of this.sessions.values()) {
+      if (session.client.getStatus() !== 'CONNECTED') continue;
+      // A server without the feature would answer with an error.
+      if (!session.serverStore.serverDetails?.protocol?.features.includes('user-brb')) continue;
+      session.client.send(MessageType.USER_UPDATE_BRB, { brb });
+    }
+  }
+
+  /**
+   * Online, "Volto já" or invisible: one choice, kept in settings and applied
+   * to every server. Invisible hides the BRB status too, so they never combine.
+   */
+  public setPresenceStatus(status: PresenceStatus): void {
+    const appearOffline = status === 'invisible';
+    const brb = status === 'brb';
+    const visibilityChanged = settingsStore.appearOffline !== appearOffline;
+    const brbChanged = settingsStore.brb !== brb;
+    if (!visibilityChanged && !brbChanged) return;
+    settingsStore.appearOffline = appearOffline;
+    settingsStore.brb = brb;
+    settingsStore.save();
+    // Set BRB before showing up again, so nobody sees a plain "online" flash.
+    if (brbChanged) this.setBrb(brb);
+    if (visibilityChanged) this.setAppearOffline(appearOffline);
+    appEvents.emit('settings.updated');
   }
 
   /**

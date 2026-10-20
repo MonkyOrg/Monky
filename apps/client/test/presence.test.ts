@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { UserSummary } from '@monky/shared';
+import { MessageType, type UserSummary } from '@monky/shared';
 import { createServerStore } from '../src/renderer/stores/serverStore';
-import { SessionManager } from '../src/renderer/core/SessionManager';
+import { currentPresenceStatus, SessionManager } from '../src/renderer/core/SessionManager';
 import { EventBus } from '../src/renderer/core/EventBus';
+import { settingsStore } from '../src/renderer/stores/settingsStore';
 
 const self: UserSummary = {
   id: 'self', clientId: 'identity', nickname: 'Self', status: 'ONLINE', joinedAt: 1,
@@ -71,4 +72,42 @@ test('visibility is applied to every authenticated server, not just the foregrou
   assert.ok(manager.getAll().every((session) => session.serverStore.currentUser?.invisible));
   manager.setAppearOffline(false);
   assert.ok(manager.getAll().every((session) => session.serverStore.currentUser?.invisible === false));
+});
+
+test('presence status is one choice: BRB only reaches servers that negotiated it and invisible clears it', (t) => {
+  const manager = new SessionManager();
+  const modern = manager.create('modern', 1000, 'Self');
+  const legacy = manager.create('legacy', 1001, 'Self');
+  for (const session of manager.getAll()) session.serverStore.currentUser = { ...self };
+  modern.serverStore.serverDetails = { id: 'm', name: 'Modern', createdAt: 1, maxUsers: 10, channels: [], voiceStates: {}, members: [],
+    protocol: { version: 40, minimumVersion: 35, features: ['user-brb'] } };
+  legacy.serverStore.serverDetails = { id: 'l', name: 'Legacy', createdAt: 1, maxUsers: 10, channels: [], voiceStates: {}, members: [],
+    protocol: { version: 40, minimumVersion: 35, features: [] } };
+  for (const session of manager.getAll()) t.mock.method(session.client, 'getStatus', () => 'CONNECTED');
+  const [modernSent, legacySent] = manager.getAll().map((session) => t.mock.method(session.client, 'send', () => {}));
+  const previous = { appearOffline: settingsStore.appearOffline, brb: settingsStore.brb };
+  t.mock.method(settingsStore, 'save', () => {});
+  t.after(() => Object.assign(settingsStore, previous));
+  settingsStore.appearOffline = false;
+  settingsStore.brb = false;
+
+  manager.setPresenceStatus('brb');
+  assert.equal(currentPresenceStatus(), 'brb');
+  assert.deepEqual(modernSent.mock.calls.map((call) => call.arguments), [[MessageType.USER_UPDATE_BRB, { brb: true }]]);
+  assert.equal(legacySent.mock.callCount(), 0, 'a server without user-brb would answer with an error');
+
+  manager.setPresenceStatus('brb');
+  assert.equal(modernSent.mock.callCount(), 1, 'choosing the current status sends nothing');
+
+  manager.setPresenceStatus('invisible');
+  assert.equal(currentPresenceStatus(), 'invisible');
+  assert.equal(settingsStore.brb, false);
+  assert.deepEqual(modernSent.mock.calls.slice(1).map((call) => call.arguments), [
+    [MessageType.USER_UPDATE_BRB, { brb: false }],
+    [MessageType.USER_UPDATE_VISIBILITY, { appearOffline: true }],
+  ]);
+  assert.deepEqual(legacySent.mock.calls.map((call) => call.arguments), [[MessageType.USER_UPDATE_VISIBILITY, { appearOffline: true }]]);
+
+  manager.setPresenceStatus('online');
+  assert.equal(currentPresenceStatus(), 'online');
 });

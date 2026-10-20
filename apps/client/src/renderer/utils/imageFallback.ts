@@ -26,20 +26,57 @@ export const BROKEN_IMAGE_URL = `data:image/svg+xml;base64,${btoa(BROKEN_IMAGE_S
  * `data-fallback` attribute; images without it get the generic placeholder.
  *
  * - `avatar`  — a person silhouette, for user pictures
- * - `initial` — the element is replaced by `data-fallback-initial`, matching how
- *               a server with no icon is already drawn in the rail
+ * - `initial` — the element gives way to `data-fallback-initial` (or to a sibling
+ *               `[data-fallback-initial-slot]` already painted underneath),
+ *               matching how a server with no icon is drawn in the rail
  * - `broken`  — the generic "could not load" placeholder (default)
  */
 export type ImageFallbackKind = 'avatar' | 'initial' | 'broken';
 
 const APPLIED_FLAG = 'fallbackApplied';
+const FAILED_RETRY_MS = 60_000;
+// Outcome per `initial` image URL. Views that redraw often (the server rail)
+// read it so a re-render neither hides a loaded icon behind its initial for a
+// frame nor keeps re-requesting one that cannot load.
+const initialImageLoaded = new Set<string>();
+const initialImageFailedAt = new Map<string, number>();
+
+export function initialImageState(url: string): 'loaded' | 'failed' | 'unknown' {
+  if (initialImageLoaded.has(url)) return 'loaded';
+  const failedAt = initialImageFailedAt.get(url);
+  if (failedAt !== undefined && Date.now() - failedAt < FAILED_RETRY_MS) return 'failed';
+  return 'unknown';
+}
 
 function replaceWithInitial(img: HTMLImageElement): void {
+  const url = img.getAttribute('src');
+  if (url) {
+    initialImageLoaded.delete(url);
+    initialImageFailedAt.set(url, Date.now());
+  }
+  // Layered markup already paints the initial under the picture.
+  const slot = img.parentElement?.querySelector<HTMLElement>(':scope > [data-fallback-initial-slot]');
+  if (slot) {
+    slot.title = t('common.imageLoadFailed');
+    img.remove();
+    return;
+  }
   const initial = img.dataset.fallbackInitial ?? '?';
   const span = document.createElement('span');
   span.textContent = initial;
   span.title = t('common.imageLoadFailed');
   img.replaceWith(span);
+}
+
+function handleImageLoad(event: Event): void {
+  const img = event.target as HTMLImageElement | null;
+  if (!img || img.tagName !== 'IMG' || img.dataset.fallback !== 'initial') return;
+  const url = img.getAttribute('src');
+  if (url) {
+    initialImageLoaded.add(url);
+    initialImageFailedAt.delete(url);
+  }
+  img.dataset.loaded = '1';
 }
 
 function handleImageError(event: Event): void {
@@ -68,4 +105,5 @@ export function installImageFallback(): void {
   if (installed) return;
   installed = true;
   document.addEventListener('error', handleImageError, true);
+  document.addEventListener('load', handleImageLoad, true);
 }

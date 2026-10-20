@@ -209,6 +209,12 @@ if (!process.versions.electron) {
       assert.equal(replacement.readIntLE(44, 3), 0);
       assert.equal(replacement.readIntLE(replacement.length - 6, 3), 0);
       assert.deepEqual(fs.readFileSync(path.join(folder, 'tone.wav')), original);
+      const authoredBytes = fs.readFileSync(path.join(folder, 'authored.ogg'));
+      await browser.webContents.executeJavaScript('window.soundboardFilesQa.prepareRenameOnly()', true);
+      await nativeClick('.modal-backdrop:not([data-ui-closing]):not([inert]) .dialog-card [data-action="confirm"]');
+      await browser.webContents.executeJavaScript('window.soundboardFilesQa.finishRenameOnly()', true);
+      assert.ok(!fs.existsSync(path.join(folder, 'authored.ogg')), 'Rename-only overwrite moved the actual OS file');
+      assert.deepEqual(fs.readFileSync(path.join(folder, 'authored-renamed.ogg')), authoredBytes, 'Rename-only overwrite never re-encodes');
       const longPcm = [Float32Array.from({ length: 48000 * 131 }, (_, i) => 0.125 * Math.sin(2 * Math.PI * 200 * i / 48000))];
       const longWav = Buffer.from(encodeSoundboardEdit(longPcm, 48000, { start: 0, end: 131, fadeIn: 0, fadeOut: 0 }).bytes);
       fs.writeFileSync(path.join(folder, 'long.wav'), longWav);
@@ -934,7 +940,26 @@ async function runDom(fixture) {
       check(document.querySelector('[data-editor-overwrite]').disabled, 'Missing encoder blocks overwrite, not a mislabeled WAV');
       check(!document.querySelector('[data-overwrite-unavailable]').hidden, 'Missing encoder has an explicit prerequisite notice');
       check(!document.querySelector('[data-editor-save]').disabled, 'New WAV copy remains available without the encoder');
+      input('#sb-edit-name', 'authored-renamed');
+      check(!document.querySelector('[data-editor-overwrite]').disabled, 'A name-only change can overwrite without an encoder');
+      check(document.querySelector('[data-overwrite-unavailable]').hidden, 'Rename-only overwrite hides the encoder notice');
+      input('#sb-edit-name', 'authored');
+      check(document.querySelector('[data-editor-overwrite]').disabled, 'Typing the original name back is not a rename');
       document.querySelector('[data-editor-close]').click();
+    },
+    async prepareRenameOnly() {
+      actions('edit', 'authored.ogg').click();
+      await until(() => document.querySelector('[data-editor-form] fieldset')?.disabled === false, 'Rename-only editor not ready');
+      input('#sb-edit-name', 'authored-renamed');
+      document.querySelector('[data-editor-overwrite]').click();
+      await until(() => dialog(), 'Rename-only confirmation missing');
+      check(dialog().querySelector('.dialog-message').textContent ===
+        t('soundboard.renameOnlyConfirm', { name: 'authored.ogg', newName: 'authored-renamed.ogg' }), 'Rename-only overwrite says what it does');
+    },
+    async finishRenameOnly() {
+      await until(() => !document.querySelector('.sb-editor-card') && exactStatus(t('soundboard.originalSaved', { name: 'authored-renamed.ogg' })),
+        'Rename-only overwrite did not finish');
+      check(!!name('authored-renamed.ogg') && !name('authored.ogg'), 'Library shows the original under its new name only');
     },
     async openFinal() {
       await modal.open();
