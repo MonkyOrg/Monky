@@ -276,7 +276,13 @@ export interface UserRoleSummary {
   roleIds: string[];
 }
 
-export type VoiceConnectionHealth = 'connecting' | 'connected' | 'reconnecting' | 'failed';
+/**
+ * `idle`: the call is admitted but carries no media in either direction (a
+ * listen-only member with nobody to hear, as in the AFK room), so no media
+ * transport was negotiated yet. It is shown as connected, with no ping until
+ * audio flows; clients that predate it simply show no badge for it.
+ */
+export type VoiceConnectionHealth = 'connecting' | 'connected' | 'reconnecting' | 'failed' | 'idle';
 
 export interface VoiceRosterParticipant {
   user: UserSummary;

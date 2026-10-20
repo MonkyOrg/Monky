@@ -60,7 +60,7 @@ export interface SfuClientEngineCallbacks {
    * manager answers this by rejoining the room until it comes back.
    */
   onConnectionFailed: (reason: string) => void;
-  /** A transport reached `connected`, which closes any rejoin ladder in flight. */
+  /** A transport reached `connected`, or the call settled `idle`; either closes any rejoin ladder in flight. */
   onConnected: () => void;
 }
 
@@ -105,6 +105,9 @@ export class SfuClientEngine {
   // The server refuses microphone publication while Speak is denied in the
   // channel. That is a permission mute, not a broken transport.
   private microphoneDenied = false;
+  // The manager finished publishing what the call had to publish. Until then,
+  // transports that are still `new` may just be waiting for their first producer.
+  private publicationSettled = false;
 
   constructor(
     getClient: () => NetworkClient,
@@ -1038,6 +1041,25 @@ export class SfuClientEngine {
     this.consumerSetupFailed = false;
     this.microphoneSetupFailed = false;
     this.microphoneDenied = false;
+    this.publicationSettled = false;
+  }
+
+  /**
+   * Called once the join published everything it had to. A call that then has
+   * nothing to send or receive (a listen-only member alone with silent peers,
+   * as everyone in the AFK room is) is reported `idle` instead of waiting for a
+   * negotiation that will never happen.
+   */
+  public settlePublication(): void {
+    if (!this.channelId || !this.isReady()) return;
+    this.publicationSettled = true;
+    this.notifyIfHealthy();
+  }
+
+  private isIdle(): boolean {
+    return this.sendTransportState === 'new' && this.recvTransportState === 'new'
+      && !this.pendingMicProducer && !this.pendingCameraProducer
+      && this.pendingScreenProducers.size === 0 && this.pendingConsumers.size === 0;
   }
 
   /**
@@ -1053,9 +1075,14 @@ export class SfuClientEngine {
    * be connected: recovery would never be reported as finished, the other
    * participants would keep their "connecting" badge, and the backoff would
    * stay pinned at its longest delay for the rest of the session.
+   *
+   * When neither direction ever negotiates, there is no media to carry at all:
+   * once publication settled, the call is `idle` — not failing, but with its
+   * connectivity untested, so it is not reported as connected either.
    */
   private getHealth(): VoiceConnectionHealth {
     if (this.consumerSetupFailed || this.microphoneSetupFailed) return 'failed';
+    if (this.publicationSettled && this.isIdle()) return 'idle';
     return aggregateTransportHealth([
       this.sendTransportState, this.recvTransportState,
       ...(this.pendingMicProducer || this.pendingConsumers.size > 0 ? ['connecting'] : []),
@@ -1065,11 +1092,11 @@ export class SfuClientEngine {
   private notifyIfHealthy(): void {
     const health = this.getHealth();
     this.callbacks.onHealthChanged(health);
-    if (health === 'connected' || health === 'failed') {
+    if (health === 'connected' || health === 'idle' || health === 'failed') {
       if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
       this.recoveryTimer = null;
-      if (health === 'connected') this.callbacks.onConnected();
-      else this.callbacks.onConnectionFailed('SFU transport failed');
+      if (health === 'failed') this.callbacks.onConnectionFailed('SFU transport failed');
+      else this.callbacks.onConnected();
     } else if (!this.recoveryTimer) {
       this.recoveryTimer = setTimeout(() => {
         this.recoveryTimer = null;

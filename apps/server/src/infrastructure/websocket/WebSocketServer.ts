@@ -503,7 +503,8 @@ export class WebSocketServer {
       this.reconcileScreenAccess();
       void this.refreshScreenRoles().catch(error => Logger.error('WEBRTC', 'Screen audience refresh failed.', error));
     });
-    this.sfuManager.setHealthListener((sessionId, channelId, connectionHealth) => {
+    this.sfuManager.setHealthListener((sessionId, channelId, transportHealth) => {
+      const connectionHealth = this.sfuCallHealth(sessionId, channelId, transportHealth);
       const current = this.signalingService.getVoiceState(sessionId);
       if (!current || current.channelId !== channelId || current.connectionHealth === connectionHealth) return;
       const voiceState = this.signalingService.updateVoiceState(sessionId, { connectionHealth });
@@ -4365,7 +4366,7 @@ export class WebSocketServer {
     }
     if (isSfu) {
       result.voiceState = this.signalingService.updateVoiceState(session.sessionId, {
-        connectionHealth: this.sfuManager.getConnectionHealth(session.sessionId, payload.channelId),
+        connectionHealth: this.sfuCallHealth(session.sessionId, payload.channelId),
       }) ?? result.voiceState;
     }
 
@@ -4714,6 +4715,19 @@ export class WebSocketServer {
     const state = this.signalingService.getVoiceState(sessionId);
     return this.sfuManager.setMicrophonesMuted(sessionId,
       !state || state.isMuted || state.isDeafened || !!state.serverMuted || !!state.serverDeafened || !!state.permissionMuted);
+  }
+
+  /**
+   * Health of a member's SFU call as the room sees it. A listen-only member
+   * (Speak denied, which everyone in the AFK room is) with nobody to hear never
+   * negotiates its transports, so they would read `connecting` forever. With no
+   * media to carry in either direction, the call is `idle`: admitted, untested.
+   */
+  private sfuCallHealth(
+    sessionId: string, channelId: string, health = this.sfuManager.getConnectionHealth(sessionId, channelId),
+  ): ReturnType<SfuManager['getConnectionHealth']> {
+    if (health !== 'connecting' || !this.signalingService.getVoiceState(sessionId)?.permissionMuted) return health;
+    return this.sfuManager.isCallIdle(sessionId, channelId) ? 'idle' : health;
   }
 
   private async resolvePermissionMuted(session: ClientSession, channelId: string): Promise<boolean> {

@@ -1323,6 +1323,7 @@ export const ptBR = {
   'main.reconnecting': 'Reconectando…',
   'main.connecting': 'Conectando…',
   'main.connectingTitle': 'Estabelecendo a conexão de voz',
+  'main.voiceIdleTitle': 'Conectado. Nenhum áudio passando agora: o ping é medido quando alguém falar.',
   'main.reconnectingTitle': 'Perdeu a conexão, tentando reconectar',
   'main.inVoiceChannel': 'No canal de voz',
   'main.mentionBadge': 'Você foi mencionado',

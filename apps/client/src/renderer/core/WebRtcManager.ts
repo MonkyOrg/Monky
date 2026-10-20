@@ -746,6 +746,8 @@ export class WebRtcManager {
 
       if (this.isSfuJoinStale(epoch, channelId)) {
         this.sfuEngine.leave();
+      } else {
+        this.sfuEngine.settlePublication();
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -920,7 +922,9 @@ export class WebRtcManager {
     }
     const wasRecovering = this.sfuReconnectAttempts > 0;
     this.sfuReconnectAttempts = 0;
-    voiceStore.setReconnecting(false);
+    // The engine already reported the health; this only clears a recovery
+    // flag, and must not turn an `idle` call into a connected one.
+    if (voiceStore.isReconnecting) voiceStore.setReconnecting(false);
     if (wasRecovering) {
       clientLog.info('SFU', 'SFU connection restored');
       appEvents.emit('sfu.reconnected', {});

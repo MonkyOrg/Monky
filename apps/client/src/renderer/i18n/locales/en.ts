@@ -1361,6 +1361,7 @@ export const en: TranslationMap = {
   'main.reconnecting': 'Reconnecting…',
   'main.connecting': 'Connecting…',
   'main.connectingTitle': 'Establishing the voice connection',
+  'main.voiceIdleTitle': 'Connected. No audio flowing right now: ping is measured once someone talks.',
   'main.reconnectingTitle': 'Lost connection, trying to reconnect',
   'main.inVoiceChannel': 'In a voice channel',
   'main.mentionBadge': 'You were mentioned',

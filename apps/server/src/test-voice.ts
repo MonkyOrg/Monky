@@ -502,6 +502,35 @@ test('SFU health is derived from both server ICE/DTLS transports, not signaling 
   sfu.close();
 });
 
+test('a listen-only member with nothing to receive (the AFK room) is not shown connecting forever', async () => {
+  const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
+  const sfu = new SfuManager();
+  server['sfuManager'] = sfu;
+  server['signalingService'] = signaling();
+  await server['signalingService'].joinVoiceChannel('afk-member', 'afk-member', 'room', true, false, true);
+  await server['signalingService'].joinVoiceChannel('speaker', 'speaker', 'room');
+  const transport = (id: string) => ({ id, closed: false, iceState: 'new', dtlsState: 'new', close() {} } as MediasoupTypes.WebRtcTransport);
+  for (const sessionId of ['afk-member', 'speaker']) {
+    for (const direction of ['send', 'recv'] as const) {
+      const id = `${sessionId}-${direction}`;
+      sfu['transports'].set(id, { transport: transport(id), sessionId, channelId: 'room', direction, purpose: 'call', healthState: 'new' });
+    }
+  }
+  assert.equal(sfu.getConnectionHealth('afk-member', 'room'), 'connecting');
+  assert.equal(server['sfuCallHealth']('afk-member', 'room'), 'idle', 'no media to carry, so connectivity is untested');
+  assert.equal(server['sfuCallHealth']('speaker', 'room'), 'connecting', 'a member who may speak is still about to publish');
+
+  sfu['consumers'].set('consumer', {
+    consumer: { id: 'consumer', close() {} } as MediasoupTypes.Consumer,
+    transportId: 'afk-member-recv', sessionId: 'afk-member', channelId: 'room', producerId: 'producer',
+  });
+  assert.equal(server['sfuCallHealth']('afk-member', 'room'), 'connecting', 'something to receive needs a real negotiation');
+  sfu['consumers'].clear();
+  sfu['transports'].get('afk-member-recv')!.healthState = 'failed';
+  assert.equal(server['sfuCallHealth']('afk-member', 'room'), 'failed', 'a real failure is never masked');
+  sfu.close();
+});
+
 test('real missing-producer consume path replies before the delayed close broadcast without reporting transport failure', async () => {
   const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
   const sfu = new SfuManager();

@@ -2161,6 +2161,12 @@ export class VoiceStageView {
         if (tooltipContent) tooltipContent.textContent = t(voiceStore.isConnecting ? 'main.connectingTitle' : 'main.reconnectingTitle');
         return;
       }
+      if (voiceStore.isIdle) {
+        pingText.textContent = '-- ms';
+        pingBadge.className = 'stage-ping-badge unknown';
+        if (tooltipContent) tooltipContent.textContent = t('main.voiceIdleTitle');
+        return;
+      }
 
       const isSfu = webRtcManager.isSfuMode();
       const participants = participantManager.getInVoiceChannel(this.currentChannelId);
@@ -2178,7 +2184,7 @@ export class VoiceStageView {
       }
 
       const avgPing = await webRtcManager.getAverageP2pPing();
-      if (!pingBadge.isConnected || voiceStore.isConnecting || voiceStore.isReconnecting) return;
+      if (!pingBadge.isConnected || voiceStore.isConnecting || voiceStore.isReconnecting || voiceStore.isIdle) return;
       const indicator = voiceConnectionIndicator(avgPing, voiceStore.isReconnecting);
 
       if (avgPing !== null) {

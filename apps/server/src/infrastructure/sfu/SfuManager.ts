@@ -176,6 +176,24 @@ export class SfuManager {
       .map((r) => r.healthState ?? 'new'));
   }
 
+  /**
+   * Whether the session's call transports exist but nothing was ever negotiated
+   * on them. Mediasoup only starts ICE/DTLS on the first produce or consume, so
+   * such transports stay `new` and carry no media in either direction.
+   */
+  public isCallIdle(sessionId: string, channelId: string): boolean {
+    const transportIds = new Set<string>();
+    for (const [id, record] of this.transports) {
+      if (record.sessionId !== sessionId || record.channelId !== channelId || record.purpose !== 'call') continue;
+      if ((record.healthState ?? 'new') !== 'new') return false;
+      transportIds.add(id);
+    }
+    if (transportIds.size === 0) return false;
+    for (const producer of this.producers.values()) if (transportIds.has(producer.transportId)) return false;
+    for (const consumer of this.consumers.values()) if (transportIds.has(consumer.transportId)) return false;
+    return true;
+  }
+
   private updateTransportHealth(transportId: string): void {
     const record = this.transports.get(transportId);
     if (!record) return;

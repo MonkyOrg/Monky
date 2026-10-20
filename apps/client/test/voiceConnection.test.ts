@@ -313,7 +313,7 @@ test('decoded microphone VAD stays per-peer, takes precedence over RTP and retai
 
 test('SFU health badges are visible to local users, remote users and observers, independently of signaling', () => {
   const manager = new ParticipantManager();
-  for (const health of ['connecting', 'connected', 'reconnecting', 'failed'] satisfies VoiceConnectionHealth[]) {
+  for (const health of ['connecting', 'connected', 'reconnecting', 'failed', 'idle'] satisfies VoiceConnectionHealth[]) {
     const entry = participant('peer');
     entry.voiceState.connectionHealth = health;
     manager.reconcileVoiceChannel('room', [entry]);
@@ -432,6 +432,17 @@ test('initial voice connection is distinct from recovery and never starts the re
     assert.equal(store.isConnecting, true);
     store.setChannel(null);
     assert.equal(store.isConnecting, false);
+    store.setChannel('afk');
+    store.setConnectionHealth('reconnecting');
+    store.setConnectionHealth('idle');
+    assert.equal(store.isIdle, true);
+    assert.equal(store.isConnecting, false);
+    assert.equal(store.isReconnecting, false, 'an idle call ends recovery without claiming a connection');
+    store.setConnectionHealth('connecting');
+    assert.equal(store.isIdle, false, 'media to carry leaves the idle state');
+    store.setConnectionHealth('idle');
+    store.setChannel(null);
+    assert.equal(store.isIdle, false);
   } finally {
     offCue();
     offUpdate();
@@ -584,6 +595,35 @@ test('aggregate health never hides a failed/disconnected direction behind a heal
   assert.equal(aggregateTransportHealth(['connected', 'disconnected']), 'reconnecting');
   assert.equal(aggregateTransportHealth(['failed', 'connected']), 'failed');
   assert.equal(aggregateTransportHealth(['closed', 'connected']), 'failed');
+});
+
+test('a listen-only SFU call with nothing to receive (the AFK room) settles as connected without negotiating', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { engine, client, health, failures, connected } = engineFixture();
+  t.after(() => { engine.leave(); client.dispose(); });
+  t.mock.method(client, 'sendRequest', () => new Promise(() => {}));
+  Object.defineProperties(engine, {
+    sendTransport: { writable: true, value: { id: 'send', close() {} } },
+    recvTransport: { writable: true, value: { id: 'recv', close() {} } },
+    device: { writable: true, value: { rtpCapabilities: {} } },
+    channelId: { writable: true, value: 'afk' },
+    isInitialized: { writable: true, value: true },
+  });
+  engine['notifyIfHealthy']();
+  assert.equal(health.at(-1), 'connecting', 'idle transports may still be waiting for the first producer');
+  engine.settlePublication();
+  assert.equal(health.at(-1), 'idle', 'nothing negotiated is neither connecting nor a verified connection');
+  assert.equal(engine.isChannelConnected(), false);
+  assert.equal(connected(), 1, 'settling closes any rejoin ladder');
+  t.mock.timers.tick(20_000);
+  assert.equal(failures(), 0, 'an idle call is never treated as a stalled connection');
+
+  void engine['consumeRemoteProducer']({
+    channelId: 'afk', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', appData: { mediaType: 'mic' },
+  });
+  assert.equal(health.at(-1), 'connecting', 'media to receive needs a real negotiation');
+  engine.leave();
+  assert.equal(engine['publicationSettled'], false);
 });
 
 test('SFU disconnected state is immediate, recovers during grace, and retries persistent loss; leave clears timers', (t) => {

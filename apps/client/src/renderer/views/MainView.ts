@@ -648,7 +648,8 @@ export class MainView {
       const channelId = voiceStore.currentVoiceChannelId;
       const sessionKey = voiceStore.voiceSessionKey;
       const participants = (sessionKey ? sessionManager.get(sessionKey)?.participants.getInVoiceChannel(channelId ?? '') : undefined) ?? [];
-      const pending = voiceStore.isConnecting || voiceStore.isReconnecting;
+      // An idle call has no media flowing, so there is no ping to measure yet.
+      const pending = voiceStore.isConnecting || voiceStore.isReconnecting || voiceStore.isIdle;
       const avg = pending ? null : participants.length <= 1 && !isSfu ? 0 : await webRtcManager.getAverageP2pPing();
       if (!pingEl.isConnected || channelId !== voiceStore.currentVoiceChannelId || sessionKey !== voiceStore.voiceSessionKey) return;
       pingEl.textContent = avg !== null ? `${avg} ms` : '-- ms';
@@ -666,6 +667,7 @@ export class MainView {
       const info = document.querySelector<HTMLElement>('.voice-conn-info');
       if (info) info.title = voiceStore.isReconnecting ? t('main.reconnectingTitle')
         : voiceStore.isConnecting ? t('main.connectingTitle')
+        : voiceStore.isIdle ? t('main.voiceIdleTitle')
         : `${isSfu ? 'SFU' : 'P2P'} · ${pingEl.textContent} · ${label}`;
     };
     update();
