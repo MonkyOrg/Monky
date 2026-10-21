@@ -1,4 +1,5 @@
 @import './bot-compatibility.css';
+@import './updateCompatibility.css';
 @import './messageEditing.css';
 
 /* Qualquer regra de autor com `display` vence o `display: none` que o

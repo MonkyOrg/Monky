@@ -97,3 +97,18 @@ test('missing, malformed, oversized and failed metadata is explicitly unavailabl
   }
   assert.equal((await fetchReleaseCompatibility(version, async () => { throw new TypeError('network'); })).status, 'unavailable');
 });
+
+test('release metadata requests propagate explicit cancellation rather than a timeout or compatibility claim', async () => {
+  const controller = new AbortController();
+  let observed: AbortSignal | null | undefined;
+  const pending = fetchReleaseCompatibility(version, async (_url, init) => {
+    observed = init?.signal;
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+    });
+  }, controller.signal);
+  controller.abort();
+  const result = await pending;
+  assert.equal(observed?.aborted, true);
+  assert.deepEqual(result, { status: 'unavailable', reason: 'Compatibility metadata request cancelled.' });
+});

@@ -1,0 +1,55 @@
+.update-compatibility-card {
+  max-width: 520px;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+
+.update-compatibility-card .modal-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-compatibility-card .modal-title > span {
+  color: var(--warning);
+}
+
+.update-compatibility-servers {
+  display: grid;
+  gap: 10px;
+}
+
+.update-compatibility-server {
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-sidebar);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.update-compatibility-server ul {
+  list-style: none;
+  margin-top: 12px;
+  padding: 0;
+}
+
+.update-compatibility-server li {
+  padding: 10px 0 0;
+  border-top: 1px solid var(--border-color);
+}
+
+.update-compatibility-server li + li {
+  margin-top: 10px;
+}
+
+.update-compatibility-server small {
+  display: block;
+  margin-top: 4px;
+  color: var(--warning);
+  font-size: 11px;
+}
+
+.update-compatibility-card .modal-footer {
+  flex-wrap: wrap;
+}

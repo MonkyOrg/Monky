@@ -74,6 +74,7 @@ import type {
   StickerSaveResult,
   TrayVoiceStatus,
   UpdateCheckResult,
+  UpdatePreflightResult,
   UpdateOutcome,
   ReleaseNotesResult,
   RendererBootstrapFailure,
@@ -214,8 +215,10 @@ export interface ElectronApi {
   getAppVersion: () => Promise<string>;
   signalRendererReady: () => void;
   reportFatalBootstrap: (failure: RendererBootstrapFailure) => Promise<boolean>;
-  checkForUpdates: () => Promise<UpdateCheckResult>;
-  downloadUpdate: (expectedVersion?: string) => Promise<UpdateSimpleResult>;
+  checkForUpdates: (requestId?: string) => Promise<UpdateCheckResult>;
+  downloadUpdate: (expectedVersion?: string, requestId?: string) => Promise<UpdateSimpleResult>;
+  cancelUpdate: (requestId: string) => Promise<UpdateSimpleResult>;
+  checkUpdateCompatibility: (version: string, requestId: string) => Promise<UpdatePreflightResult>;
   installUpdate: () => Promise<UpdateSimpleResult>;
   setUpdateChannel: (allowBeta: boolean) => Promise<UpdateSimpleResult>;
   getUpdateOutcome: () => Promise<UpdateOutcome | null>;
@@ -564,8 +567,10 @@ const api: ElectronApi = {
     });
   },
   reportFatalBootstrap: (failure) => ipcRenderer.invoke(CRASH_RECOVERY_IPC.bootstrapFailed, failure),
-  checkForUpdates: () => ipcRenderer.invoke(UPDATER_IPC.check),
-  downloadUpdate: (expectedVersion) => ipcRenderer.invoke(UPDATER_IPC.download, expectedVersion),
+  checkForUpdates: (requestId) => ipcRenderer.invoke(UPDATER_IPC.check, requestId),
+  downloadUpdate: (expectedVersion, requestId) => ipcRenderer.invoke(UPDATER_IPC.download, expectedVersion, requestId),
+  cancelUpdate: (requestId) => ipcRenderer.invoke(UPDATER_IPC.cancel, requestId),
+  checkUpdateCompatibility: (version, requestId) => ipcRenderer.invoke(UPDATER_IPC.preflight, version, requestId),
   installUpdate: () => ipcRenderer.invoke(UPDATER_IPC.install),
   setUpdateChannel: (allowBeta) => ipcRenderer.invoke(UPDATER_IPC.setChannel, allowBeta),
   getUpdateOutcome: () => ipcRenderer.invoke(UPDATER_IPC.outcome),

@@ -73,3 +73,4 @@ if (require.main === module) {
 export { MonkyServer, ServerConfig };
 export { Logger } from './infrastructure/logger/Logger';
 export type { LogListener } from './infrastructure/logger/Logger';
+export { readStoredUpdateInventory } from './infrastructure/database/updateInventory';
