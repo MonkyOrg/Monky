@@ -18,7 +18,6 @@ import { voiceStore, VoiceStore } from '../stores/voiceStore';
 import { audioProcessor } from '../core/AudioProcessor';
 import { videoService } from '../core/VideoService';
 import { webRtcManager } from '../core/WebRtcManager';
-import { soundEffects } from '../core/SoundEffects';
 import { getAvatarUrl } from '../utils/avatar';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
 import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
@@ -2239,7 +2238,6 @@ export class VoiceStageView {
     if (!channelId) return;
     this.stopPingMonitor();
     this.stopTelemetryMonitor();
-    soundEffects.play('leave_voice');
     leaveCurrentCall();
     this.setChannel(channelId);
   }

@@ -9823,16 +9823,18 @@ input:focus, textarea:focus, select:focus {
   gap: 4px;
 }
 
+/* Member search in Server settings > Members. */
 .members-search {
   position: relative;
   display: flex;
   align-items: center;
-  padding: 10px 8px 0;
+  flex: 0 1 280px;
+  min-width: 200px;
 }
 
 .members-search-icon {
   position: absolute;
-  left: 18px;
+  left: 10px;
   color: var(--text-muted);
   pointer-events: none;
 }
@@ -9850,10 +9852,16 @@ input:focus, textarea:focus, select:focus {
 
 .members-search-clear {
   position: absolute;
-  right: 14px;
+  right: 6px;
   width: 20px;
   height: 20px;
   padding: 0;
+  color: var(--text-muted);
+}
+
+.members-search-count {
+  margin: -4px 0 8px;
+  font-size: 11px;
   color: var(--text-muted);
 }
 
@@ -10349,6 +10357,24 @@ button[data-loading="1"]::after {
   border-radius: var(--radius-sm);
   white-space: nowrap;
   line-height: 1.4;
+}
+
+/* "+N": the lower roles that did not fit, listed by its tooltip. */
+.member-role-more {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  background-color: rgba(255, 255, 255, 0.08);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  line-height: 1.4;
+  cursor: default;
+}
+
+.member-role-more:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
 }
 
 /* LIVE (screen share) badge + camera icon next to a user's name */

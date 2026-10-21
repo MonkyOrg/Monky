@@ -197,6 +197,11 @@ async function runElectronSmoke() {
     if (type === M.VOICE_LEAVE) { peer.leaves++; leave(peer); return; }
     if (type === M.USER_LOGOUT) { leave(peer); return; }
     if (type === M.PING) { peer.pings++; reply(M.PONG, payload); return; }
+    // Loaded after login by every session; this fixture has no community content.
+    if (type === M.COMMUNITY_GET) {
+      reply(M.COMMUNITY_GET, { settings: { eventsEnabled: false, bannerUrl: null }, events: [], liveActions: [] });
+      return;
+    }
     if (type === M.VOICE_STATE_UPDATE) {
       if (peer.state) {
         Object.assign(peer.state, payload);
@@ -427,6 +432,7 @@ async function runElectronSmoke() {
     stage('two isolated Chromium participants, real Opus RTP and decoded PCM');
     await run(a, 'window.voiceRecovery.join()');
     await run(b, 'window.voiceRecovery.join()');
+    check((await snapshot(a)).callCues.join() === 'join_voice', 'Admission into the room plays the join cue once');
     await duplex();
     await bounded();
 
@@ -485,10 +491,11 @@ async function runElectronSmoke() {
     await duplex();
     await bounded();
 
-    async function interruptAndRecover() {
+    async function interruptAndRecover(audibleCues = true) {
       const before = await snapshot(a);
       const auths = peers.A.auths;
       const rejected = peers.A.rejected;
+      const newCues = value => value.callCues.slice(before.callCues.length).join();
       peers.A.rejectNext = 2;
       peers.A.socket.terminate();
       await until(async () => (await snapshot(a)).status === 'RECONNECTING', 'lost signaling');
@@ -496,6 +503,9 @@ async function runElectronSmoke() {
       check(suspended.channel === room && suspended.key === before.key && suspended.reconnecting && !suspended.ready,
         'Suspension preserves call intent but releases real transports');
       check(suspended.liveCaptureTracks === 0, 'Network suspension stops the captured input');
+      // A server restarting (an update) only shows up as this lost socket.
+      check(newCues(suspended) === (audibleCues ? 'leave_voice' : ''),
+        'Losing the server mid-call plays the leave cue at once, unless deafened');
       const allocationsBeforeOfflineInit = peers.A.created.transports;
       await run(a, 'window.voiceRecovery.initSfu()');
       check(await run(a, 'window.voiceRecovery.offlineRequestFailsImmediately()'), 'Offline requests reject without waiting for timeout');
@@ -510,6 +520,8 @@ async function runElectronSmoke() {
         && after.muted === before.muted && after.deafened === before.deafened, 'Channel/mute/deafen intent survives reconnect');
       check(peers.A.state.isMuted === before.muted && peers.A.state.isDeafened === before.deafened,
         'Re-admission carries the preserved privacy flags over the real WS protocol');
+      check(newCues(after) === (audibleCues ? 'leave_voice,join_voice' : ''),
+        'Automatic re-admission plays the join cue after the leave cue, exactly once each');
     }
     stage('signaling cut, two rejected WebSocket retries, automatic duplex recovery');
     await interruptAndRecover();
@@ -518,7 +530,7 @@ async function runElectronSmoke() {
 
     stage('muted/deafened reconstruction remains silent, then restores in-place');
     await run(a, 'window.voiceRecovery.setPrivacy(true, true)');
-    await interruptAndRecover();
+    await interruptAndRecover(false);
     const privateState = await snapshot(a);
     check(!privateState.microphoneOpen && privateState.localTrackEnabled === false && privateState.gain === 0,
       'Rebuilt microphone and playback remain gated by real privacy controls');
@@ -537,9 +549,12 @@ async function runElectronSmoke() {
     peers.A.socket.terminate();
     await until(async () => (await snapshot(a)).reconnecting, 'network suspension before leave');
     check((await snapshot(a)).selfInRoster, 'The disconnected call still has its local roster entry');
+    const cuesBeforeLeave = (await snapshot(a)).callCues.length;
     const left = await run(a, 'window.voiceRecovery.leave()');
     check(left.released && !left.selfInRoster && left.channel === null && left.key === null && !left.reconnecting,
       'Local hang-up releases media and roster synchronously, without a server echo');
+    check(left.callCues.length === cuesBeforeLeave && left.callCues.at(-1) === 'leave_voice',
+      'Hanging up a call already announced as lost does not repeat the leave cue');
     await until(() => peers.A.auths === authsBeforeLeave + 1, 'signaling returns after explicit leave');
     const pings = peers.A.pings;
     await until(() => peers.A.pings > pings, 'post-reconnect production heartbeat');
@@ -556,6 +571,7 @@ async function runElectronSmoke() {
     check((await snapshot(a)).admissionPending, 'The real admission boundary is pending');
     const cancelled = await run(a, 'window.voiceRecovery.leave()');
     check(cancelled.released && !cancelled.selfInRoster && !cancelled.admissionPending, 'Pending admission can be cancelled locally');
+    check(cancelled.callCues.length === beforePending.callCues.length, 'An admission cancelled before completing makes no sound');
     await until(() => peers.A.state === null, 'server processes explicit leave before stale success');
     peers.A.pendingJoin();
     peers.A.pendingJoin = null;
@@ -594,11 +610,16 @@ async function runElectronSmoke() {
 
 async function setupRenderer({ port, label, room, M }) {
   const [{ NetworkClient }, { sessionManager }, connection, { webRtcManager: rtc }, { audioProcessor: audio },
-    { voiceStore: voice }, { settingsStore: settings }, { appEvents }, { currentEventOrigin }] = await Promise.all([
+    { voiceStore: voice }, { settingsStore: settings }, { appEvents }, { currentEventOrigin }, { soundEffects }] = await Promise.all([
     import('/core/NetworkClient.ts'), import('/core/SessionManager.ts'), import('/core/serverConnection.ts'),
     import('/core/WebRtcManager.ts'), import('/core/AudioProcessor.ts'), import('/stores/voiceStore.ts'),
     import('/stores/settingsStore.ts'), import('/core/EventBus.ts'), import('/core/sessionRouting.ts'),
+    import('/core/SoundEffects.ts'),
   ]);
+  // Join/leave cues the user would hear, in order; other cues are irrelevant here.
+  const callCues = [];
+  const playCue = soundEffects.play;
+  soundEffects.play = key => { if (key === 'join_voice' || key === 'leave_voice') callCues.push(key); };
   const errors = [];
   const statusHistory = [];
   const ownedObjects = new Set();
@@ -723,7 +744,7 @@ async function setupRenderer({ port, label, room, M }) {
       gain: rtc.mediaRouter.voicePipelines.get(remote)?.gain.gain.value, rms: rms(),
       released: objects.length === 0 && [...ownedObjects].every(value => value.closed) && liveCaptureTracks === 0
         && !audio.audioContext && rtc.mediaRouter.voicePipelines.size === 0 && rtc.mediaRouter.audioContexts.size === 0,
-      pendingResult, errors: [...errors],
+      pendingResult, errors: [...errors], callCues: [...callCues],
     };
   };
   const inbound = async () => {
@@ -802,6 +823,7 @@ async function setupRenderer({ port, label, room, M }) {
       await tone.close();
       window.removeEventListener('error', onError);
       window.removeEventListener('unhandledrejection', onRejection);
+      soundEffects.play = playCue;
     },
   };
 }
