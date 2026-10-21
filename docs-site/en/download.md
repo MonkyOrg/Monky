@@ -50,6 +50,18 @@ from other folders to troubleshoot.
 
 The app tells you when a new version is out. You can also check under **Settings › About and Updates › Check for updates**.
 
+During a check or download, use **Cancel** or the notice's **×** to stop the
+operation. Once installation starts (or the install image opens on macOS),
+cancelling through Monky is no longer available.
+
+If you host servers on this computer, the app checks registered bots before
+updating, even when the server is stopped or the bot is offline. When a bot's
+last recorded protocol is incompatible, the warning names the server and bot;
+choose **Not now** or **Install anyway**. If compatibility cannot be confirmed,
+you can **Try again**, close the warning or **Install without verifying**.
+People who only join remote servers do not receive this warning: updating the
+client does not update those servers or their bots.
+
 On Windows the update applies itself: Monky downloads it, installs it and reopens.
 
 On macOS the system will not replace an app that is running, so Monky downloads the `.dmg`, opens the install window and then **closes itself**. Drag Monky into your *Applications* folder, confirm the replacement and open the app again.

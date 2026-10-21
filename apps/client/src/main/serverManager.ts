@@ -1,8 +1,8 @@
 import path from 'path';
 import fs from 'fs';
 import { app, BrowserWindow } from 'electron';
-import { MonkyServer, Logger, type ServerConfig } from '@monky/server';
-import { LIMITS, type HostServerOptions, type IpcEvents, type LogEntry, type ServerStats } from '@monky/shared';
+import { MonkyServer, Logger, readStoredUpdateInventory, type ServerConfig } from '@monky/server';
+import { LIMITS, type HostedUpdateServer, type HostServerOptions, type IpcEvents, type LogEntry, type ServerStats } from '@monky/shared';
 import { mt, type MainTranslationKey } from './i18n';
 import { isSafeServerId, migrateLegacyServerData, serverDataDirFor } from './serverDataDir';
 import { HostedServerCleanupError, HostedServerConflictError, HostedServerLifecycle } from './hostedServerLifecycle';
@@ -176,6 +176,34 @@ export class ServerManager {
   public async getStats(): Promise<ServerStats | null> {
     const server = this.lifecycle.getServer();
     return server ? server.getStats() : null;
+  }
+
+  public getUpdateInventory(signal?: AbortSignal): Promise<HostedUpdateServer[]> {
+    return this.lifecycle.runExclusive(async () => {
+      signal?.throwIfAborted();
+      const base = ServerManager.baseDataDir();
+      const active = this.lifecycle.getServer();
+      const activeId = this.getStatus().serverId;
+      const ids: Array<string | null> = [];
+      if (fs.existsSync(base)) {
+        if (fs.existsSync(path.join(base, 'server.db'))) ids.push(null);
+        for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
+          if (entry.isDirectory() && !entry.isSymbolicLink() && isSafeServerId(entry.name) &&
+              fs.existsSync(path.join(base, entry.name, 'server.db'))) ids.push(entry.name);
+        }
+      }
+      if (active && !ids.includes(activeId)) ids.push(activeId);
+      const servers: HostedUpdateServer[] = [];
+      for (const serverId of ids) {
+        signal?.throwIfAborted();
+        const inventory = active && serverId === activeId
+          ? active.getUpdateInventory()
+          : await readStoredUpdateInventory(path.join(serverId === null ? base : serverDataDirFor(base, serverId), 'server.db'));
+        if (inventory.bots.length) servers.push({ serverId, ...inventory });
+      }
+      signal?.throwIfAborted();
+      return servers;
+    });
   }
 
   /**

@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Agora é possível cancelar a verificação e o download de atualizações antes do início da instalação. Avisos sobre compatibilidade de bots aparecem somente ao atualizar servidores hospedados neste computador, identificando os bots afetados, mesmo com o servidor parado.",
+  "en": "Update checks and downloads can now be cancelled before installation starts. Bot compatibility warnings only appear when updating servers hosted on this computer, identifying affected bots even when the server is stopped."
+}

@@ -29,6 +29,7 @@ function runtime() {
     async start() { this.starts++; await this.onStart(); },
     async stop() { this.stops++; await this.onStop(); },
     async getStats() { return { serverName: 'Synthetic server' }; },
+    getUpdateInventory() { return { serverName: 'Live server', bots: [{ id: 'live', name: 'Live bot', protocolVersion: 40 }] }; },
   };
 }
 
@@ -37,7 +38,7 @@ function fixture(create) {
   const events = [];
   const errors = [];
   const logListeners = new Set();
-  const io = { directories: [], removed: [], renamed: [], existing: new Set(), failure: null };
+  const io = { directories: [], removed: [], renamed: [], existing: new Set(), failure: null, entries: [], snapshots: [] };
   const fakeFs = {
     existsSync: name => io.existing.has(name),
     mkdirSync(name) {
@@ -46,6 +47,7 @@ function fixture(create) {
     },
     renameSync: (from, to) => { io.renamed.push([from, to]); },
     rmSync: name => { io.removed.push(name); },
+    readdirSync: () => io.entries.map(name => ({ name, isDirectory: () => true, isSymbolicLink: () => false })),
   };
   const fakeWindow = {
     isDestroyed: () => false,
@@ -84,6 +86,10 @@ function fixture(create) {
     }],
     ['@monky/shared', { LIMITS }],
     ['@monky/server', {
+      readStoredUpdateInventory: async filename => {
+        io.snapshots.push(filename);
+        return { serverName: 'Stored server', bots: [{ id: 'old', name: 'Offline bot', protocolVersion: 23 }] };
+      },
       MonkyServer: { create: async config => { configCalls.push({ ...config }); return create(config); } },
       Logger: {
         subscribe: callback => { logListeners.add(callback); return () => logListeners.delete(callback); },
@@ -154,6 +160,26 @@ test('real ServerManager wiring serializes concurrent IPC starts and never repla
     channel: 'server-host:status-changed',
     args: [{ isRunning: true, port: 3000, serverId: 'a' }],
   }]);
+});
+
+test('update inventory includes stopped and legacy servers but reads the live in-memory server without stale disk data', async () => {
+  const f = fixture(async () => runtime());
+  const base = path.join('C:\\', 'synthetic-monky-profile', 'server-data');
+  f.io.existing.add(base);
+  f.io.entries.push('a', 'b', '..');
+  for (const id of ['a', 'b']) f.io.existing.add(path.join(base, id, 'server.db'));
+  await f.manager.startServer(serverA);
+  let result = await f.manager.getUpdateInventory();
+  assert.equal(result.length, 2);
+  assert.equal(result[0].bots[0].id, 'live');
+  assert.equal(result[1].bots[0].id, 'old');
+  assert.deepEqual(f.io.snapshots, [path.join(base, 'b', 'server.db')]);
+  await f.manager.stopServer();
+  f.io.existing.add(path.join(base, 'server.db'));
+  result = await f.manager.getUpdateInventory();
+  assert.equal(result.length, 3);
+  assert.equal(result[0].serverId, null);
+  assert.equal(f.io.removed.length, 0);
 });
 
 test('legacy data cannot be relabeled by a same-port caller and conflict errors follow native language', async () => {

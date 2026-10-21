@@ -1,6 +1,7 @@
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import { readUpdateInventory } from './infrastructure/database/updateInventory';
 import { v4 as uuidv4 } from 'uuid';
 import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ProtocolErrorCode, ServerStats, UserSummary, VoiceMode, stripAdministrator, type ServerShutdownReason } from '@monky/shared';
 import { AuthService } from './application/services/AuthService';
@@ -817,6 +818,10 @@ export class MonkyServer {
       this.startupTasks.length = 0;
       Logger.info('INFO', 'Server stopped.');
     });
+  }
+
+  public getUpdateInventory(): ReturnType<typeof readUpdateInventory> {
+    return readUpdateInventory(this.dbConn.getDb());
   }
 
   /**

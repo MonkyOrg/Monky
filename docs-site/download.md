@@ -51,6 +51,18 @@ nem remova proteções de outras pastas para tentar resolver.
 O app avisa quando sai uma versão nova. Você também pode conferir em
 **Configurações › Sobre e Updates › Verificar atualizações**.
 
+Durante a verificação ou o download, use **Cancelar** ou o **×** do aviso para
+interromper a operação. Depois que a instalação começar (ou a imagem de
+instalação for aberta no macOS), não é mais possível cancelar pelo Monky.
+
+Se você hospeda servidores neste computador, o app confere os bots cadastrados
+antes de atualizar, mesmo com o servidor parado ou o bot offline. Havendo um
+último protocolo registrado incompatível, o aviso identifica o servidor e o bot;
+você pode escolher **Agora não** ou **Instalar mesmo assim**. Se a compatibilidade
+não puder ser confirmada, pode **Tentar novamente**, fechar o aviso ou
+**Instalar sem verificar**. Quem apenas entra em servidores remotos não recebe
+esse aviso: atualizar o cliente não atualiza esses servidores nem seus bots.
+
 No Windows a atualização é aplicada sozinha: o Monky baixa, instala e reabre.
 
 No macOS o sistema não permite substituir um aplicativo que está em uso, então o Monky baixa o `.dmg`, abre a janela de instalação e **se fecha sozinho** logo em seguida. Arraste o Monky para a pasta *Aplicativos*, confirme a substituição e abra o app de novo.

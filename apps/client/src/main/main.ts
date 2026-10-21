@@ -439,7 +439,7 @@ function createWindow(deferShow = false): void {
   });
   localExecutionStopped = false;
   rendererNativeRetired = false;
-  setupUpdater(mainWindow);
+  setupUpdater(mainWindow, signal => serverManager.getUpdateInventory(signal));
 
   // A launch straight after an update install keeps the "finishing" splash up
   // while this fresh process cold-starts. Hold the main window back until the

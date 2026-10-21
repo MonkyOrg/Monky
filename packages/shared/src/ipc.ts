@@ -442,6 +442,7 @@ export type TrayVoiceStatus = z.infer<typeof trayVoiceStatusSchema>;
 
 export interface UpdateCheckResult {
   ok: boolean;
+  cancelled?: boolean;
   available?: boolean;
   version?: string;
   error?: string;
@@ -452,6 +453,8 @@ export const UPDATER_IPC = {
   setChannel: 'updater:set-channel',
   check: 'updater:check',
   download: 'updater:download',
+  cancel: 'updater:cancel',
+  preflight: 'updater:preflight',
   install: 'updater:install',
   outcome: 'updater:outcome',
   releaseNotes: 'updater:release-notes',
@@ -459,7 +462,23 @@ export const UPDATER_IPC = {
 
 export interface UpdateSimpleResult {
   ok: boolean;
+  cancelled?: boolean;
   error?: string;
+}
+
+export interface HostedUpdateServer {
+  serverId: string | null;
+  serverName: string;
+  bots: { id: string; name: string; protocolVersion: number | null }[];
+}
+
+export interface HostedBotUpdateWarning {
+  serverName: string;
+  bots: { name: string; status: 'incompatible' | 'unknown' }[];
+}
+
+export interface UpdatePreflightResult extends UpdateSimpleResult {
+  warnings?: HostedBotUpdateWarning[];
 }
 
 /**
@@ -989,8 +1008,10 @@ export interface IpcInvokeChannels {
 
   // Atualizador
   'updater:set-channel': { args: [allowBeta: boolean]; returnType: UpdateSimpleResult };
-  'updater:check': { args: []; returnType: UpdateCheckResult };
-  'updater:download': { args: [expectedVersion?: string]; returnType: UpdateSimpleResult };
+  'updater:check': { args: [requestId?: string]; returnType: UpdateCheckResult };
+  'updater:download': { args: [expectedVersion?: string, requestId?: string]; returnType: UpdateSimpleResult };
+  'updater:cancel': { args: [requestId: string]; returnType: UpdateSimpleResult };
+  'updater:preflight': { args: [version: string, requestId: string]; returnType: UpdatePreflightResult };
   'updater:install': { args: []; returnType: UpdateSimpleResult };
   'updater:outcome': { args: []; returnType: UpdateOutcome | null };
   'updater:release-notes': { args: [tag?: string]; returnType: ReleaseNotesResult };

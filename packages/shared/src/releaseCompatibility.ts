@@ -66,9 +66,11 @@ export function parseBotCompatibility(value: unknown): BotCompatibilitySummary |
 export async function fetchReleaseCompatibility(
   version: string,
   request: typeof fetch = globalThis.fetch,
+  cancellation?: AbortSignal,
 ): Promise<ReleaseCompatibilityResult> {
   if (!isReleaseVersion(version)) return { status: 'unavailable', reason: 'Invalid release version.' };
-  const signal = AbortSignal.timeout(8000);
+  const timeout = AbortSignal.timeout(8000);
+  const signal = cancellation ? AbortSignal.any([timeout, cancellation]) : timeout;
   let url = new URL(`https://github.com/MonkyOrg/Monky/releases/download/v${version}/monky-compatibility-${version}.json`);
   try {
     for (let redirects = 0; redirects <= 5; redirects++) {
@@ -117,7 +119,8 @@ export async function fetchReleaseCompatibility(
     return {
       status: 'unavailable',
       reason: error instanceof SyntaxError ? 'Invalid compatibility metadata JSON.'
-        : signal.aborted ? 'Compatibility metadata request timed out.' : 'Compatibility metadata request failed.',
+        : cancellation?.aborted ? 'Compatibility metadata request cancelled.'
+          : timeout.aborted ? 'Compatibility metadata request timed out.' : 'Compatibility metadata request failed.',
     };
   }
 }

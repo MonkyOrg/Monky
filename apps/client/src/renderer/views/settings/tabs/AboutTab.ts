@@ -5,6 +5,7 @@ import { changelogModal } from '../../ChangelogModal';
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
 import { bindVersionCopyButton, renderVersionCopyButton, setVersionCopyButton } from '../../VersionCopyButton';
+import { showErrorToast } from '../../CopyToast';
 import licenseText from '../../../../../../../LICENSE?raw';
 
 const IDEAS_URL = 'https://github.com/MonkyOrg/Monky/discussions/categories/ideas';
@@ -14,6 +15,7 @@ const DONATE_URL = 'https://buymeacoffee.com/monkyorg';
 export class AboutTab {
   private unbindVersionCopy: (() => void) | null = null;
   private unbindSourceLink: (() => void) | null = null;
+  private unbindUpdateCheck: (() => void) | null = null;
 
   public renderHtml(): string {
     return `
@@ -208,19 +210,33 @@ export class AboutTab {
       };
     }
 
-    btnCheckUpdates?.addEventListener('click', async () => {
+    let checking = false;
+    let attached = true;
+    const checkUpdates = async (): Promise<void> => {
+      if (checking) { await updateService.cancelCheck(); return; }
+      checking = true;
+      if (btnCheckUpdates) btnCheckUpdates.textContent = t('common.cancel');
       if (updateStatus) updateStatus.textContent = t('settings.checking');
       const res = await updateService.checkManually();
+      checking = false;
+      if (!attached || !container.isConnected) return;
+      if (btnCheckUpdates) btnCheckUpdates.textContent = t('settings.checkUpdates');
       if (updateStatus) {
-        if (res.status === 'error') {
-          updateStatus.textContent = t('settings.updateCheckFailed');
+        if (res.status === 'error' || res.status === 'cancelled') {
+          updateStatus.textContent = '';
         } else if (res.status === 'available' && res.version) {
           updateStatus.textContent = t('settings.updateAvailable', { version: res.version });
         } else {
           updateStatus.textContent = t('settings.upToDate');
         }
       }
-    });
+    };
+    btnCheckUpdates?.addEventListener('click', checkUpdates);
+    this.unbindUpdateCheck = () => {
+      attached = false;
+      btnCheckUpdates?.removeEventListener('click', checkUpdates);
+      if (checking) void updateService.cancelCheck();
+    };
 
     btnViewChangelog?.addEventListener('click', () => {
       void changelogModal.open({ celebrate: false });
@@ -231,7 +247,13 @@ export class AboutTab {
       settingsStore.updateBetaChannel = allowBeta;
       settingsStore.save();
       if (window.api?.setUpdateChannel) {
-        await window.api.setUpdateChannel(allowBeta);
+        const result = await window.api.setUpdateChannel(allowBeta);
+        if (!result.ok) {
+          checkboxBeta.checked = !allowBeta;
+          settingsStore.updateBetaChannel = !allowBeta;
+          settingsStore.save();
+          showErrorToast(result.error || t('update.busy'));
+        }
       }
     });
 
@@ -302,6 +324,8 @@ export class AboutTab {
   }
 
   public cleanup(): void {
+    this.unbindUpdateCheck?.();
+    this.unbindUpdateCheck = null;
     this.unbindSourceLink?.();
     this.unbindSourceLink = null;
     this.unbindVersionCopy?.();

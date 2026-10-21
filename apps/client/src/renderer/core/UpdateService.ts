@@ -1,11 +1,11 @@
-import { releaseRequiresProtocolUpdate, type ReleaseCompatibilityResult } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
 import { animateEnter, removeWithMotion } from '../utils/surfaceMotion';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { settingsStore } from '../stores/settingsStore';
 import { changelogModal } from '../views/ChangelogModal';
-import { showConfirm } from '../views/Dialog';
+import { showUpdateCompatibility } from '../views/UpdateCompatibilityDialog';
+import { showErrorToast } from '../views/CopyToast';
 import { appEvents } from './EventBus';
 
 const DISMISSED_KEY = 'monky_dismissed_update';
@@ -18,6 +18,11 @@ interface BannerAction {
   primary?: boolean;
   dismiss?: boolean;
   onClick: () => void;
+}
+
+interface ActiveRequest {
+  id: string;
+  cancelled: boolean;
 }
 
 /**
@@ -39,7 +44,9 @@ class UpdateService {
   private listenersBound = false;
   private unbindUpdateEvents: Array<() => void> = [];
   private startingDownload = false;
-  private availableCompatibility: ReleaseCompatibilityResult | undefined;
+  private activeCheck: ActiveRequest | null = null;
+  private activeDownload: ActiveRequest | null = null;
+  private installing = false;
 
   public async init(): Promise<void> {
     if (!window.api?.checkForUpdates) {
@@ -124,10 +131,13 @@ class UpdateService {
     this.listenersBound = true;
 
     const u1 = window.api.onUpdateProgress((percent) => {
+      if (!this.activeDownload || this.activeDownload.cancelled || this.installing) return;
       this.setText(t('update.downloading', { percent }));
     });
 
     const u2 = window.api.onUpdateDownloaded((info) => {
+      if (!this.activeDownload || this.activeDownload.cancelled) return;
+      this.installing = true;
       if (info.manual) {
         // macOS: the .dmg is open and the app closes on its own so Finder can
         // replace the bundle (#377). Nothing left to click, same as Windows.
@@ -141,6 +151,8 @@ class UpdateService {
     });
 
     const u3 = window.api.onUpdateError(() => {
+      if ((!this.activeDownload && !this.installing) || this.activeDownload?.cancelled) return;
+      this.installing = false;
       this.setText(t('update.downloadFailed'));
       this.setActions([
         {
@@ -153,14 +165,17 @@ class UpdateService {
     });
 
     this.unbindUpdateEvents.push(u1, u2, u3, appEvents.on('i18n.language_changed', () => {
-      if (this.bannerKind === 'available') this.showAvailable(this.latestVersion, this.availableCompatibility);
+      if (this.bannerKind === 'available') this.showAvailable(this.latestVersion);
     }));
   }
 
   private async check(): Promise<void> {
+    if (this.activeCheck || this.startingDownload || this.installing) return;
+    const request = { id: crypto.randomUUID(), cancelled: false };
+    this.activeCheck = request;
     try {
-      const result = await window.api.checkForUpdates();
-      if (!result?.ok || !result.available || !result.version) {
+      const result = await window.api.checkForUpdates(request.id);
+      if (this.activeCheck !== request || request.cancelled || !result?.ok || !result.available || !result.version) {
         return;
       }
 
@@ -169,9 +184,11 @@ class UpdateService {
       }
 
       this.latestVersion = result.version;
-      this.showAvailable(result.version, result.compatibility);
+      this.showAvailable(result.version);
     } catch {
       // Non-fatal: try again on the next interval.
+    } finally {
+      if (this.activeCheck === request) this.activeCheck = null;
     }
   }
 
@@ -179,77 +196,123 @@ class UpdateService {
    * Triggered by the "Verificar atualizações" button in Settings. Unlike the
    * automatic check, it ignores the dismissed flag and reports the outcome.
    */
-  public async checkManually(): Promise<{ status: 'available' | 'latest' | 'error'; version?: string }> {
+  public async checkManually(): Promise<{ status: 'available' | 'latest' | 'error' | 'cancelled'; version?: string }> {
     if (!window.api?.checkForUpdates) {
       return { status: 'error' };
     }
+    if (this.startingDownload || this.installing) {
+      showErrorToast(t('update.busy'));
+      return { status: 'cancelled' };
+    }
+    if (this.activeCheck) await this.cancelCheck();
+    const request = { id: crypto.randomUUID(), cancelled: false };
+    this.activeCheck = request;
+    this.setText(t('settings.checking'));
+    this.setActions(this.cancelActions(() => { void this.cancelCheck(); }));
     try {
-      const result = await window.api.checkForUpdates();
+      const result = await window.api.checkForUpdates(request.id);
+      if (request.cancelled || this.activeCheck !== request) return { status: 'cancelled' };
+      if (result.cancelled) { this.dismiss(false); return { status: 'cancelled' }; }
       if (!result?.ok) {
+        this.dismiss(false);
+        showErrorToast(t('settings.updateCheckFailed'));
         return { status: 'error' };
       }
       if (result.available && result.version) {
         this.latestVersion = result.version;
-        this.showAvailable(result.version, result.compatibility);
+        this.showAvailable(result.version);
         return { status: 'available', version: result.version };
       }
+      this.dismiss(false);
       return { status: 'latest' };
     } catch {
+      if (request.cancelled || this.activeCheck !== request) return { status: 'cancelled' };
+      this.dismiss(false);
+      showErrorToast(t('settings.updateCheckFailed'));
       return { status: 'error' };
+    } finally {
+      if (this.activeCheck === request) this.activeCheck = null;
     }
   }
 
-  private showAvailable(version: string, compatibility?: ReleaseCompatibilityResult): void {
+  public async cancelCheck(): Promise<void> {
+    const request = this.activeCheck;
+    if (!request) return;
+    request.cancelled = true;
+    this.activeCheck = null;
+    this.dismiss(false);
+    try {
+      const result = await window.api.cancelUpdate(request.id);
+      if (!result.ok) throw new Error(result.error);
+    } catch (error) {
+      console.warn('[UpdateService] Could not cancel update check', error);
+      showErrorToast(t('update.cancelFailed'));
+    }
+  }
+
+  private cancelActions(cancel: () => void): BannerAction[] {
+    return [
+      { label: t('common.cancel'), onClick: cancel },
+      { label: '×', dismiss: true, onClick: cancel },
+    ];
+  }
+
+  private showAvailable(version: string): void {
     this.ensureBanner();
-    this.availableCompatibility = compatibility;
-    const warning = this.compatibilityWarning(compatibility);
-    this.setText(t('update.available', { version: escapeHtml(version) }) +
-      (warning ? `<span class="update-bot-compatibility">${escapeHtml(warning)}</span>` : ''));
+    this.setText(t('update.available', { version: escapeHtml(version) }));
     this.bannerKind = 'available';
     this.setActions([
       {
         label: t('update.updateNow'),
         primary: true,
-        onClick: () => { void this.downloadConfirmedVersion(version, compatibility); },
+        onClick: () => { void this.downloadConfirmedVersion(version); },
       },
       { label: '×', dismiss: true, onClick: () => this.dismiss() },
     ]);
   }
 
-  private compatibilityWarning(compatibility?: ReleaseCompatibilityResult): string | null {
-    return compatibility?.status === 'available' && releaseRequiresProtocolUpdate(compatibility.manifest, 'bot')
-      ? t('update.botCompatibilityChanged', {
-        protocol: compatibility.manifest.protocolVersion, sdk: compatibility.manifest.botSdkVersion,
-      })
-      : compatibility?.status === 'unavailable' ? t('update.botCompatibilityUnknown') : null;
-  }
-
-  private async downloadConfirmedVersion(version: string, compatibility?: ReleaseCompatibilityResult): Promise<void> {
-    if (this.startingDownload) return;
+  private async downloadConfirmedVersion(version: string): Promise<void> {
+    if (this.startingDownload || this.installing) return;
     this.startingDownload = true;
+    if (this.activeCheck) await this.cancelCheck();
+    const request = { id: crypto.randomUUID(), cancelled: false };
+    this.activeDownload = request;
     try {
-      const warning = this.compatibilityWarning(compatibility);
-      if (warning) {
+      for (;;) {
+        this.setText(t('update.checkingLocalBots'));
+        this.setActions(this.cancelActions(() => { void this.cancelDownload(); }));
+        const assessment = await window.api.checkUpdateCompatibility(version, request.id);
+        if (request.cancelled || assessment.cancelled) { this.dismiss(false); return; }
+        if (!assessment.ok) throw new Error(assessment.error);
+        if (!assessment.warnings?.length) break;
         const banner = this.banner;
         if (banner) setSurfaceVisible(banner, false, 'notice');
-        let confirmed = false;
+        let choice: 'install' | 'retry' | 'cancel';
         try {
-          confirmed = await showConfirm({
-            message: warning, variant: 'warning', confirmLabel: t('update.updateNow'),
-          });
+          choice = await showUpdateCompatibility(assessment.warnings);
         } finally {
           if (banner?.isConnected) {
             setSurfaceVisible(banner, true, 'notice');
             banner.querySelector<HTMLButtonElement>('.update-banner__download')?.focus();
           }
         }
-        if (!confirmed) return;
+        if (choice === 'retry') continue;
+        if (choice === 'cancel') {
+          this.showAvailable(version);
+          return;
+        }
+        break;
       }
       this.setText(t('update.startingDownload'));
-      this.setActions([]);
-      const result = await window.api.downloadUpdate(version);
+      this.setActions(this.cancelActions(() => { void this.cancelDownload(); }));
+      const result = await window.api.downloadUpdate(version, request.id);
+      if (result.cancelled || request.cancelled) { this.dismiss(false); return; }
       if (!result.ok) throw new Error(result.error || t('update.downloadFailed'));
-    } catch {
+    } catch (error) {
+      if (request.cancelled) return;
+      console.warn('[UpdateService] Update failed', error);
+      showErrorToast(error instanceof Error ? error.message : t('update.downloadFailed'));
+      this.installing = false;
       this.setText(t('update.downloadFailed'));
       this.setActions([
         {
@@ -260,15 +323,31 @@ class UpdateService {
       ]);
     } finally {
       this.startingDownload = false;
+      if (this.activeDownload === request) this.activeDownload = null;
     }
   }
 
-  private dismiss(): void {
-    if (this.latestVersion) {
+  private async cancelDownload(): Promise<void> {
+    const request = this.activeDownload;
+    if (!request || this.installing) return;
+    try {
+      const result = await window.api.cancelUpdate(request.id);
+      if (!result.ok) throw new Error(result.error);
+      if (result.cancelled) {
+        request.cancelled = true;
+        if (this.activeDownload === request) this.dismiss(false);
+      }
+    } catch (error) {
+      console.warn('[UpdateService] Could not cancel update', error);
+      showErrorToast(t('update.cancelFailed'));
+    }
+  }
+
+  private dismiss(remember = true): void {
+    if (remember && this.latestVersion) {
       localStorage.setItem(DISMISSED_KEY, this.latestVersion);
     }
     this.bannerKind = '';
-    this.availableCompatibility = undefined;
     if (this.banner) removeWithMotion(this.banner, 'notice');
     this.banner = null;
     this.textEl = null;
@@ -280,6 +359,8 @@ class UpdateService {
 
     const banner = document.createElement('div');
     banner.className = 'update-banner';
+    banner.setAttribute('role', 'status');
+    banner.setAttribute('aria-live', 'polite');
 
     const text = document.createElement('span');
     text.className = 'update-banner__text';
@@ -308,16 +389,19 @@ class UpdateService {
   private setActions(actions: BannerAction[]): void {
     this.ensureBanner();
     if (!this.actionsEl) return;
+    const restoreFocus = this.actionsEl.contains(document.activeElement);
     this.actionsEl.innerHTML = '';
 
     for (const action of actions) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.textContent = action.label;
+      if (action.dismiss) btn.setAttribute('aria-label', t('common.close'));
       btn.className = action.dismiss ? 'update-banner__dismiss' : 'update-banner__download';
       btn.addEventListener('click', action.onClick);
       this.actionsEl.appendChild(btn);
     }
+    if (restoreFocus) this.actionsEl.querySelector<HTMLButtonElement>('button')?.focus();
   }
 }
 

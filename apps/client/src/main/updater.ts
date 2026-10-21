@@ -1,8 +1,10 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
-import fs from 'fs';
-import https from 'https';
+import { app, BrowserWindow, ipcMain, net, shell } from 'electron';
 import path from 'path';
-import { UpdateOutcome, ReleaseNotesResult, UPDATER_IPC, fetchReleaseCompatibility, isReleaseVersion, type UpdateCheckResult } from '@monky/shared';
+import type { CancellationToken } from 'electron-updater';
+import { UpdateOutcome, ReleaseNotesResult, UPDATER_IPC, fetchReleaseCompatibility, isReleaseVersion,
+  type HostedBotUpdateWarning, type HostedUpdateServer, type UpdatePreflightResult, type UpdateCheckResult } from '@monky/shared';
+import { downloadToFile } from './updateDownload';
+import { requestUpdateMetadata } from './updateMetadataRequest';
 import { mt } from './i18n';
 import { beginUpdateInstall, consumeUpdateOutcome } from './updateInstall';
 import { updateLog } from './updateLog';
@@ -35,11 +37,39 @@ type AutoUpdater = {
   on: (event: string, cb: (arg: unknown) => void) => void;
   setFeedURL: (options: { provider: 'generic'; url: string }) => void;
   checkForUpdates: () => Promise<{ updateInfo?: { version: string } } | null>;
-  downloadUpdate: () => Promise<unknown>;
+  downloadUpdate: (token: CancellationToken) => Promise<unknown>;
   quitAndInstall: (isSilent?: boolean, isForceRunAfter?: boolean) => void;
 };
 
 let autoUpdater: AutoUpdater | null = null;
+
+interface UpdateOperation {
+  id: string;
+  controller: AbortController;
+  phase: 'checking' | 'preflight' | 'downloading' | 'installing';
+  token?: CancellationToken;
+}
+
+let checking: UpdateOperation | null = null;
+let downloading: UpdateOperation | null = null;
+let installing = false;
+const cancelledRequests = new Set<string>();
+
+function rememberCancellation(id: string): void {
+  cancelledRequests.add(id);
+  if (cancelledRequests.size > 100) {
+    const oldest = cancelledRequests.values().next().value;
+    if (oldest) cancelledRequests.delete(oldest);
+  }
+}
+
+function validRequestId(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value);
+}
+
+function operation(id: string, phase: UpdateOperation['phase']): UpdateOperation {
+  return { id, phase, controller: new AbortController() };
+}
 
 // Whether the user opted into the beta channel (set from the renderer via the
 // `update-set-channel` IPC). When true, update detection also considers GitHub
@@ -135,18 +165,18 @@ let pendingTag: string | null = null;
  * over a hundred releases, and a short window could cut off the very release
  * being looked for.
  */
-async function fetchTargetRelease(): Promise<GithubRelease | null | { error: string }> {
+async function fetchTargetRelease(signal: AbortSignal): Promise<GithubRelease | null | { error: string }> {
   const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'Monky-App' };
 
   if (betaChannel) {
-    const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100`, {
-      headers,
+    const res = await net.fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100`, {
+      headers, signal,
     });
     if (!res.ok) return { error: `HTTP ${res.status}` };
     return pickBestRelease(await res.json());
   }
 
-  const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, { headers });
+  const res = await net.fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, { headers, signal });
   if (!res.ok) return { error: `HTTP ${res.status}` };
   return (await res.json()) as GithubRelease;
 }
@@ -158,16 +188,21 @@ async function fetchTargetRelease(): Promise<GithubRelease | null | { error: str
  * already in progress). It also records what to download: the matching .dmg on
  * macOS, the release tag everywhere else.
  */
-async function checkViaGitHub(): Promise<CheckResult> {
-  pendingTag = null;
-  pendingMacAsset = null;
+async function checkViaGitHub(signal: AbortSignal): Promise<CheckResult> {
   try {
-    const rel = await fetchTargetRelease();
+    const rel = await fetchTargetRelease(AbortSignal.any([signal, AbortSignal.timeout(15000)]));
+    signal.throwIfAborted();
     if (rel && 'error' in rel) return { ok: false, error: rel.error };
-    if (!rel) return { ok: true, available: false };
+    if (!rel) {
+      pendingTag = null;
+      pendingMacAsset = null;
+      return { ok: true, available: false };
+    }
 
     const version = (rel.tag_name ?? '').replace(/^v/i, '');
     if (!version || !isNewer(version, app.getVersion())) {
+      pendingTag = null;
+      pendingMacAsset = null;
       updateLog('checkViaGitHub: no newer release', {
         candidate: version,
         current: app.getVersion(),
@@ -177,6 +212,7 @@ async function checkViaGitHub(): Promise<CheckResult> {
     }
 
     pendingTag = rel.tag_name ?? null;
+    pendingMacAsset = null;
     updateLog('checkViaGitHub: update available', {
       version,
       tag: pendingTag,
@@ -191,92 +227,48 @@ async function checkViaGitHub(): Promise<CheckResult> {
       const dmgs = (rel.assets ?? []).filter((a) => a.name.endsWith('.dmg'));
       const asset =
         dmgs.find((a) => (wantArm ? /arm64/i.test(a.name) : !/arm64/i.test(a.name))) ?? dmgs[0];
-      if (asset) {
+      if (asset && path.basename(asset.name) === asset.name && !asset.name.includes('\\')) {
         pendingMacAsset = { version, name: asset.name, url: asset.browser_download_url };
       }
     }
 
-    const compatibility = await fetchReleaseCompatibility(version);
-    if (compatibility.status === 'unavailable') {
-      updateLog('Release compatibility metadata unavailable', { version, reason: compatibility.reason });
-    }
-    return { ok: true, available: true, version, compatibility };
+    return { ok: true, available: true, version };
   } catch (e) {
+    if (signal.aborted) return { ok: false, cancelled: true };
     return { ok: false, error: msg(e) };
   }
 }
 
-function downloadToFile(
-  url: string,
-  destPath: string,
-  onProgress: (pct: number) => void
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const request = (currentUrl: string, redirects: number): void => {
-      if (redirects > 5) {
-        reject(new Error('Too many redirects'));
-        return;
-      }
-      https
-        .get(currentUrl, { headers: { 'User-Agent': 'Monky-App' } }, (response) => {
-          const status = response.statusCode ?? 0;
-          if (status >= 300 && status < 400 && response.headers.location) {
-            response.resume();
-            request(response.headers.location, redirects + 1);
-            return;
-          }
-          if (status !== 200) {
-            response.resume();
-            reject(new Error(`HTTP ${status}`));
-            return;
-          }
-
-          const total = parseInt(response.headers['content-length'] ?? '0', 10);
-          let received = 0;
-          const file = fs.createWriteStream(destPath);
-
-          response.on('data', (chunk: Buffer) => {
-            received += chunk.length;
-            if (total > 0) {
-              onProgress(Math.round((received / total) * 100));
-            }
-          });
-          response.pipe(file);
-          file.on('finish', () => file.close(() => resolve()));
-          file.on('error', (err) => {
-            fs.unlink(destPath, () => reject(err));
-          });
-        })
-        .on('error', reject);
-    };
-    request(url, 0);
-  });
-}
-
-async function downloadMacDmg(mainWindow: BrowserWindow): Promise<CheckResult> {
+async function downloadMacDmg(mainWindow: BrowserWindow, task: UpdateOperation): Promise<CheckResult> {
   if (!pendingMacAsset) {
     return { ok: false, error: mt('error.noPendingUpdate') };
   }
   try {
     const destPath = path.join(app.getPath('temp'), pendingMacAsset.name);
-    await downloadToFile(pendingMacAsset.url, destPath, (pct) => {
+    await downloadToFile(pendingMacAsset.url, destPath, task.controller.signal, (pct) => {
       mainWindow.webContents.send('updater:progress', pct);
     });
+    task.controller.signal.throwIfAborted();
     downloadedMacPath = destPath;
+    task.phase = 'installing';
+    installing = true;
+    mainWindow.webContents.send('updater:downloaded', { manual: true });
 
     // Open the .dmg so the user can drag the app into Applications. A failure
     // here means there is nothing on screen to install from, so the app must
     // not go ahead and close.
     const openError = await shell.openPath(destPath);
     if (openError) {
+      installing = false;
       mainWindow.webContents.send('updater:error', openError);
       return { ok: false, error: openError };
     }
 
-    mainWindow.webContents.send('updater:downloaded', { manual: true });
     quitForMacInstall(MAC_QUIT_DELAY_MS);
     return { ok: true };
   } catch (e) {
+    if (task.controller.signal.aborted) return { ok: false, cancelled: true };
+    installing = false;
     mainWindow.webContents.send('updater:error', msg(e));
     return { ok: false, error: msg(e) };
   }
@@ -301,14 +293,17 @@ async function fetchReleaseNotes(tag?: string): Promise<ReleaseNotesResult> {
 
 // ── Wiring ───────────────────────────────────────────────────────────────
 
-export function setupUpdater(mainWindow: BrowserWindow): void {
+export function setupUpdater(
+  mainWindow: BrowserWindow,
+  getInventory: (signal: AbortSignal) => Promise<HostedUpdateServer[]>,
+): void {
   const isMac = process.platform === 'darwin';
 
   if (!isMac) {
     const updater = loadAutoUpdater();
     if (updater) {
       updater.autoDownload = false;
-      updater.autoInstallOnAppQuit = true;
+      updater.autoInstallOnAppQuit = false;
       // Route electron-updater's own internal logging into update-flow.log. Its
       // NSIS install step and any spawn/relaunch failure are reported here — the
       // most likely place to catch why a real update silently fails to apply
@@ -325,10 +320,14 @@ export function setupUpdater(mainWindow: BrowserWindow): void {
       });
 
       updater.on('download-progress', (p) => {
+        if (!downloading || downloading.controller.signal.aborted || downloading.phase === 'installing') return;
         const percent = (p as { percent?: number })?.percent ?? 0;
         mainWindow.webContents.send('updater:progress', Math.round(percent));
       });
       updater.on('update-downloaded', (info) => {
+        if (!downloading || downloading.controller.signal.aborted || installing) return;
+        downloading.phase = 'installing';
+        installing = true;
         downloadedVersion = cleanVer((info as { version?: string })?.version ?? '');
         updateLog('update-downloaded', { version: downloadedVersion });
         mainWindow.webContents.send('updater:downloaded', { manual: false });
@@ -352,12 +351,15 @@ export function setupUpdater(mainWindow: BrowserWindow): void {
               updater.quitAndInstall(false, true);
             })
             .catch((e) => {
+              installing = false;
               updateLog('quitAndInstall chain FAILED', { error: msg(e) });
               mainWindow.webContents.send('updater:error', msg(e));
             });
         }, 1500);
       });
       updater.on('error', (err) => {
+        if ((!downloading && !installing) || downloading?.controller.signal.aborted) return;
+        installing = false;
         updateLog('electron-updater error event', { error: msg(err) });
         mainWindow.webContents.send('updater:error', msg(err));
       });
@@ -365,6 +367,8 @@ export function setupUpdater(mainWindow: BrowserWindow): void {
   }
 
   ipcMain.handle(UPDATER_IPC.setChannel, async (_e, allowBeta: unknown): Promise<CheckResult> => {
+    if (downloading || installing || checking?.phase === 'preflight') return { ok: false, error: mt('error.updateBusy') };
+    checking?.controller.abort();
     betaChannel = !!allowBeta;
     // Which releases are eligible is decided by `fetchTargetRelease`, which
     // queries the GitHub API itself. electron-updater is handed the chosen
@@ -378,27 +382,94 @@ export function setupUpdater(mainWindow: BrowserWindow): void {
     return { ok: true };
   });
 
-  ipcMain.handle(UPDATER_IPC.check, async (): Promise<CheckResult> => {
-    // Detection is done via the GitHub API on every platform for reliability.
-    return checkViaGitHub();
+  ipcMain.handle(UPDATER_IPC.cancel, async (_event, requestId: unknown): Promise<CheckResult> => {
+    if (!validRequestId(requestId)) return { ok: false, error: mt('error.invalidUpdateRequest') };
+    const task = [checking, downloading].find(item => item?.id === requestId);
+    if (installing || task?.phase === 'installing') return { ok: true, cancelled: false };
+    // Keep consent cancelled across the gap between preflight and download IPC.
+    rememberCancellation(requestId);
+    task?.controller.abort();
+    task?.token?.cancel();
+    updateLog('Update operation cancelled', { phase: task?.phase ?? 'pending' });
+    return { ok: true, cancelled: true };
   });
 
-  ipcMain.handle(UPDATER_IPC.download, async (_event, expectedVersion: unknown): Promise<CheckResult> => {
+  ipcMain.handle(UPDATER_IPC.check, async (_event, requestId: unknown): Promise<CheckResult> => {
+    if (requestId !== undefined && !validRequestId(requestId)) return { ok: false, error: mt('error.invalidUpdateRequest') };
+    if (typeof requestId === 'string' && cancelledRequests.has(requestId)) return { ok: false, cancelled: true };
+    if (downloading || installing || checking?.phase === 'preflight') return { ok: false, error: mt('error.updateBusy') };
+    checking?.controller.abort();
+    const task = operation(typeof requestId === 'string' ? requestId : 'automatic', 'checking');
+    checking = task;
+    try {
+      return await checkViaGitHub(task.controller.signal);
+    } finally {
+      if (checking === task) checking = null;
+    }
+  });
+
+  ipcMain.handle(UPDATER_IPC.preflight, async (_event, version: unknown, requestId: unknown): Promise<UpdatePreflightResult> => {
+    if (!isReleaseVersion(version) || cleanVer(pendingTag ?? '') !== version || !validRequestId(requestId)) {
+      return { ok: false, error: mt('error.noPendingUpdate') };
+    }
+    if (cancelledRequests.has(requestId)) return { ok: false, cancelled: true };
+    if (downloading || installing) return { ok: false, error: mt('error.updateBusy') };
+    checking?.controller.abort();
+    const task = operation(requestId, 'preflight');
+    checking = task;
+    try {
+      const servers = await getInventory(task.controller.signal);
+      task.controller.signal.throwIfAborted();
+      if (!servers.some(server => server.bots.length)) return { ok: true, warnings: [] };
+      const compatibility = await fetchReleaseCompatibility(version, requestUpdateMetadata, task.controller.signal);
+      task.controller.signal.throwIfAborted();
+      if (compatibility.status === 'unavailable') {
+        updateLog('Release compatibility metadata unavailable', { version, reason: compatibility.reason });
+      }
+      const warnings = servers.map(server => ({
+        serverName: server.serverName,
+        bots: server.bots.flatMap<HostedBotUpdateWarning['bots'][number]>(bot => {
+          if (compatibility.status !== 'available' || bot.protocolVersion === null ||
+              bot.protocolVersion > compatibility.manifest.protocolVersion) {
+            return [{ name: bot.name, status: 'unknown' as const }];
+          }
+          const manifest = compatibility.manifest;
+          const minimum = manifest.minimumBotProtocol ?? manifest.protocolVersion;
+          return bot.protocolVersion < minimum
+            ? [{ name: bot.name, status: 'incompatible' as const }] : [];
+        }),
+      })).filter(server => server.bots.length);
+      return { ok: true, warnings };
+    } catch (error) {
+      if (task.controller.signal.aborted) return { ok: false, cancelled: true };
+      updateLog('Local update compatibility check failed', { error: msg(error) });
+      return { ok: false, error: mt('error.updateInventoryFailed') };
+    } finally {
+      if (checking === task) checking = null;
+    }
+  });
+
+  ipcMain.handle(UPDATER_IPC.download, async (_event, expectedVersion: unknown, requestId: unknown): Promise<CheckResult> => {
+    if (requestId !== undefined && !validRequestId(requestId)) return { ok: false, error: mt('error.invalidUpdateRequest') };
+    if (typeof requestId === 'string' && cancelledRequests.has(requestId)) return { ok: false, cancelled: true };
+    if (downloading || installing) return { ok: false, error: mt('error.updateBusy') };
     if (expectedVersion !== undefined &&
         (!isReleaseVersion(expectedVersion) || cleanVer(pendingTag ?? '') !== expectedVersion)) {
       return { ok: false, error: mt('error.noPendingUpdate') };
     }
-    if (isMac) {
-      return downloadMacDmg(mainWindow);
-    }
-    const updater = loadAutoUpdater();
-    if (!updater) {
+    const updater = isMac ? null : loadAutoUpdater();
+    if (!isMac && !updater) {
       return { ok: false, error: mt('error.updaterUnavailable') };
     }
     if (!app.isPackaged) {
       return { ok: false, error: mt('error.updaterDevMode') };
     }
+    checking?.controller.abort();
+    const task = operation(typeof requestId === 'string' ? requestId : 'download', 'downloading');
+    downloading = task;
     try {
+      if (isMac) return await downloadMacDmg(mainWindow, task);
+      if (!updater) return { ok: false, error: mt('error.updaterUnavailable') };
       // Point electron-updater straight at the release `checkViaGitHub` picked,
       // as a generic feed, instead of letting its GitHub provider search for one
       // (#354).
@@ -419,7 +490,7 @@ export function setupUpdater(mainWindow: BrowserWindow): void {
       // than the one the user is on. Our own SemVer comparison already picked
       // the right release, so the library only needs to be told where it is.
       if (!pendingTag) {
-        const recheck = await checkViaGitHub();
+        const recheck = await checkViaGitHub(task.controller.signal);
         if (!recheck.ok) return recheck;
       }
       if (!pendingTag) {
@@ -428,18 +499,30 @@ export function setupUpdater(mainWindow: BrowserWindow): void {
       updater.setFeedURL({ provider: 'generic', url: feedUrlForTag(pendingTag) });
       updateLog('updater:download', { tag: pendingTag, feedUrl: feedUrlForTag(pendingTag) });
       // electron-updater requires its own check before it can download.
-      await updater.checkForUpdates();
+      const detected = await updater.checkForUpdates();
+      task.controller.signal.throwIfAborted();
+      if (cleanVer(detected?.updateInfo?.version ?? '') !== cleanVer(pendingTag)) {
+        return { ok: false, error: mt('error.noPendingUpdate') };
+      }
+      const { CancellationToken: Token } = require('electron-updater') as typeof import('electron-updater');
+      task.token = new Token();
       updateLog('checkForUpdates done, starting downloadUpdate');
-      await updater.downloadUpdate();
+      await updater.downloadUpdate(task.token);
+      task.controller.signal.throwIfAborted();
       updateLog('downloadUpdate resolved');
       return { ok: true };
     } catch (e) {
+      if (task.controller.signal.aborted) return { ok: false, cancelled: true };
       updateLog('updater:download FAILED', { error: msg(e) });
       return { ok: false, error: msg(e) };
+    } finally {
+      task.token?.dispose();
+      if (downloading === task) downloading = null;
     }
   });
 
   ipcMain.handle(UPDATER_IPC.install, async (): Promise<CheckResult> => {
+    if (downloading || installing) return { ok: false, error: mt('error.updateBusy') };
     if (isMac) {
       if (downloadedMacPath) {
         const openError = await shell.openPath(downloadedMacPath);
@@ -449,6 +532,8 @@ export function setupUpdater(mainWindow: BrowserWindow): void {
       }
       // Asked for explicitly, so there is no reason to wait as long as the
       // automatic path does.
+      if (!downloadedMacPath) return { ok: false, error: mt('error.noPendingUpdate') };
+      installing = true;
       quitForMacInstall(1000);
       return { ok: true };
     }
@@ -456,6 +541,8 @@ export function setupUpdater(mainWindow: BrowserWindow): void {
     if (!updater) {
       return { ok: false, error: mt('error.updaterUnavailable') };
     }
+    if (!downloadedVersion) return { ok: false, error: mt('error.noPendingUpdate') };
+    installing = true;
     // Defer so the IPC reply is delivered before the app quits to install.
     setImmediate(() => {
       beginUpdateInstall(downloadedVersion || cleanVer(pendingTag ?? ''), mainWindow)
@@ -467,6 +554,7 @@ export function setupUpdater(mainWindow: BrowserWindow): void {
           updater.quitAndInstall(false, true);
         })
         .catch((e) => {
+          installing = false;
           updateLog('updater:install chain FAILED', { error: msg(e) });
           mainWindow.webContents.send('updater:error', msg(e));
         });
