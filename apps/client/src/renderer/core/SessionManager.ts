@@ -1,4 +1,4 @@
-import { MessageType, type UserActivity } from '@monky/shared';
+import { MessageType, type CustomStatus, type UserActivity } from '@monky/shared';
 import { CommunityFeed } from './CommunityFeed';
 import { settingsStore } from '../stores/settingsStore';
 import { BotScreenStore, setActiveBotScreenStore } from '../stores/botScreenStore';
@@ -60,11 +60,18 @@ export interface ServerSession {
   password?: string;
 }
 
-/** What the person chose to show everyone: online, "Volto já" or invisible. */
-export type PresenceStatus = 'online' | 'brb' | 'invisible';
+/** What the person chose to show everyone: online, "Volto já", their own status or invisible. */
+export type PresenceStatus = 'online' | 'brb' | 'custom' | 'invisible';
 
 export function currentPresenceStatus(): PresenceStatus {
-  return settingsStore.appearOffline ? 'invisible' : settingsStore.brb ? 'brb' : 'online';
+  if (settingsStore.appearOffline) return 'invisible';
+  if (settingsStore.brb) return 'brb';
+  return settingsStore.customStatusActive && settingsStore.customStatus ? 'custom' : 'online';
+}
+
+/** The custom status others should see right now, or null when another status is chosen. */
+export function publishedCustomStatus(): CustomStatus | null {
+  return currentPresenceStatus() === 'custom' ? settingsStore.customStatus : null;
 }
 
 export function sessionKeyFor(host: string, port: number): string {
@@ -151,23 +158,62 @@ export class SessionManager {
     }
   }
 
+  /** Publishes the custom status, or clears it with null, on every server that negotiated it (custom-status). */
+  public setCustomStatus(customStatus: CustomStatus | null): void {
+    for (const session of this.sessions.values()) {
+      if (session.client.getStatus() !== 'CONNECTED') continue;
+      if (!session.serverStore.serverDetails?.protocol?.features.includes('custom-status')) continue;
+      session.client.send(MessageType.USER_UPDATE_CUSTOM_STATUS, { customStatus });
+    }
+  }
+
   /**
-   * Online, "Volto já" or invisible: one choice, kept in settings and applied
-   * to every server. Invisible hides the BRB status too, so they never combine.
+   * Online, "Volto já", the custom status or invisible: one choice, kept in
+   * settings and applied to every server. Invisible hides the others, and the
+   * server lets only one of "Volto já" and the custom status stand.
    */
   public setPresenceStatus(status: PresenceStatus): void {
+    if (status === 'custom' && !settingsStore.customStatus) return;
     const appearOffline = status === 'invisible';
     const brb = status === 'brb';
+    const customStatusActive = status === 'custom';
     const visibilityChanged = settingsStore.appearOffline !== appearOffline;
     const brbChanged = settingsStore.brb !== brb;
-    if (!visibilityChanged && !brbChanged) return;
+    const customChanged = settingsStore.customStatusActive !== customStatusActive;
+    if (!visibilityChanged && !brbChanged && !customChanged) return;
     settingsStore.appearOffline = appearOffline;
     settingsStore.brb = brb;
+    settingsStore.customStatusActive = customStatusActive;
     settingsStore.save();
-    // Set BRB before showing up again, so nobody sees a plain "online" flash.
-    if (brbChanged) this.setBrb(brb);
+    // Set the status before showing up again, so nobody sees a plain "online" flash.
+    if (brbChanged && brb) this.setBrb(true);
+    else if (customChanged && customStatusActive) this.setCustomStatus(settingsStore.customStatus);
+    else {
+      if (brbChanged) this.setBrb(false);
+      if (customChanged) this.setCustomStatus(null);
+    }
     if (visibilityChanged) this.setAppearOffline(appearOffline);
     appEvents.emit('settings.updated');
+  }
+
+  /** Saves the custom status and makes it the current choice; null deletes it. */
+  public saveCustomStatus(customStatus: CustomStatus | null): void {
+    const wasActive = currentPresenceStatus() === 'custom';
+    settingsStore.customStatus = customStatus;
+    if (!customStatus) {
+      settingsStore.customStatusActive = false;
+      settingsStore.save();
+      if (wasActive) this.setCustomStatus(null);
+      appEvents.emit('settings.updated');
+      return;
+    }
+    if (wasActive) {
+      settingsStore.save();
+      this.setCustomStatus(customStatus);
+      appEvents.emit('settings.updated');
+    } else {
+      this.setPresenceStatus('custom');
+    }
   }
 
   /**

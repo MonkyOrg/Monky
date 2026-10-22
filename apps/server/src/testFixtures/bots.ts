@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { WebSocket } from 'ws';
-import { BOT_CAPABILITIES, MessageType, Permission, PROTOCOL_VERSION, ProtocolErrorCode, type BotCapability, type ProtocolOffer, type UserSummary } from '@monky/shared';
+import { BOT_CAPABILITIES, MessageType, Permission, PROTOCOL_VERSION, ProtocolErrorCode, type BotCapability, type CustomStatus, type ProtocolOffer, type UserSummary } from '@monky/shared';
 import { AttachmentService } from '../application/services/AttachmentService';
 import { AuthService } from '../application/services/AuthService';
 import { BotService } from '../application/services/BotService';
@@ -283,10 +283,11 @@ export async function createFixture(options: {
     protocolVersion = PROTOCOL_VERSION,
     protocolOffer?: ProtocolOffer,
     brb?: boolean,
+    customStatus?: CustomStatus,
   ) => {
     const peer = await connect();
     const challenge = await peer.request(MessageType.AUTH_CONNECT, {
-      protocolVersion, protocolOffer, nickname, publicKey: keys.publicKey, deviceId, appearOffline, brb,
+      protocolVersion, protocolOffer, nickname, publicKey: keys.publicKey, deviceId, appearOffline, brb, customStatus,
     });
     assert.equal(challenge.type, MessageType.AUTH_CHALLENGE);
     const signature = sign(null, Buffer.from(text(challenge.payload.nonce), 'hex'), keys.privateKey).toString('hex');

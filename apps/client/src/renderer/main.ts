@@ -32,7 +32,7 @@ import {
 } from '@monky/shared';
 import { audioProcessor } from './core/AudioProcessor';
 import { appEvents } from './core/EventBus';
-import { networkClient, type ConnectionStatus, type NetworkDisconnectedPayload } from './core/NetworkClient';
+import { networkClient, type ConnectionStatus } from './core/NetworkClient';
 import { callClient, leaveCurrentCall, rejoinCallOnSession, showHome, suspendCallForNetworkLoss } from './core/serverConnection';
 import { VoiceModeReconnect, type VoiceReconnectCall } from './core/VoiceModeReconnect';
 import { participantManager } from './core/ParticipantManager';
@@ -756,16 +756,12 @@ class App {
       }
     });
 
-    appEvents.on('network.disconnected', (payload: NetworkDisconnectedPayload) => {
+    appEvents.on('network.disconnected', () => {
       const origin = currentEventOrigin();
       const ownsCall = !voiceStore.voiceSessionKey || voiceStore.voiceSessionKey === origin;
       // A server restart, update or removal drops the call just like a voice
-      // kick, so it gets the same leave cue (#533). Leaving on purpose already
-      // played it. Read before leaving: reset() clears the server deafen.
-      const shouldPlayLeaveCue = ownsCall && payload.cause === 'server'
-        && voiceStore.currentVoiceChannelId !== null && !voiceStore.getEffectiveDeafened();
+      // kick: leaving it plays the leave cue (callCues), as any other ending.
       if (ownsCall) leaveCurrentCall(false);
-      if (shouldPlayLeaveCue) soundEffects.play('leave_voice');
 
       // The stores resolve to the session that dropped, so this clears the
       // right bundle even when a background server is the one going away.
@@ -1036,10 +1032,9 @@ class App {
         !serverStore.isMySession(payload.sessionId)
       ) {
         webRtcManager.connectToPeer(payload.sessionId, false);
-        // Let everyone already in the channel hear that someone joined (#54), unless deafened (#251).
-        if (!alreadyInChannel && !voiceStore.getEffectiveDeafened()) {
-          soundEffects.play('join_voice');
-        }
+        // Let everyone already in the channel hear that someone joined (#54).
+        // App cues ignore deafen, which only silences voices and the soundboard.
+        if (!alreadyInChannel) soundEffects.play('join_voice');
       }
     });
 
@@ -1064,14 +1059,9 @@ class App {
       if (this.eventOwnsCall()) {
         if (isMySession && voiceStore.currentVoiceChannelId === payload.channelId) {
           leaveCurrentCall(false);
-          if (!voiceStore.getEffectiveDeafened()) {
-            soundEffects.play('leave_voice');
-          }
           if (isForegroundEvent()) this.mainView.render();
         } else {
-          if (voiceStore.currentVoiceChannelId === payload.channelId && !voiceStore.getEffectiveDeafened()) {
-            soundEffects.play('leave_voice');
-          }
+          if (voiceStore.currentVoiceChannelId === payload.channelId) soundEffects.play('leave_voice');
           webRtcManager.removePeer(payload.sessionId);
         }
       }
@@ -1084,7 +1074,7 @@ class App {
       const isSameVoiceChannel =
         this.eventOwnsCall() && voiceStore.currentVoiceChannelId === payload.voiceState.channelId;
 
-      if (isRemoteUser && isSameVoiceChannel && !voiceStore.isDeafened) {
+      if (isRemoteUser && isSameVoiceChannel) {
         if (
           previousVoiceState?.isScreenSharing === false &&
           payload.voiceState.isScreenSharing === true
@@ -1126,14 +1116,9 @@ class App {
         clientLog.error('SCREEN_SHARE', 'Failed to stop screen sharing after voice kick', { error: String(error) });
       });
       webRtcManager.closeAllPeers();
-      // Being kicked is still leaving the call, so it gets the same cue as
-      // leaving on your own (#533) — read before reset(), which clears the
-      // server-side deafen that decides whether anything should be heard.
-      const shouldPlayLeaveCue = !voiceStore.getEffectiveDeafened();
+      // Being kicked is still leaving the call: reset() ends it with the same
+      // leave cue as leaving on your own (#533).
       voiceStore.reset();
-      if (shouldPlayLeaveCue) {
-        soundEffects.play('leave_voice');
-      }
       if (isForegroundEvent()) this.mainView.render();
     });
 

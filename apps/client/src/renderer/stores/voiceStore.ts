@@ -192,6 +192,7 @@ export class VoiceStore {
   public setChannel(channelId: string | null, sessionKey: string | null = null): void {
     clientLog.info('CONNECTION', `Voice channel ${channelId ? 'joined' : 'left'}`, { channelId, sessionKey });
     const wasReconnecting = this.isReconnecting;
+    const endedCall = !channelId && this.currentVoiceChannelId !== null;
     if (!channelId || channelId !== this.currentVoiceChannelId || sessionKey !== this.voiceSessionKey) {
       this.clearScreenWatching();
       this.setSpeaking(false);
@@ -224,6 +225,8 @@ export class VoiceStore {
     }
     emitOutsideRouting(() => {
       appEvents.emit('voice.channel_changed', channelId);
+      // The local call stopped existing, whatever ended it (callCues).
+      if (endedCall) appEvents.emit('voice.call_ended');
       if (clearedModeration) appEvents.emit('voice.state_updated');
       if (wasReconnecting && !this.isReconnecting) appEvents.emit('voice.reconnecting_changed', false);
     });
@@ -409,7 +412,10 @@ export class VoiceStore {
       // Ending a call is a channel change: without this the sidebar row and the
       // rail badge would linger when the call's server drops while the user is
       // looking at another one (#400).
-      if (hadChannel) appEvents.emit('voice.channel_changed', null);
+      if (hadChannel) {
+        appEvents.emit('voice.channel_changed', null);
+        appEvents.emit('voice.call_ended');
+      }
       // Stops the reconnection cue if the call ended mid-attempt (#553).
       if (wasReconnecting) appEvents.emit('voice.reconnecting_changed', false);
     });

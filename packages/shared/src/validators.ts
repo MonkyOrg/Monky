@@ -227,6 +227,34 @@ export const portSchema = z
   .min(LIMITS.MIN_PORT, `Porta deve ser maior ou igual a ${LIMITS.MIN_PORT}`)
   .max(LIMITS.MAX_PORT, `Porta deve ser menor ou igual a ${LIMITS.MAX_PORT}`);
 
+/** One line of visible text: no line breaks or control characters. */
+const statusLine = (max: number) => z.string().trim().max(max)
+  .refine((value) => !/\p{Cc}/u.test(value), 'Status com caracteres inválidos')
+  .transform((value) => value || undefined);
+
+/**
+ * A single emoji grapheme as the picker yields it: pictographs plus their
+ * modifiers, joiners, variation selectors and keycap or flag parts. Anything
+ * else (letters, markup) is rejected, since it renders beside every name.
+ */
+const statusEmojiSchema = z.string().max(32)
+  .regex(/^(?:\p{Extended_Pictographic}|\p{Emoji_Component}|\p{Emoji_Presentation}|\u200d|\ufe0f|\u20e3)+$/u, 'Emoji inválido')
+  // Emoji_Component also covers plain digits, # and *: require an actual pictograph, flag or keycap.
+  .refine((value) => /\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20e3/u.test(value), 'Emoji inválido')
+  .refine((value) => [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value)].length === 1,
+    'Use apenas um emoji');
+
+export const customStatusSchema = z.object({
+  text: statusLine(LIMITS.MAX_CUSTOM_STATUS_TEXT_LENGTH).optional(),
+  emoji: statusEmojiSchema.optional(),
+  tag: statusLine(LIMITS.MAX_CUSTOM_STATUS_TAG_LENGTH).optional(),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Cor inválida').transform((value) => value.toLowerCase()),
+  showEmoji: z.boolean(),
+  showTag: z.boolean(),
+}).strict().transform(({ text, emoji, tag, ...status }) => ({
+  ...status, ...(text ? { text } : {}), ...(emoji ? { emoji } : {}), ...(tag ? { tag } : {}),
+}));
+
 export const authConnectSchema = z.object({
   protocolVersion: z.number().int().positive(),
   protocolOffer: protocolOfferSchema.optional(),
@@ -247,6 +275,8 @@ export const authConnectSchema = z.object({
   appearOffline: z.boolean().optional(),
   // "Be right back" status (user-brb); applied only when the feature is negotiated.
   brb: z.boolean().optional(),
+  // Custom status (custom-status); applied only when negotiated, and never with brb.
+  customStatus: customStatusSchema.optional(),
   // Bot token for bot authentication (#569). Mutually exclusive with the
   // challenge-response flow: when present the server skips the nonce handshake.
   botToken: z.string().min(1).max(128).optional(),
@@ -465,6 +495,10 @@ export const userUpdateActivitySchema = z.object({
 
 export const userUpdateBrbSchema = z.object({
   brb: z.boolean(),
+}).strict();
+
+export const userUpdateCustomStatusSchema = z.object({
+  customStatus: customStatusSchema.nullable(),
 }).strict();
 
 export const gameShareRequestSchema = z.object({

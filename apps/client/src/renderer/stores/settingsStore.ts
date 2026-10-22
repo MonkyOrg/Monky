@@ -10,6 +10,8 @@ import {
   OverlayBounds,
   OverlayConfig,
   botSettingsValuesSchema,
+  customStatusSchema,
+  type CustomStatus,
   normalizeBotLocale,
   type BotFormValues,
   type BotLocale,
@@ -133,6 +135,10 @@ export class SettingsStore {
   public appearOffline: boolean = false;
   // "Volto já" status (user-brb). Never combined with appearOffline.
   public brb: boolean = false;
+  // Custom status (custom-status): the saved definition outlives its use, so it can be picked again.
+  public customStatus: CustomStatus | null = null;
+  // Whether the saved custom status is the current choice. Never with brb or appearOffline.
+  public customStatusActive: boolean = false;
   // Share the game being played with the channel (#675). Off by default: this
   // reads what is running on the machine, so it is never opt-out.
   public shareGameActivity: boolean = false;
@@ -331,6 +337,11 @@ export class SettingsStore {
         if (typeof this.brb !== 'boolean' || this.appearOffline) {
           this.brb = false;
         }
+        const customStatus = customStatusSchema.safeParse(this.customStatus);
+        this.customStatus = customStatus.success ? customStatus.data : null;
+        if (typeof this.customStatusActive !== 'boolean' || !this.customStatus || this.appearOffline || this.brb) {
+          this.customStatusActive = false;
+        }
         if (typeof this.shareGameActivity !== 'boolean') {
           this.shareGameActivity = false;
         }
@@ -468,6 +479,8 @@ export class SettingsStore {
     this.botDownloadConfirmationExceptions = [];
     this.appearOffline = false;
     this.brb = false;
+    this.customStatus = null;
+    this.customStatusActive = false;
     this.onboardingCompleted = false;
     this.save();
   }
@@ -783,6 +796,8 @@ export class SettingsStore {
         askShutdownOnLastLeave: this.askShutdownOnLastLeave,
         appearOffline: this.appearOffline,
         brb: this.brb,
+        customStatus: this.customStatus,
+        customStatusActive: this.customStatusActive,
         shareGameActivity: this.shareGameActivity,
         suggestGameShare: this.suggestGameShare,
         chatSoundServerOverrides: this.chatSoundServerOverrides,

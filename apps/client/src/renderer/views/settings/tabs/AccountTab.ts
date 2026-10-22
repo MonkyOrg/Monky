@@ -15,6 +15,8 @@ import { dmStore } from '../../../stores/dmStore';
 import { formatBytes } from '../../../utils/attachment';
 import { appEvents } from '../../../core/EventBus';
 import { currentPresenceStatus, type PresenceStatus } from '../../../core/SessionManager';
+import { customStatusModal } from '../../CustomStatusModal';
+import { customStatusLabel } from '../../../utils/presenceTag';
 import type { TranslationKey } from '../../../i18n';
 
 const PRESENCE_OPTIONS: ReadonlyArray<{ status: PresenceStatus; icon: string; label: TranslationKey; description: TranslationKey }> = [
@@ -26,6 +28,31 @@ const PRESENCE_OPTIONS: ReadonlyArray<{ status: PresenceStatus; icon: string; la
 export class AccountTab {
   private detachEmojiPicker: (() => void) | null = null;
   private detachPresenceSync: (() => void) | null = null;
+
+  /** The custom status card: picks the saved status, or opens the editor when there is none. */
+  private renderCustomCard(): string {
+    return `<div class="presence-custom-card" data-presence-custom>
+      <button type="button" class="voice-mode-card input-mode-card" data-presence-custom-select aria-pressed="false">
+        <span class="input-mode-card-title"><span class="material-symbols-outlined md-18 presence-menu-icon presence-custom-icon"
+          data-presence-custom-icon aria-hidden="true">circle</span>${t('customStatus.title')}</span>
+        <span class="input-mode-card-description" data-presence-custom-description></span>
+      </button>
+      <button type="button" class="btn btn-secondary presence-custom-edit" data-presence-custom-edit hidden>
+        <span class="material-symbols-outlined md-16" aria-hidden="true">edit</span>${t('customStatus.edit')}</button>
+    </div>`;
+  }
+
+  /** Reflects the saved custom status in place, keeping focus on whatever was clicked. */
+  private syncCustomCard(container: HTMLElement): void {
+    const saved = settingsStore.customStatus;
+    container.querySelector('[data-presence-custom-select]')?.setAttribute('aria-pressed', String(currentPresenceStatus() === 'custom'));
+    const icon = container.querySelector<HTMLElement>('[data-presence-custom-icon]');
+    if (icon) icon.style.color = saved?.color ?? '';
+    const description = container.querySelector('[data-presence-custom-description]');
+    if (description) description.textContent = saved ? customStatusLabel(saved) : t('customStatus.cardHint');
+    const edit = container.querySelector<HTMLElement>('[data-presence-custom-edit]');
+    if (edit) edit.hidden = !saved;
+  }
 
   public renderHtml(): string {
     return `
@@ -68,6 +95,7 @@ export class AccountTab {
             <span class="input-mode-card-title"><span class="material-symbols-outlined md-18 presence-menu-icon presence-menu-icon--${status}" aria-hidden="true">${icon}</span>${t(label)}</span>
             <span class="input-mode-card-description">${t(description)}</span>
           </button>`).join('')}
+          ${this.renderCustomCard()}
         </div>
       </div>
 
@@ -263,12 +291,14 @@ export class AccountTab {
       callbacks.onReloadModal();
     });
 
-    // Status cards: online, "Volto já" or invisible (#561, user-brb).
+    // Status cards: online, "Volto já", custom or invisible (#561, user-brb, custom-status).
     const presenceCards = [...container.querySelectorAll<HTMLButtonElement>('[data-presence]')];
     const syncPresenceCards = () => {
       const current = currentPresenceStatus();
       for (const card of presenceCards) card.setAttribute('aria-pressed', String(card.dataset.presence === current));
+      this.syncCustomCard(container);
     };
+    syncPresenceCards();
     for (const card of presenceCards) {
       card.addEventListener('click', () => {
         const status = PRESENCE_OPTIONS.find(option => option.status === card.dataset.presence)?.status;
@@ -277,6 +307,14 @@ export class AccountTab {
         syncPresenceCards();
       });
     }
+    // Picks the saved custom status, or opens the editor when there is none yet.
+    container.querySelector('.presence-cards')?.addEventListener('click', (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('[data-presence-custom-edit]')) { customStatusModal.open(); return; }
+      if (!target?.closest('[data-presence-custom-select]')) return;
+      if (settingsStore.customStatus) callbacks.onPresenceChanged?.('custom');
+      else customStatusModal.open();
+    });
     // Another device or the user card's menu may change it while this is open.
     this.detachPresenceSync?.();
     this.detachPresenceSync = appEvents.on('settings.updated', syncPresenceCards);

@@ -14,6 +14,7 @@ import { currentEventOrigin } from './sessionRouting';
 import { stopLocalScreenShares } from './screenShareControls';
 import { afkChannelIdOf } from '../utils/voiceRooms';
 import { showInfoToast } from '../views/CopyToast';
+import { announceCallJoined, announceCallLeft } from './callCues';
 
 interface ClientIdentity {
   publicKey: string;
@@ -231,6 +232,9 @@ export function leaveCurrentCall(notifyServer = true): void {
 /** Signalling recovery owns admission; media must not race it with SFU rejoins. */
 export function suspendCallForNetworkLoss(sessionKey: string): void {
   if (voiceStore.voiceSessionKey !== sessionKey || !voiceStore.currentVoiceChannelId) return;
+  // The server dropped this session from the room (a restart drops everyone):
+  // the user is out until the reconnection admits them again.
+  announceCallLeft();
   voiceAdmissionGeneration++;
   activeVoiceAdmission = null;
   webRtcManager.suspendForVoiceReconnect(true);
@@ -420,6 +424,7 @@ export async function joinCallOnSession(
       voiceStore.setReconnecting(false);
     }
     assertCurrent();
+    announceCallJoined(sessionKey, channelId);
     if (microphoneError) appEvents.emit('voice.microphone_failed', { error: microphoneError.message });
     if (reconnect) appEvents.emit('voice.mode_switched', { mode: 'p2p' });
   } catch (error) {

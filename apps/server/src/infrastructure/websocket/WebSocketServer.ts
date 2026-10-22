@@ -233,7 +233,14 @@ import { RateLimiter } from '../security/RateLimiter';
 import { describeFailure, ServerResourceScope } from '../lifecycle/ServerResourceScope';
 import { BotInteractionHandler, BotInteractionSession } from './BotInteractionHandler';
 import { botVoiceJoinSchema, botVoiceChannelSchema, botVoiceSignalSchema } from '@monky/shared';
-import { userUpdateActivitySchema, userUpdateBrbSchema } from '@monky/shared';
+import { userUpdateActivitySchema, userUpdateBrbSchema, userUpdateCustomStatusSchema, type CustomStatus } from '@monky/shared';
+
+/** Whether two devices of one person show the same custom status (custom-status). */
+function sameCustomStatus(a: CustomStatus | undefined, b: CustomStatus | undefined): boolean {
+  if (!a || !b) return a === b;
+  return a.text === b.text && a.emoji === b.emoji && a.tag === b.tag && a.color === b.color
+    && a.showEmoji === b.showEmoji && a.showTag === b.showTag;
+}
 
 const BOT_LOCAL_ALLOWED_MESSAGES = new Set<MessageType>([
   MessageType.BOT_LOCAL_SOURCE_REQUEST,
@@ -1097,6 +1104,9 @@ export class WebSocketServer {
       case MessageType.USER_UPDATE_BRB:
         this.handleUserUpdateBrb(session, payload, requestId);
         break;
+      case MessageType.USER_UPDATE_CUSTOM_STATUS:
+        this.handleUserUpdateCustomStatus(session, payload, requestId);
+        break;
 
       case MessageType.GAME_SHARE_REQUEST: {
         const error = this.gameShareRequests.request(session, payload, requestId);
@@ -1579,6 +1589,9 @@ export class WebSocketServer {
     session.invisible = result.appearOffline === true;
     // "Volto já" only exists between peers that negotiated it (user-brb).
     result.user.brb = !session.isBot && result.brb === true && session.protocol?.features.includes('user-brb') ? true : undefined;
+    // A custom status is the other choice beside "Volto já", never both (custom-status).
+    result.user.customStatus = !session.isBot && !result.user.brb && session.protocol?.features.includes('custom-status')
+      ? result.customStatus : undefined;
     if (result.newMember) this.recordAudit(session, 'member.join', { target: auditRef.member(result.user) });
 
     // Prevent duplicate sessions for the *same device*. A lingering/zombie socket
@@ -1693,6 +1706,10 @@ export class WebSocketServer {
     if (session.protocol?.features.includes('user-brb') && this.getSessionsOfUser(result.user.id)
       .some((other) => other !== session && !!other.user?.brb !== !!session.user?.brb)) {
       this.applyBrb(session, session.user?.brb === true);
+    }
+    if (session.protocol?.features.includes('custom-status') && this.getSessionsOfUser(result.user.id)
+      .some((other) => other !== session && !sameCustomStatus(other.user?.customStatus, session.user?.customStatus))) {
+      this.applyCustomStatus(session, session.user?.customStatus ?? null);
     }
 
     // Broadcast USER_JOINED to all other clients — unless the user is invisible (#561).
@@ -3494,6 +3511,7 @@ export class WebSocketServer {
     if (shared.activity !== undefined && !features?.includes('game-activity')) shared = { ...shared, activity: undefined };
     // Peers without user-brb keep seeing a plain online person.
     if (shared.brb !== undefined && !features?.includes('user-brb')) shared = { ...shared, brb: undefined };
+    if (shared.customStatus !== undefined && !features?.includes('custom-status')) shared = { ...shared, customStatus: undefined };
     return shared;
   }
 
@@ -3506,7 +3524,7 @@ export class WebSocketServer {
       // Hiding has to hide the game too, or "aparecer offline" leaks what the
       // person is doing while claiming they are offline (#675).
       ...(invisible
-        ? { status: 'DISCONNECTED', sessionId: undefined, connectedAt: undefined, activity: undefined, brb: undefined }
+        ? { status: 'DISCONNECTED', sessionId: undefined, connectedAt: undefined, activity: undefined, brb: undefined, customStatus: undefined }
         : {}),
     };
     for (const recipient of this.sessions.values()) {
@@ -3620,7 +3638,38 @@ export class WebSocketServer {
     // Every device carries it, or a later broadcast from another one (a
     // nickname change, say) would bring back a stale status.
     for (const target of this.getSessionsOfUser(session.user.id)) {
-      if (target.user) target.user = { ...target.user, brb: brb || undefined };
+      // "Volto já" replaces a custom status: the person picked one of the two.
+      if (target.user) target.user = { ...target.user, brb: brb || undefined, ...(brb ? { customStatus: undefined } : {}) };
+    }
+    this.broadcastUserUpdate(session.user, requestId);
+  }
+
+  /** The person's own status (custom-status), for every device at once; null clears it. */
+  private handleUserUpdateCustomStatus(session: ClientSession, payload: unknown, requestId?: string): void {
+    if (!session.user) return;
+    if (session.isBot) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bots não usam status personalizado.', requestId);
+      return;
+    }
+    if (!session.protocol?.features.includes('custom-status')) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE,
+        'O status personalizado exige um cliente e servidor atualizados.', requestId);
+      return;
+    }
+    const parsed = userUpdateCustomStatusSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Status personalizado inválido.', requestId);
+      return;
+    }
+    this.applyCustomStatus(session, parsed.data.customStatus, requestId);
+  }
+
+  private applyCustomStatus(session: ClientSession, customStatus: CustomStatus | null, requestId?: string): void {
+    if (!session.user) return;
+    for (const target of this.getSessionsOfUser(session.user.id)) {
+      if (target.user) {
+        target.user = { ...target.user, customStatus: customStatus ?? undefined, ...(customStatus ? { brb: undefined } : {}) };
+      }
     }
     this.broadcastUserUpdate(session.user, requestId);
   }

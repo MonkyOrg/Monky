@@ -6,6 +6,7 @@ import {
   PROTOCOL_FEATURES,
   PROTOCOL_VERSION,
   ProtocolErrorCode,
+  type CustomStatus,
   type UserActivity,
 } from '@monky/shared';
 import { createFixture, identity, record, text } from './testFixtures/bots';
@@ -162,4 +163,86 @@ test('"Volto já" is refused from clients without the feature, from bots, and wi
   const createdBot = await owner.peer.request(MessageType.BOT_CREATE, {});
   const bot = await f.bot(text(createdBot.payload.token));
   await bot.peer.error(MessageType.USER_UPDATE_BRB, { brb: true }, ProtocolErrorCode.PERMISSION_DENIED);
+});
+
+const lunch: CustomStatus = { text: 'Almoçando', emoji: '🍔', tag: 'ALMOÇO', color: '#22aa66', showEmoji: true, showTag: false };
+const withoutCustomStatus = {
+  minimumVersion: MIN_CLIENT_PROTOCOL,
+  features: PROTOCOL_FEATURES.filter((feature) => feature !== 'custom-status'),
+};
+
+test('a custom status reaches peers that negotiated it, replaces "Volto já" and hides behind appear-offline', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const alice = await f.human('Alice');
+  const bob = await f.human('Bob');
+  const legacy = await f.human('Legacy', identity(), undefined, false, PROTOCOL_VERSION, withoutCustomStatus);
+  const isAliceUpdate = (message: { type: string; payload: Record<string, unknown> }) =>
+    message.type === MessageType.USER_UPDATED && text(updatedUser(message).id) === alice.id;
+
+  await alice.peer.request(MessageType.USER_UPDATE_BRB, { brb: true });
+  const bobStart = bob.peer.messages.length;
+  const legacyStart = legacy.peer.messages.length;
+  const own = updatedUser(await alice.peer.request(MessageType.USER_UPDATE_CUSTOM_STATUS, {
+    customStatus: { ...lunch, color: '#22AA66', text: '  Almoçando ' },
+  }));
+  assert.deepEqual(own.customStatus, lunch, 'the server stores the validated, normalized status');
+  assert.equal(Object.hasOwn(own, 'brb'), false, 'choosing a custom status ends "Volto já"');
+  // The earlier "Volto já" broadcast may still be arriving; wait for the update that ended it.
+  const afterBrb = (message: { type: string; payload: Record<string, unknown> }) =>
+    isAliceUpdate(message) && !Object.hasOwn(updatedUser(message), 'brb');
+  assert.deepEqual(updatedUser(await bob.peer.wait(afterBrb, bobStart)).customStatus, lunch);
+  assert.equal(Object.hasOwn(updatedUser(await legacy.peer.wait(afterBrb, legacyStart)), 'customStatus'), false,
+    'peers without the feature keep seeing a plain online person');
+
+  const carol = await f.human('Carol');
+  const members = record(carol.auth.payload.server).members;
+  assert.ok(Array.isArray(members));
+  assert.deepEqual(members.map(record).find((member) => text(member.id) === alice.id)?.customStatus, lunch);
+
+  const hiddenStart = bob.peer.messages.length;
+  await alice.peer.request(MessageType.USER_UPDATE_VISIBILITY, { appearOffline: true });
+  const hidden = updatedUser(await bob.peer.wait((message) => isAliceUpdate(message)
+    && updatedUser(message).status === 'DISCONNECTED', hiddenStart));
+  assert.equal(Object.hasOwn(hidden, 'customStatus'), false, 'appear-offline hides the status too');
+  await alice.peer.request(MessageType.USER_UPDATE_VISIBILITY, { appearOffline: false });
+
+  const brbStart = bob.peer.messages.length;
+  await alice.peer.request(MessageType.USER_UPDATE_BRB, { brb: true });
+  const brb = updatedUser(await bob.peer.wait((message) => isAliceUpdate(message) && updatedUser(message).brb === true, brbStart));
+  assert.equal(Object.hasOwn(brb, 'customStatus'), false, '"Volto já" ends the custom status');
+
+  await alice.peer.request(MessageType.USER_UPDATE_CUSTOM_STATUS, { customStatus: lunch });
+  const clearStart = bob.peer.messages.length;
+  await alice.peer.request(MessageType.USER_UPDATE_CUSTOM_STATUS, { customStatus: null });
+  await bob.peer.wait((message) => isAliceUpdate(message) && !Object.hasOwn(updatedUser(message), 'customStatus'), clearStart);
+});
+
+test('a device that connects with a custom status applies it to the other devices of the person', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const keys = identity();
+  const desktop = await f.human('Alice', keys, undefined, false, PROTOCOL_VERSION, undefined, true);
+  const desktopStart = desktop.peer.messages.length;
+  const laptop = await f.human('Alice', keys, undefined, false, PROTOCOL_VERSION, undefined, undefined, lunch);
+  assert.deepEqual(record(laptop.auth.payload.currentUser).customStatus, lunch);
+  const update = await desktop.peer.wait((message) => message.type === MessageType.USER_UPDATED
+    && text(updatedUser(message).id) === desktop.id && Object.hasOwn(updatedUser(message), 'customStatus'), desktopStart);
+  assert.deepEqual(updatedUser(update).customStatus, lunch);
+  assert.equal(Object.hasOwn(updatedUser(update), 'brb'), false, 'the newer choice replaces "Volto já" everywhere');
+});
+
+test('a custom status is refused from clients without the feature, from bots, and when malformed', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Owner');
+  for (const customStatus of [{ ...lunch, emoji: 'abc' }, { ...lunch, color: 'red' }, { ...lunch, text: 'x'.repeat(129) }]) {
+    await owner.peer.error(MessageType.USER_UPDATE_CUSTOM_STATUS, { customStatus }, ProtocolErrorCode.BAD_REQUEST);
+  }
+  const legacy = await f.human('Legacy', identity(), undefined, false, PROTOCOL_VERSION, withoutCustomStatus, undefined, lunch);
+  assert.equal(Object.hasOwn(record(legacy.auth.payload.currentUser), 'customStatus'), false, 'the login status needs the feature too');
+  await legacy.peer.error(MessageType.USER_UPDATE_CUSTOM_STATUS, { customStatus: lunch }, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+  const createdBot = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const bot = await f.bot(text(createdBot.payload.token));
+  await bot.peer.error(MessageType.USER_UPDATE_CUSTOM_STATUS, { customStatus: lunch }, ProtocolErrorCode.PERMISSION_DENIED);
 });

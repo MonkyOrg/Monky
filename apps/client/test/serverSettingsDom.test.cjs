@@ -432,6 +432,36 @@ async function* runRegression(language, sharedModule) {
   acknowledge('MEMBER_KICK');
   await flush();
   check(memberIds().join() === 'admin,bob', 'An expelled offline member disappears immediately');
+  const search = () => field('#server-members-search');
+  const shownIds = () => memberIds().filter(id => !memberRow(id).hidden);
+  check(search() && !document.getElementById('members-search-input'), 'Member search lives in Server settings > Members');
+  const searchBox = search().getBoundingClientRect();
+  check(searchBox.left + parseFloat(getComputedStyle(search()).paddingLeft)
+    >= field('.members-search-icon').getBoundingClientRect().right, 'The search text starts after its icon');
+  change('#server-members-search', 'BÓB');
+  check(shownIds().join() === 'bob' && !field('#server-members-search-clear').hidden
+    && field('[data-server-members-count]').textContent === t('roles.membersShown', { shown: 1, total: 2 }),
+    'Member search ignores case and accents and reports how many rows match');
+  search().focus();
+  const rolesBeforeSearch = store.roles;
+  const extraRole = (id, name, position) => ({ ...role, id, name, position });
+  store.updateRoles([...rolesBeforeSearch, extraRole('mods', 'Mods', 4), extraRole('vip', 'VIP', 3), extraRole('djs', 'DJs', 2)],
+    [{ userId: 'bob', roleIds: ['editors', 'djs', 'vip', 'mods'] }]);
+  await flush();
+  check(document.activeElement === search() && search().value === 'BÓB' && shownIds().join() === 'bob',
+    'Refreshing the member rows keeps the search text, its focus and the filter');
+  const bobTags = [...memberRow('bob').querySelectorAll('.member-role-tag')].map(tag => tag.textContent);
+  const more = memberRow('bob').querySelector('.member-role-more');
+  check(bobTags.join() === 'Mods,VIP' && more?.textContent === '+2' && more.dataset.tooltip === 'DJs\nEditors'
+    && more.tabIndex === 0, 'Only the highest roles show; the rest collapse into a focusable +N listing them on hover');
+  change('#server-members-search', 'nobody');
+  check(shownIds().length === 0 && !field('[data-server-members-empty]').hidden, 'A search without matches says so');
+  search().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check(search().value === '' && shownIds().join() === 'admin,bob' && field('[data-server-members-empty]').hidden
+    && field('#server-members-search-clear').hidden && field('[data-server-members-count]').hidden && mainBackdrop(),
+    'Escape clears a typed search before it may close the settings');
+  store.updateRoles(rolesBeforeSearch, []);
+  await flush();
   store.removeMemberCompletely('helper');
   tab('general');
   check(field('#server-settings-version').textContent === '44.7.9-beta',

@@ -186,6 +186,14 @@ export class ServerSettingsModal {
     const escape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || !handlesModalKey(root, event)) return;
       event.preventDefault();
+      // A search being typed is cleared first; the next Escape closes.
+      const field = event.target;
+      if (field instanceof HTMLInputElement && field.hasAttribute('data-clear-on-escape') && field.value) {
+        event.stopPropagation();
+        field.value = '';
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+        return;
+      }
       this.close();
     };
     window.addEventListener('keydown', escape, true);

@@ -67,6 +67,22 @@ export interface UserActivity {
   iconBase64?: string;
 }
 
+/**
+ * A status the person wrote themselves (custom-status). Every part is
+ * optional except the dot colour; `showEmoji`/`showTag` choose what appears
+ * next to their name, while the text replaces "Online" under it.
+ */
+export interface CustomStatus {
+  text?: string;
+  /** One Unicode emoji, as picked from the emoji picker. */
+  emoji?: string;
+  tag?: string;
+  /** `#rrggbb`, painted on the status dot and the tag. */
+  color: string;
+  showEmoji: boolean;
+  showTag: boolean;
+}
+
 export interface UserSummary {
   id: string;
   clientId: string;
@@ -98,6 +114,12 @@ export interface UserSummary {
    * negotiated the feature receive it, and never while the person is invisible.
    */
   brb?: boolean;
+  /**
+   * Custom status (custom-status): a phrase, emoji, tag and dot colour the
+   * person chose. Like `brb`, only peers that negotiated the feature receive
+   * it, never while the person is invisible, and never together with `brb`.
+   */
+  customStatus?: CustomStatus;
   /** True when this account is a bot created via the bot management API (#569). */
   isBot?: boolean;
   /**

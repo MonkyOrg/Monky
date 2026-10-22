@@ -6,7 +6,7 @@ import { enterModal, exitModal, handlesModalKey } from '../../../utils/modalSurf
 import { removeOwnedSurfaces } from '../../../utils/surfaceMotion';
 import { t } from '../../../i18n';
 import type { ServerSettingsContext } from '../ServerSettingsContext';
-import { ServerMembersTab } from './ServerMembersTab';
+import { filterServerMembers, ServerMembersTab } from './ServerMembersTab';
 import { ColorPicker } from '../../ColorPicker';
 import { COLOR_PRESETS } from '../../../utils/colors';
 import { ContextMenu } from '../../ContextMenu';
@@ -397,6 +397,13 @@ export class ServerRolesTab {
         this.openMemberPicker();
       } else if (target.dataset.roleMemberAction && target.dataset.roleId && target.dataset.userId) {
         this.assignRole(target.dataset.userId, target.dataset.roleId, target.dataset.roleMemberAction === 'add');
+      } else if (target.id === 'server-members-search-clear') {
+        const search = container.querySelector<HTMLInputElement>('#server-members-search');
+        if (search) {
+          search.value = '';
+          filterServerMembers(container);
+          search.focus();
+        }
       } else if (target.classList.contains('member-actions-trigger')) {
         const wrap = target.closest('.settings-action-menu-wrap');
         const menu = wrap?.querySelector('.settings-action-menu');
@@ -424,6 +431,8 @@ export class ServerRolesTab {
     container.addEventListener('input', (event) => {
       if (event.target instanceof HTMLInputElement && event.target.classList.contains('role-members-search')) {
         this.filterMemberRows(container, event.target.value);
+      } else if (event.target instanceof HTMLInputElement && event.target.id === 'server-members-search') {
+        filterServerMembers(container);
       }
     }, options);
     container.addEventListener('change', (event) => {
@@ -730,8 +739,11 @@ export class ServerRolesTab {
       this.roleMenu.close();
       const body = root.querySelector('#roles-list tbody');
       if (body) body.innerHTML = this.renderRoleRows();
-      const members = root.querySelector('#tab-panel-members > fieldset');
-      if (members) members.innerHTML = new ServerMembersTab().renderHtml();
+      const members = root.querySelector('#server-members-table tbody');
+      if (members) {
+        members.innerHTML = new ServerMembersTab().renderRows();
+        filterServerMembers(root);
+      }
     }
     const roleId = this.editorRoleId();
     const role = roleId ? this.getEditorRole(roleId) : undefined;

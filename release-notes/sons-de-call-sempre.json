@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Os sons de entrada e saída da call agora tocam sempre que você entra, sai ou é tirado de uma call: quando o servidor reinicia para atualizar, quando a conexão cai e volta sozinha, quando alguém te move ou te manda para o AFK.",
+  "en": "The call join and leave sounds now play whenever you enter, leave or are taken out of a call: when the server restarts to update, when the connection drops and recovers on its own, when someone moves you or sends you to AFK."
+}

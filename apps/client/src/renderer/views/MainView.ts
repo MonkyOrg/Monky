@@ -8,7 +8,7 @@ import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisib
 import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { appEvents } from '../core/EventBus';
 import { networkClient, ProtocolRequestError } from '../core/NetworkClient';
-import { currentPresenceStatus, sessionManager, type PresenceStatus } from '../core/SessionManager';
+import { currentPresenceStatus, publishedCustomStatus, sessionManager, type PresenceStatus } from '../core/SessionManager';
 import { isForegroundEvent } from '../core/sessionRouting';
 import { callClient, isVoiceAdmissionPending, joinCallOnSession, leaveCurrentCall, rejoinCallOnSession, showHome } from '../core/serverConnection';
 import { participantManager } from '../core/ParticipantManager';
@@ -52,12 +52,13 @@ import { renderChannelIcon, showChannelIconLoading } from './channelIcon';
 import { captureHostedServerLeaveState, promptShutdownAfterLeave } from '../utils/hostedServer';
 import { userContextMenu } from './UserContextMenu';
 import { soundboardModal } from './SoundboardModal';
-import { soundEffects } from '../core/SoundEffects';
 import { getAvatarUrl, toAbsoluteServerIconUrl } from '../utils/avatar';
 import { ownAvatarSource } from '../core/profileSync';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
 import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
-import { renderBrbTag } from '../utils/presenceTag';
+import { customStatusDotStyle, customStatusLabel, renderPresenceTag, visibleCustomStatus } from '../utils/presenceTag';
+import { renderRoleTags } from '../utils/roleTags';
+import { customStatusModal } from './CustomStatusModal';
 import { serverRailView } from './ServerRailView';
 import { soundboardPlayersBar } from './SoundboardPlayersBar';
 import { overlayBridgeService } from '../core/OverlayBridgeService';
@@ -73,22 +74,23 @@ import type { MessageSearchResultPayload } from '@monky/shared';
 /** A loose channel or a category, the two kinds of entries at the sidebar root. */
 type ChannelTreeTarget = { kind: 'channel' | 'category'; id: string };
 
-/** Case- and accent-insensitive form used to match member names. */
-function normalizeMemberQuery(value: string): string {
-  return value.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLocaleLowerCase().trim();
-}
+/** Role tags in the narrow member sidebar before the rest collapse into "+N". */
+const SIDEBAR_ROLE_TAGS = 2;
 
-function presenceIndicator(): { className: PresenceStatus; label: string } {
+function presenceIndicator(): { className: PresenceStatus; label: string; style: string } {
   const status = currentPresenceStatus();
+  const custom = publishedCustomStatus();
+  if (custom) return { className: status, label: customStatusLabel(custom), style: customStatusDotStyle(custom) };
   const label = status === 'invisible' ? t('main.statusInvisible') : status === 'brb' ? t('main.statusBrb') : t('main.statusOnline');
-  return { className: status, label };
+  return { className: status, label, style: '' };
 }
 
-/** The status dot on the user card; clicking it chooses online, "Volto já" or invisible. */
+/** The status dot on the user card; clicking it chooses online, "Volto já", the custom status or invisible. */
 function renderPresenceDot(): string {
-  const { className, label } = presenceIndicator();
+  const { className, label, style } = presenceIndicator();
   return `<button type="button" id="main-user-status-dot" class="status-indicator status-indicator-button ${className}"
-    aria-haspopup="menu" aria-expanded="false" aria-label="${escapeHtml(t('main.changeStatusAria', { status: label }))}"
+    ${style ? `style="${style}"` : ''} aria-haspopup="menu" aria-expanded="false"
+    aria-label="${escapeHtml(t('main.changeStatusAria', { status: label }))}"
     title="${escapeHtml(t('main.changeStatus'))}"></button>`;
 }
 
@@ -112,8 +114,6 @@ export class MainView {
   private botScreenDock: BotScreenDock | null = null;
   private unbindEvents: Array<() => void> = [];
   private activeContentView: 'chat' | 'stage' = 'chat';
-  /** Text typed in the members sidebar search, kept across list redraws. */
-  private memberFilter = '';
   private sidebarPingInterval: number | null = null;
   // Caches the rendered screen-share notice so the frequent (per-frame)
   // 'participants.updated' events don't rebuild it on every speaking change,
@@ -203,8 +203,6 @@ export class MainView {
     const navigationKey = home ? 'home' : sessionManager.getActiveKey();
     const navigating = this.navigationKey !== navigationKey;
     if (navigating && this.activeContentView === 'stage') this.voiceStageView?.openAutomaticPictureInPicture();
-    // Each server has its own members: a filter typed elsewhere means nothing here.
-    if (navigating) this.memberFilter = '';
     this.navigationKey = navigationKey;
 
     const markup = `
@@ -284,7 +282,7 @@ export class MainView {
                 <div class="user-info-text">
                   <span id="main-user-name" class="user-name-display">${escapeHtml(u.nickname)}</span>
                   ${home ? `<span class="user-status-text" title="${escapeHtml(s.name)}">${escapeHtml(s.name)}</span>` : ''}
-                  <span id="main-user-status-text" class="user-status-text">${presenceIndicator().label}</span>
+                  <span id="main-user-status-text" class="user-status-text">${escapeHtml(presenceIndicator().label)}</span>
                 </div>
               </div>
 
@@ -325,16 +323,6 @@ export class MainView {
         <div class="members-sidebar">
           <div class="members-header">
             <span id="members-count-label">${t('main.membersCount', { count: 0 })}</span>
-          </div>
-          <div class="members-search">
-            <span class="material-symbols-outlined md-18 members-search-icon" aria-hidden="true">search</span>
-            <input id="members-search-input" class="members-search-input" type="text" autocomplete="off" spellcheck="false"
-              placeholder="${escapeHtml(t('main.searchMembers'))}" aria-label="${escapeHtml(t('main.searchMembers'))}"
-              aria-controls="members-list-items" value="${escapeHtml(this.memberFilter)}">
-            <button type="button" id="members-search-clear" class="btn btn-icon members-search-clear" title="${escapeHtml(t('common.clear'))}"
-              aria-label="${escapeHtml(t('common.clear'))}" ${this.memberFilter ? '' : 'hidden'}>
-              <span class="material-symbols-outlined md-16" aria-hidden="true">close</span>
-            </button>
           </div>
           <div id="members-list-items" class="members-list"></div>
         </div>
@@ -528,7 +516,7 @@ export class MainView {
                 </div>
                 <div class="user-info-text">
                   <span id="main-user-name" class="user-name-display">${escapeHtml(nickname)}</span>
-                  <span id="main-user-status-text" class="user-status-text">${presenceIndicator().label}</span>
+                  <span id="main-user-status-text" class="user-status-text">${escapeHtml(presenceIndicator().label)}</span>
                 </div>
               </div>
               <div class="user-quick-actions">
@@ -1547,7 +1535,7 @@ export class MainView {
                     <div id="voice-mini-user-${sessionId}" class="voice-participant-mini ${isSpeaking ? 'speaking' : ''}" data-session-id="${sessionId}" title="${escapeHtml(displayName)} (${t(isLocal ? 'common.you' : 'main.rightClickVolumeShort')})">
                       <img class="voice-mini-avatar" src="${avatar}" data-fallback="avatar">
                       <span class="voice-mini-name">${escapeHtml(displayName)}</span>
-                      ${renderBrbTag(p.user)}
+                      ${renderPresenceTag(p.user)}
                       ${isPeerFailed ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-failed" title="${isSfu ? t('main.sfuConnectionFailed') : peerFailureTooltip('main.peerConnectionFailed')}">link_off</span>` : ''}
                       ${isConnecting ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-connecting" title="${t(isSfu ? 'main.sfuConnecting' : 'main.peerConnecting')}">sync</span>` : ''}
                       ${isRelayed ? `<span class="material-symbols-outlined md-14 voice-mini-icon relayed" title="${t('main.peerRelayed')}">swap_horiz</span>` : ''}
@@ -2539,7 +2527,6 @@ export class MainView {
       return false;
     }
     if (voiceStore.voiceSessionKey !== session.key || voiceStore.currentVoiceChannelId !== channelId) return false;
-    if (!silent && !voiceStore.getEffectiveDeafened()) soundEffects.play('join_voice');
     return true;
   }
 
@@ -2619,10 +2606,8 @@ export class MainView {
     const countEl = document.getElementById('members-count-label');
 
     const allMembers = serverStore.getAllMembersInDisplayOrder();
-    const query = normalizeMemberQuery(this.memberFilter);
-    const shownMembers = query ? allMembers.filter((m) => normalizeMemberQuery(m.nickname).includes(query)) : allMembers;
-    const onlineMembers = shownMembers.filter((m) => m.status !== 'DISCONNECTED');
-    const offlineMembers = shownMembers.filter((m) => m.status === 'DISCONNECTED');
+    const onlineMembers = allMembers.filter((m) => m.status !== 'DISCONNECTED');
+    const offlineMembers = allMembers.filter((m) => m.status === 'DISCONNECTED');
 
     // For private channel visibility: determine which voice channels the local
     // user can see, so members in invisible private channels appear as offline.
@@ -2655,21 +2640,24 @@ export class MainView {
       const isSelfMuted = !effectiveOffline && (isLocalCall ? voiceStore.isMuted : (voiceState?.isMuted ?? false));
 
       const isBrb = !effectiveOffline && !m.invisible && m.brb === true;
-      const statusClass = m.invisible ? 'invisible' : (isReconnecting ? 'reconnecting' : (isBrb ? 'brb' : (inVoice ? 'voice' : (effectiveOffline ? 'offline' : 'online'))));
+      const customStatus = effectiveOffline ? null : visibleCustomStatus(m);
+      const statusClass = m.invisible ? 'invisible' : (isReconnecting ? 'reconnecting' : (isBrb ? 'brb' : customStatus ? 'custom'
+        : (inVoice ? 'voice' : (effectiveOffline ? 'offline' : 'online'))));
       const statusText = m.invisible ? t('main.statusInvisible') : isReconnecting
         ? t('main.reconnecting')
-        : (isBrb ? t('main.statusBrb') : (inVoice ? t('main.inVoiceChannel') : (effectiveOffline ? t('main.statusOffline') : t('main.statusOnline'))));
+        : (isBrb ? t('main.statusBrb') : customStatus?.text ?? (inVoice ? t('main.inVoiceChannel')
+          : (effectiveOffline ? t('main.statusOffline') : t('main.statusOnline'))));
 
       return `
         <div class="member-item ${effectiveOffline ? 'member-offline' : ''} ${isReconnecting ? 'reconnecting' : ''}" data-user-id="${m.id}" title="${escapeHtml(m.nickname)} ${isLocal ? `(${t('common.you')})` : `(${t('main.rightClickVolume')})`}">
           <div class="member-avatar-wrapper">
             <img class="member-avatar-img" src="${avatar}" data-fallback="avatar">
-            <span class="status-indicator ${statusClass}" role="img" aria-label="${statusText}"></span>
+            <span class="status-indicator ${statusClass}"${customStatus && statusClass === 'custom' ? ` style="${customStatusDotStyle(customStatus)}"` : ''} role="img" aria-label="${escapeHtml(statusText)}"></span>
           </div>
           <div class="member-info">
             <div class="member-name-row">
               <span class="member-name">${escapeHtml(m.nickname)}</span>
-              ${isBrb ? renderBrbTag(m) : ''}
+              ${effectiveOffline ? '' : renderPresenceTag(m)}
               ${isLocal ? `<span class="member-badge-you">${t('common.you')}</span>` : ''}
               ${m.id === serverStore.ownerId ? `<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
               ${m.isBot ? `<span class="member-badge-bot" title="Bot">BOT</span>` : ''}
@@ -2692,9 +2680,9 @@ export class MainView {
               const userRoles = serverStore
                 .getUserRoles(m.id)
                 .filter((r) => !r.isDefault && (canSeeAllBadges || myRoleIds.includes(r.id)));
-              return userRoles.length ? `<div class="member-role-tags">${userRoles.map((role) => `<span class="member-role-tag" style="${role.color ? `--role-color: ${role.color}` : ''}">${escapeHtml(role.name)}</span>`).join('')}</div>` : '';
+              return renderRoleTags(userRoles, SIDEBAR_ROLE_TAGS);
             })()}
-            <span class="member-subtext">${statusText}</span>
+            <span class="member-subtext"${customStatus?.text ? ` title="${escapeHtml(customStatus.text)}"` : ''}>${escapeHtml(statusText)}</span>
           </div>
         </div>
       `;
@@ -2715,10 +2703,6 @@ export class MainView {
           <div class="member-section-header">${t('main.membersOffline')} — ${offlineMembers.length}</div>
           ${offlineMembers.map((m) => renderMemberItem(m, true)).join('')}
         `);
-      }
-
-      if (query && shownMembers.length === 0) {
-        sections.push(`<div class="members-search-empty" role="status">${escapeHtml(t('main.searchMembersEmpty'))}</div>`);
       }
 
       listEl.innerHTML = sections.join('');
@@ -2820,28 +2804,6 @@ export class MainView {
     });
     this.refreshServerMonitorVisibility();
     btnProfile?.addEventListener('click', (e) => withButtonLoading(e.currentTarget as HTMLElement, () => settingsModal.open()));
-    const membersSearch = document.getElementById('members-search-input') as HTMLInputElement | null;
-    const membersSearchClear = document.getElementById('members-search-clear');
-    const applyMemberFilter = (value: string) => {
-      this.memberFilter = value;
-      if (membersSearchClear) membersSearchClear.hidden = !value;
-      this.renderMembers();
-    };
-    membersSearch?.addEventListener('input', () => applyMemberFilter(membersSearch.value));
-    membersSearch?.addEventListener('keydown', (event) => {
-      if (event.key !== 'Escape' || !membersSearch.value) return;
-      // Escape clears the search before anything else reacts to it.
-      event.preventDefault();
-      event.stopPropagation();
-      membersSearch.value = '';
-      applyMemberFilter('');
-    });
-    membersSearchClear?.addEventListener('click', () => {
-      if (!membersSearch) return;
-      membersSearch.value = '';
-      applyMemberFilter('');
-      membersSearch.focus();
-    });
     const statusDot = document.getElementById('main-user-status-dot');
     statusDot?.addEventListener('click', (event) => {
       // The dot sits inside the profile button: it chooses a status instead.
@@ -2856,10 +2818,13 @@ export class MainView {
         label, icon, iconClass: `presence-menu-icon presence-menu-icon--${status}`, checked: current === status,
         onClick: () => sessionManager.setPresenceStatus(status),
       });
+      const saved = settingsStore.customStatus;
       contextMenu.open(box.left, box.top, [
         option('online', 'circle', t('main.statusOnline')),
         option('brb', 'schedule', t('main.statusBrb')),
+        ...saved ? [{ ...option('custom', 'circle', customStatusLabel(saved)), iconColor: saved.color }] : [],
         option('invisible', 'visibility_off', t('main.statusInvisible')),
+        { label: t(saved ? 'customStatus.edit' : 'customStatus.set'), icon: 'edit', onClick: () => customStatusModal.open() },
       ], statusDot);
     });
     const openOwnUserMenu = (event: MouseEvent) => {
@@ -3006,7 +2971,6 @@ export class MainView {
         // Captured before the socket closes: afterwards there is no way to tell
         // whether this user was hosting the server they just left (#334).
         const leaveState = await captureHostedServerLeaveState(session.client.getCurrentServerUrl());
-        soundEffects.play('leave_voice');
         appEvents.emit('connection.manual_disconnect', { key: session.key });
         // Microphone and peer mesh are shared by every session (#400): tearing
         // them down while the call lives on another server would kill the audio
@@ -3200,6 +3164,7 @@ export class MainView {
       const presence = presenceIndicator();
       if (dot) {
         dot.className = `status-indicator status-indicator-button ${presence.className}`;
+        dot.setAttribute('style', presence.style);
         dot.setAttribute('aria-label', t('main.changeStatusAria', { status: presence.label }));
       }
       const statusText = document.getElementById('main-user-status-text');
