@@ -69,6 +69,8 @@ import { archiveDate, renderForwardedBadge } from '../utils/messageForward';
 
 /** How close to the end the feed must be to keep following new messages (#270). */
 const BOTTOM_SCROLL_THRESHOLD_PX = 48;
+// How long a channel or history reveal follows a viewport that shrinks under it.
+const REVEAL_FOLLOW_MS = 1000;
 
 /** A file picked for upload, tracked until its message is sent (#11). */
 interface PendingAttachment {
@@ -112,6 +114,11 @@ export class ChatView {
   private unbindEvents: Array<() => void> = [];
   /** Tracks whether the feed is following the end of the conversation (#270). */
   private pinnedToBottom = true;
+  /**
+   * Until when a reveal of the newest message (opening a channel or its
+   * history) is under way. It also ends on arrival or when the user takes over.
+   */
+  private revealingEndUntil = 0;
   // @-mention autocomplete state (#14). The list may also offer the
   // channel-wide token (#464), which is not a user.
   private mentionActive = false;
@@ -1956,6 +1963,29 @@ export class ChatView {
       messagesFeed.addEventListener('scroll', () => {
         this.pinnedToBottom = this.isFeedAtBottom(messagesFeed);
       });
+      // The composer can grow under the feed while it scrolls to the newest
+      // message (a toolbar wrapping onto another line in a narrow window): the
+      // smaller viewport moves the end below the scroll's destination, so the
+      // newest message would stay hidden behind the composer.
+      let viewport = messagesFeed.clientHeight;
+      const keepEndInView = new ResizeObserver(() => {
+        const shrunk = messagesFeed.clientHeight < viewport;
+        viewport = messagesFeed.clientHeight;
+        if (shrunk && performance.now() < this.revealingEndUntil) this.scrollToBottom(true);
+      });
+      keepEndInView.observe(messagesFeed);
+      const userTakesOver = () => { this.revealingEndUntil = 0; };
+      const takeoverEvents = ['wheel', 'touchstart', 'keydown', 'pointerdown'] as const;
+      for (const type of takeoverEvents) messagesFeed.addEventListener(type, userTakesOver, { passive: true });
+      // The bounded reveal starts with an instant leg that ends far from the end;
+      // only a scroll that comes to rest at the end finishes the reveal.
+      const revealSettled = () => { if (this.isFeedAtBottom(messagesFeed)) this.revealingEndUntil = 0; };
+      messagesFeed.addEventListener('scrollend', revealSettled);
+      this.unbindEvents.push(() => {
+        keepEndInView.disconnect();
+        for (const type of takeoverEvents) messagesFeed.removeEventListener(type, userTakesOver);
+        messagesFeed.removeEventListener('scrollend', revealSettled);
+      });
     }
 
     const autoResize = () => {
@@ -2715,6 +2745,9 @@ export class ChatView {
   private scrollToBottom(shortReveal = false): void {
     const feed = document.getElementById('chat-messages-feed');
     if (feed) {
+      // Only the bounded reveal of a channel or history is followed, and briefly:
+      // other scrolls, including one already at the end, are not in flight.
+      this.revealingEndUntil = shortReveal && !this.isFeedAtBottom(feed) ? performance.now() + REVEAL_FOLLOW_MS : 0;
       const scroll = () => {
         if (shortReveal) restoreScrollWithMotion(feed, feed.scrollHeight);
         else smoothScrollTo(feed, { top: feed.scrollHeight });
