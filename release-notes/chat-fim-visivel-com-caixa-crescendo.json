@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Ao abrir um canal, a última mensagem não fica mais escondida atrás da caixa de texto quando ela cresce enquanto o chat rola até o fim, o que acontecia principalmente em janelas estreitas.",
+  "en": "When opening a channel, the newest message no longer ends up hidden behind the message box when the box grows while the chat scrolls to the end, which happened mostly in narrow windows."
+}

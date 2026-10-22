@@ -2559,6 +2559,10 @@ async function* regression(locale, inviteModule) {
       scrollTo.call(this, options);
     };
     main.chatView.renderMessages({ forceScroll: true });
+    // The composer growing mid-reveal (a toolbar wrapping in a narrow window) shrinks
+    // the feed without scrolling it; the reveal must still end on the newest message.
+    const revealComposer = mainRoot.querySelector('.chat-input-container');
+    requestAnimationFrame(() => { revealComposer.style.paddingBottom = '24px'; });
     check(longFeed.scrollHeight > longFeed.clientHeight * 20 &&
       longFeed.scrollHeight - longFeed.clientHeight - longFeed.scrollTop <= 161 &&
       scrollCalls.some(call => call.behavior === 'smooth' && call.top > call.before),
@@ -2573,6 +2577,7 @@ async function* regression(locale, inviteModule) {
       };
       requestAnimationFrame(settle);
     });
+    revealComposer.style.paddingBottom = '';
     // Exercise a normal bottom pin too: a clamped no-op is not another viewport of travel.
     main.chatView.scrollToBottom();
     check(scrollCalls.filter(call => call.behavior === 'smooth').every(call => Math.abs(call.top - call.before) <= 161),

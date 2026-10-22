@@ -54,19 +54,24 @@ if (!process.versions.electron) {
     });
     window.webContents.on('console-message', (_event, level, message) => { if (level >= 3) console.error(`[renderer] ${message}`); });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-    await window.loadURL(`http://127.0.0.1:${httpServer.address().port}/__custom_status__`);
-    const checks = await window.webContents.executeJavaScript(`(${runCustomStatusSmoke.toString()})().catch((error) => { throw new Error(error.stack); })`, true);
-    console.log(`Custom status DOM smoke: ${checks} checks passed`);
+    // A fresh page per language: CI runs in English, a developer machine may default to Portuguese.
+    for (const language of ['pt-BR', 'en']) {
+      await window.loadURL(`http://127.0.0.1:${httpServer.address().port}/__custom_status__`);
+      const checks = await window.webContents.executeJavaScript(
+        `(${runCustomStatusSmoke.toString()})(${JSON.stringify(language)}).catch((error) => { throw new Error(error.stack); })`, true);
+      console.log(`Custom status DOM smoke (${language}): ${checks} checks passed`);
+    }
     await finish(0);
   }).catch(async (error) => { console.error('Custom status DOM smoke failed', error); await finish(1); });
 }
 
-async function runCustomStatusSmoke() {
+async function runCustomStatusSmoke(language) {
   const [{ MainView }, { settingsStore: settings }, { serverStore: server }, { sessionManager }, { soundEffects },
-    { appEvents }] = await Promise.all([
+    { appEvents }, { t, setLanguage }] = await Promise.all([
     import('/views/MainView.ts'), import('/stores/settingsStore.ts'), import('/stores/serverStore.ts'),
-    import('/core/SessionManager.ts'), import('/core/SoundEffects.ts'), import('/core/EventBus.ts'),
+    import('/core/SessionManager.ts'), import('/core/SoundEffects.ts'), import('/core/EventBus.ts'), import('/i18n/index.ts'),
   ]);
+  setLanguage(language);
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
   const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
@@ -113,7 +118,7 @@ async function runCustomStatusSmoke() {
   check(!root.querySelector('.members-list img[src="x"]') && !window.pwned, 'status text is escaped, never markup');
   const bia = row('bia');
   check(!bia.querySelector('.presence-custom'), 'with emoji and tag both hidden nothing sits beside the name');
-  check(bia.querySelector('.status-indicator.custom') && bia.querySelector('.member-subtext').textContent === 'Online',
+  check(bia.querySelector('.status-indicator.custom') && bia.querySelector('.member-subtext').textContent === t('main.statusOnline'),
     'without text the coloured dot remains and the subtitle stays Online');
   check(row('caio').querySelector('.presence-brb-tag') && !row('caio').querySelector('.presence-custom'), '"Volto já" keeps its BRB tag');
 
@@ -121,7 +126,7 @@ async function runCustomStatusSmoke() {
   const menuItems = () => [...document.querySelectorAll('.floating-context-menu [role^="menuitem"]')];
   dot().click();
   await settle();
-  check(menuItems().map((item) => item.textContent.trim()).join('|').includes('Definir status personalizado'),
+  check(menuItems().map((item) => item.textContent.trim()).join('|').includes(t('customStatus.set')),
     'the status menu offers to set a custom status');
   check(menuItems().length === 4, 'without a saved status there is no custom choice yet');
   menuItems().at(-1).click();
@@ -178,8 +183,8 @@ async function runCustomStatusSmoke() {
   const customItem = menuItems().find((item) => item.textContent.includes('Em reunião'));
   check(customItem?.getAttribute('aria-checked') === 'true' && customItem.querySelector('.material-symbols-outlined').style.color,
     'the saved status is a checked choice painted in its colour');
-  check(labels.at(-1).includes('Editar status personalizado'), 'the last item edits the saved status');
-  menuItems().find((item) => item.textContent.includes('Online')).click();
+  check(labels.at(-1).includes(t('customStatus.edit')), 'the last item edits the saved status');
+  menuItems().find((item) => item.textContent.includes(t('main.statusOnline'))).click();
   await settle();
   check(!settings.customStatusActive && settings.customStatus, 'choosing Online keeps the saved status for later');
   check(sent.at(-1)?.payload.customStatus === null, 'and clears it on the server');
