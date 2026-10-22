@@ -29,6 +29,8 @@ import {
   ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX,
   userActivitySchema,
   userUpdateActivitySchema,
+  customStatusSchema,
+  userUpdateCustomStatusSchema,
   voiceAfkSchema,
   AFK_TIMEOUT_OPTIONS_SECONDS,
   isAfkTimeoutSeconds,
@@ -272,6 +274,36 @@ assert.deepEqual(AFK_TIMEOUT_OPTIONS_SECONDS.filter(isAfkTimeoutSeconds), [...AF
 assert.equal(isAfkTimeoutSeconds(LIMITS.AFK_TIMEOUT_DEFAULT_SECONDS), true, 'o padrão é uma das opções oferecidas');
 for (const value of [0, 120, '900', null]) assert.equal(isAfkTimeoutSeconds(value), false, `inatividade ${String(value)}`);
 console.log('✔ Limite de pessoas e canal AFK verificados');
+
+// Status personalizado (custom-status)
+{
+  const status = { color: '#5865F2', showEmoji: true, showTag: true };
+  assert.deepEqual(customStatusSchema.parse({ ...status, text: '  almoçando  ', emoji: '🍔', tag: ' AFK ' }),
+    { color: '#5865f2', showEmoji: true, showTag: true, text: 'almoçando', emoji: '🍔', tag: 'AFK' },
+    'texto e tag são aparados e a cor é normalizada');
+  assert.deepEqual(customStatusSchema.parse({ ...status, text: '   ', tag: '' }), { color: '#5865f2', showEmoji: true, showTag: true },
+    'campos em branco somem: só a cor da bolinha é obrigatória');
+  for (const emoji of ['👍🏽', '👨‍👩‍👧', '🇧🇷', '1️⃣', '❤️']) {
+    assert.equal(customStatusSchema.safeParse({ ...status, emoji }).success, true, `emoji ${emoji}`);
+  }
+  for (const emoji of ['a', '1', '#', '😀😀', '<b>', '🍔 ']) {
+    assert.equal(customStatusSchema.safeParse({ ...status, emoji }).success, false, `não é um único emoji: ${emoji}`);
+  }
+  for (const invalid of [
+    { ...status, color: 'red' },
+    { ...status, text: 'x'.repeat(LIMITS.MAX_CUSTOM_STATUS_TEXT_LENGTH + 1) },
+    { ...status, tag: 'x'.repeat(LIMITS.MAX_CUSTOM_STATUS_TAG_LENGTH + 1) },
+    { ...status, text: 'duas\nlinhas' },
+    { ...status, showTag: undefined },
+    { ...status, extra: true },
+  ]) assert.equal(customStatusSchema.safeParse(invalid).success, false, JSON.stringify(invalid));
+  assert.equal(userUpdateCustomStatusSchema.safeParse({ customStatus: null }).success, true, 'null limpa o status');
+  assert.equal(authConnectSchema.safeParse({
+    protocolVersion: PROTOCOL_VERSION, nickname: 'Ana', publicKey: `${ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX}${'a'.repeat(64)}`,
+    customStatus: { ...status, color: 'nope' },
+  }).success, false, 'o login também valida o status');
+}
+console.log('✔ Status personalizado verificado');
 
 // Presença de jogo e convites de partida (#675)
 console.assert(

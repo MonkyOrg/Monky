@@ -23,6 +23,10 @@ export const LIMITS = {
   // three orders of magnitude below MAX_AVATAR_SIZE on purpose: this field is
   // never a place to put bulk data, and the server has no maxPayload of its own.
   MAX_ACTIVITY_ICON_LENGTH: 32 * 1024,
+  // Custom status (custom-status): a short phrase under the name and a tag
+  // small enough to sit beside it, like the BRB tag.
+  MAX_CUSTOM_STATUS_TEXT_LENGTH: 128,
+  MAX_CUSTOM_STATUS_TAG_LENGTH: 12,
   // "Pedir para ver a partida" (#763): how long the player has to answer, and
   // how long the same person waits before asking the same player again.
   GAME_SHARE_REQUEST_TIMEOUT_MS: 30_000,

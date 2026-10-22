@@ -6,6 +6,8 @@ export interface ContextMenuItem {
   icon?: string;
   /** Extra classes for the icon, e.g. to colour a status. */
   iconClass?: string;
+  /** Paints the icon, e.g. a custom status dot in the person's colour. */
+  iconColor?: string;
   /** Marks the current choice of a single-choice menu (menuitemradio). */
   checked?: boolean;
   danger?: boolean;
@@ -75,6 +77,7 @@ export class ContextMenu {
         icon.className = 'material-symbols-outlined md-18' + ('iconClass' in item && item.iconClass ? ` ${item.iconClass}` : '');
         icon.setAttribute('aria-hidden', 'true');
         icon.textContent = item.icon;
+        if ('iconColor' in item && item.iconColor) icon.style.color = item.iconColor;
         btn.appendChild(icon);
       }
       const label = document.createElement('span');

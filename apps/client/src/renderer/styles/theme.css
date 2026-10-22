@@ -9994,6 +9994,191 @@ input:focus, textarea:focus, select:focus {
   white-space: nowrap;
 }
 
+/* Custom status (custom-status): the dot, emoji and tag in the person's own colour. */
+.status-indicator.custom {
+  background-color: var(--status-color, var(--success));
+}
+
+.presence-menu-icon--custom { font-variation-settings: 'FILL' 1; }
+
+.presence-custom {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.presence-custom-emoji {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.presence-custom-tag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  line-height: 1.4;
+  color: var(--status-color);
+  background-color: color-mix(in srgb, var(--status-color) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--status-color) 40%, transparent);
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+
+.presence-custom-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.presence-custom-card > .input-mode-card { flex: 1; }
+
+.presence-custom-icon {
+  color: var(--text-muted);
+  font-variation-settings: 'FILL' 1;
+}
+
+.presence-custom-edit {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.custom-status-modal { max-width: 460px; }
+
+.custom-status-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.custom-status-form .form-group { margin-bottom: 0; }
+
+.custom-status-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+
+.custom-status-preview-dot.status-indicator {
+  position: static;
+  width: 12px;
+  height: 12px;
+  border: none;
+  flex-shrink: 0;
+}
+
+.custom-status-preview-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.custom-status-preview-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.custom-status-preview-text {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.custom-status-text-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.custom-status-text-row input { flex: 1; min-width: 0; }
+
+.custom-status-emoji-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  color: var(--text-muted);
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.custom-status-emoji-btn:hover,
+.custom-status-emoji-btn:focus-visible {
+  color: var(--text-primary);
+  border-color: var(--border-focus);
+}
+
+.custom-status-emoji-glyph {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.custom-status-clear-emoji {
+  position: absolute;
+  left: 28px;
+  top: -6px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  color: var(--text-primary);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+}
+
+.custom-status-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.custom-status-field-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.custom-status-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+
+.custom-status-footer .custom-status-remove { margin-right: auto; }
+
 .user-avatar-container .status-indicator {
   width: 14px;
   height: 14px;

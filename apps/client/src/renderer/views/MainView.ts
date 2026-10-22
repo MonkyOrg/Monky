@@ -8,7 +8,7 @@ import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisib
 import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { appEvents } from '../core/EventBus';
 import { networkClient, ProtocolRequestError } from '../core/NetworkClient';
-import { currentPresenceStatus, sessionManager, type PresenceStatus } from '../core/SessionManager';
+import { currentPresenceStatus, publishedCustomStatus, sessionManager, type PresenceStatus } from '../core/SessionManager';
 import { isForegroundEvent } from '../core/sessionRouting';
 import { callClient, isVoiceAdmissionPending, joinCallOnSession, leaveCurrentCall, rejoinCallOnSession, showHome } from '../core/serverConnection';
 import { participantManager } from '../core/ParticipantManager';
@@ -56,8 +56,9 @@ import { getAvatarUrl, toAbsoluteServerIconUrl } from '../utils/avatar';
 import { ownAvatarSource } from '../core/profileSync';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
 import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
-import { renderBrbTag } from '../utils/presenceTag';
+import { customStatusDotStyle, customStatusLabel, renderPresenceTag, visibleCustomStatus } from '../utils/presenceTag';
 import { renderRoleTags } from '../utils/roleTags';
+import { customStatusModal } from './CustomStatusModal';
 import { serverRailView } from './ServerRailView';
 import { soundboardPlayersBar } from './SoundboardPlayersBar';
 import { overlayBridgeService } from '../core/OverlayBridgeService';
@@ -76,17 +77,20 @@ type ChannelTreeTarget = { kind: 'channel' | 'category'; id: string };
 /** Role tags in the narrow member sidebar before the rest collapse into "+N". */
 const SIDEBAR_ROLE_TAGS = 2;
 
-function presenceIndicator(): { className: PresenceStatus; label: string } {
+function presenceIndicator(): { className: PresenceStatus; label: string; style: string } {
   const status = currentPresenceStatus();
+  const custom = publishedCustomStatus();
+  if (custom) return { className: status, label: customStatusLabel(custom), style: customStatusDotStyle(custom) };
   const label = status === 'invisible' ? t('main.statusInvisible') : status === 'brb' ? t('main.statusBrb') : t('main.statusOnline');
-  return { className: status, label };
+  return { className: status, label, style: '' };
 }
 
-/** The status dot on the user card; clicking it chooses online, "Volto já" or invisible. */
+/** The status dot on the user card; clicking it chooses online, "Volto já", the custom status or invisible. */
 function renderPresenceDot(): string {
-  const { className, label } = presenceIndicator();
+  const { className, label, style } = presenceIndicator();
   return `<button type="button" id="main-user-status-dot" class="status-indicator status-indicator-button ${className}"
-    aria-haspopup="menu" aria-expanded="false" aria-label="${escapeHtml(t('main.changeStatusAria', { status: label }))}"
+    ${style ? `style="${style}"` : ''} aria-haspopup="menu" aria-expanded="false"
+    aria-label="${escapeHtml(t('main.changeStatusAria', { status: label }))}"
     title="${escapeHtml(t('main.changeStatus'))}"></button>`;
 }
 
@@ -278,7 +282,7 @@ export class MainView {
                 <div class="user-info-text">
                   <span id="main-user-name" class="user-name-display">${escapeHtml(u.nickname)}</span>
                   ${home ? `<span class="user-status-text" title="${escapeHtml(s.name)}">${escapeHtml(s.name)}</span>` : ''}
-                  <span id="main-user-status-text" class="user-status-text">${presenceIndicator().label}</span>
+                  <span id="main-user-status-text" class="user-status-text">${escapeHtml(presenceIndicator().label)}</span>
                 </div>
               </div>
 
@@ -512,7 +516,7 @@ export class MainView {
                 </div>
                 <div class="user-info-text">
                   <span id="main-user-name" class="user-name-display">${escapeHtml(nickname)}</span>
-                  <span id="main-user-status-text" class="user-status-text">${presenceIndicator().label}</span>
+                  <span id="main-user-status-text" class="user-status-text">${escapeHtml(presenceIndicator().label)}</span>
                 </div>
               </div>
               <div class="user-quick-actions">
@@ -1531,7 +1535,7 @@ export class MainView {
                     <div id="voice-mini-user-${sessionId}" class="voice-participant-mini ${isSpeaking ? 'speaking' : ''}" data-session-id="${sessionId}" title="${escapeHtml(displayName)} (${t(isLocal ? 'common.you' : 'main.rightClickVolumeShort')})">
                       <img class="voice-mini-avatar" src="${avatar}" data-fallback="avatar">
                       <span class="voice-mini-name">${escapeHtml(displayName)}</span>
-                      ${renderBrbTag(p.user)}
+                      ${renderPresenceTag(p.user)}
                       ${isPeerFailed ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-failed" title="${isSfu ? t('main.sfuConnectionFailed') : peerFailureTooltip('main.peerConnectionFailed')}">link_off</span>` : ''}
                       ${isConnecting ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-connecting" title="${t(isSfu ? 'main.sfuConnecting' : 'main.peerConnecting')}">sync</span>` : ''}
                       ${isRelayed ? `<span class="material-symbols-outlined md-14 voice-mini-icon relayed" title="${t('main.peerRelayed')}">swap_horiz</span>` : ''}
@@ -2636,21 +2640,24 @@ export class MainView {
       const isSelfMuted = !effectiveOffline && (isLocalCall ? voiceStore.isMuted : (voiceState?.isMuted ?? false));
 
       const isBrb = !effectiveOffline && !m.invisible && m.brb === true;
-      const statusClass = m.invisible ? 'invisible' : (isReconnecting ? 'reconnecting' : (isBrb ? 'brb' : (inVoice ? 'voice' : (effectiveOffline ? 'offline' : 'online'))));
+      const customStatus = effectiveOffline ? null : visibleCustomStatus(m);
+      const statusClass = m.invisible ? 'invisible' : (isReconnecting ? 'reconnecting' : (isBrb ? 'brb' : customStatus ? 'custom'
+        : (inVoice ? 'voice' : (effectiveOffline ? 'offline' : 'online'))));
       const statusText = m.invisible ? t('main.statusInvisible') : isReconnecting
         ? t('main.reconnecting')
-        : (isBrb ? t('main.statusBrb') : (inVoice ? t('main.inVoiceChannel') : (effectiveOffline ? t('main.statusOffline') : t('main.statusOnline'))));
+        : (isBrb ? t('main.statusBrb') : customStatus?.text ?? (inVoice ? t('main.inVoiceChannel')
+          : (effectiveOffline ? t('main.statusOffline') : t('main.statusOnline'))));
 
       return `
         <div class="member-item ${effectiveOffline ? 'member-offline' : ''} ${isReconnecting ? 'reconnecting' : ''}" data-user-id="${m.id}" title="${escapeHtml(m.nickname)} ${isLocal ? `(${t('common.you')})` : `(${t('main.rightClickVolume')})`}">
           <div class="member-avatar-wrapper">
             <img class="member-avatar-img" src="${avatar}" data-fallback="avatar">
-            <span class="status-indicator ${statusClass}" role="img" aria-label="${statusText}"></span>
+            <span class="status-indicator ${statusClass}"${customStatus && statusClass === 'custom' ? ` style="${customStatusDotStyle(customStatus)}"` : ''} role="img" aria-label="${escapeHtml(statusText)}"></span>
           </div>
           <div class="member-info">
             <div class="member-name-row">
               <span class="member-name">${escapeHtml(m.nickname)}</span>
-              ${isBrb ? renderBrbTag(m) : ''}
+              ${effectiveOffline ? '' : renderPresenceTag(m)}
               ${isLocal ? `<span class="member-badge-you">${t('common.you')}</span>` : ''}
               ${m.id === serverStore.ownerId ? `<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
               ${m.isBot ? `<span class="member-badge-bot" title="Bot">BOT</span>` : ''}
@@ -2675,7 +2682,7 @@ export class MainView {
                 .filter((r) => !r.isDefault && (canSeeAllBadges || myRoleIds.includes(r.id)));
               return renderRoleTags(userRoles, SIDEBAR_ROLE_TAGS);
             })()}
-            <span class="member-subtext">${statusText}</span>
+            <span class="member-subtext"${customStatus?.text ? ` title="${escapeHtml(customStatus.text)}"` : ''}>${escapeHtml(statusText)}</span>
           </div>
         </div>
       `;
@@ -2811,10 +2818,13 @@ export class MainView {
         label, icon, iconClass: `presence-menu-icon presence-menu-icon--${status}`, checked: current === status,
         onClick: () => sessionManager.setPresenceStatus(status),
       });
+      const saved = settingsStore.customStatus;
       contextMenu.open(box.left, box.top, [
         option('online', 'circle', t('main.statusOnline')),
         option('brb', 'schedule', t('main.statusBrb')),
+        ...saved ? [{ ...option('custom', 'circle', customStatusLabel(saved)), iconColor: saved.color }] : [],
         option('invisible', 'visibility_off', t('main.statusInvisible')),
+        { label: t(saved ? 'customStatus.edit' : 'customStatus.set'), icon: 'edit', onClick: () => customStatusModal.open() },
       ], statusDot);
     });
     const openOwnUserMenu = (event: MouseEvent) => {
@@ -3154,6 +3164,7 @@ export class MainView {
       const presence = presenceIndicator();
       if (dot) {
         dot.className = `status-indicator status-indicator-button ${presence.className}`;
+        dot.setAttribute('style', presence.style);
         dot.setAttribute('aria-label', t('main.changeStatusAria', { status: presence.label }));
       }
       const statusText = document.getElementById('main-user-status-text');

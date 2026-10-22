@@ -21,7 +21,7 @@ import { webRtcManager } from '../core/WebRtcManager';
 import { getAvatarUrl } from '../utils/avatar';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
 import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
-import { renderBrbTag } from '../utils/presenceTag';
+import { renderPresenceTag } from '../utils/presenceTag';
 import { getVoiceControlModeration, isViewingCallServer, toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
 import { renderAudioMuteIndicators, renderAudioStateIcon, updateAudioStateIcon } from './AudioStateIcon';
 import { bindStageControlsMotion } from './FooterControlsMotion';
@@ -1764,7 +1764,7 @@ export class VoiceStageView {
         <div class="stage-viewers" data-publisher="${escapeHtml(sidOf(p))}" data-share="${escapeHtml(tile.shareId!)}"></div>` : ''}
       <div class="stage-badges-overlay">
         <span>${label}</span>
-        ${renderBrbTag(p.user)}
+        ${renderPresenceTag(p.user)}
         ${isPeerFailed ? `<span class="material-symbols-outlined md-14 stage-peer-failed-icon" title="${isSfu ? t('main.sfuConnectionFailed') : peerFailureTooltip('stage.peerConnectionFailed')}">link_off</span>` : ''}
         ${isConnecting ? `<span class="material-symbols-outlined md-14 stage-peer-connecting-icon" title="${t(isSfu ? 'main.sfuConnecting' : 'stage.peerConnecting')}">sync</span>` : ''}
         ${isRelayed ? `<span class="material-symbols-outlined md-14" style="color: var(--warning, #f0b232);" title="${t('stage.peerRelayed')}">swap_horiz</span>` : ''}

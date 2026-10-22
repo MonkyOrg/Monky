@@ -13,6 +13,7 @@ const commands = [
   ['npm', 'run', 'test:screens', '--workspace=apps/client'],
   ['node', 'packages/bot-sdk/test-browser/voiceRendererSmoke.cjs'],
   ['node', 'apps/client/test/userContextMenuSmoke.cjs'],
+  ['node', 'apps/client/test/customStatusDomSmoke.cjs'],
   ['node', 'apps/client/test/audioDeviceSmoke.cjs'],
   ['node', 'apps/client/test/liveAudioDeviceSmoke.cjs'],
   ['node', 'apps/client/test/dropdownSmoke.cjs'],

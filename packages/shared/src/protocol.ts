@@ -1,4 +1,4 @@
-import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, RtcTransportPurpose, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserActivity, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, VoiceRestrictions, WebRtcSignalPayload } from './models.js';
+import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, CustomStatus, Role, RtcTransportPurpose, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserActivity, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, VoiceRestrictions, WebRtcSignalPayload } from './models.js';
 import type {
   BotForm, BotFormValues, BotSettingsContext, BotSettingsDefinition, BotSettingsListResponse,
   BotSettingsPatch, BotSettingsSnapshot, BotServerSettingsSnapshot, CommandAutocompleteResult, CommandValues,
@@ -227,6 +227,8 @@ export enum MessageType {
   USER_UPDATE_ACTIVITY = 'USER_UPDATE_ACTIVITY',
   /** Client -> server: turn the "be right back" status on or off (user-brb). */
   USER_UPDATE_BRB = 'USER_UPDATE_BRB',
+  /** Client -> server: set (or clear, with null) the person's custom status (custom-status). */
+  USER_UPDATE_CUSTOM_STATUS = 'USER_UPDATE_CUSTOM_STATUS',
   /** Client -> server: ask a player in the same voice channel to share their game window (#763). */
   GAME_SHARE_REQUEST = 'GAME_SHARE_REQUEST',
   /** Server -> requester: the ask reached the player; carries the id the answer will refer to (#763). */
@@ -417,6 +419,8 @@ export interface AuthConnectPayload {
    * the unknown field, so it is safe to send before negotiation.
    */
   brb?: boolean;
+  /** The user's custom status (custom-status); dropped the same way by servers without it. */
+  customStatus?: CustomStatus;
   /**
    * Bot authentication token (#569). Mutually exclusive with `publicKey` /
    * challenge-response: a bot sends its token here and the server verifies it
@@ -963,6 +967,11 @@ export interface UserUpdateActivityPayload {
 /** Client -> server: "Volto já" on or off (user-brb). */
 export interface UserUpdateBrbPayload {
   brb: boolean;
+}
+
+/** Client -> server: the person's custom status, or null to clear it (custom-status). */
+export interface UserUpdateCustomStatusPayload {
+  customStatus: CustomStatus | null;
 }
 
 /** Client -> server: "Pedir para ver a partida" (#763). */

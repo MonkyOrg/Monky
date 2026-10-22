@@ -373,6 +373,8 @@ export class NetworkClient {
             deviceId: getDeviceId(),
             appearOffline: settingsStore.appearOffline || undefined,
             brb: (!settingsStore.appearOffline && settingsStore.brb) || undefined,
+            customStatus: (!settingsStore.appearOffline && !settingsStore.brb && settingsStore.customStatusActive
+              && settingsStore.customStatus) || undefined,
           },
           authRequestId
         );
@@ -581,6 +583,8 @@ export class NetworkClient {
             protocolOffer: createProtocolOffer('client'), deviceId: getDeviceId(),
             appearOffline: settingsStore.appearOffline || undefined,
             brb: (!settingsStore.appearOffline && settingsStore.brb) || undefined,
+            customStatus: (!settingsStore.appearOffline && !settingsStore.brb && settingsStore.customStatusActive
+              && settingsStore.customStatus) || undefined,
           }, requestId);
           return;
         }

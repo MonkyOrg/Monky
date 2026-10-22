@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   AttachmentStorageInfo,
   AuthConnectPayload,
+  CustomStatus,
   LIMITS,
   PROTOCOL_VERSION,
   negotiateProtocol,
@@ -39,6 +40,8 @@ export interface AuthResult {
   appearOffline?: boolean;
   /** The user arrived "be right back" (user-brb); applied only when negotiated. */
   brb?: boolean;
+  /** The user arrived with a custom status (custom-status); applied only when negotiated. */
+  customStatus?: CustomStatus;
   /** True on the first connection of a member, which registers them on the server. */
   newMember?: boolean;
 }
@@ -54,6 +57,7 @@ interface PendingAuthChallenge {
   /** The user wants to appear offline to everyone else (#561). */
   appearOffline: boolean;
   brb: boolean;
+  customStatus?: CustomStatus;
 }
 
 /**
@@ -194,6 +198,7 @@ export class AuthService {
       deviceId: parseResult.data.deviceId || randomBytes(16).toString('hex'),
       appearOffline: parseResult.data.appearOffline === true,
       brb: parseResult.data.brb === true,
+      customStatus: parseResult.data.customStatus,
     });
     const timer = setTimeout(() => this.clearChallenge(ws), 30_000);
     timer.unref();
@@ -481,6 +486,7 @@ export class AuthService {
       serverDetails,
       appearOffline: pending.appearOffline,
       brb: pending.brb,
+      customStatus: pending.customStatus,
       newMember,
     };
   }

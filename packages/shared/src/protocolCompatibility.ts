@@ -36,9 +36,10 @@ import { PROTOCOL_VERSION } from './constants.js';
 // negotiated it receive the field; older servers ignore `forward`, so clients only offer the badge when negotiated.
 // user-brb: USER_UPDATE_BRB and UserSummary.brb, the "Volto já" status. Older servers drop the auth flag and are never
 // sent the update, and peers without it never receive the field, so they keep seeing the person as online.
+// custom-status: USER_UPDATE_CUSTOM_STATUS and UserSummary.customStatus, the person's own status, negotiated the same way.
 export const MIN_CLIENT_PROTOCOL = 35;
 export const MIN_BOT_PROTOCOL = 24;
-export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8', 'voice-user-limit', 'afk-channel', 'bot-storage', 'message-forward', 'user-brb'] as const;
+export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8', 'voice-user-limit', 'afk-channel', 'bot-storage', 'message-forward', 'user-brb', 'custom-status'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];
 export const protocolOfferSchema = z.object({
   minimumVersion: z.number().int().positive(),
@@ -55,7 +56,8 @@ export function createProtocolOffer(kind: 'client' | 'bot'): ProtocolOffer {
       feature !== 'role-deny' && feature !== 'role-grants' && feature !== 'game-activity' && feature !== 'game-share-request' &&
       feature !== 'channel-tree-order' && feature !== 'poll-voters' && feature !== 'poll-edit' &&
       feature !== 'server-audit' && feature !== 'bot-manifest-url' && feature !== 'screen-shares-8' &&
-      feature !== 'voice-user-limit' && feature !== 'afk-channel' && feature !== 'message-forward' && feature !== 'user-brb')) };
+      feature !== 'voice-user-limit' && feature !== 'afk-channel' && feature !== 'message-forward' && feature !== 'user-brb' &&
+      feature !== 'custom-status')) };
 }
 export function negotiateProtocol(version: unknown, offer: unknown, kind: 'client' | 'bot'): ProtocolAgreement | null {
   const minimumVersion = kind === 'bot' ? MIN_BOT_PROTOCOL : MIN_CLIENT_PROTOCOL;

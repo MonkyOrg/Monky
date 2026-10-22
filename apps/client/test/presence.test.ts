@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MessageType, type UserSummary } from '@monky/shared';
+import { MessageType, type CustomStatus, type UserSummary } from '@monky/shared';
 import { createServerStore } from '../src/renderer/stores/serverStore';
 import { currentPresenceStatus, SessionManager } from '../src/renderer/core/SessionManager';
 import { EventBus } from '../src/renderer/core/EventBus';
@@ -110,4 +110,60 @@ test('presence status is one choice: BRB only reaches servers that negotiated it
 
   manager.setPresenceStatus('online');
   assert.equal(currentPresenceStatus(), 'online');
+});
+
+test('the custom status is a fourth choice: saved, published where negotiated and replaced by any other', (t) => {
+  const manager = new SessionManager();
+  const modern = manager.create('modern', 1000, 'Self');
+  const legacy = manager.create('legacy', 1001, 'Self');
+  for (const session of manager.getAll()) session.serverStore.currentUser = { ...self };
+  modern.serverStore.serverDetails = { id: 'm', name: 'Modern', createdAt: 1, maxUsers: 10, channels: [], voiceStates: {}, members: [],
+    protocol: { version: 40, minimumVersion: 35, features: ['user-brb', 'custom-status'] } };
+  legacy.serverStore.serverDetails = { id: 'l', name: 'Legacy', createdAt: 1, maxUsers: 10, channels: [], voiceStates: {}, members: [],
+    protocol: { version: 40, minimumVersion: 35, features: ['user-brb'] } };
+  for (const session of manager.getAll()) t.mock.method(session.client, 'getStatus', () => 'CONNECTED');
+  const [modernSent, legacySent] = manager.getAll().map((session) => t.mock.method(session.client, 'send', () => {}));
+  const previous = {
+    appearOffline: settingsStore.appearOffline, brb: settingsStore.brb,
+    customStatus: settingsStore.customStatus, customStatusActive: settingsStore.customStatusActive,
+  };
+  t.mock.method(settingsStore, 'save', () => {});
+  t.after(() => Object.assign(settingsStore, previous));
+  Object.assign(settingsStore, { appearOffline: false, brb: false, customStatus: null, customStatusActive: false });
+  const sentBy = (sent: typeof modernSent) => sent.mock.calls.map((call) => call.arguments);
+
+  manager.setPresenceStatus('custom');
+  assert.equal(currentPresenceStatus(), 'online', 'nothing to show before a custom status is saved');
+
+  const lunch: CustomStatus = { text: 'Almoçando', emoji: '🍔', color: '#22aa66', showEmoji: true, showTag: true };
+  manager.saveCustomStatus(lunch);
+  assert.equal(currentPresenceStatus(), 'custom');
+  assert.deepEqual(sentBy(modernSent), [[MessageType.USER_UPDATE_CUSTOM_STATUS, { customStatus: lunch }]]);
+
+  const edited = { ...lunch, text: 'Volto às 14h' };
+  manager.saveCustomStatus(edited);
+  assert.deepEqual(sentBy(modernSent).at(-1), [MessageType.USER_UPDATE_CUSTOM_STATUS, { customStatus: edited }],
+    'editing the current status republishes it');
+
+  manager.setPresenceStatus('brb');
+  assert.equal(currentPresenceStatus(), 'brb');
+  assert.equal(settingsStore.customStatusActive, false);
+  assert.deepEqual(settingsStore.customStatus, edited, 'the definition is kept to be picked again');
+  assert.deepEqual(sentBy(modernSent).at(-1), [MessageType.USER_UPDATE_BRB, { brb: true }],
+    'one message: the server ends the custom status itself');
+
+  manager.setPresenceStatus('custom');
+  assert.deepEqual(sentBy(modernSent).at(-1), [MessageType.USER_UPDATE_CUSTOM_STATUS, { customStatus: edited }]);
+  assert.ok(!sentBy(legacySent).some(([type]) => type === MessageType.USER_UPDATE_CUSTOM_STATUS),
+    'a server without custom-status would answer with an error');
+
+  manager.setPresenceStatus('online');
+  assert.deepEqual(sentBy(modernSent).at(-1), [MessageType.USER_UPDATE_CUSTOM_STATUS, { customStatus: null }]);
+
+  manager.setPresenceStatus('custom');
+  manager.saveCustomStatus(null);
+  assert.equal(currentPresenceStatus(), 'online');
+  assert.equal(settingsStore.customStatus, null);
+  assert.deepEqual(sentBy(modernSent).at(-1), [MessageType.USER_UPDATE_CUSTOM_STATUS, { customStatus: null }],
+    'deleting the current status clears it everywhere');
 });
