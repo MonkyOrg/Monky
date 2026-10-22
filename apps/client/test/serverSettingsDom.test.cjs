@@ -435,6 +435,9 @@ async function* runRegression(language, sharedModule) {
   const search = () => field('#server-members-search');
   const shownIds = () => memberIds().filter(id => !memberRow(id).hidden);
   check(search() && !document.getElementById('members-search-input'), 'Member search lives in Server settings > Members');
+  const searchBox = search().getBoundingClientRect();
+  check(searchBox.left + parseFloat(getComputedStyle(search()).paddingLeft)
+    >= field('.members-search-icon').getBoundingClientRect().right, 'The search text starts after its icon');
   change('#server-members-search', 'BÓB');
   check(shownIds().join() === 'bob' && !field('#server-members-search-clear').hidden
     && field('[data-server-members-count]').textContent === t('roles.membersShown', { shown: 1, total: 2 }),
