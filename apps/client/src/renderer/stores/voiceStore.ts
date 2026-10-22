@@ -4,14 +4,6 @@ import { settingsStore } from './settingsStore';
 import { clientLog } from '../core/ClientLogService';
 import { screenShareQualitySchema, type ScreenShareQuality, type VoiceConnectionHealth } from '@monky/shared';
 
-/**
- * `voice.call_ended`: the local call stopped existing, whatever ended it.
- * `deafened` is the state just before the teardown cleared the server deafen.
- */
-export interface VoiceCallEndedPayload {
-  deafened: boolean;
-}
-
 export class VoiceStore {
   public currentVoiceChannelId: string | null = null;
   /**
@@ -201,7 +193,6 @@ export class VoiceStore {
     clientLog.info('CONNECTION', `Voice channel ${channelId ? 'joined' : 'left'}`, { channelId, sessionKey });
     const wasReconnecting = this.isReconnecting;
     const endedCall = !channelId && this.currentVoiceChannelId !== null;
-    const deafened = this.getEffectiveDeafened();
     if (!channelId || channelId !== this.currentVoiceChannelId || sessionKey !== this.voiceSessionKey) {
       this.clearScreenWatching();
       this.setSpeaking(false);
@@ -234,7 +225,8 @@ export class VoiceStore {
     }
     emitOutsideRouting(() => {
       appEvents.emit('voice.channel_changed', channelId);
-      if (endedCall) appEvents.emit('voice.call_ended', { deafened } satisfies VoiceCallEndedPayload);
+      // The local call stopped existing, whatever ended it (callCues).
+      if (endedCall) appEvents.emit('voice.call_ended');
       if (clearedModeration) appEvents.emit('voice.state_updated');
       if (wasReconnecting && !this.isReconnecting) appEvents.emit('voice.reconnecting_changed', false);
     });
@@ -398,9 +390,6 @@ export class VoiceStore {
     this.clearScreenWatching();
     const hadChannel = this.currentVoiceChannelId !== null;
     const wasReconnecting = this.isReconnecting;
-    // Read before the server deafen below is cleared: it decides whether the
-    // leave cue may be heard.
-    const deafened = this.getEffectiveDeafened();
     this.setSpeaking(false);
     this.currentVoiceChannelId = null;
     this.voiceSessionKey = null;
@@ -425,7 +414,7 @@ export class VoiceStore {
       // looking at another one (#400).
       if (hadChannel) {
         appEvents.emit('voice.channel_changed', null);
-        appEvents.emit('voice.call_ended', { deafened } satisfies VoiceCallEndedPayload);
+        appEvents.emit('voice.call_ended');
       }
       // Stops the reconnection cue if the call ended mid-attempt (#553).
       if (wasReconnecting) appEvents.emit('voice.reconnecting_changed', false);

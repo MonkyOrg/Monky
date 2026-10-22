@@ -1,6 +1,5 @@
 import { appEvents } from './EventBus';
 import { soundEffects } from './SoundEffects';
-import { voiceStore, type VoiceCallEndedPayload } from '../stores/voiceStore';
 
 /**
  * The join and leave cues of the local call, in one place so that every way
@@ -12,7 +11,8 @@ import { voiceStore, type VoiceCallEndedPayload } from '../stores/voiceStore';
  * the call on its own and nothing was heard at all. Here the cue follows what
  * the user was last told: a join is announced once per room, and a leave only
  * after a join, so a refused admission or a second teardown makes no sound.
- * Deafened users hear neither (#251).
+ * Like every app cue they play while deafened, which only silences voices and
+ * the soundboard.
  */
 let announcedCall: string | null = null;
 
@@ -21,17 +21,17 @@ export function announceCallJoined(sessionKey: string, channelId: string): void 
   const call = `${sessionKey}\n${channelId}`;
   if (announcedCall === call) return;
   announcedCall = call;
-  if (!voiceStore.getEffectiveDeafened()) soundEffects.play('join_voice');
+  soundEffects.play('join_voice');
 }
 
 /**
  * The announced call is gone, or suspended until the server admits it again
  * (signalling lost). The join cue then marks the way back.
  */
-export function announceCallLeft(deafened = voiceStore.getEffectiveDeafened()): void {
+export function announceCallLeft(): void {
   if (announcedCall === null) return;
   announcedCall = null;
-  if (!deafened) soundEffects.play('leave_voice');
+  soundEffects.play('leave_voice');
 }
 
-appEvents.on<VoiceCallEndedPayload>('voice.call_ended', ({ deafened }) => announceCallLeft(deafened));
+appEvents.on('voice.call_ended', () => announceCallLeft());

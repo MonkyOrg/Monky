@@ -1032,10 +1032,9 @@ class App {
         !serverStore.isMySession(payload.sessionId)
       ) {
         webRtcManager.connectToPeer(payload.sessionId, false);
-        // Let everyone already in the channel hear that someone joined (#54), unless deafened (#251).
-        if (!alreadyInChannel && !voiceStore.getEffectiveDeafened()) {
-          soundEffects.play('join_voice');
-        }
+        // Let everyone already in the channel hear that someone joined (#54).
+        // App cues ignore deafen, which only silences voices and the soundboard.
+        if (!alreadyInChannel) soundEffects.play('join_voice');
       }
     });
 
@@ -1062,9 +1061,7 @@ class App {
           leaveCurrentCall(false);
           if (isForegroundEvent()) this.mainView.render();
         } else {
-          if (voiceStore.currentVoiceChannelId === payload.channelId && !voiceStore.getEffectiveDeafened()) {
-            soundEffects.play('leave_voice');
-          }
+          if (voiceStore.currentVoiceChannelId === payload.channelId) soundEffects.play('leave_voice');
           webRtcManager.removePeer(payload.sessionId);
         }
       }
@@ -1077,7 +1074,7 @@ class App {
       const isSameVoiceChannel =
         this.eventOwnsCall() && voiceStore.currentVoiceChannelId === payload.voiceState.channelId;
 
-      if (isRemoteUser && isSameVoiceChannel && !voiceStore.isDeafened) {
+      if (isRemoteUser && isSameVoiceChannel) {
         if (
           previousVoiceState?.isScreenSharing === false &&
           payload.voiceState.isScreenSharing === true

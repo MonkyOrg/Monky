@@ -491,7 +491,7 @@ async function runElectronSmoke() {
     await duplex();
     await bounded();
 
-    async function interruptAndRecover(audibleCues = true) {
+    async function interruptAndRecover() {
       const before = await snapshot(a);
       const auths = peers.A.auths;
       const rejected = peers.A.rejected;
@@ -504,8 +504,8 @@ async function runElectronSmoke() {
         'Suspension preserves call intent but releases real transports');
       check(suspended.liveCaptureTracks === 0, 'Network suspension stops the captured input');
       // A server restarting (an update) only shows up as this lost socket.
-      check(newCues(suspended) === (audibleCues ? 'leave_voice' : ''),
-        'Losing the server mid-call plays the leave cue at once, unless deafened');
+      check(newCues(suspended) === 'leave_voice',
+        'Losing the server mid-call plays the leave cue at once, even while deafened');
       const allocationsBeforeOfflineInit = peers.A.created.transports;
       await run(a, 'window.voiceRecovery.initSfu()');
       check(await run(a, 'window.voiceRecovery.offlineRequestFailsImmediately()'), 'Offline requests reject without waiting for timeout');
@@ -520,7 +520,7 @@ async function runElectronSmoke() {
         && after.muted === before.muted && after.deafened === before.deafened, 'Channel/mute/deafen intent survives reconnect');
       check(peers.A.state.isMuted === before.muted && peers.A.state.isDeafened === before.deafened,
         'Re-admission carries the preserved privacy flags over the real WS protocol');
-      check(newCues(after) === (audibleCues ? 'leave_voice,join_voice' : ''),
+      check(newCues(after) === 'leave_voice,join_voice',
         'Automatic re-admission plays the join cue after the leave cue, exactly once each');
     }
     stage('signaling cut, two rejected WebSocket retries, automatic duplex recovery');
@@ -530,7 +530,7 @@ async function runElectronSmoke() {
 
     stage('muted/deafened reconstruction remains silent, then restores in-place');
     await run(a, 'window.voiceRecovery.setPrivacy(true, true)');
-    await interruptAndRecover(false);
+    await interruptAndRecover();
     const privateState = await snapshot(a);
     check(!privateState.microphoneOpen && privateState.localTrackEnabled === false && privateState.gain === 0,
       'Rebuilt microphone and playback remain gated by real privacy controls');
