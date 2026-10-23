@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O Monky não fica mais lento enquanto alguém está ao vivo. Os indicadores de transmissão pulsam algumas vezes e param, e a prévia da sua tela não força a janela a se redesenhar a cada quadro. Cliques e mensagens voltam a responder na hora, mesmo em monitores de 240 Hz.",
+  "en": "Monky no longer slows down while someone is live. Broadcast indicators pulse a few times and then rest, and your screen preview no longer forces the window to redraw on every frame. Clicks and messages respond instantly again, even on 240 Hz monitors."
+}

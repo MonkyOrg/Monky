@@ -57,6 +57,7 @@ import { ownAvatarSource } from '../core/profileSync';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
 import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
 import { customStatusDotStyle, customStatusLabel, renderPresenceTag, visibleCustomStatus } from '../utils/presenceTag';
+import { LivePulseClock } from '../utils/livePulse';
 import { renderRoleTags } from '../utils/roleTags';
 import { customStatusModal } from './CustomStatusModal';
 import { serverRailView } from './ServerRailView';
@@ -101,6 +102,7 @@ export class MainView {
   private messageSearch: MessageSearch | null = null;
   private forumView: ForumView | null = null;
   private chatInForum = false;
+  private readonly livePulse = new LivePulseClock();
   private voiceChatView: ChatView | null = null;
   private voiceChatChannelId: string | null = null;
   private voiceChatResizeCleanup: (() => void) | null = null;
@@ -2659,6 +2661,7 @@ export class MainView {
       countEl.innerText = t('main.membersCount', { count: allMembers.length });
     }
 
+    const liveMembers = new Set<string>();
     const renderMemberItem = (m: UserSummary, isOffline: boolean): string => {
       const isLocal = m.id === serverStore.currentUser?.id;
       const isLocalCall = isLocal && isViewingCallServer() && !!voiceStore.currentVoiceChannelId;
@@ -2677,6 +2680,9 @@ export class MainView {
       const isSelfDeafened = !effectiveOffline && (isLocalCall ? voiceStore.isDeafened : (voiceState?.isDeafened ?? false));
       const isSelfMuted = !effectiveOffline && (isLocalCall ? voiceStore.isMuted : (voiceState?.isMuted ?? false));
 
+      const isLive = !effectiveOffline && !!voiceState?.isScreenSharing;
+      if (isLive) liveMembers.add(m.id);
+      const livePulseStyle = isLive ? ` style="animation-delay: ${this.livePulse.delay(m.id)}"` : '';
       const isBrb = !effectiveOffline && !m.invisible && m.brb === true;
       const customStatus = effectiveOffline ? null : visibleCustomStatus(m);
       const statusClass = m.invisible ? 'invisible' : (isReconnecting ? 'reconnecting' : (isBrb ? 'brb' : customStatus ? 'custom'
@@ -2700,9 +2706,9 @@ export class MainView {
               ${m.id === serverStore.ownerId ? `<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
               ${m.isBot ? `<span class="member-badge-bot" title="Bot">BOT</span>` : ''}
               ${isReconnecting ? `<span class="member-reconnecting-badge" title="${t('main.reconnectingTitle')}"><span class="material-symbols-outlined md-14 spin">sync</span></span>` : ''}
-              ${(!effectiveOffline && voiceState?.isScreenSharing) ? (isLocal || !vm
-                ? `<span class="member-live-badge" title="${t('main.sharingScreen')}">LIVE</span>`
-                : `<button type="button" class="member-live-badge" data-watch-live="${escapeHtml(vm.user.sessionId || vm.user.id)}"
+              ${isLive ? (isLocal || !vm
+                ? `<span class="member-live-badge"${livePulseStyle} title="${t('main.sharingScreen')}">LIVE</span>`
+                : `<button type="button" class="member-live-badge"${livePulseStyle} data-watch-live="${escapeHtml(vm.user.sessionId || vm.user.id)}"
                     title="${escapeHtml(t('main.watchLiveAria', { name: m.nickname }))}"
                     aria-label="${escapeHtml(t('main.watchLiveAria', { name: m.nickname }))}">LIVE</button>`) : ''}
               ${(!effectiveOffline && voiceState?.isCameraOn) ? `<span class="material-symbols-outlined md-14 member-cam-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
@@ -2744,6 +2750,7 @@ export class MainView {
       }
 
       listEl.innerHTML = sections.join('');
+      this.livePulse.retain(liveMembers);
 
       // Attach contextmenu listeners to member items
       listEl.querySelectorAll('.member-item').forEach((item) => {
