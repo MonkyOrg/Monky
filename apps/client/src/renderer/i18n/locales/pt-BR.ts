@@ -1741,7 +1741,7 @@ export const ptBR = {
   'settings.dmMaxFileHint': 'Seus amigos veem esse limite e não conseguem enviar arquivos maiores para você.',
   'settings.gameActivitySection': 'Atividade de jogo',
   'settings.gameActivityLabel': 'Mostrar o jogo que estou jogando',
-  'settings.gameActivityHint': 'Quem estiver nos seus servidores vê o jogo aberto na Steam ao clicar em você e na lista do canal de voz.',
+  'settings.gameActivityHint': 'Por enquanto, só jogos abertos pela Steam no Windows. Quem estiver nos seus servidores vê o jogo ao clicar em você e na lista do canal de voz.',
   'userMenu.playingNow': 'Jogando agora',
   'userMenu.playingElapsed': 'Tempo de partida',
   'settings.gameShareSuggestionLabel': 'Sugerir compartilhar o jogo',

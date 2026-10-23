@@ -43,8 +43,11 @@ this limit and cannot send you larger files. See
 
 ### Game activity
 
-On Windows, Monky recognizes the game open on **Steam**. Only the game's name
-and icon leave your computer; the process list and executable paths stay on it.
+On Windows, Monky recognizes the game open on **Steam**. That is all for now:
+games from other stores or launchers (Epic, Riot, Battle.net, EA, Ubisoft,
+GOG) and games opened outside Steam do not show up, and game activity does not
+work on macOS. Only the game's name and icon leave your computer; the process
+list and executable paths stay on it.
 
 - **Show the game I am playing** (off by default): people in your servers see
   the game when they click you and in the voice channel list.

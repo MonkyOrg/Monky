@@ -43,9 +43,11 @@ amigos veem esse limite e não conseguem enviar arquivos maiores. Veja
 
 ### Atividade de jogo
 
-No Windows, o Monky reconhece o jogo aberto na **Steam**. Só o nome e o ícone
-do jogo saem do seu computador; a lista de processos e os caminhos dos
-executáveis ficam nele.
+No Windows, o Monky reconhece o jogo aberto na **Steam**. Por enquanto é só
+isso: jogos de outras lojas ou launchers (Epic, Riot, Battle.net, EA, Ubisoft,
+GOG) e jogos abertos fora da Steam não aparecem, e no macOS a atividade de jogo
+não funciona. Só o nome e o ícone do jogo saem do seu computador; a lista de
+processos e os caminhos dos executáveis ficam nele.
 
 - **Mostrar o jogo que estou jogando** (desligado por padrão): quem está nos
   seus servidores vê o jogo ao clicar em você e na lista do canal de voz.

@@ -1779,7 +1779,7 @@ export const en: TranslationMap = {
   'settings.dmMaxFileHint': 'Your friends see this limit and cannot send you larger files.',
   'settings.gameActivitySection': 'Game activity',
   'settings.gameActivityLabel': 'Show the game I am playing',
-  'settings.gameActivityHint': 'People in your servers see the game open on Steam when they click you and in the voice channel list.',
+  'settings.gameActivityHint': 'For now, only games opened through Steam on Windows. People in your servers see the game when they click you and in the voice channel list.',
   'userMenu.playingNow': 'Playing now',
   'userMenu.playingElapsed': 'Time in match',
   'settings.gameShareSuggestionLabel': 'Suggest sharing my game',
