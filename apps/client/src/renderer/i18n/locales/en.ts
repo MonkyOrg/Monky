@@ -102,6 +102,7 @@ export const en: TranslationMap = {
   'categories.category': 'Category',
   'categories.create': 'Create category',
   'categories.edit': 'Edit category',
+  'categories.markAsRead': 'Mark category as read',
   'categories.delete': 'Delete category',
   'categories.deleteConfirm': 'Channels will be kept without a category, preserving their current permissions.',
   'categories.uncategorized': 'Uncategorized',

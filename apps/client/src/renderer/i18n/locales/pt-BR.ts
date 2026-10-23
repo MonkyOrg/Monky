@@ -104,6 +104,7 @@ export const ptBR = {
   'categories.category': 'Categoria',
   'categories.create': 'Criar categoria',
   'categories.edit': 'Editar categoria',
+  'categories.markAsRead': 'Marcar categoria como lida',
   'categories.delete': 'Excluir categoria',
   'categories.deleteConfirm': 'Os canais serão mantidos sem categoria, com suas permissões atuais preservadas.',
   'categories.uncategorized': 'Sem categoria',
