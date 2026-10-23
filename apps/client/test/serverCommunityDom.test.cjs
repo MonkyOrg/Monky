@@ -351,7 +351,10 @@ async function* regression(locale, inviteModule) {
   const flush = async () => {
     for (let pass = 0; pass < 3; pass++) {
       for (let i = 0; i < 40; i++) await Promise.resolve();
-      const active = document.getAnimations().filter(animation => animation.effect?.getTiming().iterations !== Infinity);
+      // Infinite loops and the short decorative live pulse never move layout; waiting
+      // for them would only stall the test.
+      const active = document.getAnimations().filter(animation => animation.effect?.getTiming().iterations !== Infinity
+        && !animation.effect?.target?.classList?.contains('live-pulse-dot'));
       let timeout;
       try {
         await Promise.race([

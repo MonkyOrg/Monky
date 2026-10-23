@@ -21,6 +21,7 @@ class NativeVideoPresentationSink extends VideoFrameSink {
     this.track = null;
     this.stream = null;
     this.observation = null;
+    this.observationStarted = false;
     this.presentationBaseline = null;
     this.hasPresentationCallbacks = typeof video.requestVideoFrameCallback === 'function'
       && typeof video.cancelVideoFrameCallback === 'function';
@@ -48,7 +49,9 @@ class NativeVideoPresentationSink extends VideoFrameSink {
       this.video.muted = true;
       this.video.playsInline = true;
       this.video.srcObject = this.stream;
-      this.observePresentation();
+      // Presentation callbacks start with the first sample(): each one schedules a
+      // full rendering update of the page, which costs a large UI a frame's work
+      // on every video frame while nobody reads the counter.
       // play() needs a first frame. Waiting here would deadlock a source waiting for readiness.
       this.playObserver = Promise.resolve(this.video.play()).then(() => {
         if (!this.stopping) this.playbackStarted = true;
@@ -80,6 +83,12 @@ class NativeVideoPresentationSink extends VideoFrameSink {
 
   async acceptFrame(frame, timestampUs, metadata) {
     if (!this.writer || this.stopping) { frame.close(); return false; }
+    if (this.video.srcObject !== this.stream) {
+      frame.close();
+      this.stopAccepting();
+      this.fail(new Error('Native presentation target was replaced.'));
+      return false;
+    }
     if (!Number.isSafeInteger(metadata?.frameId) || metadata.frameId < 1
       || !Number.isSafeInteger(timestampUs) || timestampUs < -1 || frame.timestamp !== timestampUs) {
       frame.close();
@@ -119,11 +128,6 @@ class NativeVideoPresentationSink extends VideoFrameSink {
     this.observation = this.video.requestVideoFrameCallback((_now, metadata) => {
       this.observation = null;
       if (this.stopping) return;
-      if (this.video.srcObject !== this.stream) {
-        this.stopAccepting();
-        this.fail(new Error('Native presentation target was replaced.'));
-        return;
-      }
       if (!Number.isSafeInteger(metadata.presentedFrames) || metadata.presentedFrames < 0
         || !Number.isFinite(metadata.mediaTime)) {
         this.stopAccepting();
@@ -138,6 +142,10 @@ class NativeVideoPresentationSink extends VideoFrameSink {
   }
 
   async sample() {
+    if (!this.observationStarted && this.track && !this.stopping) {
+      this.observationStarted = true;
+      this.observePresentation();
+    }
     return {
       kind: 'native-video-presentation', encoding: false, outbound: [], inbound: [],
       timestampSemantics: 'rtc-render-deadline-or-immediate-us',
