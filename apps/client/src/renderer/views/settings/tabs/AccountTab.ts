@@ -17,7 +17,6 @@ import { appEvents } from '../../../core/EventBus';
 import { currentPresenceStatus, type PresenceStatus } from '../../../core/SessionManager';
 import { CustomStatusEditor } from '../../CustomStatusModal';
 import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
-import { smoothScrollIntoView } from '../../../utils/scroll';
 import { customStatusLabel } from '../../../utils/presenceTag';
 import type { TranslationKey } from '../../../i18n';
 
@@ -72,7 +71,6 @@ export class AccountTab {
     setSurfaceVisible(host, true, 'panel');
     container.querySelector('[data-presence-custom-edit]')?.setAttribute('aria-expanded', 'true');
     editor.focus();
-    smoothScrollIntoView(host, { block: 'nearest' });
   }
 
   private closeCustomEditor(container: HTMLElement, restoreFocus = true): void {
