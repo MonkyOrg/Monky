@@ -77,6 +77,7 @@ import type {
   UpdatePreflightResult,
   UpdateOutcome,
   ReleaseNotesResult,
+  ReleaseHistoryResult,
   RendererBootstrapFailure,
   NativeScreenCommand,
   NativeScreenCommandResult,
@@ -223,6 +224,7 @@ export interface ElectronApi {
   setUpdateChannel: (allowBeta: boolean) => Promise<UpdateSimpleResult>;
   getUpdateOutcome: () => Promise<UpdateOutcome | null>;
   getReleaseNotes: (tag?: string) => Promise<ReleaseNotesResult>;
+  getReleaseHistory: (page: number, before?: string) => Promise<ReleaseHistoryResult>;
   onUpdateProgress: (cb: (percent: number) => void) => () => void;
   onUpdateDownloaded: (cb: (info: { manual: boolean }) => void) => () => void;
   onUpdateError: (cb: (message: string) => void) => () => void;
@@ -575,6 +577,7 @@ const api: ElectronApi = {
   setUpdateChannel: (allowBeta) => ipcRenderer.invoke(UPDATER_IPC.setChannel, allowBeta),
   getUpdateOutcome: () => ipcRenderer.invoke(UPDATER_IPC.outcome),
   getReleaseNotes: (tag) => ipcRenderer.invoke(UPDATER_IPC.releaseNotes, tag),
+  getReleaseHistory: (page, before) => ipcRenderer.invoke(UPDATER_IPC.releaseHistory, page, before),
   onUpdateProgress: (cb) => {
     const listener = (_e: Electron.IpcRendererEvent, percent: number) => cb(percent);
     ipcRenderer.on('updater:progress', listener);

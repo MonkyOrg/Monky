@@ -26,6 +26,19 @@ import { contextMenu, type ContextMenuEntry } from './ContextMenu';
 import { appEvents } from '../core/EventBus';
 import { addServerModal } from './addServer/AddServerModal';
 import { serverMonitorModal } from './ServerMonitorModal';
+import { markSessionRead } from '../core/readState';
+import { dmStore } from '../stores/dmStore';
+import type { ChatSoundMode } from '../stores/settingsStore';
+import { showErrorToast } from './CopyToast';
+
+type RailUnread = 'mention' | 'unread' | null;
+
+const NOTIFICATION_MODES: ReadonlyArray<{ mode: ChatSoundMode; label: 'chatSound.inheritGeneral' | 'chatSound.all' | 'chatSound.mentions' | 'chatSound.none' }> = [
+  { mode: 'inherit', label: 'chatSound.inheritGeneral' },
+  { mode: 'all', label: 'chatSound.all' },
+  { mode: 'mentions', label: 'chatSound.mentions' },
+  { mode: 'none', label: 'chatSound.none' },
+];
 
 type DraggedRailItem =
   | { type: 'server'; host: string; port: number }
@@ -65,6 +78,50 @@ export class ServerRailView {
 
   private static keyOf(host: string, port: number): string {
     return `${host.trim().replace(/^wss?:\/\//, '')}:${port}`;
+  }
+
+  /** Logical server id used by the per-server notification preference. */
+  private static serverIdOf(server: SavedServer): string | undefined {
+    return getServerSessionForAddress(server.host, server.port)?.serverStore.serverDetails?.id ?? server.serverId;
+  }
+
+  /**
+   * Unread state shown on the rail. Only servers kept connected in the
+   * background count: the one on screen already shows it in its channel list.
+   */
+  private static unreadOf(server: SavedServer, currentUrl: string | null): RailUnread {
+    const live = getServerSessionForAddress(server.host, server.port);
+    if (!live || live.key === currentUrl || live.client.getStatus() !== 'CONNECTED') return null;
+    if (live.chatStore.hasAnyMention()) return 'mention';
+    return live.chatStore.hasAnyUnread() ? 'unread' : null;
+  }
+
+  /** Live sessions of the given servers that still hold something unread. */
+  private static unreadSessions(servers: readonly SavedServer[]) {
+    return servers.flatMap((server) => {
+      const live = getServerSessionForAddress(server.host, server.port);
+      return live?.chatStore.hasAnyUnread() ? [live] : [];
+    });
+  }
+
+  private markServersRead(servers: readonly SavedServer[]): void {
+    ServerRailView.unreadSessions(servers).forEach(markSessionRead);
+    this.render();
+  }
+
+  private folderServers(folder: RailFolderNode): SavedServer[] {
+    return folder.children.flatMap((child) => connectionStore.savedServers.find(
+      (server) => server.host === child.host && server.port === child.port) ?? []);
+  }
+
+  private setServerNotifications(serverId: string, mode: ChatSoundMode): void {
+    try {
+      settingsStore.setServerChatSoundOverride(serverId, mode);
+    } catch (error) {
+      console.warn('[ServerRailView] Could not save server notifications', error);
+      showErrorToast(t('serverRail.notificationsSaveFailed'));
+    }
+    this.render();
   }
 
   public setHomeBadge(count: number): void {
@@ -220,6 +277,15 @@ export class ServerRailView {
       )}`;
     }).join('');
 
+    const folderUnread = folder.collapsed ? folder.children.reduce<RailUnread>((state, child) => {
+      if (state === 'mention') return state;
+      const server = savedByKey.get(ServerRailView.keyOf(child.host, child.port));
+      return (server && ServerRailView.unreadOf(server, currentUrl)) || state;
+    }, null) : null;
+    const folderBadge = folderUnread
+      ? `<span class="server-rail-folder-badge" data-kind="${folderUnread}" title="${escapeHtml(t(folderUnread === 'mention' ? 'serverRail.folderMentionTooltip' : 'serverRail.folderUnreadTooltip'))}"></span>`
+      : '';
+
     return `
       <div class="server-rail-folder ${folder.collapsed ? 'collapsed' : ''}" data-folder-id="${escapeHtml(folder.id)}">
         <div
@@ -245,6 +311,7 @@ export class ServerRailView {
             ${folder.collapsed ? 'folder' : 'folder_open'}
           </span>
           <span class="server-rail-folder-name">${escapeHtml(folder.name)}</span>
+          ${folderBadge}
         </div>
         <div class="server-rail-folder-children">
           ${childrenHtml}
@@ -272,8 +339,10 @@ export class ServerRailView {
     const callIcon = serverRailCallIcon(live?.community.snapshot?.events, voiceStore.currentVoiceChannelId);
     // A mention outranks a plain unread, so the row shows the red dot instead
     // of the white one when both are pending (#479).
-    const hasMention = !!background?.chatStore.hasAnyMention();
-    const hasUnread = !hasMention && !!background?.chatStore.hasAnyUnread();
+    const unread = ServerRailView.unreadOf(srv, currentUrl);
+    const hasMention = unread === 'mention';
+    const hasUnread = unread === 'unread';
+    const muted = settingsStore.getServerChatSoundOverride(ServerRailView.serverIdOf(srv)) === 'none';
     const initial = (srv.name || srv.host || '?').trim().charAt(0).toUpperCase();
     // Read from the session that owns this row, never from the proxied store:
     // a render triggered inside a background event would otherwise paint that
@@ -299,7 +368,7 @@ export class ServerRailView {
 
     return `
       <div
-        class="server-rail-item ${isCurrent ? 'active' : ''} ${folderId ? 'server-rail-item--nested' : ''}"
+        class="server-rail-item ${isCurrent ? 'active' : ''} ${folderId ? 'server-rail-item--nested' : ''} ${unread ? 'server-rail-item--unread' : ''}"
         data-node-type="server"
         data-host="${escapeHtml(srv.host)}"
         data-port="${srv.port}"
@@ -320,6 +389,7 @@ export class ServerRailView {
         >
           ${this.renderServerIcon(iconUrl, initial)}
           <span class="server-rail-status-dot" data-status="${isCurrent || background ? 'online' : 'checking'}"></span>
+          ${muted ? `<span class="server-rail-muted" title="${escapeHtml(t('serverRail.mutedTooltip'))}"><span class="material-symbols-outlined md-12" aria-hidden="true">notifications_off</span></span>` : ''}
           ${badge}
         </button>
       </div>
@@ -413,6 +483,17 @@ export class ServerRailView {
     const railEl = document.getElementById('server-rail');
     if (!railEl) return;
 
+    railEl.querySelector('#server-rail-home')?.addEventListener('contextmenu', (event) => {
+      const mouseEvent = event as MouseEvent;
+      event.preventDefault();
+      contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, [{
+        label: t('serverRail.markAllDmsRead'),
+        icon: 'mark_chat_read',
+        disabled: dmStore.unreadTotal() === 0,
+        onClick: () => { void dmStore.markAllRead(); },
+      }], event.currentTarget as HTMLElement);
+    });
+
     railEl.querySelector('.server-rail-list')?.addEventListener('contextmenu', (event) => {
       const mouseEvent = event as MouseEvent;
       const target = event.target as HTMLElement | null;
@@ -420,6 +501,12 @@ export class ServerRailView {
       if (target.closest('.server-rail-avatar, .server-rail-folder-header')) return;
       event.preventDefault();
       contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, [
+        {
+          label: t('serverRail.markAllServersRead'),
+          icon: 'mark_chat_read',
+          disabled: !ServerRailView.unreadSessions(connectionStore.savedServers).length,
+          onClick: () => this.markServersRead(connectionStore.savedServers),
+        },
         {
           label: t('main.createFolder'),
           icon: 'create_new_folder',
@@ -457,7 +544,14 @@ export class ServerRailView {
           (node): node is RailFolderNode => node.type === 'folder' && node.id === folderId
         );
         if (!folder) return;
+        const folderServers = this.folderServers(folder);
         contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, [
+          {
+            label: t('serverRail.markFolderRead'),
+            icon: 'mark_chat_read',
+            disabled: !ServerRailView.unreadSessions(folderServers).length,
+            onClick: () => this.markServersRead(folderServers),
+          },
           {
             label: t('main.renameFolder'),
             icon: 'edit',
@@ -489,6 +583,34 @@ export class ServerRailView {
       },
     ];
 
+    const live = getServerSessionForAddress(server.host, server.port);
+    entries.push({
+      label: t('serverRail.markServerRead'),
+      icon: 'mark_chat_read',
+      disabled: !live?.chatStore.hasAnyUnread(),
+      onClick: () => this.markServersRead([server]),
+    });
+
+    const serverId = ServerRailView.serverIdOf(server);
+    if (serverId) {
+      const mode = settingsStore.getServerChatSoundOverride(serverId);
+      entries.push(
+        {
+          label: t(mode === 'none' ? 'serverRail.unmute' : 'serverRail.mute'),
+          icon: mode === 'none' ? 'notifications_active' : 'notifications_off',
+          onClick: () => this.setServerNotifications(serverId, mode === 'none' ? 'inherit' : 'none'),
+        },
+        {
+          label: t('serverRail.notifications'),
+          icon: 'notifications',
+          submenu: NOTIFICATION_MODES.map((option) => ({
+            label: t(option.label),
+            checked: option.mode === mode,
+            onClick: () => this.setServerNotifications(serverId, option.mode),
+          })),
+        },
+      );
+    }
     if (owned) {
       entries.push(
         {

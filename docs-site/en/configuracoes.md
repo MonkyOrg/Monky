@@ -761,6 +761,11 @@ synthesized defaults. Resetting an effect restores its original file or tone;
 **Reset all** removes every override. This does not enable chat notifications
 or PTT cues that you disabled in their respective options.
 
+### Per-server notifications and unread messages
+-click a server in the sidebar to **Mute server** or, under **Server**, choose between following the general setting, all messages, only or muted. The choice applies only to that server, is saved on device, and each channel can still override it from its own menu. Muted show a crossed-out bell; mentions are still highlighted in red.
+ connected in the background show a white dot when there are new and a red one when you were mentioned; collapsed folders summarize servers inside. In the same menu, **Mark server as read** clears every. Right-clicking also offers **Mark folder as read** on a folder header,
+**Mark all servers as read** on the empty part of the bar, **Mark all as read** on the Home button and **Mark as read** on each direct.
+
 ## Bot tools
 
 Inspect installed tools, storage, cache, authorizations and local tasks.

@@ -132,6 +132,14 @@ export class DmStore {
     return this.snapshotValue.conversations.reduce((sum, conversation) => sum + conversation.unread, 0);
   }
 
+  /** Marks every conversation with unread messages as read (Home menu). */
+  async markAllRead(): Promise<void> {
+    const peers = this.snapshotValue.conversations
+      .filter((conversation) => conversation.unread > 0)
+      .map((conversation) => conversation.peer);
+    await Promise.all(peers.map((peer) => this.markRead(peer)));
+  }
+
   isOnline(peer: string): boolean {
     return this.transport?.isReachable(normalizeKey(peer)) ?? false;
   }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fetchVersionReleaseNotes } from '../src/main/releaseNotes';
+import { RELEASE_HISTORY_PAGE_SIZE, fetchReleaseHistory, fetchVersionReleaseNotes } from '../src/main/releaseNotes';
 import { parseClientReleaseNotes } from '../src/renderer/utils/clientReleaseNotes';
 
 const note = { 'pt-BR': 'Copie sua versão com um clique!', en: 'Copy your version with a click!' };
@@ -102,4 +102,40 @@ test('retrieval validates tags before I/O and distinguishes HTTP, content and ne
   assert.equal((await fetchVersionReleaseNotes('1.0.0')).ok, false);
   reply = new Error('offline');
   assert.equal((await fetchVersionReleaseNotes('1.0.0')).error, 'offline');
+});
+
+test('release history pages keep only published releases older than the one on screen', async (context) => {
+  const requests: string[] = [];
+  const release = (tag: string, extra: Record<string, unknown> = {}) => ({
+    tag_name: tag, body: wrap(payload), draft: false, published_at: '2026-10-21T14:16:55Z', ...extra,
+  });
+  let listing: unknown = [
+    release('v40.3.2'), release('v40.3.2-beta'), release('v40.2.0-beta'), release('v40.2.0'),
+    release('v40.1.1', { published_at: 'not a date', body: null }), release('v39.0.0', { draft: true }),
+    release('../../etc'), release('v38.0.0', { body: 42 }), { tag_name: 7 }, null,
+  ];
+  context.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    requests.push(String(input));
+    return new Response(JSON.stringify(listing));
+  });
+  const result = await fetchReleaseHistory('40.3.2', 1, '40.3.2');
+  assert.equal(requests[0], `https://api.github.com/repos/MonkyOrg/Monky/releases?per_page=${RELEASE_HISTORY_PAGE_SIZE}&page=1`);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.entries?.map(entry => entry.version), ['40.2.0', '40.2.0-beta', '40.1.1'],
+    'newer/same versions, drafts and malformed tags are dropped; stable sorts before its beta');
+  assert.equal(result.entries?.[0].url, 'https://github.com/MonkyOrg/Monky/releases/tag/v40.2.0');
+  assert.equal(result.entries?.[2].publishedAt, null);
+  assert.equal(result.entries?.[2].body, '');
+  assert.equal(result.hasMore, false, 'a short page is the last one');
+
+  listing = Array.from({ length: RELEASE_HISTORY_PAGE_SIZE }, (_, index) => release(`v1.0.${index}`));
+  assert.equal((await fetchReleaseHistory('40.3.2', 2)).hasMore, true, 'a full page may have a next one');
+  assert.match(requests[1], /page=2$/);
+
+  for (const [page, before] of [[0, undefined], [1.5, undefined], [51, undefined], [1, '../x']] as const) {
+    assert.equal((await fetchReleaseHistory('40.3.2', page, before)).ok, false);
+  }
+  assert.equal(requests.length, 2, 'invalid requests never reach the network');
+  listing = { message: 'rate limited' };
+  assert.equal((await fetchReleaseHistory('40.3.2', 1)).ok, false);
 });

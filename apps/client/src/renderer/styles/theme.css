@@ -828,6 +828,46 @@ input:focus, textarea:focus, select:focus {
   background-color: var(--danger);
 }
 
+/* Silenced server: a small marker in the opposite corner of the status dot,
+   so it never competes with the unread/mention badge. */
+.server-rail-muted {
+  position: absolute;
+  left: -3px;
+  bottom: -3px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 2px solid var(--bg-app);
+  background-color: var(--bg-card);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.server-rail-muted .material-symbols-outlined {
+  font-size: 12px;
+}
+
+/* Unread servers also show a short pill on the left edge, like the one used
+   for hover and the active server. */
+.server-rail-item--unread .server-rail-pill {
+  height: 8px;
+}
+
+.server-rail-folder-badge {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #fff;
+}
+
+.server-rail-folder-badge[data-kind='mention'] {
+  background-color: var(--danger);
+}
+
 .server-rail-status-dot[data-status='offline'] {
   background-color: var(--danger);
 }
@@ -4144,6 +4184,36 @@ input:focus, textarea:focus, select:focus {
 .changelog-group-list { margin: 0; padding-left: 24px; }
 .changelog-group-list li + li { margin-top: 8px; }
 .changelog-error { color: var(--danger); }
+.changelog-history-heading {
+  margin: 24px 0 4px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.changelog-release { padding: 8px 0 4px; }
+.changelog-release + .changelog-release { border-top: 1px dashed var(--border-color); }
+.changelog-release-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0 0;
+  font-size: 14px;
+}
+.changelog-release-title time { font-size: 11px; font-weight: 400; color: var(--text-muted); }
+.changelog-release .changelog-group { margin: 10px 0; }
+.changelog-release .changelog-empty { margin: 6px 0 10px; }
+.changelog-history-status {
+  min-height: 1px;
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 8px;
+}
+.changelog-history-note { margin: 4px 0; font-size: 12px; color: var(--text-muted); }
 .chat-message-row:focus { outline: none; }
 .chat-message-row:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
 .chat-reply-reference {

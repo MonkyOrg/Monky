@@ -458,6 +458,7 @@ export const UPDATER_IPC = {
   install: 'updater:install',
   outcome: 'updater:outcome',
   releaseNotes: 'updater:release-notes',
+  releaseHistory: 'updater:release-history',
 } as const satisfies Record<string, keyof IpcInvokeChannels>;
 
 export interface UpdateSimpleResult {
@@ -501,6 +502,22 @@ export interface ReleaseNotesResult {
   body?: string;
   /** URL of the release page, for a "view on GitHub" link. */
   url?: string;
+  error?: string;
+}
+
+/** One published release in the changelog history, newest first. */
+export interface ReleaseHistoryEntry {
+  version: string;
+  body: string;
+  url: string;
+  publishedAt: string | null;
+}
+
+/** A page of releases older than the one on screen (changelog lazy loading). */
+export interface ReleaseHistoryResult {
+  ok: boolean;
+  entries?: ReleaseHistoryEntry[];
+  hasMore?: boolean;
   error?: string;
 }
 
@@ -1015,6 +1032,7 @@ export interface IpcInvokeChannels {
   'updater:install': { args: []; returnType: UpdateSimpleResult };
   'updater:outcome': { args: []; returnType: UpdateOutcome | null };
   'updater:release-notes': { args: [tag?: string]; returnType: ReleaseNotesResult };
+  'updater:release-history': { args: [page: number, before?: string]; returnType: ReleaseHistoryResult };
 
   // Client Logging (#444)
   'client-log:write': { args: [entry: ClientLogEntry]; returnType: void };

@@ -778,6 +778,10 @@ Restaurar um efeito recupera seu arquivo ou tom original; **Restaurar todos**
 remove todas as substituições. Isso não ativa notificações de chat nem sons
 de PTT que você tenha desligado nas respectivas opções.
 
+### Notificações por servidor e mensagens não lidas
+ com o botão direito em um servidor na barra lateral para **Silenciar** ou escolher, em **Notificações do servidor**, entre seguir a geral, todas as mensagens, apenas menções ou silenciar. A escolha só para aquele servidor, fica salva neste dispositivo e cada canal ainda sobrescrevê-la pelo próprio menu. Servidores silenciados mostram um sino; menções continuam destacadas em vermelho.
+ conectados em segundo plano mostram um ponto branco quando há novas e vermelho quando você foi mencionado; pastas recolhidas os servidores de dentro. No mesmo menu, **Marcar servidor como lido** todos os canais. O clique com o botão direito também oferece **Marcar como lida** no cabeçalho de uma pasta, **Marcar todos os servidores lidos** no espaço vazio da barra, **Marcar todas as conversas como** no botão Início e **Marcar como lido** em cada conversa direta.
+
 ## Ferramentas de bots
 
 Veja ferramentas instaladas, armazenamento, cache, autorizações e tarefas
