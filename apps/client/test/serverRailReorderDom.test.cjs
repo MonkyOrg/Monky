@@ -154,6 +154,8 @@ if (!process.versions.electron) {
           'the target previews the folder while hovered');
       });
       await check(JSON.stringify(await order()) === '[5103,"folder:5102","folder:5101"]', 'dropping on a server creates a folder with both');
+      const animated = await evaluate('window.animatedFolders');
+      await check(animated > 0, `the new folder opens with the slide animation, not abruptly (${animated} animations)`);
       await check(await evaluate(`document.querySelector('.server-rail-folder:not(.collapsed) .server-rail-folder-header')?.getAttribute('aria-label') === 'b.test, a.test'`),
         'an unnamed folder is labelled after its servers');
 
@@ -186,6 +188,8 @@ if (!process.versions.electron) {
       // Collapsed, the folder becomes a tile with its servers in miniature.
       await evaluate(`window.collapseAll()`);
       await check(await waitFor(`document.querySelectorAll('.server-rail-folder.collapsed .server-rail-folder-mini').length === 3`), 'a collapsed folder shows its servers in miniature');
+      await check(await evaluate(`[...document.querySelectorAll('.server-rail-folder-mini')].every(mini => getComputedStyle(mini).borderRadius === '6px' && mini.getBoundingClientRect().width === 18)`),
+        'miniatures are rounded squares filling the tile, like Discord');
       // Opening and closing slide the servers in and out instead of snapping.
       const clickAt = async (point) => {
         browser.webContents.sendInputEvent({ type: 'mouseMove', ...point });
@@ -254,6 +258,13 @@ async function setupRail() {
   };
   sessionManager.activate(session.key);
   window.connectCalls = 0;
+  // Counts slide animations on folder contents, to tell a smooth opening from a jump.
+  const animate = Element.prototype.animate;
+  window.animatedFolders = 0;
+  Element.prototype.animate = function (...args) {
+    if (this.classList?.contains('server-rail-folder-children')) window.animatedFolders++;
+    return animate.apply(this, args);
+  };
   serverRailView.connectToSavedServer = async () => { window.connectCalls++; };
   window.railOrder = () => connectionStore.railLayout.flatMap(node => node.type === 'server'
     ? [node.port] : node.children.map(child => `folder:${child.port}`));

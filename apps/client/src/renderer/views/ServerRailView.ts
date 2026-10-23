@@ -83,6 +83,8 @@ export class ServerRailView {
    * fresh element (true = opening).
    */
   private pendingFolderMotion = new Map<string, boolean>();
+  /** Folders painted by the previous render; null before the first one. */
+  private renderedFolderIds: Set<string> | null = null;
   private hostedStatusBound = false;
   private static readonly PROBE_INTERVAL_MS = 15000;
   /** Share of a server's height, at each edge, that places instead of grouping. */
@@ -199,6 +201,7 @@ export class ServerRailView {
     this.bindFolderToggles();
     this.bindDragAndDrop();
     this.bindContextMenus();
+    this.queueNewFolderMotion();
     this.playFolderMotion(railEl);
     // Background events may repaint the rail while something is being dragged.
     if (this.pointerDrag?.active) this.markDragging(this.pointerDrag.item);
@@ -522,6 +525,23 @@ export class ServerRailView {
         connectionStore.toggleFolderCollapsed(folder.id);
       });
     });
+  }
+
+  /**
+   * A folder that did not exist on the previous render was just created by
+   * grouping servers: it opens with the same motion as a click, instead of
+   * popping in. The first render (app start) never animates.
+   */
+  private queueNewFolderMotion(): void {
+    const folders = connectionStore.railLayout.filter((node): node is RailFolderNode => node.type === 'folder');
+    const previous = this.renderedFolderIds;
+    this.renderedFolderIds = new Set(folders.map((folder) => folder.id));
+    if (!previous) return;
+    for (const folder of folders) {
+      if (!previous.has(folder.id) && !folder.collapsed && !this.pendingFolderMotion.has(folder.id)) {
+        this.pendingFolderMotion.set(folder.id, true);
+      }
+    }
   }
 
   private collapseAllFolders(): void {
