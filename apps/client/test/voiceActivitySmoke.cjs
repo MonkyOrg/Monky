@@ -267,7 +267,7 @@ async function prepareRenderer(url, label, MessageType, publicKey) {
   window.api = {
     onAppBeforeQuit: () => () => {}, setWindowInServer: async () => {}, setLanguage: async () => {},
     setPttConfig: async () => true, fitHomeWindowToContent: async () => {},
-    hostServerStatus: async () => ({ isRunning: false, port: null, serverId: null }),
+    hostServerStatus: async () => ({ servers: [] }),
     onHostServerStatusChanged: () => () => {}, writeClientLog: async () => {},
     signChallenge: nonce => window.voiceActivityIdentity.signChallenge(nonce),
   };

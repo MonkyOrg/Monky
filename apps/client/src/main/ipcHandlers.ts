@@ -664,8 +664,12 @@ export function setupIpcHandlers(
     return await serverManager.startServer(options);
   });
 
-  ipcMain.handle('server-host:stop', async () => {
-    await serverManager.stopServer();
+  const hostedPort = (port: unknown): port is number =>
+    typeof port === 'number' && Number.isInteger(port) && port >= LIMITS.MIN_PORT && port <= LIMITS.MAX_PORT;
+
+  ipcMain.handle('server-host:stop', async (_, port: unknown) => {
+    if (!hostedPort(port)) return { success: false };
+    await serverManager.stopServer(port);
     return { success: true };
   });
 
@@ -673,16 +677,16 @@ export function setupIpcHandlers(
     return serverManager.getStatus();
   });
 
-  ipcMain.handle('server-host:logs', async () => {
-    return serverManager.getLogs();
+  ipcMain.handle('server-host:logs', async (_, port: unknown) => {
+    return hostedPort(port) ? serverManager.getLogs(port) : [];
   });
 
-  ipcMain.handle('server-host:clear-logs', async () => {
-    serverManager.clearLogs();
+  ipcMain.handle('server-host:clear-logs', async (_, port: unknown) => {
+    if (hostedPort(port)) serverManager.clearLogs(port);
   });
 
-  ipcMain.handle('server-host:stats', async () => {
-    return serverManager.getStats();
+  ipcMain.handle('server-host:stats', async (_, port: unknown) => {
+    return hostedPort(port) ? serverManager.getStats(port) : null;
   });
 
   // Removing a server from "Meus Servidores" has to take its data with it (#364).

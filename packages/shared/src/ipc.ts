@@ -458,6 +458,7 @@ export const UPDATER_IPC = {
   install: 'updater:install',
   outcome: 'updater:outcome',
   releaseNotes: 'updater:release-notes',
+  releaseHistory: 'updater:release-history',
 } as const satisfies Record<string, keyof IpcInvokeChannels>;
 
 export interface UpdateSimpleResult {
@@ -504,6 +505,22 @@ export interface ReleaseNotesResult {
   error?: string;
 }
 
+/** One published release in the changelog history, newest first. */
+export interface ReleaseHistoryEntry {
+  version: string;
+  body: string;
+  url: string;
+  publishedAt: string | null;
+}
+
+/** A page of releases older than the one on screen (changelog lazy loading). */
+export interface ReleaseHistoryResult {
+  ok: boolean;
+  entries?: ReleaseHistoryEntry[];
+  hasMore?: boolean;
+  error?: string;
+}
+
 export interface DiscoveredLanServer {
   host: string;
   port: number;
@@ -529,6 +546,18 @@ export interface HostServerOptions {
    * Voice mode ('p2p' | 'sfu') chosen when the server was created (#515).
    */
   voiceMode?: 'p2p' | 'sfu';
+}
+
+/** One server hosted by this app. The port identifies it while it runs. */
+export interface HostedServerInstance {
+  port: number;
+  /** Entry of "Meus Servidores" that owns it; null for the legacy flat data folder. */
+  serverId: string | null;
+}
+
+/** Every server this app is hosting, sorted by port. */
+export interface HostServerStatus {
+  servers: HostedServerInstance[];
 }
 
 /**
@@ -915,11 +944,11 @@ export interface IpcInvokeChannels {
 
   // Servidor Local
   'server-host:start': { args: [options: HostServerOptions]; returnType: { success: boolean; error?: string } };
-  'server-host:stop': { args: []; returnType: { success: boolean } };
-  'server-host:status': { args: []; returnType: { isRunning: boolean; port: number | null; serverId: string | null } };
-  'server-host:logs': { args: []; returnType: LogEntry[] };
-  'server-host:clear-logs': { args: []; returnType: void };
-  'server-host:stats': { args: []; returnType: ServerStats | null };
+  'server-host:stop': { args: [port: number]; returnType: { success: boolean } };
+  'server-host:status': { args: []; returnType: HostServerStatus };
+  'server-host:logs': { args: [port: number]; returnType: LogEntry[] };
+  'server-host:clear-logs': { args: [port: number]; returnType: void };
+  'server-host:stats': { args: [port: number]; returnType: ServerStats | null };
   'server-host:delete-data': { args: [serverId: string]; returnType: { success: boolean; error?: string } };
 
   // LAN Discovery
@@ -1015,6 +1044,7 @@ export interface IpcInvokeChannels {
   'updater:install': { args: []; returnType: UpdateSimpleResult };
   'updater:outcome': { args: []; returnType: UpdateOutcome | null };
   'updater:release-notes': { args: [tag?: string]; returnType: ReleaseNotesResult };
+  'updater:release-history': { args: [page: number, before?: string]; returnType: ReleaseHistoryResult };
 
   // Client Logging (#444)
   'client-log:write': { args: [entry: ClientLogEntry]; returnType: void };
@@ -1058,8 +1088,8 @@ export interface IpcEvents {
   'updater:progress': [percent: number];
   'updater:downloaded': [info: { manual: boolean }];
   'updater:error': [message: string];
-  'server-host:log': [entry: LogEntry];
-  'server-host:status-changed': [status: { isRunning: boolean; port: number | null; serverId: string | null }];
+  'server-host:log': [port: number, entry: LogEntry];
+  'server-host:status-changed': [status: HostServerStatus];
 
   /** Jogo detectado mudou — `null` quando nada está rodando (#675). */
   'game-presence:changed': [activity: UserActivity | null];

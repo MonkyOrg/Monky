@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { readUpdateInventory } from './infrastructure/database/updateInventory';
 import { v4 as uuidv4 } from 'uuid';
-import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ProtocolErrorCode, ServerStats, UserSummary, VoiceMode, stripAdministrator, type ServerShutdownReason } from '@monky/shared';
+import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ProtocolErrorCode, ServerStats, UserSummary, VoiceMode, stripAdministrator, type LogEntry, type ServerShutdownReason } from '@monky/shared';
 import { AuthService } from './application/services/AuthService';
 import { AttachmentService, type FinalizeUploadResult } from './application/services/AttachmentService';
 import { BotService } from './application/services/BotService';
@@ -822,6 +822,23 @@ export class MonkyServer {
 
   public getUpdateInventory(): ReturnType<typeof readUpdateInventory> {
     return readUpdateInventory(this.dbConn.getDb());
+  }
+
+  /**
+   * Full log entries of this instance only. The global Logger buffer mixes
+   * every server in the process, which is wrong once the desktop app hosts
+   * more than one at a time.
+   */
+  public subscribeLogs(listener: (entry: LogEntry) => void): () => void {
+    return this.logScope.subscribeLocal(listener);
+  }
+
+  public getRecentLogs(): LogEntry[] {
+    return this.logScope.recentLocal();
+  }
+
+  public clearLogs(): void {
+    this.logScope.clearLocal();
   }
 
   /**

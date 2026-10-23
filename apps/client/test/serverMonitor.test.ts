@@ -237,14 +237,14 @@ test('request failures are reported once and do not restart polling or manufactu
 });
 
 function localFixture() {
-  const logListeners = new Set<(entry: LogEntry) => void>();
+  const logListeners = new Set<(port: number, entry: LogEntry) => void>();
   const statusListeners = new Set<Parameters<LocalMonitorApi['onHostServerStatusChanged']>[0]>();
-  let status = { isRunning: true, port: 3000, serverId: 'local-a' };
+  let status: Awaited<ReturnType<LocalMonitorApi['hostServerStatus']>> = { servers: [{ port: 3000, serverId: 'local-a' }] };
   const localStats: ServerStats = { ...stats, dataDir: 'local-server-directory' };
   let readStats = async (): Promise<ServerStats | null> => ({ ...localStats });
   let history: LogEntry[] = [];
   const api: LocalMonitorApi = {
-    hostServerStatus: async () => ({ ...status }),
+    hostServerStatus: async () => ({ servers: status.servers.map((server) => ({ ...server })) }),
     hostServerStats: () => readStats(),
     hostServerLogs: async () => history,
     onHostServerLog: (listener) => { logListeners.add(listener); return () => { logListeners.delete(listener); }; },
@@ -254,9 +254,13 @@ function localFixture() {
     api, logListeners, statusListeners,
     stats: (read: typeof readStats) => { readStats = read; },
     history: (entries: LogEntry[]) => { history = entries; },
-    log: (entry: LogEntry) => { for (const listener of logListeners) listener(entry); },
+    log: (entry: LogEntry, port = 3000) => { for (const listener of logListeners) listener(port, entry); },
+    setServers: (servers: Array<{ port: number; serverId: string | null }>) => {
+      status = { servers };
+      for (const listener of statusListeners) listener(status);
+    },
     stop: () => {
-      status = { ...status, isRunning: false };
+      status = { servers: [] };
       for (const listener of statusListeners) listener(status);
     },
   };
@@ -270,7 +274,7 @@ test('local history buffers live entries during loading and removes every IPC li
   f.history([log]);
   const updates: MonitorUpdate[] = [];
   const errors: unknown[] = [];
-  const feed = new ServerMonitorFeed(new LocalServerMonitorSource(f.api), (value) => updates.push(value), (error) => errors.push(error));
+  const feed = new ServerMonitorFeed(new LocalServerMonitorSource(f.api, 3000), (value) => updates.push(value), (error) => errors.push(error));
   const opening = feed.start();
   await flush();
   f.log(log);
@@ -299,7 +303,7 @@ test('stopping a local host while loading removes listeners immediately and reje
   f.stats(() => gate.promise);
   const updates: MonitorUpdate[] = [];
   const errors: unknown[] = [];
-  const feed = new ServerMonitorFeed(new LocalServerMonitorSource(f.api), (value) => updates.push(value), (error) => errors.push(error));
+  const feed = new ServerMonitorFeed(new LocalServerMonitorSource(f.api, 3000), (value) => updates.push(value), (error) => errors.push(error));
   const opening = feed.start();
   await flush();
   f.stop();
@@ -314,11 +318,11 @@ test('stopping a local host while loading removes listeners immediately and reje
 });
 
 test('local monitoring without a bridge or running host fails explicitly', async () => {
-  const unavailable = new LocalServerMonitorSource(undefined);
+  const unavailable = new LocalServerMonitorSource(undefined, 3000);
   await assert.rejects(unavailable.read(), { reason: 'localUnavailable' });
   const f = localFixture();
   f.stop();
-  const stopped = new LocalServerMonitorSource(f.api);
+  const stopped = new LocalServerMonitorSource(f.api, 3000);
   await assert.rejects(stopped.read(), { reason: 'localStopped' });
   stopped.dispose();
 });
@@ -329,13 +333,35 @@ test('a local stop event cleans up even before the initial host-status request a
   f.api.hostServerStatus = () => gate.promise;
   const updates: MonitorUpdate[] = [];
   const errors: unknown[] = [];
-  const feed = new ServerMonitorFeed(new LocalServerMonitorSource(f.api), (value) => updates.push(value), (error) => errors.push(error));
+  const feed = new ServerMonitorFeed(new LocalServerMonitorSource(f.api, 3000), (value) => updates.push(value), (error) => errors.push(error));
   const opening = feed.start();
   f.stop();
   assert.equal(f.logListeners.size, 0);
   assert.equal(f.statusListeners.size, 0);
   assert.equal(errors.length, 1);
-  gate.resolve({ isRunning: true, port: 3000, serverId: 'local-a' });
+  gate.resolve({ servers: [{ port: 3000, serverId: 'local-a' }] });
   await opening;
   assert.deepEqual(updates, []);
+});
+
+test('a local monitor follows only its own port while other hosted servers start, stop and log', async () => {
+  const f = localFixture();
+  f.stats(async () => ({ ...stats, dataDir: 'local-a' }));
+  f.history([log]);
+  const updates: MonitorUpdate[] = [];
+  const errors: unknown[] = [];
+  const source = new LocalServerMonitorSource(f.api, 3000);
+  const feed = new ServerMonitorFeed(source, (value) => updates.push(value), (error) => errors.push(error));
+  await feed.start();
+  f.setServers([{ port: 3000, serverId: 'local-a' }, { port: 3001, serverId: 'local-b' }]);
+  f.log({ ...log, message: 'From the other server' }, 3001);
+  const own = { ...log, message: 'Own event' };
+  f.log(own);
+  f.setServers([{ port: 3000, serverId: 'local-a' }]);
+  assert.deepEqual(errors, [], 'another server starting or stopping does not end this monitor');
+  const next = await source.read();
+  assert.deepEqual(next.entries, [own], 'entries from another port never reach this view');
+  f.setServers([{ port: 3000, serverId: 'local-other' }]);
+  assert.equal(errors.length, 1, 'a different server on the same port ends the view');
+  feed.stop();
 });

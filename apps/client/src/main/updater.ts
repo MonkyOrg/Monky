@@ -1,14 +1,14 @@
 import { app, BrowserWindow, ipcMain, net, shell } from 'electron';
 import path from 'path';
 import type { CancellationToken } from 'electron-updater';
-import { UpdateOutcome, ReleaseNotesResult, UPDATER_IPC, fetchReleaseCompatibility, isReleaseVersion,
+import { UpdateOutcome, ReleaseNotesResult, ReleaseHistoryResult, UPDATER_IPC, fetchReleaseCompatibility, isReleaseVersion,
   type HostedBotUpdateWarning, type HostedUpdateServer, type UpdatePreflightResult, type UpdateCheckResult } from '@monky/shared';
 import { downloadToFile } from './updateDownload';
 import { requestUpdateMetadata } from './updateMetadataRequest';
 import { mt } from './i18n';
 import { beginUpdateInstall, consumeUpdateOutcome } from './updateInstall';
 import { updateLog } from './updateLog';
-import { fetchVersionReleaseNotes } from './releaseNotes';
+import { fetchReleaseHistory, fetchVersionReleaseNotes } from './releaseNotes';
 import {
   cleanVer,
   feedUrlForTag,
@@ -572,5 +572,15 @@ export function setupUpdater(
   // demand from Settings (#547). Defaults to the running version's release.
   ipcMain.handle(UPDATER_IPC.releaseNotes, async (_e, tag?: unknown): Promise<ReleaseNotesResult> => {
     return fetchReleaseNotes(typeof tag === 'string' ? tag : undefined);
+  });
+
+  // Older releases, loaded page by page as the changelog is scrolled.
+  ipcMain.handle(UPDATER_IPC.releaseHistory, async (_e, page: unknown, before?: unknown): Promise<ReleaseHistoryResult> => {
+    if (typeof page !== 'number' || (before !== undefined && typeof before !== 'string')) {
+      return { ok: false, error: 'Invalid release history request' };
+    }
+    const result = await fetchReleaseHistory(app.getVersion(), page, before);
+    if (!result.ok) updateLog('fetchReleaseHistory FAILED', { page, error: result.error });
+    return result;
   });
 }

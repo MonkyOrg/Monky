@@ -113,7 +113,7 @@ async function runRegression(config) {
   });
   localStatsRead = async () => ({ ...baseStats, dataDir: 'local-host' });
   window.api = {
-    hostServerStatus: async () => ({ isRunning: true, port: 3000, serverId: 'local-host' }),
+    hostServerStatus: async () => ({ servers: [{ port: 3000, serverId: 'local-host' }] }),
     hostServerStats: async () => { localReads++; return localStatsRead(); },
     hostServerLogs: async () => [log],
     hostServerClearLogs: async () => { localClears++; },
@@ -233,7 +233,7 @@ async function runRegression(config) {
   await sessionManager.removeAll();
   let resolveLocal;
   localStatsRead = () => new Promise((resolve) => { resolveLocal = resolve; });
-  const localOpening = modal.openLocal();
+  const localOpening = modal.openLocal(3000);
   await flush();
   check(logListeners.size === 1 && statusListeners.size === 1, 'local source subscribes once before loading');
   modal.close();
@@ -244,7 +244,7 @@ async function runRegression(config) {
     'late local response cannot reopen or retain a timer');
   localStatsRead = async () => ({ ...baseStats, dataDir: 'local-host' });
   opener.focus();
-  await modal.openLocal();
+  await modal.openLocal(3000);
   check(document.querySelector('#monitor-source').textContent.trim() === t('serverMonitor.localSource'), 'local monitoring works without a connected session');
   document.querySelector('#btn-clear-logs').click();
   check(localClears === 0, 'local clear is also display-only');

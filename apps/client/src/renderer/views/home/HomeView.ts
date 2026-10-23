@@ -180,7 +180,18 @@ export class HomeView {
     const item = (event.target as HTMLElement).closest<HTMLElement>('.home-dm-item[data-dm-id]');
     if (!item) return;
     event.preventDefault();
-    this.openPeerMenu(item.dataset.dmId!, event.clientX, event.clientY, item);
+    const id = item.dataset.dmId!;
+    const peer = dmStore.peer(id);
+    const unread = dmStore.conversationList().find((conversation) => conversation.peer === id)?.unread ?? 0;
+    contextMenu.open(event.clientX, event.clientY, [
+      {
+        label: t('channelMenu.markAsRead'),
+        icon: 'mark_chat_read',
+        disabled: unread === 0,
+        onClick: () => { void dmStore.markRead(id); },
+      },
+      ...(peer ? peerMenuItems(peer) : []),
+    ], item);
   }
 
   private runFriendAction(action: FriendRowAction, id: string, anchor: HTMLElement, event: MouseEvent): void {

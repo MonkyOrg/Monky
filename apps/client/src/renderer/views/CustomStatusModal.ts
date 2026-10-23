@@ -15,36 +15,43 @@ import { showErrorToast } from './CopyToast';
 
 const DEFAULT_COLOR = '#5865f2';
 
+export type CustomStatusEditorResult = 'saved' | 'removed' | 'cancelled';
+
+interface CustomStatusEditorOptions {
+  /** Prefix of every id in the form, so two editors never share one. */
+  idPrefix: string;
+  onClose: (result: CustomStatusEditorResult) => void;
+}
+
 /**
- * Writes the person's own status (custom-status): emoji, text, tag, dot colour
- * and whether the emoji and tag show next to their name. Saving makes it the
- * current status; removing deletes it and falls back to online.
+ * The form that writes the person's own status (custom-status): emoji, text,
+ * tag, dot colour and whether the emoji and tag show next to their name.
+ * Saving makes it the current status; removing deletes it and falls back to
+ * online. Hosted by the stand-alone modal and, inline, by the Account tab of
+ * Settings, where a second modal would replace the Settings card.
  */
-export class CustomStatusModal {
+export class CustomStatusEditor {
   private root: HTMLElement | null = null;
   private draft: CustomStatus = { color: DEFAULT_COLOR, showEmoji: true, showTag: true };
-  private readonly colorPicker = new ColorPicker({ id: 'custom-status-color', label: 'customStatus.colorLabel', presets: COLOR_PRESETS });
+  private readonly colorPicker: ColorPicker;
   private emojiPicker: EmojiPicker | null = null;
   private controller: AbortController | null = null;
 
-  public open(): void {
-    this.close();
+  constructor(private readonly options: CustomStatusEditorOptions) {
+    this.colorPicker = new ColorPicker({ id: `${options.idPrefix}-color`, label: 'customStatus.colorLabel', presets: COLOR_PRESETS });
+  }
+
+  public renderHtml(): string {
     const saved = settingsStore.customStatus;
     this.draft = saved ? { ...saved } : { color: DEFAULT_COLOR, showEmoji: true, showTag: true };
-    const root = document.createElement('div');
-    root.className = 'modal-backdrop';
-    root.innerHTML = `<div class="modal-card custom-status-modal" role="dialog" aria-modal="true" aria-labelledby="custom-status-title">
-      <div class="modal-header">
-        <div class="modal-title" id="custom-status-title">${t('customStatus.title')}</div>
-        <button type="button" class="modal-close-btn" data-custom-status-cancel aria-label="${escapeHtml(t('common.close'))}">&times;</button>
-      </div>
-      <form class="custom-status-form" novalidate>
+    const id = this.options.idPrefix;
+    return `<form class="custom-status-form" novalidate>
         <div class="custom-status-preview" aria-live="polite" data-custom-status-preview></div>
         <div class="form-group">
-          <label for="custom-status-text">${t('customStatus.textLabel')}</label>
+          <label for="${id}-text">${t('customStatus.textLabel')}</label>
           <div class="custom-status-text-row">
             <button type="button" class="custom-status-emoji-btn" data-custom-status-emoji aria-haspopup="dialog" aria-expanded="false"></button>
-            <input id="custom-status-text" type="text" autocomplete="off" maxlength="${LIMITS.MAX_CUSTOM_STATUS_TEXT_LENGTH}"
+            <input id="${id}-text" data-custom-status-text type="text" autocomplete="off" maxlength="${LIMITS.MAX_CUSTOM_STATUS_TEXT_LENGTH}"
               placeholder="${escapeHtml(t('customStatus.textPlaceholder'))}" value="${escapeHtml(this.draft.text ?? '')}">
             <button type="button" class="btn btn-icon custom-status-clear-emoji" data-custom-status-clear-emoji
               aria-label="${escapeHtml(t('customStatus.removeEmoji'))}" title="${escapeHtml(t('customStatus.removeEmoji'))}">
@@ -54,8 +61,8 @@ export class CustomStatusModal {
         </div>
         <div class="custom-status-grid">
           <div class="form-group">
-            <label for="custom-status-tag">${t('customStatus.tagLabel')}</label>
-            <input id="custom-status-tag" type="text" autocomplete="off" maxlength="${LIMITS.MAX_CUSTOM_STATUS_TAG_LENGTH}"
+            <label for="${id}-tag">${t('customStatus.tagLabel')}</label>
+            <input id="${id}-tag" data-custom-status-tag type="text" autocomplete="off" maxlength="${LIMITS.MAX_CUSTOM_STATUS_TAG_LENGTH}"
               placeholder="${escapeHtml(t('customStatus.tagPlaceholder'))}" value="${escapeHtml(this.draft.tag ?? '')}">
           </div>
           <div class="form-group">
@@ -63,37 +70,41 @@ export class CustomStatusModal {
             ${this.colorPicker.renderHtml(this.draft.color)}
           </div>
         </div>
-        ${this.switchRow('custom-status-show-emoji', 'customStatus.showEmoji', this.draft.showEmoji)}
-        ${this.switchRow('custom-status-show-tag', 'customStatus.showTag', this.draft.showTag)}
+        ${this.switchRow(`${id}-show-emoji`, 'customStatus.showEmoji', this.draft.showEmoji, 'data-custom-status-show-emoji')}
+        ${this.switchRow(`${id}-show-tag`, 'customStatus.showTag', this.draft.showTag, 'data-custom-status-show-tag')}
         <div class="modal-footer custom-status-footer">
           ${saved ? `<button type="button" class="btn btn-secondary custom-status-remove" data-custom-status-remove>${t('customStatus.remove')}</button>` : ''}
           <button type="button" class="btn btn-secondary" data-custom-status-cancel>${t('common.cancel')}</button>
           <button type="submit" class="btn btn-primary" data-custom-status-save>${t('common.save')}</button>
         </div>
-      </form>
-    </div>`;
-    document.body.appendChild(root);
-    this.root = root;
-    enterModal(root);
-    this.bind(root);
-    this.render();
-    root.querySelector<HTMLInputElement>('#custom-status-text')?.focus();
+      </form>`;
   }
 
-  public close(): void {
+  /** Binds the form rendered by `renderHtml` inside `root`. */
+  public mount(root: HTMLElement): void {
+    this.destroy();
+    this.root = root;
+    this.bind(root);
+    this.render();
+  }
+
+  public focus(): void {
+    this.root?.querySelector<HTMLInputElement>('[data-custom-status-text]')?.focus({ preventScroll: true });
+  }
+
+  public destroy(): void {
     this.controller?.abort();
     this.controller = null;
     this.emojiPicker?.destroy();
     this.emojiPicker = null;
     this.colorPicker.cleanup();
-    if (this.root) exitModal(this.root);
     this.root = null;
   }
 
-  private switchRow(id: string, label: 'customStatus.showEmoji' | 'customStatus.showTag', checked: boolean): string {
+  private switchRow(id: string, label: 'customStatus.showEmoji' | 'customStatus.showTag', checked: boolean, marker: string): string {
     return `<div class="custom-status-switch-row">
       <span id="${id}-label">${t(label)}</span>
-      <label class="toggle-switch"><input type="checkbox" role="switch" id="${id}" aria-labelledby="${id}-label" ${checked ? 'checked' : ''}>
+      <label class="toggle-switch"><input type="checkbox" role="switch" id="${id}" ${marker} aria-labelledby="${id}-label" ${checked ? 'checked' : ''}>
         <span class="toggle-slider"></span></label>
     </div>`;
   }
@@ -102,16 +113,16 @@ export class CustomStatusModal {
     const controller = new AbortController();
     this.controller = controller;
     const options = { signal: controller.signal };
-    const field = (id: string) => root.querySelector<HTMLInputElement>(`#${id}`)!;
-    const text = field('custom-status-text');
-    const tag = field('custom-status-tag');
+    const field = (marker: string) => root.querySelector<HTMLInputElement>(`[${marker}]`)!;
+    const text = field('data-custom-status-text');
+    const tag = field('data-custom-status-tag');
     text.addEventListener('input', () => { this.draft.text = text.value; this.render(); }, options);
     tag.addEventListener('input', () => { this.draft.tag = tag.value; this.render(); }, options);
-    field('custom-status-show-emoji').addEventListener('change', (event) => {
+    field('data-custom-status-show-emoji').addEventListener('change', (event) => {
       this.draft.showEmoji = (event.currentTarget as HTMLInputElement).checked;
       this.render();
     }, options);
-    field('custom-status-show-tag').addEventListener('change', (event) => {
+    field('data-custom-status-show-tag').addEventListener('change', (event) => {
       this.draft.showTag = (event.currentTarget as HTMLInputElement).checked;
       this.render();
     }, options);
@@ -138,22 +149,15 @@ export class CustomStatusModal {
       emojiButton.focus();
     }, options);
 
-    root.querySelectorAll('[data-custom-status-cancel]').forEach((button) => button.addEventListener('click', () => this.close(), options));
+    root.querySelector('[data-custom-status-cancel]')?.addEventListener('click', () => this.options.onClose('cancelled'), options);
     root.querySelector('[data-custom-status-remove]')?.addEventListener('click', () => {
       sessionManager.saveCustomStatus(null);
-      this.close();
+      this.options.onClose('removed');
     }, options);
     root.querySelector('form')?.addEventListener('submit', (event) => {
       event.preventDefault();
       this.save();
     }, options);
-    root.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape' && handlesModalKey(root, event)) {
-        event.preventDefault();
-        this.close();
-      }
-    }, options);
-    enableBackdropClose(root, () => this.close());
   }
 
   /** The draft as it would be published, or null while it has nothing to show. */
@@ -170,7 +174,7 @@ export class CustomStatusModal {
       return;
     }
     sessionManager.saveCustomStatus(status);
-    this.close();
+    this.options.onClose('saved');
   }
 
   private render(): void {
@@ -201,6 +205,49 @@ export class CustomStatusModal {
     }
     const saveButton = root.querySelector<HTMLButtonElement>('[data-custom-status-save]');
     if (saveButton) saveButton.disabled = !status;
+  }
+}
+
+/** Stand-alone editor, opened from the user card where no other modal is up. */
+export class CustomStatusModal {
+  private root: HTMLElement | null = null;
+  private controller: AbortController | null = null;
+  private readonly editor = new CustomStatusEditor({ idPrefix: 'custom-status', onClose: () => this.close() });
+
+  public open(): void {
+    this.close();
+    const root = document.createElement('div');
+    root.className = 'modal-backdrop';
+    root.innerHTML = `<div class="modal-card custom-status-modal" role="dialog" aria-modal="true" aria-labelledby="custom-status-title">
+      <div class="modal-header">
+        <div class="modal-title" id="custom-status-title">${t('customStatus.title')}</div>
+        <button type="button" class="modal-close-btn" data-custom-status-close aria-label="${escapeHtml(t('common.close'))}">&times;</button>
+      </div>
+      ${this.editor.renderHtml()}
+    </div>`;
+    document.body.appendChild(root);
+    this.root = root;
+    enterModal(root);
+    this.editor.mount(root);
+    const controller = new AbortController();
+    this.controller = controller;
+    root.querySelector('[data-custom-status-close]')?.addEventListener('click', () => this.close(), { signal: controller.signal });
+    root.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && handlesModalKey(root, event)) {
+        event.preventDefault();
+        this.close();
+      }
+    }, { signal: controller.signal });
+    enableBackdropClose(root, () => this.close());
+    this.editor.focus();
+  }
+
+  public close(): void {
+    this.controller?.abort();
+    this.controller = null;
+    this.editor.destroy();
+    if (this.root) exitModal(this.root);
+    this.root = null;
   }
 }
 

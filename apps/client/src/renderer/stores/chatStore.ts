@@ -455,6 +455,21 @@ export class ChatStore {
     return this.unreadChannels.has(channelId);
   }
 
+  /**
+   * Clears every unread and mention flag at once ("mark server as read").
+   * Returns the channels that held a mention so the caller can clear them on
+   * the server too, otherwise they come back as unread on the next reconnect.
+   */
+  public markAllRead(): string[] {
+    const mentions = [...this.mentionChannels];
+    const hadUnread = this.unreadChannels.size > 0;
+    this.mentionChannels.clear();
+    this.unreadChannels.clear();
+    if (mentions.length) this.bus.emit('chat.mentions_updated');
+    if (hadUnread) this.bus.emit('chat.unread_updated');
+    return mentions;
+  }
+
   /** Whether anything is unread anywhere, used by the server rail badge (#400). */
   public hasAnyUnread(): boolean {
     return this.unreadChannels.size > 0 || this.mentionChannels.size > 0;

@@ -2351,11 +2351,51 @@ export class MainView {
     }
   }
 
+  /** A forum's unread state lives in its posts, which are channels of their own. */
+  private readableChannelIds(channelId: string): string[] {
+    const channels = serverStore.serverDetails?.channels ?? [];
+    const channel = channels.find((item) => item.id === channelId);
+    if (!channel) return [];
+    return channel.type === 'FORUM'
+      ? [channel.id, ...channels.filter((item) => item.forumId === channel.id).map((item) => item.id)]
+      : [channel.id];
+  }
+
+  private hasUnreadIn(channelIds: readonly string[]): boolean {
+    return channelIds.some((id) => chatStore.hasUnread(id) || chatStore.hasMention(id));
+  }
+
+  /** Clears the unread dot and, on the server too, any pending mention (#263, #14). */
+  private markChannelsRead(channelIds: readonly string[]): void {
+    for (const channelId of channelIds) {
+      chatStore.clearUnread(channelId);
+      if (chatStore.hasMention(channelId)) {
+        chatStore.clearMention(channelId);
+        networkClient.send(MessageType.CHAT_MENTIONS_READ, { channelId });
+      }
+    }
+  }
+
+  /**
+   * Mark as read is offered to everyone; arranging the category stays with
+   * whoever can manage channels.
+   */
   private openCategoryMenu(categoryId: string, x: number, y: number): void {
-    if (!serverStore.hasPermission(Permission.MANAGE_CHANNELS)) return;
     const categories = serverStore.serverDetails?.categories ?? [];
     const category = categories.find((item) => item.id === categoryId);
     if (!category) return;
+    const inCategory = (serverStore.serverDetails?.channels ?? [])
+      .filter((item) => item.categoryId === categoryId && !item.forumId)
+      .flatMap((item) => this.readableChannelIds(item.id));
+    const markRead: ContextMenuEntry = {
+      label: t('categories.markAsRead'), icon: 'mark_chat_read',
+      disabled: !this.hasUnreadIn(inCategory),
+      onClick: () => this.markChannelsRead(inCategory),
+    };
+    if (!serverStore.hasPermission(Permission.MANAGE_CHANNELS)) {
+      contextMenu.open(x, y, [markRead]);
+      return;
+    }
     // A category steps past its root neighbour, loose channels included when
     // the server shares one root order.
     const siblings = serverStore.getChannelTreeRoot()
@@ -2366,6 +2406,7 @@ export class MainView {
       if (neighbor) this.commitCategoryOrder(categoryId, { kind: neighbor.kind, id: neighbor.id }, delta > 0);
     };
     contextMenu.open(x, y, [
+      markRead,
       { label: t('categories.addChannel'), icon: 'add', onClick: () => createChannelModal.open('TEXT', categoryId) },
       { label: t('categories.edit'), icon: 'settings', onClick: () => categoryModal.open(category) },
       { label: t('categories.moveUp'), icon: 'arrow_upward', disabled: position <= 0 || !serverStore.hasPermission(Permission.MANAGE_CHANNELS), onClick: () => move(-1) },
@@ -2390,6 +2431,18 @@ export class MainView {
     const channel = serverStore.serverDetails?.channels.find((c) => c.id === channelId);
     const items: ContextMenuEntry[] = [];
 
+    // Always listed first, as in Discord, and disabled when there is nothing
+    // to clear; hiding it made the option look missing (#263).
+    if (channel?.type === 'TEXT' || channel?.type === 'VOICE' || channel?.type === 'FORUM') {
+      const readable = this.readableChannelIds(channelId);
+      items.push({
+        label: t('channelMenu.markAsRead'),
+        icon: 'mark_chat_read',
+        disabled: !this.hasUnreadIn(readable),
+        onClick: () => this.markChannelsRead(readable),
+      });
+    }
+
     // Notification controls apply to every channel that carries messages.
     if (channel?.type === 'TEXT' || channel?.type === 'VOICE') {
       items.push({
@@ -2397,21 +2450,6 @@ export class MainView {
         icon: 'notifications',
         onClick: () => this.openChannelNotificationMenu(channelId, x, y),
       });
-
-      // Only offered when there is actually something to clear (#263).
-      if (chatStore.hasUnread(channelId) || chatStore.hasMention(channelId)) {
-        items.push({
-          label: t('channelMenu.markAsRead'),
-          icon: 'mark_chat_read',
-          onClick: () => {
-            chatStore.clearUnread(channelId);
-            if (chatStore.hasMention(channelId)) {
-              chatStore.clearMention(channelId);
-              networkClient.send(MessageType.CHAT_MENTIONS_READ, { channelId });
-            }
-          },
-        });
-      }
     }
 
     if (serverStore.hasPermission(Permission.MANAGE_CHANNELS)) {

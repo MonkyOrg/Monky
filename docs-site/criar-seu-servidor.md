@@ -20,13 +20,15 @@ usa o nickname global salvo em **Meu Perfil**.
 Clique em **Criar e Iniciar Servidor**. O servidor sobe na sua máquina, escuta em todas as interfaces de rede na porta escolhida e abre para visualização. Entrar em um canal de voz é uma ação separada.
 
 Servidores criados ficam salvos (até 10) e aparecem no trilho como qualquer
-outro servidor. Clique com o botão direito no ícone para **Iniciar**, **Parar**,
-abrir o **Monitor** ou **Excluir** os dados locais.
+outro servidor. Clique com o botão direito no ícone para **Iniciar** ou
+**Parar**, abrir o **Monitor** (enquanto estiver rodando) ou **Excluir** os
+dados locais.
 
-Iniciar um servidor offline pelo trilho de servidores preserva a chamada
-atual, inclusive câmera, compartilhamentos e mute. Se outro servidor já estiver
-hospedado nesta instância, ele não será substituído: pare-o explicitamente
-quando for seguro antes de iniciar um diferente.
+Você pode manter vários servidores seus rodando ao mesmo tempo, cada um na sua
+porta. O formulário já sugere uma porta livre e não aceita a porta de outro
+servidor seu. Iniciar um servidor offline pelo trilho de servidores preserva a
+chamada atual, inclusive câmera, compartilhamentos e mute, e nunca desliga
+outro servidor que esteja rodando.
 
 Voltar à Home pela casinha não desconecta servidores nem encerra a chamada.
 Para iniciar outro servidor salvo sem sair da chamada, use sua entrada no

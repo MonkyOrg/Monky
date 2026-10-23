@@ -1,7 +1,58 @@
-import type { ReleaseNotesResult } from '@monky/shared';
+import type { ReleaseHistoryEntry, ReleaseHistoryResult, ReleaseNotesResult } from '@monky/shared';
+import { compareVersions } from './updateVersions';
 
 const REPOSITORY = 'MonkyOrg/Monky';
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9a-z.-]+)?(?:\+[0-9a-z.-]+)?$/i;
+export const RELEASE_HISTORY_PAGE_SIZE = 20;
+const MAX_HISTORY_PAGE = 50;
+
+const baseVersion = (version: string): string => version.split(/[-+]/)[0];
+
+/**
+ * One page of the GitHub release listing, reduced to releases older than
+ * `before` (the version already on screen), newest first. Beta and stable
+ * builds of the same number carry the same notes, so the caller dedupes them
+ * by base version; the stable one sorts first within a page.
+ */
+export async function fetchReleaseHistory(installedVersion: string, page: number, before?: string): Promise<ReleaseHistoryResult> {
+  const anchor = (before?.trim() || installedVersion).replace(/^v/i, '');
+  if (!Number.isInteger(page) || page < 1 || page > MAX_HISTORY_PAGE || anchor.length > 128 || !VERSION.test(anchor)) {
+    return { ok: false, error: 'Invalid release history request' };
+  }
+  try {
+    const response = await fetch(
+      `https://api.github.com/repos/${REPOSITORY}/releases?per_page=${RELEASE_HISTORY_PAGE_SIZE}&page=${page}`,
+      {
+        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Monky-App' },
+        signal: AbortSignal.timeout(10_000),
+      }
+    );
+    if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
+    const list: unknown = await response.json();
+    if (!Array.isArray(list)) return { ok: false, error: 'Unexpected GitHub release response' };
+    const entries: ReleaseHistoryEntry[] = [];
+    for (const release of list as unknown[]) {
+      if (!release || typeof release !== 'object') continue;
+      const { tag_name: tag, body, draft, published_at: publishedAt } = release as Record<string, unknown>;
+      if (draft === true || typeof tag !== 'string' || (body !== null && body !== undefined && typeof body !== 'string')) continue;
+      const version = tag.replace(/^v/i, '');
+      if (tag !== `v${version}` || version.length > 128 || !VERSION.test(version)) continue;
+      if (compareVersions(baseVersion(version), baseVersion(anchor)) >= 0) continue;
+      const text = typeof body === 'string' ? body : '';
+      if (text.length > 200_000) continue;
+      entries.push({
+        version,
+        body: text,
+        url: `https://github.com/${REPOSITORY}/releases/tag/${encodeURIComponent(tag)}`,
+        publishedAt: typeof publishedAt === 'string' && !Number.isNaN(Date.parse(publishedAt)) ? publishedAt : null,
+      });
+    }
+    entries.sort((a, b) => compareVersions(b.version, a.version));
+    return { ok: true, entries, hasMore: list.length === RELEASE_HISTORY_PAGE_SIZE && page < MAX_HISTORY_PAGE };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
 
 /** Keep release selection tied to the installed version, including beta tags. */
 export async function fetchVersionReleaseNotes(installedVersion: string, tag?: string): Promise<ReleaseNotesResult> {

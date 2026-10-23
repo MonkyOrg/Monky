@@ -20,6 +20,8 @@ import { renderMarkdown } from '../../utils/markdown';
 import type { MessageClipboardContent } from '../../utils/messageClipboard';
 import { formatMessageClock, formatMessageTime, renderReplyPreview } from '../../utils/messageReply';
 import { setSurfaceVisible } from '../../utils/surfaceVisibility';
+import { animateEnter } from '../../utils/surfaceMotion';
+import { renderLoadingSkeleton } from '../../utils/loadingSkeleton';
 import { bindChatComposer, renderChatComposer, renderChatEditComposer } from '../ChatComposer';
 import { contextMenu, type ContextMenuEntry } from '../ContextMenu';
 import { showErrorToast } from '../CopyToast';
@@ -72,6 +74,8 @@ export class DmConversationView {
   private composerPicker: EmojiPicker | null = null;
   private pinnedToBottom = true;
   private sending = false;
+  /** Whether opening the conversation finished, even without any history. */
+  private openSettled = false;
   private readonly copy = new MessageCopy({
     isActive: () => !!this.container?.isConnected,
     feed: () => this.query('[data-dm-feed]'),
@@ -89,6 +93,7 @@ export class DmConversationView {
 
   public mount(container: HTMLElement): void {
     this.destroy();
+    this.openSettled = false;
     this.container = container;
     this.listeners = new AbortController();
     container.innerHTML = this.renderShell();
@@ -114,7 +119,13 @@ export class DmConversationView {
         this.renderComposerState();
       }),
     );
-    void dmStore.open(this.peer);
+    const peer = this.peer;
+    void dmStore.open(peer).finally(() => {
+      // A failed load must not leave placeholders up: fall back to the feed.
+      if (this.peer !== peer || !this.container) return;
+      this.openSettled = true;
+      if (!dmStore.conversation(peer)) this.renderMessages(true);
+    });
     window.addEventListener('focus', () => void dmStore.markRead(this.peer), { signal: this.listeners.signal });
     this.focusInput();
   }
@@ -306,6 +317,13 @@ export class DmConversationView {
     const feed = this.query('[data-dm-feed]');
     if (!feed) return;
     const state = dmStore.conversation(this.peer);
+    // Nothing of this conversation is loaded yet: show message-shaped
+    // placeholders instead of a blank feed.
+    if (!state && !this.openSettled) {
+      feed.innerHTML = renderLoadingSkeleton('messages', 5);
+      return;
+    }
+    const replacingSkeleton = !!feed.querySelector(':scope > .loading-skeleton');
     const previousHeight = feed.scrollHeight;
     const previousTop = feed.scrollTop;
     const firstBefore = feed.querySelector<HTMLElement>('.chat-message-row')?.dataset.messageId;
@@ -329,6 +347,7 @@ export class DmConversationView {
       feed.scrollTop = previousTop;
     }
     this.renderTyping();
+    if (replacingSkeleton) animateEnter(feed, 'view');
   }
 
   private renderIntro(): string {

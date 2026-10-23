@@ -810,6 +810,37 @@ async function regression(locale) {
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   rightClick(root.querySelector('.channel-item[data-channel-id="voice"]'));
   check(menuItems().some(item => menuLabel(item) === t('main.editChannel')), 'right-clicking a channel preserves its own menu');
+  check(menuLabel(menuItems()[0]) === t('channelMenu.markAsRead') && menuItems()[0].disabled,
+    'mark as read is always the first channel option, disabled when nothing is unread');
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  {
+    const { chatStore } = await import('/stores/chatStore.ts');
+    const mentionsRead = [];
+    client.send = (type, payload) => { if (type === 'CHAT_MENTIONS_READ') mentionsRead.push(payload.channelId); };
+    chatStore.markUnread('voice');
+    chatStore.markMention('voice');
+    rightClick(root.querySelector('.channel-item[data-channel-id="voice"]'));
+    const markRead = menuItems()[0];
+    check(menuLabel(markRead) === t('channelMenu.markAsRead') && !markRead.disabled, 'an unread channel can be marked as read');
+    markRead.click();
+    check(!chatStore.hasUnread('voice') && !chatStore.hasMention('voice') && mentionsRead.includes('voice'),
+      'marking a channel as read clears the dot and the mention, also on the server');
+    chatStore.markUnread('voice');
+    rightClick(categoryTitle);
+    const markCategory = menuItems()[0];
+    check(menuLabel(markCategory) === t('categories.markAsRead') && !markCategory.disabled, 'a category with unread channels can be marked as read');
+    markCategory.click();
+    check(!chatStore.hasUnread('voice'), 'marking the category as read clears its channels');
+    const managing = store.myPermissions;
+    store.myPermissions = 0;
+    chatStore.markUnread('voice');
+    rightClick(categoryTitle);
+    check(JSON.stringify(menuItems().map(menuLabel)) === JSON.stringify([t('categories.markAsRead')]),
+      'members without management permission still get mark as read on a category');
+    menuItems()[0].click();
+    check(!chatStore.hasUnread('voice'), 'and it works for them');
+    store.myPermissions = managing;
+  }
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   view.openChannelMenu('voice', 10, 10);
   check(document.querySelector('[aria-haspopup="menu"]'), 'channel movement is offered through contextual submenu');

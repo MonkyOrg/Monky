@@ -1,7 +1,8 @@
 import { connectionStore, type CreatedServer } from '../stores/connectionStore';
 import { t, getLanguage } from '../i18n';
 
-let pendingStart: { id: string; port: number; promise: Promise<void> } | null = null;
+/** Starts in flight, per server: a second click joins the same start. */
+const pendingStarts = new Map<string, Promise<void>>();
 
 export function findOwnedServer(host: string, port: number): CreatedServer | undefined {
   const localHost = host.trim().replace(/^wss?:\/\//i, '').replace(/^\[(.+)\]$/, '$1').toLowerCase();
@@ -10,14 +11,13 @@ export function findOwnedServer(host: string, port: number): CreatedServer | und
 }
 
 /**
- * Starting for browsing never replaces another hosted instance. The same rule
- * applies to Home and the rail, independently of where the current call lives.
+ * Several of the user's servers may run side by side, each on its own port.
+ * Starting never replaces another hosted instance: a port held by a different
+ * server, or this server already running elsewhere, is reported instead.
  */
-export async function ensureHostedServerStarted(server: CreatedServer): Promise<void> {
-  if (pendingStart) {
-    if (pendingStart.id === server.id && pendingStart.port === server.port) return pendingStart.promise;
-    throw new Error(t('navigation.hostStartBusy'));
-  }
+export function ensureHostedServerStarted(server: CreatedServer): Promise<void> {
+  const pending = pendingStarts.get(server.id);
+  if (pending) return pending;
 
   const target = { ...server };
   const promise = (async () => {
@@ -28,9 +28,12 @@ export async function ensureHostedServerStarted(server: CreatedServer): Promise<
     const status = await api.hostServerStatus().catch((error: unknown) => {
       throw new Error(t('main.serverStartFailedMessage'), { cause: error });
     });
-    if (status.isRunning && (status.port !== target.port || status.serverId !== target.id)) {
-      throw new Error(t('navigation.otherHostedServerRunning'));
+    const onPort = status.servers.find(item => item.port === target.port);
+    if (onPort && onPort.serverId !== target.id) {
+      throw new Error(t('navigation.hostedPortInUse', { port: String(target.port) }));
     }
+    const elsewhere = status.servers.find(item => item.serverId === target.id && item.port !== target.port);
+    if (elsewhere) throw new Error(t('navigation.hostedServerElsewhere', { port: String(elsewhere.port) }));
 
     // A matching status is not proof of readiness: a stop may already be queued.
     const result = await api.hostServerStart({
@@ -54,11 +57,10 @@ export async function ensureHostedServerStarted(server: CreatedServer): Promise<
     connectionStore.saveCreatedServer({ ...target, lastStarted: Date.now() });
   })();
 
-  const operation = { id: target.id, port: target.port, promise };
-  pendingStart = operation;
-  try {
-    await promise;
-  } finally {
-    if (pendingStart === operation) pendingStart = null;
-  }
+  pendingStarts.set(target.id, promise);
+  void promise.then(
+    () => { if (pendingStarts.get(target.id) === promise) pendingStarts.delete(target.id); },
+    () => { if (pendingStarts.get(target.id) === promise) pendingStarts.delete(target.id); },
+  );
+  return promise;
 }

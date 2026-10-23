@@ -77,7 +77,7 @@ if (!process.versions.electron) {
       return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2), bottom: Math.round(box.bottom) };
     })()`);
     // Real Chromium input: the same path a user's mouse takes, not synthetic DOM events.
-    const drag = async (from, to, midway) => {
+    const drag = async (from, to, midway, beforeRelease) => {
       browser.webContents.sendInputEvent({ type: 'mouseMove', ...from });
       await new Promise(resolve => setTimeout(resolve, 20));
       browser.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...from });
@@ -89,6 +89,10 @@ if (!process.versions.electron) {
         await new Promise(resolve => setTimeout(resolve, 15));
         if (step === 5 && midway) await midway();
       }
+      if (beforeRelease) {
+        await frames();
+        await beforeRelease();
+      }
       browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...to });
       await waitFor(`!document.querySelector('.server-rail--dragging')`);
       await new Promise(resolve => setTimeout(resolve, 60));
@@ -96,6 +100,13 @@ if (!process.versions.electron) {
     };
     try {
       await browser.loadURL(`http://127.0.0.1:${vite.httpServer.address().port}/__rail__`);
+      // Set explicitly: CI runners may report reduced motion on their own,
+      // which would skip the folder animations checked below.
+      browser.webContents.debugger.attach('1.3');
+      const motion = (value) => browser.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+        features: [{ name: 'prefers-reduced-motion', value }],
+      });
+      await motion('no-preference');
       const setup = await evaluate(`(${setupRail.toString()})().then(() => null).catch(error => ({ failure: error.stack || String(error) }))`);
       if (setup?.failure) throw new Error(setup.failure);
       const order = () => evaluate('window.railOrder()');
@@ -141,12 +152,101 @@ if (!process.versions.electron) {
       await check(await evaluate('window.connectCalls === 1'), 'a plain click still opens the server');
       await check(JSON.stringify(await order()) === '[5103,5102,5101]', 'a plain click does not reorder');
 
-      // Servers enter and leave folders by dropping on the folder header.
-      await evaluate(`window.createFolder()`);
-      const folderHeader = await center('.server-rail-folder-header');
+      // Like Discord: holding a server over the middle of another previews a
+      // folder and dropping it there groups both, in place of the target.
       const connectedAgain = await center('.server-rail-item[data-port="5101"]');
-      await drag(connectedAgain, folderHeader);
-      await check(JSON.stringify(await order()) === '[5103,5102,"folder:5101"]', 'a server moves into a folder');
+      const groupTarget = await center('.server-rail-item[data-port="5102"]');
+      await drag(connectedAgain, groupTarget, null, async () => {
+        await check(await waitFor(`!!document.querySelector('.server-rail-item.combine-target[data-port="5102"]')`),
+          'the target previews the folder while hovered');
+      });
+      await check(JSON.stringify(await order()) === '[5103,"folder:5102","folder:5101"]', 'dropping on a server creates a folder with both');
+      const animated = await evaluate('window.animatedFolders');
+      await check(animated > 0, `the new folder opens with the slide animation, not abruptly (${animated} animations)`);
+      await check(await evaluate(`document.querySelector('.server-rail-folder:not(.collapsed) .server-rail-folder-header')?.getAttribute('aria-label') === 'b.test, a.test'`),
+        'an unnamed folder is labelled after its servers');
+
+      // Near an edge the line shows instead and nothing is grouped.
+      const loose = await center('.server-rail-item[data-port="5103"]');
+      const folderTile = await evaluate(`(() => {
+        const box = document.querySelector('.server-rail-folder-header').getBoundingClientRect();
+        return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2), bottom: Math.round(box.bottom) };
+      })()`);
+      await drag(loose, folderTile, null, async () => {
+        await check(await waitFor(`!!document.querySelector('.server-rail-folder-header.drag-over')`), 'the folder highlights while a server is held over it');
+      });
+      await check(JSON.stringify(await order()) === '["folder:5102","folder:5101","folder:5103"]', 'dropping on a folder adds the server to it');
+
+      // Settings: name and colour.
+      await evaluate(`window.openFolderSettings()`);
+      await check(await waitFor(`!!document.querySelector('.folder-settings-modal')`), 'folder settings open');
+      await evaluate(`(() => {
+        const input = document.querySelector('#folder-settings-name');
+        input.value = 'Amigos';
+        document.querySelector('[data-folder-color="#e91e63"]').click();
+      })()`);
+      await check(await evaluate(`document.querySelector('[data-folder-color="#e91e63"]').getAttribute('aria-checked') === 'true'`), 'the chosen colour is selected');
+      const done = await center('[data-folder-settings-done]');
+      browser.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...done });
+      browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...done });
+      await check(await waitFor(`window.folderState()?.name === 'Amigos' && window.folderState()?.color === '#e91e63'`), 'Done saves the name and colour');
+      await check(await evaluate(`document.querySelector('.server-rail-folder').style.getPropertyValue('--folder-color') === '#e91e63'`), 'the rail paints the folder colour');
+
+      // Collapsed, the folder becomes a tile with its servers in miniature.
+      await evaluate(`window.collapseAll()`);
+      await check(await waitFor(`document.querySelectorAll('.server-rail-folder.collapsed .server-rail-folder-mini').length === 3`), 'a collapsed folder shows its servers in miniature');
+      await check(await evaluate(`(() => { const minis = [...document.querySelectorAll('.server-rail-folder-mini')]; const style = mini => getComputedStyle(mini); return minis.every(mini => mini.getBoundingClientRect().width === 19) && style(minis[0]).borderTopLeftRadius === '14px' && style(minis[0]).borderBottomRightRadius === '4px' && style(minis[1]).borderTopRightRadius === '14px' && style(minis[2]).borderBottomLeftRadius === '14px' && style(minis[2]).borderTopRightRadius === '4px'; })()`),
+        'miniatures follow the tile corner outside and are squarer inside, like Discord');
+      // Opening and closing slide the servers in and out instead of snapping.
+      const clickAt = async (point) => {
+        browser.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+        browser.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
+        browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
+        await frames();
+      };
+      const children = `document.querySelector('.server-rail-folder-children')`;
+      await clickAt(await center('.server-rail-folder-header'));
+      await check(await waitFor(`!`+children+`.hidden && `+children+`.getAnimations().length > 0`), 'opening a folder animates its servers in');
+      await check(await waitFor(`!`+children+`.hidden && `+children+`.getAnimations().length === 0 && `+children+`.getBoundingClientRect().height > 80`),
+        'the opened folder settles at full height');
+      await clickAt(await center('.server-rail-folder-header'));
+      await check(await evaluate(`!`+children+`.hidden && document.querySelector('.server-rail-folder--closing') && `+children+`.getAnimations().length > 0`),
+        'closing keeps the servers and tint visible while they slide out');
+      await check(await waitFor(``+children+`.hidden && !document.querySelector('.server-rail-folder--closing')`), 'the closed folder hides its servers when done');
+      await clickAt(await center('.server-rail-folder-header'));
+      await check(await waitFor(`!`+children+`.hidden && `+children+`.getAnimations().length === 0`), 'the folder opens again');
+
+      // Icons morph from a circle into a rounded square, and the picture follows the shape.
+      await check(await evaluate(`[...document.querySelectorAll('.server-rail-avatar > img')].every(img => getComputedStyle(img).clipPath === 'none')`),
+        'server pictures are not clipped to a fixed circle');
+      const hoverTarget = await center('.server-rail-item[data-port="5102"] .server-rail-avatar');
+      browser.webContents.sendInputEvent({ type: 'mouseMove', ...hoverTarget });
+      await check(await waitFor(`getComputedStyle(document.querySelector('.server-rail-item[data-port="5102"] .server-rail-avatar')).borderRadius === '16px'`),
+        'hovering a server rounds it into a square');
+      browser.webContents.sendInputEvent({ type: 'mouseMove', x: 300, y: 300 });
+      await check(await waitFor(`getComputedStyle(document.querySelector('.server-rail-item[data-port="5102"] .server-rail-avatar')).borderRadius === '50%'`),
+        'leaving it turns it back into a circle');
+
+      // With reduced motion the folder opens and closes at once, without sliding.
+      await motion('reduce');
+      await clickAt(await center('.server-rail-folder-header'));
+      await check(await evaluate(children + `.hidden && ` + children + `.getAnimations().length === 0 && !document.querySelector('.server-rail-folder--closing')`),
+        'with reduced motion the folder closes at once');
+      await clickAt(await center('.server-rail-folder-header'));
+      await check(await evaluate(`!`+children+`.hidden && `+children+`.getAnimations().length === 0`),
+        'with reduced motion the folder opens at once');
+      await motion('no-preference');
+
+      // Dragging servers out until one is left dissolves the folder.
+      const leaving = await center('.server-rail-item[data-port="5103"]');
+      const top = await center('.server-rail-folder-header');
+      await drag(leaving, { x: top.x, y: top.y - 26 });
+      await check(JSON.stringify(await order()) === '[5103,"folder:5102","folder:5101"]', 'a server can leave the folder');
+      const leavingToo = await center('.server-rail-item[data-port="5101"]');
+      const head = await center('.server-rail-item[data-port="5103"]');
+      await drag(leavingToo, { x: head.x, y: head.y - 22 });
+      await check(JSON.stringify(await order()) === '[5101,5103,5102]', 'a folder left with one server gives way to it');
+      await check(await evaluate(`!document.querySelector('.server-rail-folder')`), 'no empty or single-server folder remains');
       console.log('Server rail reorder DOM passed');
       await finish(0);
     } catch (error) {
@@ -175,6 +275,13 @@ async function setupRail() {
   };
   sessionManager.activate(session.key);
   window.connectCalls = 0;
+  // Counts slide animations on folder contents, to tell a smooth opening from a jump.
+  const animate = Element.prototype.animate;
+  window.animatedFolders = 0;
+  Element.prototype.animate = function (...args) {
+    if (this.classList?.contains('server-rail-folder-children')) window.animatedFolders++;
+    return animate.apply(this, args);
+  };
   serverRailView.connectToSavedServer = async () => { window.connectCalls++; };
   window.railOrder = () => connectionStore.railLayout.flatMap(node => node.type === 'server'
     ? [node.port] : node.children.map(child => `folder:${child.port}`));
@@ -187,7 +294,11 @@ async function setupRail() {
       html: rail.innerHTML.slice(0, 600),
     };
   };
-  window.createFolder = () => connectionStore.createFolder('Group');
+  const { folderSettingsModal } = await import('/views/FolderSettingsModal.ts');
+  const folder = () => connectionStore.railLayout.find(node => node.type === 'folder');
+  window.folderState = () => folder() && { name: folder().name, color: folder().color };
+  window.openFolderSettings = () => folderSettingsModal.open(folder().id);
+  window.collapseAll = () => connectionStore.collapseAllFolders();
   const { appEvents } = await import('/core/EventBus.ts');
   appEvents.on('connection.saved_servers_changed', () => serverRailView.render());
   serverRailView.render();

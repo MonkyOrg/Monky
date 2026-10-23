@@ -20,13 +20,14 @@ nickname saved under **My Profile**.
 Click **Create and Start Server**. The server starts on your machine, listens on every network interface on the chosen port, and opens for browsing. Joining a voice channel is a separate action.
 
 Created servers are saved (up to 10) and appear on the rail like any other
-server. Right-click the icon to **Start**, **Stop**, open **Monitor** or
-**Delete** the local data.
+server. Right-click the icon to **Start** or **Stop** it, open **Monitor**
+(while it is running) or **Delete** the local data.
 
-Starting an offline server from the server rail preserves the current
-call, including camera, screen shares and mute. If this instance already hosts
-another server, it will not replace it: stop that server explicitly when safe
-before starting a different one.
+You can keep several of your servers running at the same time, each on its own
+port. The form suggests a free port and does not accept a port used by another
+of your servers. Starting an offline server from the server rail preserves the
+current call, including camera, screen shares and mute, and never stops
+another running server.
 
 Returning Home through the house icon does not disconnect servers or end the
 call. To start another saved server without leaving the call, use its entry in

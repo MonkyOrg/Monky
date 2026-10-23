@@ -55,11 +55,17 @@ if (!process.versions.electron) {
     window.webContents.on('console-message', (_event, level, message) => { if (level >= 3) console.error(`[renderer] ${message}`); });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     // A fresh page per language: CI runs in English, a developer machine may default to Portuguese.
-    for (const language of ['pt-BR', 'en']) {
+    // The motion preference is set explicitly: CI runners may report reduced
+    // motion on their own, which would silently skip the animations checked here.
+    window.webContents.debugger.attach('1.3');
+    for (const [language, motion] of [['pt-BR', 'no-preference'], ['en', 'reduce']]) {
       await window.loadURL(`http://127.0.0.1:${httpServer.address().port}/__custom_status__`);
+      await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+        features: [{ name: 'prefers-reduced-motion', value: motion }],
+      });
       const checks = await window.webContents.executeJavaScript(
         `(${runCustomStatusSmoke.toString()})(${JSON.stringify(language)}).catch((error) => { throw new Error(error.stack); })`, true);
-      console.log(`Custom status DOM smoke (${language}): ${checks} checks passed`);
+      console.log(`Custom status DOM smoke (${language}, ${motion}): ${checks} checks passed`);
     }
     await finish(0);
   }).catch(async (error) => { console.error('Custom status DOM smoke failed', error); await finish(1); });
@@ -205,6 +211,61 @@ async function runCustomStatusSmoke(language) {
   modal().querySelector('[data-custom-status-remove]').click();
   await settle();
   check(!modal() && settings.customStatus === null && !settings.customStatusActive, 'Remove deletes the saved status');
+
+  // In Settings the editor opens inline, under the cards: a second modal would
+  // replace the Settings card with a smaller one, which looked like a blink.
+  const { settingsModal } = await import('/views/SettingsModal.ts');
+  await settingsModal.open();
+  await settle();
+  const settingsCard = () => document.querySelector('.settings-modal-card');
+  const openModals = () => document.querySelectorAll('.modal-backdrop:not([data-ui-closing])').length;
+  const pencil = () => document.querySelector('[data-presence-custom-edit]');
+  const customCard = document.querySelector('[data-presence-custom]');
+  const brbCard = document.querySelector('[data-presence="brb"]');
+  check(customCard.getBoundingClientRect().height === brbCard.getBoundingClientRect().height,
+    'the custom card is the same size as the card beside it');
+  const pencilBox = pencil().getBoundingClientRect();
+  const cardBox = customCard.getBoundingClientRect();
+  check(pencilBox.top >= cardBox.top && pencilBox.bottom <= cardBox.bottom && pencilBox.right <= cardBox.right,
+    'the edit action sits inside the card');
+  check(pencil().getAttribute('aria-label') === t('customStatus.set'), 'without a status the icon offers to set one');
+  const host = () => document.querySelector('[data-presence-custom-editor]');
+  check(host().hidden, 'the inline editor starts closed');
+  pencil().click();
+  check(!host().hidden && pencil().getAttribute('aria-expanded') === 'true', 'the pencil opens the editor');
+  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  check(reducedMotion ? host().getAnimations().length === 0 : host().getAnimations().length > 0,
+    reducedMotion ? 'with reduced motion the editor opens at once' : 'the editor slides open instead of appearing at once');
+  await settle();
+  check(openModals() === 1 && !document.querySelector('.custom-status-modal') && settingsCard() && !settingsCard().hidden,
+    'no second modal opens and the Settings card stays');
+  check(document.activeElement?.id === 'settings-custom-status-text', 'the inline editor is focused on the text');
+  const inline = (id, value) => {
+    const input = host().querySelector(`#${id}`);
+    input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  inline('settings-custom-status-text', 'Estudando');
+  host().querySelector('[data-custom-status-save]').click();
+  check(reducedMotion ? host().hidden : host().getAnimations().length > 0,
+    reducedMotion ? 'with reduced motion saving closes the editor at once' : 'saving slides the editor closed');
+  await settle();
+  check(host().hidden && !host().innerHTML && settings.customStatus?.text === 'Estudando' && settings.customStatusActive,
+    'saving inline stores the status and closes the editor');
+  check(document.querySelector('[data-presence-custom-description]').textContent.includes('Estudando'),
+    'the card shows the saved text');
+  check(pencil().getAttribute('aria-label') === t('customStatus.edit') && document.activeElement === pencil(),
+    'focus returns to the pencil, which now edits');
+  pencil().click();
+  await settle();
+  check(host().querySelector('#settings-custom-status-text').value === 'Estudando', 'reopening loads the saved values');
+  host().querySelector('[data-custom-status-cancel]').click();
+  await settle();
+  check(host().hidden && settings.customStatus?.text === 'Estudando', 'Cancel closes without changes');
+  check(openModals() === 1, 'still a single modal');
+  settingsModal.close();
+  await settle();
+  sessionManager.saveCustomStatus(null);
 
   appEvents.emit('settings.updated');
   view.destroy?.();

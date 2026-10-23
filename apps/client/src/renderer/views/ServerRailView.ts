@@ -10,6 +10,7 @@ import { favoritesStore } from '../stores/favoritesStore';
 import {
   connectionStore,
   CreatedServer,
+  DEFAULT_FOLDER_COLOR,
   SavedServer,
   RailFolderNode,
   RailNode,
@@ -26,6 +27,23 @@ import { contextMenu, type ContextMenuEntry } from './ContextMenu';
 import { appEvents } from '../core/EventBus';
 import { addServerModal } from './addServer/AddServerModal';
 import { serverMonitorModal } from './ServerMonitorModal';
+import { folderSettingsModal } from './FolderSettingsModal';
+import { setSurfaceVisible } from '../utils/surfaceVisibility';
+import { animateEnter } from '../utils/surfaceMotion';
+import { markSessionRead } from '../core/readState';
+import { dmStore } from '../stores/dmStore';
+import type { ChatSoundMode } from '../stores/settingsStore';
+import type { HostServerStatus } from '@monky/shared';
+import { showErrorToast } from './CopyToast';
+
+type RailUnread = 'mention' | 'unread' | null;
+
+const NOTIFICATION_MODES: ReadonlyArray<{ mode: ChatSoundMode; label: 'chatSound.inheritGeneral' | 'chatSound.all' | 'chatSound.mentions' | 'chatSound.none' }> = [
+  { mode: 'inherit', label: 'chatSound.inheritGeneral' },
+  { mode: 'all', label: 'chatSound.all' },
+  { mode: 'mentions', label: 'chatSound.mentions' },
+  { mode: 'none', label: 'chatSound.none' },
+];
 
 type DraggedRailItem =
   | { type: 'server'; host: string; port: number }
@@ -57,14 +75,81 @@ export class ServerRailView {
   private lastProbeTime = 0;
   private probeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private homeBadgeCount = 0;
+  /** Ports of the servers this app is hosting right now, pushed by the main process. */
+  private hostedPorts = new Set<number>();
+  /**
+   * Folders toggled by the user, animated by the next render: toggling saves
+   * the layout and repaints the whole rail, so the motion is applied to the
+   * fresh element (true = opening).
+   */
+  private pendingFolderMotion = new Map<string, boolean>();
+  /** Folders painted by the previous render; null before the first one. */
+  private renderedFolderIds: Set<string> | null = null;
+  private hostedStatusBound = false;
   private static readonly PROBE_INTERVAL_MS = 15000;
+  /** Share of a server's height, at each edge, that places instead of grouping. */
+  private static readonly COMBINE_EDGE = 0.25;
 
   constructor() {
     appEvents.on('community.updated', () => this.render());
   }
 
+  private bindHostedStatus(): void {
+    if (this.hostedStatusBound || !window.api?.hostServerStatus) return;
+    this.hostedStatusBound = true;
+    const apply = (status: HostServerStatus) => {
+      this.hostedPorts = new Set(status.servers.map((server) => server.port));
+    };
+    window.api.onHostServerStatusChanged?.(apply);
+    void window.api.hostServerStatus().then(apply, () => {});
+  }
+
   private static keyOf(host: string, port: number): string {
     return `${host.trim().replace(/^wss?:\/\//, '')}:${port}`;
+  }
+
+  /** Logical server id used by the per-server notification preference. */
+  private static serverIdOf(server: SavedServer): string | undefined {
+    return getServerSessionForAddress(server.host, server.port)?.serverStore.serverDetails?.id ?? server.serverId;
+  }
+
+  /**
+   * Unread state shown on the rail. Only servers kept connected in the
+   * background count: the one on screen already shows it in its channel list.
+   */
+  private static unreadOf(server: SavedServer, currentUrl: string | null): RailUnread {
+    const live = getServerSessionForAddress(server.host, server.port);
+    if (!live || live.key === currentUrl || live.client.getStatus() !== 'CONNECTED') return null;
+    if (live.chatStore.hasAnyMention()) return 'mention';
+    return live.chatStore.hasAnyUnread() ? 'unread' : null;
+  }
+
+  /** Live sessions of the given servers that still hold something unread. */
+  private static unreadSessions(servers: readonly SavedServer[]) {
+    return servers.flatMap((server) => {
+      const live = getServerSessionForAddress(server.host, server.port);
+      return live?.chatStore.hasAnyUnread() ? [live] : [];
+    });
+  }
+
+  private markServersRead(servers: readonly SavedServer[]): void {
+    ServerRailView.unreadSessions(servers).forEach(markSessionRead);
+    this.render();
+  }
+
+  private folderServers(folder: RailFolderNode): SavedServer[] {
+    return folder.children.flatMap((child) => connectionStore.savedServers.find(
+      (server) => server.host === child.host && server.port === child.port) ?? []);
+  }
+
+  private setServerNotifications(serverId: string, mode: ChatSoundMode): void {
+    try {
+      settingsStore.setServerChatSoundOverride(serverId, mode);
+    } catch (error) {
+      console.warn('[ServerRailView] Could not save server notifications', error);
+      showErrorToast(t('serverRail.notificationsSaveFailed'));
+    }
+    this.render();
   }
 
   public setHomeBadge(count: number): void {
@@ -78,6 +163,7 @@ export class ServerRailView {
     const railEl = document.getElementById('server-rail');
     if (!railEl) return;
 
+    this.bindHostedStatus();
     contextMenu.close();
 
     // The active key (not the proxied client) is what identifies the server on
@@ -115,6 +201,8 @@ export class ServerRailView {
     this.bindFolderToggles();
     this.bindDragAndDrop();
     this.bindContextMenus();
+    this.queueNewFolderMotion();
+    this.playFolderMotion(railEl);
     // Background events may repaint the rail while something is being dragged.
     if (this.pointerDrag?.active) this.markDragging(this.pointerDrag.item);
 
@@ -220,40 +308,81 @@ export class ServerRailView {
       )}`;
     }).join('');
 
+    const servers = folder.children.flatMap((child) => savedByKey.get(ServerRailView.keyOf(child.host, child.port)) ?? []);
+    const label = folder.name || servers.map((server) => server.name || server.host).join(', ');
+    const color = folder.color ?? DEFAULT_FOLDER_COLOR;
+    const holdsCurrent = servers.some((server) => {
+      const live = getServerSessionForAddress(server.host, server.port);
+      return (live?.key ?? sessionKeyFor(server.host, server.port)) === currentUrl;
+    });
+    const folderUnread = servers.reduce<RailUnread>((state, server) => {
+      if (state === 'mention') return state;
+      return ServerRailView.unreadOf(server, currentUrl) || state;
+    }, null);
+    // Collapsed, the folder summarizes what is inside; open, each server shows its own.
+    const folderBadge = folder.collapsed && folderUnread
+      ? `<span class="server-rail-folder-badge" data-kind="${folderUnread}" title="${escapeHtml(t(folderUnread === 'mention' ? 'serverRail.folderMentionTooltip' : 'serverRail.folderUnreadTooltip'))}"></span>`
+      : '';
+    const preview = folder.collapsed
+      ? `<span class="server-rail-folder-grid" aria-hidden="true">${servers.slice(0, 4).map((server) => {
+        const { iconUrl, initial } = this.iconOf(server);
+        return `<span class="server-rail-folder-mini">${this.renderServerIcon(iconUrl, initial)}</span>`;
+      }).join('')}</span>`
+      : '<span class="material-symbols-outlined md-24 server-rail-folder-icon" aria-hidden="true">folder</span>';
+    const classes = [
+      'server-rail-folder',
+      folder.collapsed ? 'collapsed' : '',
+      holdsCurrent ? 'has-active' : '',
+      folder.collapsed && folderUnread ? 'has-unread' : '',
+    ].filter(Boolean).join(' ');
+
     return `
-      <div class="server-rail-folder ${folder.collapsed ? 'collapsed' : ''}" data-folder-id="${escapeHtml(folder.id)}">
-        <div
-          class="server-rail-folder-header"
-          data-node-type="folder"
-          data-folder-id="${escapeHtml(folder.id)}"
-          data-root-index="${rootIndex}"
-          draggable="false"
-          data-rail-draggable="${busy ? 'false' : 'true'}"
-          title="${escapeHtml(folder.name)}"
-        >
-          <button
-            type="button"
-            class="server-rail-folder-toggle"
-            data-folder-toggle="${escapeHtml(folder.id)}"
-            aria-label="${escapeHtml(folder.name)}"
-            title="${escapeHtml(folder.name)}"
-            draggable="false"
-          >
-            <span class="server-rail-folder-arrow" aria-hidden="true">${folder.collapsed ? '▸' : '▾'}</span>
-          </button>
-          <span class="material-symbols-outlined md-16 server-rail-folder-icon" aria-hidden="true">
-            ${folder.collapsed ? 'folder' : 'folder_open'}
-          </span>
-          <span class="server-rail-folder-name">${escapeHtml(folder.name)}</span>
-        </div>
-        <div class="server-rail-folder-children">
-          ${childrenHtml}
-          ${this.renderFolderChildDropZone(folder.id, folder.children.length)}
+      <div class="${classes}" data-folder-id="${escapeHtml(folder.id)}" style="--folder-color: ${color}">
+        <div class="server-rail-folder-shell">
+          <div class="server-rail-folder-row">
+            <span class="server-rail-pill" aria-hidden="true"></span>
+            <button
+              type="button"
+              class="server-rail-folder-header"
+              data-node-type="folder"
+              data-folder-id="${escapeHtml(folder.id)}"
+              data-root-index="${rootIndex}"
+              draggable="false"
+              data-rail-draggable="${busy ? 'false' : 'true'}"
+              title="${escapeHtml(label)}"
+              aria-label="${escapeHtml(label)}"
+              aria-expanded="${folder.collapsed ? 'false' : 'true'}"
+            >
+              ${preview}
+              ${folderBadge}
+            </button>
+          </div>
+          <div class="server-rail-folder-children" ${folder.collapsed ? 'hidden' : ''}>
+            ${childrenHtml}
+            ${this.renderFolderChildDropZone(folder.id, folder.children.length)}
+          </div>
         </div>
       </div>
     `;
   }
 
+  /**
+   * Icon shown for a saved server. Read from the session that owns this row,
+   * never from the proxied store: a render triggered inside a background event
+   * would otherwise paint that server's icon on whichever row is current
+   * (#400). Relative paths are resolved against that same session's host,
+   * never the visible one (#312).
+   */
+  private iconOf(srv: SavedServer): { iconUrl: string | null | undefined; initial: string } {
+    const live = getServerSessionForAddress(srv.host, srv.port);
+    const liveIcon = live?.serverStore.serverDetails?.iconUrl;
+    const liveBase = live?.client.getHttpBaseUrl();
+    const resolvedLiveIcon = liveIcon?.startsWith('/') ? (liveBase ? `${liveBase}${liveIcon}` : null) : liveIcon;
+    return {
+      iconUrl: resolvedLiveIcon || srv.iconUrl,
+      initial: (srv.name || srv.host || '?').trim().charAt(0).toUpperCase(),
+    };
+  }
   private renderServerItem(
     srv: SavedServer,
     currentUrl: string | null,
@@ -272,17 +401,11 @@ export class ServerRailView {
     const callIcon = serverRailCallIcon(live?.community.snapshot?.events, voiceStore.currentVoiceChannelId);
     // A mention outranks a plain unread, so the row shows the red dot instead
     // of the white one when both are pending (#479).
-    const hasMention = !!background?.chatStore.hasAnyMention();
-    const hasUnread = !hasMention && !!background?.chatStore.hasAnyUnread();
-    const initial = (srv.name || srv.host || '?').trim().charAt(0).toUpperCase();
-    // Read from the session that owns this row, never from the proxied store:
-    // a render triggered inside a background event would otherwise paint that
-    // server's icon on whichever row is current (#400). Relative paths are
-    // resolved against that same session's host, never the visible one (#312).
-    const liveIcon = live?.serverStore.serverDetails?.iconUrl;
-    const liveBase = live?.client.getHttpBaseUrl();
-    const resolvedLiveIcon = liveIcon?.startsWith('/') ? (liveBase ? `${liveBase}${liveIcon}` : null) : liveIcon;
-    const iconUrl = resolvedLiveIcon || srv.iconUrl;
+    const unread = ServerRailView.unreadOf(srv, currentUrl);
+    const hasMention = unread === 'mention';
+    const hasUnread = unread === 'unread';
+    const muted = settingsStore.getServerChatSoundOverride(ServerRailView.serverIdOf(srv)) === 'none';
+    const { iconUrl, initial } = this.iconOf(srv);
     const label = srv.name || `${srv.host}:${srv.port}`;
     const title = isConnecting
       ? t('main.connectingTo', { name: label })
@@ -299,7 +422,7 @@ export class ServerRailView {
 
     return `
       <div
-        class="server-rail-item ${isCurrent ? 'active' : ''} ${folderId ? 'server-rail-item--nested' : ''}"
+        class="server-rail-item ${isCurrent ? 'active' : ''} ${folderId ? 'server-rail-item--nested' : ''} ${unread ? 'server-rail-item--unread' : ''}"
         data-node-type="server"
         data-host="${escapeHtml(srv.host)}"
         data-port="${srv.port}"
@@ -320,6 +443,7 @@ export class ServerRailView {
         >
           ${this.renderServerIcon(iconUrl, initial)}
           <span class="server-rail-status-dot" data-status="${isCurrent || background ? 'online' : 'checking'}"></span>
+          ${muted ? `<span class="server-rail-muted" title="${escapeHtml(t('serverRail.mutedTooltip'))}"><span class="material-symbols-outlined md-12" aria-hidden="true">notifications_off</span></span>` : ''}
           ${badge}
         </button>
       </div>
@@ -391,27 +515,86 @@ export class ServerRailView {
     const railEl = document.getElementById('server-rail');
     if (!railEl) return;
 
-    railEl.querySelectorAll('.server-rail-folder-toggle').forEach((button) => {
-      button.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const folderId = button.getAttribute('data-folder-toggle');
-        if (folderId) connectionStore.toggleFolderCollapsed(folderId);
-      });
-    });
-
     railEl.querySelectorAll('.server-rail-folder-header').forEach((header) => {
       header.addEventListener('click', () => {
         if (this.suppressRailClick) return;
         const folderId = header.getAttribute('data-folder-id');
-        if (folderId) connectionStore.toggleFolderCollapsed(folderId);
+        const folder = folderId ? connectionStore.findFolder(folderId) : undefined;
+        if (!folder) return;
+        this.pendingFolderMotion.set(folder.id, folder.collapsed);
+        connectionStore.toggleFolderCollapsed(folder.id);
       });
     });
+  }
+
+  /**
+   * A folder that did not exist on the previous render was just created by
+   * grouping servers: it opens with the same motion as a click, instead of
+   * popping in. The first render (app start) never animates.
+   */
+  private queueNewFolderMotion(): void {
+    const folders = connectionStore.railLayout.filter((node): node is RailFolderNode => node.type === 'folder');
+    const previous = this.renderedFolderIds;
+    this.renderedFolderIds = new Set(folders.map((folder) => folder.id));
+    if (!previous) return;
+    for (const folder of folders) {
+      if (!previous.has(folder.id) && !folder.collapsed && !this.pendingFolderMotion.has(folder.id)) {
+        this.pendingFolderMotion.set(folder.id, true);
+      }
+    }
+  }
+
+  private collapseAllFolders(): void {
+    for (const node of connectionStore.railLayout) {
+      if (node.type === 'folder' && !node.collapsed) this.pendingFolderMotion.set(node.id, false);
+    }
+    connectionStore.collapseAllFolders();
+  }
+
+  /**
+   * Slides a folder's servers in or out. The fresh render already reflects the
+   * new state, so the list is put back where it was and then animated by the
+   * shared expansion helper (which also honours reduced motion).
+   */
+  private playFolderMotion(railEl: HTMLElement): void {
+    if (!this.pendingFolderMotion.size) return;
+    const pending = [...this.pendingFolderMotion];
+    this.pendingFolderMotion.clear();
+    for (const [folderId, opening] of pending) {
+      const folder = Array.from(railEl.querySelectorAll<HTMLElement>('.server-rail-folder'))
+        .find((node) => node.dataset.folderId === folderId);
+      const children = folder?.querySelector<HTMLElement>(':scope > .server-rail-folder-shell > .server-rail-folder-children');
+      const header = folder?.querySelector<HTMLElement>('.server-rail-folder-header > :first-child');
+      if (!folder || !children) continue;
+      children.hidden = opening;
+      if (opening) {
+        // Start from the collapsed look so the tint fades in with the list.
+        folder.classList.add('server-rail-folder--opening');
+        requestAnimationFrame(() => folder.classList.remove('server-rail-folder--opening'));
+        setSurfaceVisible(children, true, 'panel');
+      } else {
+        // Keep the tint around the servers while they slide away.
+        folder.classList.add('server-rail-folder--closing');
+        setSurfaceVisible(children, false, 'panel', undefined, () => folder.classList.remove('server-rail-folder--closing'));
+      }
+      if (header) animateEnter(header, 'view');
+    }
   }
 
   private bindContextMenus(): void {
     const railEl = document.getElementById('server-rail');
     if (!railEl) return;
+
+    railEl.querySelector('#server-rail-home')?.addEventListener('contextmenu', (event) => {
+      const mouseEvent = event as MouseEvent;
+      event.preventDefault();
+      contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, [{
+        label: t('serverRail.markAllDmsRead'),
+        icon: 'mark_chat_read',
+        disabled: dmStore.unreadTotal() === 0,
+        onClick: () => { void dmStore.markAllRead(); },
+      }], event.currentTarget as HTMLElement);
+    });
 
     railEl.querySelector('.server-rail-list')?.addEventListener('contextmenu', (event) => {
       const mouseEvent = event as MouseEvent;
@@ -421,12 +604,16 @@ export class ServerRailView {
       event.preventDefault();
       contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, [
         {
-          label: t('main.createFolder'),
-          icon: 'create_new_folder',
-          onClick: () => {
-            const name = this.promptFolderName();
-            if (name) connectionStore.createFolder(name);
-          },
+          label: t('serverRail.markAllServersRead'),
+          icon: 'mark_chat_read',
+          disabled: !ServerRailView.unreadSessions(connectionStore.savedServers).length,
+          onClick: () => this.markServersRead(connectionStore.savedServers),
+        },
+        {
+          label: t('serverRail.closeAllFolders'),
+          icon: 'folder',
+          disabled: !connectionStore.railLayout.some((node) => node.type === 'folder' && !node.collapsed),
+          onClick: () => this.collapseAllFolders(),
         },
       ]);
     });
@@ -457,22 +644,31 @@ export class ServerRailView {
           (node): node is RailFolderNode => node.type === 'folder' && node.id === folderId
         );
         if (!folder) return;
+        const folderServers = this.folderServers(folder);
         contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, [
           {
-            label: t('main.renameFolder'),
-            icon: 'edit',
-            onClick: () => {
-              const name = this.promptFolderName(folder.name);
-              if (name) connectionStore.renameFolder(folderId, name);
-            },
+            label: t('serverRail.markFolderRead'),
+            icon: 'mark_chat_read',
+            disabled: !ServerRailView.unreadSessions(folderServers).length,
+            onClick: () => this.markServersRead(folderServers),
           },
           {
-            label: t('main.deleteFolder'),
-            icon: 'delete',
-            danger: true,
+            label: t('serverRail.folderSettings'),
+            icon: 'settings',
+            onClick: () => folderSettingsModal.open(folderId, header as HTMLElement),
+          },
+          {
+            label: t('serverRail.closeAllFolders'),
+            icon: 'folder',
+            disabled: !connectionStore.railLayout.some((node) => node.type === 'folder' && !node.collapsed),
+            onClick: () => this.collapseAllFolders(),
+          },
+          {
+            label: t('serverRail.ungroupFolder'),
+            icon: 'folder_off',
             onClick: () => connectionStore.deleteFolder(folderId),
           },
-        ]);
+        ], header as HTMLElement);
       });
     });
   }
@@ -489,22 +685,53 @@ export class ServerRailView {
       },
     ];
 
-    if (owned) {
+    const live = getServerSessionForAddress(server.host, server.port);
+    entries.push({
+      label: t('serverRail.markServerRead'),
+      icon: 'mark_chat_read',
+      disabled: !live?.chatStore.hasAnyUnread(),
+      onClick: () => this.markServersRead([server]),
+    });
+
+    const serverId = ServerRailView.serverIdOf(server);
+    if (serverId) {
+      const mode = settingsStore.getServerChatSoundOverride(serverId);
       entries.push(
         {
-          label: t('connection.start'),
-          icon: 'play_arrow',
-          onClick: () => { void this.startOwnedServer(owned); },
+          label: t(mode === 'none' ? 'serverRail.unmute' : 'serverRail.mute'),
+          icon: mode === 'none' ? 'notifications_active' : 'notifications_off',
+          onClick: () => this.setServerNotifications(serverId, mode === 'none' ? 'inherit' : 'none'),
         },
         {
-          label: t('connection.stop'),
-          icon: 'stop',
-          onClick: () => { void this.stopOwnedServer(); },
+          label: t('serverRail.notifications'),
+          icon: 'notifications',
+          submenu: NOTIFICATION_MODES.map((option) => ({
+            label: t(option.label),
+            checked: option.mode === mode,
+            onClick: () => this.setServerNotifications(serverId, option.mode),
+          })),
         },
+      );
+    }
+    if (owned) {
+      const running = this.hostedPorts.has(owned.port);
+      entries.push(
+        running
+          ? {
+            label: t('connection.stop'),
+            icon: 'stop',
+            onClick: () => { void this.stopOwnedServer(owned.port); },
+          }
+          : {
+            label: t('connection.start'),
+            icon: 'play_arrow',
+            onClick: () => { void this.startOwnedServer(owned); },
+          },
         {
           label: t('serverMonitor.title'),
           icon: 'monitoring',
-          onClick: () => { void serverMonitorModal.openLocal(); },
+          disabled: !running,
+          onClick: () => { void serverMonitorModal.openLocal(owned.port); },
         },
         {
           label: t('connection.deleteSavedServer'),
@@ -566,10 +793,10 @@ export class ServerRailView {
     }
   }
 
-  private async stopOwnedServer(): Promise<void> {
+  private async stopOwnedServer(port: number): Promise<void> {
     if (!window.api?.hostServerStop) return;
-    if (!(await confirmStopHostedServer())) return;
-    const result = await window.api.hostServerStop();
+    if (!(await confirmStopHostedServer(port))) return;
+    const result = await window.api.hostServerStop(port);
     if (!result.success) {
       await showAlert({ title: t('common.error'), message: t('connection.stopServerError'), variant: 'danger' });
     }
@@ -587,8 +814,9 @@ export class ServerRailView {
     if (!confirmed) return;
     try {
       const status = await window.api?.hostServerStatus?.();
-      if (status?.isRunning && (status.serverId === server.id || status.port === server.port)) {
-        await this.stopOwnedServer();
+      const running = status?.servers.find((item) => item.serverId === server.id || item.port === server.port);
+      if (running) {
+        await this.stopOwnedServer(running.port);
       }
       const deleted = await window.api?.hostServerDeleteData?.(server.id);
       connectionStore.removeCreatedServer(server.id);
@@ -661,7 +889,6 @@ export class ServerRailView {
     for (const element of draggableNodes) {
       element.addEventListener('mousedown', (event) => {
         if (event.button !== 0 || this.connectingKey || this.pointerDrag) return;
-        if ((event.target as Element | null)?.closest('.server-rail-folder-toggle')) return;
         const item = this.railItemOf(element);
         if (!item) return;
         this.pointerDrag = { item, startX: event.clientX, startY: event.clientY, active: false };
@@ -708,6 +935,7 @@ export class ServerRailView {
     const target = this.pointerTarget(event.clientX, event.clientY);
     if (target?.zone) this.activateDropZone(target.zone);
     else if (target?.header) this.activateFolderHeader(target.header);
+    else if (target?.combine) this.activateCombine(target.combine);
     else this.clearDropIndicators();
   };
 
@@ -744,14 +972,21 @@ export class ServerRailView {
     } else if (target.header && drag.item.type === 'server') {
       const folderId = target.header.dataset.folderId;
       if (folderId) connectionStore.moveServerToFolder(drag.item.host, drag.item.port, folderId);
+    } else if (target.combine && drag.item.type === 'server') {
+      const host = target.combine.dataset.host;
+      const port = parseInt(target.combine.dataset.port || '0', 10);
+      if (host && port) connectionStore.groupServers({ host, port }, drag.item);
     }
   }
 
   /**
    * Where a release would land. The thin drop zones are hard to hit, so
-   * hovering a server or folder also counts, before or after it by half.
+   * hovering a server or folder also counts. Like Discord, a server dragged
+   * over the middle of another server groups them in a folder (or joins the
+   * folder that one is in), and over the middle of a folder joins it; near
+   * the top or bottom edge it is placed before or after instead.
    */
-  private pointerTarget(clientX: number, clientY: number): { zone?: HTMLElement; header?: HTMLElement } | null {
+  private pointerTarget(clientX: number, clientY: number): { zone?: HTMLElement; header?: HTMLElement; combine?: HTMLElement } | null {
     const railEl = document.getElementById('server-rail');
     const element = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
     if (!railEl || !element || !railEl.contains(element) || !this.draggedRailItem) return null;
@@ -764,17 +999,42 @@ export class ServerRailView {
     };
     const zone = element.closest<HTMLElement>('.server-rail-drop-zone');
     if (zone) return this.canDropOnZone(zone) ? { zone } : null;
+    const middle = (node: Element): boolean => {
+      const rect = node.getBoundingClientRect();
+      const edge = rect.height * ServerRailView.COMBINE_EDGE;
+      return clientY > rect.top + edge && clientY < rect.bottom - edge;
+    };
     const header = element.closest<HTMLElement>('.server-rail-folder-header');
-    if (header) return draggingFolder ? around(header.closest('.server-rail-folder')) : { header };
+    if (header) {
+      const folder = header.closest('.server-rail-folder');
+      return draggingFolder || !middle(header) ? around(folder) : { header };
+    }
     const server = element.closest<HTMLElement>('.server-rail-item');
     if (!server) return null;
-    return around(draggingFolder ? server.closest('.server-rail-folder') ?? server : server);
+    if (draggingFolder) return around(server.closest('.server-rail-folder') ?? server);
+    const dragged = this.draggedRailItem;
+    const isSelf = dragged.type === 'server' && server.dataset.host === dragged.host
+      && server.dataset.port === String(dragged.port);
+    if (!isSelf && middle(server)) return { combine: server };
+    return around(server);
+  }
+
+  private activateCombine(server: HTMLElement): void {
+    const railEl = document.getElementById('server-rail');
+    if (!railEl) return;
+    railEl.querySelectorAll('.server-rail-drop-zone.active').forEach((item) => item.classList.remove('active'));
+    railEl.querySelectorAll('.server-rail-folder-header.drag-over').forEach((item) => item.classList.remove('drag-over'));
+    railEl.querySelectorAll('.server-rail-item.combine-target').forEach((item) => {
+      if (item !== server) item.classList.remove('combine-target');
+    });
+    server.classList.add('combine-target');
   }
 
   private clearDropIndicators(): void {
     const railEl = document.getElementById('server-rail');
     railEl?.querySelectorAll('.server-rail-drop-zone.active').forEach((item) => item.classList.remove('active'));
     railEl?.querySelectorAll('.server-rail-folder-header.drag-over').forEach((item) => item.classList.remove('drag-over'));
+    railEl?.querySelectorAll('.server-rail-item.combine-target').forEach((item) => item.classList.remove('combine-target'));
   }
   private activateDropZone(zone: HTMLElement): void {
     const railEl = document.getElementById('server-rail');
@@ -782,8 +1042,8 @@ export class ServerRailView {
     railEl.querySelectorAll('.server-rail-drop-zone.active').forEach((item) => {
       if (item !== zone) item.classList.remove('active');
     });
-    railEl.querySelectorAll('.server-rail-folder-header.drag-over').forEach((item) => {
-      item.classList.remove('drag-over');
+    railEl.querySelectorAll('.server-rail-folder-header.drag-over, .server-rail-item.combine-target').forEach((item) => {
+      item.classList.remove('drag-over', 'combine-target');
     });
     zone.classList.add('active');
   }
@@ -794,6 +1054,7 @@ export class ServerRailView {
     railEl.querySelectorAll('.server-rail-drop-zone.active').forEach((item) => {
       item.classList.remove('active');
     });
+    railEl.querySelectorAll('.server-rail-item.combine-target').forEach((item) => item.classList.remove('combine-target'));
     railEl.querySelectorAll('.server-rail-folder-header.drag-over').forEach((item) => {
       if (item !== header) item.classList.remove('drag-over');
     });
@@ -808,8 +1069,8 @@ export class ServerRailView {
     railEl.querySelectorAll('.server-rail-drop-zone.active').forEach((item) => {
       item.classList.remove('active');
     });
-    railEl.querySelectorAll('.server-rail-folder-header.drag-over, .dragging').forEach((item) => {
-      item.classList.remove('drag-over', 'dragging');
+    railEl.querySelectorAll('.server-rail-folder-header.drag-over, .server-rail-item.combine-target, .dragging').forEach((item) => {
+      item.classList.remove('drag-over', 'combine-target', 'dragging');
     });
   }
 
@@ -830,13 +1091,6 @@ export class ServerRailView {
     }
 
     connectionStore.moveServerToFolder(dragged.host, dragged.port, null, rootIndex);
-  }
-
-  private promptFolderName(initialValue: string = ''): string | null {
-    const value = window.prompt(t('main.folderNamePrompt'), initialValue);
-    if (value === null) return null;
-    const trimmed = value.trim();
-    return trimmed || null;
   }
 
   private async connectToSavedServer(server: SavedServer): Promise<void> {

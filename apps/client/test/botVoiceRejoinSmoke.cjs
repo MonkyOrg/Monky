@@ -420,7 +420,7 @@ async function setupFullVoiceRenderer(port, traceNative = false) {
     setLanguage: async () => {},
     setPttConfig: async () => true,
     fitHomeWindowToContent: async () => {},
-    hostServerStatus: async () => ({ isRunning: false, port: null, serverId: null }),
+    hostServerStatus: async () => ({ servers: [] }),
     onHostServerStatusChanged: () => () => {},
     writeClientLog: async entry => { logs.push(entry); if (entry.level === 'ERROR') console.error(entry.message); },
   };

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   HostedServerCleanupError, HostedServerConflictError, HostedServerLifecycle,
-  type HostedServerRuntime, type HostedServerStatus, type HostedServerTarget,
+  type HostedServerEntry, type HostedServerRuntime, type HostedServerTarget,
 } from '../src/main/hostedServerLifecycle';
 
 function deferred<T = void>() {
@@ -28,7 +28,11 @@ class SyntheticServer implements HostedServerRuntime {
 
 const targetA = { port: 3000, serverId: 'a' };
 const targetB = { port: 3001, serverId: 'b' };
-const stopped = { isRunning: false, port: null, serverId: null };
+type HostedServerStatus = { servers: HostedServerEntry[] };
+const stopped: HostedServerStatus = { servers: [] };
+const running = (...servers: HostedServerEntry[]): HostedServerStatus => ({ servers });
+const runningA = running({ port: 3000, serverId: 'a' });
+const runningB = running({ port: 3001, serverId: 'b' });
 
 function fixture(create: (options: HostedServerTarget) => Promise<SyntheticServer>) {
   const statuses: HostedServerStatus[] = [];
@@ -38,24 +42,47 @@ function fixture(create: (options: HostedServerTarget) => Promise<SyntheticServe
   return { lifecycle, statuses };
 }
 
-test('concurrent different hosts never replace or implicitly stop the winner', async () => {
+test('different servers on different ports start one after the other and run side by side', async () => {
+  const gate = deferred();
+  const first = new SyntheticServer();
+  const second = new SyntheticServer();
+  first.onStart = () => gate.promise;
+  const created: HostedServerTarget[] = [];
+  const { lifecycle, statuses } = fixture(async (options) => { created.push(options); return options.port === 3000 ? first : second; });
+  const startA = lifecycle.start(targetA);
+  const startB = lifecycle.start(targetB);
+  await flush();
+  assert.deepEqual(lifecycle.getStatus(), stopped);
+  assert.deepEqual(created, [targetA], 'the second start waits for the first to settle');
+  gate.resolve();
+  await Promise.all([startA, startB]);
+  assert.deepEqual(created, [targetA, targetB]);
+  assert.deepEqual(statuses, [runningA, running({ port: 3000, serverId: 'a' }, { port: 3001, serverId: 'b' })]);
+  assert.equal(first.stops + second.stops, 0);
+  assert.equal(lifecycle.getServer(3000), first);
+  assert.equal(lifecycle.getServer(3001), second);
+});
+
+test('a different server on a busy port never replaces or implicitly stops the winner', async () => {
   const gate = deferred();
   const server = new SyntheticServer();
   server.onStart = () => gate.promise;
   const created: HostedServerTarget[] = [];
   const { lifecycle, statuses } = fixture(async (options) => { created.push(options); return server; });
   const first = lifecycle.start(targetA);
-  const second = lifecycle.start(targetB);
-  const rejected = assert.rejects(second, HostedServerConflictError);
+  const rejected = assert.rejects(lifecycle.start({ port: 3000, serverId: 'b' }), (error) => {
+    assert.ok(error instanceof HostedServerConflictError);
+    assert.equal(error.reason, 'port');
+    assert.equal(error.port, 3000);
+    return true;
+  });
   await flush();
-  assert.deepEqual(lifecycle.getStatus(), stopped);
   assert.equal(server.starts, 1);
-  assert.equal(server.stops, 0);
   gate.resolve();
   await first;
   await rejected;
   assert.deepEqual(created, [targetA]);
-  assert.deepEqual(statuses, [{ isRunning: true, port: 3000, serverId: 'a' }]);
+  assert.deepEqual(statuses, [runningA]);
   assert.equal(server.stops, 0);
 });
 
@@ -113,10 +140,12 @@ test('queued starts snapshot their identity rather than following later caller m
   target.serverId = 'changed';
   await pending;
   assert.deepEqual(created, [targetA]);
-  assert.deepEqual(lifecycle.getStatus(), { isRunning: true, port: 3000, serverId: 'a' });
+  assert.deepEqual(lifecycle.getStatus(), runningA);
 });
 
 test('stop during pending creation waits for start and shutdown before a later start can run', async () => {
+  // The later start reuses the port, so it truly depends on the stop finishing.
+  const targetB = { port: 3000, serverId: 'b' };
   const created = deferred<SyntheticServer>();
   const startGate = deferred();
   const stopGate = deferred();
@@ -130,7 +159,7 @@ test('stop during pending creation waits for start and shutdown before a later s
     return options.serverId === 'a' ? created.promise : secondServer;
   });
   const first = lifecycle.start(targetA);
-  const stop = lifecycle.stop();
+  const stop = lifecycle.stop(3000);
   const second = lifecycle.start(targetB);
   await flush();
   assert.deepEqual(calls, ['a']);
@@ -145,15 +174,12 @@ test('stop during pending creation waits for start and shutdown before a later s
   await flush();
   assert.equal(firstServer.stops, 1);
   assert.deepEqual(calls, ['a']);
-  assert.deepEqual(lifecycle.getStatus(), { isRunning: true, port: 3000, serverId: 'a' });
+  assert.deepEqual(lifecycle.getStatus(), runningA);
   stopGate.resolve();
   await stop;
   await second;
   assert.deepEqual(calls, ['a', 'b']);
-  assert.deepEqual(statuses, [
-    { isRunning: true, port: 3000, serverId: 'a' }, stopped,
-    { isRunning: true, port: 3001, serverId: 'b' },
-  ]);
+  assert.deepEqual(statuses, [runningA, stopped, running({ port: 3000, serverId: 'b' })]);
 });
 
 test('creation rejection leaves the queue usable for a successful retry', async () => {
@@ -166,7 +192,7 @@ test('creation rejection leaves the queue usable for a successful retry', async 
   });
   await assert.rejects(lifecycle.start(targetA), error => error === failure);
   assert.deepEqual(lifecycle.getStatus(), stopped);
-  assert.equal(lifecycle.getServer(), null);
+  assert.equal(lifecycle.getServer(3000), null);
   assert.equal(statuses.length, 0);
   await lifecycle.start(targetA);
   assert.equal(creations, 2);
@@ -207,17 +233,19 @@ test('failed stop preserves ownership, rejects unhealthy reuse and permits an ex
   const { lifecycle, statuses } = fixture(async () => server);
   await lifecycle.start(targetA);
   const before = lifecycle.getStatus();
-  await assert.rejects(lifecycle.stop(), error => error === failure);
-  assert.equal(lifecycle.getServer(), server);
+  await assert.rejects(lifecycle.stop(3000), error => error === failure);
+  assert.equal(lifecycle.getServer(3000), server);
   assert.deepEqual(lifecycle.getStatus(), before);
   assert.equal(statuses.length, 1);
-  await assert.rejects(lifecycle.start(targetB), HostedServerConflictError);
+  await assert.rejects(lifecycle.start({ port: 3000, serverId: 'b' }), HostedServerConflictError);
   await assert.rejects(lifecycle.start(targetA), HostedServerConflictError);
+  await assert.rejects(lifecycle.start({ port: 3009, serverId: 'a' }), HostedServerConflictError,
+    'its data folder stays owned until the stop succeeds');
   assert.equal(server.stops, 1);
   server.onStop = async () => {};
-  await lifecycle.stop();
+  await lifecycle.stop(3000);
   assert.equal(server.stops, 2);
-  assert.equal(lifecycle.getServer(), null);
+  assert.equal(lifecycle.getServer(3000), null);
   assert.deepEqual(lifecycle.getStatus(), stopped);
   await lifecycle.start(targetB);
   assert.equal(server.starts, 2);
@@ -229,11 +257,11 @@ test('duplicate concurrent stops share the lifecycle queue without stopping an i
   server.onStop = () => gate.promise;
   const { lifecycle, statuses } = fixture(async () => server);
   await lifecycle.start(targetA);
-  const first = lifecycle.stop();
-  const second = lifecycle.stop();
+  const first = lifecycle.stop(3000);
+  const second = lifecycle.stop(3000);
   await flush();
   assert.equal(server.stops, 1);
-  assert.equal(lifecycle.getStatus().isRunning, true);
+  assert.equal(lifecycle.getStatus().servers.length, 1);
   gate.resolve();
   await Promise.all([first, second]);
   assert.equal(server.stops, 1);
@@ -253,12 +281,12 @@ test('failed startup cleanup retains the candidate until explicit shutdown succe
     assert.equal(error.stopError, stopError);
     return true;
   });
-  assert.equal(lifecycle.getServer(), server);
-  assert.deepEqual(statuses, [{ isRunning: true, port: 3000, serverId: 'a' }]);
+  assert.equal(lifecycle.getServer(3000), server);
+  assert.deepEqual(statuses, [runningA]);
   await assert.rejects(lifecycle.start(targetA), HostedServerConflictError);
-  await assert.rejects(lifecycle.start(targetB), HostedServerConflictError);
+  await assert.rejects(lifecycle.start({ port: 3000, serverId: 'b' }), HostedServerConflictError);
   server.onStop = async () => {};
-  await lifecycle.stop();
+  await lifecycle.stop(3000);
   assert.deepEqual(lifecycle.getStatus(), stopped);
   server.onStart = async () => {};
   await lifecycle.start(targetB);

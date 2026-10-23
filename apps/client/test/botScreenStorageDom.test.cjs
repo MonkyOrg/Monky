@@ -48,7 +48,7 @@ if (!process.versions.electron) {
   ipcMain.handle(SHORTCUT_IPC.setPttConfig, event => owns(event));
   ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, () => null);
   ipcMain.handle('app:set-language', event => owns(event));
-  ipcMain.handle('server-host:status', () => ({ isRunning: false, port: null, serverId: null }));
+  ipcMain.handle('server-host:status', () => ({ servers: [] }));
   ipcMain.handle('client-log:write', (event, entry) => {
     if (owns(event) && entry.level === 'ERROR') nativeErrors.push(entry.message);
   });
