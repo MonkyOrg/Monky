@@ -804,7 +804,9 @@ linha de posição, que apenas reordena. Soltar sobre uma pasta adiciona o
 servidor a ela, e arrastar servidores para fora até sobrar um desfaz a pasta.
 
 Recolhida, a pasta mostra os ícones dos servidores em miniatura; aberta, um
-fundo colorido envolve os servidores. No clique com o botão direito da pasta,
+fundo colorido envolve os servidores. Abrir e fechar desliza os servidores com
+uma animação suave, que some quando o sistema pede menos movimento. No clique
+com o botão direito da pasta,
 **Configurações da pasta** define nome e cor, **Fechar todas as pastas**
 recolhe todas e **Desfazer pasta** devolve os servidores à barra. Pastas sem
 nome usam os nomes dos servidores na dica.

@@ -28,6 +28,8 @@ import { appEvents } from '../core/EventBus';
 import { addServerModal } from './addServer/AddServerModal';
 import { serverMonitorModal } from './ServerMonitorModal';
 import { folderSettingsModal } from './FolderSettingsModal';
+import { setSurfaceVisible } from '../utils/surfaceVisibility';
+import { animateEnter } from '../utils/surfaceMotion';
 import { markSessionRead } from '../core/readState';
 import { dmStore } from '../stores/dmStore';
 import type { ChatSoundMode } from '../stores/settingsStore';
@@ -75,6 +77,12 @@ export class ServerRailView {
   private homeBadgeCount = 0;
   /** Ports of the servers this app is hosting right now, pushed by the main process. */
   private hostedPorts = new Set<number>();
+  /**
+   * Folders toggled by the user, animated by the next render: toggling saves
+   * the layout and repaints the whole rail, so the motion is applied to the
+   * fresh element (true = opening).
+   */
+  private pendingFolderMotion = new Map<string, boolean>();
   private hostedStatusBound = false;
   private static readonly PROBE_INTERVAL_MS = 15000;
   /** Share of a server's height, at each edge, that places instead of grouping. */
@@ -191,6 +199,7 @@ export class ServerRailView {
     this.bindFolderToggles();
     this.bindDragAndDrop();
     this.bindContextMenus();
+    this.playFolderMotion(railEl);
     // Background events may repaint the rail while something is being dragged.
     if (this.pointerDrag?.active) this.markDragging(this.pointerDrag.item);
 
@@ -345,7 +354,7 @@ export class ServerRailView {
               ${folderBadge}
             </button>
           </div>
-          <div class="server-rail-folder-children">
+          <div class="server-rail-folder-children" ${folder.collapsed ? 'hidden' : ''}>
             ${childrenHtml}
             ${this.renderFolderChildDropZone(folder.id, folder.children.length)}
           </div>
@@ -507,9 +516,49 @@ export class ServerRailView {
       header.addEventListener('click', () => {
         if (this.suppressRailClick) return;
         const folderId = header.getAttribute('data-folder-id');
-        if (folderId) connectionStore.toggleFolderCollapsed(folderId);
+        const folder = folderId ? connectionStore.findFolder(folderId) : undefined;
+        if (!folder) return;
+        this.pendingFolderMotion.set(folder.id, folder.collapsed);
+        connectionStore.toggleFolderCollapsed(folder.id);
       });
     });
+  }
+
+  private collapseAllFolders(): void {
+    for (const node of connectionStore.railLayout) {
+      if (node.type === 'folder' && !node.collapsed) this.pendingFolderMotion.set(node.id, false);
+    }
+    connectionStore.collapseAllFolders();
+  }
+
+  /**
+   * Slides a folder's servers in or out. The fresh render already reflects the
+   * new state, so the list is put back where it was and then animated by the
+   * shared expansion helper (which also honours reduced motion).
+   */
+  private playFolderMotion(railEl: HTMLElement): void {
+    if (!this.pendingFolderMotion.size) return;
+    const pending = [...this.pendingFolderMotion];
+    this.pendingFolderMotion.clear();
+    for (const [folderId, opening] of pending) {
+      const folder = Array.from(railEl.querySelectorAll<HTMLElement>('.server-rail-folder'))
+        .find((node) => node.dataset.folderId === folderId);
+      const children = folder?.querySelector<HTMLElement>(':scope > .server-rail-folder-shell > .server-rail-folder-children');
+      const header = folder?.querySelector<HTMLElement>('.server-rail-folder-header > :first-child');
+      if (!folder || !children) continue;
+      children.hidden = opening;
+      if (opening) {
+        // Start from the collapsed look so the tint fades in with the list.
+        folder.classList.add('server-rail-folder--opening');
+        requestAnimationFrame(() => folder.classList.remove('server-rail-folder--opening'));
+        setSurfaceVisible(children, true, 'panel');
+      } else {
+        // Keep the tint around the servers while they slide away.
+        folder.classList.add('server-rail-folder--closing');
+        setSurfaceVisible(children, false, 'panel', undefined, () => folder.classList.remove('server-rail-folder--closing'));
+      }
+      if (header) animateEnter(header, 'view');
+    }
   }
 
   private bindContextMenus(): void {
@@ -544,7 +593,7 @@ export class ServerRailView {
           label: t('serverRail.closeAllFolders'),
           icon: 'folder',
           disabled: !connectionStore.railLayout.some((node) => node.type === 'folder' && !node.collapsed),
-          onClick: () => connectionStore.collapseAllFolders(),
+          onClick: () => this.collapseAllFolders(),
         },
       ]);
     });
@@ -592,7 +641,7 @@ export class ServerRailView {
             label: t('serverRail.closeAllFolders'),
             icon: 'folder',
             disabled: !connectionStore.railLayout.some((node) => node.type === 'folder' && !node.collapsed),
-            onClick: () => connectionStore.collapseAllFolders(),
+            onClick: () => this.collapseAllFolders(),
           },
           {
             label: t('serverRail.ungroupFolder'),

@@ -786,7 +786,9 @@ only reorders. Dropping on a folder adds the server to it, and dragging
 servers out until one is left removes the folder.
 
 Collapsed, a folder shows its servers' icons in miniature; open, a coloured
-background wraps its servers. In the folder's right-click menu, **Folder
+background wraps its servers. Opening and closing slide the servers with a
+smooth animation, which is skipped when the system asks for reduced motion. In
+the folder's right-click menu, **Folder
 settings** sets its name and colour, **Close all folders** collapses every
 folder and **Ungroup folder** returns its servers to the bar. Unnamed folders
 use their servers' names in the tooltip.

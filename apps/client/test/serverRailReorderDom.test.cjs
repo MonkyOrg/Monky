@@ -186,8 +186,35 @@ if (!process.versions.electron) {
       // Collapsed, the folder becomes a tile with its servers in miniature.
       await evaluate(`window.collapseAll()`);
       await check(await waitFor(`document.querySelectorAll('.server-rail-folder.collapsed .server-rail-folder-mini').length === 3`), 'a collapsed folder shows its servers in miniature');
-      await evaluate(`window.expandFolder()`);
-      await frames();
+      // Opening and closing slide the servers in and out instead of snapping.
+      const clickAt = async (point) => {
+        browser.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+        browser.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
+        browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
+        await frames();
+      };
+      const children = `document.querySelector('.server-rail-folder-children')`;
+      await clickAt(await center('.server-rail-folder-header'));
+      await check(await waitFor(`!`+children+`.hidden && `+children+`.getAnimations().length > 0`), 'opening a folder animates its servers in');
+      await check(await waitFor(`!`+children+`.hidden && `+children+`.getAnimations().length === 0 && `+children+`.getBoundingClientRect().height > 80`),
+        'the opened folder settles at full height');
+      await clickAt(await center('.server-rail-folder-header'));
+      await check(await evaluate(`!`+children+`.hidden && document.querySelector('.server-rail-folder--closing') && `+children+`.getAnimations().length > 0`),
+        'closing keeps the servers and tint visible while they slide out');
+      await check(await waitFor(``+children+`.hidden && !document.querySelector('.server-rail-folder--closing')`), 'the closed folder hides its servers when done');
+      await clickAt(await center('.server-rail-folder-header'));
+      await check(await waitFor(`!`+children+`.hidden && `+children+`.getAnimations().length === 0`), 'the folder opens again');
+
+      // Icons morph from a circle into a rounded square, and the picture follows the shape.
+      await check(await evaluate(`[...document.querySelectorAll('.server-rail-avatar > img')].every(img => getComputedStyle(img).clipPath === 'none')`),
+        'server pictures are not clipped to a fixed circle');
+      const hoverTarget = await center('.server-rail-item[data-port="5102"] .server-rail-avatar');
+      browser.webContents.sendInputEvent({ type: 'mouseMove', ...hoverTarget });
+      await check(await waitFor(`getComputedStyle(document.querySelector('.server-rail-item[data-port="5102"] .server-rail-avatar')).borderRadius === '16px'`),
+        'hovering a server rounds it into a square');
+      browser.webContents.sendInputEvent({ type: 'mouseMove', x: 300, y: 300 });
+      await check(await waitFor(`getComputedStyle(document.querySelector('.server-rail-item[data-port="5102"] .server-rail-avatar')).borderRadius === '50%'`),
+        'leaving it turns it back into a circle');
 
       // Dragging servers out until one is left dissolves the folder.
       const leaving = await center('.server-rail-item[data-port="5103"]');
@@ -244,7 +271,6 @@ async function setupRail() {
   window.folderState = () => folder() && { name: folder().name, color: folder().color };
   window.openFolderSettings = () => folderSettingsModal.open(folder().id);
   window.collapseAll = () => connectionStore.collapseAllFolders();
-  window.expandFolder = () => connectionStore.toggleFolderCollapsed(folder().id);
   const { appEvents } = await import('/core/EventBus.ts');
   appEvents.on('connection.saved_servers_changed', () => serverRailView.render());
   serverRailView.render();

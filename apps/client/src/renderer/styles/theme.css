@@ -742,7 +742,9 @@ input:focus, textarea:focus, select:focus {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: border-radius 0.15s ease, background-color 0.15s ease;
+  /* Discord-style morph: round at rest, rounded square on hover and while
+     selected, eased so the corners visibly flow instead of snapping. */
+  transition: border-radius 0.22s cubic-bezier(0.2, 0, 0, 1), background-color 0.15s ease;
   font-weight: 700;
   font-size: 16px;
   flex-shrink: 0;
@@ -753,8 +755,11 @@ input:focus, textarea:focus, select:focus {
   overflow: visible;
 }
 
+/* The picture follows the button's corners. A fixed circular clip kept the
+   icon round while the button behind it squared off, so the two shapes
+   disagreed mid-morph. */
 .server-rail-avatar > img {
-  clip-path: circle(50%);
+  border-radius: inherit;
 }
 
 /* The icon covers the server's initial only once it has actually loaded (#456):
@@ -917,7 +922,7 @@ input:focus, textarea:focus, select:focus {
 
 .server-rail-home:hover,
 .server-rail-avatar:hover {
-  border-radius: 30%;
+  border-radius: 16px;
   background-color: var(--primary, #5865f2);
   color: #fff;
 }
@@ -981,7 +986,7 @@ input:focus, textarea:focus, select:focus {
 }
 
 .server-rail-avatar.active {
-  border-radius: 30%;
+  border-radius: 16px;
 }
 
 /* #287: Discord-style connection pill. It sits flush against the rail's left
@@ -1115,9 +1120,14 @@ input:focus, textarea:focus, select:focus {
   transition: background-color 0.2s ease;
 }
 
-.server-rail-folder:not(.collapsed) .server-rail-folder-shell {
+.server-rail-folder:not(.collapsed) .server-rail-folder-shell,
+.server-rail-folder--closing .server-rail-folder-shell {
   background-color: color-mix(in srgb, var(--folder-color) 22%, transparent);
   padding-bottom: 2px;
+}
+
+.server-rail-folder.server-rail-folder--opening .server-rail-folder-shell {
+  background-color: transparent;
 }
 
 .server-rail-folder-row {
@@ -1239,10 +1249,11 @@ input:focus, textarea:focus, select:focus {
 }
 
 .server-rail-item .server-rail-avatar {
-  transition: border-radius 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease, background-color 0.15s ease;
+  transition: border-radius 0.22s cubic-bezier(0.2, 0, 0, 1), transform 0.18s ease, box-shadow 0.18s ease, background-color 0.15s ease;
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .server-rail-home,
   .server-rail-item .server-rail-avatar,
   .server-rail-item.combine-target .server-rail-avatar,
   .server-rail-folder-shell,
@@ -2124,7 +2135,7 @@ input:focus, textarea:focus, select:focus {
   background: rgba(88, 101, 242, 0.1);
 }
 
-.server-rail-folder.collapsed .server-rail-folder-children {
+.server-rail-folder-children[hidden] {
   display: none;
 }
 
