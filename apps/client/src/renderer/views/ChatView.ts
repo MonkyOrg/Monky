@@ -3,7 +3,8 @@ import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, 
 import type { AttachmentMeta, BotLocale, ChatMessageUpdatedPayload, ChatSendPayload, CommandPresentation, MessageReply, NativePoll, ResolvedMessageBlock, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
-import { cancelSurfaceMotion } from '../utils/surfaceMotion';
+import { animateEnter, cancelSurfaceMotion } from '../utils/surfaceMotion';
+import { renderLoadingSkeleton } from '../utils/loadingSkeleton';
 import { formatMessageTime, renderReplyPreview } from '../utils/messageReply';
 import { appEvents } from '../core/EventBus';
 import { networkClient, getActiveNetworkClient } from '../core/NetworkClient';
@@ -109,6 +110,14 @@ export class ChatView {
   // A history reload asked for by a reconnection, not by the reader: it must
   // not throw them back to the bottom or rebuild a feed that did not change.
   private resyncSnapshot: string | null = null;
+  /**
+   * Channel whose first history page is on its way. Until it lands the feed
+   * shows message-shaped placeholders instead of the empty-channel message,
+   * which was misleading on a channel that does have messages.
+   */
+  private historyPendingChannel: string | null = null;
+  private historyPendingTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly HISTORY_SKELETON_TIMEOUT_MS = 10_000;
   private composerInput: MarkdownInput | null = null;
   private composerChannelId: string | null = null;
   private unbindEvents: Array<() => void> = [];
@@ -179,6 +188,7 @@ export class ChatView {
     chatStore.clearMention(channelId);
     chatStore.clearUnread(channelId);
     networkClient.send(MessageType.CHAT_MENTIONS_READ, { channelId });
+    this.markHistoryPending();
     this.render();
     this.loadHistory();
     // Auto-focus the message input after the fresh DOM has settled (#181).
@@ -257,6 +267,29 @@ export class ChatView {
     if (forumId) this.container.querySelector('#chat-forum-back')?.addEventListener('click', () => this.onOpenForum?.(forumId));
   }
 
+  /** Shows the skeleton only when nothing of this channel is known yet. */
+  private markHistoryPending(): void {
+    const channelId = this.currentChannelId;
+    this.clearHistoryPending();
+    if (!channelId || !this.server.hasPermission(Permission.READ_MESSAGES, channelId)) return;
+    if (chatStore.getMessages(channelId).length || chatStore.getInvocations(channelId).length) return;
+    this.historyPendingChannel = channelId;
+    // A history that never arrives must not leave placeholders up forever.
+    this.historyPendingTimer = setTimeout(() => {
+      if (this.historyPendingChannel !== channelId) return;
+      this.clearHistoryPending();
+      if (this.currentChannelId === channelId) this.renderMessages();
+    }, ChatView.HISTORY_SKELETON_TIMEOUT_MS);
+  }
+
+  private clearHistoryPending(): boolean {
+    const wasPending = this.historyPendingChannel !== null;
+    if (this.historyPendingTimer) clearTimeout(this.historyPendingTimer);
+    this.historyPendingTimer = null;
+    this.historyPendingChannel = null;
+    return wasPending;
+  }
+
   private loadHistory(): void {
     if (!this.currentChannelId || !this.server.hasPermission(Permission.READ_MESSAGES, this.currentChannelId)) return;
 
@@ -302,6 +335,11 @@ export class ChatView {
     const shouldScroll = options.forceScroll === true || this.isFeedAtBottom(feed);
 
     const messages = chatStore.getMessages(this.currentChannelId);
+    if (messages.length === 0 && chatStore.getInvocations(this.currentChannelId).length === 0
+      && this.historyPendingChannel === this.currentChannelId) {
+      feed.innerHTML = renderLoadingSkeleton('messages', 6);
+      return;
+    }
     if (messages.length === 0 && chatStore.getInvocations(this.currentChannelId).length === 0) {
       feed.innerHTML = `
         <div id="chat-empty-placeholder" class="chat-feed-state">
@@ -335,6 +373,11 @@ export class ChatView {
     const placeholder = feed.querySelector('#chat-empty-placeholder');
     if (placeholder) {
       placeholder.remove();
+    }
+    // A live message can beat the history page: it replaces the placeholders.
+    if (this.historyPendingChannel === this.currentChannelId) {
+      this.clearHistoryPending();
+      feed.querySelector(':scope > .loading-skeleton')?.remove();
     }
 
     const shouldScroll = options.forceScroll === true || this.isFeedAtBottom(feed);
@@ -2555,6 +2598,8 @@ export class ChatView {
           if (this.composerInput) this.composerInput.value = '';
           this.renderReplyComposer();
         }
+        if (canRead) this.markHistoryPending();
+        else this.clearHistoryPending();
         this.renderMessages();
         if (canRead) this.loadHistory();
       }
@@ -2587,16 +2632,20 @@ export class ChatView {
     });
     const u4 = appEvents.on('chat.history_loaded', (data: { channelId: string; aroundMessageId?: string }) => {
       if (data.channelId === this.currentChannelId) {
+        const replacingSkeleton = this.historyPendingChannel === data.channelId && this.clearHistoryPending();
         const snapshot = data.aroundMessageId ? null : this.resyncSnapshot;
         this.resyncSnapshot = null;
         if (snapshot !== null) {
-          if (snapshot !== JSON.stringify(chatStore.getMessages(data.channelId))) this.renderMessages();
+          if (replacingSkeleton || snapshot !== JSON.stringify(chatStore.getMessages(data.channelId))) this.renderMessages();
           return;
         }
         const jumpId = data.aroundMessageId === this.pendingJumpId ? this.pendingJumpId : null;
         if (jumpId) this.pendingJumpId = null;
         if (returnLatest) returnLatest.hidden = !data.aroundMessageId;
         this.renderMessages({ forceScroll: !jumpId });
+        // Fade the real messages in over where the placeholders were.
+        const feed = this.container.querySelector<HTMLElement>('#chat-messages-feed');
+        if (replacingSkeleton && feed) animateEnter(feed, 'view');
         if (!this.server.hasPermission(Permission.READ_MESSAGES, data.channelId)) {
           if (this.composerInput) this.composerInput.value = '';
           this.renderReplyComposer();
@@ -3512,6 +3561,7 @@ export class ChatView {
   }
 
   public destroy(): void {
+    this.clearHistoryPending();
     lightboxModal.close();
     this.clearPending();
     this.unbindListeners();

@@ -5205,6 +5205,50 @@ input:focus, textarea:focus, select:focus {
   height: 110px;
   border-radius: var(--radius-sm);
 }
+/* Chat history placeholder: rows anchored to the bottom, like the feed. */
+.loading-skeleton--messages {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 16px;
+  overflow: hidden;
+}
+.loading-skeleton--messages .loading-skeleton-content { gap: 22px; }
+.loading-skeleton-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+.loading-skeleton-avatar {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+}
+.loading-skeleton-message-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 2px;
+}
+.loading-skeleton-name,
+.loading-skeleton-text {
+  display: block;
+  height: 12px;
+  border-radius: 999px;
+}
+.loading-skeleton-name { width: 120px; height: 14px; }
+.loading-skeleton-message:nth-child(3n + 1) .loading-skeleton-name { width: 92px; }
+.loading-skeleton-message:nth-child(3n + 2) .loading-skeleton-name { width: 148px; }
+.loading-skeleton-message .loading-skeleton-text:nth-child(2) { width: 72%; }
+.loading-skeleton-message:nth-child(2n) .loading-skeleton-text:nth-child(2) { width: 46%; }
+.loading-skeleton-message:nth-child(3n) .loading-skeleton-text:nth-child(2) { width: 84%; }
+/* Only some rows have a second line of text, as in a real conversation. */
+.loading-skeleton-message .loading-skeleton-text:nth-child(3) { display: none; width: 38%; }
+.loading-skeleton-message:nth-child(3n + 2) .loading-skeleton-text:nth-child(3) { display: block; }
 .loading-error { padding: 16px; color: var(--text-secondary); text-align: center; }
 .loading-error p { margin: 0 0 12px; }
 .loading-skeleton-value {
