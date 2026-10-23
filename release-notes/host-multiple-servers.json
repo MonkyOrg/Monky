@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Agora você pode hospedar vários servidores seus ao mesmo tempo, cada um na sua porta. Parar um não derruba os outros, e o monitor mostra só os logs do servidor escolhido.",
+  "en": "You can now host several of your servers at the same time, each on its own port. Stopping one no longer affects the others, and the monitor only shows the logs of the chosen server."
+}

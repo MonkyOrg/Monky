@@ -275,7 +275,9 @@ technical — it is about who looks after it:
 
 Hosting **from the app** is the two-click path, and that is why the client
 imports `@monky/server` directly: no separate process, no admin port. The price
-is that the server lives only as long as the app does.
+is that the server lives only as long as the app does. The app can host several
+servers at once in the same process, each with its own port and data folder;
+each instance keeps its own logs.
 
 The **CLI** exists for the opposite case — a server that should not depend on
 somebody keeping a window open. It manages several servers on the same machine,

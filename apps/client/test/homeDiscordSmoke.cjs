@@ -144,7 +144,7 @@ async function setupHomeDiscordSmoke() {
     startLanDiscovery: async () => {},
     onLanDiscoveryFound: listener => { lanFoundListeners.add(listener); return () => lanFoundListeners.delete(listener); },
     onLanDiscoveryLost: listener => { lanLostListeners.add(listener); return () => lanLostListeners.delete(listener); },
-    hostServerStatus: async () => ({ isRunning: false, port: null, serverId: null }),
+    hostServerStatus: async () => ({ servers: [] }),
     hostServerStart: async options => { startedHosts.push(options); return { success: true }; },
     hostServerStop: async () => ({ success: true }),
     hostServerDeleteData: async () => ({ success: true }),
@@ -286,11 +286,20 @@ async function setupHomeDiscordSmoke() {
   ownedButton.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 80, clientY: 80 }));
   await until(() => !!document.querySelector('.floating-context-menu'), 'owned server context menu did not open');
   const menuText = document.querySelector('.floating-context-menu').textContent;
-  for (const label of ['Iniciar', 'Parar', 'Excluir'].some(label => menuText.includes(label))
-    ? ['Iniciar', 'Parar', 'Monitor', 'Excluir']
-    : ['Start', 'Stop', 'Monitor', 'Delete']) {
+  const portuguese = ['Iniciar', 'Excluir'].some(label => menuText.includes(label));
+  for (const label of portuguese ? ['Iniciar', 'Monitor', 'Excluir'] : ['Start', 'Monitor', 'Delete']) {
     check(menuText.includes(label), `owned server context menu includes ${label}`);
   }
+  check(!menuText.includes(portuguese ? 'Parar' : 'Stop'), 'a stopped server offers Start, not Stop');
+  // Once the main process reports it running, the same menu offers Stop instead.
+  for (const listener of hostStatusListeners) listener({ servers: [{ port: 5200, serverId: 'owned-fixture' }] });
+  document.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  document.querySelector('.server-rail-avatar[data-port="5200"]').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 80, clientY: 80 }));
+  await until(() => document.querySelector('.floating-context-menu:not([data-ui-closing])')?.textContent.includes(portuguese ? 'Parar' : 'Stop'),
+    'a running server offers Stop');
+  check(!document.querySelector('.floating-context-menu:not([data-ui-closing])').textContent.includes(portuguese ? 'Iniciar' : 'Start'),
+    'a running server does not offer Start');
+  for (const listener of hostStatusListeners) listener({ servers: [] });
 
   equal(startedHosts.length, 0, 'background auto-connect did not start stopped hosted servers');
   await until(() => sent.some(message => message.type === MessageType.USER_UPDATE_AVATAR), 'background sessions did not receive the global avatar');
@@ -400,7 +409,7 @@ async function setupFirstLaunchGuideSmoke() {
     startLanDiscovery: async () => {},
     onLanDiscoveryFound: unsubscribe,
     onLanDiscoveryLost: unsubscribe,
-    hostServerStatus: async () => ({ isRunning: false, port: null, serverId: null }),
+    hostServerStatus: async () => ({ servers: [] }),
     hostServerStart: async () => ({ success: true }),
     hostServerStop: async () => ({ success: true }),
     hostServerDeleteData: async () => ({ success: true }),

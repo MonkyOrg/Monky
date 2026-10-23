@@ -548,6 +548,18 @@ export interface HostServerOptions {
   voiceMode?: 'p2p' | 'sfu';
 }
 
+/** One server hosted by this app. The port identifies it while it runs. */
+export interface HostedServerInstance {
+  port: number;
+  /** Entry of "Meus Servidores" that owns it; null for the legacy flat data folder. */
+  serverId: string | null;
+}
+
+/** Every server this app is hosting, sorted by port. */
+export interface HostServerStatus {
+  servers: HostedServerInstance[];
+}
+
 /**
  * Snapshot of a locally hosted server, shown to whoever is running it.
  * Deliberately cheap to produce: it is polled by the UI.
@@ -932,11 +944,11 @@ export interface IpcInvokeChannels {
 
   // Servidor Local
   'server-host:start': { args: [options: HostServerOptions]; returnType: { success: boolean; error?: string } };
-  'server-host:stop': { args: []; returnType: { success: boolean } };
-  'server-host:status': { args: []; returnType: { isRunning: boolean; port: number | null; serverId: string | null } };
-  'server-host:logs': { args: []; returnType: LogEntry[] };
-  'server-host:clear-logs': { args: []; returnType: void };
-  'server-host:stats': { args: []; returnType: ServerStats | null };
+  'server-host:stop': { args: [port: number]; returnType: { success: boolean } };
+  'server-host:status': { args: []; returnType: HostServerStatus };
+  'server-host:logs': { args: [port: number]; returnType: LogEntry[] };
+  'server-host:clear-logs': { args: [port: number]; returnType: void };
+  'server-host:stats': { args: [port: number]; returnType: ServerStats | null };
   'server-host:delete-data': { args: [serverId: string]; returnType: { success: boolean; error?: string } };
 
   // LAN Discovery
@@ -1076,8 +1088,8 @@ export interface IpcEvents {
   'updater:progress': [percent: number];
   'updater:downloaded': [info: { manual: boolean }];
   'updater:error': [message: string];
-  'server-host:log': [entry: LogEntry];
-  'server-host:status-changed': [status: { isRunning: boolean; port: number | null; serverId: string | null }];
+  'server-host:log': [port: number, entry: LogEntry];
+  'server-host:status-changed': [status: HostServerStatus];
 
   /** Jogo detectado mudou — `null` quando nada está rodando (#675). */
   'game-presence:changed': [activity: UserActivity | null];

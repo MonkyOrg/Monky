@@ -762,9 +762,34 @@ synthesized defaults. Resetting an effect restores its original file or tone;
 or PTT cues that you disabled in their respective options.
 
 ### Per-server notifications and unread messages
--click a server in the sidebar to **Mute server** or, under **Server**, choose between following the general setting, all messages, only or muted. The choice applies only to that server, is saved on device, and each channel can still override it from its own menu. Muted show a crossed-out bell; mentions are still highlighted in red.
- connected in the background show a white dot when there are new and a red one when you were mentioned; collapsed folders summarize servers inside. In the same menu, **Mark server as read** clears every. Right-clicking also offers **Mark folder as read** on a folder header,
-**Mark all servers as read** on the empty part of the bar, **Mark all as read** on the Home button and **Mark as read** on each direct.
+
+Right-click a server in the sidebar to **Mute server** or, under **Server
+notifications**, choose between following the general setting, all messages,
+mentions only or muted. The choice applies only to that server, is saved on
+this device, and each channel can still override it from its own menu. Muted
+servers show a crossed-out bell; mentions are still highlighted in red.
+
+Servers connected in the background show a white dot when there are new
+messages and a red one when you were mentioned; collapsed folders summarize
+the servers inside. In the same menu, **Mark server as read** clears every
+channel. Right-clicking also offers **Mark folder as read** on a folder,
+**Mark all servers as read** on the empty part of the bar, **Mark all
+conversations as read** on the Home button and **Mark as read** on each direct
+conversation.
+
+### Folders in the server bar
+
+As in Discord, drag a server and drop it on the middle of another one to
+create a folder with both; the target turns into the folder shape before you
+let go. Near the top or bottom edge the position line appears instead, which
+only reorders. Dropping on a folder adds the server to it, and dragging
+servers out until one is left removes the folder.
+
+Collapsed, a folder shows its servers' icons in miniature; open, a coloured
+background wraps its servers. In the folder's right-click menu, **Folder
+settings** sets its name and colour, **Close all folders** collapses every
+folder and **Ungroup folder** returns its servers to the bar. Unnamed folders
+use their servers' names in the tooltip.
 
 ## Bot tools
 
@@ -925,9 +950,13 @@ does not join voice automatically or interrupt the current call, microphone,
 camera or screen shares. Joining a different voice channel remains a
 separate action.
 
-If this application instance already hosts another server, it will not stop
-it implicitly. Use the hosting controls to stop it explicitly when safe before
-starting a different server.
+You can host several of your own servers at the same time, each on its own
+port; stopping one does not affect the others. When you create a server,
+Monky suggests a free port and refuses a port used by another of your servers.
+Servers created in earlier versions that shared a port are separated
+automatically: the one started last keeps the port and the others move to the
+next free one, without losing data. Starting never stops another server
+implicitly.
 
 ## Server settings: immediate application
 

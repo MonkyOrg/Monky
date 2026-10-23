@@ -190,9 +190,14 @@ export type LocalMonitorApi = Pick<ElectronApi,
   'hostServerStatus' | 'hostServerStats' | 'hostServerLogs' | 'onHostServerLog' | 'onHostServerStatusChanged'
 >;
 type LocalStatus = Awaited<ReturnType<LocalMonitorApi['hostServerStatus']>>;
+type LocalInstance = LocalStatus['servers'][number];
 
-function sameHost(first: LocalStatus, second: LocalStatus): boolean {
-  return first.isRunning && second.isRunning && first.serverId === second.serverId && first.port === second.port;
+function instanceOn(status: LocalStatus, port: number): LocalInstance | null {
+  return status.servers.find((server) => server.port === port) ?? null;
+}
+
+function sameHost(first: LocalInstance | null, second: LocalInstance | null): boolean {
+  return !!first && !!second && first.serverId === second.serverId && first.port === second.port;
 }
 
 function entryKey(entry: LogEntry): string {
@@ -216,7 +221,7 @@ function mergeLocalHistory(history: LogEntry[], buffered: LogEntry[]): LogEntry[
 }
 
 export class LocalServerMonitorSource implements ServerMonitorSource {
-  private expected: LocalStatus | null = null;
+  private expected: LocalInstance | null = null;
   private expectedStats: Pick<ServerStats, 'startedAt' | 'dataDir'> | null = null;
   private invalidated = false;
   private disposed = false;
@@ -226,7 +231,8 @@ export class LocalServerMonitorSource implements ServerMonitorSource {
   private dropped = 0;
   private cleanup: Array<() => void> = [];
 
-  constructor(private readonly api: LocalMonitorApi | undefined) {}
+  /** Watches the server this app hosts on `port`; other hosted servers are ignored. */
+  constructor(private readonly api: LocalMonitorApi | undefined, private readonly port: number) {}
 
   public assertCurrent(): void {
     if (this.disposed) throw new DOMException('Monitor closed', 'AbortError');
@@ -238,8 +244,8 @@ export class LocalServerMonitorSource implements ServerMonitorSource {
     this.assertCurrent();
     const api = this.api;
     if (!api) throw new ServerMonitorError('localUnavailable');
-    this.cleanup.push(api.onHostServerLog((entry) => {
-      if (this.disposed || this.invalidated) return;
+    this.cleanup.push(api.onHostServerLog((port, entry) => {
+      if (this.disposed || this.invalidated || port !== this.port) return;
       this.pendingEntries.push(entry);
       const excess = this.pendingEntries.length - SERVER_MONITOR_LIMITS.HISTORY_ENTRIES;
       if (excess > 0) {
@@ -249,8 +255,10 @@ export class LocalServerMonitorSource implements ServerMonitorSource {
     }));
     this.cleanup.push(api.onHostServerStatusChanged((status) => {
       if (this.disposed) return;
+      const current = instanceOn(status, this.port);
+      if (this.expected ? sameHost(this.expected, current) : current) return;
       this.statusVersion++;
-      if (!status.isRunning || (this.expected && !sameHost(this.expected, status))) {
+      if (!current || this.expected) {
         this.invalidated = true;
         invalidate(new ServerMonitorError('localStopped'));
       }
@@ -262,18 +270,18 @@ export class LocalServerMonitorSource implements ServerMonitorSource {
     const api = this.api;
     if (!api) throw new ServerMonitorError('localUnavailable');
     const version = this.statusVersion;
-    const before = await api.hostServerStatus();
+    const before = instanceOn(await api.hostServerStatus(), this.port);
     this.assertCurrent();
-    if (!before.isRunning || version !== this.statusVersion || (this.expected && !sameHost(this.expected, before))) {
+    if (!before || version !== this.statusVersion || (this.expected && !sameHost(this.expected, before))) {
       throw new ServerMonitorError('localStopped');
     }
     this.expected ??= { ...before };
     const initial = !this.initialized;
     const [stats, history] = await Promise.all([
-      api.hostServerStats(), initial ? api.hostServerLogs() : Promise.resolve([]),
+      api.hostServerStats(this.port), initial ? api.hostServerLogs(this.port) : Promise.resolve([]),
     ]);
     this.assertCurrent();
-    const after = await api.hostServerStatus();
+    const after = instanceOn(await api.hostServerStatus(), this.port);
     this.assertCurrent();
     if (!stats || !sameHost(before, after) || version !== this.statusVersion
       || (this.expectedStats && (stats.startedAt !== this.expectedStats.startedAt || stats.dataDir !== this.expectedStats.dataDir))) {

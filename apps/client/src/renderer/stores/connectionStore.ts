@@ -1,9 +1,11 @@
 import { ConnectionStatus } from '../core/NetworkClient';
 import { appEvents } from '../core/EventBus';
 import { clientLog } from '../core/ClientLogService';
-import { VoiceMode } from '@monky/shared';
+import { LIMITS, VoiceMode } from '@monky/shared';
 import { favoritesStore, savedServerFavoriteKey } from './favoritesStore';
 import { settingsStore } from './settingsStore';
+
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 export interface SavedServer {
   host: string;
@@ -25,10 +27,17 @@ export interface RailServerNode {
 export interface RailFolderNode {
   type: 'folder';
   id: string;
+  /** May be empty: the rail then names the folder after its servers. */
   name: string;
+  /** `#rrggbb`; absent means the default accent colour. */
+  color?: string;
   collapsed: boolean;
   children: RailServerNode[];
 }
+
+export const DEFAULT_FOLDER_COLOR = '#5865f2';
+const FOLDER_COLOR = /^#[0-9a-f]{6}$/i;
+const MAX_FOLDER_NAME_LENGTH = 100;
 
 export type RailNode = RailServerNode | RailFolderNode;
 
@@ -270,6 +279,7 @@ export class ConnectionStore {
   }
 
   public saveRailLayout(): void {
+    this.dissolveSmallFolders();
     try {
       localStorage.setItem(ConnectionStore.RAIL_LAYOUT_STORAGE_KEY, JSON.stringify(this.railLayout));
     } catch (e) {}
@@ -286,31 +296,76 @@ export class ConnectionStore {
     appEvents.emit('connection.saved_servers_changed');
   }
 
-  public createFolder(name: string): string | null {
-    const trimmed = name.trim();
-    if (!trimmed) return null;
-    const id = `folder_${Date.now()}`;
-    this.railLayout.push({
-      type: 'folder',
-      id,
-      name: trimmed,
-      collapsed: false,
-      children: [],
+  /**
+   * Dropping one server on another groups them, as in Discord: on a loose
+   * server a new folder takes its place; on a server already in a folder the
+   * dragged one joins that folder right after it. Returns the folder id.
+   */
+  public groupServers(target: { host: string; port: number }, dragged: { host: string; port: number }): string | null {
+    const targetKey = this.serverKey(target.host, target.port);
+    if (targetKey === this.serverKey(dragged.host, dragged.port)) return null;
+    if (!this.savedServers.some((server) => this.serverKey(server.host, server.port) === targetKey)) return null;
+    const existingFolder = this.getFolderIdForServer(target.host, target.port);
+    if (existingFolder) {
+      const folder = this.findFolder(existingFolder);
+      const index = folder?.children.findIndex((child) => this.serverKey(child.host, child.port) === targetKey) ?? -1;
+      this.moveServerToFolder(dragged.host, dragged.port, existingFolder, index + 1);
+      return existingFolder;
+    }
+    const removal = this.removeServerNode(dragged.host, dragged.port);
+    const draggedNode: RailServerNode = removal?.node ?? { type: 'server', host: dragged.host, port: dragged.port };
+    const targetIndex = this.railLayout.findIndex((node) => node.type === 'server' && this.serverKey(node.host, node.port) === targetKey);
+    if (targetIndex < 0) {
+      this.syncRailLayoutWithSavedServers();
+      appEvents.emit('connection.saved_servers_changed');
+      return null;
+    }
+    const id = `folder_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    this.railLayout.splice(targetIndex, 1, {
+      type: 'folder', id, name: '', collapsed: false,
+      children: [{ type: 'server', host: target.host, port: target.port }, draggedNode],
     });
     this.saveRailLayout();
     appEvents.emit('connection.saved_servers_changed');
     return id;
   }
 
-  public renameFolder(folderId: string, name: string): void {
-    const folder = this.railLayout.find(
-      (node): node is RailFolderNode => node.type === 'folder' && node.id === folderId
-    );
-    const trimmed = name.trim();
-    if (!folder || !trimmed) return;
-    folder.name = trimmed;
+  public updateFolder(folderId: string, changes: { name?: string; color?: string | null }): void {
+    const folder = this.findFolder(folderId);
+    if (!folder) return;
+    if (changes.name !== undefined) folder.name = changes.name.trim().slice(0, MAX_FOLDER_NAME_LENGTH);
+    if (changes.color !== undefined) {
+      const color = changes.color?.toLowerCase();
+      if (!color || color === DEFAULT_FOLDER_COLOR) delete folder.color;
+      else if (FOLDER_COLOR.test(color)) folder.color = color;
+    }
     this.saveRailLayout();
     appEvents.emit('connection.saved_servers_changed');
+  }
+
+  public collapseAllFolders(): void {
+    let changed = false;
+    for (const node of this.railLayout) {
+      if (node.type === 'folder' && !node.collapsed) {
+        node.collapsed = true;
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    this.saveRailLayout();
+    appEvents.emit('connection.saved_servers_changed');
+  }
+
+  public findFolder(folderId: string): RailFolderNode | undefined {
+    return this.railLayout.find((node): node is RailFolderNode => node.type === 'folder' && node.id === folderId);
+  }
+
+  /** A folder only groups: with fewer than two servers it gives way to them. */
+  private dissolveSmallFolders(): void {
+    for (let index = this.railLayout.length - 1; index >= 0; index--) {
+      const node = this.railLayout[index];
+      if (node.type === 'folder' && node.children.length < 2) this.railLayout.splice(index, 1, ...node.children);
+    }
   }
 
   public deleteFolder(folderId: string): void {
@@ -432,9 +487,60 @@ export class ConnectionStore {
         ))
         .sort((a, b) => b.lastStarted - a.lastStarted)
         .slice(0, 10);
+      this.separateCreatedServerPorts();
     } catch (e) {
       this.createdServers = [];
     }
+  }
+
+  /**
+   * Older versions always offered port 3000, so two servers created here could
+   * share it and overwrite each other's entry in the server list. The one
+   * started most recently keeps the port; the others move to the next free
+   * one. Their data is untouched: it lives in a folder named after the id.
+   */
+  private separateCreatedServerPorts(): void {
+    const taken = new Set<number>();
+    let changed = false;
+    for (const server of this.createdServers) {
+      if (!taken.has(server.port)) {
+        taken.add(server.port);
+        continue;
+      }
+      const port = this.nextFreeLocalPort(server.port + 1, taken);
+      clientLog.info('STORE', `Moving created server ${server.id} from port ${server.port} to ${port}: the port was shared`);
+      server.port = port;
+      taken.add(port);
+      changed = true;
+    }
+    if (!changed) return;
+    try {
+      localStorage.setItem('monky_created_servers', JSON.stringify(this.createdServers));
+    } catch (e) {}
+  }
+
+  /**
+   * First port from ``preferred`` up not used by one of the user's servers nor
+   * by another saved server on this machine.
+   */
+  public nextFreeLocalPort(preferred: number = 3000, extra: ReadonlySet<number> = new Set()): number {
+    const used = new Set<number>(extra);
+    for (const server of this.createdServers) used.add(server.port);
+    for (const server of this.savedServers) {
+      if (LOCAL_HOSTS.has(server.host.trim().toLowerCase())) used.add(server.port);
+    }
+    for (let port = Math.max(LIMITS.MIN_PORT, preferred); port <= LIMITS.MAX_PORT; port++) {
+      if (!used.has(port)) return port;
+    }
+    for (let port = LIMITS.MIN_PORT; port < preferred; port++) {
+      if (!used.has(port)) return port;
+    }
+    return preferred;
+  }
+
+  /** Another of the user's servers already configured on ``port``, if any. */
+  public createdServerOnPort(port: number, exceptId?: string): CreatedServer | undefined {
+    return this.createdServers.find((server) => server.port === port && server.id !== exceptId);
   }
 
   public saveCreatedServer(server: CreatedServer): void {
@@ -556,7 +662,8 @@ export class ConnectionStore {
       return {
         type: 'folder',
         id: candidate.id,
-        name: candidate.name,
+        name: candidate.name.slice(0, MAX_FOLDER_NAME_LENGTH),
+        ...(typeof candidate.color === 'string' && FOLDER_COLOR.test(candidate.color) ? { color: candidate.color.toLowerCase() } : {}),
         collapsed: candidate.collapsed,
         children: candidate.children
           .map((child) => this.parseRailNode(child))
@@ -591,10 +698,15 @@ export class ConnectionStore {
         seen.add(key);
       }
 
+      if (nextChildren.length < 2) {
+        nextLayout.push(...nextChildren);
+        continue;
+      }
       nextLayout.push({
         type: 'folder',
         id: node.id,
-        name: node.name.trim() || 'Folder',
+        name: node.name.trim(),
+        ...(node.color ? { color: node.color } : {}),
         collapsed: node.collapsed,
         children: nextChildren,
       });

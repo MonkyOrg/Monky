@@ -779,8 +779,35 @@ remove todas as substituições. Isso não ativa notificações de chat nem sons
 de PTT que você tenha desligado nas respectivas opções.
 
 ### Notificações por servidor e mensagens não lidas
- com o botão direito em um servidor na barra lateral para **Silenciar** ou escolher, em **Notificações do servidor**, entre seguir a geral, todas as mensagens, apenas menções ou silenciar. A escolha só para aquele servidor, fica salva neste dispositivo e cada canal ainda sobrescrevê-la pelo próprio menu. Servidores silenciados mostram um sino; menções continuam destacadas em vermelho.
- conectados em segundo plano mostram um ponto branco quando há novas e vermelho quando você foi mencionado; pastas recolhidas os servidores de dentro. No mesmo menu, **Marcar servidor como lido** todos os canais. O clique com o botão direito também oferece **Marcar como lida** no cabeçalho de uma pasta, **Marcar todos os servidores lidos** no espaço vazio da barra, **Marcar todas as conversas como** no botão Início e **Marcar como lido** em cada conversa direta.
+
+Clique com o botão direito em um servidor na barra lateral para **Silenciar
+servidor** ou escolher, em **Notificações do servidor**, entre seguir a
+configuração geral, todas as mensagens, apenas menções ou silenciar. A escolha
+vale só para aquele servidor, fica salva neste dispositivo e cada canal ainda
+pode sobrescrevê-la pelo próprio menu. Servidores silenciados mostram um sino
+cortado; menções continuam destacadas em vermelho.
+
+Servidores conectados em segundo plano mostram um ponto branco quando há
+mensagens novas e vermelho quando você foi mencionado; pastas recolhidas
+resumem os servidores de dentro. No mesmo menu, **Marcar servidor como lido**
+limpa todos os canais. O clique com o botão direito também oferece **Marcar
+pasta como lida** em uma pasta, **Marcar todos os servidores como lidos** no
+espaço vazio da barra, **Marcar todas as conversas como lidas** no botão Início
+e **Marcar como lido** em cada conversa direta.
+
+### Pastas na barra de servidores
+
+Como no Discord, arraste um servidor e solte-o sobre o meio de outro para
+criar uma pasta com os dois; o servidor de destino se transforma no formato
+da pasta antes de você soltar. Perto da borda de cima ou de baixo aparece a
+linha de posição, que apenas reordena. Soltar sobre uma pasta adiciona o
+servidor a ela, e arrastar servidores para fora até sobrar um desfaz a pasta.
+
+Recolhida, a pasta mostra os ícones dos servidores em miniatura; aberta, um
+fundo colorido envolve os servidores. No clique com o botão direito da pasta,
+**Configurações da pasta** define nome e cor, **Fechar todas as pastas**
+recolhe todas e **Desfazer pasta** devolve os servidores à barra. Pastas sem
+nome usam os nomes dos servidores na dica.
 
 ## Ferramentas de bots
 
@@ -942,9 +969,12 @@ lateral, não entra automaticamente em voz e não interrompe a chamada atual,
 o microfone, a câmera ou os compartilhamentos. Entrar em outro canal de voz
 continua sendo uma ação separada.
 
-Se outro servidor já estiver hospedado por esta instância do app, ele não será
-desligado implicitamente. Use os controles de hospedagem para pará-lo
-explicitamente quando for seguro, antes de iniciar um servidor diferente.
+Você pode hospedar vários servidores próprios ao mesmo tempo, cada um na sua
+porta; parar um não afeta os outros. Ao criar um servidor, o Monky já sugere
+uma porta livre e recusa a porta de outro servidor seu. Servidores criados em
+versões anteriores que dividiam a mesma porta são separados automaticamente:
+o iniciado por último mantém a porta e os outros passam para a próxima livre,
+sem perder dados. Iniciar nunca desliga outro servidor implicitamente.
 
 ## Configurações do servidor: aplicação imediata
 

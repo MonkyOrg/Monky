@@ -30,6 +30,7 @@ import type {
   DevelopmentQaReport,
   DiscoveredLanServer,
   HostServerOptions,
+  HostServerStatus,
   ImageSelectionResult,
   LinkPreviewData,
   LocalExecutionMutationResult,
@@ -139,16 +140,14 @@ export interface ElectronApi {
   encryptBackup: (contents: string, password: string) => Promise<BackupCryptoResult>;
   decryptBackup: (payload: string, password: string) => Promise<BackupCryptoResult>;
   hostServerStart: (options: HostServerOptions) => Promise<{ success: boolean; error?: string }>;
-  hostServerStop: () => Promise<{ success: boolean }>;
-  hostServerStatus: () => Promise<{ isRunning: boolean; port: number | null; serverId: string | null }>;
-  hostServerLogs: () => Promise<LogEntry[]>;
-  hostServerClearLogs: () => Promise<void>;
-  hostServerStats: () => Promise<ServerStats | null>;
+  hostServerStop: (port: number) => Promise<{ success: boolean }>;
+  hostServerStatus: () => Promise<HostServerStatus>;
+  hostServerLogs: (port: number) => Promise<LogEntry[]>;
+  hostServerClearLogs: (port: number) => Promise<void>;
+  hostServerStats: (port: number) => Promise<ServerStats | null>;
   hostServerDeleteData: (serverId: string) => Promise<{ success: boolean; error?: string }>;
-  onHostServerLog: (callback: (entry: LogEntry) => void) => () => void;
-  onHostServerStatusChanged: (
-    callback: (status: { isRunning: boolean; port: number | null; serverId: string | null }) => void
-  ) => () => void;
+  onHostServerLog: (callback: (port: number, entry: LogEntry) => void) => () => void;
+  onHostServerStatusChanged: (callback: (status: HostServerStatus) => void) => () => void;
   getDesktopSources: (options?: DesktopSourcesOptions) => Promise<DesktopSource[]>;
   getDesktopSourcePreviews: (request: DesktopSourcePreviewsRequest) => Promise<DesktopSourcePreview[]>;
   cancelDesktopSourcePreviews: () => Promise<void>;
@@ -433,22 +432,19 @@ const api: ElectronApi = {
   encryptBackup: (contents, password) => ipcRenderer.invoke('backup:encrypt', contents, password),
   decryptBackup: (payload, password) => ipcRenderer.invoke('backup:decrypt', payload, password),
   hostServerStart: (options) => ipcRenderer.invoke('server-host:start', options),
-  hostServerStop: () => ipcRenderer.invoke('server-host:stop'),
+  hostServerStop: (port) => ipcRenderer.invoke('server-host:stop', port),
   hostServerStatus: () => ipcRenderer.invoke('server-host:status'),
-  hostServerLogs: () => ipcRenderer.invoke('server-host:logs'),
-  hostServerClearLogs: () => ipcRenderer.invoke('server-host:clear-logs'),
-  hostServerStats: () => ipcRenderer.invoke('server-host:stats'),
+  hostServerLogs: (port) => ipcRenderer.invoke('server-host:logs', port),
+  hostServerClearLogs: (port) => ipcRenderer.invoke('server-host:clear-logs', port),
+  hostServerStats: (port) => ipcRenderer.invoke('server-host:stats', port),
   hostServerDeleteData: (serverId) => ipcRenderer.invoke('server-host:delete-data', serverId),
   onHostServerLog: (callback) => {
-    const listener = (_event: unknown, entry: LogEntry) => callback(entry);
+    const listener = (_event: unknown, port: number, entry: LogEntry) => callback(port, entry);
     ipcRenderer.on('server-host:log', listener);
     return () => ipcRenderer.removeListener('server-host:log', listener);
   },
   onHostServerStatusChanged: (callback) => {
-    const listener = (
-      _event: unknown,
-      status: { isRunning: boolean; port: number | null; serverId: string | null }
-    ) => callback(status);
+    const listener = (_event: unknown, status: HostServerStatus) => callback(status);
     ipcRenderer.on('server-host:status-changed', listener);
     return () => ipcRenderer.removeListener('server-host:status-changed', listener);
   },

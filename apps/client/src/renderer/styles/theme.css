@@ -857,11 +857,15 @@ input:focus, textarea:focus, select:focus {
 }
 
 .server-rail-folder-badge {
-  flex-shrink: 0;
-  width: 8px;
-  height: 8px;
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
+  border: 2px solid var(--bg-app);
   background-color: #fff;
+  pointer-events: none;
 }
 
 .server-rail-folder-badge[data-kind='mention'] {
@@ -1093,80 +1097,164 @@ input:focus, textarea:focus, select:focus {
   opacity: 1;
 }
 
+/* Discord-style folders: collapsed, a tinted tile with up to four server
+   icons; open, a tinted column wrapping its servers under a folder icon. The
+   colour comes from the folder settings. */
 .server-rail-folder {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+.server-rail-folder-shell {
+  width: 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  border-radius: 24px;
+  transition: background-color 0.2s ease;
+}
+
+.server-rail-folder:not(.collapsed) .server-rail-folder-shell {
+  background-color: color-mix(in srgb, var(--folder-color) 22%, transparent);
+  padding-bottom: 2px;
+}
+
+.server-rail-folder-row {
+  position: relative;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+/* The shell is narrower than the rail; the pill still sits on the rail edge. */
+.server-rail-folder-row .server-rail-pill {
+  left: -6px;
+}
+
+.server-rail-folder.collapsed .server-rail-folder-row:hover .server-rail-pill {
+  height: 20px;
+}
+
+.server-rail-folder.collapsed.has-unread .server-rail-pill {
+  height: 8px;
+}
+
+.server-rail-folder.collapsed.has-active .server-rail-pill {
+  height: 40px;
+}
+
+.server-rail-folder-header {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: none;
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--folder-color);
+  background-color: color-mix(in srgb, var(--folder-color) 38%, var(--bg-card));
+  transition: background-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.server-rail-folder:not(.collapsed) .server-rail-folder-header {
+  background-color: transparent;
+}
+
+.server-rail-folder-header:hover {
+  background-color: color-mix(in srgb, var(--folder-color) 50%, var(--bg-card));
+}
+
+.server-rail-folder-header:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+/* A server held over the folder will join it on release. */
+.server-rail-folder-header.drag-over {
+  box-shadow: 0 0 0 2px var(--folder-color);
+  transform: scale(1.06);
+}
+
+.server-rail-folder-icon {
+  color: var(--folder-color);
+}
+
+.server-rail-folder-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 16px);
+  grid-auto-rows: 16px;
+  gap: 3px;
+}
+
+.server-rail-folder-mini {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--bg-card);
+  color: var(--text-normal);
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.server-rail-folder-mini > .server-rail-icon {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+}
+
+.server-rail-folder-mini > .server-rail-icon[data-loaded] {
+  opacity: 1;
+}
+
+.server-rail-folder-mini:has(> .server-rail-icon[data-loaded]) > .server-rail-initial {
+  visibility: hidden;
+}
+
+.server-rail-folder-children {
   width: 100%;
   display: flex;
   flex-direction: column;
   align-items: stretch;
 }
 
-.server-rail-folder-header {
-  margin: 0 6px 0 8px;
-  min-height: 24px;
-  padding: 4px 8px;
-  border-radius: var(--radius-full);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-secondary);
-  background: rgba(36, 44, 56, 0.35);
-  transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+/* Dropping on the middle of a server groups the two: the target grows into a
+   folder-shaped tile, previewing the folder about to be created. */
+.server-rail-item.combine-target .server-rail-avatar {
+  border-radius: 16px;
+  transform: scale(1.12);
+  box-shadow: 0 0 0 3px var(--accent-primary), 0 0 18px rgba(88, 101, 242, 0.45);
+  transition: border-radius 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
 }
 
-.server-rail-folder-header:hover {
-  background: rgba(88, 101, 242, 0.16);
-  color: var(--text-primary);
+.server-rail-item .server-rail-avatar {
+  transition: border-radius 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease, background-color 0.15s ease;
 }
 
-.server-rail-folder-header.drag-over {
-  background: rgba(88, 101, 242, 0.24);
-  color: var(--text-primary);
-  box-shadow: inset 0 0 0 1px rgba(88, 101, 242, 0.45);
-}
+@media (prefers-reduced-motion: reduce) {
+  .server-rail-item .server-rail-avatar,
+  .server-rail-item.combine-target .server-rail-avatar,
+  .server-rail-folder-shell,
+  .server-rail-folder-header {
+    transition: none;
+  }
 
-.server-rail-folder-toggle {
-  width: 14px;
-  height: 14px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: inherit;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  flex-shrink: 0;
+  .server-rail-item.combine-target .server-rail-avatar,
+  .server-rail-folder-header.drag-over {
+    transform: none;
+  }
 }
-
-.server-rail-folder-arrow {
-  font-size: 11px;
-  line-height: 1;
-}
-
-.server-rail-folder-icon {
-  color: inherit;
-  opacity: 0.9;
-  flex-shrink: 0;
-}
-
-.server-rail-folder-name {
-  min-width: 0;
-  flex: 1;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.server-rail-folder-children {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-}
-
 .home-sidebar-root {
   min-height: 0;
   flex: 1 1 auto;
@@ -2042,20 +2130,14 @@ input:focus, textarea:focus, select:focus {
 
 .server-rail-drop-zone--nested::after {
   width: 0;
-  margin-left: 14px;
 }
 
 .server-rail-drop-zone--nested.active::after {
   width: 26px;
 }
 
-.server-rail-item--nested {
-  justify-content: flex-end;
-  padding-right: 4px;
-}
-
 .server-rail-item--nested .server-rail-pill {
-  left: 8px;
+  left: -6px;
 }
 
 .server-rail-item--nested .server-rail-avatar {
@@ -15258,4 +15340,101 @@ body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-card.
 @media (prefers-reduced-motion: reduce) {
   .native-poll-step-viewport > .native-poll-step { animation: none; }
   .image-carousel-track { transition: none; }
+}
+
+/* Folder settings (rail folders): name plus a Discord-like colour grid. */
+.folder-settings-modal {
+  width: 92%;
+  max-width: 480px;
+}
+
+.folder-settings-form .form-group + .form-group {
+  margin-top: 16px;
+}
+
+.folder-settings-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.folder-settings-colors {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.folder-settings-swatches {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.folder-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 22px);
+  gap: 6px;
+}
+
+.folder-settings-swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background-color: var(--swatch-color);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.folder-settings-swatch--large {
+  width: 50px;
+  height: 50px;
+}
+
+.folder-settings-swatch .material-symbols-outlined {
+  visibility: hidden;
+}
+
+.folder-settings-swatch[aria-checked='true'] .material-symbols-outlined {
+  visibility: visible;
+}
+
+.folder-settings-swatch[aria-checked='true'] {
+  box-shadow: 0 0 0 2px var(--bg-card), 0 0 0 4px var(--swatch-color);
+}
+
+.folder-settings-swatch:hover {
+  transform: scale(1.08);
+}
+
+.folder-settings-swatch:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+.folder-settings-custom.selected .color-picker-trigger {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 1px var(--accent-primary);
+}
+
+.folder-settings-done {
+  width: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .folder-settings-swatch {
+    transition: none;
+  }
+
+  .folder-settings-swatch:hover {
+    transform: none;
+  }
 }

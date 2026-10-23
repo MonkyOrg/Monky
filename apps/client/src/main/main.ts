@@ -258,7 +258,7 @@ function bindMainWindowNavigationGuards(): void {
 function shutdownServer(): void {
   if (isShuttingDown) return;
   isShuttingDown = true;
-  serverManager.stopServer();
+  void serverManager.stopAll().catch(() => {});
 }
 
 function quitApplication(): void {

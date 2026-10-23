@@ -1,8 +1,8 @@
 import path from 'path';
 import fs from 'fs';
 import { app, BrowserWindow } from 'electron';
-import { MonkyServer, Logger, readStoredUpdateInventory, type ServerConfig } from '@monky/server';
-import { LIMITS, type HostedUpdateServer, type HostServerOptions, type IpcEvents, type LogEntry, type ServerStats } from '@monky/shared';
+import { MonkyServer, readStoredUpdateInventory, type ServerConfig } from '@monky/server';
+import { LIMITS, type HostedUpdateServer, type HostServerOptions, type HostServerStatus, type IpcEvents, type LogEntry, type ServerStats } from '@monky/shared';
 import { mt, type MainTranslationKey } from './i18n';
 import { isSafeServerId, migrateLegacyServerData, serverDataDirFor } from './serverDataDir';
 import { HostedServerCleanupError, HostedServerConflictError, HostedServerLifecycle } from './hostedServerLifecycle';
@@ -14,7 +14,8 @@ function errorMessage(error: unknown, fallback: MainTranslationKey): string {
 }
 
 export class ServerManager {
-  private unsubscribeLogs: (() => void) | null = null;
+  /** Log forwarding per hosted port, dropped as soon as that server stops. */
+  private readonly logForwarders = new Map<number, { server: MonkyServer; unsubscribe: () => void }>();
   private readonly lifecycle = new HostedServerLifecycle<MonkyServer, HostServerOptions>(
     (options) => this.createServer(options),
     () => this.onLifecycleChange(),
@@ -38,7 +39,10 @@ export class ServerManager {
       return { success: true };
     } catch (error) {
       if (error instanceof HostedServerConflictError) {
-        return { success: false, error: mt('error.hostedServerAlreadyRunning') };
+        return {
+          success: false,
+          error: mt(error.reason === 'port' ? 'error.hostedServerAlreadyRunning' : 'error.hostedServerIdentityRunning', { port: String(error.port) }),
+        };
       }
       console.error('[ServerManager] Error starting local server:', error);
       if (error instanceof HostedServerCleanupError) {
@@ -100,8 +104,7 @@ export class ServerManager {
     }
     return this.lifecycle.runExclusive(() => {
       // Wait for pending starts and stops before deciding whether data is free.
-      const status = this.getStatus();
-      if (status.isRunning && status.serverId === serverId) {
+      if (this.getStatus().servers.some((server) => server.serverId === serverId)) {
         return { success: false, error: mt('error.deleteServerDataRunning') };
       }
 
@@ -115,22 +118,27 @@ export class ServerManager {
     });
   }
 
-  public async stopServer(): Promise<void> {
+  public async stopServer(port: number): Promise<void> {
     try {
-      await this.lifecycle.stop();
+      await this.lifecycle.stop(port);
     } catch (error) {
       console.error('[ServerManager] Error stopping local server:', error);
       throw new Error(errorMessage(error, 'error.stopServerFailed'), { cause: error });
     }
   }
 
-  private onLifecycleChange(): void {
-    if (this.getStatus().isRunning) {
-      if (!this.unsubscribeLogs) this.startForwardingLogs();
-    } else {
-      this.unsubscribeLogs?.();
-      this.unsubscribeLogs = null;
+  /** Stops every hosted server, e.g. when the app quits. */
+  public async stopAll(): Promise<void> {
+    try {
+      await this.lifecycle.stopAll();
+    } catch (error) {
+      console.error('[ServerManager] Error stopping local servers:', error);
+      throw new Error(errorMessage(error, 'error.stopServerFailed'), { cause: error });
     }
+  }
+
+  private onLifecycleChange(): void {
+    this.syncLogForwarding();
     this.notifyStatus();
   }
 
@@ -154,27 +162,35 @@ export class ServerManager {
   }
 
   /**
-   * Streams the hosted server's log entries to the renderer as they happen, so
-   * the log view does not have to poll. The subscription is dropped on stop:
-   * starting and stopping repeatedly would otherwise stack listeners.
+   * Streams each hosted server's own log entries to the renderer as they
+   * happen, tagged with its port so two servers never share a log view. A
+   * subscription is dropped on stop: starting and stopping repeatedly would
+   * otherwise stack listeners.
    */
-  private startForwardingLogs(): void {
-    this.unsubscribeLogs?.();
-    this.unsubscribeLogs = Logger.subscribe((entry: LogEntry) => {
-      this.broadcast('server-host:log', entry);
-    });
+  private syncLogForwarding(): void {
+    const live = new Map(this.lifecycle.entries().map((entry) => [entry.port, entry.server]));
+    for (const [port, forwarder] of [...this.logForwarders]) {
+      if (live.get(port) === forwarder.server) continue;
+      forwarder.unsubscribe();
+      this.logForwarders.delete(port);
+    }
+    for (const [port, server] of live) {
+      if (this.logForwarders.has(port)) continue;
+      const unsubscribe = server.subscribeLogs((entry: LogEntry) => this.broadcast('server-host:log', port, entry));
+      this.logForwarders.set(port, { server, unsubscribe });
+    }
   }
 
-  public getLogs(): LogEntry[] {
-    return Logger.getRecent();
+  public getLogs(port: number): LogEntry[] {
+    return this.lifecycle.getServer(port)?.getRecentLogs() ?? [];
   }
 
-  public clearLogs(): void {
-    Logger.clearBuffer();
+  public clearLogs(port: number): void {
+    this.lifecycle.getServer(port)?.clearLogs();
   }
 
-  public async getStats(): Promise<ServerStats | null> {
-    const server = this.lifecycle.getServer();
+  public async getStats(port: number): Promise<ServerStats | null> {
+    const server = this.lifecycle.getServer(port);
     return server ? server.getStats() : null;
   }
 
@@ -182,8 +198,7 @@ export class ServerManager {
     return this.lifecycle.runExclusive(async () => {
       signal?.throwIfAborted();
       const base = ServerManager.baseDataDir();
-      const active = this.lifecycle.getServer();
-      const activeId = this.getStatus().serverId;
+      const active = new Map(this.lifecycle.entries().map((entry) => [entry.serverId, entry.server]));
       const ids: Array<string | null> = [];
       if (fs.existsSync(base)) {
         if (fs.existsSync(path.join(base, 'server.db'))) ids.push(null);
@@ -192,12 +207,13 @@ export class ServerManager {
               fs.existsSync(path.join(base, entry.name, 'server.db'))) ids.push(entry.name);
         }
       }
-      if (active && !ids.includes(activeId)) ids.push(activeId);
+      for (const activeId of active.keys()) if (!ids.includes(activeId)) ids.push(activeId);
       const servers: HostedUpdateServer[] = [];
       for (const serverId of ids) {
         signal?.throwIfAborted();
-        const inventory = active && serverId === activeId
-          ? active.getUpdateInventory()
+        const live = active.get(serverId);
+        const inventory = live
+          ? live.getUpdateInventory()
           : await readStoredUpdateInventory(path.join(serverId === null ? base : serverDataDirFor(base, serverId), 'server.db'));
         if (inventory.bots.length) servers.push({ serverId, ...inventory });
       }
@@ -207,11 +223,11 @@ export class ServerManager {
   }
 
   /**
-   * Single source of truth for the hosted server. The renderer used to track
+   * Single source of truth for the hosted servers. The renderer used to track
    * which of the user's servers was up in view state, which went stale as soon
    * as it was started from somewhere else (#333).
    */
-  public getStatus(): { isRunning: boolean; port: number | null; serverId: string | null } {
+  public getStatus(): HostServerStatus {
     return this.lifecycle.getStatus();
   }
 }

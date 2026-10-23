@@ -327,7 +327,7 @@ async function setupFixture(language) {
     startLanDiscovery: noop,
     onLanDiscoveryFound: unsubscribe,
     onLanDiscoveryLost: unsubscribe,
-    hostServerStatus: async () => ({ isRunning: false, port: null, serverId: null }),
+    hostServerStatus: async () => ({ servers: [] }),
     hostServerStart: async () => ({ success: true }),
     hostServerStop: async () => ({ success: true }),
     hostServerDeleteData: async () => ({ success: true }),

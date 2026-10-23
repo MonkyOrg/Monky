@@ -13,14 +13,14 @@ function hostOf(url: string | null): { host: string; port: number } | null {
 }
 
 /**
- * Number of people connected to the server hosted by this app, or null when no
- * server is up. Counts distinct people, matching the `/preview` semantics — one
- * person on two devices is still one person (#309).
+ * Number of people connected to the server this app hosts on `port`, or null
+ * when it is not up. Counts distinct people, matching the `/preview` semantics
+ * — one person on two devices is still one person (#309).
  */
-export async function getHostedServerOnlineUsers(): Promise<number | null> {
+export async function getHostedServerOnlineUsers(port: number): Promise<number | null> {
   if (!window.api?.hostServerStats) return null;
   try {
-    const stats = await window.api.hostServerStats();
+    const stats = await window.api.hostServerStats(port);
     return stats ? stats.onlineUsers : null;
   } catch {
     return null;
@@ -31,8 +31,8 @@ export async function getHostedServerOnlineUsers(): Promise<number | null> {
  * Warns before stopping a server that still has people on it, so the owner is
  * never surprised by disconnecting everyone (#334). Returns whether to proceed.
  */
-export async function confirmStopHostedServer(): Promise<boolean> {
-  const onlineUsers = await getHostedServerOnlineUsers();
+export async function confirmStopHostedServer(port: number): Promise<boolean> {
+  const onlineUsers = await getHostedServerOnlineUsers(port);
   if (onlineUsers === null || onlineUsers <= 0) return true;
 
   return showConfirm({
@@ -50,6 +50,7 @@ export async function confirmStopHostedServer(): Promise<boolean> {
  */
 export interface HostedServerLeaveState {
   serverName: string;
+  port: number;
 }
 
 export async function captureHostedServerLeaveState(
@@ -63,14 +64,14 @@ export async function captureHostedServerLeaveState(
     if (!current || !LOCAL_HOSTS.has(current.host)) return null;
 
     const status = await window.api.hostServerStatus();
-    if (!status.isRunning || status.port !== current.port) return null;
+    if (!status.servers.some((server) => server.port === current.port)) return null;
 
-    const stats = await window.api.hostServerStats();
+    const stats = await window.api.hostServerStats(current.port);
     // The count still includes the person leaving, so anything above one means
     // somebody stays behind and the server should keep running.
     if (!stats || stats.onlineUsers > 1) return null;
 
-    return { serverName: stats.serverName };
+    return { serverName: stats.serverName, port: current.port };
   } catch {
     return null;
   }
@@ -99,5 +100,5 @@ export async function promptShutdownAfterLeave(state: HostedServerLeaveState): P
   }
 
   if (!confirmed) return;
-  await window.api?.hostServerStop?.();
+  await window.api?.hostServerStop?.(state.port);
 }

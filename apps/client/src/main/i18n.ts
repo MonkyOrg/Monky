@@ -159,7 +159,8 @@ const CATALOGS = {
     'error.startServerFailed': 'Falha ao iniciar servidor',
     'error.stopServerFailed': 'Falha ao parar servidor',
     'error.hostedServerAlreadyRunning':
-      'Outro servidor já está em execução. Pare-o explicitamente pelos controles de hospedagem quando for seguro e tente novamente.',
+      'Outro servidor seu já está usando a porta {port}. Escolha outra porta para este servidor ou pare o outro e tente novamente.',
+    'error.hostedServerIdentityRunning': 'Este servidor já está em execução na porta {port}.',
     'error.startServerCleanupFailed':
       'Não foi possível iniciar nem encerrar completamente o servidor. Tente pará-lo explicitamente antes de iniciar outro. Início: {startError}. Encerramento: {stopError}.',
     'error.deleteServerDataFailed': 'Não foi possível apagar os dados do servidor',
@@ -347,7 +348,8 @@ const CATALOGS = {
     'error.startServerFailed': 'Failed to start the server',
     'error.stopServerFailed': 'Failed to stop the server',
     'error.hostedServerAlreadyRunning':
-      'Another server is already running. Stop it explicitly using the hosting controls when it is safe, then try again.',
+      'Another of your servers is already using port {port}. Pick another port for this server, or stop the other one and try again.',
+    'error.hostedServerIdentityRunning': 'This server is already running on port {port}.',
     'error.startServerCleanupFailed':
       'The server could not start or shut down completely. Try stopping it explicitly before starting another. Start: {startError}. Shutdown: {stopError}.',
     'error.deleteServerDataFailed': 'Could not delete the server data',

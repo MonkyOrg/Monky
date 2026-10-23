@@ -257,7 +257,7 @@ class AddServerModal {
         <div class="form-row">
           <div class="form-group">
             <label for="add-server-local-port">${t('connection.localPortLabel')}</label>
-            <input id="add-server-local-port" type="number" value="3000" required min="1024" max="65535">
+            <input id="add-server-local-port" type="number" value="${connectionStore.nextFreeLocalPort()}" required min="1024" max="65535">
           </div>
           <div class="form-group">
             <label for="add-server-access-password">${t('connection.accessPasswordLabel')}</label>
@@ -488,6 +488,11 @@ class AddServerModal {
     const existing = connectionStore.createdServers.find((server) =>
       server.name === serverName && server.port === port && (server.password || '') === (password || '')
       && server.textChannel === textChannel && server.voiceChannel === voiceChannel);
+    const portOwner = connectionStore.createdServerOnPort(port, existing?.id);
+    if (portOwner) {
+      this.showError(t('connection.localPortTaken', { port: String(port), name: portOwner.name }));
+      return;
+    }
     const createdServer: CreatedServer = {
       id: existing?.id || `created-${now}-${Math.random().toString(36).slice(2, 8)}`,
       name: serverName,

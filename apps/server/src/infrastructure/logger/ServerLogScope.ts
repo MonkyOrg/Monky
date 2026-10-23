@@ -1,5 +1,5 @@
 import {
-  SERVER_MONITOR_LIMITS, type LogEntry, type ServerMonitorLogEntry,
+  LIMITS, SERVER_MONITOR_LIMITS, type LogEntry, type ServerMonitorLogEntry,
 } from '@monky/shared';
 
 const SAFE_MESSAGES = new Set([
@@ -86,9 +86,37 @@ export class ServerLogScope {
   private entries: ServerMonitorLogEntry[] = [];
   private sequence = 0;
   private closed = false;
+  /** Unfiltered entries for the host's own monitor; never sent to remote viewers. */
+  private local: LogEntry[] = [];
+  private localListeners = new Set<(entry: LogEntry) => void>();
+
+  public subscribeLocal(listener: (entry: LogEntry) => void): () => void {
+    this.localListeners.add(listener);
+    return () => { this.localListeners.delete(listener); };
+  }
+
+  public recentLocal(): LogEntry[] {
+    return this.local.map((entry) => ({ ...entry }));
+  }
+
+  public clearLocal(): void {
+    this.local = [];
+  }
 
   public record(entry: LogEntry, message: string): void {
     if (this.closed) return;
+    this.local.push({ ...entry });
+    if (this.local.length > LIMITS.LOG_BUFFER_SIZE) {
+      this.local.splice(0, this.local.length - LIMITS.LOG_BUFFER_SIZE);
+    }
+    for (const listener of this.localListeners) {
+      // A broken listener must not stop the server from logging.
+      try {
+        listener({ ...entry });
+      } catch {
+        /* ignore */
+      }
+    }
     this.entries.push({
       timestamp: entry.timestamp,
       level: entry.level,
@@ -123,5 +151,7 @@ export class ServerLogScope {
   public close(): void {
     this.closed = true;
     this.entries = [];
+    this.local = [];
+    this.localListeners.clear();
   }
 }

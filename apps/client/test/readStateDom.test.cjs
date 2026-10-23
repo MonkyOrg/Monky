@@ -235,9 +235,7 @@ async function setupFixture() {
   window.sessions.c.chatStore.markUnread('c-1');
   serverRailView.connectToSavedServer = async () => {};
   window.folderize = () => {
-    connectionStore.createFolder('Group');
-    const folder = connectionStore.railLayout.find(node => node.type === 'folder');
-    connectionStore.moveServerToFolder('c.test', 5103, folder.id);
+    connectionStore.groupServers({ host: 'c.test', port: 5103 }, { host: 'b.test', port: 5102 });
     const moved = connectionStore.railLayout.find(node => node.type === 'folder');
     if (!moved.collapsed) connectionStore.toggleFolderCollapsed(moved.id);
     window.sessions.c.chatStore.markUnread('c-1');

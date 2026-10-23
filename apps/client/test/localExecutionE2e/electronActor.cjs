@@ -152,7 +152,7 @@ const ready = app.whenReady().then(async () => {
   register(legacy.language, () => undefined);
   register(legacy.inServer, () => undefined);
   register(legacy.fitHome, () => undefined);
-  register(legacy.hostStatus, () => ({ isRunning: false, port: null, serverId: null }));
+  register(legacy.hostStatus, () => ({ servers: [] }));
   register(legacy.clientLog, entry => {
     if (entry.level === 'ERROR') emit({ event: 'renderer.clientError', message: entry.message });
   });

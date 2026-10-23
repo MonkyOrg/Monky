@@ -77,7 +77,7 @@ if (!process.versions.electron) {
       return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2), bottom: Math.round(box.bottom) };
     })()`);
     // Real Chromium input: the same path a user's mouse takes, not synthetic DOM events.
-    const drag = async (from, to, midway) => {
+    const drag = async (from, to, midway, beforeRelease) => {
       browser.webContents.sendInputEvent({ type: 'mouseMove', ...from });
       await new Promise(resolve => setTimeout(resolve, 20));
       browser.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...from });
@@ -88,6 +88,10 @@ if (!process.versions.electron) {
         });
         await new Promise(resolve => setTimeout(resolve, 15));
         if (step === 5 && midway) await midway();
+      }
+      if (beforeRelease) {
+        await frames();
+        await beforeRelease();
       }
       browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...to });
       await waitFor(`!document.querySelector('.server-rail--dragging')`);
@@ -141,12 +145,60 @@ if (!process.versions.electron) {
       await check(await evaluate('window.connectCalls === 1'), 'a plain click still opens the server');
       await check(JSON.stringify(await order()) === '[5103,5102,5101]', 'a plain click does not reorder');
 
-      // Servers enter and leave folders by dropping on the folder header.
-      await evaluate(`window.createFolder()`);
-      const folderHeader = await center('.server-rail-folder-header');
+      // Like Discord: holding a server over the middle of another previews a
+      // folder and dropping it there groups both, in place of the target.
       const connectedAgain = await center('.server-rail-item[data-port="5101"]');
-      await drag(connectedAgain, folderHeader);
-      await check(JSON.stringify(await order()) === '[5103,5102,"folder:5101"]', 'a server moves into a folder');
+      const groupTarget = await center('.server-rail-item[data-port="5102"]');
+      await drag(connectedAgain, groupTarget, null, async () => {
+        await check(await waitFor(`!!document.querySelector('.server-rail-item.combine-target[data-port="5102"]')`),
+          'the target previews the folder while hovered');
+      });
+      await check(JSON.stringify(await order()) === '[5103,"folder:5102","folder:5101"]', 'dropping on a server creates a folder with both');
+      await check(await evaluate(`document.querySelector('.server-rail-folder:not(.collapsed) .server-rail-folder-header')?.getAttribute('aria-label') === 'b.test, a.test'`),
+        'an unnamed folder is labelled after its servers');
+
+      // Near an edge the line shows instead and nothing is grouped.
+      const loose = await center('.server-rail-item[data-port="5103"]');
+      const folderTile = await evaluate(`(() => {
+        const box = document.querySelector('.server-rail-folder-header').getBoundingClientRect();
+        return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2), bottom: Math.round(box.bottom) };
+      })()`);
+      await drag(loose, folderTile, null, async () => {
+        await check(await waitFor(`!!document.querySelector('.server-rail-folder-header.drag-over')`), 'the folder highlights while a server is held over it');
+      });
+      await check(JSON.stringify(await order()) === '["folder:5102","folder:5101","folder:5103"]', 'dropping on a folder adds the server to it');
+
+      // Settings: name and colour.
+      await evaluate(`window.openFolderSettings()`);
+      await check(await waitFor(`!!document.querySelector('.folder-settings-modal')`), 'folder settings open');
+      await evaluate(`(() => {
+        const input = document.querySelector('#folder-settings-name');
+        input.value = 'Amigos';
+        document.querySelector('[data-folder-color="#e91e63"]').click();
+      })()`);
+      await check(await evaluate(`document.querySelector('[data-folder-color="#e91e63"]').getAttribute('aria-checked') === 'true'`), 'the chosen colour is selected');
+      const done = await center('[data-folder-settings-done]');
+      browser.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...done });
+      browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...done });
+      await check(await waitFor(`window.folderState()?.name === 'Amigos' && window.folderState()?.color === '#e91e63'`), 'Done saves the name and colour');
+      await check(await evaluate(`document.querySelector('.server-rail-folder').style.getPropertyValue('--folder-color') === '#e91e63'`), 'the rail paints the folder colour');
+
+      // Collapsed, the folder becomes a tile with its servers in miniature.
+      await evaluate(`window.collapseAll()`);
+      await check(await waitFor(`document.querySelectorAll('.server-rail-folder.collapsed .server-rail-folder-mini').length === 3`), 'a collapsed folder shows its servers in miniature');
+      await evaluate(`window.expandFolder()`);
+      await frames();
+
+      // Dragging servers out until one is left dissolves the folder.
+      const leaving = await center('.server-rail-item[data-port="5103"]');
+      const top = await center('.server-rail-folder-header');
+      await drag(leaving, { x: top.x, y: top.y - 26 });
+      await check(JSON.stringify(await order()) === '[5103,"folder:5102","folder:5101"]', 'a server can leave the folder');
+      const leavingToo = await center('.server-rail-item[data-port="5101"]');
+      const head = await center('.server-rail-item[data-port="5103"]');
+      await drag(leavingToo, { x: head.x, y: head.y - 22 });
+      await check(JSON.stringify(await order()) === '[5101,5103,5102]', 'a folder left with one server gives way to it');
+      await check(await evaluate(`!document.querySelector('.server-rail-folder')`), 'no empty or single-server folder remains');
       console.log('Server rail reorder DOM passed');
       await finish(0);
     } catch (error) {
@@ -187,7 +239,12 @@ async function setupRail() {
       html: rail.innerHTML.slice(0, 600),
     };
   };
-  window.createFolder = () => connectionStore.createFolder('Group');
+  const { folderSettingsModal } = await import('/views/FolderSettingsModal.ts');
+  const folder = () => connectionStore.railLayout.find(node => node.type === 'folder');
+  window.folderState = () => folder() && { name: folder().name, color: folder().color };
+  window.openFolderSettings = () => folderSettingsModal.open(folder().id);
+  window.collapseAll = () => connectionStore.collapseAllFolders();
+  window.expandFolder = () => connectionStore.toggleFolderCollapsed(folder().id);
   const { appEvents } = await import('/core/EventBus.ts');
   appEvents.on('connection.saved_servers_changed', () => serverRailView.render());
   serverRailView.render();

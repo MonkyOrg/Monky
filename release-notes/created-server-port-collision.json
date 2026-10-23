@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Criar um segundo servidor não substitui mais o primeiro na barra. O formulário sugere uma porta livre, recusa a porta de outro servidor seu, e servidores antigos que dividiam a mesma porta são separados sem perder dados.",
+  "en": "Creating a second server no longer replaces the first one in the bar. The form suggests a free port, refuses one already used by another of your servers, and older servers sharing a port are separated without losing data."
+}

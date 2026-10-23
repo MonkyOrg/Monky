@@ -52,8 +52,8 @@ export class ServerMonitorModal {
     await this.openSource(source, session);
   }
 
-  public async openLocal(): Promise<void> {
-    await this.openSource(new LocalServerMonitorSource(window.api));
+  public async openLocal(port: number): Promise<void> {
+    await this.openSource(new LocalServerMonitorSource(window.api, port));
   }
 
   private async openSource(source: ServerMonitorSource, session?: ServerSession): Promise<void> {

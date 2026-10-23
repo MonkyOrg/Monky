@@ -8,14 +8,17 @@ export interface HostedServerTarget {
   serverId?: string;
 }
 
-export interface HostedServerStatus {
-  isRunning: boolean;
-  port: number | null;
+export interface HostedServerEntry {
+  port: number;
   serverId: string | null;
 }
 
 export class HostedServerConflictError extends Error {
-  constructor() {
+  /**
+   * `port`: another hosted server already listens on the requested port.
+   * `identity`: the same server (same data folder) already runs on another port.
+   */
+  constructor(public readonly reason: 'port' | 'identity', public readonly port: number) {
     super('HOSTED_SERVER_ALREADY_RUNNING');
     this.name = 'HostedServerConflictError';
   }
@@ -31,9 +34,21 @@ export class HostedServerCleanupError extends Error {
   }
 }
 
+interface ActiveServer<Server> {
+  server: Server;
+  port: number;
+  serverId: string | null;
+  ready: boolean;
+}
+
+/**
+ * Every server hosted by this app, keyed by port. Starts and stops still run
+ * one at a time: two servers may share the process, but never a data folder
+ * or a port, and a half-finished start must not race the next decision.
+ */
 export class HostedServerLifecycle<Server extends HostedServerRuntime, Options extends HostedServerTarget> {
   private tail: Promise<void> = Promise.resolve();
-  private active: { server: Server; port: number; serverId: string | null; ready: boolean } | null = null;
+  private readonly active = new Map<number, ActiveServer<Server>>();
 
   constructor(
     private readonly createServer: (options: Options) => Promise<Server>,
@@ -51,12 +66,15 @@ export class HostedServerLifecycle<Server extends HostedServerRuntime, Options e
     const target = { ...options };
     return this.runExclusive(async () => {
       const serverId = target.serverId ?? null;
-      if (this.active) {
+      const onPort = this.active.get(target.port);
+      if (onPort) {
         // An absent id owns the legacy flat directory, not any named server's
         // directory. Matching only the port must never relabel that data.
-        if (this.active.ready && this.active.port === target.port && this.active.serverId === serverId) return;
-        throw new HostedServerConflictError();
+        if (onPort.ready && onPort.serverId === serverId) return;
+        throw new HostedServerConflictError('port', target.port);
       }
+      const sameData = [...this.active.values()].find((entry) => entry.serverId === serverId);
+      if (sameData) throw new HostedServerConflictError('identity', sameData.port);
 
       const server = await this.createServer(target);
       try {
@@ -67,37 +85,58 @@ export class HostedServerLifecycle<Server extends HostedServerRuntime, Options e
         } catch (stopError) {
           // Failed cleanup still owns resources. Keep an explicit stop possible,
           // but do not acknowledge a duplicate start as a healthy instance.
-          this.active = { server, port: target.port, serverId, ready: false };
+          this.active.set(target.port, { server, port: target.port, serverId, ready: false });
           this.onChange();
           throw new HostedServerCleanupError(startError, stopError);
         }
         throw startError;
       }
 
-      this.active = { server, port: target.port, serverId, ready: true };
+      this.active.set(target.port, { server, port: target.port, serverId, ready: true });
       this.onChange();
     });
   }
 
-  public stop(): Promise<void> {
+  public stop(port: number): Promise<void> {
     return this.runExclusive(async () => {
-      if (!this.active) return;
-      this.active.ready = false;
-      await this.active.server.stop();
-      this.active = null;
+      const entry = this.active.get(port);
+      if (!entry) return;
+      entry.ready = false;
+      await entry.server.stop();
+      this.active.delete(port);
       this.onChange();
     });
   }
 
-  public getServer(): Server | null {
-    return this.active?.server ?? null;
+  /** Stops everything, e.g. on quit. Every server is attempted even if one fails. */
+  public stopAll(): Promise<void> {
+    return this.runExclusive(async () => {
+      const failures: unknown[] = [];
+      for (const entry of [...this.active.values()]) {
+        entry.ready = false;
+        try {
+          await entry.server.stop();
+          this.active.delete(entry.port);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      this.onChange();
+      if (failures.length) throw failures[0];
+    });
   }
 
-  public getStatus(): HostedServerStatus {
-    return {
-      isRunning: this.active !== null,
-      port: this.active?.port ?? null,
-      serverId: this.active?.serverId ?? null,
-    };
+  public getServer(port: number): Server | null {
+    return this.active.get(port)?.server ?? null;
+  }
+
+  public entries(): Array<HostedServerEntry & { server: Server }> {
+    return [...this.active.values()]
+      .sort((a, b) => a.port - b.port)
+      .map(({ server, port, serverId }) => ({ server, port, serverId }));
+  }
+
+  public getStatus(): { servers: HostedServerEntry[] } {
+    return { servers: this.entries().map(({ port, serverId }) => ({ port, serverId })) };
   }
 }

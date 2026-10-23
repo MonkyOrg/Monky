@@ -277,7 +277,9 @@ O mesmo código de servidor sobe de três maneiras, e a diferença não é técn
 
 Hospedar **pelo app** é o caminho de dois cliques, e é por isso que o cliente
 importa `@monky/server` diretamente: não há processo separado nem porta de
-administração. O preço é que o servidor vive enquanto o app viver.
+administração. O preço é que o servidor vive enquanto o app viver. O app pode
+hospedar vários servidores ao mesmo tempo no mesmo processo, cada um com sua
+porta e sua pasta de dados; os logs de cada um são separados por instância.
 
 O **CLI** existe para o caso oposto — um servidor que não deveria depender de
 alguém manter uma janela aberta. Ele administra vários servidores na mesma

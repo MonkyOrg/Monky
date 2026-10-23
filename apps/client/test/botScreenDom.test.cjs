@@ -52,7 +52,7 @@ if (!process.versions.electron) {
     return null;
   });
   ipcMain.handle('app:set-language', event => owns(event));
-  ipcMain.handle('server-host:status', event => owns(event) ? { isRunning: false, port: null, serverId: null } : null);
+  ipcMain.handle('server-host:status', event => owns(event) ? { servers: [] } : null);
   ipcMain.handle('client-log:write', (event, entry) => {
     if (owns(event) && entry.level === 'ERROR') nativeErrors.push(entry.message);
   });
