@@ -55,11 +55,17 @@ if (!process.versions.electron) {
     window.webContents.on('console-message', (_event, level, message) => { if (level >= 3) console.error(`[renderer] ${message}`); });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     // A fresh page per language: CI runs in English, a developer machine may default to Portuguese.
-    for (const language of ['pt-BR', 'en']) {
+    // The motion preference is set explicitly: CI runners may report reduced
+    // motion on their own, which would silently skip the animations checked here.
+    window.webContents.debugger.attach('1.3');
+    for (const [language, motion] of [['pt-BR', 'no-preference'], ['en', 'reduce']]) {
       await window.loadURL(`http://127.0.0.1:${httpServer.address().port}/__custom_status__`);
+      await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+        features: [{ name: 'prefers-reduced-motion', value: motion }],
+      });
       const checks = await window.webContents.executeJavaScript(
         `(${runCustomStatusSmoke.toString()})(${JSON.stringify(language)}).catch((error) => { throw new Error(error.stack); })`, true);
-      console.log(`Custom status DOM smoke (${language}): ${checks} checks passed`);
+      console.log(`Custom status DOM smoke (${language}, ${motion}): ${checks} checks passed`);
     }
     await finish(0);
   }).catch(async (error) => { console.error('Custom status DOM smoke failed', error); await finish(1); });
@@ -227,7 +233,9 @@ async function runCustomStatusSmoke(language) {
   check(host().hidden, 'the inline editor starts closed');
   pencil().click();
   check(!host().hidden && pencil().getAttribute('aria-expanded') === 'true', 'the pencil opens the editor');
-  check(host().getAnimations().length > 0, 'the editor slides open instead of appearing at once');
+  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  check(reducedMotion ? host().getAnimations().length === 0 : host().getAnimations().length > 0,
+    reducedMotion ? 'with reduced motion the editor opens at once' : 'the editor slides open instead of appearing at once');
   await settle();
   check(openModals() === 1 && !document.querySelector('.custom-status-modal') && settingsCard() && !settingsCard().hidden,
     'no second modal opens and the Settings card stays');
@@ -239,7 +247,8 @@ async function runCustomStatusSmoke(language) {
   };
   inline('settings-custom-status-text', 'Estudando');
   host().querySelector('[data-custom-status-save]').click();
-  check(host().getAnimations().length > 0, 'saving slides the editor closed');
+  check(reducedMotion ? host().hidden : host().getAnimations().length > 0,
+    reducedMotion ? 'with reduced motion saving closes the editor at once' : 'saving slides the editor closed');
   await settle();
   check(host().hidden && !host().innerHTML && settings.customStatus?.text === 'Estudando' && settings.customStatusActive,
     'saving inline stores the status and closes the editor');

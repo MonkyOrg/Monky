@@ -100,6 +100,13 @@ if (!process.versions.electron) {
     };
     try {
       await browser.loadURL(`http://127.0.0.1:${vite.httpServer.address().port}/__rail__`);
+      // Set explicitly: CI runners may report reduced motion on their own,
+      // which would skip the folder animations checked below.
+      browser.webContents.debugger.attach('1.3');
+      const motion = (value) => browser.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+        features: [{ name: 'prefers-reduced-motion', value }],
+      });
+      await motion('no-preference');
       const setup = await evaluate(`(${setupRail.toString()})().then(() => null).catch(error => ({ failure: error.stack || String(error) }))`);
       if (setup?.failure) throw new Error(setup.failure);
       const order = () => evaluate('window.railOrder()');
@@ -219,6 +226,16 @@ if (!process.versions.electron) {
       browser.webContents.sendInputEvent({ type: 'mouseMove', x: 300, y: 300 });
       await check(await waitFor(`getComputedStyle(document.querySelector('.server-rail-item[data-port="5102"] .server-rail-avatar')).borderRadius === '50%'`),
         'leaving it turns it back into a circle');
+
+      // With reduced motion the folder opens and closes at once, without sliding.
+      await motion('reduce');
+      await clickAt(await center('.server-rail-folder-header'));
+      await check(await evaluate(children + `.hidden && ` + children + `.getAnimations().length === 0 && !document.querySelector('.server-rail-folder--closing')`),
+        'with reduced motion the folder closes at once');
+      await clickAt(await center('.server-rail-folder-header'));
+      await check(await evaluate(`!`+children+`.hidden && `+children+`.getAnimations().length === 0`),
+        'with reduced motion the folder opens at once');
+      await motion('no-preference');
 
       // Dragging servers out until one is left dissolves the folder.
       const leaving = await center('.server-rail-item[data-port="5103"]');
