@@ -10249,13 +10249,17 @@ input:focus, textarea:focus, select:focus {
   white-space: nowrap;
 }
 
+/* The edit action sits in the card's corner, so the custom card is the same
+   size as the other three status cards. */
 .presence-custom-card {
+  position: relative;
   display: flex;
-  flex-direction: column;
-  gap: 6px;
 }
 
-.presence-custom-card > .input-mode-card { flex: 1; }
+.presence-custom-card > .input-mode-card {
+  flex: 1;
+  padding-right: 44px;
+}
 
 .presence-custom-icon {
   color: var(--text-muted);
@@ -10263,12 +10267,46 @@ input:focus, textarea:focus, select:focus {
 }
 
 .presence-custom-edit {
-  align-self: flex-start;
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  padding: 4px 10px;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.presence-custom-edit:hover,
+.presence-custom-edit[aria-expanded='true'] {
+  background-color: var(--bg-hover, rgba(255, 255, 255, 0.06));
+  border-color: var(--border-color);
+  color: var(--text-primary);
+}
+
+.presence-custom-edit:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+/* Inline editor under the status cards (Settings → Account). */
+.presence-custom-editor {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .presence-custom-edit { transition: none; }
 }
 
 .custom-status-modal { max-width: 460px; }

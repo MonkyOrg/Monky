@@ -15,7 +15,9 @@ import { dmStore } from '../../../stores/dmStore';
 import { formatBytes } from '../../../utils/attachment';
 import { appEvents } from '../../../core/EventBus';
 import { currentPresenceStatus, type PresenceStatus } from '../../../core/SessionManager';
-import { customStatusModal } from '../../CustomStatusModal';
+import { CustomStatusEditor } from '../../CustomStatusModal';
+import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
+import { smoothScrollIntoView } from '../../../utils/scroll';
 import { customStatusLabel } from '../../../utils/presenceTag';
 import type { TranslationKey } from '../../../i18n';
 
@@ -28,8 +30,18 @@ const PRESENCE_OPTIONS: ReadonlyArray<{ status: PresenceStatus; icon: string; la
 export class AccountTab {
   private detachEmojiPicker: (() => void) | null = null;
   private detachPresenceSync: (() => void) | null = null;
+  /**
+   * The custom status editor opens inline, under the status cards. Opening it
+   * as a second modal replaced the Settings card with a smaller one, which
+   * read as one window blinking into another.
+   */
+  private customEditor: CustomStatusEditor | null = null;
 
-  /** The custom status card: picks the saved status, or opens the editor when there is none. */
+  /**
+   * The custom status card: picks the saved status, or opens the editor when
+   * there is none. Its edit action is a corner icon inside the card, so the
+   * four status cards keep the same size.
+   */
   private renderCustomCard(): string {
     return `<div class="presence-custom-card" data-presence-custom>
       <button type="button" class="voice-mode-card input-mode-card" data-presence-custom-select aria-pressed="false">
@@ -37,9 +49,45 @@ export class AccountTab {
           data-presence-custom-icon aria-hidden="true">circle</span>${t('customStatus.title')}</span>
         <span class="input-mode-card-description" data-presence-custom-description></span>
       </button>
-      <button type="button" class="btn btn-secondary presence-custom-edit" data-presence-custom-edit hidden>
-        <span class="material-symbols-outlined md-16" aria-hidden="true">edit</span>${t('customStatus.edit')}</button>
+      <button type="button" class="presence-custom-edit" data-presence-custom-edit
+        aria-expanded="false" aria-controls="settings-custom-status-editor">
+        <span class="material-symbols-outlined md-18" aria-hidden="true">edit</span></button>
     </div>`;
+  }
+
+  private openCustomEditor(container: HTMLElement): void {
+    const host = container.querySelector<HTMLElement>('[data-presence-custom-editor]');
+    if (!host) return;
+    if (this.customEditor) {
+      this.customEditor.focus();
+      return;
+    }
+    const editor = new CustomStatusEditor({
+      idPrefix: 'settings-custom-status',
+      onClose: () => this.closeCustomEditor(container),
+    });
+    this.customEditor = editor;
+    host.innerHTML = editor.renderHtml();
+    editor.mount(host);
+    setSurfaceVisible(host, true, 'panel');
+    container.querySelector('[data-presence-custom-edit]')?.setAttribute('aria-expanded', 'true');
+    editor.focus();
+    smoothScrollIntoView(host, { block: 'nearest' });
+  }
+
+  private closeCustomEditor(container: HTMLElement, restoreFocus = true): void {
+    const editor = this.customEditor;
+    if (!editor) return;
+    this.customEditor = null;
+    editor.destroy();
+    const host = container.querySelector<HTMLElement>('[data-presence-custom-editor]');
+    const edit = container.querySelector<HTMLElement>('[data-presence-custom-edit]');
+    edit?.setAttribute('aria-expanded', 'false');
+    if (host) {
+      // The form stays painted while it slides away, then is dropped.
+      setSurfaceVisible(host, false, 'panel', undefined, () => { if (!this.customEditor) host.innerHTML = ''; });
+    }
+    if (restoreFocus && edit?.isConnected) edit.focus({ preventScroll: true });
   }
 
   /** Reflects the saved custom status in place, keeping focus on whatever was clicked. */
@@ -51,7 +99,11 @@ export class AccountTab {
     const description = container.querySelector('[data-presence-custom-description]');
     if (description) description.textContent = saved ? customStatusLabel(saved) : t('customStatus.cardHint');
     const edit = container.querySelector<HTMLElement>('[data-presence-custom-edit]');
-    if (edit) edit.hidden = !saved;
+    if (edit) {
+      const label = t(saved ? 'customStatus.edit' : 'customStatus.set');
+      edit.setAttribute('aria-label', label);
+      edit.title = label;
+    }
   }
 
   public renderHtml(): string {
@@ -97,6 +149,8 @@ export class AccountTab {
           </button>`).join('')}
           ${this.renderCustomCard()}
         </div>
+        <div class="presence-custom-editor" id="settings-custom-status-editor" data-presence-custom-editor
+          role="region" aria-label="${escapeHtml(t('customStatus.title'))}" hidden></div>
       </div>
 
       <!-- Game activity (#675) -->
@@ -310,10 +364,14 @@ export class AccountTab {
     // Picks the saved custom status, or opens the editor when there is none yet.
     container.querySelector('.presence-cards')?.addEventListener('click', (event) => {
       const target = event.target instanceof Element ? event.target : null;
-      if (target?.closest('[data-presence-custom-edit]')) { customStatusModal.open(); return; }
+      if (target?.closest('[data-presence-custom-edit]')) {
+        if (this.customEditor) this.closeCustomEditor(container);
+        else this.openCustomEditor(container);
+        return;
+      }
       if (!target?.closest('[data-presence-custom-select]')) return;
       if (settingsStore.customStatus) callbacks.onPresenceChanged?.('custom');
-      else customStatusModal.open();
+      else this.openCustomEditor(container);
     });
     // Another device or the user card's menu may change it while this is open.
     this.detachPresenceSync?.();
@@ -383,6 +441,8 @@ export class AccountTab {
   }
 
   public cleanup(): void {
+    this.customEditor?.destroy();
+    this.customEditor = null;
     this.detachEmojiPicker?.();
     this.detachEmojiPicker = null;
     this.detachPresenceSync?.();

@@ -206,6 +206,58 @@ async function runCustomStatusSmoke(language) {
   await settle();
   check(!modal() && settings.customStatus === null && !settings.customStatusActive, 'Remove deletes the saved status');
 
+  // In Settings the editor opens inline, under the cards: a second modal would
+  // replace the Settings card with a smaller one, which looked like a blink.
+  const { settingsModal } = await import('/views/SettingsModal.ts');
+  await settingsModal.open();
+  await settle();
+  const settingsCard = () => document.querySelector('.settings-modal-card');
+  const openModals = () => document.querySelectorAll('.modal-backdrop:not([data-ui-closing])').length;
+  const pencil = () => document.querySelector('[data-presence-custom-edit]');
+  const customCard = document.querySelector('[data-presence-custom]');
+  const brbCard = document.querySelector('[data-presence="brb"]');
+  check(customCard.getBoundingClientRect().height === brbCard.getBoundingClientRect().height,
+    'the custom card is the same size as the card beside it');
+  const pencilBox = pencil().getBoundingClientRect();
+  const cardBox = customCard.getBoundingClientRect();
+  check(pencilBox.top >= cardBox.top && pencilBox.bottom <= cardBox.bottom && pencilBox.right <= cardBox.right,
+    'the edit action sits inside the card');
+  check(pencil().getAttribute('aria-label') === t('customStatus.set'), 'without a status the icon offers to set one');
+  const host = () => document.querySelector('[data-presence-custom-editor]');
+  check(host().hidden, 'the inline editor starts closed');
+  pencil().click();
+  check(!host().hidden && pencil().getAttribute('aria-expanded') === 'true', 'the pencil opens the editor');
+  check(host().getAnimations().length > 0, 'the editor slides open instead of appearing at once');
+  await settle();
+  check(openModals() === 1 && !document.querySelector('.custom-status-modal') && settingsCard() && !settingsCard().hidden,
+    'no second modal opens and the Settings card stays');
+  check(document.activeElement?.id === 'settings-custom-status-text', 'the inline editor is focused on the text');
+  const inline = (id, value) => {
+    const input = host().querySelector(`#${id}`);
+    input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  inline('settings-custom-status-text', 'Estudando');
+  host().querySelector('[data-custom-status-save]').click();
+  check(host().getAnimations().length > 0, 'saving slides the editor closed');
+  await settle();
+  check(host().hidden && !host().innerHTML && settings.customStatus?.text === 'Estudando' && settings.customStatusActive,
+    'saving inline stores the status and closes the editor');
+  check(document.querySelector('[data-presence-custom-description]').textContent.includes('Estudando'),
+    'the card shows the saved text');
+  check(pencil().getAttribute('aria-label') === t('customStatus.edit') && document.activeElement === pencil(),
+    'focus returns to the pencil, which now edits');
+  pencil().click();
+  await settle();
+  check(host().querySelector('#settings-custom-status-text').value === 'Estudando', 'reopening loads the saved values');
+  host().querySelector('[data-custom-status-cancel]').click();
+  await settle();
+  check(host().hidden && settings.customStatus?.text === 'Estudando', 'Cancel closes without changes');
+  check(openModals() === 1, 'still a single modal');
+  settingsModal.close();
+  await settle();
+  sessionManager.saveCustomStatus(null);
+
   appEvents.emit('settings.updated');
   view.destroy?.();
   return checks;
