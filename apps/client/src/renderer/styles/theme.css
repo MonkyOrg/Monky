@@ -1195,23 +1195,25 @@ input:focus, textarea:focus, select:focus {
   color: var(--folder-color);
 }
 
-/* Four icons fill the tile edge to edge, as rounded squares. The grid keeps
-   its full size with fewer servers, so two icons sit on the top row. */
+/* Four icons fill the tile edge to edge. Like Discord, each one follows the
+   tile's rounded corner on its outer side and is only slightly rounded where
+   it meets its neighbours. The grid keeps its full size with fewer servers,
+   so two icons sit on the top row. */
 .server-rail-folder-grid {
-  width: 38px;
-  height: 38px;
+  width: 40px;
+  height: 40px;
   display: grid;
-  grid-template-columns: repeat(2, 18px);
-  grid-template-rows: repeat(2, 18px);
+  grid-template-columns: repeat(2, 19px);
+  grid-template-rows: repeat(2, 19px);
   gap: 2px;
   align-content: start;
 }
 
 .server-rail-folder-mini {
   position: relative;
-  width: 18px;
-  height: 18px;
-  border-radius: 6px;
+  width: 19px;
+  height: 19px;
+  border-radius: 4px;
   overflow: hidden;
   display: flex;
   align-items: center;
@@ -1221,6 +1223,12 @@ input:focus, textarea:focus, select:focus {
   font-size: 9px;
   font-weight: 700;
 }
+
+/* Outer corner concentric with the tile (16px radius, 2px inset). */
+.server-rail-folder-mini:nth-child(1) { border-top-left-radius: 14px; }
+.server-rail-folder-mini:nth-child(2) { border-top-right-radius: 14px; }
+.server-rail-folder-mini:nth-child(3) { border-bottom-left-radius: 14px; }
+.server-rail-folder-mini:nth-child(4) { border-bottom-right-radius: 14px; }
 
 .server-rail-folder-mini > .server-rail-icon {
   position: absolute;

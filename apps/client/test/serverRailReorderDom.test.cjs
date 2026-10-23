@@ -188,8 +188,8 @@ if (!process.versions.electron) {
       // Collapsed, the folder becomes a tile with its servers in miniature.
       await evaluate(`window.collapseAll()`);
       await check(await waitFor(`document.querySelectorAll('.server-rail-folder.collapsed .server-rail-folder-mini').length === 3`), 'a collapsed folder shows its servers in miniature');
-      await check(await evaluate(`[...document.querySelectorAll('.server-rail-folder-mini')].every(mini => getComputedStyle(mini).borderRadius === '6px' && mini.getBoundingClientRect().width === 18)`),
-        'miniatures are rounded squares filling the tile, like Discord');
+      await check(await evaluate(`(() => { const minis = [...document.querySelectorAll('.server-rail-folder-mini')]; const style = mini => getComputedStyle(mini); return minis.every(mini => mini.getBoundingClientRect().width === 19) && style(minis[0]).borderTopLeftRadius === '14px' && style(minis[0]).borderBottomRightRadius === '4px' && style(minis[1]).borderTopRightRadius === '14px' && style(minis[2]).borderBottomLeftRadius === '14px' && style(minis[2]).borderTopRightRadius === '4px'; })()`),
+        'miniatures follow the tile corner outside and are squarer inside, like Discord');
       // Opening and closing slide the servers in and out instead of snapping.
       const clickAt = async (point) => {
         browser.webContents.sendInputEvent({ type: 'mouseMove', ...point });
