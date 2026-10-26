@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "O download de atualizações agora registra a velocidade no log interno, para ajudar a descobrir por que ele às vezes fica lento.",
+  "en": "Update downloads now record their speed in the internal log, to help find out why they are sometimes slow."
+}
