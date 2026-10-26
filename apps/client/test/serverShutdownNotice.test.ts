@@ -42,14 +42,25 @@ test('a background server that restarts only gets a toast naming it', (context) 
   assert.ok(toasts.every(toast => (toast.durationMs ?? 0) >= 5000), 'the toast stays long enough to be read');
 });
 
-test('the server on screen and the one hosting the call still get a modal', (context) => {
+test('the server on screen and the one hosting the call get a modal when closed for good', (context) => {
   const { alerts, toasts, onScreen, call } = fixture(context);
   presentServerShutdownNotice({ reasonCode: 'stopped', serverName: 'Open server', sessionKey: onScreen.key });
-  presentServerShutdownNotice({ reasonCode: 'update', serverName: 'Call server', sessionKey: call.key });
+  presentServerShutdownNotice({ reasonCode: 'stopped', serverName: 'Call server', sessionKey: call.key });
   assert.equal(toasts.length, 0);
   assert.deepEqual(alerts.map(alert => [alert.title, alert.message]), [
     [t('app.serverShutdownTitle'), t('app.serverShutdownMessage')],
-    [t('app.serverUpdatingTitle'), t('app.serverUpdatingMessage', { server: 'Call server' })],
+    [t('app.serverShutdownTitle'), t('app.serverShutdownMessage')],
+  ]);
+});
+
+test('an update restart is a toast even for the server on screen and the one hosting the call', (context) => {
+  const { alerts, toasts, onScreen, call } = fixture(context);
+  presentServerShutdownNotice({ reasonCode: 'update', serverName: 'Open server', sessionKey: onScreen.key });
+  presentServerShutdownNotice({ reasonCode: 'update', serverName: 'Call server', sessionKey: call.key });
+  assert.equal(alerts.length, 0);
+  assert.deepEqual(toasts.map(toast => toast.message), [
+    t('app.serverUpdatingToast', { server: 'Open server' }),
+    t('app.serverUpdatingToast', { server: 'Call server' }),
   ]);
 });
 

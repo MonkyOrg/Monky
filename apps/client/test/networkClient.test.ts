@@ -421,7 +421,6 @@ test('leaving from a reconnect notification cannot schedule a timer after teardo
 test('a disconnection tells whether the server or this client ended the session', async context => {
   const cases: Array<[string, (f: ReturnType<typeof fixture>) => void, NetworkDisconnectedPayload['cause']]> = [
     ['restart notice', f => f.lastSocket().receive({ type: MessageType.SERVER_SHUTDOWN, payload: { reasonCode: 'stopped' } }), 'server'],
-    ['update notice', f => f.lastSocket().receive({ type: MessageType.SERVER_SHUTDOWN, payload: { reasonCode: 'update' } }), 'server'],
     ['malformed notice', f => f.lastSocket().receive({ type: MessageType.SERVER_SHUTDOWN, payload: { reasonCode: 'unknown' } }), 'server'],
     ['explicit leave', f => f.client.disconnect(), 'local'],
     ['session disposal', f => f.client.dispose(), 'local'],
@@ -441,7 +440,7 @@ test('a disconnection tells whether the server or this client ended the session'
   }
 });
 
-test('a background server update notice reaches global UI without reconnecting or losing its identity', async context => {
+test('a background server update notice reaches global UI and keeps reconnecting with its identity', async context => {
   const f = fixture(context);
   f.client.sessionKey = 'background-server';
   await f.connected();
@@ -461,8 +460,8 @@ test('a background server update notice reaches global UI without reconnecting o
   await setImmediate();
   assert.deepEqual(notices, [{ reasonCode: 'update', serverName: 'Remote fixture server', sessionKey: 'background-server' }],
     'The notice names its session, so the UI can tell a background server from the one in use');
-  assert.equal(f.client.getStatus(), 'DISCONNECTED');
+  assert.equal(f.client.getStatus(), 'RECONNECTING');
   context.mock.timers.tick(60_000);
   await setImmediate();
-  assert.equal(f.sockets.length, 1, 'Intentional shutdown keeps the existing manual-reconnection behavior');
+  assert.equal(f.sockets.length, 2, 'An update restart reconnects on its own, like any dropped socket');
 });
