@@ -231,8 +231,8 @@ async function runElectron() {
     await run(b, "window.activity.serverShutdown('update')");
     await until(async () => {
       const value = await run(b, 'window.activity.snapshot()');
-      return { ...value, ok: !value.connected && !value.inRoom && !value.microphoneOpen && value.leaveCues === 1 };
-    }, 'An update notice drops the call with exactly one leave cue');
+      return { ...value, ok: value.connected && value.inRoom && value.leaveCues === 1 };
+    }, 'An update notice reconnects the session and re-admits the call after exactly one leave cue');
     assert.equal((await run(a, 'window.activity.snapshot()')).leaveCues, 0,
       'Losing a server while outside a call must not play the leave cue');
     console.log(`VOICE ACTIVITY ${config.mode}: real audio, speech/silence, local mute/deafen, delayed leave echoes, administrative removal and server shutdown passed`);

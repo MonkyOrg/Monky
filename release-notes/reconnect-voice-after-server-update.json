@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Quando um servidor reinicia para atualizar, o Monky agora reconecta sozinho e devolve você ao canal de voz em que estava. O aviso virou um toast discreto, em vez de um pop-up.",
+  "en": "When a server restarts to update, Monky now reconnects by itself and puts you back in the voice channel you were in. The notice is now a discreet toast instead of a pop-up."
+}

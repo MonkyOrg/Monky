@@ -546,7 +546,10 @@ export class NetworkClient {
       this.emitScoped('network.server_shutdown', {
         ...parsed.data, serverName: this.serverName || this.currentServerUrl, sessionKey: this.sessionKey,
       } satisfies ServerShutdownNotice);
-      this.disconnect('server');
+      // An update restart is temporary: take the normal dropped-socket path so
+      // the session reconnects and re-admits the call once the server is back.
+      if (parsed.data.reasonCode === 'update') this.handleSocketClosed();
+      else this.disconnect('server');
       return;
     }
 

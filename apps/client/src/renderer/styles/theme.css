@@ -9118,7 +9118,8 @@ input:focus, textarea:focus, select:focus {
   z-index: 1;
 }
 
-.stage-video-element.screen-share {
+.stage-video-element.screen-share,
+.stage-focused-main .stage-video-element {
   object-fit: contain;
   background-color: #000000;
 }
