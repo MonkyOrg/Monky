@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O status personalizado, o \"Volto já\" e o jogo em andamento não somem mais da lista de membros ao entrar no servidor. O servidor os descartava quando o avatar ou o nome eram reenviados. Também corrigimos o nome cortado na lista de membros quando há muitas etiquetas ao lado.",
+  "en": "Your custom status, \"Volto já\" and the game you are playing no longer vanish from the member list when you join a server. The server dropped them whenever the avatar or nickname was resent. We also fixed the name being cut off in the member list when many tags sit beside it."
+}

@@ -10591,11 +10591,13 @@ button[data-loading="1"]::after {
 .member-name-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 2px 6px;
+  flex-wrap: wrap;
   overflow: hidden;
 }
 
 .member-name {
+  max-width: 100%;
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
