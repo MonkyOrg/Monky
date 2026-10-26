@@ -3475,7 +3475,7 @@ export class WebSocketServer {
       });
     }
     this.applyUserUpdate(result.updatedUser);
-    this.broadcastUserUpdate(result.updatedUser, requestId);
+    this.broadcastUserUpdate(session.user, requestId);
   }
 
   private async handleUserUpdateAvatar(
@@ -3497,7 +3497,7 @@ export class WebSocketServer {
     }
 
     this.applyUserUpdate(result.updatedUser);
-    this.broadcastUserUpdate(result.updatedUser, requestId);
+    this.broadcastUserUpdate(session.user, requestId);
   }
 
   /**
@@ -6217,6 +6217,10 @@ export class WebSocketServer {
         sessionId: target.sessionId,
         connectedAt: target.user?.connectedAt,
         invisible: target.invisible,
+        // The service only knows the stored profile, so the live presence is carried over.
+        activity: target.user?.activity,
+        brb: target.user?.brb,
+        customStatus: target.user?.customStatus,
       };
     }
   }

@@ -232,6 +232,30 @@ test('a device that connects with a custom status applies it to the other device
   assert.equal(Object.hasOwn(updatedUser(update), 'brb'), false, 'the newer choice replaces "Volto já" everywhere');
 });
 
+test('presence survives a profile change, such as the avatar the client resends on every connection', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const alice = await f.human('Alice');
+  const bob = await f.human('Bob');
+  await alice.peer.request(MessageType.USER_UPDATE_ACTIVITY, { activity: game });
+  await alice.peer.request(MessageType.USER_UPDATE_CUSTOM_STATUS, { customStatus: lunch });
+
+  const bobStart = bob.peer.messages.length;
+  const renamed = updatedUser(await alice.peer.request(MessageType.USER_CHANGE_NICKNAME, { newNickname: 'Alice2' }));
+  assert.equal(renamed.nickname, 'Alice2');
+  assert.deepEqual(renamed.customStatus, lunch);
+  assert.deepEqual(renamed.activity, game);
+  const seen = updatedUser(await bob.peer.wait((message) => message.type === MessageType.USER_UPDATED
+    && updatedUser(message).nickname === 'Alice2', bobStart));
+  assert.deepEqual(seen.customStatus, lunch);
+  assert.deepEqual(seen.activity, game);
+
+  await alice.peer.request(MessageType.USER_UPDATE_BRB, { brb: true });
+  const brbRename = updatedUser(await alice.peer.request(MessageType.USER_CHANGE_NICKNAME, { newNickname: 'Alice3' }));
+  assert.equal(brbRename.brb, true);
+  assert.equal(Object.hasOwn(brbRename, 'customStatus'), false);
+});
+
 test('a custom status is refused from clients without the feature, from bots, and when malformed', async (t) => {
   const f = await createFixture();
   t.after(() => f.dispose());
