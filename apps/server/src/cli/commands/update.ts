@@ -20,8 +20,11 @@ import { confirm } from '../prompts';
 import { runSync } from '../process';
 import { createCliDownloadProgress, downloadCliArtifact, validateCliArtifact, type CliReleaseArtifact } from '../releaseDownload';
 
+// Release bodies carry the full changelog, so 100 entries already exceed the
+// 4 MiB response limit in fetchLatestVersion; the newest release is always in
+// the first few entries.
 export const GITHUB_RELEASES_URL =
-  'https://api.github.com/repos/MonkyOrg/Monky/releases?per_page=100';
+  'https://api.github.com/repos/MonkyOrg/Monky/releases?per_page=30';
 export const GITHUB_LATEST_RELEASE_URL = 'https://api.github.com/repos/MonkyOrg/Monky/releases/latest';
 
 export function getRepoRoot(): string | null {
