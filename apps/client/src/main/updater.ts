@@ -319,9 +319,23 @@ export function setupUpdater(
         autoInstallOnAppQuit: updater.autoInstallOnAppQuit,
       });
 
+      // Throttled speed log: lets a slow download be told apart (network/CDN vs
+      // app) from the log alone, since electron-updater logs nothing per chunk.
+      let lastProgressLogAt = 0;
       updater.on('download-progress', (p) => {
         if (!downloading || downloading.controller.signal.aborted || downloading.phase === 'installing') return;
-        const percent = (p as { percent?: number })?.percent ?? 0;
+        const info = p as { percent?: number; transferred?: number; total?: number; bytesPerSecond?: number };
+        const percent = info.percent ?? 0;
+        const now = Date.now();
+        if (now - lastProgressLogAt >= 10_000) {
+          lastProgressLogAt = now;
+          updateLog('download-progress', {
+            percent: Math.round(percent),
+            transferredMB: Math.round((info.transferred ?? 0) / 1048576),
+            totalMB: Math.round((info.total ?? 0) / 1048576),
+            KBps: Math.round((info.bytesPerSecond ?? 0) / 1024),
+          });
+        }
         mainWindow.webContents.send('updater:progress', Math.round(percent));
       });
       updater.on('update-downloaded', (info) => {
