@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Corrigida a atualização do servidor pelo canal beta, que falhava ao verificar novas versões. Servidores já instalados precisam atualizar o CLI manualmente uma vez.",
+  "en": "Fixed server updates on the beta channel, which failed while checking for new versions. Servers already installed need to update the CLI manually once."
+}

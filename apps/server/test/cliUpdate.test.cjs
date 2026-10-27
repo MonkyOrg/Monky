@@ -313,3 +313,8 @@ test('voice restart checks never substitute online counts when a server lacks vo
   value = { userCount: 8, voiceUserCount: 0 };
   assert.equal(await countVoiceUsers(port), 0);
 });
+
+test('the beta release listing stays small enough for the 4 MiB response limit', () => {
+  const pageSize = Number(new URL(update.GITHUB_RELEASES_URL).searchParams.get('per_page'));
+  assert.ok(pageSize >= 10 && pageSize <= 30);
+});
