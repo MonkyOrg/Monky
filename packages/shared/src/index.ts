@@ -17,8 +17,9 @@ export {
   isMotionQualityPreset,
   restoreQualityPreset,
   EVERYONE_MENTION_TOKENS,
-  hasEveryoneMention,
 } from './constants.js';
+export { MentionMatcher, hasEveryoneMention } from './mentions.js';
+export type { Mention, MentionMatcherOptions } from './mentions.js';
 export type { QualityPresetType, QualityProfile, AfkTimeoutSeconds } from './constants.js';
 
 export * from './models.js';

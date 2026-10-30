@@ -44,6 +44,12 @@ export interface AuthResult {
   customStatus?: CustomStatus;
   /** True on the first connection of a member, which registers them on the server. */
   newMember?: boolean;
+  /**
+   * True when signing in changed who holds which role: a default role given or
+   * the first member made owner. Only then do the other connections need the
+   * role state again (S-WS-4).
+   */
+  rolesChanged?: boolean;
 }
 
 interface PendingAuthChallenge {
@@ -366,12 +372,13 @@ export class AuthService {
       userRecord.lastSeenAt = now;
     }
 
-    await this.roleService.ensureDefaultRolesAssigned(userRecord.id);
+    let rolesChanged = await this.roleService.ensureDefaultRolesAssigned(userRecord.id);
 
     if (!server.ownerUserId) {
       await this.serverRepo.updateServer({ ownerUserId: userRecord.id });
       await this.roleService.assignAdminRole(userRecord.id);
       server.ownerUserId = userRecord.id;
+      rolesChanged = true;
     }
 
     const userSummary = this.toUserSummary(userRecord, 'ONLINE', now, {
@@ -488,6 +495,7 @@ export class AuthService {
       brb: pending.brb,
       customStatus: pending.customStatus,
       newMember,
+      rolesChanged,
     };
   }
 

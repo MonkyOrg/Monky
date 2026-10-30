@@ -498,9 +498,7 @@ class FakeProducer {
 
 function producerFixture(t: TestContext) {
   const { engine, client } = engineFixture();
-  const preferred = settingsStore.preferredVideoCodec;
-  settingsStore.preferredVideoCodec = 'auto';
-  t.after(() => { engine.leave(); client.dispose(); settingsStore.preferredVideoCodec = preferred; });
+  t.after(() => { engine.leave(); client.dispose(); });
   t.mock.method(engine, 'canProduceKind', () => true);
   t.mock.method(client, 'send', () => {});
   const pending: {
@@ -608,7 +606,10 @@ test('SFU ping samples receive-only clients and uses the worse active direction'
   t.after(() => { engine.leave(); client.dispose(); });
   const transport = (state: string, rtt: number) => ({
     connectionState: state, close: () => {},
-    getStats: async () => new Map([['pair', { type: 'candidate-pair', state: 'succeeded', currentRoundTripTime: rtt }]]),
+    getStats: async () => new Map<string, object>([
+      ['transport', { type: 'transport', selectedCandidatePairId: 'pair' }],
+      ['pair', { type: 'candidate-pair', state: 'succeeded', currentRoundTripTime: rtt }],
+    ]),
   });
   Object.defineProperties(engine, {
     sendTransport: { value: transport('new', 0), writable: true },
@@ -617,6 +618,49 @@ test('SFU ping samples receive-only clients and uses the worse active direction'
   assert.equal(await engine.getPing(), 75);
   Object.defineProperty(engine, 'sendTransport', { value: transport('connected', 0.15), writable: true });
   assert.equal(await engine.getPing(), 150);
+});
+
+test('SFU ping is read from the candidate pair carrying media, not the first one that succeeded', async (t) => {
+  const { engine, client } = engineFixture();
+  t.after(() => { engine.leave(); client.dispose(); });
+  // UDP and TCP towards the server both succeed; only the TCP pair carries media.
+  Object.defineProperty(engine, 'recvTransport', { writable: true, value: {
+    connectionState: 'connected', close: () => {},
+    getStats: async () => new Map<string, object>([
+      ['udp-pair', { type: 'candidate-pair', state: 'succeeded', currentRoundTripTime: 0.012 }],
+      ['tcp-pair', { type: 'candidate-pair', state: 'succeeded', currentRoundTripTime: 0.18 }],
+      ['transport', { type: 'transport', selectedCandidatePairId: 'tcp-pair' }],
+    ]),
+  } });
+  assert.equal(await engine.getPing(), 180);
+});
+
+test('an ended microphone track keeps the SFU call listen-only instead of failing the transport', async (t) => {
+  const { engine, client, failures, health } = engineFixture();
+  t.after(() => { engine.leave(); client.dispose(); });
+  t.mock.method(engine, 'canProduceKind', () => true);
+  t.mock.method(client, 'send', () => {});
+  engine['channelId'] = 'room';
+  engine['sendTransportState'] = 'connected';
+  engine['recvTransportState'] = 'connected';
+  let produced = 0;
+  const ended = captureTrack('audio');
+  Object.defineProperty(engine, 'sendTransport', { writable: true, value: {
+    close() {},
+    async produce() {
+      produced++;
+      ended.stop();
+      throw new DOMException('track ended', 'InvalidStateError');
+    },
+  } });
+  // Ended while the producer was being negotiated.
+  assert.equal(await engine.produceMic(ended), null);
+  // Already ended when publication starts, as on every rung of a rejoin.
+  assert.equal(await engine.produceMic(ended), null);
+  assert.equal(produced, 1, 'a dead track is not offered to the transport again');
+  assert.equal(failures(), 0, 'a dead capture track is not a broken link and starts no rejoin');
+  assert.notEqual(health.at(-1), 'failed');
+  assert.equal(engine.isChannelConnected(), true);
 });
 
 test('rebuilding SFU producers does not stop caller-owned capture tracks', async (t) => {

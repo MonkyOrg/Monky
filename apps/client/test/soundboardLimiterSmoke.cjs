@@ -185,6 +185,18 @@ if (!process.versions.electron) {
         await mouse('mouseUp', target);
         await window.webContents.executeJavaScript(`window.limiterModalSmoke.mouseTrigger(${open})`, true);
       }
+      const reopen = await window.webContents.executeJavaScript('window.limiterModalSmoke.triggerTarget()', true);
+      await mouse('mouseDown', reopen);
+      await mouse('mouseUp', reopen);
+      await window.webContents.executeJavaScript('window.limiterModalSmoke.mouseTrigger(true)', true);
+      const pageText = await window.webContents.executeJavaScript('window.limiterModalSmoke.pageTextTarget()', true);
+      await mouse('mouseDown', pageText);
+      await mouse('mouseUp', pageText);
+      await window.webContents.executeJavaScript('window.limiterModalSmoke.focusOnPage()', true);
+      await key('Escape');
+      await window.webContents.executeJavaScript('window.limiterModalSmoke.escapedFromPage()', true);
+      await key('Escape');
+      await window.webContents.executeJavaScript('window.limiterModalSmoke.closedByEscape()', true);
     }
     const modalChecks = await window.webContents.executeJavaScript('window.limiterModalSmoke.finish()', true);
     console.log(`Soundboard modal limiter: ${modalChecks} checks passed (native keyboard, PT/EN, shared preferences, failures, resize and cleanup)`);
@@ -465,6 +477,10 @@ async function setupModalSmoke() {
       root.innerHTML = tab.renderHtml();
       tab.attachEvents(root);
       await modal.open();
+      const card = document.querySelector('.soundboard-modal-card');
+      check(card.getAttribute('role') === 'dialog' && card.getAttribute('aria-modal') === 'true'
+        && document.getElementById(card.getAttribute('aria-labelledby'))?.textContent === 'Soundboard',
+      'The soundboard is announced as a labelled modal dialog');
       check(panel().getBoundingClientRect().height === 0 && panel().inert && !document.querySelector('.sb-limiter-toolbar'),
         'Inline settings occupy no space and are inert when initially closed');
       check(!trigger().hasAttribute('aria-haspopup') && !expanded() && trigger().getAttribute('aria-controls') === panel().id,
@@ -850,6 +866,26 @@ async function setupModalSmoke() {
       await checkTriggerHighlight(open);
       check(!trigger().matches(':focus-visible') && getComputedStyle(trigger()).outlineStyle === 'none',
         'Native mouse activation does not leave a keyboard focus ring on the settings button');
+    },
+    async closedByEscape() {
+      await until(() => !document.querySelector('.modal-backdrop:not([data-ui-closing]) .soundboard-modal-card'),
+        'Native Escape with quick settings collapsed must close the soundboard');
+      check(!trigger() || trigger().closest('[data-ui-closing]'), 'Escape closes the soundboard once nothing inside it is open');
+    },
+    pageTextTarget() {
+      const text = document.querySelector('.soundboard-modal-card .modal-footer > div');
+      const rect = text.getBoundingClientRect();
+      return { x: Math.round(rect.x + 8), y: Math.round(rect.y + rect.height / 2) };
+    },
+    focusOnPage() {
+      check(document.activeElement === document.body && expanded() && !panel().inert,
+        'Clicking plain text in the soundboard leaves focus on the page with quick settings still open');
+    },
+    async escapedFromPage() {
+      check(document.querySelector('.modal-backdrop:not([data-ui-closing]) .soundboard-modal-card'),
+        'Escape from the page closes quick settings first and keeps the soundboard open');
+      await settleSection(false);
+      check(panel().inert && document.activeElement === trigger(), 'Closed quick settings hand focus back to their button');
     },
     finish() {
       soundboardService.stopSound();

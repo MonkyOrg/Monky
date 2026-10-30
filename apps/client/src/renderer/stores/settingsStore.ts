@@ -63,7 +63,6 @@ function restoreBotLocalePreferences(value: unknown): Record<string, BotLocale> 
 
 export class SettingsStore {
   public qualityPreset: QualityPresetType = 'NORMAL';
-  public preferredVideoCodec: 'auto' | 'av1' | 'vp9' | 'vp8' | 'h264' = 'auto';
   public screenEncodingMode: ScreenEncodingMode = 'hardware';
   public screenEncodingStrategy: ScreenEncodingStrategy = 'automatic';
   public preferredScreenCodec: ScreenCodec = 'h264';
@@ -276,9 +275,6 @@ export class SettingsStore {
         }
         if (!['simple', 'complete'].includes(this.screenShareTelemetryMode)) {
           this.screenShareTelemetryMode = 'simple';
-        }
-        if (!['auto', 'av1', 'vp9', 'vp8', 'h264'].includes(this.preferredVideoCodec)) {
-          this.preferredVideoCodec = 'auto';
         }
         if (!this.customProfile || typeof this.customProfile !== 'object' || !this.customProfile.audioBitrateKbps) {
           this.customProfile = { ...DEFAULT_CUSTOM_PROFILE };
@@ -745,7 +741,6 @@ export class SettingsStore {
       this.limitCustomProfile();
       localStorage.setItem('monky_settings', JSON.stringify({
         qualityPreset: this.qualityPreset,
-        preferredVideoCodec: this.preferredVideoCodec,
         screenEncodingMode: this.screenEncodingMode,
         screenEncodingStrategy: this.screenEncodingStrategy,
         preferredScreenCodec: this.preferredScreenCodec,

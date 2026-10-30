@@ -1,17 +1,19 @@
 import {
-  MessageType, Permission, botSelectorPublicSchema, validateBotFormValues, validateNativeLiveFormValues,
+  MessageType, Permission, ProtocolErrorCode, botSelectorPublicSchema, validateBotFormValues, validateNativeLiveFormValues,
   communitySnapshotSchema, nativeLiveFormResultsSchema, nativeLiveFormSchema, survivingNativePollSelection,
   type ServerEventPublic, type LiveAction, type EventControl, type NativeLiveForm,
   type NativeLiveFormResults, type NativePoll,
   createServerInviteLink, eventResultSchema, eventInterestedListResultSchema, type EventInterestedListResult,
 } from '@monky/shared';
 import type { CommunityFeed } from '../core/CommunityFeed';
+import { ProtocolRequestError } from '../core/NetworkClient';
 import { appEvents } from '../core/EventBus';
 import { getLanguage, t } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { botInputError, convertBotInputValues, initialBotInputValues } from '../utils/botInputs';
 import { scrollWithin } from '../utils/scroll';
-import { addBotFieldImage, applyBotFieldAction, readBotFieldChange, renderBotFields } from './botFields';
+import { preserveViewState } from '../utils/preserveViewState';
+import { addBotFieldImage, applyBotFieldAction, chooseBotFieldValue, readBotFieldChange, renderBotFields } from './botFields';
 import { openCommunityModal } from './CommunityModal';
 import { openServerEventWizard } from './ServerEventWizard';
 import { renderServerEventCard } from './ServerEventCard';
@@ -35,12 +37,25 @@ import {
 } from './nativePoll';
 import { openNativePollWizard } from './NativePollWizard';
 import { openNativeLiveFormWizard } from './NativeLiveFormWizard';
-import { DEFAULT_AVATAR_URL } from '../utils/avatar';
+import { resolveAvatarUrl } from '../utils/avatar';
+import { renderKeyedList } from '../utils/keyedList';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 import {
   imageCarouselNavigationButton, imageCarouselPresentationClass, moveImageCarousel, renderImageCarousel,
 } from './ImageCarousel';
 import '../styles/community.css';
+
+/** Attributes naming the event or live action a card belongs to; see `preserveViewState`. */
+const ACTIVITY_ITEMS = ['data-event-id', 'data-live-action-card', 'data-live-poll-card', 'data-native-live-form-card'];
+/** Each question of a form; see `preserveViewState`. */
+const QUESTION_ITEMS = ['data-field-name'];
+/** Shortest wait between two checks of an event the snapshot does not carry. */
+const EVENT_CHECK_INTERVAL_MS = 1000;
+
+/** How the server answers for an event that was deleted or is no longer visible to this member. */
+function isEventRefused(error: unknown): boolean {
+  return error instanceof ProtocolRequestError && error.code === ProtocolErrorCode.PERMISSION_DENIED;
+}
 
 export class ServerCommunityView {
   private readonly abort = new AbortController();
@@ -50,7 +65,11 @@ export class ServerCommunityView {
   private bannerTransition = 0;
   private clearCopyFeedback: (() => void) | null = null;
   private modals = new Set<(immediate?: boolean) => void>();
+  /** Open event lists and details, told when the server refuses one of their events; see `forgetEvent`. */
+  private readonly eventWatchers = new Set<(id: string) => void>();
   private readonly storageKey: string;
+  /** Last markup written to the sidebar section; see `show`. */
+  private shownHtml: string | null = null;
 
   constructor(
     private readonly root: HTMLElement,
@@ -112,8 +131,8 @@ export class ServerCommunityView {
     if (!snapshot) {
       this.setHeaderImage(null);
       this.root.hidden = !this.feed.error;
-      this.root.innerHTML = this.feed.error ? `<p role="alert">${t('community.loadError')}</p>
-        <button class="btn btn-secondary" type="button" data-community="retry">${t('community.retry')}</button>` : '';
+      this.show(this.feed.error ? `<p role="alert">${t('community.loadError')}</p>
+        <button class="btn btn-secondary" type="button" data-community="retry">${t('community.retry')}</button>` : '');
       return;
     }
     const items = this.items();
@@ -134,9 +153,9 @@ export class ServerCommunityView {
     const eventLabel = eventCount === 0 ? t('community.events') : eventCount === 1
       ? t('community.sidebarOneEvent') : t('community.sidebarEventCount', { count: eventCount });
     this.root.hidden = (!image || !!this.header) && !item && !showToolbar;
-    this.root.innerHTML = `${(image && !this.header) || item ? `<section class="community-banner">
+    this.show(`${(image && !this.header) || item ? `<section class="community-banner">
       ${image && !this.header && !item
-        ? `<img src="${escapeHtml(this.feed.client.getHttpBaseUrl() + image)}" alt="${escapeHtml(t('community.banner'))}">`
+        ? `<img src="${escapeHtml(this.assetUrl(image))}" alt="${escapeHtml(t('community.banner'))}">`
         : ''}
       ${item ? `<button class="community-dismiss" type="button" data-community="dismiss" aria-label="${escapeHtml(t('community.closeBanner'))}">×</button>
         <div class="community-banner-body"><small class="community-live-label"><span class="community-live-dot"></span>${t(item.event ? 'community.active' : 'community.liveActions')}</small>
@@ -152,14 +171,29 @@ export class ServerCommunityView {
       ${showToolbar ? `<div class="community-toolbar">
         ${snapshot.settings.eventsEnabled ? `<button class="community-sidebar-link" type="button" data-community="events"><span class="material-symbols-outlined md-20">event</span>${hasActiveEvent ? '<span class="live-pulse-dot community-sidebar-live-dot" aria-hidden="true"></span>' : ''}${eventLabel}</button>` : ''}
         ${liveActionCount || canCreateLiveAction ? `<button class="community-sidebar-link" type="button" data-community="actions"><span class="material-symbols-outlined md-20">bolt</span>${liveActionCount ? '<span class="live-pulse-dot community-sidebar-live-dot" aria-hidden="true"></span>' : ''}${liveActionCount === 0 ? t('community.liveActions') : t(liveActionCount === 1 ? 'community.oneLiveAction' : 'community.liveActionCount', { count: liveActionCount })}</button>` : ''}
-      </div>` : ''}`;
+      </div>` : ''}`);
+  }
+
+  /**
+   * The server sends a snapshot for every vote, response or "interested" anywhere
+   * on it; rewriting identical markup would only drop focus and restart motion.
+   */
+  private show(html: string): void {
+    if (html === this.shownHtml) return;
+    this.shownHtml = html;
+    this.root.innerHTML = html;
+  }
+
+  /** Files the server stores (banners, covers, avatars) resolved against this session's server. */
+  private assetUrl(path: string | null | undefined): string {
+    return resolveAvatarUrl(path, this.feed.client.getHttpBaseUrl());
   }
 
   private setHeaderImage(image: string | null): void {
     if (!this.header) return;
     this.header.classList.toggle('server-header--banner', !!image);
     this.header.style.backgroundImage = image
-      ? `linear-gradient(#0008, transparent 65%), url(${JSON.stringify(this.feed.client.getHttpBaseUrl() + image)})` : '';
+      ? `linear-gradient(#0008, transparent 65%), url(${JSON.stringify(this.assetUrl(image))})` : '';
   }
 
   private click = (event: MouseEvent): void => {
@@ -198,6 +232,49 @@ export class ServerCommunityView {
     return modal;
   }
 
+  /**
+   * Rebuilds a dialog's content keeping focus on the same control of the same card.
+   * When that card is gone the dialog title takes focus, never a neighbor's button.
+   * A card's ⋯ menu closes when its card is rebuilt or withdrawn, so no action can
+   * reach an item that is no longer on screen, and when its ⋯ moves or the dialog
+   * scrolls, since the menu does not follow it; focus in that menu returns to the ⋯
+   * of the same card, or to the title.
+   */
+  private keepPlace(modal: ReturnType<typeof openCommunityModal>, draw: () => void): void {
+    const opener = [...modal.content.querySelectorAll<HTMLElement>('[aria-expanded="true"]')]
+      .find(element => contextMenu.isOpenFor(element)) ?? null;
+    const placed = opener?.getBoundingClientRect();
+    const scroller = modal.element.querySelector<HTMLElement>('.community-modal');
+    const scrolled = scroller?.scrollTop;
+    const active = document.activeElement;
+    const menuFocused = !!opener && active instanceof Element && !!active.closest('.floating-context-menu');
+    let closed = false;
+    preserveViewState(modal.content, () => {
+      draw();
+      if (!opener || !placed) return;
+      const box = opener.isConnected ? opener.getBoundingClientRect() : null;
+      // Scroll anchoring can hold the ⋯ in place by scrolling the dialog, and the menu
+      // closes on any scroll: it is closed here, where focus can go back to the ⋯.
+      if (box && Math.abs(box.top - placed.top) < 1 && Math.abs(box.left - placed.left) < 1
+        && scroller?.scrollTop === scrolled) return;
+      contextMenu.close();
+      closed = true;
+    }, {
+      itemKeys: ACTIVITY_ITEMS,
+      fallback: () => modal.element.querySelector<HTMLElement>('.modal-title'),
+      origin: menuFocused ? opener : null,
+    });
+    // A ⋯ that stayed but moved takes back the focus of the menu it no longer anchors.
+    if (closed && menuFocused && opener?.isConnected) opener.focus({ preventScroll: true });
+  }
+
+  /** The server refused this event: the dialog showing it closes and no list keeps it. */
+  private forgetEvent(id: string): void {
+    // Top-most first, so a detail closes, giving focus back to its list, before that list
+    // drops the card.
+    for (const forget of [...this.eventWatchers].reverse()) forget(id);
+  }
+
   private openWizard(event?: ServerEventPublic): void {
     const modal = openServerEventWizard(this.feed, event);
     if (!modal) return;
@@ -218,6 +295,17 @@ export class ServerCommunityView {
     } finally { signal.removeEventListener('abort', cancel); }
   }
 
+  /** Fetches an event the snapshot does not carry; one the server refuses leaves the open lists. */
+  private async confirmEvent(id: string, signal: AbortSignal): Promise<ServerEventPublic> {
+    try {
+      return await this.getEvent(id, signal);
+    } catch (error) {
+      if (!isEventRefused(error)) throw error;
+      this.forgetEvent(id);
+      throw new Error(t('community.eventUnavailable'));
+    }
+  }
+
   private openRequestedEvent(): void {
     if (!this.feed.snapshot) return;
     const id = this.feed.takeEventRequest();
@@ -229,7 +317,7 @@ export class ServerCommunityView {
         const event = await this.getEvent(id, modal.signal);
         if (modal.signal.aborted) return;
         modal.close();
-        this.openEvent(event);
+        this.openEvent(event, true);
       } finally { modal.content.textContent = ''; }
     });
   }
@@ -261,7 +349,7 @@ export class ServerCommunityView {
         ${event.status === 'active' ? `<button class="btn btn-secondary" type="button" data-event-action="copyLink"><span class="material-symbols-outlined md-18">link</span>${t('community.copyLinkShort')}</button>` : ''}
         ${event.status === 'active' && event.location.kind !== 'external' ? `<button class="btn btn-success" type="button" data-event-action="join">${t(event.location.kind === 'voice' ? 'community.join' : 'community.openChannel')}</button>` : ''}
         ${canManage && ongoing && event.status === 'scheduled' ? `<button class="btn btn-primary" type="button" data-event-action="start">${t('community.start')}</button>` : ''}`;
-    const images = this.eventImages(event).map(url => this.feed.client.getHttpBaseUrl() + url);
+    const images = this.eventImages(event).map(url => this.assetUrl(url));
     return renderServerEventCard(event, location, images, actions, !details);
   }
 
@@ -303,7 +391,11 @@ export class ServerCommunityView {
             : action === 'interest' ? (event.interested ? 'community.notInterested' : 'community.interested')
             : action === 'exportCalendar' && event.repeat !== 'none' ? 'community.exportSeries' : `community.${action}`),
           danger: action === 'cancel' || action === 'delete' || action === 'end',
-          onClick: () => this.runEventAction(modal, event, button, action),
+          // The menu stays open while its card is unchanged: it acts on the event as it is now.
+          onClick: () => {
+            const current = events().find((entry) => entry.id === event.id);
+            if (current) this.runEventAction(modal, current, button, action);
+          },
         })), button);
         return;
       }
@@ -313,7 +405,8 @@ export class ServerCommunityView {
   }
 
   private runEventAction(modal: ReturnType<typeof openCommunityModal>, event: ServerEventPublic, button: HTMLButtonElement, requestedAction?: string): void {
-    if (modal.signal.aborted) return;
+    // A button no longer on screen (its card rebuilt, the event withdrawn) acts on nothing.
+    if (modal.signal.aborted || !button.isConnected) return;
     modal.content.querySelector('[data-event-feedback]')?.remove();
     void modal.run(async () => {
         if (requestedAction === 'detail') { this.openEvent(event); return; }
@@ -343,8 +436,13 @@ export class ServerCommunityView {
           if (requestedAction === 'exportCalendar') {
             const server = this.feed.server.serverDetails;
             if (!server) throw new Error(t('community.changed'));
+            // Only the snapshot is kept current: an event from the history is confirmed
+            // with the server before its content leaves the app.
+            const current = this.feed.snapshot?.events.some((entry) => entry.id === event.id)
+              ? event : await this.confirmEvent(event.id, modal.signal);
+            if (modal.signal.aborted) return;
             const result = await window.api.saveEventCalendar({
-              event, serverId: server.id, serverName: server.name, location: this.locationName(event), link: this.eventLink(event),
+              event: current, serverId: server.id, serverName: server.name, location: this.locationName(current), link: this.eventLink(current),
             });
             if (result.status === 'failed') throw new Error(result.error);
             if (result.status === 'saved' && !modal.signal.aborted) this.eventFeedback(modal, t('community.calendarSaved'));
@@ -383,17 +481,31 @@ export class ServerCommunityView {
     }
     let history = false;
     let previous: ServerEventPublic[] = [];
+    let shown: string | null = null;
     const events = () => history ? previous : this.feed.snapshot?.events ?? [];
     const render = () => {
-      const count = events().length;
+      const list = events();
+      const count = list.length;
+      const heading = `<span class="material-symbols-outlined md-24" aria-hidden="true">event</span>${escapeHtml(t(count === 1 ? 'community.oneEvent' : 'community.eventCount', { count }))}`;
+      const items = [
+        ...count ? list.map((event) => ({ key: `event:${event.id}`, html: this.eventHtml(event) })) : [{ key: 'empty', html: `<div class="community-empty">
+          <span class="material-symbols-outlined">event</span><h2>${t('community.emptyEvents')}</h2><p>${t('community.emptyHint')}</p></div>` }],
+        // Its state lives in the switch, so the row never has to be rebuilt.
+        { key: 'history', html: `<div class="community-history">
+          <span>${t('community.history')}</span>
+          <label class="toggle-switch"><input type="checkbox" role="switch" data-history aria-label="${escapeHtml(t('community.history'))}"><span class="toggle-slider"></span></label>
+          </div>` },
+      ];
+      // Snapshots also arrive for votes and responses elsewhere: unchanged cards stay as they are,
+      // and a changed one is the only one rebuilt.
+      const markup = heading + items.map((item) => item.html).join('');
+      if (markup === shown) return;
+      shown = markup;
       const title = modal.element.querySelector('.modal-title');
-      if (title) title.innerHTML = `<span class="material-symbols-outlined md-24">event</span>${escapeHtml(t(count === 1 ? 'community.oneEvent' : 'community.eventCount', { count }))}`;
-      modal.content.innerHTML = `${events().length ? events().map((event) => this.eventHtml(event)).join('') : `<div class="community-empty">
-        <span class="material-symbols-outlined">event</span><h2>${t('community.emptyEvents')}</h2><p>${t('community.emptyHint')}</p></div>`}
-        <div class="community-history">
-        <span>${t('community.history')}</span>
-        <label class="toggle-switch"><input type="checkbox" role="switch" data-history ${history ? 'checked' : ''} aria-label="${escapeHtml(t('community.history'))}"><span class="toggle-slider"></span></label>
-        </div>`;
+      if (title) title.innerHTML = heading;
+      this.keepPlace(modal, () => renderKeyedList(modal.content, items));
+      const toggle = modal.content.querySelector<HTMLInputElement>('[data-history]');
+      if (toggle) toggle.checked = history;
     };
     const refresh = async () => {
       if (history) {
@@ -410,19 +522,27 @@ export class ServerCommunityView {
       }
     }, { signal: modal.signal });
     this.bindEventActions(modal, events);
+    // The history is a copy fetched once: an event the server refused since then leaves it.
+    const forget = (id: string) => {
+      if (!previous.some((event) => event.id === id)) return;
+      previous = previous.filter((event) => event.id !== id);
+      render();
+    };
+    this.eventWatchers.add(forget);
     const unbind = this.feed.subscribe(() => {
       if (!this.feed.snapshot?.settings.eventsEnabled) { modal.close(true); return; }
       if (history) {
+        // In the server's order: what is on or coming first, then the ended and cancelled.
         const current = new Map(this.feed.snapshot.events.map((event) => [event.id, event]));
-        previous = [...previous.filter((event) => !current.has(event.id) && ['ended', 'cancelled'].includes(event.status)), ...current.values()];
+        previous = [...current.values(), ...previous.filter((event) => !current.has(event.id) && ['ended', 'cancelled'].includes(event.status))];
       }
       render();
     });
-    modal.signal.addEventListener('abort', unbind, { once: true });
+    modal.signal.addEventListener('abort', () => { unbind(); this.eventWatchers.delete(forget); }, { once: true });
     render();
   }
 
-  private openEvent(initial: ServerEventPublic): void {
+  private openEvent(initial: ServerEventPublic, fresh = false): void {
     const modal = this.modal(initial.title);
     modal.element.querySelector('.community-modal')?.classList.add('event-detail-modal');
     let event = initial;
@@ -431,7 +551,6 @@ export class ServerCommunityView {
     let cursor: string | null = null;
     let loading = false, failed = false, generation = 0;
     let requestId: string | null = null;
-    let detailAbort = new AbortController();
     const tabsId = crypto.randomUUID();
     const cancelMembers = () => {
       generation++;
@@ -451,7 +570,7 @@ export class ServerCommunityView {
         <button type="button" id="${tabsId}-details" role="tab" data-event-tab="details" aria-controls="${tabsId}-details-panel" aria-selected="${tab === 'details'}" tabindex="${tab === 'details' ? 0 : -1}">${t('community.details')}</button>
         <button type="button" id="${tabsId}-interested" role="tab" data-event-tab="interested" aria-controls="${tabsId}-interested-panel" aria-selected="${tab === 'interested'}" tabindex="${tab === 'interested' ? 0 : -1}">${t('community.interestedCount', { count: event.interestedCount })}</button></div>
         <section class="event-interest-list" id="${tabsId}-interested-panel" role="tabpanel" aria-labelledby="${tabsId}-interested" ${tab !== 'interested' ? 'hidden' : ''} aria-busy="${loading}">
-          <ul>${members.map(member => `<li><img src="${escapeHtml(member.avatarUrl ? this.feed.client.getHttpBaseUrl() + member.avatarUrl : DEFAULT_AVATAR_URL)}" alt=""><span>${escapeHtml(member.nickname)}</span></li>`).join('')}</ul>
+          <ul>${members.map(member => `<li><img src="${escapeHtml(this.assetUrl(member.avatarUrl))}" alt="" data-fallback="avatar"><span>${escapeHtml(member.nickname)}</span></li>`).join('')}</ul>
           ${loading ? `<p role="status">${t('community.loadingInterested')}</p>` : ''}
           ${!loading && !failed && !members.length ? `<p>${t('community.noInterested')}</p>` : ''}
           ${failed ? `<p role="alert">${t('community.interestedLoadError')}</p>` : ''}
@@ -467,6 +586,7 @@ export class ServerCommunityView {
       content.querySelector('.community-interest-count')?.remove();
       if (focusedTab === 'details' || focusedTab === 'interested') modal.content.querySelector<HTMLElement>(`[data-event-tab="${focusedTab}"]`)?.focus();
     };
+    const redraw = () => this.keepPlace(modal, render);
     const loadMembers = async (reset: boolean) => {
       cancelMembers();
       if (reset) { members = []; cursor = null; }
@@ -474,7 +594,7 @@ export class ServerCommunityView {
       loading = true;
       failed = false;
       requestId = crypto.randomUUID();
-      render();
+      redraw();
       try {
         const response = await this.feed.client.sendRequest<unknown>(MessageType.EVENT_GET_INTERESTED, {
           id: event.id, ...(cursor ? { cursor } : {}), limit: 50,
@@ -489,7 +609,7 @@ export class ServerCommunityView {
         console.warn('[Community] Interested members could not be loaded.', error);
         failed = true;
       } finally {
-        if (!modal.signal.aborted && current === generation) { requestId = null; loading = false; render(); }
+        if (!modal.signal.aborted && current === generation) { requestId = null; loading = false; redraw(); }
       }
     };
     modal.content.addEventListener('click', click => {
@@ -498,7 +618,7 @@ export class ServerCommunityView {
       if (target.hasAttribute('data-interested-more')) { void loadMembers(false); return; }
       tab = target.dataset.eventTab === 'interested' ? 'interested' : 'details';
       if (tab === 'interested') void loadMembers(true);
-      else { cancelMembers(); render(); }
+      else { cancelMembers(); redraw(); }
     }, { signal: modal.signal });
     modal.content.addEventListener('keydown', key => {
       if (!(key.target instanceof Element) || !key.target.closest('[data-event-tab]')) return;
@@ -508,39 +628,122 @@ export class ServerCommunityView {
       modal.content.querySelector<HTMLButtonElement>(`[data-event-tab="${next}"]`)?.click();
       modal.content.querySelector<HTMLElement>(`[data-event-tab="${next}"]`)?.focus();
     }, { signal: modal.signal });
-    this.bindEventActions(modal, () => [event]);
+    // Links can open an event the bounded snapshot does not carry, such as one from the history.
+    let inSnapshot = !!this.feed.snapshot?.events.some((entry) => entry.id === initial.id);
+    const shownKey = (value: ServerEventPublic) => JSON.stringify([this.eventHtml(value, true),
+      this.feed.server.knownMembers.get(value.creatorUserId)?.nickname, this.feed.server.serverDetails?.name]);
+    /** What the content shows; null while the event is hidden until the server confirms it. */
+    let shown: string | null = shownKey(event);
+    // While hidden, nothing on screen — or still in a stale menu — acts on the event.
+    this.bindEventActions(modal, () => shown === null ? [] : [event]);
+    const show = (value: ServerEventPublic) => {
+      const hidden = shown === null;
+      const interestChanged = value.interestedCount !== event.interestedCount || value.interested !== event.interested;
+      event = value;
+      // The title comes back after a confirmation and follows renames.
+      modal.setTitle(value.title);
+      const key = shownKey(value);
+      if (hidden) modal.clearError();
+      // Snapshots also follow votes and responses elsewhere: the loaded pages and
+      // what is on screen only change when this event does.
+      if (tab === 'interested' && (hidden || interestChanged)) { shown = key; void loadMembers(true); }
+      else if (key !== shown) { shown = key; redraw(); }
+    };
+    // Revoked content leaves the screen at once — the name in the title, the card and its
+    // menu, the interested members — and focus moves to the now neutral title.
+    const conceal = (text: string) => {
+      cancelMembers();
+      shown = null;
+      modal.setTitle(t('community.details'));
+      this.keepPlace(modal, () => { modal.content.textContent = text; });
+    };
+    // Checks with the server run one at a time and at most once per interval, so a
+    // burst of snapshots (votes, responses) costs a single EVENT_GET.
+    let checking: AbortController | null = null;
+    let checkTimer: number | null = null;
+    let checkAgain = false;
+    let lastCheck = 0;
+    const cancelCheck = () => {
+      if (checkTimer !== null) window.clearTimeout(checkTimer);
+      checkTimer = null;
+      checkAgain = false;
+      checking?.abort();
+      checking = null;
+    };
+    const check = () => {
+      checkTimer = null;
+      lastCheck = performance.now();
+      const controller = new AbortController();
+      checking = controller;
+      const signal = AbortSignal.any([modal.signal, controller.signal]);
+      void this.getEvent(event.id, signal).then(
+        (result) => { if (!signal.aborted) show(result); },
+        (error: unknown) => {
+          if (signal.aborted) return;
+          const refused = isEventRefused(error);
+          if (!refused && shown !== null) {
+            // A timeout says nothing about the event: it stays until the next snapshot checks again.
+            console.warn('[Community] Event check failed.', error);
+            return;
+          }
+          // The server no longer shows it, or it is already hidden: nothing of it is left
+          // behind, not even an empty dialog or its card in the history, and the toast says why.
+          console.warn('[Community] Event no longer available.', error);
+          if (refused) { this.forgetEvent(event.id); return; }
+          modal.close(true);
+          showErrorToast(t('community.eventLoadError'));
+        },
+      ).finally(() => {
+        if (checking !== controller) return;
+        checking = null;
+        if (checkAgain) { checkAgain = false; scheduleCheck(); }
+      });
+    };
+    const scheduleCheck = () => {
+      if (checking) { checkAgain = true; return; }
+      if (checkTimer === null) {
+        checkTimer = window.setTimeout(check, Math.max(0, lastCheck + EVENT_CHECK_INTERVAL_MS - performance.now()));
+      }
+    };
     const unbind = this.feed.subscribe(() => {
       if (!this.feed.snapshot?.settings.eventsEnabled) { modal.close(true); return; }
-      const current = this.feed.snapshot?.events.find((entry) => entry.id === event.id);
-      detailAbort.abort();
-      detailAbort = new AbortController();
-      cancelMembers();
+      const current = this.feed.snapshot.events.find((entry) => entry.id === event.id);
+      const left = inSnapshot && !current;
+      inSnapshot = !!current;
       if (current) {
-        event = current;
-        render();
-        if (tab === 'interested') void loadMembers(true);
-      } else {
-        // Links may target an event outside the bounded snapshot, including historical events.
-        const signal = AbortSignal.any([modal.signal, detailAbort.signal]);
-        modal.content.textContent = t('community.loadingEvent');
-        void (async () => {
-          try {
-            const result = await this.getEvent(event.id, signal);
-            if (signal.aborted) return;
-            event = result;
-            render();
-            if (tab === 'interested') await loadMembers(true);
-          } catch (error) {
-            if (signal.aborted) return;
-            console.warn('[Community] Event refresh failed.', error);
-            modal.content.textContent = '';
-            modal.fail(error instanceof Error ? error.message : t('community.loadError'));
-          }
-        })();
+        // The live copy supersedes a check still in flight.
+        cancelCheck();
+        show(current);
+        return;
       }
+      if (left) {
+        // Ended, cancelled, deleted or no longer visible: nothing stays on screen while
+        // the server is asked, since it only comes back if the server still shows it.
+        cancelCheck();
+        conceal(t('community.loadingEvent'));
+        check();
+        return;
+      }
+      // Outside the snapshot from the start (history, links): confirmed again without blanking.
+      scheduleCheck();
     });
-    modal.signal.addEventListener('abort', () => { unbind(); cancelMembers(); detailAbort.abort(); }, { once: true });
+    // The server refused it, as answer to this dialog's check or to an export from it.
+    const forget = (id: string) => {
+      if (id !== event.id || modal.signal.aborted) return;
+      modal.close(true);
+      showErrorToast(t('community.eventUnavailable'));
+    };
+    this.eventWatchers.add(forget);
+    modal.signal.addEventListener('abort', () => {
+      unbind(); cancelMembers(); cancelCheck(); this.eventWatchers.delete(forget);
+    }, { once: true });
     render();
+    // An event the snapshot does not carry (history, links) is confirmed at once, unless it was
+    // just fetched: a server where nothing else changes sends no snapshot that would ask.
+    if (!inSnapshot) {
+      if (fresh) lastCheck = performance.now();
+      else check();
+    }
   }
 
   private confirmStart(event: ServerEventPublic): void {
@@ -572,19 +775,19 @@ export class ServerCommunityView {
       header.insertBefore(create, header.querySelector('[data-community-close]'));
       create.addEventListener('click', () => this.openCreateLiveAction(), { signal: modal.signal });
     }
+    let shown: string | null = null;
     const render = () => {
       const actions = this.feed.snapshot?.liveActions ?? [];
       const polls = this.feed.snapshot?.polls ?? [];
       const forms = this.feed.snapshot?.nativeForms ?? [];
       const count = actions.length + polls.length + forms.length;
-      const title = modal.element.querySelector('.modal-title');
-      if (title) title.innerHTML = `<span class="material-symbols-outlined md-24">bolt</span>${escapeHtml(t(count === 1 ? 'community.oneLiveAction' : 'community.liveActionCount', { count }))}`;
+      const heading = `<span class="material-symbols-outlined md-24" aria-hidden="true">bolt</span>${escapeHtml(t(count === 1 ? 'community.oneLiveAction' : 'community.liveActionCount', { count }))}`;
       const actionCards = actions.map((action) => {
         const channel = this.feed.server.getChannel(action.channelId);
         const canManage = this.canCloseLiveAction(action);
         return `<article class="community-event-row live-action-card" data-live-action-card="${escapeHtml(action.id)}">
           ${action.imageUrls[0] ? `<img class="live-action-card-image ${imageCarouselPresentationClass(action.imagePresentation)}"
-            src="${escapeHtml(this.feed.client.getHttpBaseUrl() + action.imageUrls[0])}" alt="">` : ''}
+            src="${escapeHtml(this.assetUrl(action.imageUrls[0]))}" alt="">` : ''}
           <div class="community-event-content">
             <small class="community-live-label"><span class="community-live-dot"></span>${t('community.liveActions')}
               ${action.audience.visibility === 'private' ? `<span class="community-private-badge"><span class="material-symbols-outlined md-16">lock</span>${t('audience.privateBadge')}</span>` : ''}</small>
@@ -607,7 +810,7 @@ export class ServerCommunityView {
           this.feed.server.hasPermission(Permission.MANAGE_SERVER) ||
           this.feed.server.hasPermission(Permission.EMIT_LIVE_ACTIONS, poll.channelId);
         return `<article class="community-event-row live-action-card" data-live-poll-card="${escapeHtml(poll.id)}">
-          ${poll.imageUrls[0] ? `<img class="live-action-card-image" src="${escapeHtml(this.feed.client.getHttpBaseUrl() + poll.imageUrls[0])}" alt="">` : ''}
+          ${poll.imageUrls[0] ? `<img class="live-action-card-image" src="${escapeHtml(this.assetUrl(poll.imageUrls[0]))}" alt="">` : ''}
           <div class="community-event-content">
             <small class="community-live-label"><span class="community-live-dot"></span>${t('poll.liveAction')}
               ${poll.audience.visibility === 'private' ? `<span class="community-private-badge"><span class="material-symbols-outlined md-16">lock</span>${t('audience.privateBadge')}</span>` : ''}</small>
@@ -644,11 +847,23 @@ export class ServerCommunityView {
           </footer>
         </article>`;
       });
-      modal.content.innerHTML = count ? [...actionCards, ...pollCards, ...formCards].join('') : `<div class="community-empty live-action-empty">
+      const items = count ? [
+        ...actionCards.map((html, index) => ({ key: `action:${actions[index].id}`, html })),
+        ...pollCards.map((html, index) => ({ key: `poll:${polls[index].id}`, html })),
+        ...formCards.map((html, index) => ({ key: `form:${forms[index].id}`, html })),
+      ] : [{ key: 'empty', html: `<div class="community-empty live-action-empty">
         <span class="material-symbols-outlined">bolt</span>
         <h2>${t('community.emptyActions')}</h2>
         <p>${t('community.emptyActionsHint')}</p>
-      </div>`;
+      </div>` }];
+      // A vote changes one card's count: only that card is rebuilt, and every other one
+      // keeps its focus and its open menu.
+      const markup = heading + items.map((item) => item.html).join('');
+      if (markup === shown) return;
+      shown = markup;
+      const title = modal.element.querySelector('.modal-title');
+      if (title) title.innerHTML = heading;
+      this.keepPlace(modal, () => renderKeyedList(modal.content, items));
     };
     modal.content.addEventListener('click', (event) => {
       const target = event.target instanceof Element ? event.target : null;
@@ -764,16 +979,21 @@ export class ServerCommunityView {
     }).format(value);
     const profile = () => nativePollVoterProfile(this.feed.server.knownMembers);
     const snapshotPoll = () => (this.feed.snapshot?.polls ?? []).find(entry => entry.id === poll.id);
+    let shown: string | null = null;
     const render = () => {
-      const focused = capturePollFocus(modal.content);
-      const bars = capturePollBars(modal.content);
-      modal.content.innerHTML = renderNativePoll(
+      const html = renderNativePoll(
         poll,
         this.feed.server.hasPermission(Permission.SEND_MESSAGES, poll.channelId),
         formatTime,
         this.feed.client.getHttpBaseUrl(),
         { pendingSelection, profile: profile() },
       );
+      // Snapshots for other items arrive too; only a real change replaces the buttons.
+      if (html === shown) return;
+      shown = html;
+      const focused = capturePollFocus(modal.content);
+      const bars = capturePollBars(modal.content);
+      modal.content.innerHTML = html;
       restorePollFocus(modal.content, focused);
       animatePollBars(modal.content, bars);
     };
@@ -851,7 +1071,7 @@ export class ServerCommunityView {
     poll: NativePoll,
     button: HTMLButtonElement,
   ): void {
-    if (button.disabled || modal.signal.aborted) return;
+    if (button.disabled || modal.signal.aborted || !button.isConnected) return;
     button.disabled = true;
     void modal.run(async () => {
       try {
@@ -883,7 +1103,7 @@ export class ServerCommunityView {
     form: NativeLiveForm,
     button: HTMLButtonElement,
   ): void {
-    if (button.disabled || modal.signal.aborted) return;
+    if (button.disabled || modal.signal.aborted || !button.isConnected) return;
     button.disabled = true;
     void modal.run(async () => {
       try {
@@ -914,6 +1134,9 @@ export class ServerCommunityView {
     let form = initial;
     let values = form.myResponse?.values ?? initialBotInputValues(form.form.fields);
     let pending = false;
+    // Answers changed here and not sent yet: a snapshot must never overwrite them.
+    let edited = false;
+    let seenResponseAt = form.myResponse?.updatedAt ?? null;
     const fieldContext = () => ({
       prefix: `native-form-${form.id}`,
       disabled: pending,
@@ -960,7 +1183,7 @@ export class ServerCommunityView {
         '[data-bot-input], [data-bot-select-value], [data-field-action], select, input, textarea, button:not(:disabled)',
       )?.focus({ preventScroll: true });
     };
-    const render = () => {
+    const draw = () => {
       modal.content.innerHTML = `<header class="native-form-action-header">
         <h2 tabindex="-1">${escapeHtml(form.form.title)}
           ${form.audience.visibility === 'private' ? `<span class="community-private-badge"><span class="material-symbols-outlined md-16">lock</span>${t('audience.privateBadge')}</span>` : ''}</h2>
@@ -979,14 +1202,22 @@ export class ServerCommunityView {
           <button type="button" class="btn btn-primary" data-native-form-submit ${pending ? 'disabled' : ''}>${escapeHtml(form.form.submitLabel ?? t('liveForm.submit'))}</button>
         </footer>`;
     };
+    // Rebuilding the questions (sending, a failure, answers from another device) keeps the reader's place.
+    const render = () => preserveViewState(modal.content, draw, {
+      scroller: '.live-action-step',
+      itemKeys: QUESTION_ITEMS,
+      fallback: () => modal.content.querySelector<HTMLElement>('.native-form-action-header h2'),
+    });
     modal.content.addEventListener('input', event => {
       clearFieldError(event.target);
-      values = readBotFieldChange(event.target, form.form.fields, values) ?? values;
+      const next = readBotFieldChange(event.target, form.form.fields, values);
+      if (next) { values = next; edited = true; }
       updateClearButton(event.target);
     }, { signal: modal.signal });
     modal.content.addEventListener('change', event => {
       clearFieldError(event.target);
-      values = readBotFieldChange(event.target, form.form.fields, values) ?? values;
+      const next = readBotFieldChange(event.target, form.form.fields, values);
+      if (next) { values = next; edited = true; }
       updateClearButton(event.target);
     }, { signal: modal.signal });
     modal.content.addEventListener('click', event => {
@@ -996,17 +1227,15 @@ export class ServerCommunityView {
       const choice = target?.closest<HTMLElement>('[data-bot-select-value]');
       if (choice) {
         clearFieldError(choice);
-        const name = choice.closest<HTMLElement>('[data-field-name]')?.dataset.fieldName;
-        if (name && choice.dataset.botSelectValue !== undefined) {
-          values = { ...values, [name]: choice.dataset.botSelectValue };
-          render();
-        }
+        const next = chooseBotFieldValue(choice, form.form.fields, values);
+        if (next) { values = next; edited = true; }
         return;
       }
       const fieldButton = target?.closest<HTMLButtonElement>('[data-field-action]');
       if (fieldButton) {
         clearFieldError(fieldButton);
-        values = applyBotFieldAction(fieldButton, form.form.fields, values, fieldContext()) ?? values;
+        const next = applyBotFieldAction(fieldButton, form.form.fields, values, fieldContext());
+        if (next) { values = next; edited = true; }
         return;
       }
       if (!target?.closest('[data-native-form-submit]')) return;
@@ -1037,9 +1266,15 @@ export class ServerCommunityView {
     const unbind = this.feed.subscribe(() => {
       const current = (this.feed.snapshot?.nativeForms ?? []).find(entry => entry.id === form.id);
       if (!current) { modal.close(true); return; }
+      // Every submission, vote or "interested" on the server sends a snapshot: only
+      // a changed form, or this member's answers sent from another device, repaint.
+      const changed = current.revision !== form.revision || current.audience.visibility !== form.audience.visibility;
+      const responseAt = current.myResponse?.updatedAt ?? null;
+      const answeredElsewhere = responseAt !== seenResponseAt && !!current.myResponse && !edited && !pending;
+      seenResponseAt = responseAt;
       form = current;
-      if (current.myResponse) values = current.myResponse.values;
-      render();
+      if (answeredElsewhere && current.myResponse) values = current.myResponse.values;
+      if (changed || answeredElsewhere) render();
     });
     modal.signal.addEventListener('abort', unbind, { once: true });
     render();
@@ -1248,7 +1483,7 @@ export class ServerCommunityView {
       if (!entry) return '';
       return `<div class="native-live-form-results-toolbar">
         ${entry.user ? `<div class="native-live-form-results-person">
-          <img src="${escapeHtml(entry.user.avatarUrl ?? DEFAULT_AVATAR_URL)}" alt="">
+          <img src="${escapeHtml(this.assetUrl(entry.user.avatarUrl))}" alt="" data-fallback="avatar">
           <div><strong>${escapeHtml(entry.user.nickname)}</strong>
             <small>${'updatedAt' in entry.response ? dateFormatter.format(entry.response.updatedAt) : ''}</small></div>
         </div>` : `<div class="native-live-form-results-person native-live-form-results-person--anonymous">
@@ -1441,7 +1676,7 @@ export class ServerCommunityView {
     action: LiveAction,
     button: HTMLButtonElement,
   ): void {
-    if (button.disabled || modal.signal.aborted) return;
+    if (button.disabled || modal.signal.aborted || !button.isConnected) return;
     button.disabled = true;
     void modal.run(async () => {
       try {
@@ -1502,7 +1737,7 @@ export class ServerCommunityView {
       imageUpload: { client: this.feed.client, channelId: action.channelId },
     });
     modal.signal.addEventListener('abort', audioPreviewService.bind(modal.content), { once: true });
-    const render = () => {
+    const draw = () => {
       modal.content.innerHTML = `${renderImageCarousel(
         action.imageUrls, this.feed.client.getHttpBaseUrl(), action.title, action.imagePresentation,
       )}
@@ -1518,6 +1753,12 @@ export class ServerCommunityView {
           <button type="button" class="btn btn-primary" data-live-submit ${pending ? 'disabled' : ''}>${escapeHtml(form.submitLabel ?? t('common.confirm'))}</button>
         </footer>`;
     };
+    // Sending and a failed send rebuild the form; the scroll position stays where it was.
+    const render = () => preserveViewState(modal.content, draw, {
+      scroller: '.live-action-step',
+      itemKeys: QUESTION_ITEMS,
+      fallback: () => modal.content.querySelector<HTMLElement>('.live-action-step > h2'),
+    });
     modal.content.addEventListener('input', (event) => {
       values = readBotFieldChange(event.target, form.fields, values) ?? values;
     }, { signal: modal.signal });
@@ -1532,14 +1773,7 @@ export class ServerCommunityView {
       if (pending || audioPreviewService.ownsEventTarget(event.target)) return;
       const choice = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-bot-select-value]') : null;
       if (choice) {
-        const name = choice.closest<HTMLElement>('[data-field-name]')?.dataset.fieldName;
-        if (name && choice.dataset.botSelectValue !== undefined) {
-          values = { ...values, [name]: choice.dataset.botSelectValue };
-          render();
-          const field = [...modal.content.querySelectorAll<HTMLElement>('[data-field-name]')].find(item => item.dataset.fieldName === name);
-          [...field?.querySelectorAll<HTMLElement>('[data-bot-select-value]') ?? []]
-            .find(item => item.dataset.botSelectValue === values[name])?.focus();
-        }
+        values = chooseBotFieldValue(choice, form.fields, values) ?? values;
         return;
       }
       const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button') : null;
@@ -1602,5 +1836,6 @@ export class ServerCommunityView {
     for (const unbind of this.unbind) unbind();
     for (const close of [...this.modals]) close(true);
     this.root.replaceChildren();
+    this.shownHtml = null;
   }
 }

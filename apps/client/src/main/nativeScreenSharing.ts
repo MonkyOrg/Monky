@@ -5,16 +5,15 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import {
   MessageType, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, SCREEN_SHARE_LIMITS, nativeScreenCommandSchema, nativeScreenEventSchema,
-  getScreenShareProfile,
+  getScreenShareProfile, nativeScreenFailureReason,
   nativeScreenProducerSchema, nativeScreenReplySchema, nativeScreenRpcMethodSchema, nativeScreenSignalSchema,
   type NativeScreenCall, type NativeScreenCapabilities, type NativeScreenCommand, type NativeScreenCommandResult,
-  type NativeScreenEvent, type NativeScreenFailure, type NativeScreenParticipant, type NativeScreenSignalPayload,
+  type NativeScreenEvent, type NativeScreenParticipant, type NativeScreenSignalPayload,
   type NativeScreenSource, type NativeScreenAudioPreferences, type NativeScreenCaptureKind, type NativeScreenVideoProfile,
-  type NativeScreenCaptureMode, type ScreenEncodingSelection, type ScreenEncodingAvailability,
-  type ScreenEncodingMode, type ScreenCodecPreference, type ScreenEncodingStrategy, type BrowserOcclusionEngine,
+  type NativeScreenCaptureMode, type ScreenEncodingSelection, type ScreenEncodingAvailability, type BrowserOcclusionEngine,
 } from '@monky/shared';
 import {
-  loadRuntime, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription, NativePcmCaptureHub,
+  loadRuntimeAsync, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription, NativePcmCaptureHub,
   NativeScreenPreviewBridge, createCaptureBridge, type CaptureBridge, probeCaptureCapabilities, assertMacCaptureBridgeClosed,
   validateCaptureTarget, type NativeScreenRuntime, type NativeScreenAudioOptions, type NativeScreenCaptureTarget,
   type NativeScreenCaptureCapability,
@@ -26,6 +25,7 @@ import type { ClientLogger } from './clientLogger';
 import { browserOcclusionEngine } from './browserOcclusion';
 import { mt } from './i18n';
 import { selectScreenEncoding } from './screenEncodingPolicy';
+import { ScreenEncodingCache, isScreenEncoderFailure, type ScreenEncodingRequest } from './screenEncodingCache';
 
 type RendererRequest = Extract<NativeScreenEvent, { requestId: string }>;
 type RequestInput = Omit<Extract<RendererRequest, { type: 'signal' }>, 'requestId' | 'callId'>
@@ -180,27 +180,6 @@ function errorDetails(error: unknown): { message: string; code?: 'ERR_SCREEN_CAP
   }
   return { message: [...messages].join(' / ').slice(0, 4096) || 'Native screen operation failed.',
     ...(code ? { code } : {}) };
-}
-function failureReason(error: unknown): NativeScreenFailure {
-  const pending: unknown[] = [error], seen = new Set<unknown>();
-  while (pending.length && seen.size < 12) {
-    const current = pending.shift();
-    if (seen.has(current)) continue;
-    seen.add(current);
-    if (record(current) && typeof current.code === 'string' && [
-      'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED', 'ERR_MAC_VIDEO_PROFILE_UNSUPPORTED',
-      'ERR_MAC_VIDEO_ENCODER_UNSUPPORTED',
-    ].includes(current.code)) return 'unsupported';
-    if (record(current) && typeof current.code === 'string' && [
-      'ERR_SCREEN_CAPTURE_SOURCE_LOST', 'ERR_MAC_SOURCE_LOST', 'ERR_MAC_SOURCE_CHANGED',
-      'ERR_MAC_SOURCE_IDENTITY', 'ERR_MAC_CAPTURE_SOURCE_CHANGED', 'ERR_AUDIO_TARGET',
-    ].includes(current.code)) return 'source-unavailable';
-    if (current instanceof AggregateError) pending.push(...current.errors.slice(0, 8));
-    if (current instanceof Error && current.cause !== undefined) pending.push(current.cause);
-  }
-  const code = record(error) && typeof error.code === 'string' ? error.code : '';
-  if (code.includes('CAPTURE')) return 'capture-failed';
-  return 'connection-failed';
 }
 function documentIdentity(value: string): string {
   const url = new URL(value);
@@ -383,6 +362,7 @@ class NativeScreenSharingService {
   private encodingQueue: Promise<unknown> = Promise.resolve();
   private encodingRetirementFailure: unknown;
   private readonly encodingRequests = new Map<string, AbortController>();
+  private readonly encodingCache = new ScreenEncodingCache();
   // Counts Windows display changes. A monitor identity read can wait behind another program's registry
   // writes while holding the system display lock, freezing every screen, so it never runs on a timer.
   private displayGeneration = 0;
@@ -521,7 +501,7 @@ class NativeScreenSharingService {
     this.emit(call, { type: 'error', callId: call.config.callId, publisherSessionId,
       ...(shareId ? { shareId } : {}), ...(presentationId ? { presentationId } : {}),
       ...(sourceInstanceId ? { sourceInstanceId } : {}),
-      reason: details.code ? 'capture-failed' : failureReason(error), ...details });
+      reason: details.code ? 'capture-failed' : nativeScreenFailureReason(error), ...details });
   }
 
   private request(call: CallRecord, input: RequestInput): Promise<unknown> {
@@ -579,7 +559,8 @@ class NativeScreenSharingService {
         return { capture: false, captureAudio: false, receive: false, backend: null, reason: 'platform' };
       }
       try {
-        this.runtime = loadRuntime();
+        // Asynchronous, so the first picker or watch does not stall every IPC while the runtime is hashed.
+        this.runtime = await loadRuntimeAsync();
         this.log('runtime-ready', { requiresSelectionProbe: true, captureAudio: screenAudio.isPacketCaptureSupported() });
         return { capture: false, captureAudio: screenAudio.isPacketCaptureSupported(), receive: true,
           requiresSelectionProbe: true, captureKinds: [...this.runtime.capture.captureKinds], backend: null, reason: null };
@@ -597,19 +578,38 @@ class NativeScreenSharingService {
     return this.runtime;
   }
 
-  private encoding(video: NativeScreenVideoProfile, mode: ScreenEncodingMode, codec: ScreenCodecPreference,
-    strategy: ScreenEncodingStrategy, signal?: AbortSignal, inspectHardware = true): Promise<ScreenEncodingAvailability> {
+  /**
+   * Which encoder a request can use. An admission reuses what an earlier discovery proved; `refresh`, a
+   * verification the user asked for, always probes again and replaces what was remembered.
+   */
+  private encoding(request: ScreenEncodingRequest, signal?: AbortSignal, refresh = false): Promise<ScreenEncodingAvailability> {
     if (this.encodingRetirementFailure) return Promise.reject(this.encodingRetirementFailure);
-    if (this.encodingJobs.size >= 4) return Promise.reject(new Error('Screen encoder discovery is busy.'));
+    const { video, mode, codec, strategy, inspectHardware } = request;
     const abort = signal ? AbortSignal.any([this.encodingAbort.signal, signal]) : this.encodingAbort.signal;
+    const remembered = refresh ? null : this.encodingCache.get(request, this.displayGeneration);
+    if (remembered) return Promise.resolve().then(() => {
+      abort.throwIfAborted();
+      this.log('encoder-discovery-reused', { encoder: remembered.selection?.encoder ?? null,
+        codec: remembered.selection?.codec ?? null, encodingMode: remembered.selection?.mode ?? null,
+        video: diagnosticProfile(video) });
+      return remembered;
+    });
+    if (this.encodingJobs.size >= 4) return Promise.reject(new Error('Screen encoder discovery is busy.'));
+    // Nothing that starts after this verification may reuse the answer it is replacing.
+    if (refresh) this.encodingCache.forget(request);
     const work = this.encodingQueue.then(async () => {
       abort.throwIfAborted();
+      // An identical discovery queued ahead of this one already answered it.
+      const settled = refresh ? null : this.encodingCache.get(request, this.displayGeneration);
+      if (settled) return settled;
+      const displayGeneration = this.displayGeneration;
       const capabilities = await this.capabilities();
       abort.throwIfAborted();
       if (!capabilities.requiresSelectionProbe && !capabilities.capture)
         throw new Error(`Native screen encoder runtime is unavailable: ${capabilities.reason}.`);
       const runtime = this.nativeRuntime();
-      return selectScreenEncoding(strategy, mode, codec, runtime.capture.encoders, async selection => {
+      const skipped: Error[] = [];
+      const availability = await selectScreenEncoding(strategy, mode, codec, runtime.capture.encoders, async selection => {
         abort.throwIfAborted();
         const profile = getScreenShareProfile(video, 'source', selection.codec);
         const runId = randomBytes(16).toString('hex');
@@ -647,11 +647,14 @@ class NativeScreenSharingService {
           encoderInitialized: true, retirementConfirmed: true, sourceCaptured: false,
         });
       }, inspectHardware, (selection, error) => {
+        skipped.push(error);
         this.logFailure('encoder-candidate', error, undefined, {
           encoder: selection.encoder, codec: selection.codec, encodingMode: selection.mode,
           retirementConfirmed: true, continuingHardwareDiscovery: true,
         }, 'INFO');
       });
+      this.encodingCache.set(request, displayGeneration, availability, skipped);
+      return availability;
     });
     this.encodingQueue = work.catch(() => {});
     this.encodingJobs.add(work);
@@ -698,8 +701,10 @@ class NativeScreenSharingService {
       const abort = new AbortController();
       this.encodingRequests.set(command.probeId, abort);
       try {
-        return { kind: 'encoding', availability: await this.encoding(command.video, command.encodingMode, command.codec,
-          command.encodingStrategy ?? 'automatic', abort.signal) };
+        // Settings shows what the encoders can do now, so it never answers from memory; what it proves
+        // replaces what later admissions reuse (a driver installed meanwhile, say).
+        return { kind: 'encoding', availability: await this.encoding({ video: command.video, mode: command.encodingMode,
+          codec: command.codec, strategy: command.encodingStrategy ?? 'automatic', inspectHardware: true }, abort.signal, true) };
       } finally { this.encodingRequests.delete(command.probeId); }
     }
     if (command.action === 'join') {
@@ -999,16 +1004,39 @@ class NativeScreenSharingService {
       sourceState();
       stage = 'preflight';
       this.log('preflight-start', diagnostic);
-      const encoding = await this.encoding(command.video, command.encodingMode ?? 'hardware', command.codec ?? 'auto',
-        command.encodingStrategy ?? 'automatic', selection.abort.signal, false);
-      assertCurrent();
-      if (!encoding.selection) throw new Error(encoding.reason ?? 'No compatible screen encoder is available for this codec and profile.');
-      const video = getScreenShareProfile(command.video, 'source', encoding.selection.codec);
-      diagnostic.video = diagnosticProfile(video);
-      selection.probe = new SelectedCaptureProbe(this.nativeRuntime(), captureDirectory,
-        error => this.logFailure('preflight', error, undefined, { ...diagnostic, stage: 'preflight' }));
-      const proof = await selection.probe.prepare(target, video, selection.abort.signal, encoding.selection,
-        command.preserveAspectRatio);
+      const discover = (): Promise<ScreenEncodingAvailability> => this.encoding({ video: command.video,
+        mode: command.encodingMode ?? 'hardware', codec: command.codec ?? 'auto',
+        strategy: command.encodingStrategy ?? 'automatic', inspectHardware: false }, selection.abort.signal);
+      type Preflight = { video: NativeScreenVideoProfile; proof: NativeScreenCaptureCapability };
+      // The selected source proves the chosen encoder with the real target, even when discovery was remembered.
+      const prepare = async (encoding: ScreenEncodingAvailability): Promise<Preflight> => {
+        assertCurrent();
+        if (!encoding.selection) throw new Error(encoding.reason ?? 'No compatible screen encoder is available for this codec and profile.');
+        const video = getScreenShareProfile(command.video, 'source', encoding.selection.codec);
+        diagnostic.video = diagnosticProfile(video);
+        selection.probe = new SelectedCaptureProbe(this.nativeRuntime(), captureDirectory,
+          error => this.logFailure('preflight', error, undefined, { ...diagnostic, stage: 'preflight' }));
+        try {
+          return { video, proof: await selection.probe.prepare(target, video, selection.abort.signal, encoding.selection,
+            command.preserveAspectRatio) };
+        } catch (error) {
+          // An encoder that fails with the real source makes every remembered discovery suspect.
+          if (isScreenEncoderFailure(error)) this.encodingCache.clear();
+          throw error;
+        }
+      };
+      let encoding = await discover();
+      let preflight: Preflight;
+      try { preflight = await prepare(encoding); }
+      catch (error) {
+        // A remembered choice that stopped working (a driver update, another adapter) is discovered again, once.
+        if (!isScreenEncoderFailure(error) || !this.encodingCache.isRemembered(encoding) || selection.probe?.retired !== true)
+          throw error;
+        this.logFailure('preflight', error, undefined, { ...diagnostic, stage: 'remembered-encoder' }, 'WARN');
+        encoding = await discover();
+        preflight = await prepare(encoding);
+      }
+      const { video, proof } = preflight;
       assertCurrent();
       sourceState();
       const backend = target.platform === 'darwin'
@@ -1027,6 +1055,8 @@ class NativeScreenSharingService {
         shareId: command.shareId, instanceId: randomUUID(), video, audio: command.audio, codec: proof.codec,
       };
       const onError = (error: Error, context?: unknown): void => {
+        // An encoder that fails while capturing makes every remembered discovery suspect.
+        if (isScreenEncoderFailure(error)) this.encodingCache.clear();
         if (record(context) && typeof context.remoteSessionId === 'string') {
           console.warn('[NativeScreen] Screen viewer failed:', { shareId: source.shareId, remoteSessionId: context.remoteSessionId }, error);
           this.logFailure('viewer', error, undefined, { ...this.context(call, source.shareId),
@@ -1037,7 +1067,8 @@ class NativeScreenSharingService {
         this.logFailure('publisher', error, undefined, { ...this.context(call, source.shareId),
           ...(record(context) && typeof context.pipelineId === 'string' ? { pipeline: diagnosticId(context.pipelineId) } : {}) });
         this.error(call, error, call.config.sessionId, source.shareId, undefined, source.instanceId);
-        if (!call.stopping && call.sources.get(source.shareId)?.source === source && failureReason(error) === 'source-unavailable')
+        if (!call.stopping && call.sources.get(source.shareId)?.source === source
+          && nativeScreenFailureReason(error) === 'source-unavailable')
           void this.removeSource(call, source.shareId).catch(cleanupError => {
             this.error(call, cleanupError, call.config.sessionId, source.shareId, undefined, source.instanceId);
           });
@@ -1217,7 +1248,7 @@ class NativeScreenSharingService {
           if (entry.monitor) clearInterval(entry.monitor);
           entry.monitor = null;
           this.logFailure('source-monitor', error, undefined, this.context(call, source.shareId));
-          if (target.kind === 'monitor' || failureReason(error) !== 'source-unavailable')
+          if (target.kind === 'monitor' || nativeScreenFailureReason(error) !== 'source-unavailable')
             this.error(call, error, call.config.sessionId, source.shareId, undefined, source.instanceId);
           void this.removeSource(call, source.shareId).catch(cleanupError =>
             this.error(call, cleanupError, call.config.sessionId, source.shareId, undefined, source.instanceId));
@@ -1531,6 +1562,7 @@ class NativeScreenSharingService {
   async retireDocument(): Promise<void> {
     if (this.calls.size) this.log('document-retirement', { calls: this.calls.size });
     for (const call of this.calls.values()) { call.documentRetired = true; call.remoteUnavailable = true; }
+    this.encodingCache.clear();
     const retirement = this.retireEncodingProbes();
     this.encodingAbort = new AbortController();
     await Promise.all([retirement, this.closeCalls()]);

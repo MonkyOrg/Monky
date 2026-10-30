@@ -314,7 +314,7 @@ if (!process.versions.electron) {
         throw new Error('The shared audience dropdown did not open and focus its search in channel settings');
       }
       await key('Escape');
-      if (!await browser.webContents.executeJavaScript(`!!document.querySelector('.channel-settings-card:not([hidden])') && !document.querySelector('[data-audience-popup]:popover-open')`)) {
+      if (!await browser.webContents.executeJavaScript(`!!document.querySelector('.channel-settings-card:not([hidden])') && !document.querySelector('[data-audience-popup]:popover-open:not([data-ui-closing])')`)) {
         throw new Error('Escape must close the role dropdown without closing channel settings');
       }
       await click('[data-audience-toggle]');
@@ -597,6 +597,16 @@ async function regression(locale) {
   check(field('.create-channel-modal') === reopenedCreate, 'late channel creation never closes a reopened form');
   create.close();
   client.sendRequest = sendRequest;
+  create.open();
+  const createDialog = field('.create-channel-modal');
+  check(createDialog.getAttribute('role') === 'dialog' && createDialog.getAttribute('aria-modal') === 'true'
+    && document.getElementById(createDialog.getAttribute('aria-labelledby'))?.textContent === t('channelModal.title'),
+  'Channel creation is announced as a labelled modal dialog');
+  document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check(!field('.create-channel-modal'), 'Escape closes channel creation even when focus is outside the form');
+  create.open();
+  field('#input-channel-name').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check(!field('.create-channel-modal'), 'Escape closes channel creation from its fields');
   const edit = new EditChannelModal();
   edit.open('text');
   check(!field('#input-channel-inherit'), 'Editing uses synchronization status instead of another inheritance switch');
@@ -677,6 +687,9 @@ async function regression(locale) {
     'A changed inherited category rejects a stale draft before sending');
   edit.close();
   store.setCategories(details.categories);
+  edit.open('text');
+  field('#input-channel-name').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check(!field('.channel-settings-card'), 'Escape closes channel editing');
   const initialCategories = [category, destination];
   const updatedCategory = { ...category, permissionOverwrites: [
     { roleId: null, allow: 0, deny: 524288 | 512 },

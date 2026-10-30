@@ -27,7 +27,7 @@ channel('child_process').subscribe(message => {
 // Only the extractor/upstream dependencies change. Parsing, persistent HTTP,
 // FFmpeg transcoding, playback feedback and native cleanup remain production code.
 sources.YouTubeSource = class extends OriginalSource {
-  constructor(paths) {
+  constructor(paths, options) {
     ffmpeg = paths.ffmpeg;
     let generating;
     const generate = signal => generating ??= processes.captureBytes(paths.ffmpeg, [
@@ -94,6 +94,6 @@ sources.YouTubeSource = class extends OriginalSource {
         ...args.slice(input + 2),
       ], signal, timeout, limit, options);
     };
-    super(paths, { capture, captureBytes, request });
+    super(paths, { ...options, capture, captureBytes, request });
   }
 };

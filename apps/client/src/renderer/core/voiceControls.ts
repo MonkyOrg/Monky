@@ -3,7 +3,7 @@ import { voiceStore } from '../stores/voiceStore';
 import { settingsStore } from '../stores/settingsStore';
 import { audioProcessor } from './AudioProcessor';
 import { webRtcManager } from './WebRtcManager';
-import { callClient } from './serverConnection';
+import { callClient, leaveCurrentCall } from './serverConnection';
 import { soundEffects } from './SoundEffects';
 import { sessionManager } from './SessionManager';
 import { serverStore } from '../stores/serverStore';
@@ -97,4 +97,13 @@ export function toggleAudioDeafen(): void {
 export function toggleSoundboardMute(): void {
   settingsStore.soundboardMuted = !settingsStore.soundboardMuted;
   settingsStore.save();
+}
+
+/**
+ * Hangs up from the stage, the sidebar row, the tray or the taskbar thumbnail.
+ * It never goes through a view: a stage that is not on screen would paint
+ * itself over the chat.
+ */
+export function leaveCall(): void {
+  if (voiceStore.currentVoiceChannelId) leaveCurrentCall();
 }

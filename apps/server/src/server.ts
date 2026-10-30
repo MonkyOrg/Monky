@@ -318,6 +318,7 @@ export class MonkyServer {
       serverRepo,
       (userId, channelId, permission) => channelService.canUserAccessChannel(userId, channelId, permission),
       (userId, channelId) => channelService.canUserAccessChannel(userId, channelId, Permission.READ_MESSAGES),
+      (channelId, userIds) => channelService.membersWithAccess(channelId, userIds, [Permission.VIEW_CHANNEL, Permission.READ_MESSAGES]),
       pollService,
     );
 

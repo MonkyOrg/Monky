@@ -300,7 +300,11 @@ async function main(): Promise<void> {
     disconnected: listener => { process.on('disconnect', listener); return () => process.off('disconnect', listener); },
   }, {
     id: workerId(process.env.MONKY_LOCAL_WORKER_ID),
-    source: paths => { ffmpeg = paths.ffmpeg; return new YouTubeSource(paths); },
+    source: paths => {
+      ffmpeg = paths.ffmpeg;
+      // Main verified these exact executables, digest and native probe, before starting this task.
+      return new YouTubeSource(paths, { toolsVerified: true });
+    },
     probe: checkMediaTool,
     verify: verifyContext,
     cleanupNative: async () => {

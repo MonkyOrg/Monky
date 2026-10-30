@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { ByteQueue } = require('../byteQueue.cjs');
 
 const MAGIC = 0x4d435331;
 const MAX_JSON = 1024 * 1024;
@@ -19,15 +20,15 @@ function encode(header, payload = Buffer.alloc(0)) {
 class Decoder {
   constructor(receive) {
     this.receive = receive;
-    this.buffer = Buffer.alloc(0);
+    this.queue = new ByteQueue();
     this.pending = null;
     this.blocked = false;
   }
   push(bytes) {
     assert.ok(Buffer.isBuffer(bytes) && !this.blocked, 'Native macOS output arrived while its pipe was paused.');
-    assert.ok(this.buffer.length + bytes.length <= MAX_JSON + MAX_PAYLOAD + 12 + 65536,
+    assert.ok(this.queue.length + bytes.length <= MAX_JSON + MAX_PAYLOAD + 12 + 65536,
       'Native macOS output exceeded its bounded frame buffer.');
-    this.buffer = Buffer.concat([this.buffer, bytes]);
+    this.queue.push(bytes);
     return this.drain();
   }
   drain() {
@@ -39,20 +40,21 @@ class Decoder {
         if (accepted === false) { this.blocked = true; return false; }
         this.pending = null;
       }
-      if (this.buffer.length < 12) return true;
-      assert.equal(this.buffer.readUInt32BE(0), MAGIC, 'Invalid native macOS wire identity.');
-      const jsonBytes = this.buffer.readUInt32BE(4), payloadBytes = this.buffer.readUInt32BE(8);
+      if (this.queue.length < 12) return true;
+      const prefix = this.queue.peek(12);
+      assert.equal(prefix.readUInt32BE(0), MAGIC, 'Invalid native macOS wire identity.');
+      const jsonBytes = prefix.readUInt32BE(4), payloadBytes = prefix.readUInt32BE(8);
       assert.ok(jsonBytes > 0 && jsonBytes <= MAX_JSON && payloadBytes <= MAX_PAYLOAD, 'Invalid native macOS wire bounds.');
       const size = 12 + jsonBytes + payloadBytes;
-      if (this.buffer.length < size) return true;
-      const header = JSON.parse(this.buffer.toString('utf8', 12, 12 + jsonBytes));
+      if (this.queue.length < size) return true;
+      const header = JSON.parse(this.queue.peek(jsonBytes, 12).toString('utf8'));
       assert.ok(header && typeof header === 'object' && !Array.isArray(header));
-      this.pending = { header, payload: Buffer.from(this.buffer.subarray(12 + jsonBytes, size)) };
-      this.buffer = this.buffer.subarray(size);
+      this.pending = { header, payload: this.queue.peek(payloadBytes, 12 + jsonBytes) };
+      this.queue.skip(size);
     }
   }
   end() {
-    assert.ok(!this.pending && this.buffer.length === 0, 'Native macOS pipe ended with an unretired or truncated frame.');
+    assert.ok(!this.pending && this.queue.length === 0, 'Native macOS pipe ended with an unretired or truncated frame.');
   }
 }
 

@@ -18,7 +18,7 @@ import { appEvents } from './EventBus';
 import { networkClient, type NetworkClient } from './NetworkClient';
 import { participantManager, type ParticipantManager } from './ParticipantManager';
 import { sessionManager } from './SessionManager';
-import { currentEventOrigin } from './sessionRouting';
+import { currentEventOrigin, emitOutsideRouting } from './sessionRouting';
 import { clientLog } from './ClientLogService';
 import { settingsStore } from '../stores/settingsStore';
 import { serverStore, type ServerStore } from '../stores/serverStore';
@@ -27,7 +27,8 @@ import { videoService } from './VideoService';
 import { RemoteMediaRouter } from './webrtc/RemoteMediaRouter';
 import { RemoteVadMonitor } from './webrtc/RemoteVadMonitor';
 import { RtcDiagnosticsCollector } from './webrtc/RtcDiagnosticsCollector';
-import { applyVideoCodecPreferences, type PreferredVideoCodec } from './webrtc/codecPreferences';
+import { applyVideoCodecPreferences } from './webrtc/codecPreferences';
+import { averageRoundTrip, candidateRoute, type CandidateRoute } from './webrtc/rtcStats';
 import { t } from '../i18n';
 import { SfuClientEngine, SfuConsumerTrackEvent } from './webrtc/SfuClientEngine';
 import { applyMediaEncodingPolicy, getMediaEncodingPolicy } from './webrtc/mediaEncodingPolicy';
@@ -42,10 +43,7 @@ import { overlayBridgeService } from './OverlayBridgeService';
  * One offer/answer exchange with a peer. A newer exchange replaces it, so one
  * that resumes after an await stops instead of applying a stale description.
  */
-interface PeerNegotiation {
-  /** Camera codec preference this exchange applies (#526). */
-  readonly preferred: PreferredVideoCodec;
-}
+type PeerNegotiation = object;
 
 export interface PeerSession {
   /** Bots may receive one authorized microphone, never camera or screen media. */
@@ -57,7 +55,21 @@ export interface PeerSession {
   remoteStream: MediaStream;
   isPolite: boolean;
   makingOffer: boolean;
+  /** Candidates that arrived before any remote description, bounded (R-VOICE-7). */
   candidateQueue: RTCIceCandidateInit[];
+  /** The queue overflowed since it was last flushed; logged once. */
+  candidatesDropped?: boolean;
+  /**
+   * The last offer from this peer was dropped as the impolite side of a
+   * collision, so the candidates that follow it are expected not to apply.
+   */
+  ignoreOffer?: boolean;
+  /**
+   * A local change (such as the camera direction) still has to reach this peer
+   * in an offer. Raised by the change, cleared by the next offer or answer, which
+   * carry it — so a peer that is not answering holds up only its own link.
+   */
+  negotiationNeeded?: boolean;
   audioSender?: RTCRtpSender | null;
   videoSender?: RTCRtpSender | null;
   /**
@@ -101,13 +113,18 @@ export class WebRtcManager {
   private static readonly PEER_FAILURE_THRESHOLD_MS = 20000;
 
   /**
-   * How often the route to each connected peer is re-read (#466).
-   *
-   * Cheap enough to keep running for the whole call — `getStats()` on a handful
-   * of peers every few seconds — and short enough that the indicator catches up
-   * with an ICE upgrade well before anyone reads anything into it.
+   * How often the call's links are measured. One `getStats()` per link feeds
+   * both the relay indicator (#466) and the ping the stage and the sidebar
+   * show — before, each view polled every peer on its own (R-VOICEUI-7).
    */
-  private static readonly RELAY_SAMPLE_INTERVAL_MS = 5000;
+  private static readonly CALL_STATS_INTERVAL_MS = 2000;
+
+  /**
+   * Bound on ICE candidates held for a peer before its first description.
+   * Legitimate peers send a few dozen; this is what the bot SDK and the Light
+   * allow too, and it keeps a buggy or hostile peer from growing it forever.
+   */
+  private static readonly MAX_PENDING_ICE_CANDIDATES = 256;
 
   /**
    * Ceiling for the SFU rejoin backoff.
@@ -168,8 +185,13 @@ export class WebRtcManager {
    * working is usually a blip worth waiting out.
    */
   private everConnectedPeers: Set<string> = new Set();
-  /** Interval timers that keep the relay indicator honest, per peer (#466). */
-  private relayMonitors: Map<string, any> = new Map();
+  /** Timer of the call-wide link measurement, running while the call has links. */
+  private callStatsTimer: ReturnType<typeof setInterval> | null = null;
+  /** Bumped on teardown so a measurement still awaiting stats is discarded. */
+  private callStatsEpoch = 0;
+  private callStatsSampling = false;
+  /** Last measured ping of the call, shared by every view that shows it. */
+  private callPing: number | null = null;
   private localAudioTrack: MediaStreamTrack | null = null;
   private localCameraTrack: MediaStreamTrack | null = null;
   private cameraTrackRevision = 0;
@@ -184,7 +206,12 @@ export class WebRtcManager {
   private currentSessionId: string = '';
   private isDeafened: boolean = false;
   private isMigratingVoiceMode: boolean = false;
-  private migrationDebounceTimer: any = null;
+  /**
+   * Transport the current call actually runs on, decided when the call starts
+   * or migrates and cleared when it ends. `isSfuMode()` only says what the
+   * server is configured for (R-VOICE-3).
+   */
+  private activeTransport: 'p2p' | 'sfu' | null = null;
   private voiceReconnectSuspended = false;
 
   /**
@@ -498,35 +525,26 @@ export class WebRtcManager {
     appEvents.on('voice.screen_audio_mute_changed', () => {
       this.updateScreenAudio();
     });
-
-    appEvents.on('server.meta_updated', () => {
-      if (this.migrationDebounceTimer) {
-        clearTimeout(this.migrationDebounceTimer);
-      }
-      this.migrationDebounceTimer = setTimeout(() => {
-        this.migrationDebounceTimer = null;
-        void this.handleVoiceModeUpdate();
-      }, 100);
-    });
   }
 
+  /**
+   * Moves a P2P call onto the SFU once its server switches to SFU.
+   *
+   * The decision reads the transport the call actually runs on. An SFU call
+   * that is still joining, or that sits between two rungs of its rejoin ladder,
+   * has no ready engine either; read as "not on the SFU", that state got
+   * "migrated" whenever an admin changed any server setting: every peer, screen
+   * and camera was torn down and the backoff started over (R-VOICE-3).
+   *
+   * SFU -> P2P has a server-authorized leave/rejoin lifecycle instead, never a
+   * hot swap of transports whose old membership has already been evicted.
+   */
   public async handleVoiceModeUpdate(): Promise<void> {
     const channelId = voiceStore.currentVoiceChannelId;
     const sessionKey = voiceStore.voiceSessionKey;
-    if (!channelId || this.voiceReconnectSuspended) return;
-
-    const isSfu = this.voiceServerStore.serverDetails?.voiceMode === 'sfu';
-    const currentlyRunningSfu = this.sfuEngine.isReady() || this.sfuEngine.isChannelConnected();
-    const targetIsSfu = isSfu;
-    // SFU -> P2P has a server-authorized leave/rejoin lifecycle, never a hot
-    // swap of transports whose old membership has already been evicted.
-    if (!targetIsSfu) return;
+    if (!channelId || this.voiceReconnectSuspended || this.activeTransport !== 'p2p' || !this.isSfuMode()) return;
     const isCurrent = () => voiceStore.currentVoiceChannelId === channelId
       && voiceStore.voiceSessionKey === sessionKey && this.isSfuMode();
-
-    if (currentlyRunningSfu === targetIsSfu) {
-      return;
-    }
 
     if (this.isMigratingVoiceMode) {
       console.log('[WebRTC] Voice mode migration already in flight, skipping duplicate call.');
@@ -534,15 +552,15 @@ export class WebRtcManager {
     }
 
     this.isMigratingVoiceMode = true;
-    const fromMode = currentlyRunningSfu ? 'SFU' : 'P2P';
-    const toMode = targetIsSfu ? 'SFU' : 'P2P';
-
-    console.log(`[WebRTC] Dynamic voice mode transition starting: ${fromMode} -> ${toMode}. Migrating active call...`);
-    clientLog.info('WEBRTC', `Dynamic voice mode transition starting: ${fromMode} -> ${toMode}`);
+    console.log('[WebRTC] Dynamic voice mode transition starting: P2P -> SFU. Migrating active call...');
+    clientLog.info('WEBRTC', 'Dynamic voice mode transition starting: P2P -> SFU');
 
     try {
       // 1. Cleanly tear down previous session connections and media router elements
       this.closeAllPeers();
+      // The call stays admitted: it keeps being measured on its new transport.
+      this.activeTransport = 'sfu';
+      this.startCallStats();
 
       // 2. Clear remote participant media streams so views do not retain closed tracks
       const participants = this.voiceParticipants.getInVoiceChannel(channelId);
@@ -557,17 +575,12 @@ export class WebRtcManager {
       await new Promise((resolve) => setTimeout(resolve, 150));
       if (!isCurrent()) return;
 
-      // 4. Re-initialize in the new target mode
-      this.resetSfuReconnect();
-      if (targetIsSfu) {
-        await this.initSfuForCurrentChannel();
-      } else {
-        this.connectToAllParticipants();
-      }
+      // 4. Join the SFU room
+      await this.initSfuForCurrentChannel();
 
       // 5. Notify UI of the mode switch
       if (isCurrent()) appEvents.emit('voice.mode_switched', { mode: 'sfu' });
-      console.log(`[WebRTC] Dynamic voice mode transition completed: ${fromMode} -> ${toMode}`);
+      console.log('[WebRTC] Dynamic voice mode transition completed: P2P -> SFU');
     } catch (err) {
       console.error('[WebRTC] Error during dynamic voice mode migration:', err);
     } finally {
@@ -662,10 +675,13 @@ export class WebRtcManager {
         return;
       }
       // Speak denied: stay in the call listening; publish once it is allowed.
-      if (this.localAudioTrack && !voiceStore.permissionMuted) {
-        const producer = await this.sfuEngine.produceMic(this.localAudioTrack);
+      const microphone = this.localAudioTrack;
+      if (microphone && !voiceStore.permissionMuted) {
+        const producer = await this.sfuEngine.produceMic(microphone);
         if (this.isSfuJoinStale(epoch, channelId)) return;
-        if (!producer && !this.sfuEngine.isMicrophoneDenied()) {
+        if (!producer && microphone.readyState !== 'live') {
+          this.dropEndedMicrophone(microphone);
+        } else if (!producer && !this.sfuEngine.isMicrophoneDenied()) {
           this.handleSfuConnectionFailure('Could not publish the microphone to the SFU');
           return;
         }
@@ -733,17 +749,20 @@ export class WebRtcManager {
     );
   }
 
-  public connectToAllParticipants(): void {
-    const channelId = voiceStore.currentVoiceChannelId;
-    if (!channelId) return;
-    const participants = this.voiceParticipants.getInVoiceChannel(channelId);
-    for (const p of participants) {
-      const sid = p.user.sessionId || p.user.id;
-      if (sid && sid !== this.currentSessionId) {
-        const isInitiator = this.currentSessionId.localeCompare(sid) > 0;
-        void this.connectToPeer(sid, isInitiator);
-      }
-    }
+  /**
+   * Keeps the call going listen-only when its microphone track ended under it.
+   *
+   * A rejoin cannot revive a capture track, so treating this as a broken link
+   * made every rung publish the same dead track and fail again, dropping all
+   * the call's audio each time (R-VOICE-12). The user is told instead; picking
+   * an input device then publishes a fresh microphone.
+   */
+  private dropEndedMicrophone(track: MediaStreamTrack): void {
+    if (this.localAudioTrack !== track) return;
+    this.localAudioTrack = null;
+    clientLog.warn('AUDIO', 'The microphone track ended during the call; continuing listen-only');
+    const error = t('voiceJoin.noAudioTrack');
+    emitOutsideRouting(() => appEvents.emit('voice.microphone_failed', { error }));
   }
 
   private handleSfuConsumerTrack(event: SfuConsumerTrackEvent): void {
@@ -852,6 +871,7 @@ export class WebRtcManager {
   private handleSfuConnected(): void {
     if (!voiceStore.currentVoiceChannelId || this.voiceReconnectSuspended
       || this.signalClient.getStatus() !== 'CONNECTED') return;
+    this.startCallStats();
     if (this.sfuReconnectTimer) {
       clearTimeout(this.sfuReconnectTimer);
       this.sfuReconnectTimer = null;
@@ -951,16 +971,18 @@ export class WebRtcManager {
   }
 
   /**
-   * Re-send an offer when the connection is stable but still has a local track
-   * that was never negotiated (see hasUnnegotiatedSenders), such as one whose
-   * offer was dropped by a glare/rollback.
+   * Sends an offer once the link can take one, when it owes the peer a local
+   * change: a flagged one (`negotiationNeeded`), or a track whose offer was
+   * dropped by a glare/rollback (see hasUnnegotiatedSenders). A failed link is
+   * left to its ICE restart or rebuild, whose offer carries the change anyway.
    */
   private async renegotiateIfNeeded(session: PeerSession): Promise<void> {
     const pc = session.pc;
-    if (pc.signalingState === 'stable' && !session.makingOffer && this.hasUnnegotiatedSenders(pc)) {
-      console.log(`[WebRTC] Re-negotiating dropped track(s) for ${session.peerSessionId}`);
-      await this.sendOffer(session);
-    }
+    if (!this.isCurrentPeer(session) || pc.signalingState !== 'stable' || session.makingOffer
+      || pc.connectionState === 'failed') return;
+    if (!session.negotiationNeeded && !this.hasUnnegotiatedSenders(pc)) return;
+    console.log(`[WebRTC] Re-negotiating pending local changes for ${session.peerSessionId}`);
+    await this.sendOffer(session);
   }
 
   private clearPeerTimers(session: PeerSession): void {
@@ -1041,8 +1063,8 @@ export class WebRtcManager {
 
     if (existing) {
       this.clearPeerTimers(existing);
-      this.stopRelayMonitor(peerSessionId);
       this.vadMonitor.cleanupRemoteVad(peerSessionId);
+      existing.candidateQueue.length = 0;
       try {
         existing.pc.close();
       } catch (e) {}
@@ -1180,7 +1202,6 @@ export class WebRtcManager {
    */
   private forgetPeerFailureState(peerSessionId: string): void {
     this.clearPeerFailureCountdown(peerSessionId);
-    this.stopRelayMonitor(peerSessionId);
     this.voiceParticipants.setPeerConnecting(peerSessionId, false);
     this.voiceParticipants.setPeerConnectionFailed(peerSessionId, false);
     this.voiceParticipants.setPeerRelayed(peerSessionId, false);
@@ -1189,106 +1210,95 @@ export class WebRtcManager {
   }
 
   /**
-   * Checks whether the established link is going through a TURN relay (#425).
+   * Measures the call now and keeps measuring it until the call ends: the ping
+   * every view shows and, on P2P, each peer's relay indicator (#466).
    *
-   * ICE picks the relay on its own, and only when no direct path exists, so
-   * this is read from the candidate pair actually carrying media rather than
-   * assumed from whether a TURN server was offered. Either endpoint being of
-   * type `relay` means the media is being forwarded by the server.
-   *
-   * Sampled repeatedly rather than once, because the first pair to succeed is
-   * frequently not the final one: relay pairs have the lowest priority but the
-   * shortest round trip, so ICE regularly connects through the relay and then
-   * promotes the direct pair a moment later. Reading it once at `connected`
-   * froze that first instant and left calls that had gone direct permanently
-   * labelled as relayed (#466).
+   * It runs from admission, not from the first connected link. The stage and
+   * the sidebar only re-evaluate the ping when a sample arrives, so a call
+   * whose links are still connecting, or never connect behind a NAT without
+   * TURN (#426), has to keep publishing its empty samples; otherwise the
+   * views keep showing the moment the caller was alone. Idempotent.
    */
-  private async sampleRelayUsage(peerSessionId: string, session: PeerSession): Promise<void> {
-    try {
-      const stats = await session.pc.getStats();
-      const pair = WebRtcManager.selectedCandidatePair(stats);
-      if (!pair) return;
-
-      const local = pair.localCandidateId ? stats.get(pair.localCandidateId) : undefined;
-      const remote = pair.remoteCandidateId ? stats.get(pair.remoteCandidateId) : undefined;
-      if (!local && !remote) return;
-
-      const relayed = local?.candidateType === 'relay' || remote?.candidateType === 'relay';
-      if (session.isRelayed === relayed) return;
-      session.isRelayed = relayed;
-      this.voiceParticipants.setPeerRelayed(peerSessionId, relayed);
-
-      clientLog.info(
-        'WEBRTC',
-        relayed
-          ? `Peer ${peerSessionId} is going through the TURN relay`
-          : `Peer ${peerSessionId} is connected directly (P2P)`,
-        { localType: local?.candidateType, remoteType: remote?.candidateType }
-      );
-      console.log(
-        `[WebRTC] Peer ${peerSessionId} route: ${relayed ? 'TURN relay' : 'direct'} (${local?.candidateType} / ${remote?.candidateType})`
-      );
-    } catch (error) {
-      clientLog.warn('WEBRTC', `Failed to detect relay usage for peer ${peerSessionId}`, {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      console.warn('[WebRTC] Failed to determine whether the peer is relayed:', error);
+  private startCallStats(): void {
+    if (!this.callStatsTimer) {
+      this.callStatsTimer = setInterval(() => { void this.sampleCallStats(); }, WebRtcManager.CALL_STATS_INTERVAL_MS);
     }
+    void this.sampleCallStats();
+  }
+
+  private stopCallStats(): void {
+    if (this.callStatsTimer) clearInterval(this.callStatsTimer);
+    this.callStatsTimer = null;
+    this.callStatsEpoch++;
+    this.callStatsSampling = false;
+    if (this.callPing !== null) this.publishCallPing(null);
   }
 
   /**
-   * The candidate pair currently carrying media, or undefined while ICE has not
-   * settled on one.
-   *
-   * `transport.selectedCandidatePairId` is the authoritative answer. The
-   * `nominated` fallback exists for engines that omit it, but it is a weaker
-   * signal: nomination shows up in the stats at different moments on each side
-   * of a call, which is how the very same link ended up flagged as relayed on
-   * one machine and as direct on the other (#466).
+   * One measurement of the whole call, shared by the stage and the sidebar.
+   * P2P averages the peers it is connected to; the SFU reports the worse of
+   * its two transports, which lead to the same server.
    */
-  private static selectedCandidatePair(stats: RTCStatsReport): any | undefined {
-    for (const report of stats.values()) {
-      if (report.type === 'transport' && report.selectedCandidatePairId) {
-        const pair = stats.get(report.selectedCandidatePairId);
-        if (pair) return pair;
-      }
+  private async sampleCallStats(): Promise<void> {
+    if (this.callStatsSampling) return;
+    const epoch = this.callStatsEpoch;
+    this.callStatsSampling = true;
+    try {
+      const sfu = (this.activeTransport ?? (this.isSfuMode() ? 'sfu' : 'p2p')) === 'sfu';
+      const ping = sfu ? await this.sfuEngine.getPing() : averageRoundTrip(await Promise.all(
+        [...this.peers.values()].filter(session => session.pc.connectionState === 'connected')
+          .map(session => this.samplePeerRoute(session))));
+      if (epoch === this.callStatsEpoch) this.publishCallPing(ping);
+    } finally {
+      if (epoch === this.callStatsEpoch) this.callStatsSampling = false;
     }
-    for (const report of stats.values()) {
-      if (report.type === 'candidate-pair' && report.state === 'succeeded' && (report.selected || report.nominated)) {
-        return report;
-      }
-    }
-    return undefined;
   }
 
-  /** Keeps the relay indicator following the route ICE is actually using (#466). */
-  private startRelayMonitor(peerSessionId: string, session: PeerSession): void {
-    // A recovery throws the RTCPeerConnection away and builds a new one under
-    // the same key, so this always rebinds to the session that just connected
-    // rather than leaving the indicator tied to a connection that is gone.
-    this.stopRelayMonitor(peerSessionId);
-    void this.sampleRelayUsage(peerSessionId, session);
-
-    const timer = setInterval(() => {
-      if (this.peers.get(peerSessionId) !== session || session.pc.connectionState === 'closed') {
-        clearInterval(timer);
-        if (this.relayMonitors.get(peerSessionId) === timer) {
-          this.relayMonitors.delete(peerSessionId);
-        }
-        return;
-      }
-      void this.sampleRelayUsage(peerSessionId, session);
-    }, WebRtcManager.RELAY_SAMPLE_INTERVAL_MS);
-
-    this.relayMonitors.set(peerSessionId, timer);
+  private publishCallPing(ping: number | null): void {
+    this.callPing = ping;
+    emitOutsideRouting(() => appEvents.emit('voice.ping_updated', ping));
   }
 
-  private stopRelayMonitor(peerSessionId: string): void {
-    const timer = this.relayMonitors.get(peerSessionId);
-    if (timer) {
-      clearInterval(timer);
-      this.relayMonitors.delete(peerSessionId);
+  /**
+   * Reads the route of a peer link and keeps its relay indicator current (#425).
+   *
+   * ICE picks the relay on its own, and only when no direct path exists, so
+   * this is read from the candidate pair actually carrying media rather than
+   * assumed from whether a TURN server was offered. It is sampled for the whole
+   * call rather than once: relay pairs have the lowest priority but the
+   * shortest round trip, so ICE regularly connects through the relay and then
+   * promotes the direct pair a moment later. Reading it once at `connected`
+   * left calls that had gone direct permanently labelled as relayed (#466).
+   */
+  private async samplePeerRoute(session: PeerSession): Promise<number | null> {
+    const peerSessionId = session.peerSessionId;
+    let route: CandidateRoute | null;
+    try {
+      route = candidateRoute(await session.pc.getStats());
+    } catch (error) {
+      if (this.isCurrentPeer(session)) {
+        clientLog.warn('WEBRTC', `Failed to read the route of peer ${peerSessionId}`, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return null;
     }
+    if (!route || !this.isCurrentPeer(session)) return null;
+    if ((route.local || route.remote) && session.isRelayed !== route.relayed) {
+      session.isRelayed = route.relayed;
+      this.voiceParticipants.setPeerRelayed(peerSessionId, route.relayed);
+      clientLog.info(
+        'WEBRTC',
+        route.relayed
+          ? `Peer ${peerSessionId} is going through the TURN relay`
+          : `Peer ${peerSessionId} is connected directly (P2P)`,
+        { localType: route.local?.type, remoteType: route.remote?.type }
+      );
+      console.log(
+        `[WebRTC] Peer ${peerSessionId} route: ${route.relayed ? 'TURN relay' : 'direct'} (${route.local?.type} / ${route.remote?.type})`
+      );
+    }
+    return route.rttMs;
   }
 
   /**
@@ -1359,7 +1369,7 @@ export class WebRtcManager {
         return;
       }
       this.clearPeerTimers(existingSession);
-      this.stopRelayMonitor(peerSessionId);
+      existingSession.candidateQueue.length = 0;
       try {
         existingSession.pc.close();
       } catch (e) {}
@@ -1558,7 +1568,11 @@ export class WebRtcManager {
         this.voiceParticipants.setRemoteStream(peerSessionId, remoteStream);
         this.everConnectedPeers.add(peerSessionId);
         this.markPeerReachable(peerSessionId);
-        this.startRelayMonitor(peerSessionId, session);
+        // Measured at once: the relay indicator follows ICE as it settles
+        // (#466), and the ping does not wait for the next sample.
+        this.startCallStats();
+        // A change held up while the link was down goes out now (R-VOICE-4).
+        void this.renegotiateIfNeeded(session);
       } else if (state === 'failed') {
         this.clearPeerTimers(session);
         appEvents.emit('remote.peer_degraded', { sessionId: peerSessionId });
@@ -1578,7 +1592,7 @@ export class WebRtcManager {
       }
     };
 
-    applyVideoCodecPreferences(pc, settingsStore.preferredVideoCodec);
+    applyVideoCodecPreferences(pc);
     if (this.peers.get(peerSessionId) !== session) return;
 
     // Watchdog to ensure connection establishes within a reasonable time
@@ -1590,7 +1604,7 @@ export class WebRtcManager {
     }
   }
 
-  private async sendOffer(session: PeerSession, iceRestart = false, propagateError = false): Promise<void> {
+  private async sendOffer(session: PeerSession, iceRestart = false): Promise<void> {
     if (!this.isCurrentPeer(session)) return;
     // Native "stable" fires before the answer promise resolves and is sent.
     for (let pending = this.nativeTasks.get(session); pending; pending = this.nativeTasks.get(session)) {
@@ -1599,12 +1613,14 @@ export class WebRtcManager {
     }
     const client = this.signalClient;
     const localSessionId = this.currentSessionId;
-    const negotiation: PeerNegotiation = { preferred: settingsStore.preferredVideoCodec };
+    const negotiation: PeerNegotiation = {};
     session.negotiation = negotiation;
     const isCurrent = () => this.isCurrentPeer(session) && session.negotiation === negotiation;
     try {
       session.makingOffer = true;
-      applyVideoCodecPreferences(session.pc, negotiation.preferred);
+      applyVideoCodecPreferences(session.pc);
+      // The offer describes every local change made up to this point.
+      session.negotiationNeeded = false;
       const offer = await session.pc.createOffer({
         ...(!session.botPeer ? { offerToReceiveAudio: true, offerToReceiveVideo: true } : {}),
         iceRestart,
@@ -1621,11 +1637,12 @@ export class WebRtcManager {
         sdp: session.pc.localDescription?.toJSON ? session.pc.localDescription.toJSON() : session.pc.localDescription,
       });
     } catch (err) {
+      // Nothing reached the peer: keep the change owed for the next offer.
+      if (isCurrent()) session.negotiationNeeded = true;
       clientLog.error('WEBRTC', `Error sending offer to ${session.peerSessionId}`, {
         error: err instanceof Error ? err.message : String(err),
       });
       console.error(`[WebRTC] Error sending offer to ${session.peerSessionId}:`, err);
-      if (propagateError) throw err;
     } finally {
       if (session.negotiation === negotiation) session.makingOffer = false;
     }
@@ -1636,19 +1653,27 @@ export class WebRtcManager {
     const localSessionId = this.currentSessionId;
     const isCurrent = () => this.isCurrentPeer(session) && session.negotiation === negotiation;
     if (!isCurrent()) return false;
-    applyVideoCodecPreferences(session.pc, negotiation.preferred);
-    const answer = await session.pc.createAnswer();
-    if (!isCurrent()) return false;
-    await session.pc.setLocalDescription(answer);
-    if (!isCurrent()) return false;
-    client.send(MessageType.RTC_SIGNAL, {
-      targetSessionId: session.peerSessionId,
-      fromSessionId: localSessionId,
-      signalType: 'answer',
-      subscriptionId: session.subscriptionId,
-      sdp: answer,
-    });
-    return true;
+    applyVideoCodecPreferences(session.pc);
+    // An answer carries the local direction of every m-line the offer has, so
+    // it settles changes still owed; a brand-new m-line still needs an offer.
+    session.negotiationNeeded = false;
+    try {
+      const answer = await session.pc.createAnswer();
+      if (!isCurrent()) return false;
+      await session.pc.setLocalDescription(answer);
+      if (!isCurrent()) return false;
+      client.send(MessageType.RTC_SIGNAL, {
+        targetSessionId: session.peerSessionId,
+        fromSessionId: localSessionId,
+        signalType: 'answer',
+        subscriptionId: session.subscriptionId,
+        sdp: answer,
+      });
+      return true;
+    } catch (error) {
+      if (isCurrent()) session.negotiationNeeded = true;
+      throw error;
+    }
   }
 
   private async handleIncomingSignal(payload: WebRtcSignalPayload): Promise<void> {
@@ -1684,9 +1709,9 @@ export class WebRtcManager {
     try {
       // Every description names the connection it belongs to (PeerSession.subscriptionId).
       if ((signalType === 'offer' || signalType === 'answer') && !payload.subscriptionId) return;
-      const apply = () => this.applyIncomingSignal(peer, payload);
-      const changed = signalType === 'offer' || signalType === 'answer'
-        ? await this.runNativeTask(peer, apply) : await apply();
+      // Candidates share the queue of descriptions, so none reaches the
+      // connection ahead of the description it follows (R-VOICE-7).
+      const changed = await this.runNativeTask(peer, () => this.applyIncomingSignal(peer, payload));
       if (!changed || !this.isCurrentPeer(peer)) return;
       this.applyBitrateConstraints();
       // Follow-up offers must run outside the incoming-description queue.
@@ -1705,15 +1730,17 @@ export class WebRtcManager {
       if (signalType === 'offer' && sdp) {
         const offerCollision =
           session.makingOffer || session.pc.signalingState !== 'stable';
-
+        // The impolite side keeps its own offer; the candidates that follow
+        // the dropped one are then expected not to apply.
+        session.ignoreOffer = offerCollision && !session.isPolite;
+        if (session.ignoreOffer) {
+          console.log(`[WebRTC] Impolite peer ignoring offer collision from ${fromSessionId}`);
+          return false;
+        }
         if (offerCollision) {
-          if (!session.isPolite) {
-            console.log(`[WebRTC] Impolite peer ignoring offer collision from ${fromSessionId}`);
-            return false;
-          }
           console.log(`[WebRTC] Polite peer rolling back for offer from ${fromSessionId}`);
         }
-        const negotiation: PeerNegotiation = { preferred: settingsStore.preferredVideoCodec };
+        const negotiation: PeerNegotiation = {};
         session.negotiation = negotiation;
         session.makingOffer = false;
         if (offerCollision) {
@@ -1725,14 +1752,7 @@ export class WebRtcManager {
         if (!this.isCurrentPeer(session) || session.negotiation !== negotiation) return false;
         await session.pc.setRemoteDescription(new RTCSessionDescription(sdp));
         if (!this.isCurrentPeer(session) || session.negotiation !== negotiation) return false;
-
-        // Flush any queued candidates
-        while (session.candidateQueue.length > 0) {
-          const c = session.candidateQueue.shift();
-          if (c) {
-            await session.pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
-          }
-        }
+        await this.flushCandidates(session);
 
         if (session.botPeer) {
           session.receiveOnly = !isReceivingBotVoice(this.voiceParticipants.get(fromSessionId)?.voiceState);
@@ -1777,28 +1797,15 @@ export class WebRtcManager {
         return await this.sendAnswer(session, negotiation);
       } else if (signalType === 'answer' && sdp) {
         if (session.pc.signalingState === 'have-local-offer') {
+          session.ignoreOffer = false;
           await session.pc.setRemoteDescription(new RTCSessionDescription(sdp));
           if (!this.isCurrentPeer(session)) return false;
-
-          // Flush queued candidates
-          while (session.candidateQueue.length > 0) {
-            const c = session.candidateQueue.shift();
-            if (c) {
-              await session.pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
-            }
-          }
-
+          await this.flushCandidates(session);
           return true;
         }
       } else if (signalType === 'candidate' && candidate) {
-        if (session.pc.remoteDescription && session.pc.remoteDescription.type) {
-          try {
-            await session.pc.addIceCandidate(new RTCIceCandidate(candidate));
-          } catch (err) {}
-        } else {
-          // Buffer candidate until remoteDescription is set
-          session.candidateQueue.push(candidate);
-        }
+        if (session.pc.remoteDescription?.type) await this.addCandidate(session, candidate);
+        else this.queueCandidate(session, candidate);
       }
     } catch (err) {
       clientLog.error('WEBRTC', `Signal handling error from ${fromSessionId}`, {
@@ -1808,6 +1815,45 @@ export class WebRtcManager {
       console.error(`[WebRTC] Signal handling error from ${fromSessionId}:`, err);
     }
     return false;
+  }
+
+  /** Holds a candidate until the first remote description arrives, within a bound (R-VOICE-7). */
+  private queueCandidate(session: PeerSession, candidate: RTCIceCandidateInit): void {
+    if (session.candidateQueue.length < WebRtcManager.MAX_PENDING_ICE_CANDIDATES) {
+      session.candidateQueue.push(candidate);
+      return;
+    }
+    if (session.candidatesDropped) return;
+    session.candidatesDropped = true;
+    clientLog.warn('WEBRTC', `Dropping ICE candidates from ${session.peerSessionId}: `
+      + `${WebRtcManager.MAX_PENDING_ICE_CANDIDATES} are already waiting for a description`);
+  }
+
+  private async flushCandidates(session: PeerSession): Promise<void> {
+    const queued = session.candidateQueue.splice(0);
+    session.candidatesDropped = false;
+    for (const candidate of queued) {
+      if (!this.isCurrentPeer(session)) return;
+      await this.addCandidate(session, candidate);
+    }
+  }
+
+  /**
+   * Applies a remote candidate. Only those following an offer dropped in a
+   * collision are expected to fail; any other failure is a real ICE problem,
+   * so it is logged instead of swallowed (#426).
+   */
+  private async addCandidate(session: PeerSession, candidate: RTCIceCandidateInit): Promise<void> {
+    try {
+      await session.pc.addIceCandidate(candidate);
+    } catch (error) {
+      if (session.ignoreOffer || !this.isCurrentPeer(session)) return;
+      clientLog.warn('WEBRTC', `Could not apply an ICE candidate from ${session.peerSessionId}`, {
+        type: /\btyp (\S+)/.exec(candidate.candidate ?? '')?.[1] ?? null,
+        sdpMid: candidate.sdpMid ?? null,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /** Initial recovery and raw fallback; normal switches retain the processed track. */
@@ -1875,7 +1921,13 @@ export class WebRtcManager {
           const sender = session.audioSender ?? session.pc.getTransceivers().find(
             (transceiver) => transceiver.receiver.track.kind === 'audio',
           )?.sender;
-          if (!sender) throw new Error('Microphone sender is unavailable');
+          if (!sender) {
+            // A bot that calls us gets its microphone m-line from its own offer,
+            // which attaches the microphone of that moment: it has nothing to swap
+            // yet, and must not fail the switch for everyone else (R-VOICE-4).
+            if (session.botPeer) continue;
+            throw new Error('Microphone sender is unavailable');
+          }
           const oldTrack = sender.track;
           await sender.replaceTrack(track);
           replaced.push({ sender, previous: oldTrack, pc: session.pc });
@@ -2038,35 +2090,52 @@ export class WebRtcManager {
       transceiver.receiver.track.kind === 'video' || transceiver.sender.track?.kind === 'video');
   }
 
+  /**
+   * Points every peer's camera m-line at `track`.
+   *
+   * The direction and the track apply locally at once; telling a peer about a
+   * new direction takes an offer/answer, which a peer that is reconnecting, not
+   * seeing us yet or past recovery can hold up for good. That wait belongs to
+   * the stuck link alone: it is flagged and renegotiates as soon as it can
+   * take an offer. Waiting on every peer in turn let one silent peer fail the
+   * camera for everybody, and turned it off with an error (R-VOICE-4).
+   */
   private async updateVideoTrackAcrossPeers(track: MediaStreamTrack | null, ensureCurrent: () => void): Promise<void> {
-    for (const session of this.peers.values()) {
+    const sessions = [...this.peers.values()].filter(session => !session.botPeer && this.isCurrentPeer(session)
+      && session.pc.connectionState !== 'closed');
+    const failures: unknown[] = [];
+    for (const session of sessions) {
       ensureCurrent();
-      if (session.botPeer || session.pc.connectionState === 'closed') continue;
+      if (!this.isCurrentPeer(session)) continue;
       try {
-        const videoTransceiver = this.cameraTransceiver(session);
-        let negotiate = false;
-        if (videoTransceiver) {
-          const direction = track ? 'sendrecv' : 'recvonly';
-          negotiate = videoTransceiver.direction !== direction;
-          videoTransceiver.direction = direction;
-          session.videoSender = videoTransceiver.sender;
-          if (videoTransceiver.sender.track !== track) await videoTransceiver.sender.replaceTrack(track);
-        } else if (track) {
-          session.videoSender = session.pc.addTrack(track, new MediaStream([track]));
-          negotiate = true;
-        }
-        ensureCurrent();
-        if (negotiate) {
-          if (!await this.waitForStable(session.pc)) throw new Error('Camera negotiation did not become ready');
-          ensureCurrent();
-          if (!this.isCurrentPeer(session)) continue;
-          await this.sendOffer(session, false, true);
-        }
-      } catch (err) {
+        await this.attachCamera(session, track);
+      } catch (error) {
         if (!this.isCurrentPeer(session)) continue;
-        console.warn(`[WebRTC] Error updating video track for peer ${session.peerSessionId}:`, err);
-        throw err;
+        clientLog.warn('VIDEO', `Could not update the camera for peer ${session.peerSessionId}`, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        failures.push(error);
       }
+    }
+    ensureCurrent();
+    // Only a change no peer could take is the publication's own failure.
+    if (failures.length > 0 && failures.length === sessions.length) throw failures[0];
+    await Promise.all(sessions.map(session => this.renegotiateIfNeeded(session)));
+  }
+
+  private async attachCamera(session: PeerSession, track: MediaStreamTrack | null): Promise<void> {
+    const transceiver = this.cameraTransceiver(session);
+    if (transceiver) {
+      const direction = track ? 'sendrecv' : 'recvonly';
+      if (transceiver.direction !== direction) {
+        transceiver.direction = direction;
+        session.negotiationNeeded = true;
+      }
+      session.videoSender = transceiver.sender;
+      if (transceiver.sender.track !== track) await transceiver.sender.replaceTrack(track);
+    } else if (track) {
+      session.videoSender = session.pc.addTrack(track, new MediaStream([track]));
+      session.negotiationNeeded = true;
     }
   }
 
@@ -2124,15 +2193,13 @@ export class WebRtcManager {
     }
   }
 
-  public async getPeerPing(peerSessionId: string): Promise<number | null> {
-    return this.diagnosticsCollector.getPeerPing(this.peers.get(peerSessionId));
-  }
-
-  public async getAverageP2pPing(): Promise<number | null> {
-    if (this.isSfuMode()) {
-      return this.sfuEngine.getPing();
-    }
-    return this.diagnosticsCollector.getAverageP2pPing(this.peers);
+  /**
+   * The call's last measured ping in milliseconds, or null until one is
+   * measured. Views read it on `voice.ping_updated` instead of each polling
+   * every link (R-VOICEUI-7).
+   */
+  public getCallPing(): number | null {
+    return this.callPing;
   }
 
   public getPeerConnection(peerSessionId: string): RTCPeerConnection | null {
@@ -2201,6 +2268,7 @@ export class WebRtcManager {
         track.onended = null;
         track.onunmute = null;
       }
+      session.candidateQueue.length = 0;
     }
     this.mediaRouter.cleanupPeerMedia(peerSessionId, session);
     session?.pc.close();
@@ -2214,8 +2282,11 @@ export class WebRtcManager {
     this.localCameraTrack = null;
   }
 
+  /** The call was admitted: media starts on the transport its server runs now. */
   public resumeAfterVoiceReconnect(): void {
     this.voiceReconnectSuspended = false;
+    this.activeTransport = this.isSfuMode() ? 'sfu' : 'p2p';
+    this.startCallStats();
     void this.nativeScreens.sync().catch(error => this.nativeScreens.report(error));
   }
 
@@ -2228,6 +2299,8 @@ export class WebRtcManager {
     this.cameraTrackRevision++;
     this.cameraTrackChange = null;
     this.voiceReconnectSuspended = false;
+    this.activeTransport = null;
+    this.stopCallStats();
     this.abandonSfuSession();
     this.resetSfuReconnect();
     const peerCount = this.peers.size;
@@ -2244,11 +2317,6 @@ export class WebRtcManager {
     this.peerFailureTimers.clear();
     this.failedPeers.clear();
     this.everConnectedPeers.clear();
-
-    for (const timer of this.relayMonitors.values()) {
-      clearInterval(timer);
-    }
-    this.relayMonitors.clear();
 
     this.mediaRouter.closeAllMedia();
     this.vadMonitor.cleanupAll();

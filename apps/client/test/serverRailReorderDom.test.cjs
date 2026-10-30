@@ -159,6 +159,13 @@ if (!process.versions.electron) {
       await drag(connectedAgain, groupTarget, null, async () => {
         await check(await waitFor(`!!document.querySelector('.server-rail-item.combine-target[data-port="5102"]')`),
           'the target previews the folder while hovered');
+        // A probe answer that changes a status while the server is held paints the dot in
+        // place: rebuilding the rail would drop the folder preview the person is aiming at.
+        await evaluate(`window.probeOnline('c.test')`);
+        await check(await evaluate(`document.querySelector('.server-rail-item[data-port="5103"] .server-rail-status-dot')?.dataset.status === 'online'`),
+          'a probe answer during a drag shows the new status');
+        await check(await evaluate(`!!document.querySelector('.server-rail-item.combine-target[data-port="5102"]')`),
+          'a probe answer during a drag keeps the folder preview');
       });
       await check(JSON.stringify(await order()) === '[5103,"folder:5102","folder:5101"]', 'dropping on a server creates a folder with both');
       const animated = await evaluate('window.animatedFolders');
@@ -262,7 +269,12 @@ async function setupRail() {
   localStorage.setItem('monky_saved_servers', JSON.stringify([
     saved('a.test', 5101, 3), saved('b.test', 5102, 2), saved('c.test', 5103, 1),
   ]));
-  window.fetch = async () => { throw new Error('offline fixture'); };
+  // Servers answer the status probe only once a step makes them reachable.
+  const reachable = new Set();
+  window.fetch = async (url) => {
+    if (!reachable.has(new URL(String(url)).hostname)) throw new Error('offline fixture');
+    return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
   const [{ connectionStore }, { sessionManager }, { serverRailView }] = await Promise.all([
     import('/stores/connectionStore.ts'), import('/core/SessionManager.ts'), import('/views/ServerRailView.ts'),
   ]);
@@ -283,6 +295,10 @@ async function setupRail() {
     return animate.apply(this, args);
   };
   serverRailView.connectToSavedServer = async () => { window.connectCalls++; };
+  window.probeOnline = async (host) => {
+    reachable.add(host);
+    await serverRailView.refreshServerRailStatuses();
+  };
   window.railOrder = () => connectionStore.railLayout.flatMap(node => node.type === 'server'
     ? [node.port] : node.children.map(child => `folder:${child.port}`));
   window.railState = () => {

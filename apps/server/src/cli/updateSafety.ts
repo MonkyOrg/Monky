@@ -11,7 +11,7 @@ import { ANSI, color, SERVER_DB_NAME } from './constants';
 import { appliedMigrations, type GlobalArgs } from './context';
 import { t } from './i18n/index';
 import { readLocalServerPreview, resolveServerPort } from './onlineUsers';
-import { getPm2ProcessName, isPm2Available } from './pm2';
+import { getPm2ProcessName, isPm2Available, listPm2Processes } from './pm2';
 import { canonicalDataDir, findServerByDataDir, getRegistryDir, type RegisteredServer } from './registry';
 import { findOnlinePm2Process } from './runningServer';
 import { knownServers } from './target';
@@ -49,8 +49,9 @@ export function findRunningTargets(globalArgs: GlobalArgs): RunningTarget[] {
   const servers: RegisteredServer[] = globalArgs.dataDirSpecified
     ? [findServerByDataDir(globalArgs.dataDir) ?? { id: '', dataDir: canonicalDataDir(globalArgs.dataDir), createdAt: 0 }]
     : knownServers();
+  const processes = listPm2Processes();
   return servers.flatMap((server) => {
-    const entry = findOnlinePm2Process(server.dataDir);
+    const entry = findOnlinePm2Process(server.dataDir, processes);
     if (!entry?.pid) return [];
     return [{
       dataDir: server.dataDir,

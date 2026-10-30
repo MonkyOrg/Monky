@@ -4,11 +4,15 @@ import type { IncomingMessage } from 'node:http';
 import { test, type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket } from 'ws';
-import { LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, type LogEntry, type ProtocolMessage } from '@monky/shared';
+import {
+  DEFAULT_PERMISSIONS, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, createProtocolOffer,
+  type LogEntry, type ProtocolMessage,
+} from '@monky/shared';
 import { Logger } from './infrastructure/logger/Logger';
+import { CoturnManager } from './infrastructure/turn/CoturnManager';
 import { MESSAGE_BUDGETS, WS_FLOW_LIMITS, type WsFlowLimits } from './infrastructure/websocket/flowControl';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
-import { createFixture, identity, record, records, text, type Peer } from './testFixtures/bots';
+import { createApprovedBotFixture, createFixture, identity, record, records, text, type Peer } from './testFixtures/bots';
 
 type Fixture = Awaited<ReturnType<typeof createFixture>>;
 type Member = Awaited<ReturnType<Fixture['human']>>;
@@ -405,4 +409,233 @@ test('a kicked member is out at once, not shown online while its sockets finish 
   assert.equal(f.wsServer.getOnlineUsersMap().has(sessionId), false);
   assert.equal(f.wsServer['sessions'].has(socket), false);
   assert.equal(f.wsServer['wss'].clients.has(socket), true, 'its socket is still closing');
+});
+
+const defaultRole = (id: string) => ({
+  id, name: 'Member', color: null, position: 1, permissions: DEFAULT_PERMISSIONS, isDefault: true, createdAt: Date.now(),
+});
+
+function gate() {
+  let open = () => {};
+  const opened = new Promise<void>((resolve) => { open = resolve; });
+  return { opened, open };
+}
+
+/** Where a client received the snapshot it signed in with. */
+function snapshotIndex(peer: Peer): number {
+  const index = peer.messages.findIndex((message) => message.type === MessageType.AUTH_SUCCESS);
+  assert.ok(index >= 0, 'signed in');
+  return index;
+}
+
+/** The name a client ends up with for a channel: its snapshot's, then every change sent after it. */
+function nameAfterSnapshot(peer: Peer, channelId: string): string {
+  const snapshot = snapshotIndex(peer);
+  let name = records(record(peer.messages[snapshot].payload.server).channels).find((channel) => channel.id === channelId)?.name;
+  for (const message of peer.messages.slice(snapshot + 1)) {
+    if ((message.type === MessageType.CHANNEL_UPDATED || message.type === MessageType.CHANNEL_CREATED) &&
+        record(message.payload.channel).id === channelId) name = record(message.payload.channel).name;
+  }
+  return text(name);
+}
+
+test('signing in again changes nobody\'s access: the others only hear that the person is back (S-WS-4)', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  await f.roleRepo.create(defaultRole('returning-default'));
+  const owner = await f.human('Login owner');
+  const returning = await f.human('Returning member');
+  const observer = await f.human('Login observer');
+  const sharer = await f.human('Login sharer');
+  const voiceId = text(records(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'VOICE')?.id);
+  await join(sharer, voiceId);
+  await sharer.peer.request(MessageType.VOICE_STATE_UPDATE, {
+    screenShareIds: ['login-screen'],
+    nativeScreenShares: [{
+      shareId: 'login-screen', instanceId: randomUUID(), audio: false,
+      video: { width: 1920, height: 1080, fps: 30, maxBitrateKbps: 8000 },
+    }],
+  });
+  await f.communityService.updateSettings(owner.id, { eventsEnabled: true });
+  let binaryFrames = 0;
+  observer.peer.ws.on('message', (_data, isBinary) => { if (isBinary) binaryFrames++; });
+  // Past the community scheduler's first round, which publishes to everyone once.
+  await delay(1_100);
+  await settled(observer.peer);
+  await returning.peer.close();
+  await eventually(() => observer.peer.messages.some((message) =>
+    message.type === MessageType.USER_CONNECTION_STATE && message.payload.status === 'reconnecting'), 'the drop is announced');
+  const roleVersion = f.permissions.getRoleAccessVersion();
+  const channelVersion = f.wsServer.getChannelAccessVersion();
+  const since = observer.peer.messages.length;
+
+  const again = await f.human('Returning member', returning.keys, returning.deviceId);
+  await settled(again.peer);
+  // A scheduler round would republish the community had the sign-in moved an access version.
+  await delay(1_100);
+  await settled(observer.peer);
+  const received = observer.peer.messages.slice(since).map((message) => message.type);
+  assert.ok(received.includes(MessageType.USER_JOINED), 'the person is back');
+  for (const redundant of [MessageType.ROLES_LIST, MessageType.CATEGORIES_UPDATED, MessageType.CHANNEL_UPDATED,
+    MessageType.CHANNEL_CREATED, MessageType.COMMUNITY_SNAPSHOT, MessageType.VOICE_STATE_CHANGED]) {
+    assert.equal(received.includes(redundant), false, `${redundant} is not sent to everyone on a sign-in`);
+  }
+  assert.equal(f.permissions.getRoleAccessVersion(), roleVersion, 'a default role already held is not written again');
+  assert.equal(f.wsServer.getChannelAccessVersion(), channelVersion);
+  assert.equal(binaryFrames, 0, 'broadcasts reach clients as text frames');
+});
+
+test('a member given a default role on their first sign-in is announced with it (S-WS-4)', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  await f.roleRepo.create(defaultRole('first-default'));
+  const owner = await f.human('Default owner');
+  const since = owner.peer.messages.length;
+  const newcomer = await f.human('Default newcomer');
+  const roles = await owner.peer.wait((message) => message.type === MessageType.ROLES_LIST &&
+    records(message.payload.userRoles).some((entry) => entry.userId === newcomer.id), since);
+  assert.deepEqual(records(roles.payload.userRoles).find((entry) => entry.userId === newcomer.id)?.roleIds, ['first-default']);
+});
+
+test('a sign-in whose snapshot went stale is caught up with its roles and channels, rows included, even while another change runs', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Race owner');
+  const publicId = text(records(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'TEXT')?.id);
+  const cases: Array<{ moment: 'while the snapshot is read' | 'right before the snapshot is sent'; nickname: string; pending?: boolean }> = [
+    { moment: 'while the snapshot is read', nickname: 'Early racer' },
+    { moment: 'right before the snapshot is sent', nickname: 'Late racer' },
+    // Another change, a settings save writing an icon say, still runs after AUTH_SUCCESS and publishes nothing about roles.
+    { moment: 'while the snapshot is read', nickname: 'Pending racer', pending: true },
+  ];
+  for (const { moment, nickname, pending } of cases) {
+    const member = await f.human(nickname);
+    const role = { ...defaultRole(randomUUID()), name: `Race ${nickname}`, isDefault: false };
+    await f.roleRepo.create(role);
+    const created = await f.channelService.createChannel({ name: `race-${role.id.slice(0, 8)}`, type: 'TEXT', isPrivate: true, allowedRoleIds: [role.id] });
+    const channelId = text(created.channel?.id);
+    const renamed = `renamed-${role.id.slice(0, 8)}`;
+    await member.peer.close();
+    // What an administrator's ROLE_ASSIGN and CHANNEL_UPDATE do, landing at that moment of the sign-in.
+    const change = async () => {
+      assert.equal((await f.roleService.assignRole(owner.id, { userId: member.id, roleId: role.id })).success, true);
+      await f.wsServer['broadcastRolesState']();
+      assert.equal((await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: publicId, name: renamed })).type,
+        MessageType.CHANNEL_UPDATED);
+      if (pending) void f.wsServer['mutateLocalAccess'](() => delay(30));
+    };
+    let restore = () => {};
+    if (moment === 'while the snapshot is read') {
+      const verify = f.authService.verifyChallengeResponse.bind(f.authService);
+      const mocked = t.mock.method(f.authService, 'verifyChallengeResponse',
+        async (...args: Parameters<typeof verify>) => {
+          const result = await verify(...args);
+          await change();
+          return result;
+        });
+      restore = () => mocked.mock.restore();
+    } else {
+      const ice = f.wsServer['buildIceServersFor'].bind(f.wsServer);
+      f.wsServer['buildIceServersFor'] = async (userId, session) => {
+        await change();
+        return ice(userId, session);
+      };
+      restore = () => { f.wsServer['buildIceServersFor'] = ice; };
+    }
+    const again = await f.human(nickname, member.keys, member.deviceId);
+    restore();
+    const label = `${moment}${pending ? ', with another change running' : ''}`;
+    assert.equal(records(record(again.auth.payload.server).channels).some((channel) => channel.id === channelId), false,
+      `${label}: the snapshot predates the grant`);
+    await settled(again.peer);
+    const afterSnapshot = again.peer.messages.slice(again.peer.messages.findIndex((message) => message.type === MessageType.AUTH_SUCCESS));
+    assert.ok(afterSnapshot.some((message) => message.type === MessageType.CHANNEL_CREATED &&
+      record(message.payload.channel).id === channelId), `${label}: the channel the grant opened arrives after AUTH_SUCCESS`);
+    const roles = afterSnapshot.filter((message) => message.type === MessageType.ROLES_LIST).at(-1);
+    assert.ok(roles && records(roles.payload.userRoles).some((entry) => entry.userId === member.id &&
+      Array.isArray(entry.roleIds) && entry.roleIds.includes(role.id)), `${label}: and so does the role`);
+    assert.equal(nameAfterSnapshot(again.peer, publicId), renamed, `${label}: and the new name of a channel it kept`);
+  }
+});
+
+test('the relay is probed before a sign-in reads anything, so a change made meanwhile reaches the member or bot (S-VOICE-6)', async (t) => {
+  const f = await createApprovedBotFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Probe owner');
+  const channelId = text(records(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'TEXT')?.id);
+  const token = text((await owner.peer.request(MessageType.BOT_CREATE, {})).payload.token);
+  let probing = gate();
+  let probe = gate();
+  // On Linux the probe runs `which` and `sudo`: other connections are served meanwhile.
+  t.mock.method(CoturnManager, 'availability', async () => {
+    probing.open();
+    await probe.opened;
+    return { supported: true };
+  });
+  const renamedWhileProbing = async <T>(signIn: () => Promise<T>, name: string): Promise<T> => {
+    probing = gate();
+    probe = gate();
+    const signingIn = signIn();
+    await probing.opened;
+    assert.equal((await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId, name })).type, MessageType.CHANNEL_UPDATED);
+    probe.open();
+    return signingIn;
+  };
+  // The snapshot itself has the change, and nothing reached the connection ahead of it: what is published
+  // before AUTH_SUCCESS (messages, mentions, presence, settings) is overwritten, and no catch-up resends it.
+  const snapshotName = (peer: Peer) => records(record(peer.messages[snapshotIndex(peer)].payload.server).channels)
+    .find((channel) => channel.id === channelId)?.name;
+  const beforeSnapshot = (peer: Peer) => peer.messages.slice(0, snapshotIndex(peer)).map((message) => message.type);
+
+  const member = await renamedWhileProbing(() => f.human('Probe member'), 'renamed-for-member');
+  assert.equal(snapshotName(member.peer), 'renamed-for-member');
+  assert.deepEqual(beforeSnapshot(member.peer), [MessageType.AUTH_CHALLENGE]);
+  const bot = await renamedWhileProbing(() => f.bot(token), 'renamed-for-bot');
+  assert.equal(snapshotName(bot.peer), 'renamed-for-bot');
+  assert.deepEqual(beforeSnapshot(bot.peer), []);
+});
+
+test('a fan-out serializes each message once, still projects it for older clients, and sends text frames (S-WS-8)', (t) => {
+  const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
+  const frames: Array<{ to: string; data: unknown; options: unknown }> = [];
+  const current = createProtocolOffer('client').features;
+  type Session = Parameters<WebSocketServer['handleDisconnect']>[0];
+  const connection = (id: string, features: typeof current, signedIn = true): Session => {
+    const ws = Object.create(WebSocket.prototype) as WebSocket;
+    Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
+    Object.defineProperty(ws, 'bufferedAmount', { value: 0 });
+    ws.send = (...args: unknown[]) => { frames.push({ to: id, data: args[0], options: args[1] }); };
+    return {
+      ws, ip: '127.0.0.1', lastSeenAt: 0, messageQueue: Promise.resolve(), sessionId: id,
+      protocol: { version: PROTOCOL_VERSION, minimumVersion: PROTOCOL_VERSION, features: [...features] },
+      user: signedIn ? { id, sessionId: id, clientId: id, nickname: id, status: 'ONLINE', joinedAt: 1 } : undefined,
+    };
+  };
+  const replaced = { ...connection('replaced', current), replaced: true };
+  const sessions = [
+    connection('current-a', current), connection('current-b', current),
+    connection('legacy', current.filter((feature) => feature !== 'message-forward')),
+    replaced, connection('anonymous', current, false),
+  ];
+  server['sessions'] = new Map(sessions.map((session) => [session.ws, session]));
+  const message: ProtocolMessage = {
+    type: MessageType.CHAT_MESSAGE,
+    payload: { id: 'forwarded', channelId: 'general', userId: 'author', content: 'Hello', createdAt: 1,
+      forwarded: { source: '#news', createdAt: 1 } },
+  };
+
+  const stringify = t.mock.method(JSON, 'stringify');
+  server.broadcast(message);
+  const serializations = stringify.mock.callCount();
+  stringify.mock.restore();
+
+  assert.deepEqual(frames.map((frame) => frame.to), ['current-a', 'current-b', 'legacy'],
+    'signed-in connections only, never one already replaced');
+  assert.equal(serializations, 2, 'one serialization per distinct message, not per recipient');
+  assert.ok(Buffer.isBuffer(frames[0].data));
+  assert.equal(frames[0].data, frames[1].data, 'recipients of the same message share its bytes');
+  for (const frame of frames) assert.deepEqual(frame.options, { binary: false }, 'a Buffer still goes out as a text frame');
+  const payload = (index: number) => record(record(JSON.parse(String(frames[index].data))).payload);
+  assert.deepEqual(payload(0).forwarded, { source: '#news', createdAt: 1 });
+  assert.equal('forwarded' in payload(2), false, 'clients without message-forward still get their projection');
 });

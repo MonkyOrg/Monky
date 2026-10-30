@@ -63,12 +63,16 @@ export interface DmIncomingRelayItem {
 
 /**
  * What the renderer must send after a DM operation.
- * - `peers`: per recipient, send on every session where that identity is reachable.
+ * - `peers`: per recipient, send on one session where that identity is reachable; the outbox tries again later.
+ * - `everywhere`: per recipient, send on every session where that identity is reachable. For requests whose
+ *   answer depends on which of its devices get them: only the device that sent a file has it, and each server
+ *   only reaches the devices connected to it. Copies of the same item are answered once.
  * - `broadcast`: send on every connected session (own-device copies, hellos).
  * - `reply`: send on the session the ingested item arrived on.
  */
 export interface DmDispatch {
   peers?: Record<string, DmRelayItem[]>;
+  everywhere?: Record<string, DmRelayItem[]>;
   broadcast?: DmRelayItem[];
   reply?: DmRelayItem[];
 }
@@ -234,6 +238,8 @@ export type DmEvent =
   | { type: 'snapshot'; snapshot: DmSnapshot }
   | { type: 'self-profile'; profile: DmSelfProfile }
   | { type: 'messages'; peer: string; messages: DmMessageView[]; peerReadAt: number }
+  /** A download under way moved on; the rest of the message did not change. */
+  | { type: 'attachment-progress'; peer: string; messageId: string; fileId: string; receivedBytes: number }
   | { type: 'typing'; peer: string }
   | { type: 'incoming-message'; peer: string; message: DmMessageView }
   | { type: 'friend-request'; peer: string; nickname: string }

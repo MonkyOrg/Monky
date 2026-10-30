@@ -58,16 +58,19 @@ function syncDirectory(directory: string): void {
  * bytes reach the disk in a temporary sibling first (fsync) and only a rename
  * publishes them. The temporary file is removed when anything fails.
  *
+ * `data` may also be a sequence of pieces, written in order, so a large file
+ * never has to sit in memory whole; a sequence that throws publishes nothing.
  * `mode` defaults to 0o600 (only this user can read it; Windows ignores it).
  */
-export function writeFileAtomicSync(target: string, data: string | Uint8Array, mode = 0o600): void {
+export function writeFileAtomicSync(target: string, data: string | Uint8Array | Iterable<Uint8Array>, mode = 0o600): void {
   const directory = path.dirname(target);
   fs.mkdirSync(directory, { recursive: true });
   const temporary = path.join(directory, `.${path.basename(target)}.${randomBytes(6).toString('hex')}.tmp`);
   let descriptor: number | null = null;
   try {
     descriptor = fs.openSync(temporary, 'wx', mode);
-    fs.writeFileSync(descriptor, data);
+    if (typeof data === 'string' || data instanceof Uint8Array) fs.writeFileSync(descriptor, data);
+    else for (const piece of data) fs.writeFileSync(descriptor, piece);
     fs.fsyncSync(descriptor);
     fs.closeSync(descriptor);
     descriptor = null;

@@ -1,16 +1,59 @@
-import { MessageType, getNicknameIssue, normalizeNickname } from '@monky/shared';
+import { MessageType, ProtocolErrorCode, getNicknameIssue, normalizeNickname } from '@monky/shared';
 import { connectionStore, type SavedServer } from '../stores/connectionStore';
 import { settingsStore } from '../stores/settingsStore';
 import { autoEntryServerKey } from '../utils/autoEntry';
 import { t } from '../i18n';
 import { appEvents } from './EventBus';
 import { clientLog } from './ClientLogService';
+import { ProtocolRequestError } from './NetworkClient';
 import { sessionKeyFor, sessionManager, type ServerSession } from './SessionManager';
 import { currentEventOrigin } from './sessionRouting';
 import { getServerSessionForAddress, openServerSession } from './serverConnection';
 import { checkServerOnline } from '../utils/serverStatus';
 
+/**
+ * Refusals that trying again cannot change: a wrong saved password, protocols
+ * the app and the server cannot share, an identity the server does not
+ * accept, a request the server rejects as such. These wait for the person to
+ * change something; a wrong password tried every round would also cost the
+ * server a password derivation each time and use up its limit of failed
+ * sign-ins per address (#372).
+ *
+ * A server with no room is not one of them: it makes room by itself when
+ * another device of this identity leaves, or an admin removes a member or
+ * raises the limit, with nothing to change here. It waits like any failure
+ * that may pass.
+ */
+const DEFINITIVE_REFUSALS: ReadonlySet<ProtocolErrorCode> = new Set([
+  ProtocolErrorCode.AUTH_INVALID_PASSWORD,
+  ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED,
+  ProtocolErrorCode.UNAUTHORIZED,
+  ProtocolErrorCode.BAD_REQUEST,
+]);
+
+/** How the automatic connections to one server have been failing. */
+interface FailedAttempts {
+  /** The saved password they used: saving another one is a reason to try again. */
+  password: string;
+  /** Refused for good, until the person changes something. */
+  refused: boolean;
+  /** Failures in a row, which set the wait before the next attempt. */
+  failures: number;
+  /** When the next attempt may start. */
+  retryAt: number;
+}
+
+function isCancellation(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
 export class AutoEntryService {
+  /**
+   * Waits after each failure in a row that may pass (network, timeout, a
+   * server still starting): the rail's probe offers the server every round,
+   * and these keep a server that keeps failing from being tried that often.
+   */
+  private static readonly RETRY_DELAYS_MS = [15_000, 30_000, 60_000, 120_000, 240_000, 480_000, 600_000];
   private running: Promise<void> | null = null;
   private cancelled = false;
   private pendingServer: SavedServer | null = null;
@@ -20,6 +63,8 @@ export class AutoEntryService {
   private listenersInstalled = false;
   private readonly suppressedKeys = new Set<string>();
   private readonly backgroundInFlight = new Set<string>();
+  /** By session key. Kept in memory only: restarting the app tries every server again. */
+  private readonly failedAttempts = new Map<string, FailedAttempts>();
   private readonly runUnbind: Array<() => void> = [];
   private readonly listenerUnbind: Array<() => void> = [];
 
@@ -138,13 +183,17 @@ export class AutoEntryService {
             });
           }
         } catch (error: unknown) {
-          if (error instanceof DOMException && error.name === 'AbortError') {
+          if (isCancellation(error)) {
             if (!this.pendingCancelled) this.cancelled = true;
-          } else if (!this.cancelled && stillSaved(server) && settingsStore.isServerAutoEntryEnabled(server)) {
-            clientLog.warn('CONNECTION', `Automatic entry failed for ${server.host}:${server.port}`, {
-              error: error instanceof Error ? error.message : String(error),
-            });
-            this.reportNotice(t('autoEntry.failed', { name: server.name || server.host }));
+          } else {
+            // The background attempts that follow must know how this one ended.
+            this.recordFailure(server, error);
+            if (!this.cancelled && stillSaved(server) && settingsStore.isServerAutoEntryEnabled(server)) {
+              clientLog.warn('CONNECTION', `Automatic entry failed for ${server.host}:${server.port}`, {
+                error: error instanceof Error ? error.message : String(error),
+              });
+              this.reportNotice(t('autoEntry.failed', { name: server.name || server.host }));
+            }
           }
         } finally {
           this.pendingServer = null;
@@ -166,6 +215,17 @@ export class AutoEntryService {
     this.listenerUnbind.push(
       appEvents.on('connection.manual_disconnect', (payload: { key?: string }) => {
         if (payload.key) this.suppressedKeys.add(payload.key);
+      }),
+      // Any sign-in that works, typically the person entering by hand, settles
+      // what the failed automatic attempts had concluded about the server.
+      appEvents.on('network.connected', () => {
+        const origin = currentEventOrigin();
+        if (origin) this.failedAttempts.delete(origin);
+      }),
+      // A server removed or moved to another address is another server if it comes back.
+      appEvents.on('connection.saved_servers_changed', () => {
+        const saved = new Set(connectionStore.savedServers.map(server => sessionKeyFor(server.host, server.port)));
+        for (const key of this.failedAttempts.keys()) if (!saved.has(key)) this.failedAttempts.delete(key);
       }),
       appEvents.on('connection.saved_server_online', (server: SavedServer) => {
         if (!settingsStore.autoConnectServers) return;
@@ -211,6 +271,7 @@ export class AutoEntryService {
     const key = autoEntryServerKey(server);
     if (!key || this.suppressedKeys.has(sessionKeyFor(server.host, server.port)) || this.backgroundInFlight.has(key)) return;
     if (getServerSessionForAddress(server.host, server.port)) return;
+    if (!this.mayRetry(server)) return;
     this.backgroundInFlight.add(key);
     try {
       if (!onlineAlreadyKnown && !(await checkServerOnline(server.host, server.port))) {
@@ -239,12 +300,47 @@ export class AutoEntryService {
         });
       }
     } catch (error: unknown) {
+      if (isCancellation(error)) return;
+      const failed = this.recordFailure(server, error);
       clientLog.warn('CONNECTION', `Background auto-connect failed for ${server.host}:${server.port}`, {
         error: error instanceof Error ? error.message : String(error),
+        nextAttempt: failed.refused ? 'after a change' : `in ${failed.retryAt - Date.now()} ms`,
       });
     } finally {
       this.backgroundInFlight.delete(key);
     }
+  }
+
+  /**
+   * Whether an automatic attempt may try this server now. A refusal holds until
+   * the saved password changes (another host or port is another server), a
+   * sign-in works or the app restarts; any other failure, until its wait ends.
+   */
+  private mayRetry(server: SavedServer): boolean {
+    const key = sessionKeyFor(server.host, server.port);
+    const failed = this.failedAttempts.get(key);
+    if (!failed) return true;
+    if (failed.password !== (server.password ?? '')) {
+      this.failedAttempts.delete(key);
+      return true;
+    }
+    return !failed.refused && Date.now() >= failed.retryAt;
+  }
+
+  private recordFailure(server: SavedServer, error: unknown): FailedAttempts {
+    const key = sessionKeyFor(server.host, server.port);
+    const password = server.password ?? '';
+    const previous = this.failedAttempts.get(key);
+    const failures = previous?.password === password ? previous.failures + 1 : 1;
+    const delays = AutoEntryService.RETRY_DELAYS_MS;
+    const failed: FailedAttempts = {
+      password,
+      refused: error instanceof ProtocolRequestError && DEFINITIVE_REFUSALS.has(error.code),
+      failures,
+      retryAt: Date.now() + delays[Math.min(failures, delays.length) - 1],
+    };
+    this.failedAttempts.set(key, failed);
+    return failed;
   }
 
   private hasOtherSessionForServer(serverId: string, excluded?: ServerSession): boolean {

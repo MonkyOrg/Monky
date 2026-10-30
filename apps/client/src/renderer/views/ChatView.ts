@@ -1,6 +1,6 @@
 import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, getCommandPresentation, getMessageText,
-  hasEveryoneMention, messageBlocksContent, messageBlocksInput, parseFencedMessageBlocks } from '@monky/shared';
-import type { AttachmentMeta, BotLocale, ChatMessageUpdatedPayload, ChatSendPayload, CommandPresentation, MessageReply, NativePoll, ResolvedMessageBlock, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
+  messageBlocksContent, messageBlocksInput, parseFencedMessageBlocks } from '@monky/shared';
+import type { AttachmentMeta, BotLocale, ChatMessageUpdatedPayload, ChatSendPayload, CommandPresentation, MentionMatcher, MessageReply, NativePoll, ResolvedMessageBlock, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
 import { escapeHtml, html } from '../utils/html';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 import { animateEnter, cancelSurfaceMotion } from '../utils/surfaceMotion';
@@ -15,6 +15,7 @@ import { userContextMenu } from './UserContextMenu';
 import { contextMenu, type ContextMenuEntry, type ContextMenuItem } from './ContextMenu';
 import { getAvatarUrl } from '../utils/avatar';
 import { renderCodeBlock, renderMarkdown } from '../utils/markdown';
+import { serverMentionMatcher } from '../utils/mentions';
 import type { MessageClipboardContent, MessageCopyMode } from '../utils/messageClipboard';
 import { getLanguage, t, tCount } from '../i18n';
 import { uploadAttachment, UploadHandle } from '../core/AttachmentUploader';
@@ -405,6 +406,7 @@ export class ChatView {
     }
 
     feed.appendChild(fragment);
+    this.pruneTrimmedRows(feed, shouldScroll);
     this.selection.sync();
 
     this.pinnedToBottom = shouldScroll;
@@ -414,6 +416,32 @@ export class ChatView {
         this.repinWhileMediaLoads(rowEl);
       }
     }
+  }
+
+  /**
+   * The store keeps only the newest messages of each channel, so the rows it let
+   * go of leave the feed too. They had stopped working anyway — their menu, copy,
+   * reply and reactions look the message up in the store — and a busy channel
+   * left open for hours would otherwise grow without limit.
+   */
+  private pruneTrimmedRows(feed: HTMLElement, followingEnd: boolean): void {
+    if (!this.currentChannelId) return;
+    const kept = new Set(this.store.getMessages(this.currentChannelId).map((message) => message.id));
+    const children = [...feed.children];
+    const trimmed = new Set<Element>(children.filter((child) => child instanceof HTMLElement
+      && child.classList.contains('chat-message-row') && !!child.dataset.messageId && !kept.has(child.dataset.messageId)));
+    if (!trimmed.size) return;
+    // Whatever the reader is looking at stays where it is (an exact restoration).
+    const anchor = followingEnd ? undefined : children.find((child) =>
+      !trimmed.has(child) && !child.classList.contains('chat-date-divider'));
+    const before = anchor?.getBoundingClientRect().top;
+    for (const row of trimmed) row.remove();
+    // A day left without messages loses its divider as well.
+    for (const divider of feed.querySelectorAll(':scope > .chat-date-divider')) {
+      const next = divider.nextElementSibling;
+      if (!next || next.classList.contains('chat-date-divider')) divider.remove();
+    }
+    if (anchor && before !== undefined) feed.scrollTop += anchor.getBoundingClientRect().top - before;
   }
 
   private bindMessageElementEvents(container: HTMLElement): void {
@@ -1022,8 +1050,10 @@ export class ChatView {
   private renderMessagesWithDividers(messages: ChatMessage[]): string {
     const parts: string[] = [];
     let lastKey = '';
+    // One matcher for the whole feed: building it walks every known member.
+    const mentions = serverMentionMatcher(serverStore);
     const items = [
-      ...messages.map((message) => ({ createdAt: message.createdAt, html: this.renderMessageRow(message) })),
+      ...messages.map((message) => ({ createdAt: message.createdAt, html: this.renderMessageRow(message, mentions) })),
       ...chatStore.getInvocations(this.currentChannelId ?? '').map((invocation) => ({
         createdAt: invocation.createdAt,
         html: renderBotInvocation(invocation, !this.getBotCommandDeniedReason(), serverStore.serverDetails?.id,
@@ -1213,20 +1243,7 @@ export class ChatView {
     if (edit) this.closeCommandDropup();
   }
 
-  private isUserMentioned(content: string, currentNickname: string): boolean {
-    if (!content) return false;
-    // `@todos` reaches everyone in the channel, so it highlights the message the
-    // same way a direct mention does (#464).
-    if (serverStore.serverDetails?.allowEveryoneMention !== false && hasEveryoneMention(content)) {
-      return true;
-    }
-    if (!currentNickname) return false;
-    const escaped = currentNickname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(`(^|[\\s(])@${escaped}(?=$|[\\s),.!?:;])`, 'i');
-    return regex.test(content);
-  }
-
-  private renderMessageRow(m: ChatMessage): string {
+  private renderMessageRow(m: ChatMessage, mentions: MentionMatcher = serverMentionMatcher(serverStore)): string {
     const time = this.formatDateTime(m.createdAt);
     const messageText = getMessageText(m, getLanguage());
 
@@ -1243,12 +1260,8 @@ export class ChatView {
     const me = serverStore.currentUser;
     const outgoing = this.store.getOutgoing(m.id);
     const currentNickname = me?.nickname?.trim();
-    const isMentioned = !m.isSystem && this.isUserMentioned(messageText, currentNickname ?? '');
-
-    const knownNicknames = Array.from(serverStore.knownMembers.values()).map((u) => u.nickname);
-    if (currentNickname && !knownNicknames.includes(currentNickname)) {
-      knownNicknames.push(currentNickname);
-    }
+    // `@todos` reaches everyone in the channel, so it highlights the row like a direct mention (#464).
+    const isMentioned = !!messageText && mentions.mentions(messageText, currentNickname ?? '');
 
     const avatarSrc = escapeHtml(getAvatarUrl(m.userAvatarUrl));
     const isBot = m.isBot || serverStore.knownMembers.get(m.userId)?.isBot === true;
@@ -1303,14 +1316,9 @@ export class ChatView {
       ? `<div class="chat-message-text">${m.blocks.map(block => block.type === 'reply'
         ? this.renderReplyReference(block.reply) : block.type === 'code'
           ? renderCodeBlock(block.language, block.code)
-          : renderMarkdown(block.text, { currentNickname, knownNicknames,
-            everyoneMentionEnabled: serverStore.serverDetails?.allowEveryoneMention !== false })).join('')}</div>`
+          : renderMarkdown(block.text, { currentNickname, mentions })).join('')}</div>`
       : visibleText && visibleText.trim().length > 0
-        ? `<div class="chat-message-text">${renderMarkdown(visibleText, {
-            currentNickname,
-            knownNicknames,
-            everyoneMentionEnabled: serverStore.serverDetails?.allowEveryoneMention !== false,
-          })}</div>`
+        ? `<div class="chat-message-text">${renderMarkdown(visibleText, { currentNickname, mentions })}</div>`
         : '';
     const stickersHtml = this.renderStickers(stickers);
     const attachmentsHtml = this.renderAttachments(otherAttachments, m);

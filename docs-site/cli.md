@@ -677,6 +677,10 @@ Devem estar abertas **tanto no firewall do Linux quanto no painel do provedor**
 monky status    # deve mostrar ✔ acessível
 ```
 
+No painel `monky status --watch`, a configuração do TURN é relida só quando o
+banco muda (no máximo a cada 30 s), e as portas são testadas a cada 60 s ou
+logo que o TURN é ligado.
+
 ### Desligando
 
 ```bash

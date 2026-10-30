@@ -13,6 +13,8 @@ import { appEvents } from '../core/EventBus';
 import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
 import { getActiveNetworkClient, networkClient } from '../core/NetworkClient';
 import { showAlert } from './Dialog';
+import { showErrorToast, showSuccessToast } from './CopyToast';
+import { canManageAdmins, changeMemberRole, memberRoleChangedMessage } from './memberActions';
 import { downloadLightboxFile, lightboxModal } from './LightboxModal';
 import { warnIfMoveBlocked } from '../utils/channelAccess';
 import { afkChannelIdOf } from '../utils/voiceRooms';
@@ -59,11 +61,7 @@ export class UserContextMenu {
     // Promoting/demoting admins is also available straight from the member list (#273).
     const adminRole = serverStore.getAdminRole();
     const isTargetAdmin = !!adminRole && roleIds.has(adminRole.id);
-    const canManageAdmin =
-      !user.isBot &&
-      !!adminRole &&
-      user.id !== serverStore.ownerId &&
-      serverStore.hasPermission(Permission.MANAGE_ROLES);
+    const canManageAdmin = !user.isBot && user.id !== serverStore.ownerId && canManageAdmins(serverStore);
     const showAdminSection = canMuteMembers || canDeafenMembers || canKickMembers || canMoveMembers || canManageRoles || canManageAdmin;
 
     // Jogo em andamento (#675) e o pedido para ver a partida (#763).
@@ -325,6 +323,25 @@ export class UserContextMenu {
     const sessionId = this.resolveVolumeTarget(user);
     settingsStore.setUserVolume(sessionId, clamped);
     webRtcManager.setPeerVolume(sessionId, clamped);
+  }
+
+  /**
+   * Same command and feedback as the Members tab. Resolves whether the role
+   * changed; a refusal is reported even if the menu was closed meanwhile.
+   */
+  private async changeRole(userId: string, roleId: string, assign: boolean): Promise<boolean> {
+    const client = getActiveNetworkClient();
+    const store = getActiveServerStore();
+    try {
+      const change = await changeMemberRole((type, payload) => client.sendRequest(type, payload), store, userId, roleId, assign);
+      if (getActiveNetworkClient() === client) showSuccessToast(memberRoleChangedMessage(assign, change));
+      return true;
+    } catch (err: unknown) {
+      if (getActiveNetworkClient() === client) {
+        showErrorToast(err instanceof Error && err.message.trim() ? err.message : t('userMenu.actionFailed'));
+      }
+      return false;
+    }
   }
 
   private async runAdminAction(action: () => Promise<unknown>): Promise<void> {
@@ -633,31 +650,38 @@ export class UserContextMenu {
       });
     });
 
-    this.menuEl.querySelectorAll('[data-action="toggle-role"]').forEach((btn) => {
+    this.menuEl.querySelectorAll<HTMLButtonElement>('[data-action="toggle-role"]').forEach((btn) => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        const roleId = btn.getAttribute('data-role-id');
-        if (!roleId) return;
-        const hasRole = serverStore.getUserRoleIds(user.id).includes(roleId);
-        btn.querySelector('.role-option-check')?.classList.toggle('checked', !hasRole);
-        void networkClient.sendRequest(
-          hasRole ? MessageType.ROLE_UNASSIGN : MessageType.ROLE_ASSIGN,
-          { userId: user.id, roleId }
-        ).catch(() => {});
+        const roleId = btn.dataset.roleId;
+        if (!roleId || btn.disabled) return;
+        const assign = !serverStore.getUserRoleIds(user.id).includes(roleId);
+        const check = btn.querySelector('.role-option-check');
+        check?.classList.toggle('checked', assign);
+        btn.disabled = true;
+        btn.setAttribute('aria-busy', 'true');
+        void this.changeRole(user.id, roleId, assign).then((changed) => {
+          if (!changed) check?.classList.toggle('checked', !assign);
+          btn.disabled = false;
+          btn.removeAttribute('aria-busy');
+        });
       });
     });
 
-    const adminBtn = this.menuEl.querySelector('[data-action="toggle-admin"]');
+    const adminBtn = this.menuEl.querySelector<HTMLButtonElement>('[data-action="toggle-admin"]');
     adminBtn?.addEventListener('click', (e) => {
       e.stopPropagation();
-      const roleId = adminBtn.getAttribute('data-role-id');
-      if (!roleId) return;
-      const isAdmin = serverStore.getUserRoleIds(user.id).includes(roleId);
-      void networkClient.sendRequest(
-        isAdmin ? MessageType.ROLE_UNASSIGN : MessageType.ROLE_ASSIGN,
-        { userId: user.id, roleId }
-      ).catch(() => {});
-      this.close();
+      const roleId = adminBtn.dataset.roleId;
+      if (!roleId || adminBtn.disabled) return;
+      const menu = this.menuEl;
+      adminBtn.disabled = true;
+      adminBtn.setAttribute('aria-busy', 'true');
+      void this.changeRole(user.id, roleId, !serverStore.getUserRoleIds(user.id).includes(roleId)).then((changed) => {
+        if (this.menuEl !== menu) return;
+        if (changed) { this.close(); return; }
+        adminBtn.disabled = false;
+        adminBtn.removeAttribute('aria-busy');
+      });
     });
 
     const handleOutsideClick = (e: MouseEvent | PointerEvent) => {

@@ -674,9 +674,9 @@ test('a role change only resends channels it edited, so other members do not red
   const viewer = await f.human('Sidebar viewer');
   const roles = records(record((await owner.peer.request(MessageType.ROLE_CREATE, { name: 'Sidebar', permissions: 0 })).payload).roles);
   const roleId = text(roles.find(role => role.name === 'Sidebar')?.id);
-  // Each reconciliation sends the categories first and any channel right after, in the same pass.
+  // The owner's next request is handled once its role change, reconciliation included, is over.
   const reconciled = async (marker: number) => {
-    await viewer.peer.wait(message => message.type === MessageType.CATEGORIES_UPDATED, marker);
+    assert.equal((await owner.peer.request(MessageType.COMMANDS_LIST)).type, MessageType.COMMANDS_LIST_RESPONSE);
     await viewer.peer.barrier();
     return viewer.peer.messages.slice(marker).filter(message => message.type === MessageType.CHANNEL_UPDATED).length;
   };

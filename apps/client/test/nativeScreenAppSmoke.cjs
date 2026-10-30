@@ -832,7 +832,6 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
   if (fourK) Object.assign(settingsStore.customProfile, {
     screenWidth: 3840, screenHeight: 2160, screenFps: fourK60 ? 60 : 120, screenBitrateKbps: 80000,
   });
-  settingsStore.preferredVideoCodec = 'h264';
   settingsStore.preferredScreenCodec = screenCodec === 'auto' ? 'h264' : screenCodec;
   settingsStore.screenEncodingStrategy = screenCodec === 'auto' ? 'automatic' : 'manual';
   if (settingsStore.screenEncodingMode !== 'hardware') throw new Error('The fresh application profile must default to Hardware encoding.');

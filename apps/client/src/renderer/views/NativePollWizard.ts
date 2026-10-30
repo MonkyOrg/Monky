@@ -19,6 +19,8 @@ import { getLanguage, t } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { uploadCommunityImage } from '../utils/communityImages';
+import { resolveAvatarUrl } from '../utils/avatar';
+import { preserveViewState } from '../utils/preserveViewState';
 import { openCommunityModal } from './CommunityModal';
 import { contextMenu } from './ContextMenu';
 import { showConfirm } from './Dialog';
@@ -79,7 +81,7 @@ export function openNativePollWizard(
   let anonymousVotes = edit?.anonymousVotes ?? false;
   // Kept images are identified by URL and new uploads by their staged reference.
   let imageSources: string[] = edit ? [...edit.imageUrls] : [];
-  let imagePreviews: string[] = edit ? edit.imageUrls.map(url => client.getHttpBaseUrl() + url) : [];
+  let imagePreviews: string[] = edit ? edit.imageUrls.map(url => resolveAvatarUrl(url, client.getHttpBaseUrl())) : [];
   let imageIndex = 0;
   let duration = initialDuration.duration;
   let unit: DurationUnit = initialDuration.unit;
@@ -458,11 +460,17 @@ export function openNativePollWizard(
       (step === 0 ? !isContentValid() : step === 1 && !audience.isValid());
   };
   audience.bind(viewport, modal.signal, syncValidity);
+  let eventsEnabled = server.communityEventsEnabled;
   const unbindCommunity = server.bus?.on?.('community.updated', () => {
+    // Only whether live actions exist matters here; anything else must not interrupt typing.
+    if (server.communityEventsEnabled === eventsEnabled) return;
+    eventsEnabled = server.communityEventsEnabled;
     if (server.communityEventsEnabled !== true) liveAction = false;
     if (step === 1) {
-      capture();
-      render();
+      preserveViewState(modal.content, () => {
+        capture();
+        render();
+      }, { scroller: '[data-poll-step-viewport]' });
     }
   });
   modal.signal.addEventListener('abort', () => unbindCommunity?.(), { once: true });

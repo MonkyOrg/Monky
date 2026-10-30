@@ -4,6 +4,7 @@ import { getAvatarUrl } from '../../../utils/avatar';
 import { escapeHtml, html, trustedHtml } from '../../../utils/html';
 import { renderRoleOption } from '../../../utils/roleOption';
 import { renderRoleTags } from '../../../utils/roleTags';
+import { canManageAdmins } from '../../memberActions';
 import { t } from '../../../i18n';
 
 const VISIBLE_ROLE_TAGS = 2;
@@ -84,6 +85,7 @@ export class ServerMembersTab {
     // Admin is toggled through its own action, never listed as a role (#265).
     const manageableRoles = roles.filter((role) => !role.isDefault && !serverStore.isAdminRole(role));
     const adminRole = serverStore.getAdminRole();
+    const canToggleAdmin = canManageAdmins(serverStore);
     const members = serverStore.getHumanMembersInDisplayOrder().sort((a, b) => a.nickname.localeCompare(b.nickname));
     const canKickMembers = serverStore.hasPermission(Permission.KICK_MEMBERS);
 
@@ -127,7 +129,7 @@ export class ServerMembersTab {
                     ${t('userMenu.kickMember')}
                   </button>
                 ` : ''}
-                ${adminRole ? html`
+                ${adminRole && canToggleAdmin ? html`
                   <button type="button" class="settings-action-menu-item" data-member-action="toggle-admin" data-user-id="${member.id}" data-role-id="${adminRole.id}" ${isOwner ? 'disabled' : ''}>
                     <span class="material-symbols-outlined md-16">${isAdmin ? 'remove_moderator' : 'shield_person'}</span>
                     <span>${isAdmin ? t('userMenu.removeAdmin') : t('userMenu.promoteToAdmin')}</span>

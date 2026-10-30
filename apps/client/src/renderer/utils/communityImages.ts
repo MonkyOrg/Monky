@@ -3,6 +3,7 @@ import {
   communityImageUploadResultSchema,
 } from '@monky/shared';
 import type { NetworkClient } from '../core/NetworkClient';
+import { resolveAvatarUrl } from './avatar';
 
 const previews = new Map<string, string>();
 
@@ -15,7 +16,7 @@ export async function uploadCommunityImage(
     MessageType.COMMUNITY_IMAGE_UPLOAD,
     { channelId, imageData },
   ));
-  const url = client.getHttpBaseUrl() + response.url;
+  const url = resolveAvatarUrl(response.url, client.getHttpBaseUrl());
   previews.set(response.ref, url);
   return { ref: response.ref, url };
 }

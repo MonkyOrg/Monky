@@ -231,7 +231,7 @@ class CaptureBridge extends ObsHostBridge {
       cancelled: this.cancelled === true, live: { hello: this.liveHello ?? null, packets: this.liveFrames.packets,
       lastPacket: this.liveFrames.lastFrame ?? null, closed: this.liveFrames.closed ?? null,
       eof: this.liveEof, pendingFeedback: this.liveRequests.size, feedbackCommands: this.liveSequence,
-      packetBackpressured: this.packetBackpressured === true, framingBufferedBytes: this.liveFrames.pending.length,
+      packetBackpressured: this.packetBackpressured === true, framingBufferedBytes: this.liveFrames.bufferedBytes,
       queuedJavaScriptFrames: 0 } };
   }
 }

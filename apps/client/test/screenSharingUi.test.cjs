@@ -175,8 +175,7 @@ for (const language of ['pt-BR', 'en']) {
     f.settingsStore.screenEncodingMode = 'software';
     f.settingsStore.preferredScreenCodec = 'av1';
     const preferences = () => JSON.stringify([
-      f.settingsStore.screenEncodingStrategy, f.settingsStore.screenEncodingMode,
-      f.settingsStore.preferredScreenCodec, f.settingsStore.preferredVideoCodec,
+      f.settingsStore.screenEncodingStrategy, f.settingsStore.screenEncodingMode, f.settingsStore.preferredScreenCodec,
     ]);
     const saved = preferences();
     let probes = 0;
@@ -400,7 +399,7 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(root.querySelector('[data-settings-section="screen-preview"]').dataset.settingsLabel, f.i18n.t('settings.screenPreviewSection'));
     const before = JSON.stringify({
       profile: f.settingsStore.customProfile, preset: f.settingsStore.qualityPreset,
-      codec: f.settingsStore.preferredVideoCodec, telemetry: f.settingsStore.screenShareTelemetryEnabled,
+      telemetry: f.settingsStore.screenShareTelemetryEnabled,
     });
     f.quality.attachEvents(root);
     preview.checked = false;
@@ -409,7 +408,7 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(f.settingsStore.screenSharePreviewPauseWhenUnfocused, false);
     assert.equal(JSON.stringify({
       profile: f.settingsStore.customProfile, preset: f.settingsStore.qualityPreset,
-      codec: f.settingsStore.preferredVideoCodec, telemetry: f.settingsStore.screenShareTelemetryEnabled,
+      telemetry: f.settingsStore.screenShareTelemetryEnabled,
     }), before);
     assert.equal(f.traces.filter(trace => trace[0] !== 'cancel-encoding').length, 0,
       'Preview preference changes do not touch capture, quality, camera or transport');
@@ -1457,7 +1456,6 @@ for (const language of ['pt-BR', 'en']) {
     await f.picker.open();
     chooseWindowMethod(f, 'game');
     f.settingsStore.qualityPreset = 'CUSTOM';
-    f.settingsStore.preferredVideoCodec = 'h264';
     const profile = { ...f.settingsStore.customProfile };
     const audio = control(f, 'chk-share-audio');
     audio.checked = false;
@@ -1508,7 +1506,6 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(audio.checked, false);
     assert.equal(f.settingsStore.qualityPreset, 'CUSTOM');
     assert.deepEqual(f.settingsStore.customProfile, profile);
-    assert.equal(f.settingsStore.preferredVideoCodec, 'h264');
     const replacement = f.source('window:404:0', 'window', f.sources[1].name);
     f.controls.sources = async () => [f.sources[0], f.sources[2], window, replacement];
     refresh.click();
@@ -1870,42 +1867,35 @@ test('macOS offers native reception and only its supported window capture method
   assert.equal(root.querySelector('#screen-receiver-native').disabled, false);
   assert.equal(f.settingsStore.getScreenShareReceiver(), 'native');
 });
-for (const saved of ['vp8', 'vp9', 'av1']) {
-  test(`legacy camera ${saved} stays persisted independently of screen codec selection`, async t => {
-    const f = fixture();
-    t.after(() => f.close());
-    f.settingsStore.preferredVideoCodec = saved;
-    f.settingsStore.screenEncodingStrategy = 'manual';
-    const root = f.mountQuality();
-    const codec = root.querySelector('#select-video-codec');
-    await flush();
-    assert.equal(f.settingsStore.preferredVideoCodec, saved);
-    assert.equal(f.saves, 0);
-    assert.equal(codec.value, 'h264');
-    assert.equal(codec.querySelector('option[value="vp8"]'), null);
-    assert.equal(codec.querySelector('option[value="vp9"]'), null);
-    codec.value = 'av1';
-    change(codec);
-    assert.equal(f.saves, 0, 'An unverified selection must not be saved.');
-    await flush();
-    assert.equal(f.settingsStore.preferredVideoCodec, saved);
-      assert.equal(f.saves, 1);
-    assert.equal(codec.value, 'av1');
-    assert.equal(f.settingsStore.preferredScreenCodec, 'av1');
-    codec.value = 'auto';
-    change(codec);
-    assert.equal(f.settingsStore.preferredVideoCodec, saved);
-    assert.equal(f.saves, 1);
-    codec.value = 'h264';
-    change(codec);
-    await flush();
-    assert.equal(f.settingsStore.preferredVideoCodec, saved);
-    assert.equal(f.settingsStore.preferredScreenCodec, 'h264');
-    assert.equal(f.saves, 2);
-    assert.equal(codec.querySelector('option[value="auto"]'), null);
-    assert.equal(codec.querySelector('option[value=""]'), null);
-  });
-}
+test('screen codec selection saves only verified choices and offers no camera-only codecs', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  f.settingsStore.screenEncodingStrategy = 'manual';
+  const root = f.mountQuality();
+  const codec = root.querySelector('#select-video-codec');
+  await flush();
+  assert.equal(f.saves, 0);
+  assert.equal(codec.value, 'h264');
+  assert.equal(codec.querySelector('option[value="vp8"]'), null);
+  assert.equal(codec.querySelector('option[value="vp9"]'), null);
+  codec.value = 'av1';
+  change(codec);
+  assert.equal(f.saves, 0, 'An unverified selection must not be saved.');
+  await flush();
+  assert.equal(f.saves, 1);
+  assert.equal(codec.value, 'av1');
+  assert.equal(f.settingsStore.preferredScreenCodec, 'av1');
+  codec.value = 'auto';
+  change(codec);
+  assert.equal(f.saves, 1);
+  codec.value = 'h264';
+  change(codec);
+  await flush();
+  assert.equal(f.settingsStore.preferredScreenCodec, 'h264');
+  assert.equal(f.saves, 2);
+  assert.equal(codec.querySelector('option[value="auto"]'), null);
+  assert.equal(codec.querySelector('option[value=""]'), null);
+});
 
 test('a late codec error cannot open a dialog after quality settings cleanup', async t => {
   const f = fixture();
@@ -1975,7 +1965,7 @@ for (const language of ['pt-BR', 'en']) {
     control(f, 'chk-share-audio').checked = false;
     change(control(f, 'chk-share-audio'));
     control(f, 'chk-preserve-aspect-ratio').checked = true;
-    const quality = JSON.stringify([f.settingsStore.qualityPreset, f.settingsStore.customProfile, f.settingsStore.preferredVideoCodec]);
+    const quality = JSON.stringify([f.settingsStore.qualityPreset, f.settingsStore.customProfile]);
     const enumerations = f.enumerations;
     opener.click();
     const guide = control(f, 'game-capture-guide').closest('.modal-backdrop');
@@ -2031,7 +2021,7 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(f.document.querySelector('[data-source-id="window:101:0"]'), selectedCard);
     assert.equal(control(f, 'chk-share-audio').checked, false);
     assert.equal(control(f, 'chk-preserve-aspect-ratio').checked, true);
-    assert.equal(JSON.stringify([f.settingsStore.qualityPreset, f.settingsStore.customProfile, f.settingsStore.preferredVideoCodec]), quality);
+    assert.equal(JSON.stringify([f.settingsStore.qualityPreset, f.settingsStore.customProfile]), quality);
     assert.equal(f.enumerations, enumerations);
     assert.equal(f.traces.length, 0, 'No probe, capture, external navigation or transport work runs while browsing');
     assert.equal(f.capabilities.capture, false);
@@ -2199,7 +2189,6 @@ for (const language of ['en', 'pt-BR']) {
     assert.equal(software.disabled, true);
     assert.equal(control(f, 'select-video-codec').disabled, true);
     assert.equal(control(f, 'select-video-codec').value, 'h264');
-    assert.equal(f.settingsStore.preferredVideoCodec, 'auto');
     assert.equal(f.saves, 0);
     assert.doesNotMatch(status.textContent, /Unsupported test adapter\/profile/);
     assert.equal(status.textContent, f.i18n.t('settings.screenEncodingHardwareUnavailable'));
@@ -2349,6 +2338,8 @@ test('changing Automatic/Manual cancels stale discovery and late results never o
   const automatic = deferred(), manual = deferred();
   f.controls.encoding = input => input.encodingStrategy === 'automatic' ? automatic.promise : manual.promise;
   f.mountQuality();
+  // Discovery is in flight once the tab learned that this device can capture.
+  await flush();
   assert.equal(key(control(f, 'screen-encoding-automatic'), 'ArrowRight').defaultPrevented, true);
   assert.equal(f.settingsStore.screenEncodingStrategy, 'automatic', 'The draft Manual choice is not saved until verified.');
   assert.ok(f.traces.some(trace => trace[0] === 'cancel-encoding'));
@@ -2375,6 +2366,8 @@ test('switching pending Manual to Automatic ignores late manual failures and kee
     : Promise.resolve({ selection: { mode: 'hardware', codec: 'h264', encoder: 'h264_texture_amf' },
       hardware: { available: true, reason: null }, fallback: false });
   f.mountQuality();
+  // The Manual check is in flight once the tab learned that this device can capture.
+  await flush();
   control(f, 'screen-encoding-automatic').click();
   await flush();
   manual.reject(new Error('Late Manual failure'));

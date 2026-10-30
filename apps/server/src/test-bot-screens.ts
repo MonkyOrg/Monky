@@ -48,14 +48,34 @@ function fixture() {
   for (const entry of [alice, bob, spectator]) voiceChannels.set(entry.sessionId!, 'voice');
   permissions.set('spectator', Permission.READ_MESSAGES);
   const service = new BotScreenService();
+  const accessOf = async (id: string) => {
+    const result = { userId: id, permissions: permissions.get(id) ?? defaults, roleIds: roles.get(id) ?? [] };
+    accessHook?.(id);
+    return result;
+  };
+  const summary = async (id: string) => id === 'voice' && exists ? { ...channel } : null;
   const handler = new BotScreenHandler(service, {
     getRoleAccessVersion: () => roleVersion,
-    getChannelSummary: async (id) => id === 'voice' && exists ? { ...channel } : null,
     rulesFor: (rules) => rules,
-    getAccessContext: async (id) => {
-      const result = { userId: id, permissions: permissions.get(id) ?? defaults, roleIds: roles.get(id) ?? [] };
-      accessHook?.(id);
-      return result;
+    getAccessContext: accessOf,
+    // As in ChannelService, a scope reads each member once through the fake above, so the race hooks still fire.
+    accessScope: () => {
+      const contexts = new Map<string, ReturnType<typeof accessOf>>();
+      const context = (id: string) => {
+        let value = contexts.get(id);
+        if (!value) {
+          value = accessOf(id);
+          contexts.set(id, value);
+        }
+        return value;
+      };
+      return {
+        member: context,
+        context,
+        channel: summary,
+        channelContext: context,
+        can: async () => { throw new Error('Screens evaluate channel access themselves.'); },
+      };
     },
   }, { isMember: async (id) => members.has(id) }, {
     sessions: () => current,

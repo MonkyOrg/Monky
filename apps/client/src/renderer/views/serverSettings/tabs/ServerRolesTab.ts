@@ -12,6 +12,7 @@ import { COLOR_PRESETS, isHexColor } from '../../../utils/colors';
 import { ContextMenu } from '../../ContextMenu';
 import { showConfirm } from '../../Dialog';
 import { showSuccessToast } from '../../CopyToast';
+import { changeMemberRole, memberRoleChangedMessage } from '../../memberActions';
 import '../../channelSettings.css';
 
 interface RoleDialog {
@@ -701,19 +702,12 @@ export class ServerRolesTab {
   private assignRole(userId: string, roleId: string, assign: boolean): void {
     const context = this.context;
     if (!context || context.operations.isPending(`assignment:${userId}:${roleId}`)) return;
-    void context.operations.run(`assignment:${userId}:${roleId}`, t('roles.assignedColumn'), Permission.MANAGE_ROLES, async () => {
-      const member = context.store.getAllMembersInDisplayOrder().find(member => member.id === userId);
-      const role = context.store.getRole(roleId);
-      if (!role) throw new Error(t('serverSettings.roleUnavailable'));
-      if (!member) throw new Error(t('roles.memberUnavailable'));
-      await context.request<RolesListPayload>(
-        assign ? MessageType.ROLE_ASSIGN : MessageType.ROLE_UNASSIGN, { userId, roleId }, Permission.MANAGE_ROLES,
-      );
-      return { name: member.nickname, role: role.name };
-    }).then(result => {
-      if (result.ok && context.isCurrent()) {
-        showSuccessToast(t(assign ? 'roles.memberAdded' : 'roles.memberRemoved', result.value));
-      }
+    void context.operations.run(`assignment:${userId}:${roleId}`, t('roles.assignedColumn'), Permission.MANAGE_ROLES,
+      () => changeMemberRole(
+        (type, payload) => context.request<RolesListPayload>(type, payload, Permission.MANAGE_ROLES),
+        context.store, userId, roleId, assign,
+      )).then(result => {
+      if (result.ok && context.isCurrent()) showSuccessToast(memberRoleChangedMessage(assign, result.value));
     });
   }
 

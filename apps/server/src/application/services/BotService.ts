@@ -39,6 +39,7 @@ type BotFailure = {
   revokedBotId?: string;
 };
 type BotProfileResult = { success: true; bot: BotInfo } | BotFailure;
+type BotProfileUpdateResult = { success: true; bot: BotInfo; changed: boolean } | BotFailure;
 type BotCreateResult = { success: true; bot: BotInfo; token: string } | BotFailure;
 
 /**
@@ -129,6 +130,7 @@ export class BotService {
       Logger.error('BOT', 'Failed to create bot.', error);
       return { success: false, errorCode: ProtocolErrorCode.INTERNAL_ERROR, errorMessage: 'Não foi possível salvar o bot.' };
     }
+    this.permissions?.refresh(id);
     Logger.info('BOT', record.profilePending
       ? `Bot link (${id}) reserved by user ${createdByUserId}; waiting for the bot identity.`
       : `Bot "${record.name}" (${id}) linked by user ${createdByUserId}.`);
@@ -196,7 +198,8 @@ export class BotService {
     return record ? this.toBotInfo(record) : null;
   }
 
-  async updateProfile(botId: string, profile: unknown): Promise<BotProfileResult> {
+  /** `changed` is false when the bot announced the profile it already had. */
+  async updateProfile(botId: string, profile: unknown): Promise<BotProfileUpdateResult> {
     const parsed = botProfileUpdateSchema.safeParse(profile);
     if (!parsed.success) {
       return {
@@ -217,18 +220,25 @@ export class BotService {
       }
 
       const updates: Partial<BotRecord> = {};
-      if (parsed.data.name !== undefined) {
+      if (parsed.data.name !== undefined && (parsed.data.name !== record.name || record.profilePending)) {
         updates.name = parsed.data.name;
         updates.profilePending = false;
       }
       const avatarBase64 = parsed.data.avatarBase64;
       if (avatarBase64 === null) {
-        updates.avatarPath = null;
+        if (record.avatarPath !== null) updates.avatarPath = null;
       } else if (avatarBase64 !== undefined) {
-        const avatar = await this.saveProfileAvatar(avatarBase64);
+        const avatar = this.decodeProfileAvatar(avatarBase64);
         if (!avatar.success) return avatar;
-        updates.avatarPath = avatar.filename;
+        // Bots announce their avatar on every start: the same image keeps its
+        // file and URL, so no client downloads it again (BOTS-4).
+        if (!record.avatarPath || !this.avatarStorage.hasContent(record.avatarPath, avatar.buffer)) {
+          const saved = await this.storeProfileAvatar(avatar.buffer, avatar.extension);
+          if (!saved.success) return saved;
+          updates.avatarPath = saved.filename;
+        }
       }
+      if (Object.keys(updates).length === 0) return { success: true, bot: this.toBotInfo(record), changed: false };
 
       try {
         await this.botRepo.update(botId, updates);
@@ -240,7 +250,7 @@ export class BotService {
       if (updates.avatarPath !== undefined && record.avatarPath) {
         this.avatarStorage.deleteAvatar(record.avatarPath);
       }
-      return { success: true, bot: this.toBotInfo({ ...record, ...updates }) };
+      return { success: true, bot: this.toBotInfo({ ...record, ...updates }), changed: true };
     });
   }
 
@@ -251,6 +261,7 @@ export class BotService {
         return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Bot não encontrado.' };
       }
       await this.botRepo.delete(botId);
+      this.permissions?.refresh(botId);
       if (record.avatarPath) this.avatarStorage.deleteAvatar(record.avatarPath);
       // Its objects left the database with the bot row; the files follow.
       this.storage?.removeBot(botId);
@@ -432,6 +443,7 @@ export class BotService {
       } catch (error) {
         const record = await this.botRepo.findById(created.bot.id);
         await this.botRepo.delete(created.bot.id);
+        permissionService.refresh(created.bot.id);
         if (record?.avatarPath) this.avatarStorage.deleteAvatar(record.avatarPath);
         Logger.error('BOT', 'Failed to persist bot permission declaration.', error);
         return { success: false, errorCode: ProtocolErrorCode.INTERNAL_ERROR, errorMessage: 'Não foi possível salvar as permissões do bot.' } satisfies BotFailure;
@@ -558,6 +570,11 @@ export class BotService {
   }
 
   private async saveProfileAvatar(value: string): Promise<{ success: true; filename: string } | BotFailure> {
+    const avatar = this.decodeProfileAvatar(value);
+    return avatar.success ? this.storeProfileAvatar(avatar.buffer, avatar.extension) : avatar;
+  }
+
+  private decodeProfileAvatar(value: string): { success: true; buffer: Buffer; extension: string } | BotFailure {
     const invalid: BotFailure = {
       success: false,
       errorCode: ProtocolErrorCode.AVATAR_INVALID_TYPE,
@@ -581,8 +598,12 @@ export class BotService {
     if (!validation.isValid || !validation.extension || (declaredMime && declaredMime !== validation.mimeType)) {
       return { ...invalid, errorMessage: validation.error ?? invalid.errorMessage };
     }
+    return { success: true, buffer, extension: validation.extension };
+  }
+
+  private async storeProfileAvatar(buffer: Buffer, extension: string): Promise<{ success: true; filename: string } | BotFailure> {
     try {
-      return { success: true, filename: await this.avatarStorage.saveAvatar(buffer, validation.extension) };
+      return { success: true, filename: await this.avatarStorage.saveAvatar(buffer, extension) };
     } catch (error) {
       Logger.error('BOT', 'Failed to save bot avatar.', error);
       return { success: false, errorCode: ProtocolErrorCode.INTERNAL_ERROR, errorMessage: 'Não foi possível salvar o avatar do bot.' };

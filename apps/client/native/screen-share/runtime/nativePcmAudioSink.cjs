@@ -47,12 +47,17 @@ class NativePcmAudioSink {
     this.playout = null;
     this.sinkWork = null;
     this.switchingSink = false;
+    this.interruption = null;
     this.lastUnderrun = null;
     this.errors = [];
     this.onStateChange = () => {
-      if (!this.stopping && !this.switchingSink && (this.ready || this.preparingOutput) && this.context?.state !== 'running') {
+      if (this.stopping || this.switchingSink || !(this.ready || this.preparingOutput)) return;
+      if (this.context?.state === 'running') { this.endInterruption(); return; }
+      if (!this.ready || this.context?.state === 'closed') {
         this.fail(new Error('Native audio output stopped; a new playout epoch is required before resuming.'));
+        return;
       }
+      this.beginInterruption();
     };
     this.onSinkChange = () => {
       if (!this.stopping && (this.ready || this.preparingOutput)) {
@@ -64,6 +69,29 @@ class NativePcmAudioSink {
   invalidateOutputClock() {
     this.clock.invalidate('output-device-changed');
     this.notify(this.onFeedback, { available: false, epoch: this.epoch, reason: 'output-device-changed' });
+  }
+
+  // Losing its device suspends a running context. Keep this epoch while the app moves screen audio to
+  // another output, which resumes it, or the device recovers by itself; fail only if neither happens in time.
+  beginInterruption() {
+    if (this.interruption !== null) return;
+    this.invalidateOutputClock();
+    this.interruption = setTimeout(() => {
+      this.interruption = null;
+      if (!this.stopping && this.context?.state !== 'running')
+        this.fail(new Error('Native audio output stopped; a new playout epoch is required before resuming.'));
+    }, this.timeoutMs);
+  }
+
+  endInterruption() {
+    if (this.interruption === null) return;
+    this.clearInterruption();
+    this.invalidateOutputClock();
+  }
+
+  clearInterruption() {
+    clearTimeout(this.interruption);
+    this.interruption = null;
   }
 
   setSinkId(sinkId) {
@@ -96,7 +124,12 @@ class NativePcmAudioSink {
         throw error;
       } finally {
         this.switchingSink = false;
-        if (!this.stopping) this.invalidateOutputClock();
+        if (!this.stopping) {
+          // Moving off a lost device resumes the context; a context a switch left suspended gets the same grace.
+          if (this.context.state === 'running') this.clearInterruption();
+          else this.beginInterruption();
+          this.invalidateOutputClock();
+        }
       }
     };
     const work = (this.sinkWork ?? Promise.resolve()).then(execute, execute);
@@ -269,6 +302,7 @@ class NativePcmAudioSink {
 
   async stop() {
     this.stopping = true;
+    this.clearInterruption();
     this.startAbort.abort(new DOMException('Native audio output preparation was cancelled.', 'AbortError'));
     this.ready = false;
     if (!this.closeWork) {

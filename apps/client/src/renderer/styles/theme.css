@@ -14803,10 +14803,16 @@ body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-card.
 
 /* ── Modal de Configuração de Sobreposição ───────────────────────────────── */
 .overlay-option-card {
+  width: 100%;
+  min-width: 0;
   padding: 12px;
   background: rgba(0, 0, 0, 0.2);
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  text-align: left;
   cursor: pointer;
   transition: all 0.15s ease;
   display: flex;
@@ -14822,6 +14828,16 @@ body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-card.
   background: rgba(88, 101, 242, 0.12);
   border-color: var(--primary);
   color: var(--text-primary);
+}
+
+.overlay-option-card:focus-visible,
+.overlay-pos-btn:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+.overlay-option-card:disabled {
+  cursor: not-allowed;
 }
 
 .overlay-pos-btn {

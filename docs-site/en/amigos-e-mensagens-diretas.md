@@ -52,6 +52,13 @@ and, on your own messages, **Edit message** and **Delete message**. See
 [Chat](/en/usando-o-app#chat) for the details; polls and stickers remain
 server-only.
 
+Whatever you started writing in a conversation stays with it, as in channels:
+the text, the files you picked, the message you are replying to and an edit you
+have not saved yet. Opening another conversation or a server and coming back
+does not wipe anything; the draft only goes away when you send the message or
+close Monky. Clicking a reply's preview jumps to the original message and
+highlights it.
+
 Monky shows when the other person is typing. Consecutive
 messages from the same person on the same day are grouped under a single name
 and picture; hover one to see its time. A message that has not been delivered

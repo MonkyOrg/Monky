@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { fileErrorCode, renameFileSync, writeFileAtomicSync } from '../atomicFile';
-import { openAtRest, sealAtRest } from './dmCrypto';
+import { openAtRest, sealAtRest, sealAtRestStream } from './dmCrypto';
 
 /**
  * Encrypted local storage for friends and DMs (#743).
@@ -151,7 +151,7 @@ export class DmPersistence {
     this.pendingWrites.clear();
   }
 
-  private atomicWrite(name: string, data: Buffer): void {
+  private atomicWrite(name: string, data: Uint8Array | Iterable<Uint8Array>): void {
     writeFileAtomicSync(this.filePath(name), data);
   }
 
@@ -168,8 +168,7 @@ export class DmPersistence {
   }
 
   writeAttachment(fileId: string, data: Buffer): void {
-    const name = this.attachmentName(fileId);
-    this.atomicWrite(name, sealAtRest(this.key, data, `file:${fileId}`));
+    this.atomicWrite(this.attachmentName(fileId), sealAtRestStream(this.key, [data], `file:${fileId}`));
   }
 
   readAttachment(fileId: string): Buffer | null {
@@ -222,28 +221,21 @@ export class DmPersistence {
    * Returns how many chunks survive.
    */
   repairPart(fileId: string): number {
+    let count = 0;
+    let intact = 0;
+    for (const record of this.partRecords(fileId)) {
+      count += 1;
+      intact = record.end;
+    }
     const filePath = this.filePath(this.partName(fileId));
-    let raw: Buffer;
+    let size: number;
     try {
-      raw = fs.readFileSync(filePath);
+      size = fs.statSync(filePath).size;
     } catch (error) {
       if (fileErrorCode(error) === 'ENOENT') return 0;
       throw error;
     }
-    let offset = 0;
-    let count = 0;
-    while (offset + 4 <= raw.length) {
-      const length = raw.readUInt32BE(offset);
-      if (length > MAX_SEALED_PART_BYTES || offset + 4 + length > raw.length) break;
-      try {
-        openAtRest(this.key, raw.subarray(offset + 4, offset + 4 + length), `part:${fileId}:${count}`);
-      } catch {
-        break;
-      }
-      offset += 4 + length;
-      count += 1;
-    }
-    if (offset < raw.length) fs.truncateSync(filePath, offset);
+    if (intact < size) fs.truncateSync(filePath, intact);
     return count;
   }
 
@@ -255,37 +247,70 @@ export class DmPersistence {
     }
   }
 
-  /** Reads every sealed chunk of a partial download, in order. */
-  readPart(fileId: string): Buffer {
-    const filePath = this.filePath(this.partName(fileId));
-    if (!fs.existsSync(filePath)) return Buffer.alloc(0);
-    const raw = fs.readFileSync(filePath);
-    const chunks: Buffer[] = [];
-    let offset = 0;
-    let index = 0;
-    while (offset + 4 <= raw.length) {
-      const length = raw.readUInt32BE(offset);
-      offset += 4;
-      if (offset + length > raw.length) break;
-      chunks.push(openAtRest(this.key, raw.subarray(offset, offset + length), `part:${fileId}:${index}`));
-      offset += length;
-      index += 1;
+  /**
+   * Turns a finished partial download into the attachment with one chunk in
+   * memory at a time: every chunk is opened in order, hashed and sealed again
+   * into the attachment file, which is published only when the size and the
+   * SHA-256 match. Returns false, writing nothing, when they do not.
+   */
+  completePart(fileId: string, size: number, sha256: string): boolean {
+    const records = this.partRecords(fileId);
+    function* verified(): Generator<Buffer> {
+      const hash = createHash('sha256');
+      let total = 0;
+      for (const { chunk } of records) {
+        total += chunk.length;
+        if (total > size) throw new PartMismatch();
+        hash.update(chunk);
+        yield chunk;
+      }
+      if (total !== size || hash.digest('hex') !== sha256) throw new PartMismatch();
     }
-    return Buffer.concat(chunks);
+    try {
+      this.atomicWrite(this.attachmentName(fileId), sealAtRestStream(this.key, verified(), `file:${fileId}`));
+    } catch (error) {
+      if (error instanceof PartMismatch) return false;
+      throw error;
+    }
+    return true;
   }
 
-  partChunkCount(fileId: string): number {
-    const filePath = this.filePath(this.partName(fileId));
-    if (!fs.existsSync(filePath)) return 0;
-    const raw = fs.readFileSync(filePath);
-    let offset = 0;
-    let count = 0;
-    while (offset + 4 <= raw.length) {
-      const length = raw.readUInt32BE(offset);
-      if (offset + 4 + length > raw.length) break;
-      offset += 4 + length;
-      count += 1;
+  /**
+   * The intact records of a partial download, in order, read one at a time:
+   * each opened chunk and the offset where its record ends. It stops at the
+   * first record that is torn (a crash, a full disk) or does not open.
+   */
+  private *partRecords(fileId: string): Generator<{ chunk: Buffer; end: number }> {
+    let descriptor: number;
+    try {
+      descriptor = fs.openSync(this.filePath(this.partName(fileId)), 'r');
+    } catch (error) {
+      if (fileErrorCode(error) === 'ENOENT') return;
+      throw error;
     }
-    return count;
+    try {
+      const header = Buffer.alloc(4);
+      let position = 0;
+      for (let index = 0; ; index += 1) {
+        if (fs.readSync(descriptor, header, 0, 4, position) < 4) return;
+        const length = header.readUInt32BE(0);
+        if (length > MAX_SEALED_PART_BYTES) return;
+        const sealed = Buffer.allocUnsafe(length);
+        if (fs.readSync(descriptor, sealed, 0, length, position + 4) < length) return;
+        let chunk: Buffer;
+        try {
+          chunk = openAtRest(this.key, sealed, `part:${fileId}:${index}`);
+        } catch {
+          return;
+        }
+        position += 4 + length;
+        yield { chunk, end: position };
+      }
+    } finally {
+      fs.closeSync(descriptor);
+    }
   }
 }
+
+/** The bytes of a finished download are not the file its message announced. */
+class PartMismatch extends Error {}

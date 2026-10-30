@@ -287,6 +287,57 @@ test('a rejected hot selection is returned to its caller without stopping output
   assert.deepEqual(f.errors, []);
 });
 
+const loseOutput = context => {
+  context.state = 'suspended';
+  context.listeners.get('statechange')();
+};
+
+test('an output lost while playing keeps its epoch, worklet and credits while screen audio moves to the default', async t => {
+  const f = fixture(t, { withOwner: true });
+  await f.owner.start('chosen-output');
+  const context = f.contexts[0], node = f.nodes[0];
+  f.grant(); await until(() => f.credits.length === 1);
+  loseOutput(context);
+  await until(() => f.feedback.some(value => value.available === false));
+  await f.owner.setSinkId('');
+  assert.equal(context.state, 'running');
+  assert.equal(context.sinkId, '');
+  await delay(400);
+  assert.equal(f.owner.getStats().sinkId, '');
+  assert.equal(f.owner.getStats().activeEpoch, 1);
+  assert.equal(f.owner.getStats().ready, true);
+  assert.equal(f.owner.receiveEpoch(f.commands.engine), 1);
+  assert.equal(f.contextCount(), 1);
+  assert.equal(f.nodes[0], node);
+  assert.equal(f.calls.filter(call => call === 'configure').length, 1);
+  assert.deepEqual(f.errors, []);
+});
+
+test('an output interruption that ends by itself keeps the same epoch', async t => {
+  const f = fixture(t, { withOwner: true });
+  await f.owner.start('chosen-output');
+  const context = f.contexts[0];
+  loseOutput(context);
+  context.state = 'running';
+  context.listeners.get('statechange')();
+  await delay(400);
+  assert.equal(f.owner.getStats().ready, true);
+  assert.equal(f.owner.getStats().activeEpoch, 1);
+  assert.deepEqual(f.errors, []);
+});
+
+test('an output that neither recovers nor moves to another device still fails after its grace period', async t => {
+  const f = fixture(t, { withOwner: true });
+  await f.owner.start('chosen-output');
+  loseOutput(f.contexts[0]);
+  await delay(50);
+  assert.equal(f.owner.getStats().ready, true, 'The output waits while it can still move to another device.');
+  await until(() => f.owner.getStats().stopped);
+  assert.ok(f.errors.some(error => /new playout epoch is required/.test(error.message)));
+  assert.equal(f.contexts[0].state, 'closed');
+  assert.equal(f.calls.includes('native-stop:1'), true);
+});
+
 test('Stop drains an in-flight output selection without starting another context or accepting a late change', async t => {
   const f = fixture(t, { withOwner: true }), gate = deferred();
   await f.owner.start('chosen-output');

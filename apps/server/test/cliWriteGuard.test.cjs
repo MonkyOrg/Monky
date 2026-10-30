@@ -61,6 +61,7 @@ async function seededServer(t, { registered = false } = {}) {
 
 function pm2State(t, entry) {
   const state = { entry };
+  t.mock.method(pm2, 'listPm2Processes', () => []);
   t.mock.method(pm2, 'findPm2Process', (name) => (name === state.entry?.name ? state.entry : null));
   t.mock.method(pm2, 'findLegacyProcessFor', () => null);
   return state;

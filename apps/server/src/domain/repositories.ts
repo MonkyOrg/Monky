@@ -4,6 +4,8 @@ import type { BotSettingsRecord } from './entities';
 
 export interface IBotPermissionRepository {
   findById(botId: string): import('@monky/shared').BotPermissions | undefined;
+  /** Every bot with its stored state, keyed by bot id. */
+  listAll(): Map<string, import('@monky/shared').BotPermissions>;
   save(botId: string, permissions: import('@monky/shared').BotPermissions): void;
   transaction<T>(operation: () => T): T;
 }
@@ -130,7 +132,8 @@ export interface IMessageRepository {
   createChatMessage(message: MessageRecord, attachmentIds: string[], mentions: MentionRecord[]): Promise<{
     message: MessageRecord; created: boolean;
   } | null>;
-  createBotMessage(message: MessageRecord): Promise<MessageRecord | null>;
+  /** Stores a bot post with its mentions; a retry returns the first copy without recording them again. */
+  createBotMessage(message: MessageRecord, mentions?: MentionRecord[]): Promise<MessageRecord | null>;
   setReaction(messageId: string, userId: string, emoji: string, add: boolean): Promise<'changed' | 'unchanged' | 'limit' | 'invalid'>;
   listReactions(messageIds: string[]): Promise<import('./entities').MessageReactionRecord[]>;
   create(message: MessageRecord): Promise<void>;

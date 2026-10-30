@@ -140,6 +140,7 @@ function fixture(t, options = {}) {
   t.mock.method(pm2, 'findPm2Process', (name) => name === pm2.getPm2ProcessName(dataDir) ? {
     name, pid: fs.existsSync(receipt) && !options.restartFailure ? 4343 : 4242, pm2_env: { status: 'online' },
   } : null);
+  t.mock.method(pm2, 'listPm2Processes', () => []);
   t.mock.method(pm2, 'findLegacyProcessFor', () => null);
   t.mock.method(onlineUsers, 'readLocalServerPreview', async () => ({ userCount: 0, voiceUserCount: 0, botCompatibility: null }));
   t.mock.method(prompts, 'confirm', async (question) => {

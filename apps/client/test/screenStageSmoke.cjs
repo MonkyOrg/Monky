@@ -89,8 +89,9 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
   let watchState = null;
   replace(rtc, 'getNativeScreenWatchState', (sessionId, shareId) =>
     sessionId === remote.sessionId && shareId === remoteSource.shareId ? watchState : null);
-  replace(rtc, 'getAverageP2pPing', async () => 0);
-  replace(rtc, 'getScreenViewers', async () => []);
+  replace(rtc, 'getCallPing', () => 0);
+  let viewerRequests = 0;
+  replace(rtc, 'getScreenViewers', async () => { viewerRequests++; return []; });
   const screenWatchCalls = [];
   replace(rtc, 'setRemoteScreenWatching', (sessionId, shareId, watching) => {
     screenWatchCalls.push({ sessionId, shareId, watching });
@@ -209,6 +210,17 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
     }
     participants.get(remote.sessionId).remoteScreenStreams.set(remoteSource.shareId, new MediaStream());
   };
+  // A third participant joins, changes and leaves while the others keep watching (#490).
+  const third = { ...local, id: 'third-user', sessionId: 'third-session', clientId: 'third-client', nickname: 'Third <UI>' };
+  const updateThird = (state = {}) => participants.updateVoiceState({
+    userId: third.id, sessionId: third.sessionId, channelId: channel.id, isSpeaking: false, isMuted: false,
+    isDeafened: false, isCameraOn: false, isScreenSharing: false, screenShareIds: [], nativeScreenShares: [], ...state,
+  });
+  const stageCards = () => new Map([...document.querySelectorAll('[data-tile-key]')].map(element => [element.dataset.tileKey, element]));
+  const stageVideos = () => new Map([...document.querySelectorAll('video')].map(element => [element, element.srcObject]));
+  const keepsCards = cards => [...cards].every(([key, element]) => element.isConnected
+    && document.querySelector(`[data-tile-key="${CSS.escape(key)}"]`) === element);
+  const keepsVideos = videos => [...videos].every(([element, stream]) => element.isConnected && element.srcObject === stream);
 
   try {
     for (const locale of ['pt-BR', 'en']) {
@@ -289,6 +301,25 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       const controls = focusedCard.querySelector('.stage-card-controls');
       check(controls && !scroll(controls, -100).defaultPrevented && stage.focusZoom.scale === 1,
         'Scrolling focused card controls must not zoom the picture');
+      check(scroll(focusedVideo, -100).defaultPrevented && focusedCard.classList.contains('is-zoomed'),
+        'The focused screen is zoomed before the focus splits');
+      const remoteCameraKey = `${remote.sessionId}:camera`;
+      document.querySelector(`[data-tile-key="${remoteCameraKey}"]`).click();
+      check(focused().join() === [focusKey(first.id), remoteCameraKey].join()
+        && card(local.sessionId, first.id) === focusedCard && video(local.sessionId, first.id) === focusedVideo,
+      'Adding a second pane keeps the zoomed screen card');
+      check(focusedVideo.style.transform === '' && !focusedCard.classList.contains('is-zoomed')
+        && !focusedCard.classList.contains('is-panning') && stage.focusZoom.scale === 1,
+      'Two panes drop the zoom instead of leaving the kept pane cropped without its gestures');
+      check(!scroll(focusedVideo, -100).defaultPrevented && focusedVideo.style.transform === '',
+        'Two panes have no zoom target');
+      document.querySelector(`[data-tile-key="${remoteCameraKey}"]`).click();
+      check(focused().join() === focusKey(first.id) && card(local.sessionId, first.id) === focusedCard,
+        'Clicking the second pane takes it out of focus, since nothing is zoomed');
+      check(scroll(focusedVideo, -100).defaultPrevented && stage.focusZoom.scale > 1 && focusedCard.classList.contains('is-zoomed'),
+        'A single pane zooms again after the split');
+      scroll(focusedVideo, 100);
+      check(stage.focusZoom.scale === 1 && focusedVideo.style.transform === '', 'The single pane unzooms again');
       card(local.sessionId, first.id).click();
       check(focused().length === 0, 'The publisher can unfocus the automatic preview');
       const localVideo = video(local.sessionId, first.id);
@@ -470,6 +501,63 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
         check(remoteCard.querySelector('.stage-badges-overlay').textContent.includes('mic_off') === muted,
           'Remote mute indicators must update without replacing the video');
       }
+      const keepsFullscreen = () => card(remote.sessionId, remoteSource.shareId) === remoteCard && remoteCard.isConnected
+        && document.fullscreenElement === remoteCard && video(remote.sessionId, remoteSource.shareId) === remoteVideo
+        && remoteVideo.srcObject === remoteStream;
+      const viewersButton = remoteCard.querySelector('.stage-viewers-button');
+      const requestsBeforeRoster = viewerRequests;
+      const volume = remoteCard.querySelector('.stage-screen-volume-slider');
+      let cardsBefore = stageCards(), videosBefore = stageVideos();
+      volume.value = '150';
+      volume.dispatchEvent(new Event('input', { bubbles: true }));
+      appEvents.emit('participants.updated');
+      stage.renderParticipants();
+      check(settings.getScreenAudioVolume(remote.sessionId, remote.clientId) === 150 && volume.isConnected && volume.value === '150'
+        && keepsFullscreen() && keepsCards(cardsBefore) && keepsVideos(videosBefore),
+      'Adjusting a screen volume and a later roster update must keep the watched card, its video and fullscreen');
+      settings.screenShareTelemetryPosition = 'bottom-right';
+      stage.renderParticipants();
+      check(keepsFullscreen() && keepsCards(cardsBefore)
+        && remoteCard.querySelector('.telemetry-overlay').classList.contains('position-bottom-right'),
+      'Moving the telemetry overlay updates it in place, without rebuilding cards');
+      settings.screenShareTelemetryPosition = 'top-left';
+      participants.addUser(third);
+      updateThird();
+      stage.renderParticipants();
+      check(document.querySelector('[data-tile-key="third-session:voice"]')?.closest('.stage-focused-strip')
+        && keepsFullscreen() && keepsCards(cardsBefore) && keepsVideos(videosBefore),
+      'A participant joining adds only their card; every other card, video and the fullscreen stay');
+      cardsBefore = stageCards();
+      updateThird({ isCameraOn: true });
+      stage.renderParticipants();
+      check(!document.querySelector('[data-tile-key="third-session:voice"]')
+        && document.querySelector('[data-tile-key="third-session:camera"] video')
+        && keepsFullscreen() && keepsVideos(videosBefore)
+        && keepsCards([...cardsBefore].filter(([key]) => !key.startsWith('third-session:'))),
+      'A camera turning on replaces only that participant card');
+      cardsBefore = stageCards();
+      videosBefore = stageVideos();
+      for (const [sessionId, reconnecting] of [[third.sessionId, true], [remote.sessionId, true], [third.sessionId, false], [remote.sessionId, false]]) {
+        participants.setReconnecting(sessionId, reconnecting);
+        stage.renderParticipants();
+        const notices = [...document.querySelectorAll(`[data-session-id="${sessionId}"][data-tile-key] > .stage-reconnecting-overlay:not([data-ui-closing])`)];
+        const expected = reconnecting ? document.querySelectorAll(`[data-session-id="${sessionId}"][data-tile-key]`).length : 0;
+        check(notices.length === expected && keepsFullscreen() && keepsCards(cardsBefore) && keepsVideos(videosBefore),
+        `Reconnecting shows or hides the notice on that participant cards without rebuilding any card or leaving fullscreen: ${JSON.stringify({
+          sessionId, reconnecting, notices: notices.length, expected, fullscreen: keepsFullscreen(),
+          cards: [...cardsBefore].filter(([key, element]) => !keepsCards([[key, element]])).map(([key]) => key),
+          videos: [...videosBefore].filter(([element, stream]) => !keepsVideos([[element, stream]])).map(([element]) => element.id) })}`);
+      }
+      participants.removeUser(third.sessionId);
+      stage.renderParticipants();
+      const othersBefore = [...cardsBefore].filter(([key]) => !key.startsWith('third-session:'));
+      check(!document.querySelector('[data-tile-key^="third-session:"]') && keepsFullscreen() && keepsCards(othersBefore)
+        && keepsVideos([...videosBefore].filter(([element]) => !element.closest('[data-tile-key^="third-session:"]'))),
+      'A participant leaving removes only their card');
+      check(remoteCard.querySelector('.stage-viewers-button') === viewersButton && viewerRequests === requestsBeforeRoster,
+        'Roster changes keep the viewer badges instead of recreating them and querying the audience again');
+      volume.value = '100';
+      volume.dispatchEvent(new Event('input', { bubbles: true }));
       fullscreen = null;
       for (const receiver of ['native', 'chromium']) {
         watchState = { state: 'unavailable', reason: 'connection-failed', receiver };
@@ -607,6 +695,63 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       stage.renderParticipants();
       check(document.querySelector(`[data-tile-key="${remote.sessionId}:camera"] video`).srcObject === null,
         'Removing a camera stream must not retain its obsolete media');
+      stage.setFocusedTiles([]);
+      check(document.querySelector('#stage-grid') && focused().length === 0, 'The grid roster checks start without focus');
+      const gridCards = stageCards(), gridVideos = stageVideos();
+      participants.addUser(third);
+      updateThird({ isCameraOn: true });
+      stage.renderParticipants();
+      check(document.querySelector('#stage-grid > [data-tile-key="third-session:camera"]')
+        && keepsCards(gridCards) && keepsVideos(gridVideos),
+      'In the grid, a participant joining with a camera keeps every other card and video');
+      participants.removeUser(third.sessionId);
+      stage.renderParticipants();
+      check(!document.querySelector('[data-tile-key^="third-session:"]') && keepsCards(gridCards) && keepsVideos(gridVideos),
+        'In the grid, a participant leaving keeps every other card and video');
+
+      // A peer announcing one share twice must still get one card that stays put, without
+      // extra viewer badges polling the server behind the scenes.
+      const nativeKey = `${remote.sessionId}:screen:${remoteSource.shareId}`;
+      const nativeCards = () => document.querySelectorAll(`[data-tile-key="${CSS.escape(nativeKey)}"]`).length;
+      const remoteState = participants.get(remote.sessionId).voiceState;
+      const nativeStream = participants.get(remote.sessionId).remoteScreenStreams.get(remoteSource.shareId);
+      rtc.setRemoteScreenWatching(remote.sessionId, remoteSource.shareId, true);
+      stage.renderParticipants();
+      const watchedCard = card(remote.sessionId, remoteSource.shareId);
+      check(watchedCard.querySelector('video').srcObject === nativeStream, 'The watched screen shows its stream');
+      const requestsBeforeRepeat = viewerRequests;
+      participants.updateVoiceState({ ...remoteState,
+        screenShareIds: [remoteSource.shareId, remoteSource.shareId, 'remote-browser'] });
+      for (let render = 0; render < 3; render++) stage.renderParticipants();
+      check(nativeCards() === 1 && card(remote.sessionId, remoteSource.shareId) === watchedCard
+        && watchedCard.querySelector('video').srcObject === nativeStream && viewerRequests === requestsBeforeRepeat,
+      'A share announced twice keeps its single card and viewer badge');
+      check(card(remote.sessionId, 'remote-browser').querySelector('.stage-badges-overlay').textContent
+        .includes(language.t('stage.screenLabelNumbered', { index: '2' })), 'Numbering the screens ignores the repeat');
+      const shareIdsOf = stage.getShareIds;
+      // Two tiles with one key, whatever produced them, must not leave a second card behind, even
+      // when a new stream rebuilds that card.
+      stage.getShareIds = (participant, isLocal) => participant.user.sessionId === remote.sessionId
+        ? ['remote-browser', remoteSource.shareId, remoteSource.shareId] : shareIdsOf.call(stage, participant, isLocal);
+      const replacedStream = new MediaStream();
+      participants.get(remote.sessionId).remoteScreenStreams.set(remoteSource.shareId, replacedStream);
+      stage.renderParticipants();
+      const repeatedCard = card(remote.sessionId, remoteSource.shareId);
+      const requestsAfterRepeat = viewerRequests;
+      check(nativeCards() === 1 && repeatedCard !== watchedCard && repeatedCard.querySelector('video').srcObject === replacedStream,
+        `A key repeated within a render places a single card: ${JSON.stringify({ cards: nativeCards(),
+          rebuilt: repeatedCard !== watchedCard, stream: repeatedCard?.querySelector('video')?.srcObject === replacedStream })}`);
+      for (let render = 0; render < 3; render++) stage.renderParticipants();
+      check(nativeCards() === 1 && card(remote.sessionId, remoteSource.shareId) === repeatedCard
+        && repeatedCard.querySelector('video').srcObject === replacedStream && viewerRequests === requestsAfterRepeat,
+      'A repeated key neither rebuilds the card on every render nor leaks the viewer badges of discarded cards');
+      delete stage.getShareIds;
+      participants.get(remote.sessionId).remoteScreenStreams.set(remoteSource.shareId, nativeStream);
+      participants.updateVoiceState(remoteState);
+      rtc.setRemoteScreenWatching(remote.sessionId, remoteSource.shareId, false);
+      stage.renderParticipants();
+      check(nativeCards() === 1 && card(remote.sessionId, remoteSource.shareId).querySelector('.screen-locked'),
+        'Stopping the watch returns the share to its single locked card');
 
       notifyExports.notify({ shareId: '<img src=x onerror=bad()>' });
       const toast = document.querySelector('.chat-copy-toast');

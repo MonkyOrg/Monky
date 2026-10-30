@@ -397,7 +397,6 @@ async function runCameraPublicationSmoke(filter) {
   rtc.setCurrentSessionId(self.sessionId);
   settings.inputMode = 'push_to_talk';
   settings.noiseSuppressionEnabled = false;
-  settings.preferredVideoCodec = 'auto';
   settings.qualityPreset = 'CUSTOM';
   settings.customProfile = {
     ...settings.customProfile, cameraWidth: 160, cameraHeight: 90, cameraFps: 12,
@@ -856,15 +855,21 @@ async function runCameraPublicationSmoke(filter) {
       const nativeReplace = bad.camera.sender.replaceTrack.bind(bad.camera.sender);
       patch(bad.camera.sender, 'replaceTrack', async track => {
         calls.push(track);
-        if (track === processed) throw failure;
+        if (track) throw failure;
         return nativeReplace(track);
       });
-      check(await rejected(rtc.setLocalCameraTrack(processed), 'Partial native replacement rejects') === failure,
-        'The actual native failure reaches the caller');
-      check(rtc.localCameraTrack === null && good.camera.sender.track === null,
-        'A partially published failing candidate is detached instead of cached');
+      // One peer refusing the track is that link's problem, not the camera's (R-VOICE-4).
+      await rtc.setLocalCameraTrack(processed);
+      check(rtc.localCameraTrack === processed && good.camera.sender.track === processed,
+        'A peer that refuses the replacement does not take the camera away from the others');
       check(!calls.includes(raw) && bad.camera.sender.track?.readyState !== 'live',
         'Failure never restores a stopped raw track');
+      rtc.peers.delete('good');
+      const last = source('#20ee20').track;
+      check(await rejected(rtc.setLocalCameraTrack(last), 'Replacement refused by every peer rejects') === failure,
+        'When no peer takes the camera, the actual native failure reaches the caller');
+      check(rtc.localCameraTrack === null && !calls.includes(raw) && last.readyState === 'live',
+        'A candidate no peer took is not cached, and capture ownership stays with its source');
       preserveOtherMedia(good);
       preserveOtherMedia(bad);
     });
@@ -873,6 +878,7 @@ async function runCameraPublicationSmoke(filter) {
       const peer = makePeer('offer-failure', 'recvonly');
       const candidate = source('#2020ee').track;
       const failure = new Error('fixture createOffer failed');
+      const createOffer = peer.session.pc.createOffer.bind(peer.session.pc);
       patch(peer.session.pc, 'createOffer', async () => { throw failure; });
       const calls = [];
       const sendOffer = rtc.sendOffer;
@@ -880,12 +886,18 @@ async function runCameraPublicationSmoke(filter) {
         calls.push(args);
         return sendOffer.apply(this, args);
       });
-      check(await rejected(rtc.setLocalCameraTrack(candidate), 'Camera negotiation failure rejects') === failure,
-        'Offer errors are propagated, not logged as a successful publication');
-      check(calls.length === 1 && calls[0][1] === false && calls[0][2] === true,
-        'Camera direction negotiation explicitly propagates sendOffer errors');
-      check(peer.camera.sender.track === null && rtc.localCameraTrack === null && candidate.readyState === 'live',
-        'Failed negotiation detaches only camera; capture ownership stays with its source');
+      // An offer that fails is owed to that link, not a failed camera (R-VOICE-4).
+      await rtc.setLocalCameraTrack(candidate);
+      check(calls.length === 1 && peer.camera.direction === 'sendrecv' && peer.camera.sender.track === candidate
+        && rtc.localCameraTrack === candidate && candidate.readyState === 'live',
+      'A failed offer keeps the published camera and capture ownership with its source');
+      check(peer.session.negotiationNeeded === true, 'The direction change stays owed to the peer after the failed offer');
+      patch(peer.session.pc, 'createOffer', createOffer);
+      const offers = sent.filter(entry => entry.payload?.signalType === 'offer').length;
+      await rtc.renegotiateIfNeeded(peer.session);
+      check(calls.length === 2 && peer.session.negotiationNeeded === false
+        && sent.filter(entry => entry.payload?.signalType === 'offer').length === offers + 1,
+      'The owed change goes out in the next offer the link can make');
       preserveOtherMedia(peer);
     });
 
@@ -1580,6 +1592,23 @@ async function runCameraPublicationSmoke(filter) {
       check(captures[0].track.readyState === 'ended', 'Cancelled stage startup releases the late capture');
       check(!sent.some(entry => entry.type === MessageType.VOICE_STATE_UPDATE && entry.payload.isCameraOn),
         'Cancelled startup never announces camera-on to the control plane');
+    });
+
+    await run('camera-toggle-outlives-the-stage', async () => {
+      bindPublication();
+      captureGate = deferred();
+      const gate = captureGate;
+      // A navigation rebuilds the stage while the camera is still starting; the
+      // next toggle (rebuilt stage, media bar or shortcut) must cancel that start.
+      const starting = mountStage().stage.toggleCamera();
+      await until(() => captures.length === 1, 'the first stage starts the camera');
+      const second = mountStage().stage.toggleCamera();
+      gate.resolve();
+      await Promise.all([starting, second]);
+      check(captures.length === 1, 'A toggle from a rebuilt stage cancels the pending start instead of capturing again', captures.length);
+      check(video.getCameraState().stream === null && !voice.isCameraOn && rtc.localCameraTrack === null,
+        'The camera started before the rebuild is never published late');
+      check(captures[0].track.readyState === 'ended', 'The cancelled capture is released');
     });
 
     await run('overlay-native-serialization-and-reopen', async () => {

@@ -351,6 +351,10 @@ sharing that child.
 Availability distinguishes files, encoders and sources:
 
 1. `loadCaptureRuntime()` verifies files and hashes without opening the GPU.
+   In the app, Main calls `loadRuntimeAsync()`: the same checks, RTC included,
+   reading and hashing in slices without stalling the process. The synchronous
+   `loadRuntime()` remains for scripts, packaging and tests. A file named by both
+   manifests is verified once.
    `captureKinds` declares implementation, **not hardware qualification**.
    Main reports `requiresSelectionProbe: true`; the picker shows preparation
    as pending, without testing an arbitrary source in the background.
@@ -433,6 +437,11 @@ PCM and output epoch; only physical clock measurement is withdrawn until a valid
 non-regressing anchor is available. Selections are serialized; a rejection is
 reported to the selector and restores the previous selection without closing
 video. Stopping the output drains pending selections before closing the context.
+A chosen device that is not connected does not fail the Watch: screens play on
+the system default output, with a notice, and return to the chosen device when it
+reappears, through the same hot switch. Losing the output during playback
+suspends the context; the epoch is kept for up to 5 s while audio moves to another
+output or the device recovers by itself, and only then does the output fail.
 Mute, deafen and volume do not recreate reception. On the stage, participant
 indicator-only updates also preserve video elements and fullscreen.
 

@@ -1,5 +1,5 @@
 import { findLiveServerLock } from '../infrastructure/lifecycle/serverLock';
-import { findLegacyProcessFor, findPm2Process, getPm2ProcessName, Pm2Process } from './pm2';
+import { findLegacyProcessFor, findPm2Process, getPm2ProcessName, listPm2Processes, Pm2Process } from './pm2';
 import { t } from './i18n/index';
 
 /**
@@ -21,13 +21,14 @@ export function isPm2ProcessActive(entry: Pm2Process | null): boolean {
 }
 
 /** The PM2 process actually running this server, the pre-registry name included. */
-export function findOnlinePm2Process(dataDir: string): Pm2Process | null {
-  const entry = findPm2Process(getPm2ProcessName(dataDir)) ?? findLegacyProcessFor(dataDir);
+export function findOnlinePm2Process(dataDir: string, processes: readonly Pm2Process[] = listPm2Processes()): Pm2Process | null {
+  const entry = findPm2Process(getPm2ProcessName(dataDir), processes) ?? findLegacyProcessFor(dataDir, processes);
   return entry?.pm2_env?.status === 'online' && entry.pid ? entry : null;
 }
 
 export function findRunningServer(dataDir: string): RunningServer | null {
-  const entry = findPm2Process(getPm2ProcessName(dataDir)) ?? findLegacyProcessFor(dataDir);
+  const processes = listPm2Processes();
+  const entry = findPm2Process(getPm2ProcessName(dataDir), processes) ?? findLegacyProcessFor(dataDir, processes);
   if (entry && isPm2ProcessActive(entry)) {
     return { via: 'pm2', process: entry.name ?? getPm2ProcessName(dataDir), pid: entry.pid || null };
   }

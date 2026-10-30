@@ -3,7 +3,8 @@ import { settingsStore } from '../stores/settingsStore';
 import { overlayBridgeService } from '../core/OverlayBridgeService';
 import { appEvents } from '../core/EventBus';
 import { t } from '../i18n';
-import { enterModal, exitModal } from '../utils/modalSurface';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
+import { enableBackdropClose } from '../utils/modal';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 
 export class OverlayConfigModal {
@@ -21,6 +22,12 @@ export class OverlayConfigModal {
   private currentHideInactiveParticipants = false;
   private currentPreserveAspectRatio = true;
   private overlaySettingsUnbind: (() => void) | null = null;
+  private readonly onKeydown = (event: KeyboardEvent): void => {
+    if (event.key === 'Escape' && handlesModalKey(this.modalEl, event)) {
+      event.preventDefault();
+      this.close();
+    }
+  };
 
   public open(): void {
     this.close();
@@ -44,14 +51,14 @@ export class OverlayConfigModal {
     this.modalEl = document.createElement('div');
     this.modalEl.className = 'modal-backdrop';
     this.modalEl.innerHTML = `
-      <div class="modal-card" style="max-width: 520px; width: 100%; display: flex; flex-direction: column; padding: 0; overflow: hidden; border-radius: var(--radius-lg); background-color: var(--bg-panel); border: 1px solid var(--border-color); box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6); animation: modalFadeIn 0.2s ease;">
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="overlay-modal-title" style="max-width: 520px; width: 100%; display: flex; flex-direction: column; padding: 0; overflow: hidden; border-radius: var(--radius-lg); background-color: var(--bg-panel); border: 1px solid var(--border-color); box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);">
         <!-- Header -->
         <div class="modal-header" style="padding: 16px 20px 14px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between;">
           <div class="modal-title" style="display: flex; align-items: center; gap: 8px;">
-            <span class="material-symbols-outlined" style="color: var(--accent-primary);">picture_in_picture_alt</span>
-            <span style="font-size: 16px; font-weight: 700; color: var(--text-primary);">${t('overlay.modalTitle')}</span>
+            <span class="material-symbols-outlined" style="color: var(--accent-primary);" aria-hidden="true">picture_in_picture_alt</span>
+            <span id="overlay-modal-title" style="font-size: 16px; font-weight: 700; color: var(--text-primary);">${t('overlay.modalTitle')}</span>
           </div>
-          <button id="modal-close" class="modal-close-btn">&times;</button>
+          <button type="button" id="modal-close" class="modal-close-btn" aria-label="${t('common.close')}">&times;</button>
         </div>
 
         <!-- Body -->
@@ -61,22 +68,24 @@ export class OverlayConfigModal {
             <label style="display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 8px;">
               ${t('overlay.sectionMode')}
             </label>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-              <div class="overlay-option-card ${this.currentMode === 'cameras-only' ? 'selected' : ''}" id="opt-mode-cameras" data-mode="cameras-only">
-                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-                  <span class="material-symbols-outlined md-18">videocam</span>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;" role="group" aria-label="${t('overlay.sectionMode')}">
+              <button type="button" class="overlay-option-card ${this.currentMode === 'cameras-only' ? 'selected' : ''}" id="opt-mode-cameras" data-mode="cameras-only"
+                aria-pressed="${this.currentMode === 'cameras-only'}" ${this.currentMinimalistMode ? 'disabled' : ''}>
+                <span style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+                  <span class="material-symbols-outlined md-18" aria-hidden="true">videocam</span>
                   <span style="font-weight: 600; font-size: 13px;">${t('overlay.modeCamerasOnly')}</span>
-                </div>
-                <p style="margin: 0; font-size: 11px; color: var(--text-muted); line-height: 1.4;">${t('overlay.modeCamerasOnlyDesc')}</p>
-              </div>
+                </span>
+                <span style="display: block; margin: 0; font-size: 11px; color: var(--text-muted); line-height: 1.4;">${t('overlay.modeCamerasOnlyDesc')}</span>
+              </button>
 
-              <div class="overlay-option-card ${this.currentMode === 'cameras-and-screens' ? 'selected' : ''}" id="opt-mode-both" data-mode="cameras-and-screens">
-                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-                  <span class="material-symbols-outlined md-18">screen_share</span>
+              <button type="button" class="overlay-option-card ${this.currentMode === 'cameras-and-screens' ? 'selected' : ''}" id="opt-mode-both" data-mode="cameras-and-screens"
+                aria-pressed="${this.currentMode === 'cameras-and-screens'}" ${this.currentMinimalistMode ? 'disabled' : ''}>
+                <span style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+                  <span class="material-symbols-outlined md-18" aria-hidden="true">screen_share</span>
                   <span style="font-weight: 600; font-size: 13px;">${t('overlay.modeCamerasAndScreens')}</span>
-                </div>
-                <p style="margin: 0; font-size: 11px; color: var(--text-muted); line-height: 1.4;">${t('overlay.modeCamerasAndScreensDesc')}</p>
-              </div>
+                </span>
+                <span style="display: block; margin: 0; font-size: 11px; color: var(--text-muted); line-height: 1.4;">${t('overlay.modeCamerasAndScreensDesc')}</span>
+              </button>
             </div>
 
             <!-- Switch de Foco no Orador Ativo (quando cameras-only) -->
@@ -89,7 +98,7 @@ export class OverlayConfigModal {
                 </div>
               </div>
               <label class="toggle-switch" aria-label="${t('overlay.focusActiveSpeakerTitle')}">
-                <input type="checkbox" id="overlay-focus-speaker-cb" ${this.currentFocusActiveSpeaker ? 'checked' : ''} />
+                <input type="checkbox" role="switch" id="overlay-focus-speaker-cb" ${this.currentFocusActiveSpeaker ? 'checked' : ''} />
                 <span class="toggle-slider"></span>
               </label>
             </div>
@@ -119,7 +128,7 @@ export class OverlayConfigModal {
               </div>
             </div>
             <label class="toggle-switch" aria-label="${t('overlay.hideSelfTitle')}">
-              <input type="checkbox" id="overlay-hide-self-cb" ${this.currentHideSelf ? 'checked' : ''} />
+              <input type="checkbox" role="switch" id="overlay-hide-self-cb" ${this.currentHideSelf ? 'checked' : ''} />
               <span class="toggle-slider"></span>
             </label>
           </div>
@@ -163,7 +172,7 @@ export class OverlayConfigModal {
               </div>
             </div>
             <label class="toggle-switch" aria-label="${t('overlay.minimalistModeTitle')}">
-              <input type="checkbox" id="overlay-minimalist-cb" ${this.currentMinimalistMode ? 'checked' : ''} />
+              <input type="checkbox" role="switch" id="overlay-minimalist-cb" ${this.currentMinimalistMode ? 'checked' : ''} />
               <span class="toggle-slider"></span>
             </label>
           </div>
@@ -178,7 +187,7 @@ export class OverlayConfigModal {
               </div>
             </div>
             <label class="toggle-switch" aria-label="${t('overlay.autoOpenOnLeaveStageTitle')}">
-              <input type="checkbox" id="overlay-auto-open-cb" ${this.currentAutoOpenOnLeaveStage ? 'checked' : ''} />
+              <input type="checkbox" role="switch" id="overlay-auto-open-cb" ${this.currentAutoOpenOnLeaveStage ? 'checked' : ''} />
               <span class="toggle-slider"></span>
             </label>
           </div>
@@ -188,19 +197,19 @@ export class OverlayConfigModal {
             <label style="display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 8px;">
               ${t('overlay.sectionLayout')}
             </label>
-            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
-              <div class="overlay-option-card ${this.currentLayout === 'grid' ? 'selected' : ''}" id="opt-layout-grid" data-layout="grid" style="text-align: center; align-items: center;">
-                <span class="material-symbols-outlined md-20" style="margin-bottom: 4px;">grid_view</span>
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;" role="group" aria-label="${t('overlay.sectionLayout')}">
+              <button type="button" class="overlay-option-card ${this.currentLayout === 'grid' ? 'selected' : ''}" id="opt-layout-grid" data-layout="grid" aria-pressed="${this.currentLayout === 'grid'}" style="text-align: center; align-items: center;">
+                <span class="material-symbols-outlined md-20" style="margin-bottom: 4px;" aria-hidden="true">grid_view</span>
                 <span style="font-size: 12px; font-weight: 600;">${t('overlay.layoutGrid')}</span>
-              </div>
-              <div class="overlay-option-card ${this.currentLayout === 'vertical' ? 'selected' : ''}" id="opt-layout-vertical" data-layout="vertical" style="text-align: center; align-items: center;">
-                <span class="material-symbols-outlined md-20" style="margin-bottom: 4px;">view_agenda</span>
+              </button>
+              <button type="button" class="overlay-option-card ${this.currentLayout === 'vertical' ? 'selected' : ''}" id="opt-layout-vertical" data-layout="vertical" aria-pressed="${this.currentLayout === 'vertical'}" style="text-align: center; align-items: center;">
+                <span class="material-symbols-outlined md-20" style="margin-bottom: 4px;" aria-hidden="true">view_agenda</span>
                 <span style="font-size: 12px; font-weight: 600;">${t('overlay.layoutVertical')}</span>
-              </div>
-              <div class="overlay-option-card ${this.currentLayout === 'horizontal' ? 'selected' : ''}" id="opt-layout-horizontal" data-layout="horizontal" style="text-align: center; align-items: center;">
-                <span class="material-symbols-outlined md-20" style="margin-bottom: 4px;">view_column</span>
+              </button>
+              <button type="button" class="overlay-option-card ${this.currentLayout === 'horizontal' ? 'selected' : ''}" id="opt-layout-horizontal" data-layout="horizontal" aria-pressed="${this.currentLayout === 'horizontal'}" style="text-align: center; align-items: center;">
+                <span class="material-symbols-outlined md-20" style="margin-bottom: 4px;" aria-hidden="true">view_column</span>
                 <span style="font-size: 12px; font-weight: 600;">${t('overlay.layoutHorizontal')}</span>
-              </div>
+              </button>
             </div>
           </div>
 
@@ -215,21 +224,21 @@ export class OverlayConfigModal {
                 <span>${t('overlay.resetSizeBtn')}</span>
               </button>
             </div>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-              <button type="button" class="btn overlay-pos-btn ${this.currentPosition === 'top-left' ? 'selected' : ''}" data-pos="top-left">
-                <span class="material-symbols-outlined md-16">north_west</span>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;" role="group" aria-label="${t('overlay.sectionPosition')}">
+              <button type="button" class="btn overlay-pos-btn ${this.currentPosition === 'top-left' ? 'selected' : ''}" data-pos="top-left" aria-pressed="${this.currentPosition === 'top-left'}">
+                <span class="material-symbols-outlined md-16" aria-hidden="true">north_west</span>
                 <span>${t('overlay.posTopLeft')}</span>
               </button>
-              <button type="button" class="btn overlay-pos-btn ${this.currentPosition === 'top-right' ? 'selected' : ''}" data-pos="top-right">
-                <span class="material-symbols-outlined md-16">north_east</span>
+              <button type="button" class="btn overlay-pos-btn ${this.currentPosition === 'top-right' ? 'selected' : ''}" data-pos="top-right" aria-pressed="${this.currentPosition === 'top-right'}">
+                <span class="material-symbols-outlined md-16" aria-hidden="true">north_east</span>
                 <span>${t('overlay.posTopRight')}</span>
               </button>
-              <button type="button" class="btn overlay-pos-btn ${this.currentPosition === 'bottom-left' ? 'selected' : ''}" data-pos="bottom-left">
-                <span class="material-symbols-outlined md-16">south_west</span>
+              <button type="button" class="btn overlay-pos-btn ${this.currentPosition === 'bottom-left' ? 'selected' : ''}" data-pos="bottom-left" aria-pressed="${this.currentPosition === 'bottom-left'}">
+                <span class="material-symbols-outlined md-16" aria-hidden="true">south_west</span>
                 <span>${t('overlay.posBottomLeft')}</span>
               </button>
-              <button type="button" class="btn overlay-pos-btn ${this.currentPosition === 'bottom-right' ? 'selected' : ''}" data-pos="bottom-right">
-                <span class="material-symbols-outlined md-16">south_east</span>
+              <button type="button" class="btn overlay-pos-btn ${this.currentPosition === 'bottom-right' ? 'selected' : ''}" data-pos="bottom-right" aria-pressed="${this.currentPosition === 'bottom-right'}">
+                <span class="material-symbols-outlined md-16" aria-hidden="true">south_east</span>
                 <span>${t('overlay.posBottomRight')}</span>
               </button>
             </div>
@@ -273,6 +282,7 @@ export class OverlayConfigModal {
         this.currentPosition = settingsStore.getOverlayConfig().position;
         this.modalEl?.querySelectorAll<HTMLElement>('.overlay-pos-btn').forEach(btn => {
           btn.classList.toggle('selected', btn.dataset.pos === this.currentPosition);
+          btn.setAttribute('aria-pressed', String(btn.dataset.pos === this.currentPosition));
         });
       }
     });
@@ -329,6 +339,7 @@ export class OverlayConfigModal {
   }
 
   public close(): void {
+    window.removeEventListener('keydown', this.onKeydown);
     if (this.overlaySettingsUnbind) {
       this.overlaySettingsUnbind();
       this.overlaySettingsUnbind = null;
@@ -342,11 +353,11 @@ export class OverlayConfigModal {
   private attachEvents(): void {
     if (!this.modalEl) return;
 
-    // Fechar no X ou clique fora no backdrop
+    // Fechar no X, com Esc ou com um clique que começa no backdrop: soltar fora
+    // um arrasto iniciado dentro do card não fecha (#145).
     this.modalEl.querySelector('#modal-close')?.addEventListener('click', () => this.close());
-    this.modalEl.addEventListener('click', (e) => {
-      if (e.target === this.modalEl) this.close();
-    });
+    enableBackdropClose(this.modalEl, () => this.close());
+    window.addEventListener('keydown', this.onKeydown);
     this.attachFooterEvents();
 
     const aspectRatio = this.modalEl.querySelector<HTMLInputElement>('#overlay-aspect-ratio');
@@ -355,12 +366,14 @@ export class OverlayConfigModal {
       this.syncLiveIfActive();
     });
     // Seleção de modo
-    const modeCards = this.modalEl.querySelectorAll('.overlay-option-card[data-mode]');
+    const modeCards = this.modalEl.querySelectorAll<HTMLButtonElement>('.overlay-option-card[data-mode]');
     const focusWrapper = this.modalEl.querySelector('#overlay-focus-speaker-row') as HTMLElement | null;
     modeCards.forEach((card) => {
       card.addEventListener('click', () => {
-        modeCards.forEach((c) => c.classList.remove('selected'));
-        card.classList.add('selected');
+        modeCards.forEach((c) => {
+          c.classList.toggle('selected', c === card);
+          c.setAttribute('aria-pressed', String(c === card));
+        });
         this.currentMode = card.getAttribute('data-mode') as OverlayMode;
         if (focusWrapper) {
           setSurfaceVisible(focusWrapper, this.currentMode === 'cameras-only' && !this.currentMinimalistMode, 'panel', 'flex');
@@ -385,6 +398,8 @@ export class OverlayConfigModal {
         modeSection.style.opacity = this.currentMinimalistMode ? '0.5' : '1';
         modeSection.style.pointerEvents = this.currentMinimalistMode ? 'none' : 'auto';
       }
+      // The minimalist overlay has no display mode, so its choices leave the keyboard too.
+      modeCards.forEach((card) => { card.disabled = this.currentMinimalistMode; });
       if (focusWrapper) {
         setSurfaceVisible(focusWrapper, this.currentMode === 'cameras-only' && !this.currentMinimalistMode, 'panel', 'flex');
       }
@@ -419,11 +434,13 @@ export class OverlayConfigModal {
     });
 
     // Seleção de layout
-    const layoutCards = this.modalEl.querySelectorAll('.overlay-option-card[data-layout]');
+    const layoutCards = this.modalEl.querySelectorAll<HTMLButtonElement>('.overlay-option-card[data-layout]');
     layoutCards.forEach((card) => {
       card.addEventListener('click', () => {
-        layoutCards.forEach((c) => c.classList.remove('selected'));
-        card.classList.add('selected');
+        layoutCards.forEach((c) => {
+          c.classList.toggle('selected', c === card);
+          c.setAttribute('aria-pressed', String(c === card));
+        });
         this.currentLayout = card.getAttribute('data-layout') as OverlayLayout;
         this.syncLiveIfActive();
       });
@@ -433,8 +450,10 @@ export class OverlayConfigModal {
     const posButtons = this.modalEl.querySelectorAll('.overlay-pos-btn');
     posButtons.forEach((btn) => {
       btn.addEventListener('click', () => {
-        posButtons.forEach((b) => b.classList.remove('selected'));
-        btn.classList.add('selected');
+        posButtons.forEach((b) => {
+          b.classList.toggle('selected', b === btn);
+          b.setAttribute('aria-pressed', String(b === btn));
+        });
         this.currentPosition = btn.getAttribute('data-pos') as OverlayPosition;
         this.positionChanged = true;
         this.syncLiveIfActive();

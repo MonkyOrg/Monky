@@ -21,6 +21,8 @@ export class CommunityFeed {
   private loading = false;
   private reload = false;
   private eventRequest: string | null = null;
+  /** What the last `community.updated` announced; see `emit`. */
+  private summary = '';
 
   requestOpenEvent(id: string): void {
     if (this.disposed) return;
@@ -93,8 +95,19 @@ export class CommunityFeed {
     return () => this.listeners.delete(listener);
   }
 
+  /**
+   * Views of this feed hear every snapshot through `subscribe`. The app-wide
+   * `community.updated` reaches surfaces outside it — the server rail's call icon
+   * and the poll wizard's live-action switch — for any connected server, so it is
+   * only raised when what they read changes, never for each vote or response.
+   */
   private emit(): void {
     for (const listener of this.listeners) listener();
+    const summary = JSON.stringify([this.server.communityEventsEnabled, (this.snapshot?.events ?? [])
+      .flatMap(event => event.status === 'active' && event.location.kind === 'voice' ? [event.location.channelId] : [])
+      .sort()]);
+    if (summary === this.summary) return;
+    this.summary = summary;
     appEvents.emit('community.updated');
   }
 

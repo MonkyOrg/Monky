@@ -13,6 +13,7 @@ const { LiveSenderFlow } = require('./encodedSender.cjs');
 const { NativeRtcCommands, assertNativeRtcEngineClosed } = require('./nativeRtcCommands.cjs');
 const { NativeP2pBroker } = require('./nativeP2pBroker.cjs');
 const { NativeP2pTransport } = require('./nativeP2pTransport.cjs');
+const { NativeSignalOutbox } = require('./nativeSignalOutbox.cjs');
 const { NativeSfuBroker } = require('./nativeSfuBroker.cjs');
 const { NativeSfuTransport } = require('./nativeSfuTransport.cjs');
 const { NativeScreenRoutes } = require('./nativeScreenRoutes.cjs');
@@ -29,6 +30,8 @@ const endpointOwners = new WeakMap();
 const gameStartupFailures = new Set([
   'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE', 'ERR_SCREEN_CAPTURE_SOURCE', 'ERR_SCREEN_CAPTURE_SOURCE_INITIALIZATION',
 ]);
+// The browser receivers' policy: a transport that does not reconnect within this time has failed.
+const TRANSPORT_DISCONNECT_GRACE_MS = 10000;
 
 class NativeScreenEndpoint {
   constructor(options) {
@@ -58,6 +61,8 @@ class NativeScreenEndpoint {
     assert.equal(typeof runtime?.rtc?.createEngine, 'function');
     for (const method of ['importSharedTexture', 'sendSharedTexture']) assert.equal(typeof textures?.[method], 'function');
     for (const observer of [onError, onState, onDiagnostic]) assert.equal(typeof observer, 'function');
+    const timers = options.timers ?? { setTimeout, clearTimeout };
+    for (const method of ['setTimeout', 'clearTimeout']) assert.equal(typeof timers[method], 'function');
     if (mode === 'p2p') assert.equal(typeof send, 'function');
     else assert.equal(typeof rpc, 'function');
     if (role === 'publish') {
@@ -68,10 +73,12 @@ class NativeScreenEndpoint {
       assert.ok(path.isAbsolute(captureDirectory));
     } else assert.ok(destination && typeof destination.frame?.isDestroyed === 'function');
     Object.assign(this, { runtime, role, mode, sessionId, publisherSessionId, channelId, pipelineId, source, profile,
-      rendition, captureDirectory, destination, send, rpc, onError, onState, onDiagnostic });
+      rendition, captureDirectory, destination, send, rpc, onError, onState, onDiagnostic, timers });
     this.audio = audio;
     this.audioMuted = audio?.muted ?? true;
     this.audioVolume = audio?.volume ?? 1;
+    // Whether the receiver holds audioMuted/audioVolume. Until it connects, connecting applies them.
+    this.audioApplied = true;
     this.target = target ? cloneSource(target) : null;
     this.captureEncoder = options.captureEncoder ?? 'auto';
     this.preserveAspectRatio = options.preserveAspectRatio ?? true;
@@ -88,6 +95,8 @@ class NativeScreenEndpoint {
     this.pendingControlBytes = 0;
     this.pendingControlCount = 0;
     this.sfuStates = new Map();
+    this.transportGrace = null;
+    this.transportFailed = false;
     this.errors = [];
     this.reported = new WeakSet();
     this.early = [];
@@ -126,12 +135,20 @@ class NativeScreenEndpoint {
         });
       }
       if (mode === 'p2p') {
+        this.outbox = new NativeSignalOutbox({
+          carrier: send, timers, onFailure: (error, scope) => this.report(error, scope),
+          isCurrent: (remote, control) => {
+            const peer = this.broker.getPeer(remote);
+            return !this.closing && peer !== null && ['opening', 'open'].includes(peer.status)
+              && peer.connectionId === control.connectionId && peer.generation === control.generation;
+          },
+        });
         this.broker = new NativeP2pBroker({
           engine: this.engine, commands: this.commands, routes: this.routes, localSessionId: sessionId,
           callId: source.instanceId, channelId, syncGroup: source.instanceId, maximumPeers: 64,
           controlVersion: source.audio ? 2 : 1, audio: this.audioAdapter ?? null,
           isCurrent: () => !this.closing, onError: (error, context) => this.report(error, context),
-          send: (remote, value) => send(remote, nativeScreenP2pControlSchema.parse(value)),
+          send: (remote, value) => this.outbox.send(remote, nativeScreenP2pControlSchema.parse(value)),
           onPeerState: state => { this.refreshCapture(); this.observe({ type: 'peer', state }); },
           onPublicationState: () => this.refreshCapture(),
         });
@@ -267,12 +284,48 @@ class NativeScreenEndpoint {
     } else if (event.type === 'error') {
       const error = Object.assign(new Error(event.data.message), event.data);
       if (event.data.terminal === false) this.onDiagnostic(error);
-      else throw error;
+      // A failed resource of one peer retires that peer alone: its broker reports it with the
+      // viewer's scope. Engine-wide and unowned failures still belong to the whole pipeline.
+      else if (event.target === 0 || await this.transport.handleEvent(event) !== true) throw error;
     } else if (event.type === 'sfu.state') {
       this.sfuStates.set(event.target, event.data.state);
       this.refreshCapture();
       this.observe({ type: 'transport', state: event.data.state });
+      this.superviseTransport(event.target, event.data.state);
     } else await this.transport.handleEvent(event);
+  }
+
+  /**
+   * A screen transport that fails, closes or stays disconnected never recovers by itself (there is no
+   * ICE restart). Fail like the browser receivers do: a publisher retires the pipeline and its viewers
+   * reconnect through a new one, and a viewer's own failure makes it reconnect automatically.
+   */
+  superviseTransport(target, state) {
+    if (this.mode !== 'sfu') return;
+    const own = this.broker.transports.get(this.role === 'publish' ? 'send' : 'recv');
+    if (own?.nativeId !== target || this.transportFailed || this.stopRequested || this.closing) return;
+    if (state === 'failed' || state === 'closed') { this.failTransport(state); return; }
+    if (state === 'connected' || state === 'completed') {
+      this.timers.clearTimeout(this.transportGrace);
+      this.transportGrace = null;
+    } else if (state === 'disconnected' && this.transportGrace === null) {
+      this.transportGrace = this.timers.setTimeout(() => {
+        this.transportGrace = null;
+        const current = this.broker.transports.get(this.role === 'publish' ? 'send' : 'recv');
+        const latest = this.sfuStates.get(target);
+        if (current?.nativeId === target && latest !== 'connected' && latest !== 'completed') this.failTransport(state);
+      }, TRANSPORT_DISCONNECT_GRACE_MS);
+      this.transportGrace?.unref?.();
+    }
+  }
+
+  failTransport(state) {
+    this.timers.clearTimeout(this.transportGrace);
+    this.transportGrace = null;
+    if (this.transportFailed || this.stopRequested || this.closing) return;
+    this.transportFailed = true;
+    this.report(Object.assign(new Error(`The native screen SFU transport is ${state}.`),
+      { code: 'ERR_NATIVE_SFU_TRANSPORT_FAILED' }));
   }
 
   connected() {
@@ -582,19 +635,26 @@ class NativeScreenEndpoint {
     assert.equal(this.role, 'receive');
     assert.equal(typeof muted, 'boolean');
     assert.ok(Number.isFinite(volume) && volume >= 0 && volume <= 2);
+    // Applying mute or volume renegotiates the audio Watch with the publisher (P2P) or the SFU:
+    // an output-device change or a repeated preference must not do it again.
+    const changed = !this.audioApplied || muted !== this.audioMuted || volume !== this.audioVolume;
     this.audioMuted = muted; this.audioVolume = volume;
+    if (changed) this.audioApplied = false;
     if (!this.audio || this.closing) return;
     await this.ready;
     this.abort.signal.throwIfAborted();
     if (sinkId !== undefined) await this.audioOutput.owner.setSinkId(sinkId);
     this.abort.signal.throwIfAborted();
+    if (!changed) return;
+    // The latest preferences win over a call that waited behind an output change.
     if (this.mode === 'p2p' && this.broker.getPeer(this.publisherSessionId)) {
-      await this.broker.setAudioVolume(this.publisherSessionId, this.source.shareId, volume);
-      await this.broker.setAudioMuted(this.publisherSessionId, this.source.shareId, muted);
+      await this.broker.setAudioVolume(this.publisherSessionId, this.source.shareId, this.audioVolume);
+      await this.broker.setAudioMuted(this.publisherSessionId, this.source.shareId, this.audioMuted);
     } else if (this.mode === 'sfu' && this.audioConsumerId) {
-      await this.broker.setConsumerVolume(this.audioConsumerId, volume);
-      await this.broker.setAudioMuted(this.audioConsumerId, muted);
-    }
+      await this.broker.setConsumerVolume(this.audioConsumerId, this.audioVolume);
+      await this.broker.setAudioMuted(this.audioConsumerId, this.audioMuted);
+    } else return;
+    this.audioApplied = true;
   }
 
   async removeRemoteProducer(producerId) {
@@ -699,6 +759,9 @@ class NativeScreenEndpoint {
 
   beginClose() {
     this.closing = true;
+    this.timers.clearTimeout(this.transportGrace);
+    this.transportGrace = null;
+    this.outbox?.close();
     this.demand = 0;
     this.previewDemand = false;
     this.captureState = 'stopping';

@@ -10,6 +10,7 @@ import { LocalPermissions, localPermissionId } from '../src/main/localExecution/
 import {
   LocalExecutionService, type LocalRuntimeTask, type LocalToolHost,
 } from '../src/main/localExecution/service';
+import type { LocalToolPreparationOptions } from '../src/main/localExecution/LocalTools';
 import { LocalExecutionError } from '../src/main/localExecution/errors';
 
 const subject: LocalExecutionSubject = {
@@ -37,7 +38,9 @@ function result(spec: LocalTaskSpec): LocalTaskResult {
 
 async function fixture(t: TestContext, runtimeResult?: (spec: LocalTaskSpec) => Promise<LocalTaskResult>) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'monky-local-service-'));
-  const permissions = new LocalPermissions(path.join(root, 'permissions.json'));
+  let changes = 0;
+  // As in production, permission changes and service changes reach the same publication.
+  const permissions = new LocalPermissions(path.join(root, 'permissions.json'), () => { changes++; });
   let preparations = 0;
   let prompts = 0;
   let supported = true;
@@ -46,16 +49,19 @@ async function fixture(t: TestContext, runtimeResult?: (spec: LocalTaskSpec) => 
   let cacheCleared = 0;
   const failures: LocalTaskFailureEvent[] = [];
   const logs: unknown[] = [];
+  const preparationOptions: Array<LocalToolPreparationOptions | undefined> = [];
   const runtimes: Array<LocalRuntimeTask & {
     closeCount: number; eof: boolean; playedFrames: number; paused: boolean;
     fail(error: unknown): void; completeNative(): void;
   }> = [];
   const tools: LocalToolHost = {
     initialize: async () => undefined,
+    supported: async () => supported,
     snapshot: async () => ({ supported, tools: [], toolsBytes: 0, cacheBytes: 0 }),
-    prepare: async (signal) => {
+    prepare: async (signal, options) => {
       signal.throwIfAborted();
       preparations++;
+      preparationOptions.push(options);
       return { node: 'managed-node', ytDlp: 'managed-yt-dlp', ffmpeg: 'managed-ffmpeg' };
     },
     remove: async (tool) => {
@@ -98,7 +104,7 @@ async function fixture(t: TestContext, runtimeResult?: (spec: LocalTaskSpec) => 
       runtimes.push(runtime);
       return runtime;
     },
-    changed: () => undefined,
+    changed: () => { changes++; },
     failed: (failure) => failures.push(failure),
     logError: (_message, error) => logs.push(error),
   });
@@ -108,8 +114,9 @@ async function fixture(t: TestContext, runtimeResult?: (spec: LocalTaskSpec) => 
   });
   await service.setConnection({ connectionId: subject.connectionId, connected: true, voiceChannelId: 'voice' });
   return {
-    service, permissions, tools, failures, logs, runtimes,
+    service, permissions, tools, failures, logs, runtimes, preparationOptions,
     counts: () => ({ preparations, prompts, removed, cacheCleared }),
+    changes: () => changes,
     setSupported: (value: boolean) => { supported = value; },
     setDecision: (value: LocalConsentDecision) => { decision = value; },
   };
@@ -177,6 +184,41 @@ test('until-disconnect consent is not silently promoted to a permanent grant', a
   assert.equal((await f.service.prepare({ requestId: 'renew-temporary', subject: next, capability: 'youtube-audio' })).status, 'prepared');
   assert.equal(f.counts().prompts, 2);
   assert.equal((await f.permissions.list())[0].decision, 'connection');
+});
+
+test('connections, voice moves and an idle owner reset publish nothing, so they never inventory the tools', async t => {
+  const f = await fixture(t);
+  const idle = f.changes();
+  await f.service.setConnection({ connectionId: 'second', connected: true, voiceChannelId: null });
+  await f.service.setConnection({ connectionId: 'second', connected: true, voiceChannelId: 'voice' });
+  await f.service.setConnection({ connectionId: 'second', connected: false, voiceChannelId: null });
+  // The initial page navigation resets the owner before any server connects.
+  await f.service.cancelOwner();
+  await f.service.setConnection({ connectionId: subject.connectionId, connected: true, voiceChannelId: 'voice' });
+  assert.equal(f.changes(), idle, 'Connection bookkeeping is not published state');
+  f.setDecision('connection');
+  assert.equal((await f.service.prepare({ requestId: 'temporary', subject, capability: 'youtube-audio' })).status, 'prepared');
+  const granted = f.changes();
+  await f.service.setConnection({ connectionId: subject.connectionId, connected: false, voiceChannelId: null });
+  assert.equal(f.changes(), granted + 1, 'Dropping a listed temporary grant is published once');
+  assert.deepEqual(await f.permissions.list(), []);
+});
+
+test('only preparations shown in a dialog rehash every tool; reuse trusts fingerprints verified in this run', async t => {
+  const f = await fixture(t);
+  const permit = await prepare(f.service);
+  assert.equal(await prepare(f.service, 'already-granted'), permit);
+  assert.equal((await f.service.startTask({
+    requestId: 'search', permit, spec: { operation: 'youtube.search', query: 'fixture' },
+  })).status, 'started');
+  const denied = { ...subject, botId: 'denied-bot' };
+  f.setDecision('deny');
+  assert.equal((await f.service.prepare({ requestId: 'denied', subject: denied, capability: 'youtube-audio' })).status, 'failed');
+  assert.deepEqual(await f.service.setPermission({
+    permissionId: localPermissionId(denied, 'youtube-audio'), enabled: true,
+  }), { status: 'completed' });
+  assert.deepEqual(f.preparationOptions.map((options) => options?.fullVerification === true), [true, false, false, true],
+    'Consent and settings dialogs verify every digest; a granted preparation and a task do not');
 });
 
 test('unsupported targets and denied consent cannot install or start tools', async (t) => {

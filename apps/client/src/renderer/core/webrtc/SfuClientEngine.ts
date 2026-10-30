@@ -27,10 +27,10 @@ import { NetworkClient, ProtocolRequestError } from '../NetworkClient';
 import { clientLog } from '../ClientLogService';
 import { appEvents } from '../EventBus';
 import { currentEventOrigin } from '../sessionRouting';
-import { settingsStore } from '../../stores/settingsStore';
 import { shouldPreferHardwareEncoding, sortVideoCodecs } from './codecPreferences';
 import { applyMediaEncodingPolicy, getMediaEncodingPolicy, type OutboundMediaKind } from './mediaEncodingPolicy';
 import { updateRtpSenderParameters } from './rtpSenderParameters';
+import { candidateRoute } from './rtcStats';
 
 /** Replies carry mediasoup structures as `unknown`; this engine reads them with mediasoup-client's types. */
 type RouterCapabilitiesResponse = Omit<SfuRouterRtpCapabilitiesPayload, 'rtpCapabilities'> & {
@@ -382,8 +382,8 @@ export class SfuClientEngine {
   /**
    * Picks which codec to encode the camera with instead of letting mediasoup
    * take the first one the router offers (#526): the router advertises AV1
-   * first, and AV1 has no hardware encoder on most desktops. This honours the
-   * same preference as P2P calls.
+   * first, and AV1 has no hardware encoder on most desktops. This follows the
+   * same automatic order as P2P calls.
    */
   private pickVideoCodec(): mediasoupTypes.RtpCodecCapability | undefined {
     // Receive capabilities are not evidence that this device can encode the
@@ -393,11 +393,7 @@ export class SfuClientEngine {
     const videoCodecs = codecs.filter(
       (codec) => codec.kind === 'video' && !/\/(rtx|red|ulpfec|flexfec)/i.test(codec.mimeType)
     );
-    const [best] = sortVideoCodecs(
-      videoCodecs,
-      settingsStore?.preferredVideoCodec ?? 'auto',
-      shouldPreferHardwareEncoding()
-    );
+    const [best] = sortVideoCodecs(videoCodecs, shouldPreferHardwareEncoding());
     return best;
   }
 
@@ -436,6 +432,14 @@ export class SfuClientEngine {
       return null;
     }
     this.closeProducer('mic', false);
+    // An ended capture track is a local device problem, not a broken link.
+    // Reported as a transport failure, it sent the call into a rejoin whose
+    // every rung published the same dead track again (R-VOICE-12).
+    if (track.readyState !== 'live') {
+      clientLog.warn('SFU', 'The microphone track ended before publication; the call stays listen-only');
+      this.notifyIfHealthy();
+      return null;
+    }
     const operation = {};
     const client = this.client;
     const channelId = this.channelId;
@@ -481,6 +485,8 @@ export class SfuClientEngine {
         if (error instanceof ProtocolRequestError && error.code === ProtocolErrorCode.PERMISSION_DENIED) {
           clientLog.warn('SFU', 'Microphone publication refused while Speak is denied in this channel');
           this.microphoneDenied = true;
+        } else if (track.readyState !== 'live') {
+          clientLog.warn('SFU', 'The microphone track ended during publication; the call stays listen-only');
         } else {
           clientLog.error('SFU', 'Failed to produce mic track', { error: error instanceof Error ? error.message : String(error) });
           this.microphoneSetupFailed = true;
@@ -794,21 +800,14 @@ export class SfuClientEngine {
     return null;
   }
 
+  /** Round trip to the server over the worse connected transport, read from the pair carrying media. */
   public async getPing(): Promise<number | null> {
     const pings: number[] = [];
     for (const transport of [this.sendTransport, this.recvTransport]) {
       if (!transport || transport.connectionState !== 'connected') continue;
       try {
-        const stats = await transport.getStats();
-        for (const report of stats.values()) {
-          if (report.type === 'candidate-pair' && (report.state === 'succeeded' || report.nominated)) {
-            const rtt = report.currentRoundTripTime ?? report.roundTripTime;
-            if (typeof rtt === 'number' && Number.isFinite(rtt) && rtt >= 0) {
-              pings.push(Math.round(rtt * 1000));
-              break;
-            }
-          }
-        }
+        const rttMs = candidateRoute(await transport.getStats())?.rttMs;
+        if (rttMs !== null && rttMs !== undefined) pings.push(rttMs);
       } catch {
         // A closing send transport must not hide a still-live receive RTT.
       }

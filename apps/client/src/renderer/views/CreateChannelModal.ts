@@ -2,7 +2,7 @@ import { MessageType, type ChannelType } from '@monky/shared';
 import { networkClient } from '../core/NetworkClient';
 import { serverStore } from '../stores/serverStore';
 import { t } from '../i18n';
-import { enterModal, exitModal } from '../utils/modalSurface';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { escapeHtml } from '../utils/html';
 import { enableBackdropClose } from '../utils/modal';
 import { attachInputEmojiPicker } from '../utils/inputEmojiPicker';
@@ -25,6 +25,12 @@ export class CreateChannelModal {
   private detachBotCommandsField: (() => void) | null = null;
   private detachEmojiPicker: (() => void) | null = null;
   private detachCategoryFields: (() => void) | null = null;
+  private readonly onKeydown = (event: KeyboardEvent): void => {
+    if (event.key === 'Escape' && handlesModalKey(this.modalEl, event)) {
+      event.preventDefault();
+      this.close();
+    }
+  };
 
   public open(defaultType: ChannelType = 'TEXT', categoryId: string | null = null): void {
     this.close();
@@ -32,11 +38,11 @@ export class CreateChannelModal {
     this.modalEl = document.createElement('div');
     this.modalEl.className = 'modal-backdrop';
     this.modalEl.innerHTML = `
-      <div class="modal-card create-channel-modal">
+      <div class="modal-card create-channel-modal" role="dialog" aria-modal="true" aria-labelledby="create-channel-title">
         <div class="modal-header">
-          <div><div class="modal-title">${t('channelModal.title')}</div>
+          <div><div class="modal-title" id="create-channel-title">${t('channelModal.title')}</div>
             ${categoryId ? `<p class="channel-category-subtitle">${escapeHtml(serverStore.serverDetails?.categories?.find(category => category.id === categoryId)?.name ?? '')}</p>` : ''}</div>
-          <button id="modal-close" class="modal-close-btn">&times;</button>
+          <button type="button" id="modal-close" class="modal-close-btn" aria-label="${t('common.close')}">&times;</button>
         </div>
 
         <div id="channel-error-banner" class="error-banner"></div>
@@ -85,6 +91,7 @@ export class CreateChannelModal {
     btnClose?.addEventListener('click', () => this.close());
     btnCancel?.addEventListener('click', () => this.close());
     enableBackdropClose(this.modalEl, () => this.close());
+    window.addEventListener('keydown', this.onKeydown);
     this.detachPrivacyFields = attachChannelPrivacyFields(this.modalEl);
     this.detachCategoryFields = attachChannelCategoryFields(this.modalEl);
     this.detachBotCommandsField = attachChannelBotCommandsField(this.modalEl);
@@ -125,6 +132,7 @@ export class CreateChannelModal {
   }
 
   public close(): void {
+    window.removeEventListener('keydown', this.onKeydown);
     this.detachCategoryFields?.();
     this.detachCategoryFields = null;
     this.detachBotCommandsField?.();

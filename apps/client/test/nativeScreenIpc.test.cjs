@@ -24,6 +24,11 @@ const policy = { exports: {} };
 vm.runInThisContext(`(function(exports, require) { ${ts.transpileModule(fs.readFileSync(policySource, 'utf8'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText}\n})`, { filename: policySource })(policy.exports, require);
+const cacheSource = path.join(path.dirname(sourceFile), 'screenEncodingCache.ts');
+const encodingCache = { exports: {} };
+vm.runInThisContext(`(function(exports, require) { ${ts.transpileModule(fs.readFileSync(cacheSource, 'utf8'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText}\n})`, { filename: cacheSource })(encodingCache.exports, require);
 const occlusionSource = path.join(path.dirname(sourceFile), 'browserOcclusion.ts');
 const occlusion = { exports: {} };
 vm.runInThisContext(`(function(exports, require) { ${ts.transpileModule(fs.readFileSync(occlusionSource, 'utf8'), {
@@ -421,6 +426,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
     if (name === 'electron') return electron;
     if (name === './i18n') return { mt: key => key };
     if (name === './screenEncodingPolicy') return policy.exports;
+    if (name === './screenEncodingCache') return encodingCache.exports;
     if (name === './browserOcclusion') return occlusion.exports;
     if (name === '@monky/screen-share') return { ...runtime, NativeScreenEndpoint: Endpoint, CaptureBridge: Probe,
       createCaptureBridge: options => new Probe(options),
@@ -437,7 +443,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
           adapterIndex: 0, vendorId: options.encoder.startsWith('obs_nvenc_') ? 0x10de : 0x1002, deviceId: 1,
           encoderInitialized: true, sourceCaptured: false, hardwareQualified: false, hardwareSessionConfirmed: false };
       },
-      loadRuntime: () => ({ capture: { captureKinds: platform === 'darwin' ? ['window', 'monitor'] : ['window', 'monitor', 'game'],
+      loadRuntimeAsync: async () => ({ capture: { captureKinds: platform === 'darwin' ? ['window', 'monitor'] : ['window', 'monitor', 'game'],
         encoders: compiledEncoders, requiresHardwareProbe: true, hardwareQualified: false } }) };
     if (name === '@monky/screen-audio') return captureModule;
     if (name === 'node:fs/promises') return modeledFiles;
@@ -2601,7 +2607,9 @@ for (const [mode, encoder] of [['hardware', 'av1_texture_amf'], ['software', 'mo
     assert.equal(result.availability.fallback, false);
     await f.join();
     await assert.rejects(f.addSource('unavailable-manual', selection));
-    assert.deepEqual(f.encodingProbes.map(probe => probe.encoder), [encoder, encoder]);
+    // Hardware admission reuses the "unsupported" discovery just proved for the same request; software
+    // admission skips the hardware inspection Settings asks for, so it is a different request.
+    assert.deepEqual(f.encodingProbes.map(probe => probe.encoder), mode === 'hardware' ? [encoder] : [encoder, encoder]);
     assert.equal(f.probes.length, 0, 'No selected-source preflight may follow an unavailable exact selection.');
     assert.equal(f.endpoints.length, 0);
     assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
@@ -2703,7 +2711,7 @@ for (const [encoder, mode] of [['av1_texture_amf', 'hardware'], ['monky_aom_av1'
       encodingMode: mode, encodingStrategy: 'manual' });
     await f.join();
     const result = await f.addSource('aligned', { video: requested, encodingMode: mode, codec: 'av1' });
-    assert.equal(f.encodingProbes.length, 2);
+    assert.equal(f.encodingProbes.length, mode === 'hardware' ? 1 : 2, 'Hardware admission reuses the proven discovery.');
     assert.ok(f.encodingProbes.every(probe => probe.video.width === 848));
     assert.equal(f.probes[0].options.video.width, 848);
     assert.deepEqual(result.source.video, { ...requested, width: 848 });
@@ -2763,4 +2771,188 @@ test('closing encoder discovery aborts only its owned request and awaits native 
   await rejected;
   assert.equal(f.removedDirectories.length, 1);
   assert.equal(f.probes.length + f.endpoints.length, 0);
+});
+
+test('remembered discoveries expire, follow display changes, ignore dormant fields and never keep a driver error', () => {
+  const { ScreenEncodingCache, isScreenEncoderFailure } = encodingCache.exports;
+  let now = 0;
+  const cache = new ScreenEncodingCache(1000, () => now);
+  const request = { video, mode: 'software', codec: 'h264', strategy: 'automatic', inspectHardware: false };
+  const proven = { selection: { mode: 'hardware', codec: 'h264', encoder: 'h264_texture_amf' },
+    hardware: { available: true, reason: null }, fallback: false };
+  cache.set(request, 1, proven);
+  const reused = cache.get({ ...request, mode: 'hardware', codec: 'auto', inspectHardware: true }, 1);
+  assert.deepEqual(reused, proven, 'Automatic discovery ignores the dormant manual fields.');
+  assert.equal(cache.isRemembered(reused), true);
+  assert.equal(cache.isRemembered(proven), false);
+  reused.selection.encoder = 'obs_x264';
+  assert.equal(cache.get(request, 1).selection.encoder, 'h264_texture_amf', 'Callers cannot change what is remembered.');
+  assert.equal(cache.get({ ...request, video: { ...video, fps: 60 } }, 1), null);
+  assert.equal(cache.get(request, 2), null, 'A display change forgets it.');
+  assert.equal(cache.get(request, 1), null);
+  cache.set(request, 1, proven);
+  now = 999;
+  assert.ok(cache.get(request, 1));
+  now = 1000;
+  assert.equal(cache.get(request, 1), null, 'It expires.');
+  const manual = { video, mode: 'software', codec: 'h264', strategy: 'manual', inspectHardware: true };
+  cache.set(manual, 1, { selection: { mode: 'software', codec: 'h264', encoder: 'obs_x264' },
+    hardware: { available: false, reason: 'Driver failed.', error: true }, fallback: false });
+  assert.equal(cache.get(manual, 1), null, 'A hardware driver error reported beside software is never kept.');
+  cache.set(manual, 1, { selection: null, hardware: { available: false, reason: 'unsupported' }, fallback: false,
+    reason: 'The selected software encoder is unsupported.' });
+  assert.equal(cache.get(manual, 1).selection, null, 'A positive "unsupported" is kept.');
+  assert.equal(cache.get({ ...manual, inspectHardware: false }, 1), null, 'Skipping the hardware inspection is another request.');
+  const fallback = { selection: { mode: 'hardware', codec: 'h264', encoder: 'obs_nvenc_h264_tex' },
+    hardware: { available: true, reason: null }, fallback: false };
+  const failure = (code, message) => Object.assign(new Error(message), { code });
+  cache.set(request, 1, fallback, [failure('ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE', 'Cannot load system AMF runtime; win32=126'),
+    failure('ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE', 'NVENC nvEncOpenEncodeSessionEx status=4(NV_ENC_ERR_INVALID_DEVICE)')]);
+  assert.equal(cache.get(request, 1).selection.encoder, 'obs_nvenc_h264_tex',
+    'A choice made past encoders their vendor refused is kept.');
+  cache.set(request, 1, fallback, [failure('ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE', 'Cannot load system AMF runtime; win32=126'),
+    failure('ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION', 'AMF AV1 initialization failed.')]);
+  assert.equal(cache.get(request, 1), null,
+    'A choice made past an encoder that failed to initialize is not kept, and it replaces the earlier one.');
+  cache.set(request, 1, proven);
+  cache.forget({ ...request, mode: 'hardware', codec: 'av1', inspectHardware: true });
+  assert.equal(cache.get(request, 1), null, 'Forgetting a request also ignores its dormant fields.');
+  cache.clear();
+  assert.equal(cache.get(manual, 1), null);
+  assert.equal(isScreenEncoderFailure(new AggregateError([new Error('Retirement detail')], 'Capture failed',
+    { cause: Object.assign(new Error('NVENC'), { code: 'ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE' }) })), true);
+  assert.equal(isScreenEncoderFailure(Object.assign(new Error('Gone'), { code: 'ERR_SCREEN_CAPTURE_SOURCE_LOST' })), false);
+});
+
+test('Settings discovery, a share and its quality change prove the encoder once, and each still probes the source', async t => {
+  const f = fixture(t, { compiledEncoders: ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'] });
+  const discovery = await f.invoke({ action: 'probe-encoding', probeId: randomUUID(), video, codec: 'auto', encodingMode: 'hardware' });
+  assert.deepEqual(f.encodingProbes.map(probe => probe.encoder), ['av1_texture_amf', 'h264_texture_amf']);
+  await f.join();
+  const first = await f.addSource();
+  const changed = await f.addSource(f.source.shareId, { replacesSourceInstanceId: first.source.instanceId });
+  assert.equal(f.encodingProbes.length, 2, 'No candidate encoder process starts again.');
+  assert.deepEqual(f.probes.map(probe => probe.options.encoder), ['h264_texture_amf', 'h264_texture_amf'],
+    'The selected source is still probed with the remembered encoder before each announcement.');
+  assert.deepEqual(first.encoding, discovery.availability);
+  assert.deepEqual(changed.encoding, discovery.availability);
+  assert.equal(f.logs.filter(entry => entry.message === 'Native screen encoder-discovery-reused').length, 2);
+});
+
+test('an encoder failing while capturing, a display change and a retired document make admissions discover encoders again', async t => {
+  const f = fixture(t, { compiledEncoders: ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'] });
+  const admit = async () => {
+    const { source } = await f.addSource();
+    await f.command({ action: 'source-remove', shareId: source.shareId });
+  };
+  await f.join();
+  await admit();
+  await admit();
+  assert.equal(f.encodingProbes.length, 2, 'The second share reused the first discovery.');
+  const { source } = await f.addSource();
+  await f.command({ action: 'preview-start', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, presentationId: randomUUID() });
+  f.endpoints[0].options.onError(Object.assign(new Error('AMF stopped encoding.'),
+    { code: 'ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION' }));
+  await tick(); await tick();
+  await f.command({ action: 'source-remove', shareId: source.shareId });
+  await admit();
+  assert.equal(f.encodingProbes.length, 4, 'An encoder that failed while capturing is discovered again.');
+  f.replaceMonitor(structuredClone(monitorTarget));
+  await admit();
+  assert.equal(f.encodingProbes.length, 6, 'A display change can add or remove an adapter.');
+  await admit();
+  assert.equal(f.encodingProbes.length, 6);
+  f.contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+  await tick(); await tick();
+  // The retired document's call is gone; the new document joins its own.
+  f.config.callId = randomUUID();
+  await f.join();
+  await admit();
+  assert.equal(f.encodingProbes.length, 8, 'A retired document forgets remembered discoveries.');
+});
+
+test('a verification the user asks for in Settings probes again and replaces what shares remember', async t => {
+  let av1 = false;
+  const f = fixture(t, { compiledEncoders: ['av1_texture_amf', 'obs_x264'], encodingProbe: async () => {
+    if (!av1) throw Object.assign(new Error('AV1 is unsupported by this adapter.'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
+  } });
+  const manual = { encodingStrategy: 'manual', encodingMode: 'hardware', codec: 'av1' };
+  const verify = () => f.invoke({ action: 'probe-encoding', probeId: randomUUID(), video, ...manual });
+  assert.equal((await verify()).availability.selection, null);
+  await f.join();
+  await assert.rejects(f.addSource(f.source.shareId, manual), /AV1 is unsupported/);
+  assert.equal(f.encodingProbes.length, 1, 'Sharing reuses the "unsupported" just proved.');
+  // A driver with AV1 is installed, and no display event follows.
+  av1 = true;
+  assert.equal((await verify()).availability.selection.encoder, 'av1_texture_amf');
+  assert.equal(f.encodingProbes.length, 2, 'The verification probed again instead of answering from memory.');
+  const { source } = await f.addSource(f.source.shareId, manual);
+  assert.equal(source.codec, 'av1');
+  assert.equal(f.encodingProbes.length, 2, 'Sharing reuses what the verification proved.');
+  assert.deepEqual(f.probes.map(probe => probe.options.encoder), ['av1_texture_amf'], 'The selected source is still probed.');
+});
+
+test('Automatic remembers no fallback past an encoder that failed to initialize, so the next share tries AV1 again', async t => {
+  let failure = Object.assign(new Error('AMF AV1 initialization failed.'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION' });
+  const f = fixture(t, { compiledEncoders: ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'], encodingProbe: async options => {
+    if (options.encoder === 'av1_texture_amf' && failure) throw failure;
+  } });
+  const admit = async () => {
+    const { source } = await f.addSource();
+    await f.command({ action: 'source-remove', shareId: source.shareId });
+    return source.codec;
+  };
+  await f.join();
+  assert.equal(await admit(), 'h264');
+  failure = null;
+  assert.equal(await admit(), 'av1', 'H264 was not remembered past an AV1 failure that may pass.');
+  assert.deepEqual(f.encodingProbes.map(probe => probe.encoder), ['av1_texture_amf', 'h264_texture_amf', 'av1_texture_amf']);
+  assert.equal(await admit(), 'av1');
+  assert.equal(f.encodingProbes.length, 3, 'The proven AV1 is remembered.');
+});
+
+for (const [machine, refusal, discovered] of [
+  ['an NVIDIA without AV1', encoder => encoder.endsWith('_amf')
+    ? ['ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE', 'Cannot load system AMF runtime; win32=126']
+    : encoder === 'obs_nvenc_av1_tex' ? ['ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED', 'NVENC lacks AV1'] : null,
+  ['av1_texture_amf', 'obs_nvenc_av1_tex', 'h264_texture_amf', 'obs_nvenc_h264_tex']],
+  ['a Vega beside a GTX', encoder => encoder === 'av1_texture_amf'
+    ? ['ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE', 'AMF AV1 source-free probe; CreateComponent(AV1) status=1']
+    : encoder.startsWith('obs_nvenc') ? ['ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE',
+      'NVENC nvEncOpenEncodeSessionEx status=4(NV_ENC_ERR_INVALID_DEVICE)'] : null,
+  ['av1_texture_amf', 'obs_nvenc_av1_tex', 'h264_texture_amf']],
+]) {
+  test(`Automatic remembers the encoder chosen past encoders their vendor refused, as on ${machine}`, async t => {
+    const f = fixture(t, {
+      compiledEncoders: ['av1_texture_amf', 'obs_nvenc_av1_tex', 'h264_texture_amf', 'obs_nvenc_h264_tex', 'obs_x264'],
+      encodingProbe: async options => {
+        const refused = refusal(options.encoder);
+        if (refused) throw Object.assign(new Error(refused[1]), { code: refused[0] });
+      },
+    });
+    await f.join();
+    for (let share = 0; share < 2; share++) {
+      const { source } = await f.addSource();
+      await f.command({ action: 'source-remove', shareId: source.shareId });
+    }
+    assert.deepEqual(f.encodingProbes.map(probe => probe.encoder), discovered, 'The second share reused the discovery.');
+    assert.deepEqual(f.probes.map(probe => probe.options.encoder), [discovered.at(-1), discovered.at(-1)]);
+  });
+}
+
+test('a remembered encoder that fails with the selected source is discovered again once, then forgotten', async t => {
+  const f = fixture(t, { compiledEncoders: ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'] });
+  await f.invoke({ action: 'probe-encoding', probeId: randomUUID(), video, codec: 'auto', encodingMode: 'hardware' });
+  await f.join();
+  const failure = Object.assign(new Error('AMF H264 refused the selected source.'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION' });
+  f.setProbeFailure(failure);
+  await assert.rejects(f.addSource(), error => error === failure);
+  assert.equal(f.encodingProbes.length, 4, 'Exactly one fresh discovery follows the remembered choice.');
+  assert.equal(f.probes.length, 2, 'Each choice was probed with the source once, each retired before the next.');
+  assert.ok(f.probes.every(probe => probe.closed));
+  f.setProbeFailure(null);
+  await f.addSource();
+  assert.equal(f.encodingProbes.length, 6, 'A choice that failed with the real source is not remembered.');
+  assert.equal(f.probes.length, 3);
 });

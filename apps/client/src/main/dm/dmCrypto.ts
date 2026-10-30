@@ -397,6 +397,21 @@ export function sealAtRest(key: Buffer, plaintext: Buffer, label: string): Buffe
   return Buffer.concat([STORE_MAGIC, nonce, cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]);
 }
 
+/**
+ * The same bytes as {@link sealAtRest}, produced piece by piece: a large file
+ * never needs a second copy of itself in memory. The tag goes last, after
+ * every piece; a piece source that throws stops the output before it.
+ */
+export function* sealAtRestStream(key: Buffer, pieces: Iterable<Buffer>, label: string): Generator<Buffer> {
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, nonce);
+  cipher.setAAD(Buffer.from(label, 'utf8'));
+  yield Buffer.concat([STORE_MAGIC, nonce]);
+  for (const piece of pieces) yield cipher.update(piece);
+  yield cipher.final();
+  yield cipher.getAuthTag();
+}
+
 export function openAtRest(key: Buffer, data: Buffer, label: string): Buffer {
   if (data.length < STORE_MAGIC.length + 12 + 16 || !data.subarray(0, STORE_MAGIC.length).equals(STORE_MAGIC)) {
     throw new DmCryptoError('Arquivo de DM inválido.');
@@ -407,7 +422,10 @@ export function openAtRest(key: Buffer, data: Buffer, label: string): Buffer {
   decipher.setAAD(Buffer.from(label, 'utf8'));
   decipher.setAuthTag(data.subarray(data.length - 16));
   try {
-    return Buffer.concat([decipher.update(body), decipher.final()]);
+    // GCM hands out every byte in update(); final() only checks the tag, so no copy is needed to join them.
+    const plaintext = decipher.update(body);
+    decipher.final();
+    return plaintext;
   } catch {
     throw new DmCryptoError('Arquivo de DM corrompido.');
   }

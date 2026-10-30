@@ -28,6 +28,7 @@ import {
   setActiveServerStore,
   type ServerStore,
 } from '../stores/serverStore';
+import { normalizeHost, toWsUrl } from '../utils/serverAddress';
 
 const VOICE_CONTEXT_EVENTS = new Set([
   'network.connected', 'network.status',
@@ -74,9 +75,15 @@ export function publishedCustomStatus(): CustomStatus | null {
   return currentPresenceStatus() === 'custom' ? settingsStore.customStatus : null;
 }
 
+/** One session per server, however its address is spelled (case, scheme, IPv6 brackets). */
 export function sessionKeyFor(host: string, port: number): string {
-  const cleanHost = host.trim().replace(/^wss?:\/\//, '');
-  return `ws://${cleanHost}:${port}`;
+  return toWsUrl({ host: normalizeHost(host), port });
+}
+
+/** What the rail shows for a server's messages: a mention outranks a plain unread (#479). */
+function railBadgeOf(chat: ChatStore): 'mention' | 'unread' | null {
+  if (chat.hasAnyMention()) return 'mention';
+  return chat.hasAnyUnread() ? 'unread' : null;
 }
 
 /**
@@ -326,13 +333,18 @@ export class SessionManager {
     if (!session) return;
     clientLog.info('CONNECTION', `Removing session: ${key}`);
     const wasActive = this.activeKey === key;
+    // An attempt that never signed in and is not on screen leaves without a
+    // word: announcing a disconnection or a change of session would make every
+    // view close or stop what it shows, for a server the person never had (an
+    // automatic connection refused or cancelled in the background).
+    const quiet = !(wasActive && !this.viewingHome) && !session.client.hasConnectedOnce();
     void session.localExecution.dispose().catch((error: unknown) => {
       clientLog.error('CONNECTION', 'Failed to dispose a removed session', {
         error: error instanceof Error ? error.message : String(error),
       });
     });
     session.community.dispose();
-    session.client.dispose();
+    session.client.dispose({ quiet });
     this.sessions.delete(key);
     // The disconnect above may have already handed the screen to another
     // session, and clearing the key then would undo it.
@@ -341,7 +353,7 @@ export class SessionManager {
         ?? this.getAll()[0] : undefined;
       this.activeKey = next?.key ?? null;
       if (next) this.applyBundle(next);
-      appEvents.emit('session.changed', { key: this.activeKey });
+      if (!quiet) appEvents.emit('session.changed', { key: this.activeKey });
     }
     emitOutsideRouting(() => appEvents.emit('session.connections_changed'));
   }
@@ -411,6 +423,7 @@ export class SessionManager {
     }
 
     const previousBundle = this.installedBundle ?? this.getActive();
+    const badgeBefore = railBadgeOf(session.chatStore);
     this.applyBundle(session);
     setForegroundContext(false);
     setEventOrigin(session.key);
@@ -424,8 +437,9 @@ export class SessionManager {
     this.notifyVoiceContext(sessionKey, event);
 
     // The background bundle notified nobody, so the rail is told separately
-    // that this server now has something worth a badge (#400).
-    if (event === `message.${MessageType.CHAT_MESSAGE}`) {
+    // when this server's badge changes (#400): a message, mentions seeded on
+    // reconnect, a read from another device. Anything else must not repaint it.
+    if (railBadgeOf(session.chatStore) !== badgeBefore) {
       appEvents.emit('session.background_activity', { key: session.key });
     }
   }

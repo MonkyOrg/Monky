@@ -222,6 +222,7 @@ export async function createFixture(options: {
     messageRepo, channelRepo, userRepo, mentionRepo, avatars, rateLimiter, attachmentService, serverRepo,
     (userId, channelId, permission) => channelService.canUserAccessChannel(userId, channelId, permission),
     (userId, channelId) => channelService.canUserAccessChannel(userId, channelId, Permission.READ_MESSAGES),
+    (channelId, userIds) => channelService.membersWithAccess(channelId, userIds, [Permission.VIEW_CHANNEL, Permission.READ_MESSAGES]),
     pollService,
   );
   const signalingService = new SignalingService(channelRepo, new SqliteVoiceRestrictionRepository(db));

@@ -1643,6 +1643,14 @@ async function installFixture() {
       check(!dropup.hidden && dropup.style.display !== 'none' && !dropup.hasAttribute('data-ui-closing')
         && dropup.textContent.includes('Ângela 🐒') && !dropup.textContent.includes('Outsider'),
       'Typing accented letters keeps the mention list open and filters it (#567)');
+      // Bots are never mentionable: picking "Lucas Bot" would write a name that mentions the member Lucas.
+      server.knownMembers.set('mention-lucas', { ...user, id: 'mention-lucas', nickname: 'Lucas' });
+      server.knownMembers.set('mention-lucas-bot', { ...user, id: 'mention-lucas-bot', nickname: 'Lucas Bot', isBot: true });
+      type(input, 'Oi @Luc');
+      const suggested = [...find('#mention-dropup').querySelectorAll('.mention-nick')].map(nick => nick.textContent.trim());
+      check(suggested.join() === 'Lucas', `Mention suggestions leave bots out: ${JSON.stringify(suggested)}`);
+      server.knownMembers.delete('mention-lucas');
+      server.knownMembers.delete('mention-lucas-bot');
       server.knownMembers.delete('mention-accented');
       server.knownMembers.delete('mention-allowed');
       server.knownMembers.delete('mention-outsider');

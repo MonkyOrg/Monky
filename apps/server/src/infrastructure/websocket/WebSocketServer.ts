@@ -246,6 +246,18 @@ function sameCustomStatus(a: CustomStatus | undefined, b: CustomStatus | undefin
     && a.showEmoji === b.showEmoji && a.showTag === b.showTag;
 }
 
+/**
+ * Whether an update touched the fields that decide who may receive a
+ * participant's screens. Anything in doubt counts as a change: a missed one
+ * would leave a revoked viewer watching.
+ */
+function screenAccessChanged(before: VoiceParticipantState | undefined, after: VoiceParticipantState): boolean {
+  return !before || before.isScreenSharing !== after.isScreenSharing
+    || before.isSharingScreenAudio !== after.isSharingScreenAudio
+    || JSON.stringify(before.screenShareIds ?? []) !== JSON.stringify(after.screenShareIds ?? [])
+    || JSON.stringify(before.nativeScreenShares ?? []) !== JSON.stringify(after.nativeScreenShares ?? []);
+}
+
 const BOT_LOCAL_ALLOWED_MESSAGES = new Set<MessageType>([
   MessageType.BOT_LOCAL_SOURCE_REQUEST,
   MessageType.BOT_LOCAL_TASK_REQUEST,
@@ -256,6 +268,11 @@ const BOT_LOCAL_ALLOWED_MESSAGES = new Set<MessageType>([
 const MAX_RETIRED_SFU_PRODUCERS = 256;
 /** A reorder from an outdated client can shuffle a whole list; past this, the rest is not itemized. */
 const MAX_AUDITED_MOVES = 10;
+/** Channels whose rows changed, resent to whoever keeps seeing them: every one of them, or the ones listed. */
+type ChannelRefresh = boolean | ReadonlySet<string>;
+/** How long a stale login waits for an access change in progress to end before catching up anyway (see resyncLoginAccess). */
+const LOGIN_RESYNC_WAIT_MS = 1_000;
+const LOGIN_RESYNC_POLL_MS = 20;
 
 interface ClientSession {
   protocol?: ProtocolAgreement;
@@ -302,6 +319,8 @@ interface ClientSession {
    * changes.
    */
   visibleChannelIds?: Set<string>;
+  /** The categories this connection was last sent, serialized: an identical list is not sent again. */
+  categoriesKey?: string;
   /** Voice rooms this connection was last shown because its person is inside them. */
   voicePresenceKey?: string;
   /**
@@ -316,6 +335,18 @@ interface ClientSession {
   /** Full endpoint used by this connection, including a proxy's port and path. */
   requestServerUrl?: string;
 }
+
+type SignedInSession = ClientSession & { user: UserSummary };
+
+function isSignedIn(session: ClientSession): session is SignedInSession {
+  return session.user !== undefined;
+}
+
+/**
+ * Serialized frames of one fan-out, keyed by the message a recipient ends up
+ * with after its projections: recipients sharing a message share its bytes.
+ */
+type FanOutFrames = Map<ProtocolMessage, Buffer>;
 
 import { CommunityHandler } from './CommunityHandler';
 import { MessageSearchHandler } from './MessageSearchHandler';
@@ -376,6 +407,10 @@ export class WebSocketServer {
   private botScreenAccessVersion = 0;
   private localAccessVersion = 0;
   private pendingLocalAccessMutations = 0;
+  /** Role-gated screen visibility is republished one pass at a time. */
+  private screenRolesRefresh: Promise<void> = Promise.resolve();
+  /** The screen-role revision whose visibility every participant was last sent. */
+  private publishedScreenRoles?: number;
   private shutdownReason: ServerShutdownReason = 'stopped';
   private dmRelay: DmRelayService<ClientSession>;
   private gameShareRequests: GameShareRequestService<ClientSession>;
@@ -486,7 +521,9 @@ export class WebSocketServer {
           this.botLocalExecution.deleteChannel(result.post.channelId);
           this.botInteractions.deleteChannel(result.post.channelId);
         }
-        await this.reconcileChannelVisibility(true);
+        // A topic is a channel: a new or deleted one reaches each member as the
+        // difference, an edited one is the only channel resent (S-WS-4).
+        await this.reconcileChannelVisibility(result.deleted ? false : new Set([result.post.channelId]));
         await this.broadcastForumActivity(result.post.forumId, [
           { type: MessageType.FORUM_POST_SAVED, payload: result },
           ...(result.message ? [{ type: MessageType.CHAT_MESSAGE, payload: result.message }] : []),
@@ -527,6 +564,9 @@ export class WebSocketServer {
       this.reconcileScreenAccess();
       void this.refreshScreenRoles().catch(error => Logger.error('WEBRTC', 'Screen audience refresh failed.', error));
     });
+    // Signing in no longer touches roles, so the map behind role-gated screens
+    // is loaded here: otherwise nothing would load it before a role edit.
+    void this.refreshScreenRoles().catch(error => Logger.error('WEBRTC', 'Screen audience refresh failed.', error));
     this.sfuManager.setHealthListener((sessionId, channelId, transportHealth) => {
       const connectionHealth = this.sfuCallHealth(sessionId, channelId, transportHealth);
       const current = this.signalingService.getVoiceState(sessionId);
@@ -1637,6 +1677,16 @@ export class WebSocketServer {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Resposta de autenticação inválida.', requestId);
       return;
     }
+    // Probed before anything is read for this login: on Linux it runs `which`
+    // and `sudo`, and a change published meanwhile would reach this connection
+    // ahead of the AUTH_SUCCESS that overwrites it. Shared and cached, the probe
+    // only delays the logins that arrive while it runs.
+    const turnAvailability = await CoturnManager.availability();
+    if (!this.isLive(session)) return;
+    // Nothing from here to AUTH_SUCCESS may wait on a process or the network.
+    // A role or channel change landing anyway makes the snapshot stale for this
+    // connection alone (see resyncLoginAccess).
+    const accessUnchanged = this.captureAccess();
     const result = await this.authService.verifyChallengeResponse(session.ws, signature);
     if (!this.isLive(session)) return;
 
@@ -1733,9 +1783,9 @@ export class WebSocketServer {
         ...result.serverDetails,
         protocol: session.protocol,
         serverVersion: this.serverVersion,
-        // Told at login because it never changes while the process lives: it
-        // depends on the host OS and on coturn being installed (#429).
-        turnAvailability: CoturnManager.describeAvailability(),
+        // Told at login because it depends on the host OS and on coturn being
+        // installed (#429), which only change through an installation.
+        turnAvailability,
       },
       currentUser: result.user,
       voiceRestrictions: this.signalingService.getVoiceRestrictions(result.user.id),
@@ -1751,10 +1801,17 @@ export class WebSocketServer {
     successPayload.server.members = Array.from(this.getOnlineUsersMap().values())
       .filter(({ user }) => !user.invisible || user.id === result.user!.id)
       .map(({ user }) => this.userForRecipient(session, user));
+    // From here on this connection holds exactly the channels and categories of
+    // the snapshot, whatever a reconciliation that ran while it was assembled
+    // recorded for it: later deltas are computed against what it was sent.
+    const snapshotChannelIds = new Set(result.serverDetails.channels.map((c) => c.id));
     successPayload.server.voiceStates = Object.fromEntries(
       Object.entries(this.signalingService.getAllVoiceStates())
-        .filter(([, state]) => session.visibleChannelIds?.has(state.channelId))
+        .filter(([, state]) => snapshotChannelIds.has(state.channelId))
     );
+    const snapshotCurrent = accessUnchanged();
+    session.visibleChannelIds = snapshotChannelIds;
+    session.categoriesKey = JSON.stringify(result.serverDetails.categories ?? []);
     this.send(session.ws, {
       type: MessageType.AUTH_SUCCESS,
       requestId,
@@ -1786,9 +1843,59 @@ export class WebSocketServer {
       }, session.ws);
     }
 
-    await this.broadcastRolesState(requestId);
+    // Signing in changes nobody's access unless it gave out a role. Republishing
+    // roles, channels and community to every connection on each login made a
+    // reconnection wave cost O(N²) (S-WS-4).
+    if (result.rolesChanged) await this.broadcastRolesState(requestId);
+    else if (!snapshotCurrent) await this.resyncLoginAccess(session);
+    else if (session.voicePresenceKey !== this.voicePresenceKey(result.user.id)) void this.syncVoicePresenceVisibility();
 
     Logger.info('NETWORK', `User ${result.user.nickname} (${result.user.id}) joined the server.`);
+  }
+
+  /**
+   * Catches up a connection whose login snapshot went stale: roles or channel
+   * access changed while it signed in, and the broadcast of that change did not
+   * reach it, or reached it ahead of the AUTH_SUCCESS that replaced it. It gets
+   * the roles and every channel it may see, rows included, as a channel it kept
+   * may have been renamed or had its rules changed.
+   *
+   * The read waits, for a bounded time, until no change is in progress and none
+   * lands while it runs, so it is not older than what a concurrent broadcast
+   * already sent. Past that time it is sent anyway: a change still running then
+   * publishes to this connection itself once it ends, as it is registered now.
+   */
+  private async resyncLoginAccess(session: ClientSession): Promise<void> {
+    const deadline = performance.now() + LOGIN_RESYNC_WAIT_MS;
+    const waiting = () => performance.now() < deadline;
+    for (;;) {
+      const userId = session.user?.id;
+      if (!userId || !this.isCurrentSession(session)) return;
+      const unchanged = this.captureAccess();
+      if (unchanged() || !waiting()) {
+        const [state, channels, categories, context] = await Promise.all([
+          this.roleService.getRoleState(),
+          this.channelService.listChannels(),
+          this.channelService.listCategories(),
+          this.channelService.getAccessContext(userId),
+        ]);
+        if (!this.isCurrentSession(session)) return;
+        if (unchanged() || !waiting()) {
+          this.send(session.ws, {
+            type: MessageType.ROLES_LIST,
+            payload: {
+              everyonePermissions: state.everyonePermissions,
+              roles: rolesForModel(state.roles, state.everyonePermissions, roleModelFor(session.protocol?.features)),
+              userRoles: state.userRoles,
+            } satisfies RolesListPayload,
+          });
+          session.voicePresenceKey = this.voicePresenceKey(userId);
+          this.sendChannelVisibility(session, this.visibleChannelIdsFor(channels, context), channels, categories, context, true);
+          return;
+        }
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, LOGIN_RESYNC_POLL_MS));
+    }
   }
 
   /**
@@ -1923,6 +2030,12 @@ export class WebSocketServer {
       return;
     }
 
+    // Probed before the bot is validated and anything is read for it, as for a
+    // person: what changes while it runs, a revocation included, is then seen by
+    // this login instead of reaching it ahead of AUTH_SUCCESS or being missed.
+    const turnAvailability = await CoturnManager.availability();
+    if (!this.isLive(session)) return;
+
     const publicKey = payload.publicKey;
     let botRecord = await this.botService.validateToken(payload.botToken, publicKey);
     if (!this.isLive(session)) return;
@@ -2050,7 +2163,7 @@ export class WebSocketServer {
       type: MessageType.AUTH_SUCCESS,
       requestId,
       payload: {
-        server: { ...serverDetails, turnAvailability: CoturnManager.describeAvailability() },
+        server: { ...serverDetails, turnAvailability },
         currentUser: botUser,
         voiceRestrictions: this.signalingService.getVoiceRestrictions(botRecord.id),
         roles: [],
@@ -2238,6 +2351,12 @@ export class WebSocketServer {
       this.sendError(session.ws, result.errorCode, result.errorMessage, requestId);
       return;
     }
+    const updated: BotProfileUpdatedPayload = { bot: result.bot };
+    // Bots announce their profile on every start: an unchanged one is only answered (BOTS-4).
+    if (!result.changed) {
+      this.send(session.ws, { type: MessageType.BOT_PROFILE_UPDATED, requestId, payload: updated });
+      return;
+    }
     if (previous) {
       // Bots resend their avatar on every start, so only a new name is worth recording.
       const changes = auditDiff([['name', previous.name, result.bot.name]]);
@@ -2253,7 +2372,6 @@ export class WebSocketServer {
         payload: { user: target.user } satisfies UserUpdatedPayload,
       });
     }
-    const updated: BotProfileUpdatedPayload = { bot: result.bot };
     this.send(session.ws, { type: MessageType.BOT_PROFILE_UPDATED, requestId, payload: updated });
     this.broadcast({ type: MessageType.BOT_PROFILE_UPDATED, payload: updated }, session.ws);
     this.broadcastCommands();
@@ -2672,11 +2790,20 @@ export class WebSocketServer {
     return this.pendingLocalAccessMutations > 0 ? null : this.localAccessVersion + this.botSettingsPermissionVersion;
   }
 
-  private captureChannelOperation(session: ClientSession): () => boolean {
+  /**
+   * Captures the channel and role access versions. The answer is true while
+   * neither moved since, nor was in the middle of a change at either end.
+   */
+  private captureAccess(): () => boolean {
     const channels = this.getChannelAccessVersion();
     const roles = this.permissionService.getRoleAccessVersion();
-    return () => channels !== null && roles !== null && this.isCurrentSession(session) &&
+    return () => channels !== null && roles !== null &&
       channels === this.getChannelAccessVersion() && roles === this.permissionService.getRoleAccessVersion();
+  }
+
+  private captureChannelOperation(session: ClientSession): () => boolean {
+    const unchanged = this.captureAccess();
+    return () => unchanged() && this.isCurrentSession(session);
   }
 
   private async handleChatSend(
@@ -3298,13 +3425,16 @@ export class WebSocketServer {
       this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Access changed.', requestId);
       return;
     }
+    const visibleCategories = categories.filter(category =>
+      canAccessChannel(category, context.permissions, context.roleIds, context.isBot, context.userId) ||
+      channels.some(channel => channel.categoryId === category.id &&
+        canAccessChannel(this.channelService.rulesFor(channel, context), context.permissions, context.roleIds, context.isBot, context.userId)));
+    // The author always gets the answer it awaits; later lists are compared with it.
+    session.categoriesKey = JSON.stringify(visibleCategories);
     this.send(session.ws, {
       type: MessageType.CATEGORIES_UPDATED,
       requestId,
-      payload: { categories: categories.filter(category =>
-        canAccessChannel(category, context.permissions, context.roleIds, context.isBot, context.userId) ||
-        channels.some(channel => channel.categoryId === category.id &&
-          canAccessChannel(this.channelService.rulesFor(channel, context), context.permissions, context.roleIds, context.isBot, context.userId))) },
+      payload: { categories: visibleCategories },
     });
   }
 
@@ -3385,18 +3515,9 @@ export class WebSocketServer {
    * reconciliation, which sends them a CREATED or a DELETED instead (#384).
    */
   private async publishChannelUpdate(channel: ChannelSummary, skip?: WebSocket): Promise<void> {
-    const updatedPayload: ChannelUpdatedPayload = { channel };
+    const message: ProtocolMessage<ChannelUpdatedPayload> = { type: MessageType.CHANNEL_UPDATED, payload: { channel } };
     const audience = await this.resolveChannelAudience(channel);
-    for (const [ws, peer] of this.sessions.entries()) {
-      if (ws === skip || !peer.user || ws.readyState !== WebSocket.OPEN) continue;
-      if (!peer.visibleChannelIds?.has(channel.id)) continue;
-      if (!audience.has(peer.user.id)) continue;
-
-      this.send(ws, {
-        type: MessageType.CHANNEL_UPDATED,
-        payload: updatedPayload,
-      });
-    }
+    this.publish((peer) => peer.visibleChannelIds?.has(channel.id) && audience.has(peer.user.id) ? message : undefined, skip);
 
     await this.reconcileChannelVisibility();
   }
@@ -3439,15 +3560,13 @@ export class WebSocketServer {
       payload: { positions: visibleTo(session) } satisfies ChannelsReorderedPayload,
     });
 
-    for (const [ws, peer] of this.sessions.entries()) {
-      if (ws === session.ws || !peer.user || ws.readyState !== WebSocket.OPEN) continue;
+    this.publish((peer) => {
       const mine = visibleTo(peer);
-      if (mine.length === 0) continue;
-      this.send(ws, {
+      return mine.length === 0 ? undefined : {
         type: MessageType.CHANNELS_REORDERED,
         payload: { positions: mine } satisfies ChannelsReorderedPayload,
-      });
-    }
+      };
+    }, session.ws);
   }
 
   private async handleChannelDelete(
@@ -3578,13 +3697,16 @@ export class WebSocketServer {
         ? { status: 'DISCONNECTED', sessionId: undefined, connectedAt: undefined, activity: undefined, brb: undefined, customStatus: undefined }
         : {}),
     };
-    for (const recipient of this.sessions.values()) {
-      if (!recipient.user) continue;
-      const payload: UserUpdatedPayload = {
-        user: recipient.user.id === user.id ? recipient.user : this.userForRecipient(recipient, publicUser),
-      };
-      this.send(recipient.ws, { type: MessageType.USER_UPDATED, requestId, payload });
-    }
+    const messages = new Map<UserSummary, ProtocolMessage<UserUpdatedPayload>>();
+    this.publish((recipient) => {
+      const shown = recipient.user.id === user.id ? recipient.user : this.userForRecipient(recipient, publicUser);
+      let message = messages.get(shown);
+      if (!message) {
+        message = { type: MessageType.USER_UPDATED, requestId, payload: { user: shown } };
+        messages.set(shown, message);
+      }
+      return message;
+    });
   }
 
   private handleUserUpdateVisibility(
@@ -3614,12 +3736,10 @@ export class WebSocketServer {
         if (!s.user) continue;
         // Same delivery rules as broadcast(), but the game is per recipient.
         const user: UserSummary = { ...s.user, invisible: undefined };
-        for (const [ws, recipient] of this.sessions.entries()) {
-          if (ws === s.ws || ws.readyState !== WebSocket.OPEN || !recipient.user || recipient.replaced) continue;
-          const joinPayload: UserJoinedPayload = { user: this.userForRecipient(recipient, user) };
-          const message: ProtocolMessage = { type: MessageType.USER_JOINED, payload: joinPayload };
-          if (this.canDeliverBotEvent(recipient, message)) this.send(ws, message);
-        }
+        this.publish((recipient) => ({
+          type: MessageType.USER_JOINED,
+          payload: { user: this.userForRecipient(recipient, user) } satisfies UserJoinedPayload,
+        }), s.ws);
       }
     }
 
@@ -4000,7 +4120,7 @@ export class WebSocketServer {
       maxUsers: result.maxUsers,
       maxMessageLength: result.maxMessageLength,
       turnEnabled: result.turnEnabled,
-      turnAvailability: CoturnManager.describeAvailability(),
+      turnAvailability: await CoturnManager.availability(),
       afkChannelId: await this.channelService.getAfkChannelId(),
       afkTimeoutSeconds: result.afkTimeoutSeconds,
     };
@@ -4167,12 +4287,15 @@ export class WebSocketServer {
       channelId: payload.channelId,
       userId: session.user.id,
     };
+    this.sendToCall(payload.channelId, { type: MessageType.SOUNDBOARD_STOPPED, requestId, payload: stoppedPayload });
+  }
 
-    for (const p of this.signalingService.getParticipantsInChannel(payload.channelId)) {
-      const sock = this.sessionSockets.get(p.sessionId);
-      if (sock && sock.readyState === WebSocket.OPEN) {
-        this.send(sock, { type: MessageType.SOUNDBOARD_STOPPED, requestId, payload: stoppedPayload });
-      }
+  /** Delivers one message to the connections in a call, serialized once for all of them (S-WS-8). */
+  private sendToCall(channelId: string, message: ProtocolMessage): void {
+    const frames: FanOutFrames = new Map();
+    for (const participant of this.signalingService.getParticipantsInChannel(channelId)) {
+      const ws = this.sessionSockets.get(participant.sessionId);
+      if (ws && ws.readyState === WebSocket.OPEN) this.send(ws, message, frames);
     }
   }
 
@@ -4239,16 +4362,7 @@ export class WebSocketServer {
     };
 
     // Only the participants of that call hear it, the author included.
-    for (const p of this.signalingService.getParticipantsInChannel(payload.channelId)) {
-      const sock = this.sessionSockets.get(p.sessionId);
-      if (sock && sock.readyState === WebSocket.OPEN) {
-        this.send(sock, {
-          type: MessageType.SOUNDBOARD_PLAYED,
-          requestId,
-          payload: broadcastPayload,
-        });
-      }
-    }
+    this.sendToCall(payload.channelId, { type: MessageType.SOUNDBOARD_PLAYED, requestId, payload: broadcastPayload });
 
     Logger.info('SOUNDBOARD', `User ${session.user.nickname} played sound "${audio.soundName}" in channel ${payload.channelId}`);
   }
@@ -4325,11 +4439,9 @@ export class WebSocketServer {
   }
 
   private notifyRecentSoundAdded(entry: RecentSoundEntry): void {
-    for (const recipient of this.sessions.values()) {
-      if (!recipient.user || recipient.isBot ||
-          !recipient.protocol?.features.includes('recent-sounds')) continue;
-      this.send(recipient.ws, { type: MessageType.RECENT_SOUND_ADDED, payload: entry });
-    }
+    const message: ProtocolMessage<RecentSoundEntry> = { type: MessageType.RECENT_SOUND_ADDED, payload: entry };
+    this.publish((recipient) =>
+      !recipient.isBot && recipient.protocol?.features.includes('recent-sounds') ? message : undefined);
   }
 
   private async handleRecentSoundsList(session: ClientSession, requestId?: string): Promise<void> {
@@ -4672,7 +4784,9 @@ export class WebSocketServer {
       botVoicePermissions: current?.botVoicePermissions,
     });
     if (updated) {
-      this.reconcileScreenAccess();
+      // Only screens decide who may receive what: a mute or a speaking flag,
+      // which bots publish at every pause, leaves every grant as it was (S-VOICE-10).
+      if (screenAccessChanged(current, updated)) this.reconcileScreenAccess();
       if (updated.isScreenSharing && !current?.isScreenSharing) this.gameShareRequests.playerStartedSharing(session.user.id);
       if (session.isBot && !isReceivingBotVoice(updated)) {
         this.closeBotVoiceReception(session, updated.channelId);
@@ -5276,10 +5390,9 @@ export class WebSocketServer {
     const payload = parsed.data;
     if (session.isBot) {
       if (!(await this.authorizeBotVoiceMedia(session, payload, requestId, payload.transportId, 'recv'))) return;
-      const producer = this.sfuManager.getProducersInChannel(payload.channelId)
-        .find((entry) => entry.producerId === payload.producerId);
-      if (!producer || producer.kind !== 'audio' || producer.appData.mediaType !== 'mic' ||
-          !this.isBotMicrophoneSource(producer.producerSessionId, payload.channelId)) {
+      const producer = this.sfuManager.getProducer(payload.producerId);
+      if (!producer || producer.channelId !== payload.channelId || producer.kind !== 'audio' ||
+          producer.appData.mediaType !== 'mic' || !this.isBotMicrophoneSource(producer.sessionId, payload.channelId)) {
         this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bots may only receive human microphones in their authorized room.', requestId);
         return;
       }
@@ -5288,8 +5401,7 @@ export class WebSocketServer {
     if (!this.canReceiveProducer(session, payload.channelId, payload.producerId)) {
       const advertised = session.knownProducerIds?.has(payload.producerId)
         || session.retiredProducerIds?.has(payload.producerId);
-      const exists = this.sfuManager.getProducersInChannel(payload.channelId)
-        .some(producer => producer.producerId === payload.producerId);
+      const exists = this.sfuManager.getProducer(payload.producerId)?.channelId === payload.channelId;
       if (advertised && !exists) {
         this.send(session.ws, {
           type: MessageType.SFU_PRODUCER_CLOSED, requestId,
@@ -5721,11 +5833,7 @@ export class WebSocketServer {
       }
       return variant;
     };
-    for (const [ws, session] of this.sessions.entries()) {
-      if (ws.readyState === WebSocket.OPEN && session.user && !session.replaced && this.canDeliverBotEvent(session, message)) {
-        this.send(ws, messageFor(roleModelFor(session.protocol?.features)));
-      }
-    }
+    this.publish((session) => messageFor(roleModelFor(session.protocol?.features)));
 
     // Roles decide who may see a private channel, so any change to them can
     // grant or revoke access. Reconciling here covers every role mutation at
@@ -5735,7 +5843,19 @@ export class WebSocketServer {
     await this.community?.refresh();
   }
 
-  private async refreshScreenRoles(): Promise<void> {
+  /**
+   * Republishes the role-gated screens each participant may see once the roles
+   * behind them changed: on role mutations, and once at startup, never on a
+   * login (S-VOICE-10). Calls run one after another, so awaiting one means
+   * every publication asked before it has reached its recipients.
+   */
+  private refreshScreenRoles(): Promise<void> {
+    const run = (this.screenRolesRefresh ?? Promise.resolve()).then(() => this.publishScreenRoles());
+    this.screenRolesRefresh = run.catch(() => {});
+    return run;
+  }
+
+  private async publishScreenRoles(): Promise<void> {
     if (this.closing) return;
     const version = this.permissionService.getScreenRoleAccessVersion();
     const readVersion = this.permissionService.getRoleAccessVersion();
@@ -5744,6 +5864,9 @@ export class WebSocketServer {
     if (this.closing || this.permissionService.getScreenRoleAccessVersion() !== version
       || this.permissionService.getRoleAccessVersion() !== readVersion) return;
     this.signalingService.setScreenRoles(state.roles, state.userRoles, version);
+    const revision = this.signalingService.getScreenRolesRevision();
+    if (revision === this.publishedScreenRoles) return;
+    this.publishedScreenRoles = revision;
     this.reconcileScreenAccess();
     for (const voiceState of Object.values(this.signalingService.getAllVoiceStates())) {
       if (!voiceState.nativeScreenShares?.length) continue;
@@ -5766,12 +5889,12 @@ export class WebSocketServer {
   }
 
   private canReceiveProducer(session: ClientSession, channelId: string, producerId: string): boolean {
-    const producer = this.sfuManager.getProducersInChannel(channelId).find(value => value.producerId === producerId);
-    if (!producer || !session.sessionId) return false;
+    const producer = this.sfuManager.getProducer(producerId);
+    if (!producer || producer.channelId !== channelId || !session.sessionId) return false;
     const appData = producer.appData;
     if (appData.mediaType !== 'screen_video' && appData.mediaType !== 'screen_audio') return true;
     if (session.isBot) return false;
-    const publisher = this.signalingService.getVoiceState(producer.producerSessionId);
+    const publisher = this.signalingService.getVoiceState(producer.sessionId);
     const parsed = sfuMediaAppDataSchema.safeParse(appData);
     if (!publisher || !parsed.success || !('shareId' in parsed.data)) return false;
     const native = 'nativeScreen' in parsed.data ? parsed.data.nativeScreen : undefined;
@@ -5861,8 +5984,7 @@ export class WebSocketServer {
         const advertised = session.knownProducerIds?.delete(payload.producerId);
         if (!advertised && !message.requestId) return null;
         // A revocation also sends CLOSED, but must not grant a later liveness oracle.
-        if (advertised && !this.sfuManager.getProducersInChannel(payload.channelId)
-          .some(producer => producer.producerId === payload.producerId)) {
+        if (advertised && this.sfuManager.getProducer(payload.producerId)?.channelId !== payload.channelId) {
           const retired = session.retiredProducerIds ??= new Set();
           retired.add(payload.producerId);
           if (retired.size > MAX_RETIRED_SFU_PRODUCERS) {
@@ -6611,7 +6733,13 @@ export class WebSocketServer {
     else this.anonymousPerAddress.delete(address);
   }
 
-  public send(ws: WebSocket, message: ProtocolMessage): void {
+  /**
+   * Delivers one message to one connection, after the projections that depend
+   * on the recipient. `frames` is shared by the recipients of a single fan-out:
+   * those that end up with the very same message reuse its serialization
+   * instead of encoding it again, which for a sound means megabytes each (S-WS-8).
+   */
+  public send(ws: WebSocket, message: ProtocolMessage, frames?: FanOutFrames): void {
     const session = this.sessions.get(ws);
     if (ws.readyState === WebSocket.OPEN && (!session || this.canDeliverBotEvent(session, message))) {
       // A recipient that stopped reading would make the server hold everything
@@ -6626,8 +6754,18 @@ export class WebSocketServer {
       const projected = session?.user ? this.projectScreenMessage(session, message) : message;
       if (!projected) return;
       const polls = session && !session.protocol?.features.includes('poll-voters') ? projectLegacyPolls(projected) : projected;
-      ws.send(JSON.stringify(session && !session.protocol?.features.includes('message-forward')
-        ? projectLegacyForwards(polls) : polls));
+      const delivered = session && !session.protocol?.features.includes('message-forward') ? projectLegacyForwards(polls) : polls;
+      if (!frames) {
+        ws.send(JSON.stringify(delivered));
+        return;
+      }
+      let frame = frames.get(delivered);
+      if (!frame) {
+        frame = Buffer.from(JSON.stringify(delivered));
+        frames.set(delivered, frame);
+      }
+      // Text frame on the wire, as a string would be: a binary one reaches browsers as a Blob.
+      ws.send(frame, { binary: false });
     }
   }
 
@@ -6658,13 +6796,23 @@ export class WebSocketServer {
       this.isCurrentBotOperation(session, 'send_messages');
   }
 
-  public broadcast(message: ProtocolMessage, ignoreWs?: WebSocket): void {
-    for (const [ws, session] of this.sessions.entries()) {
-      if (ws !== ignoreWs && ws.readyState === WebSocket.OPEN && session.user && !session.replaced &&
-          this.canDeliverBotEvent(session, message)) {
-        this.send(ws, message);
-      }
+  /**
+   * Sends every connection that may receive broadcasts — open, signed in and
+   * not superseded by a newer connection of its device — the message
+   * `messageFor` picks for it, if any. Recipients that end up with the same
+   * message share one serialization (S-WS-8); bots are filtered by `send`.
+   */
+  private publish(messageFor: (session: SignedInSession) => ProtocolMessage | undefined, skip?: WebSocket): void {
+    const frames: FanOutFrames = new Map();
+    for (const [ws, session] of this.sessions) {
+      if (ws === skip || ws.readyState !== WebSocket.OPEN || !isSignedIn(session) || session.replaced) continue;
+      const message = messageFor(session);
+      if (message) this.send(ws, message, frames);
     }
+  }
+
+  public broadcast(message: ProtocolMessage, ignoreWs?: WebSocket): void {
+    this.publish(() => message, ignoreWs);
   }
 
   /**
@@ -6686,13 +6834,8 @@ export class WebSocketServer {
     const allowedUserIds = await this.resolveChannelAudience(channel, permission);
     if ((canSend && !canSend()) || version !== this.getChannelAccessVersion() ||
         roleVersion !== this.permissionService.getRoleAccessVersion()) return;
-    for (const [ws, session] of this.sessions.entries()) {
-      if (ws !== ignoreWs && ws.readyState === WebSocket.OPEN && session.user && !session.replaced &&
-          this.canDeliverBotEvent(session, message) &&
-          (allowedUserIds.has(session.user.id) || (voiceChannelId && this.hasBotVoiceGrant(session, voiceChannelId)))) {
-        this.send(ws, message);
-      }
-    }
+    this.publish((session) => allowedUserIds.has(session.user.id) ||
+      (voiceChannelId && this.hasBotVoiceGrant(session, voiceChannelId)) ? message : undefined, ignoreWs);
   }
 
   /**
@@ -6787,6 +6930,7 @@ export class WebSocketServer {
   private async broadcastForumActivity(
     channelId: string, messages: ProtocolMessage[], ignoreWs?: WebSocket, canSend?: () => boolean
   ): Promise<void> {
+    const frames: FanOutFrames = new Map();
     for (const session of this.sessions.values()) {
       if (!session.user || session.ws === ignoreWs || !this.isCurrentSession(session)) continue;
       const channels = this.getChannelAccessVersion();
@@ -6794,7 +6938,7 @@ export class WebSocketServer {
       if (channels === null || roles === null || !await this.forumService?.canRead(session.user.id, channelId) ||
           channels !== this.getChannelAccessVersion() || roles !== this.permissionService.getRoleAccessVersion() ||
           !this.isCurrentSession(session) || (canSend && !canSend())) continue;
-      for (const message of messages) this.send(session.ws, message);
+      for (const message of messages) this.send(session.ws, message, frames);
     }
   }
 
@@ -6817,12 +6961,13 @@ export class WebSocketServer {
     if (!isCurrent()) return;
     const privatePoll = this.privatePollForMessage(message);
     if (privatePoll) {
+      const frames: FanOutFrames = new Map();
       for (const session of this.sessions.values()) {
         if (!session.user || session.ws === ignoreWs || !this.isCurrentSession(session) ||
             session.ws.readyState !== WebSocket.OPEN || !this.canDeliverBotEvent(session, message) ||
             (canSend && !canSend())) continue;
         if (await this.pollService?.canView(session.user.id, privatePoll) && isCurrent() &&
-            this.isCurrentSession(session)) this.send(session.ws, message);
+            this.isCurrentSession(session)) this.send(session.ws, message, frames);
       }
       return;
     }
@@ -6867,12 +7012,14 @@ export class WebSocketServer {
    * Brings every client's channel list back in sync with what it is allowed to
    * see (#384), pushing only the difference: channels that just became visible
    * arrive as CHANNEL_CREATED, ones that no longer are leave as CHANNEL_DELETED.
+   * `refreshChannels` also resends channels whose rows changed to whoever keeps
+   * seeing them: `true` all of them, a set only those.
    *
    * A bot that loses access while sitting in a voice channel is disconnected
    * from it. A person stays: VIEW_CHANNEL only gates finding a room and joining
    * it by oneself, so they keep seeing the room until they leave.
    */
-  private async reconcileChannelVisibility(refreshChannels = false): Promise<void> {
+  private async reconcileChannelVisibility(refreshChannels: ChannelRefresh = false): Promise<void> {
     this.botSettingsPermissionVersion++;
     this.botScreenAccessVersion++;
     const accessVersion = this.botSettingsPermissionVersion;
@@ -7014,7 +7161,8 @@ export class WebSocketServer {
   /**
    * Sends one connection the difference between the channels it was told about
    * and `nowVisible` (#384). `beforeRemoval` runs before a channel is withdrawn,
-   * so a voice eviction still reaches the client while it knows the room.
+   * so a voice eviction still reaches the client while it knows the room. Its
+   * categories go only when they differ from the ones it already has (S-WS-4).
    */
   private sendChannelVisibility(
     session: ClientSession,
@@ -7022,19 +7170,26 @@ export class WebSocketServer {
     channels: readonly ChannelSummary[],
     categories: readonly ChannelCategory[],
     context: ChannelAccessContext,
-    refreshChannels: boolean,
+    refreshChannels: ChannelRefresh,
     beforeRemoval?: (channelId: string) => void,
   ): void {
     const previouslyVisible = session.visibleChannelIds ?? new Set<string>();
-    this.send(session.ws, {
-      type: MessageType.CATEGORIES_UPDATED,
-      payload: { categories: categories.filter((category) =>
-        canAccessChannel(category, context.permissions, context.roleIds, context.isBot, context.userId) ||
-        channels.some((channel) => channel.categoryId === category.id && nowVisible.has(channel.id))) },
-    });
+    const visibleCategories = categories.filter((category) =>
+      canAccessChannel(category, context.permissions, context.roleIds, context.isBot, context.userId) ||
+      channels.some((channel) => channel.categoryId === category.id && nowVisible.has(channel.id)));
+    const categoriesKey = JSON.stringify(visibleCategories);
+    if (session.categoriesKey !== categoriesKey) {
+      session.categoriesKey = categoriesKey;
+      this.send(session.ws, {
+        type: MessageType.CATEGORIES_UPDATED,
+        payload: { categories: visibleCategories },
+      });
+    }
 
+    const refreshed = (channelId: string) =>
+      refreshChannels === true || (refreshChannels !== false && refreshChannels.has(channelId));
     for (const channel of channels) {
-      if (!nowVisible.has(channel.id) || (previouslyVisible.has(channel.id) && !refreshChannels)) continue;
+      if (!nowVisible.has(channel.id) || (previouslyVisible.has(channel.id) && !refreshed(channel.id))) continue;
       this.send(session.ws, {
         type: previouslyVisible.has(channel.id) ? MessageType.CHANNEL_UPDATED : MessageType.CHANNEL_CREATED,
         payload: { channel } as ChannelCreatedPayload,
@@ -7058,6 +7213,12 @@ export class WebSocketServer {
    * deltas sent to a connection never interleave.
    */
   private syncVoicePresenceVisibility(): Promise<void> {
+    // Being in a room is access (rulesFor), and every change to it comes through
+    // here, including a return or reconnect grant that lapses or is withdrawn
+    // while its holder is offline. Miniapps recheck now, as on voice membership.
+    this.botScreenAccessVersion++;
+    void this.botScreens?.revokeInvalid()
+      .catch((error: unknown) => Logger.error('BOT', 'Failed to reconcile voice miniapp access.', error));
     const run = (this.voicePresenceSync ?? Promise.resolve()).then(() => this.applyVoicePresenceVisibility());
     this.voicePresenceSync = run.catch((error: unknown) => Logger.error('NETWORK', 'Failed to sync voice room visibility.', error));
     return this.voicePresenceSync;

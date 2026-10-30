@@ -1,3 +1,5 @@
+import { toHttpBase } from './serverAddress';
+
 /**
  * Checks whether a Monky server is online and joinable by hitting its
  * public HTTP `/preview` endpoint. A successful response means the server
@@ -28,7 +30,7 @@ export async function fetchServerPreview(
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    const res = await fetch(`http://${host}:${port}/preview`, { signal: controller.signal });
+    const res = await fetch(`${toHttpBase({ host, port })}/preview`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return null;
     return (await res.json()) as ServerPreview;
@@ -41,7 +43,7 @@ export async function checkServerOnline(host: string, port: number, timeoutMs = 
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    const res = await fetch(`http://${host}:${port}/preview`, { signal: controller.signal });
+    const res = await fetch(`${toHttpBase({ host, port })}/preview`, { signal: controller.signal });
     clearTimeout(timeout);
     return res.ok;
   } catch {

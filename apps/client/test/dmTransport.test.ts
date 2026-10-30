@@ -6,10 +6,12 @@ import {
   DM_DEFAULT_MAX_FILE_BYTES,
   MessageType,
   PROTOCOL_VERSION,
+  ProtocolErrorCode,
   createProtocolOffer,
   normalizePublicKeyHex,
   type DmApi,
   type DmDispatch,
+  type DmRelayItem,
   type DmResult,
   type UserSummary,
 } from '@monky/shared';
@@ -129,4 +131,74 @@ test('after an identity import, DMs only travel through sessions signed in as th
   await setImmediate();
   assert.equal(transport.isReachable(friend), false);
   assert.equal(calls.filter((call) => call === 'hello').length, 0);
+});
+
+function relayBatch(payload: unknown): { relayId: string; items: DmRelayItem[] } | null {
+  if (!payload || typeof payload !== 'object' || !('relayId' in payload) || !('items' in payload)) return null;
+  const { relayId, items } = payload;
+  return typeof relayId === 'string' && Array.isArray(items) ? { relayId, items } : null;
+}
+
+test('relay sends stay within the server rate, and what it refuses for the rate is sent again in order', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 });
+  const me = newIdentity();
+  const friend = newIdentity();
+  const session = sessionManager.create('dm-pacing', 7801, 'me');
+  seed(session, me, friend);
+  context.mock.method(session.client, 'getStatus', () => 'CONNECTED');
+  const batches: Array<{ relayId: string; items: DmRelayItem[] }> = [];
+  context.mock.method(session.client, 'send', (type: MessageType, payload: unknown) => {
+    const batch = type === MessageType.DM_RELAY_SEND ? relayBatch(payload) : null;
+    if (batch) batches.push(batch);
+  });
+  const transport = new DmTransport(fakeApi({}));
+  context.after(async () => { transport.stop(); await sessionManager.removeAll(); });
+  transport.setIdentity(me, [friend]);
+  transport.start();
+  await setImmediate();
+  assert.equal(transport.isReachable(friend), true);
+
+  const chunks: DmRelayItem[] = Array.from({ length: 40 }, (_, index) => ({ to: friend, kind: 'file', data: `chunk-${index}`.padEnd(175_000, '.') }));
+  transport.execute({ peers: { [friend]: chunks } });
+  const labels = () => batches.flatMap((batch) => batch.items.map((entry) => entry.data.replace(/\.+$/, '')));
+  const burst = labels().length;
+  assert.ok(burst > 0 && burst < chunks.length, `Only what the server's burst takes leaves at once (${burst})`);
+
+  // The server still refused the first batch for the rate: it goes back to the head of the line.
+  session.client['notifyEventListeners'](`message.${MessageType.SERVER_ERROR}`, {
+    code: ProtocolErrorCode.RATE_LIMITED, message: 'Muitas mensagens diretas', relayId: batches[0].relayId,
+  });
+  assert.equal(labels().length, burst, 'Nothing goes out again before the buckets refill');
+  for (let elapsed = 0; elapsed < 15_000; elapsed += 50) context.mock.timers.tick(50);
+  const resent = labels().slice(burst);
+  assert.deepEqual(resent, [...chunks.map((_, index) => `chunk-${index}`)], 'Refused chunks first, then the rest, in order');
+});
+
+test('requests for every device of a friend go through every server the friend is on; anything else through one', async (context) => {
+  const me = newIdentity();
+  const friend = newIdentity();
+  const stranger = newIdentity();
+  const sessions = [7811, 7812, 7813].map((port) => sessionManager.create(`dm-everywhere-${port}`, port, 'me'));
+  seed(sessions[0], me, friend);
+  seed(sessions[1], me, friend);
+  seed(sessions[2], me, stranger);
+  const sent = new Map(sessions.map((session) => [session.key, [] as string[]]));
+  for (const session of sessions) {
+    context.mock.method(session.client, 'getStatus', () => 'CONNECTED');
+    context.mock.method(session.client, 'send', (type: MessageType, payload: unknown) => {
+      const batch = type === MessageType.DM_RELAY_SEND ? relayBatch(payload) : null;
+      for (const item of batch?.items ?? []) sent.get(session.key)?.push(item.data);
+    });
+  }
+  const transport = new DmTransport(fakeApi({}));
+  context.after(async () => { transport.stop(); await sessionManager.removeAll(); });
+  transport.setIdentity(me, [friend]);
+  transport.start();
+  await setImmediate();
+
+  transport.execute({ everywhere: { [friend]: [{ to: friend, kind: 'signal', data: 'pedido' }] } });
+  transport.execute({ peers: { [friend]: [{ to: friend, kind: 'signal', data: 'mensagem' }] } });
+  const through = (data: string) => sessions.filter((session) => sent.get(session.key)?.includes(data)).map((session) => session.key);
+  assert.deepEqual(through('pedido'), [sessions[0].key, sessions[1].key], 'Each server the friend is on gets the request once');
+  assert.equal(through('mensagem').length, 1, 'Anything else still goes through one of them');
 });

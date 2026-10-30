@@ -1,4 +1,5 @@
 import { appEvents } from '../core/EventBus';
+import { isForegroundEvent } from '../core/sessionRouting';
 import { animateEnter, ownSurface, removeWithMotion, topModal } from '../utils/surfaceMotion';
 
 export interface ContextMenuItem {
@@ -28,7 +29,8 @@ export type ContextMenuEntry = ContextMenuItem | ContextMenuSubmenu;
 /**
  * Lightweight floating menu anchored at a screen position. Reused for
  * per-channel "more options" (#151) and designed to grow as more actions are
- * added. Dismisses on outside click, Escape, resize or network loss.
+ * added. Dismisses on outside click, Escape, resize or the server on screen
+ * dropping.
  */
 export class ContextMenu {
   private menuEl: HTMLElement | null = null;
@@ -219,13 +221,21 @@ export class ContextMenu {
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('scroll', handleResize, true);
     },
-    appEvents.on('network.disconnected', () => this.close()),
+    appEvents.on('network.disconnected', () => {
+      // A server in the background dropping changes nothing on screen.
+      if (isForegroundEvent()) this.close();
+    }),
     appEvents.on('voice.channel_changed', () => this.close()),
     appEvents.on('session.changed', () => this.close()));
   }
 
   public isOpenFor(anchor: HTMLElement): boolean {
     return this.menuEl !== null && this.returnFocus === anchor;
+  }
+
+  /** Whether the open menu was opened from inside `root`, e.g. a list about to be redrawn. */
+  public isOpenWithin(root: HTMLElement): boolean {
+    return this.menuEl !== null && this.returnFocus !== null && root.contains(this.returnFocus);
   }
 
   public isOpen(): boolean {

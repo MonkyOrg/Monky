@@ -5,6 +5,7 @@ import { MessageType, PROTOCOL_VERSION, MIN_CLIENT_PROTOCOL, ProtocolErrorCode, 
 import { NetworkClient, ProtocolRequestError, type ConnectionStatus, type NetworkDisconnectedPayload, type ServerShutdownNotice } from '../src/renderer/core/NetworkClient';
 import { appEvents } from '../src/renderer/core/EventBus';
 import { setForegroundContext, setSessionEventRouter } from '../src/renderer/core/sessionRouting';
+import { translateProtocolError } from '../src/renderer/i18n/protocolErrors';
 
 const identity = { clientId: 'fixture-client', publicKey: 'fixture-public-key' };
 
@@ -481,6 +482,94 @@ test('a disconnection tells whether the server or this client ended the session'
       assert.equal(f.client.getStatus(), 'DISCONNECTED');
     });
   }
+});
+
+// The automatic connection stops trying a server that refused it for good and
+// keeps retrying one that failed for a reason that may pass: it tells them
+// apart by the code, while the person still reads the message shown so far.
+test('a refused sign-in rejects with its protocol code and the same message', async context => {
+  const cases: Array<[string, MessageType, object, ProtocolErrorCode, string]> = [
+    ['wrong password', MessageType.SERVER_ERROR,
+      { code: ProtocolErrorCode.AUTH_INVALID_PASSWORD, message: 'Senha do servidor incorreta.' },
+      ProtocolErrorCode.AUTH_INVALID_PASSWORD,
+      translateProtocolError(ProtocolErrorCode.AUTH_INVALID_PASSWORD, 'Senha do servidor incorreta.')],
+    ['identity refused', MessageType.AUTH_FAILED,
+      { code: ProtocolErrorCode.UNAUTHORIZED, message: 'Esta identidade não corresponde ao membro registrado.' },
+      ProtocolErrorCode.UNAUTHORIZED, 'Esta identidade não corresponde ao membro registrado.'],
+    ['refusal without a code', MessageType.AUTH_FAILED, { message: 'Falha na autenticação' },
+      ProtocolErrorCode.UNAUTHORIZED, 'Falha na autenticação'],
+  ];
+  for (const [label, type, payload, code, message] of cases) {
+    await context.test(label, async nested => {
+      const f = fixture(nested);
+      const pending = f.connect();
+      const socket = f.lastSocket();
+      socket.open();
+      socket.receive({ type, requestId: socket.sent[0].requestId, payload });
+      await assert.rejects(pending, (error: unknown) =>
+        error instanceof ProtocolRequestError && error.code === code && error.message === message);
+      assert.equal(f.client.getStatus(), 'DISCONNECTED');
+    });
+  }
+});
+
+// Disposing quietly is for a session nobody is looking at: one that never
+// signed in has nothing for the app to tear down, one that ever did has.
+test('a client that never signed in can be disposed without announcing a departure', async context => {
+  type Prepared = { settled?: Promise<void> };
+  const cases: Array<[string, (f: ReturnType<typeof fixture>) => Promise<Prepared>, boolean]> = [
+    ['failed first attempt', async f => {
+      const failed = assert.rejects(f.connect());
+      f.lastSocket().drop();
+      await failed;
+      return {};
+    }, false],
+    ['attempt still under way', async f => {
+      const settled = assert.rejects(f.connect(), { name: 'AbortError' });
+      f.lastSocket().open();
+      return { settled };
+    }, false],
+    ['signed in, then dropped', async f => {
+      await f.connected();
+      f.lastSocket().drop();
+      return {};
+    }, true],
+    ['signed in once, then a new attempt failed', async f => {
+      await f.connected();
+      const failed = assert.rejects(f.connect());
+      f.lastSocket().drop();
+      await failed;
+      return {};
+    }, true],
+  ];
+  for (const [label, prepare, announced] of cases) {
+    await context.test(label, async nested => {
+      const f = fixture(nested);
+      const departures: NetworkDisconnectedPayload[] = [];
+      let disposals = 0;
+      const off = [
+        appEvents.on<NetworkDisconnectedPayload>('network.disconnected', payload => departures.push(payload)),
+        appEvents.on('network.disposed', () => { disposals++; }),
+      ];
+      nested.after(() => off.forEach(unbind => unbind()));
+      const { settled } = await prepare(f);
+      f.client.dispose({ quiet: true });
+      await settled;
+      assert.deepEqual(departures, announced ? [{ cause: 'local' }] : []);
+      assert.equal(disposals, 1, 'Its own listeners still learn the client is gone');
+      assert.equal(f.client.hasConnectedOnce(), announced);
+    });
+  }
+  await context.test('disposing as before still announces a failed attempt', async nested => {
+    const f = fixture(nested);
+    let departures = 0;
+    nested.after(appEvents.on('network.disconnected', () => { departures++; }));
+    const failed = assert.rejects(f.connect());
+    f.lastSocket().drop();
+    await failed;
+    f.client.dispose();
+    assert.equal(departures, 1);
+  });
 });
 
 test('a background server update notice reaches global UI and keeps reconnecting with its identity', async context => {

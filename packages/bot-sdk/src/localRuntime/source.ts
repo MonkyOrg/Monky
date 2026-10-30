@@ -68,6 +68,14 @@ export interface YouTubeSourceDependencies {
   request?: AudioRequest;
 }
 
+export interface YouTubeSourceOptions extends YouTubeSourceDependencies {
+  /**
+   * The caller already verified these exact executables, as Monky's local worker does before every task.
+   * A preview then skips its own readiness check, which launches four processes; by default it still runs.
+   */
+  toolsVerified?: boolean;
+}
+
 export const MAX_SOURCE_RECOVERIES = 2;
 
 export class IncompleteAudioError extends MediaError {
@@ -218,17 +226,19 @@ export class YouTubeSource implements MusicSource {
   private readonly run: typeof capture;
   private readonly runBytes: typeof captureBytes;
   private readonly request: AudioRequest | undefined;
+  private readonly toolsVerified: boolean;
 
-  constructor(paths: MediaToolPaths, dependencies: YouTubeSourceDependencies = {}) {
+  constructor(paths: MediaToolPaths, options: YouTubeSourceOptions = {}) {
     if (!paths || typeof paths !== 'object') throw new MediaError('tools', 'Explicit media executable paths are required.');
     const tools = { node: paths.node, ytDlp: paths.ytDlp, ffmpeg: paths.ffmpeg };
     if (Object.values(tools).some(executable => typeof executable !== 'string' || !executable.trim() || executable.includes('\0'))) {
       throw new MediaError('tools', 'Explicit Node.js, yt-dlp and FFmpeg executable paths are required.');
     }
     this.paths = tools;
-    this.run = dependencies.capture ?? capture;
-    this.runBytes = dependencies.captureBytes ?? captureBytes;
-    this.request = dependencies.request;
+    this.run = options.capture ?? capture;
+    this.runBytes = options.captureBytes ?? captureBytes;
+    this.request = options.request;
+    this.toolsVerified = options.toolsVerified === true;
   }
 
   private extractorArgs(): string[] {
@@ -329,7 +339,7 @@ export class YouTubeSource implements MusicSource {
   async preview(url: string, signal: AbortSignal): Promise<Uint8Array> {
     aborted(signal);
     const canonical = videoUrl(url);
-    await this.check(signal);
+    if (!this.toolsVerified) await this.check(signal);
     aborted(signal);
     const track = await this.resolve(canonical, signal);
     aborted(signal);

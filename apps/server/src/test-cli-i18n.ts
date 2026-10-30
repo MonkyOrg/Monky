@@ -137,6 +137,7 @@ function lifecycleFixture(context: TestContext) {
   context.mock.method(target, 'knownServers', () => [server]);
   context.mock.method(pm2, 'ensurePm2', () => {});
   context.mock.method(pm2, 'requirePm2', () => true);
+  context.mock.method(pm2, 'listPm2Processes', () => []);
   context.mock.method(pm2, 'isMonkyServerRegistered', () => true);
   context.mock.method(pm2, 'findPm2Process', () => state.entry);
   context.mock.method(pm2, 'findLegacyProcessFor', () => null);
@@ -708,6 +709,7 @@ test('server selection and listings translate human copy without altering proces
   }
   const first = registerServer(path.join(root, 'first'), { name: 'Friends', port: 3000 });
   const second = registerServer(path.join(root, 'second'), { name: 'Work', port: 3100 });
+  context.mock.method(pm2, 'listPm2Processes', () => []);
   context.mock.method(pm2, 'findPm2Process', () => ({ pid: 0, pm2_env: { status: 'stopped' } }));
   context.mock.method(pm2, 'findLegacyProcessFor', () => null);
   context.mock.method(prompts, 'askChoice', async (question: string, choices: string[]) => {

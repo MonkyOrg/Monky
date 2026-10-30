@@ -37,6 +37,26 @@ export interface DmConversationState {
 }
 
 /**
+ * What the composer of a conversation held when it left the screen (R-CHAT-8):
+ * switching to another friend or to a server, or the Home being redrawn, no
+ * longer throws away the text, the files picked or the message being answered.
+ * Kept in memory only, like the drafts of server channels.
+ */
+export interface DmComposerDraft {
+  text: string;
+  replyTo: string | null;
+  files: File[];
+  /** An edit of a sent message not saved yet; `text` is then what was being typed before it. */
+  editing: { messageId: string; content: string } | null;
+}
+
+export interface DmAttachmentProgressEvent {
+  peer: string;
+  messageId: string;
+  fileId: string;
+}
+
+/**
  * Friends and direct messages in the renderer (#743).
  *
  * The main process owns keys, history and the outbox; this store mirrors what
@@ -48,6 +68,7 @@ export class DmStore {
   private transport: DmTransport | null = null;
   private snapshotValue: DmSnapshot = EMPTY;
   private readonly conversations = new Map<string, DmConversationState>();
+  private readonly drafts = new Map<string, DmComposerDraft>();
   private readonly typingUntil = new Map<string, number>();
   private readonly typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private lastTypingSent = new Map<string, number>();
@@ -80,6 +101,8 @@ export class DmStore {
   /** After an identity import the main process opens another store. */
   async reload(): Promise<void> {
     if (!this.api) return;
+    // Drafts belong to the conversations of the identity that was there before.
+    this.drafts.clear();
     const result = await this.api.snapshot();
     if (result.ok) this.applySnapshot(result.value);
     for (const peer of [...this.conversations.keys()]) void this.loadConversation(peer);
@@ -150,6 +173,20 @@ export class DmStore {
 
   conversation(peer: string): DmConversationState | undefined {
     return this.conversations.get(normalizeKey(peer));
+  }
+
+  draft(peer: string): DmComposerDraft | undefined {
+    return this.drafts.get(normalizeKey(peer));
+  }
+
+  /** Remembers the composer of a conversation leaving the screen; an empty one forgets it. */
+  setDraft(peer: string, draft: DmComposerDraft | null): void {
+    const key = normalizeKey(peer);
+    if (!draft || (draft.text.length === 0 && !draft.replyTo && draft.files.length === 0 && !draft.editing)) {
+      this.drafts.delete(key);
+      return;
+    }
+    this.drafts.set(key, draft);
   }
 
   // ---------------------------------------------------------------------------
@@ -369,6 +406,9 @@ export class DmStore {
         if (this.activePeer === event.peer && document.hasFocus()) void this.markRead(event.peer);
         break;
       }
+      case 'attachment-progress':
+        this.applyAttachmentProgress(event.peer, event.messageId, event.fileId, event.receivedBytes);
+        break;
       case 'typing':
         this.setTyping(event.peer);
         break;
@@ -389,6 +429,28 @@ export class DmStore {
         this.bus.emit('self-profile', { profile: event.profile });
         break;
     }
+  }
+
+  /**
+   * Progress of a download: only that message changes (as a new object, so
+   * views that remember how they drew the previous one notice), and the event
+   * names the file, so the screen moves its bar instead of redrawing the
+   * conversation.
+   */
+  private applyAttachmentProgress(peer: string, messageId: string, fileId: string, receivedBytes: number): void {
+    const state = this.conversations.get(peer);
+    const index = state ? state.messages.findIndex((message) => message.id === messageId) : -1;
+    if (!state || index < 0) return;
+    const message = state.messages[index];
+    const attachment = message.attachments.find((entry) => entry.fileId === fileId);
+    if (!attachment || (attachment.state !== 'pending' && attachment.state !== 'downloading')) return;
+    state.messages[index] = {
+      ...message,
+      attachments: message.attachments.map((entry) => (entry === attachment
+        ? { ...entry, state: 'downloading', receivedBytes: Math.min(entry.size, receivedBytes) }
+        : entry)),
+    };
+    this.bus.emit('attachment-progress', { peer, messageId, fileId } satisfies DmAttachmentProgressEvent);
   }
 
   private setTyping(peer: string): void {

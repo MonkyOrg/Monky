@@ -141,6 +141,7 @@ qualidade ou das regras de codec.
 | Codec e modo de codificação da tela | Preferências de qualidade, sondadas por `core/screenEncoding.ts` e verificadas na admissão da fonte nativa |
 | Limites de bitrate/FPS e preferência de adaptação de microfone e câmera | `webrtc/mediaEncodingPolicy.ts`, usado por P2P e SFU |
 | Ordem de preferência dos codecs da câmera | `webrtc/codecPreferences.ts`, com capacidades fornecidas por cada transporte |
+| Rota ICE em uso (ping, indicador de relay e diagnóstico) | `webrtc/rtcStats.ts`, usado por P2P e SFU; a chamada mede uma vez e o palco e a barra lateral só exibem |
 | Alterações serializadas de parâmetros RTP | `webrtc/rtpSenderParameters.ts`: atualizações simultâneas não sobrescrevem a transação uma da outra |
 | Recepção e associação da mídia remota à interface | `webrtc/RemoteMediaRouter`, comum aos dois modos |
 | Captura/encoder/transporte nativos e ownership no Main | `nativeScreenSharing.ts` e `native/screen-share` |

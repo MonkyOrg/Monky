@@ -23,6 +23,19 @@ function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+let glibcSupported: boolean | undefined;
+
+/** The C library cannot change while this process runs, and its report is synchronous and expensive. */
+function supportedGlibc(): boolean {
+  if (glibcSupported === undefined) {
+    const report: unknown = process.report.getReport();
+    const version = record(report) && record(report.header) && typeof report.header.glibcVersionRuntime === 'string'
+      ? /^(\d+)\.(\d+)(?:\.|$)/.exec(report.header.glibcVersionRuntime) : null;
+    glibcSupported = !!version && (Number(version[1]) > 2 || Number(version[1]) === 2 && Number(version[2]) >= 28);
+  }
+  return glibcSupported;
+}
+
 async function systemExecutable(filename: string): Promise<string | null> {
   try {
     const canonical = await fs.realpath(filename);
@@ -41,12 +54,7 @@ export async function localToolExtractionSupport(
   platform: NodeJS.Platform, arch: string,
 ): Promise<ToolExtractionSupport | null> {
   if (!['win32', 'linux', 'darwin'].includes(platform) || !['x64', 'arm64'].includes(arch)) return null;
-  if (platform === 'linux') {
-    const report: unknown = process.report.getReport();
-    if (!record(report) || !record(report.header) || typeof report.header.glibcVersionRuntime !== 'string') return null;
-    const version = /^(\d+)\.(\d+)(?:\.|$)/.exec(report.header.glibcVersionRuntime);
-    if (!version || Number(version[1]) < 2 || Number(version[1]) === 2 && Number(version[2]) < 28) return null;
-  }
+  if (platform === 'linux' && !supportedGlibc()) return null;
   const windows = process.env.SystemRoot;
   if (platform === 'win32' && (!windows || !path.isAbsolute(windows))) return null;
   const tar = await systemExecutable(platform === 'win32'

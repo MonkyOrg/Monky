@@ -2,20 +2,16 @@ import { isMotionQualityPreset } from '@monky/shared';
 import { settingsStore } from '../../stores/settingsStore';
 
 /**
- * Camera codec prioritization for WebRTC peer connections. A preference only
- * reorders the offered codecs, so the call can still negotiate a fallback:
- * - auto: AV1 -> VP9 -> VP8 -> H.264, except on 60+ FPS presets (see below)
- * - av1 / vp9 / vp8 / h264: that codec first, then the automatic order
+ * Camera codec order for WebRTC peer connections and SFU producers. Only the
+ * order of the offered codecs changes, so a call can still negotiate a
+ * fallback: AV1 -> VP9 -> VP8 -> H.264, or H.264 first on 60+ FPS presets.
+ *
+ * There is no user choice here: the camera codec selector left with #717, and
+ * a choice saved before then must not keep deciding the codec unseen.
  */
 
-export type PreferredVideoCodec = 'auto' | 'av1' | 'vp9' | 'vp8' | 'h264';
-
-export const VIDEO_CODEC_PRIORITY_ORDER = [
-  'video/av1',
-  'video/vp9',
-  'video/vp8',
-  'video/h264',
-] as const;
+const COMPRESSION_FIRST = ['video/av1', 'video/vp9', 'video/vp8', 'video/h264'] as const;
+const HARDWARE_FIRST = ['video/h264', 'video/av1', 'video/vp9', 'video/vp8'] as const;
 
 export interface CodecCapabilityLike {
   mimeType: string;
@@ -41,8 +37,8 @@ function compatibleSendingVideoCodecs(): RTCRtpCodec[] {
 }
 
 /**
- * Whether "auto" should favour a codec the GPU can encode instead of the one
- * with the best compression.
+ * Whether the camera should favour a codec the GPU can encode instead of the
+ * one with the best compression.
  *
  * AV1 and VP9 have no hardware encoder on most desktops, so WebRTC encodes them
  * on the CPU — at 1080p60 that is enough work to steal frames from the game
@@ -55,73 +51,35 @@ export function shouldPreferHardwareEncoding(): boolean {
   return preset !== undefined && isMotionQualityPreset(preset);
 }
 
-export function getPriorityListForCodec(
-  preferred: PreferredVideoCodec,
-  preferHardwareEncoding = false
-): string[] {
-  switch (preferred) {
-    case 'av1':
-      return ['video/av1', 'video/vp9', 'video/vp8', 'video/h264'];
-    case 'vp9':
-      return ['video/vp9', 'video/av1', 'video/vp8', 'video/h264'];
-    case 'vp8':
-      return ['video/vp8', 'video/av1', 'video/vp9', 'video/h264'];
-    case 'h264':
-      return ['video/h264', 'video/av1', 'video/vp9', 'video/vp8'];
-    case 'auto':
-    default:
-      return preferHardwareEncoding
-        ? ['video/h264', 'video/av1', 'video/vp9', 'video/vp8']
-        : ['video/av1', 'video/vp9', 'video/vp8', 'video/h264'];
-  }
-}
-
 /**
- * Sorts an array of WebRTC video codec capabilities according to the preference order.
- * Codecs not explicitly listed (e.g. rtx, red, ulpfec) maintain their relative position after primary codecs.
+ * Sorts video codec capabilities by the camera order. Codecs outside it (e.g.
+ * rtx, red, ulpfec) keep their relative position after the primary codecs.
  */
-export function sortVideoCodecs<T extends CodecCapabilityLike>(
-  codecs: T[],
-  preferred: PreferredVideoCodec = 'auto',
-  preferHardwareEncoding = false
-): T[] {
-  const priorityList = getPriorityListForCodec(preferred, preferHardwareEncoding);
+export function sortVideoCodecs<T extends CodecCapabilityLike>(codecs: T[], preferHardwareEncoding = false): T[] {
+  const priorityList: readonly string[] = preferHardwareEncoding ? HARDWARE_FIRST : COMPRESSION_FIRST;
   const getPriority = (mimeType: string): number => {
-    const lower = mimeType.toLowerCase();
-    const index = priorityList.findIndex((pref) => lower === pref);
+    const index = priorityList.indexOf(mimeType.toLowerCase());
     return index !== -1 ? index : 999;
   };
-
-  return [...codecs].sort((a, b) => {
-    const prioA = getPriority(a.mimeType);
-    const prioB = getPriority(b.mimeType);
-    return prioA - prioB;
-  });
+  return [...codecs].sort((a, b) => getPriority(a.mimeType) - getPriority(b.mimeType));
 }
 
-/**
- * Retrieves the supported video codecs from the WebRTC runtime, sorted by preference.
- */
-export function getPrioritizedVideoCodecs(
-  preferred: PreferredVideoCodec = settingsStore?.preferredVideoCodec ?? 'auto'
-): RTCRtpCodec[] {
+/** The video codecs this runtime can send, in the camera order. */
+export function getPrioritizedVideoCodecs(): RTCRtpCodec[] {
   if (typeof RTCRtpSender === 'undefined' || typeof RTCRtpSender.getCapabilities !== 'function') {
     return [];
   }
-  return sortVideoCodecs(compatibleSendingVideoCodecs(), preferred, shouldPreferHardwareEncoding());
+  return sortVideoCodecs(compatibleSendingVideoCodecs(), shouldPreferHardwareEncoding());
 }
 
 /**
  * Orders the codecs of local video senders. Remote-only transceivers keep the
  * remote sender's choices.
  */
-export function applyVideoCodecPreferences(
-  pc: RTCPeerConnection,
-  preferred: PreferredVideoCodec = settingsStore?.preferredVideoCodec ?? 'auto',
-): void {
+export function applyVideoCodecPreferences(pc: RTCPeerConnection): void {
   for (const transceiver of pc.getTransceivers()) {
     if (transceiver.sender.track?.kind !== 'video') continue;
-    const codecs = getPrioritizedVideoCodecs(preferred);
+    const codecs = getPrioritizedVideoCodecs();
     if (!codecs.length) continue;
     try {
       transceiver.setCodecPreferences(codecs);

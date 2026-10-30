@@ -354,6 +354,8 @@ servidor foi desligado, também fica visível e recebe o teclado: o primeiro
 
 Digitar `@` no campo de mensagem lista somente membros que podem ler o canal atual, incluindo quem está offline: escolha alguém para inserir `@apelido`. A lista acompanha alterações de cargos e privacidade. Menções digitadas manualmente também são verificadas pelo servidor; quem não tem acesso não recebe uma menção pendente. Quem é mencionado recebe o destaque na mensagem, o badge no canal e o som de menção.
 
+A menção vale para o apelido inteiro: `@Lucas` não chama quem se chama "Lu", e um `@` dentro de um e-mail, de um endereço da web ou de um trecho de código não menciona ninguém.
+
 O primeiro item da lista é o `@todos` (ou `@everyone` — os dois tokens funcionam em qualquer idioma), que notifica todo mundo que enxerga aquele canal. Canais privados continuam privados: quem não tem acesso não é notificado.
 
 Quem administra o servidor pode desligar isso em **Configurações do servidor →

@@ -95,6 +95,16 @@ test('changing voice channels turns the camera off, while a same-channel rejoin 
   assert.equal(service.getVoiceState('alice')?.isCameraOn, false);
 });
 
+test('a screen share announced twice is relayed once, before the share limit applies', async () => {
+  const service = signaling();
+  await service.joinVoiceChannel('alice', 'alice', 'room');
+  const repeated = service.updateVoiceState('alice', { screenShareIds: ['one', 'one', 'two', 'one'] });
+  assert.deepEqual(repeated?.screenShareIds, ['one', 'two'], 'viewers draw one tile per share, so each id goes out once');
+  assert.equal(repeated?.isScreenSharing, true);
+  const padded = service.updateVoiceState('alice', { screenShareIds: [...Array(8).fill('one'), 'two'] });
+  assert.deepEqual(padded?.screenShareIds, ['one', 'two'], 'repeats cannot push a real share past the limit');
+});
+
 test('authentication supplies the current identity restriction before voice, after asynchronous ICE setup', async () => {
   const restrictions = memoryRestrictions();
   const service = signaling(restrictions);
@@ -108,6 +118,13 @@ test('authentication supplies the current identity restriction before voice, aft
   server['closing'] = false;
   server['dmRelay'] = { register: () => {}, unregister: () => {} } as unknown as WebSocketServer['dmRelay'];
   server['broadcastRolesState'] = async () => {};
+  // The login compares the access versions read before and after its snapshot.
+  const permissions = Object.create(PermissionService.prototype) as PermissionService;
+  permissions.getRoleAccessVersion = () => 0;
+  server['permissionService'] = permissions;
+  server['localAccessVersion'] = 0;
+  server['botSettingsPermissionVersion'] = 0;
+  server['pendingLocalAccessMutations'] = 0;
   server['handleCommandsList'] = () => {};
   const messages: Parameters<WebSocketServer['send']>[1][] = [];
   server['send'] = (_socket, message) => { messages.push(message); };

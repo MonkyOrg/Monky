@@ -936,6 +936,15 @@ da lista** está ligado. Ao migrar de uma configuração antiga com vários dest
 somente a última escolha é mantida. A passagem da Home para o servidor tem uma
 animação curta, desativada com movimento reduzido.
 
+Uma conexão em segundo plano que falha não é repetida sem parar. Se o servidor
+recusa a entrada (senha salva errada, versão incompatível ou identidade não
+aceita), o Monky deixa de tentar até você trocar a senha em **Editar conexão**
+(botão direito no servidor do trilho), entrar no servidor por conta própria ou
+reabrir o app. Outras falhas, como rede instável, um servidor que ainda está
+subindo ou que está sem vaga no momento (cheio, ou com o limite de dispositivos
+da sua identidade atingido), são tentadas de novo com intervalos cada vez
+maiores, de até 10 minutos.
+
 ### Navegação por seções
 
 Nas configurações do app e do servidor, selecionar uma categoria expande seus

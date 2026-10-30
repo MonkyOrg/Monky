@@ -242,6 +242,43 @@ export const nativeScreenFailureSchema = z.enum([
 ]);
 export type NativeScreenFailure = z.infer<typeof nativeScreenFailureSchema>;
 
+const unsupportedScreenFailures: ReadonlySet<string> = new Set([
+  'ERR_RTC_ENCODED_FORMAT', 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED',
+  'ERR_MAC_VIDEO_PROFILE_UNSUPPORTED', 'ERR_MAC_VIDEO_ENCODER_UNSUPPORTED',
+]);
+const unavailableScreenSources: ReadonlySet<string> = new Set([
+  'ERR_SCREEN_CAPTURE_SOURCE_LOST', 'ERR_MAC_SOURCE_LOST', 'ERR_MAC_SOURCE_CHANGED',
+  'ERR_MAC_SOURCE_IDENTITY', 'ERR_MAC_CAPTURE_SOURCE_CHANGED', 'ERR_AUDIO_TARGET',
+]);
+const failureCode = (value: unknown): string => {
+  const code: unknown = typeof value === 'object' && value !== null ? Reflect.get(value, 'code') : undefined;
+  return typeof code === 'string' ? code : '';
+};
+
+/**
+ * The public reason of a native screen failure, the same for its publisher and for every viewer.
+ * Retiring failed media often wraps the real cause with cleanup errors, so a known cause anywhere in
+ * the AggregateError/cause chain wins. Only `connection-failed` makes a viewer reconnect by itself.
+ */
+export function nativeScreenFailureReason(error: unknown): NativeScreenFailure {
+  const pending: unknown[] = [error], seen = new Set<unknown>();
+  while (pending.length && seen.size < 12) {
+    const current = pending.shift();
+    if (seen.has(current)) continue;
+    seen.add(current);
+    const code = failureCode(current);
+    if (code === 'ERR_SCREEN_CAPACITY') return 'capacity-exceeded';
+    if (unsupportedScreenFailures.has(code)) return 'unsupported';
+    if (unavailableScreenSources.has(code)) return 'source-unavailable';
+    if (current instanceof AggregateError) {
+      const nested: readonly unknown[] = current.errors;
+      pending.push(...nested.slice(0, 8));
+    }
+    if (current instanceof Error && current.cause !== undefined) pending.push(current.cause);
+  }
+  return failureCode(error).includes('CAPTURE') ? 'capture-failed' : 'connection-failed';
+}
+
 export const nativeScreenSignalSchema = z.discriminatedUnion('action', [
   signalEnvelope.extend({
     action: z.literal('watch'), quality: screenShareQualitySchema, backend: z.enum(['native', 'browser']),

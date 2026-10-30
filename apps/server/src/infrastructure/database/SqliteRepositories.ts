@@ -330,7 +330,7 @@ export class SqliteChannelRepository implements IChannelRepository {
     return byChannel;
   }
 
-  private toRecord(row: SqliteChannelRow, allowedRoleIds: string[], categories: Map<string, ChannelCategory>, permissionOverwrites: ChannelPermissionOverwrite[]): ChannelRecord {
+  private toRecord(row: SqliteChannelRow, allowedRoleIds: string[], categories: ReadonlyMap<string, ChannelCategory>, permissionOverwrites: ChannelPermissionOverwrite[]): ChannelRecord {
     const access = resolveChannelPermissions({
       permissionOverwrites,
       categoryId: row.categoryId,
@@ -359,19 +359,16 @@ export class SqliteChannelRepository implements IChannelRepository {
   }
 
   async findById(id: string): Promise<ChannelRecord | null> {
-    const row = this.db.prepare(
-      `SELECT ${SqliteChannelRepository.SELECT_COLUMNS} FROM channels WHERE id = ?`
-    ).get(id) as SqliteChannelRow | undefined;
+    const row = this.readRow(id);
     if (!row) return null;
-
-    const categories = new Map(this.categories.readByServerId(row.serverId).map((category) => [category.id, category]));
-    const record = this.toRecord(row, this.loadAllowedRoles([row.id]).get(row.id) ?? [], categories, this.permissions.read([row.id]).get(row.id) ?? []);
-    if (!record.forumId) return record;
-    const parentRow: SqliteChannelRow | undefined = this.db.prepare(
-      `SELECT ${SqliteChannelRepository.SELECT_COLUMNS} FROM channels WHERE id = ?`
-    ).get(record.forumId);
-    const parent = parentRow ? this.toRecord(parentRow, this.loadAllowedRoles([parentRow.id]).get(parentRow.id) ?? [], categories, this.permissions.read([parentRow.id]).get(parentRow.id) ?? []) : null;
-    return this.withForumAccess(record, parent);
+    // A forum topic takes its access from the forum, which has to be read along with it.
+    const parentRow = row.forumId ? this.readRow(row.forumId) : undefined;
+    const rows = parentRow ? [row, parentRow] : [row];
+    // Categories are read only when one of these rows can inherit from one (S-APP-5).
+    const categories = new Map(rows.some((entry) => entry.categoryId)
+      ? this.categories.readByServerId(row.serverId).map((category): [string, ChannelCategory] => [category.id, category]) : []);
+    const [record, parent] = this.hydrate(rows, categories);
+    return record.forumId ? this.withForumAccess(record, parent ?? null) : record;
   }
 
   async listByServerId(serverId: string): Promise<ChannelRecord[]> {
@@ -379,12 +376,22 @@ export class SqliteChannelRepository implements IChannelRepository {
       `SELECT ${SqliteChannelRepository.SELECT_COLUMNS} FROM channels WHERE server_id = ? ORDER BY position ASC, created_at ASC`
     ).all(serverId) as SqliteChannelRow[];
 
-    const allowedRoles = this.loadAllowedRoles(rows.map((row) => row.id));
     const categories = new Map(this.categories.readByServerId(serverId).map((category) => [category.id, category]));
-    const permissions = this.permissions.read(rows.map(row => row.id));
-    const records = rows.map((row) => this.toRecord(row, allowedRoles.get(row.id) ?? [], categories, permissions.get(row.id) ?? []));
+    const records = this.hydrate(rows, categories);
     const byId = new Map(records.map(record => [record.id, record]));
     return records.map(record => record.forumId ? this.withForumAccess(record, byId.get(record.forumId) ?? null) : record);
+  }
+
+  private readRow(id: string): SqliteChannelRow | undefined {
+    return this.db.prepare(`SELECT ${SqliteChannelRepository.SELECT_COLUMNS} FROM channels WHERE id = ?`).get(id);
+  }
+
+  /** Rows with their effective access, read for all of them at once to avoid N+1 (#384). */
+  private hydrate(rows: SqliteChannelRow[], categories: ReadonlyMap<string, ChannelCategory>): ChannelRecord[] {
+    const ids = rows.map((row) => row.id);
+    const allowedRoles = this.loadAllowedRoles(ids);
+    const permissions = this.permissions.read(ids);
+    return rows.map((row) => this.toRecord(row, allowedRoles.get(row.id) ?? [], categories, permissions.get(row.id) ?? []));
   }
 
   private withForumAccess(record: ChannelRecord, parent: ChannelRecord | null): ChannelRecord {
@@ -624,24 +631,29 @@ export class SqliteMessageRepository implements IMessageRepository {
       for (const id of attachmentIds) {
         this.db.prepare('UPDATE message_attachments SET message_id = ? WHERE id = ?').run(message.id, id);
       }
-      for (const mention of mentions) {
-        this.db.prepare('INSERT INTO mentions (id, user_id, channel_id, message_id, created_at) VALUES (?, ?, ?, ?, ?)')
-          .run(mention.id, mention.userId, mention.channelId, mention.messageId, mention.createdAt);
-      }
+      for (const mention of mentions) this.insertMention(mention);
       return { message, created: true };
     })();
   }
 
-  async createBotMessage(message: MessageRecord): Promise<MessageRecord | null> {
+  async createBotMessage(message: MessageRecord, mentions: MentionRecord[] = []): Promise<MessageRecord | null> {
     const author = message.botAuthor;
     if (!author) throw new Error('Bot messages require an author snapshot.');
     return this.db.transaction(() => {
       if (!this.db.prepare('SELECT id FROM bots WHERE id = ? AND created_by_user_id = ?').get(author.id, author.ownerUserId)) return null;
+      // A retried post finds its first copy, whose mentions are already recorded.
+      const stored = this.db.prepare('SELECT id FROM messages WHERE id = ?').get(message.id);
       this.insertMessage(message, true);
+      if (!stored) for (const mention of mentions) this.insertMention(mention);
       const row = this.db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = ?`).get(message.id) as SqliteMessageRow | undefined;
       if (!row) throw new Error('Bot message was not persisted.');
       return toMessageRecord(row);
     })();
+  }
+
+  private insertMention(mention: MentionRecord): void {
+    this.db.prepare('INSERT INTO mentions (id, user_id, channel_id, message_id, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(mention.id, mention.userId, mention.channelId, mention.messageId, mention.createdAt);
   }
 
   private insertMessage(message: MessageRecord, idempotent = false): void {

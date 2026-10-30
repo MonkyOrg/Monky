@@ -130,6 +130,17 @@ export class AvatarStorageService {
     return { filePath, mimeType };
   }
 
+  /** Whether a stored avatar already holds exactly these bytes, so saving them again can be skipped. */
+  public hasContent(filename: string, buffer: Buffer): boolean {
+    const file = this.getAvatarFile(filename);
+    if (!file) return false;
+    try {
+      return fs.statSync(file.filePath).size === buffer.length && fs.readFileSync(file.filePath).equals(buffer);
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Removes an old avatar file
    */

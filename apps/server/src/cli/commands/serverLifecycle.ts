@@ -1,6 +1,8 @@
+import fs from 'fs';
+import path from 'path';
 import { LIMITS, LOG_LEVELS, LogLevel } from '@monky/shared';
 import { SqliteServerRepository } from '../../infrastructure/database/SqliteRepositories';
-import { ANSI, color, DEFAULT_SERVER_NAME } from '../constants';
+import { ANSI, color, DEFAULT_SERVER_NAME, SERVER_DB_NAME } from '../constants';
 import { formatBotCompatibilityWarnings, printBotCompatibility, printBotCompatibilityWarning, waitForLocalServerPreview } from '../botCompatibility';
 import { GlobalArgs, readLocalConfig, withContext } from '../context';
 import { describeTurnPortProblem, describeTurnUnavailability, formatBool, formatProcessStatus, parseOption, parsePositiveInt, pad } from '../formatters';
@@ -14,6 +16,7 @@ import {
   isMonkyServerRegistered,
   isPm2Available,
   LEGACY_PM2_PROCESS_NAME,
+  listPm2Processes,
   Pm2Process,
   requirePm2,
   writeEcosystem,
@@ -110,8 +113,8 @@ export async function buildStartPlan(dataDir: string, args: string[]): Promise<S
  * Without this an upgraded machine would end up with the old process and the
  * new per-directory one competing for the same port.
  */
-function retireLegacyProcess(dataDir: string): void {
-  if (!findLegacyProcessFor(dataDir)) return;
+function retireLegacyProcess(dataDir: string, processes: readonly Pm2Process[]): void {
+  if (!findLegacyProcessFor(dataDir, processes)) return;
   console.log(color(t('lifecycle.migratingPm2'), ANSI.dim));
   runSync('pm2', ['delete', LEGACY_PM2_PROCESS_NAME], { stdio: 'ignore' });
 }
@@ -128,7 +131,8 @@ export async function startServerCommand(globalArgs: GlobalArgs, args: string[])
 
   ensurePm2();
 
-  const existing = findPm2Process(processName);
+  const processes = listPm2Processes();
+  const existing = findPm2Process(processName, processes);
   // `status === 'online'` alone is not proof the server is up: PM2 reports the
   // state it intends to keep, so a failed spawn stays "online" with no pid.
   // Trusting it made `monky start` answer "already running" for a server that
@@ -147,7 +151,7 @@ export async function startServerCommand(globalArgs: GlobalArgs, args: string[])
     if (!(await confirmDisconnectingUsers(target, t('action.restart')))) return;
   }
 
-  retireLegacyProcess(target.dataDir);
+  retireLegacyProcess(target.dataDir, processes);
   const ecosystemPath = writeEcosystem(plan);
   recreateIfStale(processName, existing, fresh);
 
@@ -185,7 +189,8 @@ export async function stopServerCommand(globalArgs: GlobalArgs): Promise<void> {
   // Everyone on the server loses their session when it goes down (#334).
   if (!(await confirmDisconnectingUsers(target, t('action.stop')))) return;
 
-  if (!isMonkyServerRegistered(processName) && findLegacyProcessFor(target.dataDir)) {
+  const processes = listPm2Processes();
+  if (!isMonkyServerRegistered(processName, processes) && findLegacyProcessFor(target.dataDir, processes)) {
     runSync('pm2', ['stop', LEGACY_PM2_PROCESS_NAME], { stdio: 'inherit' });
     console.log(color(t('lifecycle.stopped'), ANSI.green));
     return;
@@ -215,13 +220,14 @@ export async function restartServerCommand(globalArgs: GlobalArgs, args: string[
   const afterUpdate = args.includes('--after-update');
   const target = await resolveTargetServer(globalArgs, t('action.restart'));
   const processName = getPm2ProcessName(target.dataDir);
+  const processes = listPm2Processes();
 
-  if (!isMonkyServerRegistered(processName) && !findLegacyProcessFor(target.dataDir)) {
+  if (!isMonkyServerRegistered(processName, processes) && !findLegacyProcessFor(target.dataDir, processes)) {
     console.log(color(t('lifecycle.notRegisteredStart'), ANSI.yellow));
     return false;
   }
 
-  const current = findPm2Process(processName) ?? findLegacyProcessFor(target.dataDir);
+  const current = findPm2Process(processName, processes) ?? findLegacyProcessFor(target.dataDir, processes);
   // An update only reloads servers that were running: one the operator
   // stopped on purpose must not come back up at 4am.
   if (afterUpdate && !(current?.pm2_env?.status === 'online' && current.pid)) {
@@ -246,7 +252,7 @@ export async function restartServerCommand(globalArgs: GlobalArgs, args: string[
   }
   let restartFailed = false;
   try {
-    retireLegacyProcess(target.dataDir);
+    retireLegacyProcess(target.dataDir, processes);
     recreateIfStale(processName, current, fresh);
     const result = runSync('pm2', ['startOrRestart', ecosystemPath], { stdio: 'inherit' });
     if (result.status !== 0) throw new Error(t('lifecycle.restartFailed'));
@@ -322,9 +328,10 @@ export async function logsServerCommand(globalArgs: GlobalArgs, args: string[] =
 
   const target = await resolveTargetServer(globalArgs, t('action.inspect'));
   let processName = getPm2ProcessName(target.dataDir);
+  const processes = listPm2Processes();
 
-  if (!isMonkyServerRegistered(processName)) {
-    if (findLegacyProcessFor(target.dataDir)) {
+  if (!isMonkyServerRegistered(processName, processes)) {
+    if (findLegacyProcessFor(target.dataDir, processes)) {
       processName = LEGACY_PM2_PROCESS_NAME;
     } else {
       console.log(color(t('lifecycle.logsNoRegistered'), ANSI.yellow));
@@ -388,8 +395,11 @@ function statusLabel(status: string): string {
   return color(formatProcessStatus(status), statusColor);
 }
 
-function readServerStatus(dataDir: string): { status: string; process: ReturnType<typeof findPm2Process> } {
-  const found = findPm2Process(getPm2ProcessName(dataDir)) ?? findLegacyProcessFor(dataDir);
+function readServerStatus(
+  dataDir: string,
+  processes: readonly Pm2Process[] = listPm2Processes(),
+): { status: string; process: ReturnType<typeof findPm2Process> } {
+  const found = findPm2Process(getPm2ProcessName(dataDir), processes) ?? findLegacyProcessFor(dataDir, processes);
   return { status: found?.pm2_env?.status ?? 'not started', process: found };
 }
 
@@ -438,8 +448,9 @@ function printHealthProblems(problems: HealthProblem[]): void {
 }
 
 export async function printServerTable(servers: RegisteredServer[]): Promise<void> {
+  const processes = listPm2Processes();
   const rows = await Promise.all(servers.map(async (server) => {
-    const snapshot = readServerStatus(server.dataDir);
+    const snapshot = readServerStatus(server.dataDir, processes);
     const port = resolveServerPort(server);
     return {
       name: server.name || 'Monky Server',
@@ -544,8 +555,7 @@ function formatUptime(startedAtMs: number): string {
 }
 
 /**
- * Cached TURN status so the dashboard can show it without blocking the render.
- * Updated asynchronously in the background every cycle.
+ * TURN status shown by the dashboard.
  */
 interface TurnCache {
   enabled: boolean | null;
@@ -554,21 +564,63 @@ interface TurnCache {
   portProblem: string | null;
 }
 
-let turnCache: TurnCache = { enabled: null, coturnOk: false, coturnProblem: null, portProblem: null };
+/**
+ * How often the dashboard looks at TURN again. Both checks cost far more than
+ * its 2s redraw: the settings come from loading the whole database, and the
+ * port check binds UDP ports and asks an outside service to probe this host.
+ */
+const DASHBOARD_TURN_REFRESH = { settingsMs: 30_000, probeMs: 60_000 };
 
 /**
- * Same idea as {@link turnCache}: the dashboard redraws every 2s, and probing
- * the port inside the render would stall the frame.
+ * TURN state for one dashboard. The database is read again only after it
+ * changed on disk, and at most every `settingsMs`; coturn and its ports are
+ * checked every `probeMs`, or as soon as TURN gets enabled.
+ */
+export class DashboardTurnStatus {
+  public readonly state: TurnCache = { enabled: null, coturnOk: false, coturnProblem: null, portProblem: null };
+  /** Modification time of the database read last; undefined before the first read. */
+  private databaseMtimeMs: number | null | undefined;
+  private settingsReadAt = -Infinity;
+  private probedAt = -Infinity;
+
+  constructor(private readonly dataDir: string) {}
+
+  public async refresh(now = Date.now()): Promise<void> {
+    const wasEnabled = this.state.enabled;
+    const databaseMtimeMs = fs.statSync(path.join(this.dataDir, SERVER_DB_NAME), { throwIfNoEntry: false })?.mtimeMs ?? null;
+    if (databaseMtimeMs !== this.databaseMtimeMs && now - this.settingsReadAt >= DASHBOARD_TURN_REFRESH.settingsMs) {
+      try {
+        const server = await withContext(this.dataDir, async (ctx) => ctx.serverRepo.getLifecycleSettings(), false, { readOnly: true });
+        this.state.enabled = server ? Boolean(server.turnEnabled) : null;
+        this.databaseMtimeMs = databaseMtimeMs;
+        this.settingsReadAt = now;
+      } catch {
+        // Unreadable right now: keep the last state and try again on the next redraw.
+      }
+    }
+    if (!this.state.enabled) return;
+    if (wasEnabled === true && now - this.probedAt < DASHBOARD_TURN_REFRESH.probeMs) return;
+    this.probedAt = now;
+    const reason = describeTurnUnavailability(CoturnManager.describeAvailability());
+    this.state.coturnOk = !reason;
+    this.state.coturnProblem = reason;
+    this.state.portProblem = reason ? null : await CoturnManager.checkPortReachability(describeTurnPortProblem);
+  }
+}
+
+/**
+ * Same idea as {@link DashboardTurnStatus}: the dashboard redraws every 2s, and
+ * probing the port inside the render would stall the frame.
  */
 let healthCache: HealthProblem[] = [];
 
 /**
  * Reads PM2 once and shares the result with everything drawing this frame.
  *
- * Each `readServerStatus` costs two synchronous child processes (`pm2 --version`
- * then `pm2 jlist`), so letting the health refresh and the render each do their
- * own doubled the blocking spawns per tick — enough to overrun the 2s interval
- * on the small VPSes this dashboard is meant for.
+ * Each `readServerStatus` costs a synchronous `pm2 jlist`, which loads all of
+ * PM2, so letting the health refresh and the render each do their own doubled
+ * the blocking spawns per tick — enough to overrun the 2s interval on the small
+ * VPSes this dashboard is meant for.
  */
 type StatusSnapshot = ReturnType<typeof readServerStatus>;
 
@@ -587,29 +639,6 @@ async function refreshHealthCache(server: RegisteredServer, snapshot: StatusSnap
   }
 }
 
-async function refreshTurnCache(dataDir: string): Promise<void> {
-  try {
-    await withContext(dataDir, async (ctx) => {
-      const server = await ctx.serverRepo.getLifecycleSettings();
-      if (!server) { turnCache.enabled = null; return; }
-      turnCache.enabled = Boolean(server.turnEnabled);
-      if (!turnCache.enabled) return;
-      const reason = describeTurnUnavailability(CoturnManager.describeAvailability());
-      if (reason) {
-        turnCache.coturnOk = false;
-        turnCache.coturnProblem = reason;
-        turnCache.portProblem = null;
-      } else {
-        turnCache.coturnOk = true;
-        turnCache.coturnProblem = null;
-        turnCache.portProblem = await CoturnManager.checkPortReachability(describeTurnPortProblem);
-      }
-    }, false, { readOnly: true });
-  } catch {
-    // DB locked — keep stale cache
-  }
-}
-
 /**
  * Renders one frame of the real-time dashboard without flicker.
  *
@@ -617,7 +646,9 @@ async function refreshTurnCache(dataDir: string): Promise<void> {
  * the cursor to the top-left, write the full frame, then erase everything
  * below. This produces a smooth in-place update.
  */
-function renderDashboard(server: RegisteredServer, snapshot: StatusSnapshot, botWarnings: readonly string[]): void {
+function renderDashboard(
+  server: RegisteredServer, snapshot: StatusSnapshot, botWarnings: readonly string[], turnCache: Readonly<TurnCache>,
+): void {
   const { status, process: entry } = snapshot;
   const port = server.port ?? readLocalConfig(server.dataDir).port ?? LIMITS.DEFAULT_PORT;
 
@@ -707,14 +738,15 @@ export async function statusServerCommand(globalArgs: GlobalArgs, args: string[]
 
     // --watch mode: real-time dashboard that refreshes every 2s (#441)
     // Seed TURN cache before first render, then render
+    const turn = new DashboardTurnStatus(target.dataDir);
     const seed = readServerStatus(target.dataDir);
     const port = resolveServerPort(target);
     const [, , seedWarnings] = await Promise.all([
-      refreshTurnCache(target.dataDir), refreshHealthCache(target, seed), readBotWarnings(port, seed),
+      turn.refresh(), refreshHealthCache(target, seed), readBotWarnings(port, seed),
     ]);
     // Hide the cursor only after the initial probes succeed.
     process.stdout.write('\x1b[?25l\x1b[2J');
-    renderDashboard(target, seed, seedWarnings);
+    renderDashboard(target, seed, seedWarnings, turn.state);
     let refreshing = false;
     const interval = setInterval(async () => {
       if (refreshing) return;
@@ -722,9 +754,9 @@ export async function statusServerCommand(globalArgs: GlobalArgs, args: string[]
       try {
         const snapshot = readServerStatus(target.dataDir);
         const [, , warnings] = await Promise.all([
-          refreshTurnCache(target.dataDir), refreshHealthCache(target, snapshot), readBotWarnings(resolveServerPort(target), snapshot),
+          turn.refresh(), refreshHealthCache(target, snapshot), readBotWarnings(resolveServerPort(target), snapshot),
         ]);
-        renderDashboard(target, snapshot, warnings);
+        renderDashboard(target, snapshot, warnings, turn.state);
       } catch (error) {
         console.error(color(t('lifecycle.dashboardRefreshFailed', {
           reason: error instanceof Error ? error.message : String(error),

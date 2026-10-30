@@ -166,6 +166,7 @@ async function fixture(t, options = {}) {
     return options.confirm ? options.confirm(question) : true;
   });
   t.mock.method(pm2, 'isPm2Available', () => true);
+  t.mock.method(pm2, 'listPm2Processes', () => []);
   t.mock.method(pm2, 'findLegacyProcessFor', () => null);
   t.mock.method(pm2, 'findPm2Process', (name) => {
     const server = servers.find((entry) => pm2.getPm2ProcessName(entry.dataDir) === name);

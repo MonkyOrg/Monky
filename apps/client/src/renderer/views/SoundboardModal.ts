@@ -1,5 +1,5 @@
 import { escapeHtml } from '../utils/html';
-import { enterModal, exitModal } from '../utils/modalSurface';
+import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { Permission } from '@monky/shared';
 import { soundboardService, SoundItem } from '../core/SoundboardService';
 import { settingsStore } from '../stores/settingsStore';
@@ -62,13 +62,13 @@ export class SoundboardModal {
     this.modalEl = document.createElement('div');
     this.modalEl.className = 'modal-backdrop';
     this.modalEl.innerHTML = `
-      <div class="modal-card soundboard-modal-card" style="max-width: 600px; max-height: calc(100vh - 48px); display: flex; flex-direction: column; padding: 0; overflow: hidden;">
+      <div class="modal-card soundboard-modal-card" role="dialog" aria-modal="true" aria-labelledby="sb-modal-title" style="max-width: 600px; max-height: calc(100vh - 48px); display: flex; flex-direction: column; padding: 0; overflow: hidden;">
         
         <!-- Header -->
         <div class="modal-header" style="padding: 16px 20px 12px; border-bottom: 1px solid var(--border-color);">
           <div class="modal-title" style="display: flex; align-items: center; gap: 8px;">
-            <span class="material-symbols-outlined" style="color: var(--accent-primary);">music_note</span>
-            <span>Soundboard</span>
+            <span class="material-symbols-outlined" style="color: var(--accent-primary);" aria-hidden="true">music_note</span>
+            <span id="sb-modal-title">Soundboard</span>
             <span id="sb-sound-count" style="font-size: 11px; background: var(--bg-tertiary); padding: 2px 8px; border-radius: 12px; color: var(--text-muted); font-weight: 500;">
               ${t('common.loading')}
             </span>
@@ -76,7 +76,7 @@ export class SoundboardModal {
               <span class="material-symbols-outlined md-16">help</span>
             </div>
           </div>
-          <button id="modal-close" class="modal-close-btn">&times;</button>
+          <button type="button" id="modal-close" class="modal-close-btn" aria-label="${t('common.close')}">&times;</button>
         </div>
 
         <div class="sb-modal-body">
@@ -566,13 +566,13 @@ export class SoundboardModal {
     backdrop.className = 'modal-backdrop';
     backdrop.style.zIndex = '10000';
     backdrop.innerHTML = `
-      <div class="modal-card" style="width: 380px; max-width: 90vw; text-align: center; animation: modalIn 0.15s ease;" role="dialog" aria-modal="true">
+      <div class="modal-card" style="width: 380px; max-width: 90vw; text-align: center;" role="dialog" aria-modal="true" aria-labelledby="sb-keybind-title">
         <div class="modal-header" style="justify-content: center; position: relative;">
           <div class="modal-title" style="display: flex; align-items: center; gap: 8px; font-size: 15px;">
-            <span class="material-symbols-outlined" style="color: var(--accent-primary);">keyboard</span>
-            <span>${t('soundboard.keybindTitle')}</span>
+            <span class="material-symbols-outlined" style="color: var(--accent-primary);" aria-hidden="true">keyboard</span>
+            <span id="sb-keybind-title">${t('soundboard.keybindTitle')}</span>
           </div>
-          <button id="sb-keybind-modal-close" class="modal-close-btn" style="position: absolute; right: 16px; top: 16px;">&times;</button>
+          <button type="button" id="sb-keybind-modal-close" class="modal-close-btn" style="position: absolute; right: 16px; top: 16px;" aria-label="${t('common.close')}">&times;</button>
         </div>
         <div style="padding: 16px 20px 20px;">
           <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px; word-break: break-word;">
@@ -662,7 +662,8 @@ export class SoundboardModal {
 
   private attachEvents(): void {
     if (!this.modalEl) return;
-    this.unbindEvents.push(bindSoundboardSettings(this.modalEl));
+    const settings = bindSoundboardSettings(this.modalEl);
+    this.unbindEvents.push(settings.unbind);
 
     const btnClose = this.modalEl.querySelector('#modal-close');
     const btnFooterClose = this.modalEl.querySelector('#sb-btn-close');
@@ -677,6 +678,16 @@ export class SoundboardModal {
     btnClose?.addEventListener('click', handleClose);
     btnFooterClose?.addEventListener('click', handleClose);
     enableBackdropClose(this.modalEl, handleClose);
+    // Inner surfaces (menus, the editor and shortcut capture) consume their own Escape first. Open
+    // quick settings close before the soundboard even when focus is outside it, e.g. after a click
+    // on plain text leaves it on the page.
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || !handlesModalKey(this.modalEl, event)) return;
+      event.preventDefault();
+      if (!settings.collapse()) handleClose();
+    };
+    window.addEventListener('keydown', onEscape);
+    this.unbindEvents.push(() => window.removeEventListener('keydown', onEscape));
 
     searchInput?.addEventListener('input', () => {
       this.searchQuery = searchInput.value;

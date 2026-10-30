@@ -12,14 +12,17 @@ import {
 } from '@monky/shared';
 import type { LocalExecutionDialogs } from './dialogs';
 import { LocalPermissions, localPermissionId } from './LocalPermissions';
+import type { LocalToolPreparationOptions } from './LocalTools';
 import { LocalExecutionError, localFailureDetails } from './errors';
 
 export interface LocalRuntimePaths { node: string; ytDlp: string; ffmpeg: string }
 
 export interface LocalToolHost {
   initialize(): Promise<void>;
+  /** Platform support only: no inventory walk and no digests. */
+  supported(): Promise<boolean>;
   snapshot(): Promise<Pick<LocalExecutionSnapshot, 'supported' | 'tools' | 'toolsBytes' | 'cacheBytes'>>;
-  prepare(signal: AbortSignal, retryCleanup?: boolean): Promise<LocalRuntimePaths>;
+  prepare(signal: AbortSignal, options?: LocalToolPreparationOptions): Promise<LocalRuntimePaths>;
   remove(tool: LocalToolId): Promise<void>;
   clearCache(): Promise<void>;
   dispose(): Promise<void>;
@@ -244,6 +247,9 @@ export class LocalExecutionService {
     }
     const affected = [...this.jobs.values()].filter((job) => job.subject.connectionId === state.connectionId &&
       (!state.connected || job.voiceChannelId !== undefined && job.voiceChannelId !== state.voiceChannelId));
+    // Connections and permits are not published state, and a dropped temporary grant notifies by itself.
+    // Connecting or changing voice channels therefore never makes the inventory read and hash the tools.
+    if (!affected.length) return { status: 'completed' };
     return this.mutate(async () => this.cancelJobs(affected, 'executor_unavailable'));
   }
 
@@ -324,7 +330,7 @@ export class LocalExecutionService {
           await this.assertSupported(signal);
           let prepared = false;
           const enabled = await this.options.dialogs.enable(bot, capability, signal, async (preparationSignal, retryCleanup) => {
-            await this.options.tools.prepare(preparationSignal, retryCleanup);
+            await this.prepareFromDialog(preparationSignal, retryCleanup);
             prepared = true;
           });
           if (enabled && !prepared) throw new LocalExecutionError('tool_install_failed');
@@ -452,7 +458,7 @@ export class LocalExecutionService {
               }
             }
             this.options.changed();
-            await this.options.tools.prepare(preparationSignal, retryCleanup);
+            await this.prepareFromDialog(preparationSignal, retryCleanup);
             prepared = true;
           });
           if (decision !== 'deny' && !prepared) throw new LocalExecutionError('tool_install_failed');
@@ -545,8 +551,13 @@ export class LocalExecutionService {
 
   private async assertSupported(signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
-    if (!(await this.options.tools.snapshot()).supported) throw new LocalExecutionError('unsupported_platform');
+    if (!await this.options.tools.supported()) throw new LocalExecutionError('unsupported_platform');
     signal.throwIfAborted();
+  }
+
+  /** The person watches this preparation, so it verifies every digest instead of trusting fingerprints. */
+  private async prepareFromDialog(signal: AbortSignal, retryCleanup = false): Promise<void> {
+    await this.options.tools.prepare(signal, { retryCleanup, fullVerification: true });
   }
 
   private deadline(job: Job, timeout: number): void {

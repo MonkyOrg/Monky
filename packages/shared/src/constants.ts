@@ -187,24 +187,9 @@ export function isAfkTimeoutSeconds(value: unknown): value is AfkTimeoutSeconds 
  * Both languages are always accepted, not just the sender's: a message written
  * in one language has to reach the person reading the app in the other.
  * `EVERYONE_MENTION_TOKENS[0]` is the canonical form suggested by the composer.
+ * Whether a message uses them is decided by `MentionMatcher` (mentions.ts).
  */
 export const EVERYONE_MENTION_TOKENS = ['todos', 'everyone'] as const;
-
-/** True when the text contains an `@todos` / `@everyone` token. */
-export function hasEveryoneMention(content: string): boolean {
-  const lower = content.toLowerCase();
-  return EVERYONE_MENTION_TOKENS.some((token) => {
-    let index = lower.indexOf(`@${token}`);
-    while (index !== -1) {
-      // The token must not be a prefix of a longer word, otherwise "@todosaqui"
-      // (or a nickname starting with "todos") would ping the whole channel.
-      const after = lower[index + token.length + 1];
-      if (after === undefined || !/[\p{L}\p{N}_-]/u.test(after)) return true;
-      index = lower.indexOf(`@${token}`, index + 1);
-    }
-    return false;
-  });
-}
 
 export type QualityPresetType = 'ECONOMIC' | 'NORMAL' | 'HIGH' | 'GAMING' | 'QHD' | 'UHD' | 'UHD120' | 'CUSTOM';
 

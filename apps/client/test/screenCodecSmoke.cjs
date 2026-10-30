@@ -196,7 +196,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
   const probeTransceiver = preferenceProbe.addTransceiver('video', { direction: 'sendonly' });
   for (const [name, caps] of [['send', capabilities], ['receive', RTCRtpReceiver.getCapabilities('video').codecs]]) {
     try {
-      probeTransceiver.setCodecPreferences(codecs.sortVideoCodecs(caps, 'h264'));
+      probeTransceiver.setCodecPreferences(codecs.sortVideoCodecs(caps, true));
       console.log(`CODEC TEST unfiltered ${name} preference accepted`);
     } catch (error) {
       console.log(`CODEC TEST unfiltered ${name} preference rejected: ${error.message}`);
@@ -206,8 +206,13 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
   const selected = available.some(mime => mime.toLowerCase() === 'video/h264') ? 'h264' : 'vp8';
   const required = `video/${selected}`;
   settings.save = () => {};
-  settings.preferredVideoCodec = selected;
   settings.qualityPreset = 'NORMAL';
+  // The camera has no codec choice since #717: a 60+ FPS preset is what puts H.264 first.
+  const preferHardwareCodec = async run => {
+    const preset = settings.qualityPreset;
+    settings.qualityPreset = 'GAMING';
+    try { return await run(); } finally { settings.qualityPreset = preset; }
+  };
   voice.setChannel('room');
   const sources = [];
   function source(width = 160, height = 90) {
@@ -262,7 +267,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
         })));
       }
       console.log('CODEC TEST mismatch details: ' + JSON.stringify({
-        label, selected: settings.preferredVideoCodec, expected, snapshots,
+        label, preset: settings.qualityPreset, expected, snapshots,
         parameters: sender.getParameters().codecs.map(codec => codec.mimeType),
       }));
     }
@@ -288,7 +293,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     });
     return stream;
   }
-  const onlyVideoCodec = mime => codecs.getPrioritizedVideoCodecs('auto')
+  const onlyVideoCodec = mime => codecs.getPrioritizedVideoCodecs()
     .filter(codec => [mime, 'video/rtx'].includes(codec.mimeType.toLowerCase()));
   const rtc = new WebRtcManager();
   const store = { serverDetails: { voiceMode: 'p2p' }, currentUser: { id: 'self', sessionId: 'self' } };
@@ -368,7 +373,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
       await testForegroundAdmission();
       return { checks, outputs };
     }
-    if (selected === 'h264') await testH264Profiles();
+    if (selected === 'h264') await preferHardwareCodec(testH264Profiles);
     if (profilesOnly) {
       check(selected === 'h264', 'H.264 must be available for the profile scenarios');
       return { checks, outputs };
@@ -408,16 +413,14 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     rtc.closeAllPeers(); remote.close(); incomingCamera.stop();
 
     check(await sfu.join('vp8-room'), 'An SFU router without H.264 still connects');
-    settings.preferredVideoCodec = 'h264';
     const fallbackCamera = source();
     try {
-      const camera = await sfu.produceCamera(fallbackCamera.stream.getVideoTracks()[0]);
+      const camera = await preferHardwareCodec(() => sfu.produceCamera(fallbackCamera.stream.getVideoTracks()[0]));
       check(!!camera, 'The SFU publishes a camera the router cannot receive in H.264');
       await actualCodec(camera.rtpSender, 'SFU camera fallback', 'video/vp8');
     } finally {
       sfu.leave();
       fallbackCamera.stop();
-      settings.preferredVideoCodec = selected;
     }
 
     const originalCapture = navigator.mediaDevices.getUserMedia;

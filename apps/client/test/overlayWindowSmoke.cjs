@@ -344,6 +344,33 @@ async function runOverlayConfigPositionSmoke() {
     find('btn-overlay-modal-apply').click();
     await Promise.resolve();
     check(opens.length === 1 && opens[0].position === 'top-right', 'Starting an inactive overlay applies an explicit new position.');
+
+    modal.open();
+    const backdrop = () => document.querySelector('.modal-backdrop:not([data-ui-closing])');
+    const dialog = backdrop().querySelector('.modal-card');
+    check(dialog.getAttribute('role') === 'dialog' && dialog.getAttribute('aria-modal') === 'true'
+      && document.getElementById(dialog.getAttribute('aria-labelledby'))?.textContent === t('overlay.modalTitle'),
+    'The overlay settings are announced as a labelled modal dialog.');
+    const choices = [...dialog.querySelectorAll('.overlay-option-card, .overlay-pos-btn')];
+    check(choices.length === 9 && choices.every(choice => choice instanceof HTMLButtonElement && choice.type === 'button'
+      && choice.getAttribute('aria-pressed') === String(choice.classList.contains('selected'))),
+    'Mode, layout and position choices are keyboard-operable buttons exposing their selected state.');
+    find('opt-layout-vertical').focus();
+    find('opt-layout-vertical').click();
+    check(document.activeElement === find('opt-layout-vertical') && find('opt-layout-vertical').getAttribute('aria-pressed') === 'true'
+      && find('opt-layout-grid').getAttribute('aria-pressed') === 'false', 'A focused layout choice is selected and announced as pressed.');
+    find('overlay-minimalist-cb').click();
+    check(find('opt-mode-cameras').disabled && find('opt-mode-both').disabled,
+      'Minimalist mode takes the display modes it ignores out of keyboard reach.');
+    find('overlay-minimalist-cb').click();
+    check(!find('opt-mode-cameras').disabled && !find('opt-mode-both').disabled, 'Leaving minimalist mode restores the display modes.');
+    backdrop().dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    check(find('btn-overlay-modal-apply'), 'A drag that starts in the card and ends over the backdrop does not close it (#145).');
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    check(!find('btn-overlay-modal-apply'), 'Escape closes the overlay settings.');
+    modal.open();
+    backdrop().dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    check(!find('btn-overlay-modal-apply'), 'Pressing on the backdrop itself still closes the overlay settings.');
   } finally {
     modal.close();
     Object.assign(overlayBridgeService, { getIsOpen: original.getIsOpen, syncState: original.syncState, open: original.open });

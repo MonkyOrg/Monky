@@ -2,6 +2,7 @@ import { LIMITS, MessageType, Permission, eventSaveSchema, eventTimeInZone, type
 import type { CommunityFeed } from '../core/CommunityFeed';
 import { getLanguage, t } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { resolveAvatarUrl } from '../utils/avatar';
 import { dateFieldValue, formatCalendarValue, todayCalendarValue } from '../utils/calendarDate';
 import { motionDuration, reducedMotion } from '../utils/surfaceMotion';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
@@ -70,11 +71,11 @@ export function openServerEventWizard(feed: CommunityFeed, existing?: ServerEven
   let scheduleExpanded = false;
   const currentImages = () => images ?? existingImages;
   const currentImageSources = () => currentImages().map(image => image.cropped);
-  const imagePreviews = () => currentImageSources().map(source =>
-    source.startsWith('/avatars/') ? feed.client.getHttpBaseUrl() + source : source);
-  const imageOriginalPreview = (image: CroppedImage) => image.original.startsWith('/avatars/')
-    ? feed.client.getHttpBaseUrl() + image.original
-    : image.original;
+  // New crops are data URLs made on this computer; only the server's own paths need resolving.
+  const imageUrl = (source: string) => source.startsWith('data:')
+    ? source : resolveAvatarUrl(source, feed.client.getHttpBaseUrl());
+  const imagePreviews = () => currentImageSources().map(imageUrl);
+  const imageOriginalPreview = (image: CroppedImage) => imageUrl(image.original);
   const mutableImages = () => images ??= existingImages.map(image => ({ ...image }));
   const imageSources = () => images?.map(image => image.cropped);
   const selectedChannel = () => channels().find(channel => draft.location.kind !== 'external'
@@ -386,14 +387,18 @@ export function openServerEventWizard(feed: CommunityFeed, existing?: ServerEven
           return;
         } else if (step === 1) step++;
         else {
+          const payload = { ...draft, audience: audience.value(), imageSources: imageSources() };
+          // The cover images travel inside this one message. Past the transport limit the
+          // server would drop the connection, and the draft would close with it.
+          const envelope = JSON.stringify({ type: MessageType.EVENT_SAVE, requestId: crypto.randomUUID(), payload });
+          if (new TextEncoder().encode(envelope).byteLength > LIMITS.WS_MAX_PAYLOAD_BYTES) {
+            showErrorToast(t('community.eventImagesTooLarge'));
+            return;
+          }
           saving = true;
           render();
           try {
-            await feed.client.sendRequest(MessageType.EVENT_SAVE, {
-              ...draft,
-              audience: audience.value(),
-              imageSources: imageSources(),
-            });
+            await feed.client.sendRequest(MessageType.EVENT_SAVE, payload);
             modal.close();
           } finally { saving = false; if (!modal.signal.aborted) render(); }
           return;

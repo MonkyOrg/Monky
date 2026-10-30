@@ -344,6 +344,8 @@ server was shut down, is also visible and receives the keyboard: the first
 
 Typing `@` lists only members who can read the current channel, including offline members: pick someone to insert `@nickname`. Suggestions follow role and channel privacy changes. The server also checks manually typed mentions; members without access do not receive an unread mention. Whoever is mentioned gets the highlight on the message, the channel badge and the mention sound.
 
+A mention takes the whole nickname: `@Lucas` does not ping someone called "Lu", and an `@` inside an email address, a web address or a code snippet mentions no one.
+
 The first entry on the list is `@everyone` (or `@todos` — both tokens work in any language), which notifies everybody who can see that channel. Private channels stay private: people without access are not notified.
 
 Server admins can turn this off under **Server settings → Notifications →

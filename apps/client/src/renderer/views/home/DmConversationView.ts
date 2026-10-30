@@ -8,8 +8,8 @@ import {
   type DmPeerView,
   type MessageReply,
 } from '@monky/shared';
-import { t, tCount } from '../../i18n';
-import { dmStore } from '../../stores/dmStore';
+import { getLanguage, t, tCount } from '../../i18n';
+import { dmStore, type DmAttachmentProgressEvent, type DmComposerDraft, type DmConversationState } from '../../stores/dmStore';
 import { ownAvatarSource } from '../../core/profileSync';
 import { connectionStore } from '../../stores/connectionStore';
 import { formatBytes, fileIconName } from '../../utils/attachment';
@@ -18,7 +18,9 @@ import { openFileInputPicker } from '../../utils/buttonLoading';
 import { escapeHtml } from '../../utils/html';
 import { renderMarkdown } from '../../utils/markdown';
 import type { MessageClipboardContent } from '../../utils/messageClipboard';
+import { highlightMessageJump } from '../../utils/messageJumpHighlight';
 import { formatMessageClock, formatMessageTime, renderReplyPreview } from '../../utils/messageReply';
+import { smoothScrollIntoView } from '../../utils/scroll';
 import { setSurfaceVisible } from '../../utils/surfaceVisibility';
 import { animateEnter } from '../../utils/surfaceMotion';
 import { renderLoadingSkeleton } from '../../utils/loadingSkeleton';
@@ -43,6 +45,34 @@ interface StagedFile {
   id: string;
   file: File;
   previewUrl: string | null;
+}
+
+/** How a message row was last drawn, and what besides the message it depended on. */
+interface RowRender {
+  html: string;
+  grouped: boolean;
+  reply: string;
+  context: string;
+}
+
+/** What every row of one render pass shares. */
+interface FeedContext {
+  signature: string;
+  original(messageId: string): DmMessageView | undefined;
+}
+
+const OLDER_KEY = 'older';
+const INTRO_KEY = 'intro';
+
+function rowKey(messageId: string): string {
+  return `message:${messageId}`;
+}
+
+function elementFromHtml(html: string): HTMLElement | null {
+  const template = document.createElement('template');
+  template.innerHTML = html.trim();
+  const element = template.content.firstElementChild;
+  return element instanceof HTMLElement ? element : null;
 }
 
 /** Consecutive messages from the same author on the same local day share one header. */
@@ -76,6 +106,14 @@ export class DmConversationView {
   private sending = false;
   /** Whether opening the conversation finished, even without any history. */
   private openSettled = false;
+  /** The node on screen for each feed entry (message rows, "load older", the intro). */
+  private readonly feedNodes = new Map<string, HTMLElement>();
+  /** The markup each node on screen was made from, compared with the next render to leave unchanged rows alone. */
+  private readonly nodeSources = new WeakMap<Element, string>();
+  private rowRenders = new WeakMap<DmMessageView, RowRender>();
+  /** The context signature of the last full pass (see {@link renderSignature}). */
+  private renderedSignature: string | null = null;
+  private renderFrame: number | null = null;
   private readonly copy = new MessageCopy({
     isActive: () => !!this.container?.isConnected,
     feed: () => this.query('[data-dm-feed]'),
@@ -99,13 +137,18 @@ export class DmConversationView {
     container.innerHTML = this.renderShell();
     this.bindEvents();
     this.renderHeader();
+    this.restoreDraft();
     this.renderComposerState();
     this.renderMessages(true);
     this.unsubscribers.push(
       dmStore.bus.on<{ peer: string }>('messages', (event) => {
         if (event?.peer !== this.peer) return;
-        this.renderMessages(false);
+        // Deliveries, reactions and receipts arrive in bursts: one pass per frame draws all of them.
+        this.scheduleMessages();
         if (this.replyTo) this.renderReplyComposer();
+      }),
+      dmStore.bus.on<DmAttachmentProgressEvent>('attachment-progress', (event) => {
+        if (event?.peer === this.peer) this.applyProgress(event.messageId, event.fileId);
       }),
       dmStore.bus.on<{ peer: string }>('typing', (event) => {
         if (event?.peer === this.peer) this.renderTyping();
@@ -113,6 +156,8 @@ export class DmConversationView {
       dmStore.bus.on('changed', () => {
         this.renderHeader();
         this.renderComposerState();
+        // Names, avatars and whether the friend can still be written to show in every row.
+        this.scheduleMessages();
       }),
       dmStore.bus.on('presence', () => {
         this.renderHeader();
@@ -132,11 +177,18 @@ export class DmConversationView {
 
   public destroy(): void {
     if (!this.container) return;
+    this.saveDraft();
     this.selection.stop();
     dmStore.leave(this.peer);
     this.unsubscribers.splice(0).forEach((unsubscribe) => unsubscribe());
     this.listeners?.abort();
     this.listeners = null;
+    if (this.renderFrame !== null) cancelAnimationFrame(this.renderFrame);
+    this.renderFrame = null;
+    this.feedNodes.clear();
+    // Drawn rows may point at image URLs revoked below.
+    this.rowRenders = new WeakMap();
+    this.renderedSignature = null;
     this.copy.cancel();
     contextMenu.close();
     this.picker?.destroy();
@@ -152,6 +204,51 @@ export class DmConversationView {
     this.draft = '';
     this.sending = false;
     this.container = null;
+  }
+
+  /**
+   * Puts back what the composer held when this conversation last left the
+   * screen (R-CHAT-8). An edit comes back only while its message is still
+   * there to be edited; otherwise what was typed before it does.
+   */
+  private restoreDraft(): void {
+    const saved = dmStore.draft(this.peer);
+    const input = this.input();
+    if (!saved || !input) return;
+    this.staged = saved.files.map((file) => ({
+      id: crypto.randomUUID(),
+      file,
+      previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null,
+    }));
+    const edited = saved.editing ? this.message(saved.editing.messageId) : undefined;
+    if (saved.editing && edited && !edited.deleted && this.isMine(edited)) {
+      this.editing = edited.id;
+      this.draft = saved.text;
+      input.value = saved.editing.content;
+    } else {
+      this.replyTo = saved.replyTo;
+      input.value = saved.text;
+    }
+    input.setSelectionRange(input.value.length, input.value.length);
+    if (this.staged.length > 0) this.renderTray();
+    if (this.replyTo) this.renderReplyComposer();
+  }
+
+  /** Keeps the composer for when this conversation comes back. What is being sent right now is not a draft. */
+  private saveDraft(): void {
+    const input = this.input();
+    if (!input) return;
+    if (this.sending && !this.editing) {
+      dmStore.setDraft(this.peer, null);
+      return;
+    }
+    dmStore.setDraft(this.peer, {
+      text: this.editing ? this.draft : input.value,
+      replyTo: this.editing ? null : this.replyTo,
+      files: this.staged.map((entry) => entry.file),
+      // An edit already being saved is not kept: it would come back as an edit of what was just saved.
+      editing: this.editing && !this.sending ? { messageId: this.editing, content: input.value } : null,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -313,41 +410,215 @@ export class DmConversationView {
     typing.textContent = dmStore.isTyping(this.peer) ? t('dm.typing', { nickname: this.nickname() }) : '';
   }
 
+  private scheduleMessages(): void {
+    if (this.renderFrame !== null) return;
+    this.renderFrame = requestAnimationFrame(() => {
+      this.renderFrame = null;
+      this.renderMessages(false);
+    });
+  }
+
+  /**
+   * Brings the feed in line with the conversation, touching only what changed
+   * (R-CHAT-4): rows whose markup stays the same are left alone, with the text
+   * selected in them, focus, hover and loaded images; new rows go in their
+   * place and changed ones are swapped. Redrawing every row for each delivery,
+   * reaction, receipt or page of history made long conversations slow and
+   * dropped the selection.
+   */
   private renderMessages(forceScroll: boolean): void {
+    if (this.renderFrame !== null) cancelAnimationFrame(this.renderFrame);
+    this.renderFrame = null;
     const feed = this.query('[data-dm-feed]');
     if (!feed) return;
     const state = dmStore.conversation(this.peer);
     // Nothing of this conversation is loaded yet: show message-shaped
     // placeholders instead of a blank feed.
     if (!state && !this.openSettled) {
-      feed.innerHTML = renderLoadingSkeleton('messages', 5);
+      if (!feed.querySelector(':scope > .loading-skeleton')) feed.innerHTML = renderLoadingSkeleton('messages', 5);
+      this.feedNodes.clear();
       return;
     }
     const replacingSkeleton = !!feed.querySelector(':scope > .loading-skeleton');
-    const previousHeight = feed.scrollHeight;
-    const previousTop = feed.scrollTop;
-    const firstBefore = feed.querySelector<HTMLElement>('.chat-message-row')?.dataset.messageId;
     const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 120;
-    const messages = state?.messages ?? [];
-    const intro = state && !state.hasMore ? this.renderIntro() : '';
-    const older = state?.hasMore
-      ? `<button type="button" class="btn btn-secondary dm-load-older" data-dm-older>${t('dm.loadOlder')}</button>`
-      : '';
-    feed.innerHTML = `${older}${intro}${messages.map((message, index) => this.renderMessage(message, messages[index - 1])).join('')}`;
-    this.bindFeed(feed);
-    this.loadImages(feed);
-    this.selection.sync();
-    const firstAfter = feed.querySelector<HTMLElement>('.chat-message-row')?.dataset.messageId;
-    if (forceScroll || (nearBottom && this.pinnedToBottom)) {
-      feed.scrollTop = feed.scrollHeight;
-    } else if (firstBefore && firstAfter !== firstBefore) {
-      // Older messages were prepended: keep the same message under the eyes.
-      feed.scrollTop = previousTop + (feed.scrollHeight - previousHeight);
-    } else {
-      feed.scrollTop = previousTop;
+    // A conversation opens at its latest messages.
+    const followEnd = forceScroll || replacingSkeleton || (nearBottom && this.pinnedToBottom);
+    const anchor = followEnd ? null : this.scrollAnchor(feed);
+    const focus = this.focusInFeed(feed);
+    if (this.reconcileFeed(feed, state)) {
+      this.loadImages(feed);
+      this.selection.sync();
+      if (focus) this.restoreFocus(focus);
     }
+    if (followEnd) feed.scrollTop = feed.scrollHeight;
+    else if (anchor) this.keepAnchor(feed, anchor);
     this.renderTyping();
     if (replacingSkeleton) animateEnter(feed, 'view');
+  }
+
+  /** Puts every feed entry on screen in order, reusing the nodes whose markup did not change. Returns whether any node changed. */
+  private reconcileFeed(feed: HTMLElement, state: DmConversationState | undefined): boolean {
+    const messages = state?.messages ?? [];
+    const entries: Array<{ key: string; html: string }> = [];
+    if (state?.hasMore) {
+      entries.push({ key: OLDER_KEY, html: `<button type="button" class="btn btn-secondary dm-load-older" data-dm-older>${t('dm.loadOlder')}</button>` });
+    } else if (state) {
+      entries.push({ key: INTRO_KEY, html: this.renderIntro() });
+    }
+    const context = this.feedContext(messages);
+    this.renderedSignature = context.signature;
+    messages.forEach((message, index) => {
+      entries.push({ key: rowKey(message.id), html: this.rowHtml(message, messages[index - 1], context) });
+    });
+
+    const placed: Array<[string, HTMLElement]> = [];
+    const created: HTMLElement[] = [];
+    for (const entry of entries) {
+      const current = this.feedNodes.get(entry.key);
+      if (current && current.parentElement === feed && this.nodeSources.get(current) === entry.html) {
+        placed.push([entry.key, current]);
+        continue;
+      }
+      const node = elementFromHtml(entry.html);
+      if (!node) continue;
+      this.nodeSources.set(node, entry.html);
+      placed.push([entry.key, node]);
+      created.push(node);
+    }
+    const keep = new Set<Node>(placed.map(([, node]) => node));
+    let changed = created.length > 0;
+    for (const child of [...feed.childNodes]) {
+      if (keep.has(child)) continue;
+      child.remove();
+      changed = true;
+    }
+    // Nodes already in the right order are never moved: moving one would drop a selection inside it.
+    let cursor = feed.firstElementChild;
+    for (const [, node] of placed) {
+      if (node === cursor) {
+        cursor = node.nextElementSibling;
+        continue;
+      }
+      feed.insertBefore(node, cursor);
+    }
+    this.feedNodes.clear();
+    for (const [key, node] of placed) this.feedNodes.set(key, node);
+    for (const node of created) {
+      if (node.classList.contains('chat-message-row')) this.bindRow(node);
+    }
+    return changed;
+  }
+
+  private feedContext(messages: DmMessageView[]): FeedContext {
+    let byId: Map<string, DmMessageView> | null = null;
+    return {
+      signature: this.renderSignature(),
+      original: (messageId) => (byId ??= new Map(messages.map((message) => [message.id, message]))).get(messageId),
+    };
+  }
+
+  /** Everything besides the messages themselves that rows show: when any of it changes, every row is drawn again. */
+  private renderSignature(): string {
+    return JSON.stringify([
+      getLanguage(),
+      this.canWrite(),
+      this.nickname(),
+      this.peerView()?.avatar ?? null,
+      dmStore.snapshot.me?.publicKey ?? null,
+      connectionStore.savedNickname,
+      ownAvatarSource(),
+      dmStore.snapshot.settings.maxFileBytes,
+    ]);
+  }
+
+  /** The markup of one message row, drawn again only when the message or what its row depends on changed. */
+  private rowHtml(message: DmMessageView, previous: DmMessageView | undefined, context: FeedContext): string {
+    const grouped = !!previous && previous.author === message.author && !previous.deleted && !message.replyTo &&
+      sameLocalDay(previous.createdAt, message.createdAt);
+    const reply = message.replyTo && !message.deleted ? this.renderReplyReference(context.original(message.replyTo)) : '';
+    const cached = this.rowRenders.get(message);
+    if (cached && cached.grouped === grouped && cached.reply === reply && cached.context === context.signature) return cached.html;
+    const html = this.renderMessage(message, grouped, reply);
+    this.rowRenders.set(message, { html, grouped, reply, context: context.signature });
+    return html;
+  }
+
+  /** The first message at least partly in view, and where it sits, to keep it there while rows around it change. */
+  private scrollAnchor(feed: HTMLElement): { messageId: string; top: number } | null {
+    const rows = feed.querySelectorAll<HTMLElement>(':scope > .chat-message-row');
+    const top = feed.getBoundingClientRect().top;
+    let low = 0;
+    let high = rows.length - 1;
+    let found: HTMLElement | null = null;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      if (rows[middle].getBoundingClientRect().bottom > top) {
+        found = rows[middle];
+        high = middle - 1;
+      } else {
+        low = middle + 1;
+      }
+    }
+    const messageId = found?.dataset.messageId;
+    return found && messageId ? { messageId, top: found.getBoundingClientRect().top } : null;
+  }
+
+  /** Exact restoration of what was on screen, not a navigation: instant on purpose. */
+  private keepAnchor(feed: HTMLElement, anchor: { messageId: string; top: number }): void {
+    const row = this.feedNodes.get(rowKey(anchor.messageId));
+    if (!row?.isConnected) return;
+    const shift = row.getBoundingClientRect().top - anchor.top;
+    if (Math.abs(shift) >= 1) feed.scrollTop += shift;
+  }
+
+  /** Where keyboard focus is inside the feed, to bring it back if its row is redrawn. */
+  private focusInFeed(feed: HTMLElement): { messageId: string; control: string | null } | null {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || !feed.contains(active)) return null;
+    const row = active.closest<HTMLElement>('.chat-message-row[data-message-id]');
+    const messageId = row?.dataset.messageId;
+    if (!row || !messageId) return null;
+    let control: string | null = null;
+    if (active.dataset.dmAction) control = `[data-dm-action="${CSS.escape(active.dataset.dmAction)}"]`;
+    else if (active.dataset.dmReaction) control = `[data-dm-reaction="${CSS.escape(active.dataset.dmReaction)}"]`;
+    return { messageId, control };
+  }
+
+  private restoreFocus(focus: { messageId: string; control: string | null }): void {
+    // Still where it was: its row was not redrawn.
+    if (document.activeElement && document.activeElement !== document.body) return;
+    const row = this.feedNodes.get(rowKey(focus.messageId));
+    if (!row?.isConnected) return;
+    const target = (focus.control ? row.querySelector<HTMLElement>(focus.control) : null) ?? row;
+    target.focus({ preventScroll: true });
+  }
+
+  /**
+   * A download moved on: only its file card changes, so the rest of the row
+   * keeps its selection and hover. When a full pass is due anyway (one is on
+   * its way, or names or permissions changed since the last one), that pass
+   * draws the progress together with everything else.
+   */
+  private applyProgress(messageId: string, fileId: string): void {
+    if (this.renderFrame !== null) return;
+    const feed = this.query('[data-dm-feed]');
+    const row = this.feedNodes.get(rowKey(messageId));
+    const messages = dmStore.conversation(this.peer)?.messages;
+    if (!feed || !row || row.parentElement !== feed || !messages) return;
+    const index = messages.findIndex((message) => message.id === messageId);
+    if (index < 0) return;
+    const context = this.feedContext(messages);
+    const html = context.signature === this.renderedSignature
+      ? this.rowHtml(messages[index], messages[index - 1], context) : null;
+    const selector = `[data-dm-file="${CSS.escape(fileId)}"]`;
+    const card = row.querySelector(selector);
+    const fresh = html ? elementFromHtml(html)?.querySelector(selector) : null;
+    if (!html || !card || !fresh) {
+      this.scheduleMessages();
+      return;
+    }
+    card.replaceWith(fresh);
+    this.nodeSources.set(row, html);
   }
 
   private renderIntro(): string {
@@ -375,10 +646,8 @@ export class DmConversationView {
     return { name: this.nickname(), avatar: peer?.avatar ?? null, mine: false };
   }
 
-  private renderMessage(message: DmMessageView, previous: DmMessageView | undefined): string {
+  private renderMessage(message: DmMessageView, grouped: boolean, replyReference: string): string {
     const author = this.authorInfo(message.author);
-    const grouped = !!previous && previous.author === message.author && !previous.deleted && !message.replyTo &&
-      sameLocalDay(previous.createdAt, message.createdAt);
     const time = formatMessageTime(message.createdAt);
     const writable = this.canWrite();
     const gutterTime = grouped ? `<span class="dm-grouped-time" aria-hidden="true">${formatMessageClock(message.createdAt)}</span>` : '';
@@ -419,7 +688,7 @@ export class DmConversationView {
           </div>
           ${message.forwarded ? renderForwardedBadge(message.forwarded, formatMessageTime) : ''}
           ${pending ? `<span class="chat-delivery-sr" role="status">${escapeHtml(t('dm.deliveryPending'))}</span>` : ''}
-          ${message.replyTo ? this.renderReplyReference(message.replyTo) : ''}
+          ${replyReference}
           ${message.content.trim() ? `<div class="chat-message-text">${renderMarkdown(message.content, { currentNickname: connectionStore.savedNickname })}${grouped ? editedBadge : ''}</div>` : ''}
           ${message.attachments.length ? `<div class="dm-attachments">${message.attachments.map((attachment) => this.renderAttachment(message, attachment, author.mine)).join('')}</div>` : ''}
           ${failed ? `<div class="chat-delivery chat-delivery--failed dm-delivery-failed" role="status">
@@ -444,9 +713,7 @@ export class DmConversationView {
     </div>`;
   }
 
-  private renderReplyReference(replyTo: string): string {
-    const state = dmStore.conversation(this.peer);
-    const original = state?.messages.find((message) => message.id === replyTo);
+  private renderReplyReference(original: DmMessageView | undefined): string {
     if (!original || original.deleted) {
       return `<div class="chat-reply-reference chat-quote dm-reply-missing">${escapeHtml(t('dm.replyUnavailable'))}</div>`;
     }
@@ -711,8 +978,9 @@ export class DmConversationView {
     }, { signal });
   }
 
-  private bindFeed(feed: HTMLElement): void {
-    feed.querySelectorAll<HTMLAnchorElement>('a.md-link').forEach((link) => {
+  /** Wires what a newly drawn row holds: links, server invitations and code blocks. */
+  private bindRow(row: HTMLElement): void {
+    row.querySelectorAll<HTMLAnchorElement>('a.md-link').forEach((link) => {
       link.addEventListener('click', (event) => {
         event.preventDefault();
         const url = link.getAttribute('data-external-link');
@@ -720,8 +988,8 @@ export class DmConversationView {
       });
     });
     // Only rows of this user's own messages carry a delivery state.
-    mountServerInviteCards(feed, row => row.hasAttribute('data-delivery'));
-    bindCodeBlockCopyButtons(feed);
+    mountServerInviteCards(row, (element) => element.hasAttribute('data-delivery'));
+    bindCodeBlockCopyButtons(row);
   }
 
   /** Right-clicking a message offers the same actions as in a server channel. */
@@ -791,10 +1059,7 @@ export class DmConversationView {
     }
     const jump = target.closest<HTMLElement>('[data-dm-jump]');
     if (jump) {
-      const destination = this.container?.querySelector<HTMLElement>(`.chat-message-row[data-message-id="${CSS.escape(jump.dataset.dmJump!)}"]`);
-      destination?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      destination?.classList.add('chat-message-highlight');
-      window.setTimeout(() => destination?.classList.remove('chat-message-highlight'), 1600);
+      this.jumpToMessage(jump.dataset.dmJump!);
       return;
     }
     const fileHolder = target.closest<HTMLElement>('[data-dm-file]');
@@ -916,6 +1181,22 @@ export class DmConversationView {
   // ---------------------------------------------------------------------------
   // Actions
   // ---------------------------------------------------------------------------
+
+  /**
+   * Brings the message a reply quotes into view and marks it, as server
+   * channels do (R-CHAT-12): the scroll follows "reduce motion", the mark
+   * shows which row it is, and focus moves there for the keyboard.
+   */
+  private jumpToMessage(messageId: string): void {
+    const row = this.feedNodes.get(rowKey(messageId));
+    if (!row?.isConnected) return;
+    // The scroll is on its way: the next update must not pull the feed back to the end.
+    this.pinnedToBottom = false;
+    smoothScrollIntoView(row, { block: 'center' });
+    row.tabIndex = -1;
+    row.focus({ preventScroll: true });
+    highlightMessageJump(row);
+  }
 
   private startReply(messageId: string): void {
     if (!this.canWrite()) return;
@@ -1134,42 +1415,62 @@ export class DmConversationView {
       }
       this.sending = true;
       this.syncComposer();
+      const root = this.container;
       try {
         const failure = await dmStore.editMessage(this.peer, messageId, content);
         if (failure) this.showFailure(failure);
         else if (this.editing === messageId) this.cancelEdit();
       } finally {
-        this.sending = false;
-        this.syncComposer();
-        this.focusInput();
+        if (this.container === root) {
+          this.sending = false;
+          this.syncComposer();
+          this.focusInput();
+        }
       }
       return;
     }
     if (!content && this.staged.length === 0) return;
+    const root = this.container;
+    const peer = this.peer;
+    const outgoing: DmComposerDraft = {
+      text: input.value,
+      replyTo: this.replyTo,
+      files: this.staged.map((entry) => entry.file),
+      editing: null,
+    };
     this.sending = true;
     this.syncComposer();
     try {
       const files: DmOutgoingFile[] = [];
-      for (const entry of this.staged) {
-        files.push({
-          name: entry.file.name,
-          mime: entry.file.type || 'application/octet-stream',
-          data: new Uint8Array(await entry.file.arrayBuffer()),
-        });
+      for (const file of outgoing.files) {
+        let data: ArrayBuffer;
+        try {
+          data = await file.arrayBuffer();
+        } catch {
+          // A file picked a while ago (it may have waited in a draft) can be moved or deleted since.
+          showErrorToast(t('dm.errorFileUnreadable', { name: file.name }), 7000);
+          return;
+        }
+        files.push({ name: file.name, mime: file.type || 'application/octet-stream', data: new Uint8Array(data) });
       }
-      const failure = await dmStore.sendMessage(this.peer, content, files, this.replyTo);
+      const failure = await dmStore.sendMessage(peer, content, files, outgoing.replyTo);
       if (failure) {
         this.showFailure(failure);
+        // The conversation was left while this was being sent: it waits there as the draft instead.
+        if (this.container !== root && !dmStore.draft(peer)) dmStore.setDraft(peer, outgoing);
         return;
       }
+      if (this.container !== root) return;
       input.value = '';
       this.clearStaged();
       this.clearReply();
       this.pinnedToBottom = true;
     } finally {
-      this.sending = false;
-      this.syncComposer();
-      this.focusInput();
+      if (this.container === root) {
+        this.sending = false;
+        this.syncComposer();
+        this.focusInput();
+      }
     }
   }
 

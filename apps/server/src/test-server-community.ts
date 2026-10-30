@@ -223,14 +223,15 @@ test('event reads never disclose details or interested members when access chang
   const f = await setup(t);
   const event = await f.service.saveEvent(f.owner.id, f.draft, f.now);
   await f.service.setInterest(f.owner.id, event.id, true);
-  const access = f.channelService.canUserAccessChannel;
+  const access = f.channelService.getAccessContext;
   const version = f.wsServer.getChannelAccessVersion;
   let changed = false;
   t.mock.method(f.wsServer, 'getChannelAccessVersion', () => {
     const value = version.call(f.wsServer);
     return changed && value !== null ? value + 1 : value;
   });
-  t.mock.method(f.channelService, 'canUserAccessChannel', async (userId: string, channelId: string) => {
+  // Every access check reads the member's context through here.
+  t.mock.method(f.channelService, 'getAccessContext', async (userId: string, channelId?: string) => {
     const result = await access.call(f.channelService, userId, channelId);
     if (userId === f.member.id) changed = true;
     return result;
@@ -1420,4 +1421,21 @@ test('automatic start notices survive an in-progress permission change without d
   await f.member.peer.wait(message => message.type === MessageType.EVENT_STARTED);
   await new Promise(resolve => setTimeout(resolve, 1100));
   assert.equal(f.member.peer.messages.filter(message => message.type === MessageType.EVENT_STARTED).length, 1);
+});
+
+test('community refreshes asked before the queued one starts share it, so a burst of votes costs one round (S-WS-4)', async t => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const member = await f.human('Coalesced member');
+  // Past the scheduler's first round, which publishes to everyone once.
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  await member.peer.request(MessageType.COMMANDS_LIST);
+  const community = f.wsServer['community'];
+  assert.ok(community);
+  const since = member.peer.messages.length;
+  await Promise.all([community.refresh(), community.refresh(), community.refresh()]);
+  await community.refresh();
+  await member.peer.barrier();
+  assert.equal(member.peer.messages.slice(since).filter(message => message.type === MessageType.COMMUNITY_SNAPSHOT).length, 2,
+    'three refreshes asked together share one round, and one asked after it ran gets its own');
 });

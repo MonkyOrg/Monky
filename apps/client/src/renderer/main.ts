@@ -27,7 +27,6 @@ import {
   VoiceRestrictionsUpdatedPayload,
   VoiceUserJoinedPayload,
   VoiceUserLeftPayload,
-  hasEveryoneMention,
   getMessageText,
   type AppIdentityStatus,
 } from '@monky/shared';
@@ -49,7 +48,7 @@ import { soundEffects } from './core/SoundEffects';
 import type { CommunityStartNotice } from './core/CommunityFeed';
 import { soundboardService } from './core/SoundboardService';
 import { keybindService } from './core/KeybindService';
-import { isCallInAfkChannel, toggleAudioDeafen, toggleMicrophoneMute, toggleSoundboardMute, updateLocalSpeaking } from './core/voiceControls';
+import { isCallInAfkChannel, leaveCall, toggleAudioDeafen, toggleMicrophoneMute, toggleSoundboardMute, updateLocalSpeaking } from './core/voiceControls';
 import { updateService } from './core/UpdateService';
 import { videoService } from './core/VideoService';
 import { webRtcManager } from './core/WebRtcManager';
@@ -74,7 +73,9 @@ import { showIdentityOnboarding } from './views/IdentityOnboarding';
 import { getLanguage, initI18n, t } from './i18n';
 import { translateProtocolError } from './i18n/protocolErrors';
 import { toAbsoluteServerIconUrl } from './utils/avatar';
+import { isLoopbackHost } from './utils/serverAddress';
 import { afkChannelIdOf } from './utils/voiceRooms';
+import { serverMentionMatcher } from './utils/mentions';
 import { installImageFallback } from './utils/imageFallback';
 import { clientLog } from './core/ClientLogService';
 import { startResponsivenessMonitor } from './core/ResponsivenessMonitor';
@@ -413,9 +414,7 @@ class App {
     });
 
     // Same path as the hang-up button in the sidebar's voice connection row.
-    window.api?.onTrayLeaveCall(() => {
-      this.mainView.voiceStageView?.leaveVoice();
-    });
+    window.api?.onTrayLeaveCall(leaveCall);
   }
 
   /**
@@ -492,7 +491,12 @@ class App {
         this.mainView.render();
       }),
       appEvents.on('session.connections_changed', () => {
-        if (sessionManager.isHome() || !sessionManager.getAll().length) renderHome();
+        // Inside a server that is gone there is nothing left to show but Home.
+        if (!sessionManager.isHome() && !sessionManager.getAll().length) renderHome();
+        // Anywhere else connections only show on the rail and the call row:
+        // rebuilding the layout would also rebuild an open DM, losing what was
+        // being typed and attached.
+        else this.mainView.refreshConnections();
       }),
     ];
     window.addEventListener('pagehide', () => unbindNavigation.forEach(unbind => unbind()), { once: true });
@@ -558,7 +562,7 @@ class App {
 
     appEvents.on('keybind.toggle_camera', () => {
       if (voiceStore.currentVoiceChannelId) {
-        void this.mainView.voiceStageView?.toggleCamera();
+        void this.mainView.toggleCamera();
       }
     });
 
@@ -633,9 +637,11 @@ class App {
       }
       if (ownsCall) {
         const resumingChannel = myVoiceState?.channelId === previousVoiceChannelId;
-        voiceStore.setServerMuted(resumingChannel && !!myVoiceState?.serverMuted);
-        voiceStore.setServerDeafened(resumingChannel && !!myVoiceState?.serverDeafened);
-        voiceStore.setPermissionMuted(resumingChannel && !!myVoiceState?.permissionMuted);
+        voiceStore.applyModeration({
+          serverMuted: resumingChannel && !!myVoiceState?.serverMuted,
+          serverDeafened: resumingChannel && !!myVoiceState?.serverDeafened,
+          permissionMuted: resumingChannel && !!myVoiceState?.permissionMuted,
+        });
         this.syncLocalVoiceMediaState();
 
         webRtcManager.setCurrentSessionId(payload.currentUser.sessionId || payload.currentUser.id);
@@ -653,19 +659,9 @@ class App {
 
       // Persist the server icon on the saved server entry so the rail shows it
       // even when not connected (#301).
-      if (payload.server.iconUrl) {
-        const url = networkClient.getCurrentServerUrl();
-        if (url) {
-          const match = url.match(/\/\/([^:]+):(\d+)/);
-          if (match) {
-            const port = parseInt(match[2], 10);
-            connectionStore.updateSavedServerIcon(
-              match[1],
-              port,
-              toAbsoluteServerIconUrl(match[1], port, payload.server.iconUrl)
-            );
-          }
-        }
+      if (payload.server.iconUrl && connectedSession) {
+        const { host, port } = connectedSession;
+        connectionStore.updateSavedServerIcon(host, port, toAbsoluteServerIconUrl(host, port, payload.server.iconUrl));
       }
 
       const stillHasVoiceChannel =
@@ -750,6 +746,18 @@ class App {
       serverStore.setTurnAvailability(payload.turnAvailability);
       const origin = currentEventOrigin();
       if (!origin) return;
+      // The rail and Home read the name from the saved entry, so a server renamed
+      // while in the background has to update it too (#85).
+      const session = sessionManager.get(origin);
+      if (session) {
+        connectionStore.updateSavedServerMeta(session.host, session.port, {
+          name: payload.name,
+          iconUrl: toAbsoluteServerIconUrl(session.host, session.port, payload.iconUrl),
+        });
+        // A server hosted from this machine also has an entry in "Meus
+        // Servidores", with its own copy of the name.
+        if (isLoopbackHost(session.host)) connectionStore.renameCreatedServerByPort(session.port, payload.name);
+      }
       this.voiceModeReconnect.settingsUpdated(origin, payload);
       if (voiceStore.voiceSessionKey === origin) void webRtcManager.handleVoiceModeUpdate();
     });
@@ -869,19 +877,14 @@ class App {
       if (!serverStore.hasPermission(Permission.READ_MESSAGES, message.channelId)) return;
       chatStore.addMessage(message);
       // Incoming chat cue (#152), honoring the mute / mentions-only settings
-      // (#153). Own and system messages are ignored. A mention is "@<nickname>"
-      // appearing in the message body (#14).
+      // (#153). Own and system messages are ignored. Mentions follow the rule the
+      // server and the feed highlight use (#14).
       if (!message.isSystem) {
         const me = serverStore.currentUser;
         if (me && message.userId !== me.id && serverStore.canUserReadChannel(me.id, message.channelId)) {
-          const nick = (me.nickname || '').trim().toLowerCase();
           // `@todos` counts as a mention for everyone in the channel when the
           // server allows it (#464).
-          const everyoneAllowed = serverStore.serverDetails?.allowEveryoneMention !== false;
-          const content = getMessageText(message, getLanguage());
-          const isMention =
-            (!!nick && content.toLowerCase().includes(`@${nick}`)) ||
-            (everyoneAllowed && hasEveryoneMention(content));
+          const isMention = serverMentionMatcher(serverStore).mentions(getMessageText(message, getLanguage()), me.nickname || '');
 
           // Resolve the chat-sound mode with the 3-level precedence
           // channel → server → global (#153).
@@ -943,9 +946,11 @@ class App {
     appEvents.on(`message.${MessageType.VOICE_USER_JOINED}`, (payload: VoiceUserJoinedPayload) => {
       if (serverStore.isMySession(payload.sessionId) && this.eventOwnsCall()
         && voiceStore.currentVoiceChannelId === payload.channelId) {
-        voiceStore.setServerMuted(payload.voiceState.serverMuted);
-        voiceStore.setServerDeafened(payload.voiceState.serverDeafened);
-        voiceStore.setPermissionMuted(!!payload.voiceState.permissionMuted);
+        voiceStore.applyModeration({
+          serverMuted: payload.voiceState.serverMuted,
+          serverDeafened: payload.voiceState.serverDeafened,
+          permissionMuted: !!payload.voiceState.permissionMuted,
+        });
         this.syncLocalVoiceMediaState();
       }
       if (payload.user) participantManager.addUser(payload.user);
@@ -1042,9 +1047,11 @@ class App {
       )) webRtcManager.syncBotVoiceReception(payload.voiceState.sessionId);
       if (serverStore.isMySession(payload.voiceState.sessionId) && this.eventOwnsCall()
         && voiceStore.currentVoiceChannelId === payload.voiceState.channelId) {
-        voiceStore.setServerMuted(payload.voiceState.serverMuted);
-        voiceStore.setServerDeafened(payload.voiceState.serverDeafened);
-        voiceStore.setPermissionMuted(!!payload.voiceState.permissionMuted);
+        voiceStore.applyModeration({
+          serverMuted: payload.voiceState.serverMuted,
+          serverDeafened: payload.voiceState.serverDeafened,
+          permissionMuted: !!payload.voiceState.permissionMuted,
+        });
         this.syncLocalVoiceMediaState();
       }
     });

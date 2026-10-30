@@ -50,24 +50,30 @@ export interface Pm2Process {
   };
 }
 
+/**
+ * Every process PM2 knows about, read with a single `pm2 jlist`.
+ *
+ * Each PM2 call loads all of PM2, so a command reads this once and passes the
+ * result to every lookup it makes before acting. Without PM2 the call fails
+ * and the list is empty, which needs no separate `pm2 --version`.
+ */
 export function listPm2Processes(): Pm2Process[] {
-  if (!isPm2Available()) return [];
   try {
     const listResult = runSync('pm2', ['jlist'], { encoding: 'utf8' });
-    if (listResult.status !== 0) return [];
-    const parsed = JSON.parse(listResult.stdout);
+    if (listResult.error || listResult.status !== 0) return [];
+    const parsed: unknown = JSON.parse(listResult.stdout);
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 }
 
-export function findPm2Process(processName: string): Pm2Process | null {
-  return listPm2Processes().find((entry) => entry.name === processName) ?? null;
+export function findPm2Process(processName: string, processes: readonly Pm2Process[] = listPm2Processes()): Pm2Process | null {
+  return processes.find((entry) => entry.name === processName) ?? null;
 }
 
-export function isMonkyServerRunning(processName: string): boolean {
-  return findPm2Process(processName)?.pm2_env?.status === 'online';
+export function isMonkyServerRunning(processName: string, processes: readonly Pm2Process[] = listPm2Processes()): boolean {
+  return findPm2Process(processName, processes)?.pm2_env?.status === 'online';
 }
 
 /**
@@ -91,8 +97,8 @@ export function deletePm2Process(processName: string): void {
  * Reading logs is still useful for a stopped or crashed process, so this is a
  * weaker check than {@link isMonkyServerRunning}.
  */
-export function isMonkyServerRegistered(processName: string): boolean {
-  return findPm2Process(processName) !== null;
+export function isMonkyServerRegistered(processName: string, processes: readonly Pm2Process[] = listPm2Processes()): boolean {
+  return findPm2Process(processName, processes) !== null;
 }
 
 export function readProcessDataDir(entry: Pm2Process): string | null {
@@ -109,9 +115,9 @@ export function readProcessDataDir(entry: Pm2Process): string | null {
  * Data directories of every Monky process PM2 knows about, including the
  * pre-registry process name so older installations are not lost on upgrade.
  */
-export function discoverPm2DataDirs(): string[] {
+export function discoverPm2DataDirs(processes: readonly Pm2Process[] = listPm2Processes()): string[] {
   const found: string[] = [];
-  for (const entry of listPm2Processes()) {
+  for (const entry of processes) {
     const name = entry.name ?? '';
     if (name !== LEGACY_PM2_PROCESS_NAME && !name.startsWith(`${PM2_PROCESS_PREFIX}-`)) continue;
     const dataDir = readProcessDataDir(entry);
@@ -126,8 +132,8 @@ export function discoverPm2DataDirs(): string[] {
  * Upgrading must not leave an orphan `monky-server` running alongside the new
  * per-directory process on the same port.
  */
-export function findLegacyProcessFor(dataDir: string): Pm2Process | null {
-  const legacy = findPm2Process(LEGACY_PM2_PROCESS_NAME);
+export function findLegacyProcessFor(dataDir: string, processes: readonly Pm2Process[] = listPm2Processes()): Pm2Process | null {
+  const legacy = findPm2Process(LEGACY_PM2_PROCESS_NAME, processes);
   if (!legacy) return null;
   const legacyDataDir = readProcessDataDir(legacy);
   return legacyDataDir === canonicalDataDir(dataDir) ? legacy : null;

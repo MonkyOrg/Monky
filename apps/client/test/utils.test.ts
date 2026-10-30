@@ -6,6 +6,8 @@
 
 import { escapeHtml, html, trustedHtml } from '../src/renderer/utils/html';
 import { renderMarkdown } from '../src/renderer/utils/markdown';
+import { serverMentionMatcher } from '../src/renderer/utils/mentions';
+import { MentionMatcher, type UserSummary } from '@monky/shared';
 import { formatBytes, fileIconName, resolveAttachmentUrl } from '../src/renderer/utils/attachment';
 import { avatarFileExtension, DEFAULT_AVATAR_URL, resolveAvatarUrl } from '../src/renderer/utils/avatar';
 import { EventBus } from '../src/renderer/core/EventBus';
@@ -16,6 +18,7 @@ import { buildCodeMessage, indentEdit } from '../src/renderer/views/CodeBlockMod
 import { isSafeServerId, migrateLegacyServerData, serverDataDirFor } from '../src/main/serverDataDir';
 import { createActiveProxy, silentBus } from '../src/renderer/core/activeProxy';
 import { createChatStore, setActiveChatStore, chatStore } from '../src/renderer/stores/chatStore';
+import { createServerStore as createMentionServerStore } from '../src/renderer/stores/serverStore';
 import { appEvents } from '../src/renderer/core/EventBus';
 import { isPrivateAddress, isPrivateHostname } from '../src/main/privateAddress';
 import fs from 'fs';
@@ -186,8 +189,71 @@ function runTests() {
   const mentionTest = renderMarkdown('Olá @Murilo!', { currentNickname: 'Murilo' });
   assert(mentionTest.includes('<span class="chat-mention chat-mention-me">@Murilo</span>'), 'Menção ao próprio usuário recebe classe destacada');
 
-  const mentionOtherTest = renderMarkdown('Olá @Carlos!', { currentNickname: 'Murilo', knownNicknames: ['Carlos', 'Murilo'] });
+  const mentionOtherTest = renderMarkdown('Olá @Carlos!', { currentNickname: 'Murilo', mentions: new MentionMatcher(['Carlos', 'Murilo']) });
   assert(mentionOtherTest.includes('<span class="chat-mention">@Carlos</span>'), 'Menção a outros usuários recebe classe de menção');
+
+  // O destaque segue a mesma regra do som, do badge e do servidor (R-SHELL-6, R-CHAT-9).
+  const members = new MentionMatcher(['Lu', 'Lucas', 'Ana', 'Ana Paula', '$ara', 'A&B'], { everyone: true });
+  const spans = (source: string) => [...renderMarkdown(source, { currentNickname: 'Lu', mentions: members })
+    .matchAll(/<span class="chat-mention( chat-mention-me)?">([^<]*)<\/span>/g)].map(match => `${match[1] ? 'me:' : ''}${match[2]}`);
+  assert(spans('@Lucas, vem cá').join() === '@Lucas', 'Apelido que começa outro não destaca a pessoa errada');
+  assert(spans('falem com @Ana Paula').join() === '@Ana Paula', 'O apelido mais longo vence');
+  assert(spans('**@lu** e (@ana)').join() === 'me:@Lu,@Ana', 'Menção em negrito e entre parênteses é destacada');
+  assert(renderMarkdown('**@Lu**', { currentNickname: 'Lu', mentions: members })
+    .includes('<strong><span class="chat-mention chat-mention-me">@Lu</span></strong>'), 'Negrito envolve a menção destacada');
+  assert(spans('`@Lu` lu@exemplo.com site.com/@Lu contato@todos.com.br').length === 0, 'Código, e-mail e endereço não destacam ninguém');
+  assert(spans('bom dia @todos').join() === 'me:@todos', '@todos é destacado para quem lê');
+  assert(spans('@$ara e @A&B').join() === '@$ara,@A&amp;B', 'Caracteres especiais no apelido são exibidos uma vez e escapados');
+  assert(spans('[@Lucas](https://monky.chat)').join() === '@Lucas', 'Menção no texto de um link é destacada como no servidor');
+  for (const source of ['@Lucas @Lu', '**@ana paula** `@Lu`', '> @todos\n- @Ana\n# @Lu', '```\n@Lu\n```\n@Lucas', 'x@Lu (@Lu)']) {
+    assert(spans(source).length === members.find(source).length, `O destaque mostra exatamente as menções que a regra encontra: ${source}`);
+  }
+  assert(spans('_@Lu_ e __@Lucas__').join() === 'me:@Lu,@Lucas' && renderMarkdown('_@Lu_', { currentNickname: 'Lu', mentions: members })
+    .includes('<em><span class="chat-mention chat-mention-me">@Lu</span></em>'), 'Itálico e negrito com _ envolvem a menção destacada');
+
+  // Um link Markdown mantém endereço, classe e rótulo com menção ou código no endereço, que nunca vira marcação ali.
+  for (const [source, href, label] of [
+    ['[perfil](https://exemplo.com/(@Lucas)/x)', 'https://exemplo.com/(@Lucas', 'perfil'],
+    ["[perfil](https://exemplo.com/'@todos)", 'https://exemplo.com/&#039;@todos', 'perfil'],
+    ['[x](https://a.com/`code`)', 'https://a.com/`code`', 'x'],
+    ['[x](https://a.com/```y```)', 'https://a.com/```y```', 'x'],
+  ]) {
+    const rendered = renderMarkdown(source, { currentNickname: 'Lu', mentions: members });
+    assert(rendered.includes(`<a href="${href}" class="md-link" data-external-link="${href}">${label}</a>`)
+      && !/chat-mention|<code|md-code/.test(rendered), `Link com menção ou código no endereço mantém endereço, classe e rótulo: ${source}`);
+  }
+  const splitLink = renderMarkdown('[a](https://x.com/\n"@Lucas")', { currentNickname: 'Lu', mentions: members });
+  assert(!splitLink.includes('<a ') && splitLink.includes('<span class="chat-mention">@Lucas</span>'),
+    'Um endereço que continua na linha seguinte não vira link e a menção ali segue destacada, como no aviso');
+  const forged = renderMarkdown('@Lu \u0000MN0\u0000 \u0000CB0\u0000 \u0000IC0\u0000 \u0000AL0\u0000', { currentNickname: 'Lu', mentions: members });
+  assert((forged.match(/<span class="chat-mention/g) ?? []).length === 1 && !/md-code|<code|<a |undefined/.test(forged)
+    && forged.includes('\uFFFDMN0\uFFFD'), 'NUL digitado não forja menção, código nem link');
+
+  // O som e o badge usam todos os membros conhecidos, o próprio leitor e o @todos só quando o servidor permite.
+  const mentionServer = createMentionServerStore();
+  mentionServer.bus = new EventBus();
+  const reader: UserSummary = { id: 'reader', clientId: 'reader-device', nickname: 'Lu', status: 'ONLINE', joinedAt: 1 };
+  const offline: UserSummary = { ...reader, id: 'offline', clientId: 'offline-device', nickname: 'Lucas', status: 'DISCONNECTED' };
+  const mentionDetails = { id: 'mentions', name: 'Mentions', createdAt: 1, channels: [], members: [reader], knownMembers: [offline], maxUsers: 10, voiceStates: {} };
+  mentionServer.setServerDetails(mentionDetails, reader);
+  const cue = serverMentionMatcher(mentionServer);
+  assert(!cue.mentions('@Lucas, olha', 'Lu') && cue.mentions('oi @lu!', 'Lu') && cue.mentions('bom dia @todos', 'Lu'),
+    'O aviso de menção só toca para o apelido inteiro do leitor e para @todos');
+  mentionServer.setServerDetails({ ...mentionDetails, allowEveryoneMention: false }, reader);
+  assert(!serverMentionMatcher(mentionServer).mentions('bom dia @todos', 'Lu'), '@todos não avisa quando o servidor desligou a menção');
+
+  // Os mesmos nomes do servidor, só de membros: "@Lucas Bot" menciona o Lucas, com o bot online ou não.
+  const lucasMember: UserSummary = { ...reader, id: 'lucas', clientId: 'lucas-device', nickname: 'Lucas' };
+  const lucasBot: UserSummary = { ...reader, id: 'lucas-bot', clientId: 'bot-lucas-bot', nickname: 'Lucas Bot', isBot: true };
+  mentionServer.setServerDetails({ ...mentionDetails, members: [lucasMember, lucasBot], knownMembers: [lucasMember] }, lucasMember);
+  const withBot = serverMentionMatcher(mentionServer);
+  assert(mentionServer.knownMembers.has(lucasBot.id) && withBot.mentions('@Lucas Bot toca a próxima', 'Lucas')
+    && renderMarkdown('@Lucas Bot toca', { currentNickname: 'Lucas', mentions: withBot })
+      .includes('<span class="chat-mention chat-mention-me">@Lucas</span> Bot'),
+  'Um bot online não é mencionável: "@Lucas Bot" avisa e destaca o Lucas, como no servidor');
+  mentionServer.removeMember(lucasBot.id);
+  assert(serverMentionMatcher(mentionServer).mentions('@Lucas Bot toca a próxima', 'Lucas'),
+    'Depois que o bot sai, a mesma mensagem continua mencionando o Lucas');
 
   // 5. EventBus
   console.log('\n--- Testando EventBus ---');
@@ -753,23 +819,33 @@ function runTests() {
   assert(subset[0].mimeType === 'video/VP8', 'VP8 supera H264 quando AV1 e VP9 não estão presentes');
   assert(subset[1].mimeType === 'video/H264', 'H264 fica como fallback');
 
-  // Testar preferência personalizada do usuário
-  const prefH264 = sortVideoCodecs(mockCodecs, 'h264');
-  assert(prefH264[0].mimeType === 'video/H264', 'H.264 passa a ser o primeiro quando selecionado pelo usuário');
-  assert(prefH264[1].mimeType === 'video/AV1', 'AV1 permanece como segundo fallback na preferência H.264');
+  // 60+ FPS presets put the hardware-friendly codec first (#526)
+  const hardwareFirst = sortVideoCodecs(mockCodecs, true);
+  assert(hardwareFirst[0].mimeType === 'video/H264', 'H.264 passa a ser o primeiro nos presets de movimento');
+  assert(hardwareFirst[1].mimeType === 'video/AV1', 'AV1 permanece como segundo fallback quando o hardware é preferido');
 
-  const prefVp9 = sortVideoCodecs(mockCodecs, 'vp9');
-  assert(prefVp9[0].mimeType === 'video/VP9', 'VP9 passa a ser o primeiro quando selecionado pelo usuário');
-
-  const prefVp8 = sortVideoCodecs(mockCodecs, 'vp8');
-  assert(prefVp8[0].mimeType === 'video/VP8', 'VP8 passa a ser o primeiro quando selecionado pelo usuário');
-
-  // Testar persistência de preferredVideoCodec na SettingsStore
-  const storeCodec = new SettingsStore();
-  assert(storeCodec.preferredVideoCodec === 'auto', 'preferredVideoCodec tem valor padrão "auto"');
-  storeCodec.preferredVideoCodec = 'h264';
-  storeCodec.save();
-  assert(storeCodec.preferredVideoCodec === 'h264', 'preferredVideoCodec foi atualizado e salvo');
+  // R-VOICE-10: a escolha de codec da câmera salva antes do #717 não decide mais nada
+  storageMap.set('monky_settings', JSON.stringify({ preferredVideoCodec: 'vp9', qualityPreset: 'NORMAL' }));
+  const legacyCodecStore = new SettingsStore();
+  legacyCodecStore.save();
+  assert(!('preferredVideoCodec' in JSON.parse(storageMap.get('monky_settings')!)),
+    'A preferência de codec da câmera sem UI some das configurações salvas');
+  globalSettingsStore.qualityPreset = 'NORMAL';
+  const { getPrioritizedVideoCodecs } = require('../src/renderer/core/webrtc/codecPreferences');
+  const fakeCapabilities = { codecs: mockCodecs.map(codec => ({ ...codec })) };
+  const runtime = ['RTCRtpSender', 'RTCRtpReceiver'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const);
+  for (const [name] of runtime) {
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: { getCapabilities: () => fakeCapabilities } });
+  }
+  try {
+    assert(getPrioritizedVideoCodecs()[0].mimeType === 'video/AV1',
+      'Uma preferência VP9 salva antes do #717 não decide mais o codec da câmera');
+  } finally {
+    for (const [name, descriptor] of runtime) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else Reflect.deleteProperty(globalThis, name);
+    }
+  }
 
   // Testar ServerStore com VoiceMode
   console.log('\n--- Testando ServerStore com voiceMode ---');

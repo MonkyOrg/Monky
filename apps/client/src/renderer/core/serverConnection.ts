@@ -40,12 +40,7 @@ export function isVoiceAdmissionPending(sessionKey: string, channelId: string): 
 }
 
 export function getServerSessionForAddress(host: string, port: number): ServerSession | undefined {
-  const canonicalHost = (value: string) => {
-    return value.trim().replace(/^wss?:\/\//i, '').replace(/^\[(.+)\]$/, '$1').toLowerCase();
-  };
-  const normalizedHost = canonicalHost(host);
-  return sessionManager.get(sessionKeyFor(host, port)) ?? sessionManager.getAll()
-    .find(session => session.port === port && canonicalHost(session.host) === normalizedHost);
+  return sessionManager.get(sessionKeyFor(host, port));
 }
 
 export function assertServerBrowseAvailable(host: string, port: number): void {
@@ -374,9 +369,11 @@ export async function joinCallOnSession(
     session.participants.updateVoiceState({
       ...joined.voiceState, isMuted: voiceStore.isMuted, isDeafened: voiceStore.isDeafened,
     });
-    voiceStore.setServerMuted(joined.voiceState.serverMuted);
-    voiceStore.setServerDeafened(joined.voiceState.serverDeafened);
-    voiceStore.setPermissionMuted(!!joined.voiceState.permissionMuted);
+    voiceStore.applyModeration({
+      serverMuted: joined.voiceState.serverMuted,
+      serverDeafened: joined.voiceState.serverDeafened,
+      permissionMuted: !!joined.voiceState.permissionMuted,
+    });
     if (joined.voiceState.isMuted !== voiceStore.isMuted || joined.voiceState.isDeafened !== voiceStore.isDeafened) {
       session.client.send(MessageType.VOICE_STATE_UPDATE, {
         isMuted: voiceStore.isMuted, isDeafened: voiceStore.isDeafened,

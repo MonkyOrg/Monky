@@ -22,6 +22,7 @@ import { clientLog } from './ClientLogService';
 import { t } from '../i18n';
 import { translateProtocolError } from '../i18n/protocolErrors';
 import { settingsStore } from '../stores/settingsStore';
+import { normalizeHost, toWsUrl } from '../utils/serverAddress';
 
 export type ConnectionStatus = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING';
 
@@ -54,7 +55,7 @@ export class RequestTimeoutError extends Error {
   }
 }
 
-/** A request the server answered with a protocol error; keeps the code callers branch on. */
+/** A request, the sign-in included, that the server answered with a protocol error; keeps the code callers branch on. */
 export class ProtocolRequestError extends Error {
   constructor(message: string, public readonly code: ProtocolErrorCode) {
     super(message);
@@ -134,6 +135,8 @@ export class NetworkClient {
   private lastConnectPayload: ConnectState | null = null;
   private manualDisconnect: boolean = false;
   private hasEverConnected: boolean = false;
+  /** Whether a sign-in ever succeeded, over the client's whole life: `hasEverConnected` starts over with each connection. */
+  private connectedOnce = false;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private lastPongAt: number = 0;
   private static readonly HEARTBEAT_INTERVAL_MS = 5000;
@@ -154,14 +157,27 @@ export class NetworkClient {
     this.reconnectNow();
   };
 
-  /** Releases everything the client holds outside itself, for good. */
-  public dispose(): void {
-    this.disconnect();
+  /**
+   * Releases everything the client holds outside itself, for good.
+   *
+   * `quiet` is for a client nobody is looking at: if it never signed in, it
+   * goes without `network.disconnected`. Its connect() call already told its
+   * caller how the attempt ended, and the event would make the app tear down,
+   * for a server it never had, what it tears down for one it lost: menus,
+   * dialogs, the microphone test, the queue of automatic entry.
+   */
+  public dispose(options: { quiet?: boolean } = {}): void {
+    this.end('local', !options.quiet || this.connectedOnce);
     this.emitScoped('network.disposed');
     this.eventListeners.clear();
     if (typeof window !== 'undefined') {
       window.removeEventListener('online', this.onBrowserOnline);
     }
+  }
+
+  /** Whether this client ever signed in to its server, even if it is down now. */
+  public hasConnectedOnce(): boolean {
+    return this.connectedOnce;
   }
 
   private reconnectNow(): void {
@@ -296,8 +312,9 @@ export class NetworkClient {
       this.hasEverConnected = false;
     }
 
-    const cleanHost = host.trim().replace(/^ws:\/\//, '').replace(/^wss:\/\//, '');
-    this.currentServerUrl = `ws://${cleanHost}:${port}`;
+    // IPv6 needs its brackets in the URL; the TCP probe of a failure needs them gone.
+    const probeHost = normalizeHost(host);
+    this.currentServerUrl = toWsUrl({ host, port });
     this.serverName = '';
     if (!this.sessionKey) this.sessionKey = this.currentServerUrl;
     this.lastConnectPayload = {
@@ -324,7 +341,7 @@ export class NetworkClient {
           if (this.pendingConnect === attempt) this.pendingConnect = null;
           reject(reason);
         };
-        if (diagnose) void this.diagnoseConnectionFailure(cleanHost, port).then(finish);
+        if (diagnose) void this.diagnoseConnectionFailure(probeHost, port).then(finish);
         else finish(error);
       };
 
@@ -362,6 +379,7 @@ export class NetworkClient {
             this.iceServers = (res.iceServers ?? []).map((server) => ({ ...server }));
             this.reconnectAttempt = 0;
             this.hasEverConnected = true;
+            this.connectedOnce = true;
             this.setStatus('CONNECTED');
             if (isStale()) return;
             this.startHeartbeat();
@@ -418,6 +436,10 @@ export class NetworkClient {
   }
 
   public disconnect(cause: DisconnectCause = 'local'): void {
+    this.end(cause, true);
+  }
+
+  private end(cause: DisconnectCause, announce: boolean): void {
     clientLog.info('NETWORK', 'Disconnecting from server', { cause });
     // Emitting again after the socket already died would run the whole teardown
     // twice — and, with one client per server (#400), would ask the session
@@ -447,7 +469,7 @@ export class NetworkClient {
     // here instead of lingering until their own 8s timeout.
     this.rejectPendingRequests();
     this.setStatus('DISCONNECTED');
-    if (wasLive) this.emitScoped('network.disconnected', { cause } satisfies NetworkDisconnectedPayload);
+    if (wasLive && announce) this.emitScoped('network.disconnected', { cause } satisfies NetworkDisconnectedPayload);
   }
 
   private rejectPendingRequests(): void {
@@ -583,7 +605,9 @@ export class NetworkClient {
       if (type === MessageType.AUTH_FAILED) {
         const authFailed = payload as AuthFailedPayload;
         clientLog.error('NETWORK', 'Authentication failed', { message: authFailed.message });
-        this.pendingAuth.reject(new Error(authFailed.message || t('network.genericConnectError')));
+        // The code tells whether trying again could ever help; servers that send none refuse the identity.
+        this.pendingAuth.reject(new ProtocolRequestError(authFailed.message || t('network.genericConnectError'),
+          authFailed.code ?? ProtocolErrorCode.UNAUTHORIZED));
         return;
       }
 
@@ -603,11 +627,10 @@ export class NetworkClient {
           }, requestId);
           return;
         }
-        this.pendingAuth.reject(
-          new Error(
-            translateProtocolError(errorPayload.code, errorPayload.message, errorPayload.serverProtocolVersion)
-          )
-        );
+        this.pendingAuth.reject(new ProtocolRequestError(
+          translateProtocolError(errorPayload.code, errorPayload.message, errorPayload.serverProtocolVersion),
+          errorPayload.code,
+        ));
         return;
       }
     }

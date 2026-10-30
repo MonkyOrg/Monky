@@ -8,6 +8,53 @@ const { root, digest, regularFiles, verify } = require('./buildTools.cjs');
 const { verifiedFile } = require('../runtime/runtimeFiles.cjs');
 const { copyMonkyLicenses } = require('../../../../../scripts/legal.cjs');
 
+// Vite bundles these into dist; their licenses travel in dist/THIRD_PARTY_NOTICES.txt.
+const RENDERER_ONLY_PACKAGES = [
+  '@codemirror/commands', '@codemirror/lang-markdown', '@codemirror/language', '@codemirror/state',
+  '@codemirror/view', '@lezer/markdown', '@sapphi-red/web-noise-suppressor', '@tensorflow/tfjs-backend-cpu',
+  '@tensorflow/tfjs-backend-webgl', '@tensorflow/tfjs-converter', '@tensorflow/tfjs-core', 'highlight.js',
+  'jsqr', 'material-symbols', 'mediasoup-client', 'qrcode',
+];
+
+function requiredApplicationFiles(platform) {
+  return [
+    // The hosted server's database engine and SFU worker.
+    'node_modules/sql.js/dist/sql-wasm.js',
+    'node_modules/sql.js/dist/sql-wasm.wasm',
+    `node_modules/mediasoup/worker/out/Release/mediasoup-worker${platform === 'win32' ? '.exe' : ''}`,
+    // Fonts the main process embeds in the crash and local-execution pages.
+    'node_modules/@fontsource/inter/package.json',
+    ...[400, 500, 600, 700].map(weight => `node_modules/@fontsource/inter/files/inter-latin-${weight}-normal.woff2`),
+    'node_modules/@fontsource/jetbrains-mono/package.json',
+    'node_modules/@fontsource/jetbrains-mono/files/jetbrains-mono-latin-400-normal.woff2',
+    // Notices build.files must keep while it prunes these packages; the worker's
+    // are extensionless, which is why its exclusions only match names with a dot.
+    'node_modules/sql.js/LICENSE',
+    'node_modules/sql.js/AUTHORS',
+    'node_modules/mediasoup/LICENSE',
+    'node_modules/mediasoup/worker/deps/libwebrtc/LICENSE',
+    'node_modules/mediasoup/worker/deps/libwebrtc/PATENTS',
+    'node_modules/mediasoup/worker/src/RTC/SCTP/LICENSE',
+    'node_modules/mediasoup/worker/src/Utils/README_BASE64_UTILS',
+    'node_modules/@fontsource/inter/LICENSE',
+    'node_modules/@fontsource/jetbrains-mono/LICENSE',
+    'dist/THIRD_PARTY_NOTICES.txt',
+  ];
+}
+
+/** Fails when renderer-only weight returns to the package or a runtime file or notice goes missing. */
+function verifyApplicationContents(app, platform) {
+  for (const name of RENDERER_ONLY_PACKAGES)
+    assert.ok(!fs.existsSync(path.join(app, 'node_modules', name)),
+      `${name} is bundled into the renderer; keep it in devDependencies instead of packaging it.`);
+  for (const relative of requiredApplicationFiles(platform))
+    assert.ok(fs.statSync(path.join(app, relative), { throwIfNoEntry: false })?.isFile(), `Missing packaged file: ${relative}`);
+  const notices = fs.readFileSync(path.join(app, 'dist', 'THIRD_PARTY_NOTICES.txt'), 'utf8');
+  for (const name of RENDERER_ONLY_PACKAGES)
+    assert.match(notices, new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')} `, 'm'),
+      `The renderer third-party notices omit ${name}.`);
+}
+
 function verifySourceInputs() {
   const bin = path.join(root, 'bin', 'win32-x64');
   const rtc = JSON.parse(fs.readFileSync(path.join(bin, 'rtc-build.json'), 'utf8'));
@@ -104,6 +151,22 @@ function detachPackagedHardLinks(directory) {
   }
 }
 
+/**
+ * Runtime files the package must carry unchanged. Type declarations are left
+ * out: nothing executes them, and build.files drops them along with the other
+ * TypeScript (electron-builder always drops *.d.ts).
+ */
+function runtimeSourceFiles() {
+  return ['index.cjs', ...regularFiles(path.join(root, 'runtime')).map(file => path.join('runtime', file))]
+    .filter(relative => !/\.d\.[cm]?ts$/.test(relative));
+}
+
+function verifyPackagedRuntimeSources(directory) {
+  for (const relative of runtimeSourceFiles())
+    assert.deepEqual(fs.readFileSync(path.join(directory, relative)), fs.readFileSync(path.join(root, relative)),
+      `Packaged native runtime differs from the verified source: ${relative}`);
+}
+
 async function afterPack(context) {
   const platform = context.electronPlatformName;
   const contents = platform === 'darwin'
@@ -112,8 +175,9 @@ async function afterPack(context) {
   const licenseDirectory = platform === 'darwin' ? path.join(contents, 'Resources') : contents;
   assert.deepEqual(fs.readFileSync(path.join(licenseDirectory, 'LICENSE')),
     fs.readFileSync(path.resolve(root, '..', '..', '..', '..', 'LICENSE')), 'Missing packaged Monky GPL notice.');
-  const modules = path.join(contents, platform === 'darwin' ? 'Resources' : 'resources',
-    'app', 'node_modules', '@monky');
+  const app = path.join(contents, platform === 'darwin' ? 'Resources' : 'resources', 'app');
+  verifyApplicationContents(app, platform);
+  const modules = path.join(app, 'node_modules', '@monky');
   assert.ok(!fs.existsSync(path.join(modules, 'server', 'data')), 'Server user data must never be packaged.');
   const directory = path.join(modules, 'screen-share');
   assert.ok(fs.lstatSync(directory).isDirectory(), 'The packaged native screen module must be a real directory.');
@@ -140,9 +204,7 @@ async function afterPack(context) {
   fs.cpSync(path.join(root, 'licenses'), path.join(directory, 'licenses'), { recursive: true });
   for (const name of ['README.md', 'README.en.md', 'THIRD_PARTY_NOTICES'])
     fs.copyFileSync(path.join(root, name), path.join(directory, name));
-  for (const relative of ['index.cjs', ...regularFiles(path.join(root, 'runtime')).map(file => path.join('runtime', file))])
-    assert.deepEqual(fs.readFileSync(path.join(directory, relative)), fs.readFileSync(path.join(root, relative)),
-      `Packaged native runtime differs from the verified source: ${relative}`);
+  verifyPackagedRuntimeSources(directory);
   verifyLegalFiles(directory, platform);
   for (const other of ['win32-x64', 'darwin-arm64', 'darwin-x64']) {
     if (other === `${platform}-${arch}`) continue;
@@ -159,6 +221,11 @@ async function afterPack(context) {
 }
 
 module.exports = afterPack;
+module.exports.RENDERER_ONLY_PACKAGES = RENDERER_ONLY_PACKAGES;
+module.exports.requiredApplicationFiles = requiredApplicationFiles;
+module.exports.verifyApplicationContents = verifyApplicationContents;
+module.exports.runtimeSourceFiles = runtimeSourceFiles;
+module.exports.verifyPackagedRuntimeSources = verifyPackagedRuntimeSources;
 module.exports.verifySourceInputs = verifySourceInputs;
 module.exports.verifyLegalFiles = verifyLegalFiles;
 module.exports.verifyMacSourceInputs = verifyMacSourceInputs;

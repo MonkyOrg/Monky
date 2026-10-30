@@ -52,7 +52,6 @@ async function runQualitySettingsSmoke() {
     screenShareTelemetryEnabled: settingsStore.screenShareTelemetryEnabled,
     screenShareTelemetryPosition: settingsStore.screenShareTelemetryPosition,
     screenShareTelemetryMode: settingsStore.screenShareTelemetryMode,
-    preferredVideoCodec: settingsStore.preferredVideoCodec,
     preferredScreenCodec: settingsStore.preferredScreenCodec,
     screenEncodingMode: settingsStore.screenEncodingMode,
     screenEncodingStrategy: settingsStore.screenEncodingStrategy,
@@ -94,7 +93,13 @@ async function runQualitySettingsSmoke() {
       hardwareAvailable = true;
       let completeInitialProbe;
       const initialProbe = new Promise(resolve => { completeInitialProbe = resolve; });
+      const settingsCommands = [];
       window.api = { ...originalApi, platform, nativeScreenCommand: async command => {
+        settingsCommands.push(command.action);
+        // What Main reports where native capture exists; encoders are verified separately.
+        if (command.action === 'capabilities') return { kind: 'capabilities', capabilities: { capture: false,
+          captureAudio: true, receive: true, requiresSelectionProbe: true, captureKinds: ['window', 'monitor', 'game'],
+          backend: null, reason: null } };
         if (command.action === 'probe-encoding') await initialProbe;
         return encodingCommand(command);
       } };
@@ -105,7 +110,6 @@ async function runQualitySettingsSmoke() {
       settingsStore.screenShareTelemetryMode = 'simple';
       settingsStore.screenSharePreviewPauseWhenUnfocused = true;
       settingsStore.screenShareAutoPictureInPicture = true;
-      settingsStore.preferredVideoCodec = 'vp9';
       settingsStore.preferredScreenCodec = 'h264';
       settingsStore.screenEncodingMode = 'hardware';
       settingsStore.screenEncodingStrategy = 'automatic';
@@ -121,6 +125,9 @@ async function runQualitySettingsSmoke() {
       modal.aboutTab.loadAppVersion = async () => {};
       await modal.open();
       const root = document.querySelector('.modal-backdrop--settings');
+      await wait(50);
+      check(settingsCommands.length === 0,
+        `Opening Settings on another tab must not check the screen encoder: ${JSON.stringify(settingsCommands)}`);
       root.querySelector('[data-tab="quality"]').click();
       await settled(() => !!root.querySelector('[data-section-target="video-telemetry"]'), `${locale}/telemetry navigation`);
       const quality = root.querySelector('#tab-panel-quality');
@@ -496,15 +503,15 @@ async function runQualitySettingsSmoke() {
           video: { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 } },
       });
       try {
-        const codec = quality.querySelector('#select-video-codec'), previousCodec = settingsStore.preferredVideoCodec;
+        const codec = quality.querySelector('#select-video-codec');
         const activeSource = videoService.getNativeScreenCapture(metadataOnly.id).source;
         codec.value = 'av1';
         codec.dispatchEvent(new Event('change', { bubbles: true }));
         await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/software AV1 preference`);
         settingsStore.load(false);
         check(settingsStore.preferredScreenCodec === 'av1' && codec.value === 'av1'
-          && settingsStore.preferredVideoCodec === previousCodec && settingsStore.screenEncodingMode === 'software',
-        'Software AV1 must persist independently of the existing camera codec preference.');
+          && settingsStore.screenEncodingMode === 'software',
+        'Software AV1 must persist as the screen codec and encoding mode.');
         check(videoService.getNativeScreenCapture(metadataOnly.id).source === activeSource
           && !document.querySelector('.dialog-card'),
         'A supported next-share codec preference must not replace active source metadata or report coming soon.');
@@ -856,8 +863,7 @@ async function runQualitySettingsSmoke() {
         'Returning to Normal must keep the chosen window and its app-audio preference.');
         gameMethod.click();
         const savedQuality = JSON.stringify({ preset: settingsStore.qualityPreset, profile: settingsStore.customProfile,
-          codec: settingsStore.preferredScreenCodec, encodingMode: settingsStore.screenEncodingMode,
-          cameraCodec: settingsStore.preferredVideoCodec });
+          codec: settingsStore.preferredScreenCodec, encodingMode: settingsStore.screenEncodingMode });
         let resolveRefresh;
         const pendingRefresh = new Promise(resolve => { resolveRefresh = resolve; });
         enumerateSources = () => pendingRefresh;
@@ -885,8 +891,7 @@ async function runQualitySettingsSmoke() {
           !aspect.checked && !audio.checked && nativeCommands === 0,
         'Refresh must add newly opened windows while retaining the exact source, method, audio and aspect-ratio choice.');
         check(JSON.stringify({ preset: settingsStore.qualityPreset, profile: settingsStore.customProfile,
-          codec: settingsStore.preferredScreenCodec, encodingMode: settingsStore.screenEncodingMode,
-          cameraCodec: settingsStore.preferredVideoCodec }) === savedQuality,
+          codec: settingsStore.preferredScreenCodec, encodingMode: settingsStore.screenEncodingMode }) === savedQuality,
         'Refreshing a source list must never change media quality or codec preferences.');
         enumerateSources = async () => { throw new Error('Expected software-only refresh failure'); };
         refresh.click();

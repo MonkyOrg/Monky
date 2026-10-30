@@ -5,6 +5,7 @@ const { test } = require('node:test');
 const { NativeP2pBroker, NATIVE_P2P_CONTROL_SCHEMA, parseNativeP2pMessage } = require('../runtime/nativeP2pBroker.cjs');
 const { NativeRtcCommands, isNativeRtcCommandsForEngine, assertNativeRtcEngineClosed } = require('../runtime/nativeRtcCommands.cjs');
 const { NativeScreenRoutes } = require('../runtime/nativeScreenRoutes.cjs');
+const { NativeSignalOutbox } = require('../runtime/nativeSignalOutbox.cjs');
 
 function deferred() {
   let resolve, reject;
@@ -756,6 +757,50 @@ test('consecutive peer.state patches preserve other fields, isolate peers and re
   await h.connect('a', 'b', 2);
   assert.deepEqual(a.broker.getPeer('b').nativeState, initial, 'a new peer cannot inherit the previous peer state');
   assert.deepEqual(a.broker.getPeer('c').nativeState, initial);
+});
+
+test('a native error of one peer fails only that peer, also once it is already retiring', async t => {
+  const h = await world(t, ['a', 'b', 'c']), a = h.endpoints.get('a');
+  await h.connect('a', 'b');
+  await h.connect('a', 'c');
+  const scopes = [];
+  a.broker.onError = (error, scope) => { a.errors.push(error); scopes.push(scope); };
+  const peerId = a.broker.getPeer('b').peerId;
+  const failure = { code: 'ERR_RTC_PEER', message: 'Peer transport failed.', status: 7, hresult: 0, terminal: true };
+  assert.equal(a.broker.handleNativeEvent({ type: 'error', target: peerId, data: failure }), true);
+  assert.equal(a.broker.getPeer('b').status, 'failed');
+  assert.equal(a.broker.getPeer('c').status, 'open');
+  assert.deepEqual(a.errors.map(error => error.code), ['ERR_RTC_PEER']);
+  assert.deepEqual([scopes[0].remoteSessionId, scopes[0].connectionId, scopes[0].generation], ['b', 'a-b-1', 1]);
+  // A late error of the retiring peer stays with that viewer instead of becoming an engine failure.
+  assert.equal(a.broker.handleNativeEvent({ type: 'error', target: peerId, data: failure }), true);
+  assert.deepEqual(scopes.map(scope => scope.remoteSessionId), ['b', 'b']);
+  assert.equal(a.broker.getPeer('c').status, 'open');
+  // Nothing claims an unknown resource: its endpoint treats it as the whole engine's failure.
+  assert.equal(a.broker.handleNativeEvent({ type: 'error', target: 987654, data: failure }), false);
+});
+
+test('a peer that stays disconnected fails after the grace period, while a reconnected one stays', async t => {
+  const h = await world(t, ['a', 'b', 'c']), a = h.endpoints.get('a');
+  await h.connect('a', 'b');
+  await h.connect('a', 'c');
+  const b = a.broker.getPeer('b').peerId, c = a.broker.getPeer('c').peerId;
+  for (const peerId of [b, c]) {
+    a.engine.emit('peer.state', peerId, { connectionState: 'connected' });
+    a.engine.emit('peer.state', peerId, { connectionState: 'disconnected' });
+  }
+  h.clock.advance(5000);
+  a.engine.emit('peer.state', c, { connectionState: 'connected' });
+  a.engine.emit('peer.state', b, { connectionState: 'connecting' });
+  a.engine.emit('peer.state', b, { iceConnectionState: 'checking' });
+  h.clock.advance(4999);
+  assert.equal(a.broker.getPeer('b').status, 'open', 'A short disconnection can still recover.');
+  h.clock.advance(1);
+  assert.equal(a.broker.getPeer('b').status, 'failed');
+  assert.deepEqual(a.errors.map(error => error.code), ['P2P_NATIVE_DISCONNECTED']);
+  h.clock.advance(60000);
+  assert.equal(a.broker.getPeer('c').status, 'open');
+  assert.equal(a.errors.length, 1);
 });
 
 test('two distinct source groups share one peer, stay sender-disabled before Watch, and Stop is per screen', async t => {
@@ -1574,6 +1619,33 @@ test('a signaling enqueue timeout is bounded even though no remote handler or re
   assert.ok(a.errors.some(error => error.code === 'P2P_TIMEOUT'));
   assert.equal(a.engine.resources.size, 0);
   pendingEnqueue.resolve();
+});
+
+test('through the endpoint signal outbox, held server acknowledgements stall neither negotiation nor a received answer', async t => {
+  const h = await world(t), a = h.endpoints.get('a'), b = h.endpoints.get('b');
+  const acknowledgement = deferred();
+  for (const endpoint of [a, b]) {
+    // Each message reaches the other side at once; the server's acknowledgement is held.
+    const outbox = new NativeSignalOutbox({ timers: h.clock, isCurrent: () => true,
+      onFailure: error => endpoint.errors.push(error),
+      carrier: (to, message) => { h.wire.send(endpoint.name, to, message); return acknowledgement.promise; } });
+    endpoint.broker.send = (to, message) => outbox.send(to, message);
+  }
+  await h.connect();
+  await a.broker.publish(h.supply('a'), 'b');
+  await h.settle();
+  await b.broker.watch('a', 'screen-one', destination('watched'));
+  await h.settle();
+  const [publication] = pubs(a, 'b');
+  assert.ok(a.engine.requests.some(request => request.operation === 'peer.setRemoteDescription' && request.data.type === 'answer'),
+    'The received answer was applied before any acknowledgement.');
+  assert.equal(a.broker.getPeer('b').turn, null);
+  assert.equal(b.broker.getPeer('a').turn, null);
+  assert.equal(publication.enabled, true);
+  assert.equal(watchedReceiver(b, 'a', publication).enabled, true);
+  acknowledgement.resolve();
+  await microtasks();
+  assert.equal(a.errors.length + b.errors.length, 0);
 });
 
 test('negotiation timeout and native SDP rejection have explicit failed outcomes, never fake connected or browser fallback', async t => {

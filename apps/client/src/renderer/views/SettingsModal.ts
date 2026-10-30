@@ -174,6 +174,7 @@ export class SettingsModal {
     if (this.activeTab === 'voice_video') {
       this.voiceVideoTab.activateCameraPreview();
     }
+    if (this.activeTab === 'quality') this.qualityTab.activate();
     const modal = this.modalEl;
     await Promise.all([
       this.voiceVideoTab.refreshDevices(modal).then(() => {
@@ -300,6 +301,8 @@ export class SettingsModal {
     } else {
       this.voiceVideoTab.deactivate();
     }
+    if (tab === 'quality') this.qualityTab.activate();
+    else this.qualityTab.deactivate();
   }
 
   private showError(msg: string): void {

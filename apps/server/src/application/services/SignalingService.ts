@@ -13,6 +13,16 @@ import { IChannelRepository, IVoiceRestrictionRepository } from '../../domain/re
 import type { VoiceRestrictions } from '../../domain/entities';
 import { Logger } from '../../infrastructure/logger/Logger';
 
+function sameRoleSets(a: ReadonlyMap<string, ReadonlySet<string>>, b: ReadonlyMap<string, ReadonlySet<string>>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [userId, roles] of a) {
+    const other = b.get(userId);
+    if (!other || other.size !== roles.size) return false;
+    for (const role of roles) if (!other.has(role)) return false;
+  }
+  return true;
+}
+
 export class SignalingService {
   // Map of sessionId -> VoiceParticipantState. Keyed per connection, not per
   // person, so the same user can be in voice from two devices at once (#309).
@@ -22,6 +32,8 @@ export class SignalingService {
   private legacyScreenViewers = new Map<string, ScreenWatchSignalPayload>();
   private screenRoleIds = new Map<string, Set<string>>();
   private screenRoleVersion: number | null = null;
+  /** Moves whenever the role answers behind screen audiences may have changed. */
+  private screenRolesRevision = 0;
   private currentRoleVersion: () => number | null = () => null;
   private screenSubscriptionRevoked?: (request: Extract<NativeScreenSignalPayload, { action: 'watch' }>) => void;
 
@@ -35,9 +47,11 @@ export class SignalingService {
 
   public setScreenRoles(roles: readonly { id: string }[], userRoles: readonly UserRoleSummary[], version: number): void {
     const existing = new Set(roles.map(role => role.id));
-    this.screenRoleIds = new Map(userRoles.map(user => [
+    const next = new Map(userRoles.map(user => [
       user.userId, new Set(user.roleIds.filter(id => existing.has(id))),
     ]));
+    if (version !== this.screenRoleVersion || !sameRoleSets(this.screenRoleIds, next)) this.screenRolesRevision++;
+    this.screenRoleIds = next;
     this.screenRoleVersion = version;
   }
 
@@ -49,6 +63,15 @@ export class SignalingService {
       else roles.clear();
     }
     this.screenRoleVersion = version;
+    this.screenRolesRevision++;
+  }
+
+  /**
+   * Changes each time the roles behind screen audiences may answer differently,
+   * so what each participant was shown is republished only then (S-VOICE-10).
+   */
+  public getScreenRolesRevision(): number {
+    return this.screenRolesRevision;
   }
 
   public canSeeScreenSource(publisher: VoiceParticipantState, source: NativeScreenSource, viewerUserId?: string): boolean {
@@ -310,12 +333,13 @@ export class SignalingService {
   /**
    * Share ids are relayed verbatim to every other client, which uses them to
    * build DOM ids and attributes. Only MediaStream-shaped ids are accepted so a
-   * malicious client cannot inject markup into other people's stage.
+   * malicious client cannot inject markup into other people's stage. Each id is
+   * kept once: viewers draw one tile per share.
    */
   private static sanitizeShareIds(value: unknown): string[] {
     if (!Array.isArray(value)) return [];
-    return value
-      .filter((id): id is string => typeof id === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(id))
+    return [...new Set(value
+      .filter((id): id is string => typeof id === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(id)))]
       .slice(0, SCREEN_SHARE_LIMITS.maximum);
   }
 

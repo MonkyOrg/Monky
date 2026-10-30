@@ -2655,9 +2655,13 @@ async function runSettingsNavigationSmoke() {
   let cleanups = 0;
   let versions = 0;
   const modal = new SettingsModal();
-  for (const key of ['accountTab', 'soundboardTab', 'stickersTab', 'keybindsTab', 'notificationsTab', 'qualityTab', 'logsTab']) {
+  for (const key of ['accountTab', 'soundboardTab', 'stickersTab', 'keybindsTab', 'notificationsTab', 'logsTab']) {
     modal[key] = { renderHtml: () => '', attachEvents: () => {}, cleanup: () => {} };
   }
+  let qualityActivations = 0;
+  let qualityDeactivations = 0;
+  modal.qualityTab = { renderHtml: () => '', attachEvents: () => {}, cleanup: () => {},
+    activate: () => { qualityActivations++; }, deactivate: () => { qualityDeactivations++; } };
   modal.aboutTab = { renderHtml: () => '', attachEvents: () => {}, cleanup: () => {}, loadAppVersion: async () => { versions++; } };
   modal.voiceVideoTab = {
     renderHtml: () => '<label for="settings-select-fixture">Device</label><select id="settings-select-fixture" title="Device choice"><option value="one">One</option><option value="two">Two</option></select>',
@@ -2668,6 +2672,7 @@ async function runSettingsNavigationSmoke() {
   try {
     await modal.open();
     check(starts === 0 && cameraActivations === 0, 'Opening account settings must not start hidden media previews');
+    check(qualityActivations === 0, 'Opening settings on another tab must not start the screen encoder checks');
     modal.close();
     await modal.open('voice_video');
     check(document.querySelector('#tab-panel-voice_video').style.display !== 'none'
@@ -2688,6 +2693,13 @@ async function runSettingsNavigationSmoke() {
     modal.switchTab('voice_video');
     check(starts === 2 && cameraActivations === 2 && cleanups === priorCleanup,
       'Returning to voice resumes its media previews without duplicating or dropping bindings');
+    check(qualityActivations === 0, 'Voice settings never start the screen encoder checks');
+    modal.switchTab('quality');
+    check(qualityActivations === 1, 'Showing quality settings starts its encoder checks once');
+    const qualityStops = qualityDeactivations;
+    modal.switchTab('account');
+    check(qualityActivations === 1 && qualityDeactivations === qualityStops + 1,
+      'Leaving quality settings stops its automatic encoder checks');
     modal.close();
     check(cleanups === priorCleanup + 1, 'Closing settings performs full voice tab cleanup');
     let resolveRefresh;

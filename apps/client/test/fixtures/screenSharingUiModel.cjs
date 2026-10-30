@@ -286,7 +286,7 @@ function fixture(language = 'en') {
       this.save();
     },
     qualityPreset: 'NORMAL', customProfile: { ...shared.QUALITY_PRESETS.NORMAL },
-    preferredVideoCodec: 'auto', preferredScreenCodec: 'h264', screenEncodingMode: 'hardware', screenEncodingStrategy: 'automatic',
+    preferredScreenCodec: 'h264', screenEncodingMode: 'hardware', screenEncodingStrategy: 'automatic',
     screenSharePreviewPauseWhenUnfocused: true,
     screenShareTelemetryEnabled: false, screenShareTelemetryPosition: 'top-right', screenShareTelemetryMode: 'simple',
     save() { saves++; appEvents.emit('settings.updated'); },
@@ -449,6 +449,7 @@ function fixture(language = 'en') {
     'views/settings/SettingsSectionNavigation', 'i18n/index', 'i18n/locales/en', 'i18n/locales/pt-BR',
     'i18n/locales/community', 'i18n/locales/serverAudit', 'i18n/locales/botStorage', 'i18n/messageSearch',
     'utils/html', 'utils/buttonLoading', 'utils/loadingSkeleton', 'utils/qualityProfileLimits', 'utils/avatar', 'utils/colors',
+    'utils/serverAddress',
   ]);
   function load(name) {
     if (Object.hasOwn(stubs, name)) return stubs[name];
@@ -485,11 +486,13 @@ function fixture(language = 'en') {
   const i18n = load('i18n/index');
   i18n.setLanguage(language);
   const picker = new ScreenSharePickerModal(), quality = new QualityTab();
-  const mountQuality = () => {
+  const mountQuality = ({ active = true } = {}) => {
     const root = document.createElement('main');
     root.innerHTML = quality.renderHtml();
     document.body.appendChild(root);
     quality.attachEvents(root);
+    // Settings activates the tab only while it is shown; encoder checks wait for that.
+    if (active) quality.activate();
     return root;
   };
   return {

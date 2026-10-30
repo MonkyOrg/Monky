@@ -242,24 +242,35 @@ export class LocalPermissions {
   cancelConnection(owner: number, connectionId: string): void {
     const key = connectionKey(owner, connectionId);
     this.connectionGenerations.set(key, (this.connectionGenerations.get(key) ?? 0) + 1);
+    let changed = false;
     for (const [temporaryKey, entry] of this.temporary) {
-      if (entry.owner === owner && entry.connectionId === connectionId) this.temporary.delete(temporaryKey);
+      if (entry.owner === owner && entry.connectionId === connectionId) {
+        this.temporary.delete(temporaryKey);
+        changed = true;
+      }
     }
     for (const prompt of this.prompts.values()) {
       if (prompt.owner === owner && prompt.subject.connectionId === connectionId) {
         prompt.controller.abort(new LocalExecutionError('executor_unavailable'));
       }
     }
-    this.onChanged();
+    // Only temporary grants are listed; an aborted prompt reports through the request waiting for it.
+    if (changed) this.onChanged();
   }
 
   cancelOwner(owner: number): void {
     this.ownerGenerations.set(owner, (this.ownerGenerations.get(owner) ?? 0) + 1);
-    for (const [key, entry] of this.temporary) if (entry.owner === owner) this.temporary.delete(key);
+    let changed = false;
+    for (const [key, entry] of this.temporary) {
+      if (entry.owner === owner) {
+        this.temporary.delete(key);
+        changed = true;
+      }
+    }
     for (const prompt of this.prompts.values()) {
       if (prompt.owner === owner) prompt.controller.abort(new LocalExecutionError('executor_unavailable'));
     }
-    this.onChanged();
+    if (changed) this.onChanged();
   }
 
   async dispose(): Promise<void> {

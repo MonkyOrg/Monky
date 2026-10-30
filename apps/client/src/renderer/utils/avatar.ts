@@ -1,4 +1,5 @@
 import { networkClient } from '../core/NetworkClient';
+import { toHttpBase } from './serverAddress';
 
 const DEFAULT_AVATAR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="64" height="64"><rect width="24" height="24" fill="#1c232d" rx="12"/><circle cx="12" cy="8" r="4" fill="#9da7b3"/><path d="M4 20c0-4.418 3.582-8 8-8s8 3.582 8 8" fill="#9da7b3"/></svg>`;
 
@@ -44,8 +45,7 @@ export function toAbsoluteServerIconUrl(
 ): string | null {
   if (!iconUrl || iconUrl.trim().length === 0) return null;
   if (!iconUrl.startsWith('/')) return iconUrl;
-  const cleanHost = host.trim().replace(/^wss?:\/\//, '').replace(/^https?:\/\//, '');
-  return `http://${cleanHost}:${port}${iconUrl}`;
+  return `${toHttpBase({ host, port })}${iconUrl}`;
 }
 
 /**

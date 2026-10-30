@@ -149,8 +149,10 @@ async function* regression(language) {
   let canRead = true;
   let current = true;
   let channelId = 'one';
-  let invalidator;
   let watches = 0;
+  const revoked = new Set();
+  const listeners = new Set();
+  const emit = (event, data) => { for (const listener of [...listeners]) listener(event, data); };
   let expanded = false;
   let calls = [];
   let pending;
@@ -176,6 +178,8 @@ async function* regression(language) {
     currentChannelId: () => channelId,
     canRead: () => canRead,
     isCurrent: () => current,
+    // Stands in for `accessSignature`: it only changes when access to these channels changes.
+    access: ids => JSON.stringify([canRead, ids.map(id => `${id}:${!revoked.has(id)}`)]),
     search: (payload, signal) => {
       calls.push({ payload, signal });
       if (delay) return new Promise(resolve => { pending = resolve; });
@@ -185,7 +189,7 @@ async function* regression(language) {
     },
     navigate: (...args) => navigation.push(args),
     setExpanded: value => { expanded = value; },
-    watch: invalidate => { watches++; invalidator = invalidate; return () => { watches--; }; },
+    events: { onEvent: listener => { watches++; listeners.add(listener); return () => { watches--; listeners.delete(listener); }; } },
   });
   const keyboard = key => {
     const event = new KeyboardEvent('keydown', { key, ctrlKey: key === 'f', bubbles: true, cancelable: true });
@@ -631,18 +635,42 @@ async function* regression(language) {
   check(calls.at(-1).payload.cursor === undefined
     && panel().querySelector('.message-search-result').dataset.messageId === 'first',
   'Clicking page one returns directly to the first result page');
+  // R-CHAT-3: the server re-sends the role list on every login and broadcasts every edit;
+  // only a real change of access or of a shown message touches the results.
+  const searchesBefore = calls.length;
+  const shownResult = panel().querySelector('.message-search-result');
+  emit('message.ROLES_LIST', {});
+  emit('message.CHANNEL_CREATED', { channel: { id: 'new', name: 'new', type: 'TEXT' } });
+  emit('message.CHAT_MESSAGE_UPDATED', { message: { ...message('elsewhere'), content: 'Edited elsewhere' } });
+  await flush();
+  check(!panel().hidden && panel().querySelector('.message-search-result') === shownResult && calls.length === searchesBefore,
+    'Logins and edits outside the results keep the query, filters, page and shown results');
+  emit('message.CHAT_MESSAGE_UPDATED', { message: { ...message('first'), content: 'Edited **result**', editedAt: 2000 } });
+  const edited = panel().querySelector('.message-search-result[data-message-id="first"]');
+  check(edited && edited !== shownResult && edited.querySelector('.message-search-result-content strong')?.textContent === 'result'
+    && !panel().hidden && calls.length === searchesBefore,
+  'Editing a shown result updates it in place without searching again');
+  emit('message.CHAT_MESSAGE_UPDATED', { message: { ...message('first'), content: '', deletedAt: 3000 } });
+  check(!panel().querySelector('.message-search-result') && !panel().hidden
+    && panel().querySelector('.message-search-result-count').textContent.includes('59'),
+  'Deleting a shown result removes it at once and updates the count');
+  revoked.add('forum');
+  emit('message.CHANNEL_UPDATED', { channel: { id: 'forum', name: 'forum', type: 'FORUM' } });
+  check(!panel().hidden && panel().querySelector('.message-search-result-count').textContent.includes('59'),
+    'Access changing only in channels outside the results and filters keeps the search');
+  revoked.delete('forum');
   delay = true;
   await submit();
   const stale = pending;
   canRead = false;
-  invalidator();
+  emit('message.ROLES_LIST', {});
   check(calls.at(-1).signal.aborted && panel().hidden && !panel().textContent, 'revocation aborts and clears retained DOM');
   stale({ messages: [message('stale')], total: 1 });
   await flush();
   check(panel().hidden && !panel().querySelector('.message-search-result'), 'late reply cannot restore revoked results');
   check(!keyboard('f').defaultPrevented, 'revoked Ctrl+F is not captured');
   canRead = true;
-  invalidator();
+  emit('message.ROLES_LIST', {});
   channelId = 'voice';
   check(keyboard('f').defaultPrevented, 'voice chat Ctrl+F opens message search');
   keyboard('Escape');

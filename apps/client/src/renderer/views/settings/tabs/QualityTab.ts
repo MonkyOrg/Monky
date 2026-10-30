@@ -647,6 +647,15 @@ export class QualityTab {
     bindResolution('screen');
   }
 
+  /** Encoder checks start a native encoder, so they run only while this tab is shown (#490). */
+  public activate(): void {
+    this.encoding.activate();
+  }
+
+  public deactivate(): void {
+    this.encoding.deactivate();
+  }
+
   public cleanup(): void {
     if (this.encoding.hasPendingRequest) {
       this.released = true;

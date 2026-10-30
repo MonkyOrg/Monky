@@ -36,6 +36,24 @@ test('AMF level refusal tells the viewer unsupported rather than a connection fa
   await f.publisher.close();
 });
 
+// A viewer reconnects by itself only after connection-failed: every other cause must reach it as such,
+// including the macOS codes and causes wrapped in cleanup errors that Main already recognizes.
+for (const [name, error, reason] of [
+  ['macOS profile refusal', Object.assign(new Error('Profile'), { code: 'ERR_MAC_VIDEO_PROFILE_UNSUPPORTED' }), 'unsupported'],
+  ['macOS source loss', Object.assign(new Error('Lost'), { code: 'ERR_MAC_SOURCE_LOST' }), 'source-unavailable'],
+  ['a wrapped source loss', new AggregateError([new Error('Cleanup failed'),
+    Object.assign(new Error('Lost'), { code: 'ERR_MAC_SOURCE_LOST' })], 'Pipeline retirement failed.'), 'source-unavailable'],
+]) {
+  test(`${name} reaches the viewer as ${reason}, the reason the publisher shows`, async () => {
+    const f = fixture();
+    await f.publisher.receive(f.watch('viewer'));
+    f.endpoints[0].options.onError(error);
+    await tick(); await tick();
+    assert.equal(f.sent.find(value => value.action === 'closed').reason, reason);
+    await f.publisher.close();
+  });
+}
+
 function fixture({ readiness, mode = 'p2p', closeGate } = {}) {
   const endpoints = [], sent = [], errors = [], previews = [];
   const source = { shareId: 'owned-screen', instanceId: randomUUID(), audio: false,
@@ -366,7 +384,8 @@ test('source failure closes its viewers, while another rendition remains indepen
   await tick();
   assert.equal(endpoints[0].closed, true);
   assert.equal(endpoints[1].closed, false);
-  assert.ok(sent.some(value => value.targetSessionId === 'a' && value.action === 'closed' && value.reason === 'capture-failed'));
+  // The same reason the publisher's own window shows (Main): a vanished window is no connection fault.
+  assert.ok(sent.some(value => value.targetSessionId === 'a' && value.action === 'closed' && value.reason === 'source-unavailable'));
   await publisher.close();
 });
 

@@ -1,11 +1,16 @@
 import { defineConfig } from 'vite';
 import path from 'path';
+import { thirdPartyNotices } from './scripts/thirdPartyNotices.cjs';
+
+const notices = thirdPartyNotices();
 
 export default defineConfig({
   root: path.resolve(__dirname, 'src/renderer'),
   base: './',
+  plugins: [notices.plugin],
   worker: {
     format: 'es',
+    plugins: notices.workerPlugins,
   },
   optimizeDeps: {
     // Prebundle lazy TensorFlow dependencies (including CommonJS kernels)

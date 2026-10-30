@@ -11,22 +11,22 @@ import { customVideoFpsLimit, normalizeCustomQualityProfile } from '../src/rende
 
 test('screen encoding defaults to Automatic independently of camera and persists exact Manual software', () => {
   withSettingsStorage(storage => {
+    // Camera codecs saved before #717 must neither leak into screen defaults nor survive a save.
     for (const preferredVideoCodec of ['av1', 'vp9', 'vp8', 'h264']) {
       storage.setItem('monky_settings', JSON.stringify({ preferredVideoCodec }));
       const store = new SettingsStore();
       assert.equal(store.screenEncodingMode, 'hardware');
       assert.equal(store.screenEncodingStrategy, 'automatic');
       assert.equal(store.preferredScreenCodec, 'h264');
-      assert.equal(store.preferredVideoCodec, preferredVideoCodec);
       store.screenEncodingMode = 'software';
       store.screenEncodingStrategy = 'manual';
       store.preferredScreenCodec = 'av1';
       store.save();
+      assert.equal('preferredVideoCodec' in JSON.parse(storage.getItem('monky_settings') ?? '{}'), false);
       const restored = new SettingsStore();
       assert.equal(restored.screenEncodingMode, 'software');
       assert.equal(restored.screenEncodingStrategy, 'manual');
       assert.equal(restored.preferredScreenCodec, 'av1');
-      assert.equal(restored.preferredVideoCodec, preferredVideoCodec);
     }
     storage.setItem('monky_settings', JSON.stringify({ screenEncodingMode: 'chromium', preferredScreenCodec: 'vp9' }));
     const invalid = new SettingsStore();

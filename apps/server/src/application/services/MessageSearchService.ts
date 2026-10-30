@@ -18,7 +18,7 @@ export class MessageSearchService {
   constructor(
     private readonly searchRepo: SqliteMessageSearchRepository,
     private readonly messageRepo: IMessageRepository,
-    private readonly channels: Pick<ChannelService, 'listChannels' | 'canUserAccessChannel'>,
+    private readonly channels: Pick<ChannelService, 'listChannels' | 'accessScope'>,
     private readonly permissions: Pick<PermissionService, 'checkPermission' | 'getRoleAccessVersion'>,
     private readonly chat: Pick<ChatService, 'hydrateMessages'>,
     /** Must advance on channel visibility, membership and role changes, before async writes. */
@@ -44,11 +44,14 @@ export class MessageSearchService {
       }
     };
     assertCurrent();
-    const candidates = (await this.channels.listChannels()).filter(channel =>
+    const listed = await this.channels.listChannels();
+    const candidates = listed.filter(channel =>
       (channel.type === 'TEXT' || channel.type === 'VOICE') &&
       (!filters.channelIds.length || filters.channelIds.includes(channel.id)));
+    // Forum topics are channels too: all of them are checked from this one read (S-APP-5).
+    const access = this.channels.accessScope(listed);
     const accessible = await Promise.all(candidates.map(async channel =>
-      await this.channels.canUserAccessChannel(userId, channel.id, Permission.READ_MESSAGES) ? channel.id : null));
+      await access.can(userId, channel.id, Permission.READ_MESSAGES) ? channel.id : null));
     const channelIds = accessible.filter((id): id is string => id !== null).sort();
     assertCurrent();
     const binding = this.binding(userId, filters, channelIds);
@@ -66,7 +69,9 @@ export class MessageSearchService {
       records.filter((record): record is MessageRecord => record !== null && !record.deletedAt),
       userId,
     );
-    const stillAccessible = await Promise.all(channelIds.map(id => this.channels.canUserAccessChannel(userId, id, Permission.READ_MESSAGES)));
+    // Read again: access may have changed while the page was being built.
+    const latest = this.channels.accessScope(await this.channels.listChannels());
+    const stillAccessible = await Promise.all(channelIds.map(id => latest.can(userId, id, Permission.READ_MESSAGES)));
     assertCurrent();
     if (stillAccessible.some(allowed => !allowed) || revision !== this.searchRepo.getRevision()) {
       throw new MessageSearchError(ProtocolErrorCode.PERMISSION_DENIED, 'Message search changed; search again.');

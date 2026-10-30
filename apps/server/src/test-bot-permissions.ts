@@ -135,8 +135,11 @@ test('only MANAGE_BOTS may approve a requested subset, with persistent optimisti
   assert.equal((await connected.peer.request(MessageType.CHAT_SEND, { channelId: f.textId, content: 'Approved message' })).type, MessageType.CHAT_MESSAGE);
   await connected.peer.error(MessageType.CHAT_LOAD_HISTORY, { channelId: f.textId }, ProtocolErrorCode.BOT_PERMISSIONS_REQUIRED);
   await f.owner.peer.request(MessageType.BOT_REVOKE, { botId: f.botId });
-  assert.equal(reopened.get(f.botId), undefined);
-  assert.equal(reopened.allows(f.botId, 'send_messages'), false);
+  // The live service forgets the bot at once, and nothing stored grants it anything (BOTS-5).
+  for (const permissions of [f.botPermissions, new BotPermissionService(new SqliteBotPermissionRepository(f.database.getDb()))]) {
+    assert.equal(permissions.get(f.botId), undefined);
+    assert.equal(permissions.allows(f.botId, 'send_messages'), false);
+  }
 });
 
 test('changed bot requests never increase grants and invalidate old approvals and live sockets', async (t) => {

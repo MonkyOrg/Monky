@@ -1,12 +1,12 @@
 import { connectionStore, type CreatedServer } from '../stores/connectionStore';
 import { t, getLanguage } from '../i18n';
+import { isLoopbackHost } from '../utils/serverAddress';
 
 /** Starts in flight, per server: a second click joins the same start. */
 const pendingStarts = new Map<string, Promise<void>>();
 
 export function findOwnedServer(host: string, port: number): CreatedServer | undefined {
-  const localHost = host.trim().replace(/^wss?:\/\//i, '').replace(/^\[(.+)\]$/, '$1').toLowerCase();
-  if (!['127.0.0.1', 'localhost', '::1'].includes(localHost)) return undefined;
+  if (!isLoopbackHost(host)) return undefined;
   return connectionStore.createdServers.find(server => server.port === port);
 }
 

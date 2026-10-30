@@ -88,11 +88,12 @@ export class ServerStore {
 
   /**
    * Includes offline members, but only readers of the selected channel.
-   * Orders online members first, then alphabetically, excluding self.
+   * Orders online members first, then alphabetically, excluding self. Bots are
+   * never mentionable: "@Lucas Bot" mentions a member called Lucas.
    */
   public getMentionableUsers(channelId: string): UserSummary[] {
     const list = Array.from(this.knownMembers.values()).filter((user) =>
-      user.id !== this.currentUser?.id && this.canUserReadChannel(user.id, channelId));
+      !user.isBot && user.id !== this.currentUser?.id && this.canUserReadChannel(user.id, channelId));
     return list.sort((a, b) => {
       const aOnline = a.status !== 'DISCONNECTED' ? 0 : 1;
       const bOnline = b.status !== 'DISCONNECTED' ? 0 : 1;
@@ -601,16 +602,19 @@ const PERMISSIONS = Object.values(Permission).filter((value): value is Permissio
 /**
  * What the current member can reach, as a comparable value: equal results mean
  * no server or channel permission of theirs, nor their own roles (which decide
- * private audiences), was granted or revoked.
+ * private audiences), was granted or revoked. `channelIds` limits it to those
+ * channels, so channels created or removed elsewhere leave it as it was.
  */
 export function accessSignature(
   server: Pick<ServerStore, 'serverDetails' | 'currentUser' | 'hasPermission'> & { userRoles?: UserRoleSummary[] },
+  channelIds?: readonly string[],
 ): string {
   const user = server.currentUser;
   if (!server.serverDetails || !user) return '';
   const granted = (channelId?: string) =>
     PERMISSIONS.reduce((mask, permission) => server.hasPermission(permission, channelId) ? mask | permission : mask, 0);
-  const channels = server.serverDetails.channels.map((channel) => `${channel.id}:${granted(channel.id)}`).sort();
+  const channels = server.serverDetails.channels.filter((channel) => !channelIds || channelIds.includes(channel.id))
+    .map((channel) => `${channel.id}:${granted(channel.id)}`).sort();
   const roleIds = [...(server.userRoles?.find((entry) => entry.userId === user.id)?.roleIds ?? [])].sort();
   return JSON.stringify([granted(), roleIds, channels]);
 }

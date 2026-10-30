@@ -1,4 +1,4 @@
-import { MessageType, Permission, ProtocolErrorCode, UserSummary, type ChannelDeletedPayload, type ChannelSummary } from '@monky/shared';
+import { MessageType, Permission, ProtocolErrorCode, UserSummary, type ChannelDeletedPayload, type ChannelSummary, type ServerSettingsUpdatedPayload } from '@monky/shared';
 import { categoryModal } from './CategoryModal';
 import './channelCategories.css';
 import { escapeHtml } from '../utils/html';
@@ -12,7 +12,7 @@ import { currentPresenceStatus, publishedCustomStatus, sessionManager, type Pres
 import { isForegroundEvent } from '../core/sessionRouting';
 import { callClient, isVoiceAdmissionPending, joinCallOnSession, leaveCurrentCall, rejoinCallOnSession, showHome } from '../core/serverConnection';
 import { participantManager } from '../core/ParticipantManager';
-import { serverStore } from '../stores/serverStore';
+import { accessSignature, serverStore } from '../stores/serverStore';
 import { voiceStore } from '../stores/voiceStore';
 import { chatStore } from '../stores/chatStore';
 import { settingsStore, ChatSoundMode } from '../stores/settingsStore';
@@ -27,7 +27,8 @@ import { bindPttIndicators, renderMicrophoneButton } from './PttIndicator';
 import { bindAudioDevicePopovers } from './AudioDevicePopover';
 import { bindFooterControlsMotion } from './FooterControlsMotion';
 import { renderAudioMuteIndicators, renderAudioStateIcon, updateAudioStateIcon } from './AudioStateIcon';
-import { getVoiceControlModeration, isViewingCallServer, toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
+import { getVoiceControlModeration, isViewingCallServer, leaveCall, toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
+import { toggleCamera as toggleCallCamera } from '../core/cameraControls';
 import { VoiceStageView } from './VoiceStageView';
 import { BotScreenDock } from './BotScreenDock';
 import { createChannelModal } from './CreateChannelModal';
@@ -52,7 +53,7 @@ import { renderChannelIcon, showChannelIconLoading } from './channelIcon';
 import { captureHostedServerLeaveState, promptShutdownAfterLeave } from '../utils/hostedServer';
 import { userContextMenu } from './UserContextMenu';
 import { soundboardModal } from './SoundboardModal';
-import { getAvatarUrl, toAbsoluteServerIconUrl } from '../utils/avatar';
+import { getAvatarUrl } from '../utils/avatar';
 import { ownAvatarSource } from '../core/profileSync';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
 import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
@@ -116,7 +117,7 @@ export class MainView {
   private botScreenDock: BotScreenDock | null = null;
   private unbindEvents: Array<() => void> = [];
   private activeContentView: 'chat' | 'stage' = 'chat';
-  private sidebarPingInterval: number | null = null;
+  private unbindSidebarPing: (() => void) | null = null;
   // Caches the rendered screen-share notice so the frequent (per-frame)
   // 'participants.updated' events don't rebuild it on every speaking change,
   // which would flicker the button and drop its listener (#282).
@@ -424,6 +425,7 @@ export class MainView {
         canRead: () => !!session.serverStore.serverDetails?.channels.some(channel =>
           session.serverStore.hasPermission(Permission.READ_MESSAGES, channel.id)),
         isCurrent: () => sessionManager.getActive() === session && !sessionManager.isHome() && session.client.getStatus() === 'CONNECTED',
+        access: channelIds => accessSignature(session.serverStore, channelIds),
         search: async (payload, signal) => {
           if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
           const id = crypto.randomUUID();
@@ -445,16 +447,7 @@ export class MainView {
         setExpanded: expanded => {
           this.container.querySelector('.main-layout')?.classList.toggle('main-layout--search-open', expanded);
         },
-        watch: invalidate => {
-          const detach = session.client.onEvent(event => {
-            if (event === 'network.status' || [
-              MessageType.CHANNEL_UPDATED, MessageType.CHANNEL_CREATED, MessageType.CHANNEL_DELETED,
-              MessageType.CATEGORIES_UPDATED, MessageType.ROLES_LIST, MessageType.CHAT_MESSAGE_UPDATED,
-            ].some(type => event === `message.${type}`)) invalidate();
-          });
-          const locale = appEvents.on('i18n.language_changed', invalidate);
-          return () => { detach(); locale(); };
-        },
+        events: session.client,
       });
     }
     this.updateVoiceConnectionRow();
@@ -588,6 +581,22 @@ export class MainView {
     );
   }
 
+  /** Whether the center shows the voice stage right now; Home never does. */
+  private stageShown(): boolean {
+    return !sessionManager.isHome() && this.activeContentView === 'stage';
+  }
+
+  /**
+   * The media bar and the camera shortcut. The camera belongs to the call; only
+   * a stage on screen redraws its own tile, never one destroyed by a navigation.
+   */
+  public async toggleCamera(): Promise<void> {
+    await toggleCallCamera();
+    if (!this.stageShown()) return;
+    this.voiceStageView?.updateControlsUI();
+    this.voiceStageView?.renderParticipants();
+  }
+
   /**
    * Builds (or clears) the sidebar voice-connection row shown only while the
    * user is in a voice channel: channel name, ping and a leave button (#60).
@@ -656,16 +665,14 @@ export class MainView {
       }
     });
 
-    document.getElementById('sidebar-btn-leave-voice')?.addEventListener('click', () => {
-      this.voiceStageView?.leaveVoice();
-    });
+    document.getElementById('sidebar-btn-leave-voice')?.addEventListener('click', leaveCall);
 
     this.startSidebarPing();
   }
 
   private startSidebarPing(): void {
     this.stopSidebarPing();
-    const update = async () => {
+    const update = () => {
       const pingEl = document.getElementById('sidebar-voice-ping');
       if (!pingEl) return;
       const isSfu = webRtcManager.isSfuMode();
@@ -674,8 +681,7 @@ export class MainView {
       const participants = (sessionKey ? sessionManager.get(sessionKey)?.participants.getInVoiceChannel(channelId ?? '') : undefined) ?? [];
       // An idle call has no media flowing, so there is no ping to measure yet.
       const pending = voiceStore.isConnecting || voiceStore.isReconnecting || voiceStore.isIdle;
-      const avg = pending ? null : participants.length <= 1 && !isSfu ? 0 : await webRtcManager.getAverageP2pPing();
-      if (!pingEl.isConnected || channelId !== voiceStore.currentVoiceChannelId || sessionKey !== voiceStore.voiceSessionKey) return;
+      const avg = pending ? null : participants.length <= 1 && !isSfu ? 0 : webRtcManager.getCallPing();
       pingEl.textContent = avg !== null ? `${avg} ms` : '-- ms';
       const { quality, icon } = voiceConnectionIndicator(avg, voiceStore.isReconnecting, voiceStore.isConnecting);
       const signal = document.querySelector<HTMLElement>('.voice-conn-signal');
@@ -695,14 +701,13 @@ export class MainView {
         : `${isSfu ? 'SFU' : 'P2P'} · ${pingEl.textContent} · ${label}`;
     };
     update();
-    this.sidebarPingInterval = window.setInterval(update, 2000);
+    // The call measures its links once for every view showing the ping (R-VOICEUI-7).
+    this.unbindSidebarPing = appEvents.on('voice.ping_updated', update);
   }
 
   private stopSidebarPing(): void {
-    if (this.sidebarPingInterval) {
-      clearInterval(this.sidebarPingInterval);
-      this.sidebarPingInterval = null;
-    }
+    this.unbindSidebarPing?.();
+    this.unbindSidebarPing = null;
   }
 
   private updateParticipantSpeaking(sessionId?: string): void {
@@ -1155,6 +1160,15 @@ export class MainView {
     serverRailView.render();
     this.updateVoiceConnectionRow();
     this.chatView?.resyncAfterReconnect();
+  }
+
+  /**
+   * A server connected, dropped or closed somewhere else. Connections only
+   * show on the rail and on the call row, so nothing else is rebuilt.
+   */
+  public refreshConnections(): void {
+    serverRailView.render();
+    this.updateVoiceConnectionRow();
   }
 
   private activateTextChannel(channelId: string): void {
@@ -2462,15 +2476,14 @@ export class MainView {
     if (!confirmed) return;
 
     // If we are currently in this voice channel, leave it first locally. The
-    // session check keeps a call on another server untouched (#400).
+    // session check keeps a call on another server untouched (#400). A stage
+    // on screen redraws itself; one that is not must not paint over the chat.
     if (
       channel.type === 'VOICE' &&
       voiceStore.currentVoiceChannelId === channelId &&
       voiceStore.voiceSessionKey === sessionManager.getActiveKey()
     ) {
       leaveCurrentCall();
-      this.voiceStageView?.setChannel(null);
-      this.setActiveContentView('chat');
     }
     if (channel.type === 'VOICE' && this.viewedVoiceChannelId === channelId) {
       this.viewedVoiceChannelId = null;
@@ -2833,7 +2846,7 @@ export class MainView {
       if ((mediaCam as HTMLButtonElement).dataset.loading === '1') return;
       setButtonLoading(mediaCam, true);
       try {
-        await this.voiceStageView?.toggleCamera();
+        await this.toggleCamera();
       } finally {
         setButtonLoading(mediaCam, false);
       }
@@ -2986,35 +2999,15 @@ export class MainView {
       this.updateParticipantSpeaking(data.sessionId);
     });
 
-    const u7 = appEvents.on(`message.${MessageType.SERVER_SETTINGS_UPDATED}`, (payload: any) => {
-      // The store above is the one of whichever server sent this. Everything
-      // below writes to the screen and to the saved-server list, so it may only
-      // run for the server actually being looked at (#400).
+    const u7 = appEvents.on(`message.${MessageType.SERVER_SETTINGS_UPDATED}`, (payload: ServerSettingsUpdatedPayload) => {
+      // The store above is the one of whichever server sent this. The header
+      // shows only the server actually being looked at (#400); the saved entry
+      // of any server is updated by the app (main.ts).
       if (!isForegroundEvent()) return;
       const titleEl = document.getElementById('server-name-title');
       if (titleEl) titleEl.innerText = payload.name;
       const iconEl = document.getElementById('server-header-icon') as HTMLImageElement;
       if (iconEl) iconEl.src = payload.iconUrl ? getAvatarUrl(payload.iconUrl) : logoUrl;
-      // Persist the rename and the icon on the saved server entry. Only the icon
-      // was written back, so Home and the sidebar kept the old name until the
-      // next connection (#85).
-      const url = networkClient.getCurrentServerUrl();
-      if (url) {
-        const match = url.match(/\/\/([^:]+):(\d+)/);
-        if (match) {
-          const host = match[1];
-          const port = parseInt(match[2], 10);
-          connectionStore.updateSavedServerMeta(host, port, {
-            name: payload.name,
-            iconUrl: toAbsoluteServerIconUrl(host, port, payload.iconUrl),
-          });
-          // A server hosted from this machine also has an entry in "Meus
-          // Servidores", with its own copy of the name.
-          if (host === '127.0.0.1' || host === 'localhost') {
-            connectionStore.renameCreatedServerByPort(port, payload.name);
-          }
-        }
-      }
       serverRailView.render();
     });
 
@@ -3044,6 +3037,11 @@ export class MainView {
       this.updateScreenShareNotice();
       // Keeps the "call is here" marker on the rail in sync (#400).
       serverRailView.render();
+      // Hanging up from the sidebar row, the tray or the taskbar goes around the
+      // stage: a room on screen must drop its call controls by itself.
+      if (!voiceStore.currentVoiceChannelId && this.stageShown() && this.viewedVoiceChannelId) {
+        this.voiceStageView?.setChannel(this.viewedVoiceChannelId);
+      }
     });
 
     // PiP "back to tab" returns to the call it was showing, even from another server.

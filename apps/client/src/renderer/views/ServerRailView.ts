@@ -21,6 +21,7 @@ import {
   confirmStopHostedServer,
 } from '../utils/hostedServer';
 import { toAbsoluteServerIconUrl } from '../utils/avatar';
+import { serverAddressKey } from '../utils/serverAddress';
 import { initialImageState } from '../utils/imageFallback';
 import { t } from '../i18n';
 import { contextMenu, type ContextMenuEntry } from './ContextMenu';
@@ -59,7 +60,7 @@ export function serverRailCallIcon(
 
 export class ServerRailView {
   /**
-   * Server the user is currently connecting to, as `host:port`. Kept on the view
+   * Server the user is currently connecting to, as its address key. Kept on the view
    * (instead of poked straight into the DOM) because `render()` runs again on
    * network events and would wipe any attribute set by hand (#332).
    */
@@ -73,7 +74,14 @@ export class ServerRailView {
   private pointerDrag: { item: DraggedRailItem; startX: number; startY: number; active: boolean } | null = null;
   private suppressRailClick = false;
   private lastProbeTime = 0;
-  private probeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private probeTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * What the last HTTP probe saw of each saved server that no session vouches
+   * for, by address key. The dots are painted from it after every render and
+   * every probe (applyStatuses): a probe written only into the DOM outlived the
+   * state it described, once an unchanged rail stopped being rebuilt.
+   */
+  private readonly probedOnline = new Map<string, boolean>();
   private homeBadgeCount = 0;
   /** Ports of the servers this app is hosting right now, pushed by the main process. */
   private hostedPorts = new Set<number>();
@@ -85,6 +93,9 @@ export class ServerRailView {
   private pendingFolderMotion = new Map<string, boolean>();
   /** Folders painted by the previous render; null before the first one. */
   private renderedFolderIds: Set<string> | null = null;
+  /** Rail element and markup painted last: an unchanged rail is not rebuilt. */
+  private renderedRail: HTMLElement | null = null;
+  private renderedMarkup = '';
   private hostedStatusBound = false;
   private static readonly PROBE_INTERVAL_MS = 15000;
   /** Share of a server's height, at each edge, that places instead of grouping. */
@@ -105,7 +116,7 @@ export class ServerRailView {
   }
 
   private static keyOf(host: string, port: number): string {
-    return `${host.trim().replace(/^wss?:\/\//, '')}:${port}`;
+    return serverAddressKey({ host, port });
   }
 
   /** Logical server id used by the per-server notification preference. */
@@ -138,8 +149,7 @@ export class ServerRailView {
   }
 
   private folderServers(folder: RailFolderNode): SavedServer[] {
-    return folder.children.flatMap((child) => connectionStore.savedServers.find(
-      (server) => server.host === child.host && server.port === child.port) ?? []);
+    return folder.children.flatMap((child) => connectionStore.findSavedServer(child) ?? []);
   }
 
   private setServerNotifications(serverId: string, mode: ChatSoundMode): void {
@@ -164,7 +174,6 @@ export class ServerRailView {
     if (!railEl) return;
 
     this.bindHostedStatus();
-    contextMenu.close();
 
     // The active key (not the proxied client) is what identifies the server on
     // screen: during a background event the proxy points elsewhere (#400).
@@ -173,6 +182,8 @@ export class ServerRailView {
     const savedByKey = new Map(
       (connectionStore.savedServers || []).map((server) => [ServerRailView.keyOf(server.host, server.port), server])
     );
+    // A server removed, or moved to another address, starts over from "checking" if it comes back.
+    for (const key of this.probedOnline.keys()) if (!savedByKey.has(key)) this.probedOnline.delete(key);
     const layout = connectionStore.railLayout || [];
 
     const nodesHtml = layout.map((node, index) => {
@@ -181,7 +192,7 @@ export class ServerRailView {
       return `${this.renderRootDropZone(index)}${nodeHtml}`;
     }).join('');
 
-    railEl.innerHTML = `
+    const markup = `
       <button class="server-rail-home" id="server-rail-home" title="${t('main.homeTitle')}" aria-current="${sessionManager.isHome() ? 'page' : 'false'}" ${busy ? 'disabled' : ''}>
         <span class="material-symbols-outlined md-22">home</span>
         ${this.homeBadgeCount > 0 ? `<span class="server-rail-home-badge">${this.homeBadgeCount}</span>` : ''}
@@ -193,6 +204,20 @@ export class ServerRailView {
         ${this.renderAddServerButton(busy)}
       </div>
     `;
+    // Messages of background servers, community updates and saved-server writes
+    // ask for a render far more often than the rail changes. Rebuilding the same
+    // markup would close the rail's menus and drop the marks of a drag in progress.
+    if (railEl === this.renderedRail && markup === this.renderedMarkup && !this.pendingFolderMotion.size) {
+      this.applyStatuses(railEl);
+      this.scheduleStatusRefresh();
+      return;
+    }
+    // Only a menu opened from the rail loses its anchor here; the menus of
+    // messages, channels, DMs or the status stay open.
+    if (contextMenu.isOpenWithin(railEl)) contextMenu.close();
+    railEl.innerHTML = markup;
+    this.renderedRail = railEl;
+    this.renderedMarkup = markup;
 
     railEl.querySelector('#server-rail-home')?.addEventListener('click', showHome);
     railEl.querySelector('#server-rail-add')?.addEventListener('click', () => addServerModal.open());
@@ -206,65 +231,90 @@ export class ServerRailView {
     // Background events may repaint the rail while something is being dragged.
     if (this.pointerDrag?.active) this.markDragging(this.pointerDrag.item);
 
+    this.applyStatuses(railEl);
     this.scheduleStatusRefresh();
   }
 
+  /**
+   * Probes the saved servers at most once per PROBE_INTERVAL_MS (#440): a
+   * second after the rail is drawn, then on every interval while it stays on
+   * screen. Renders are no clock, since an unchanged rail is not redrawn, and a
+   * server that comes back must still be noticed (and reconnected) while
+   * nothing else happens.
+   */
   private scheduleStatusRefresh(): void {
-    const now = Date.now();
-    if (now - this.lastProbeTime < ServerRailView.PROBE_INTERVAL_MS) {
-      return;
-    }
-
-    if (this.probeDebounceTimer) {
-      clearTimeout(this.probeDebounceTimer);
-    }
-
-    this.probeDebounceTimer = setTimeout(() => {
-      this.probeDebounceTimer = null;
+    if (this.probeTimer) return;
+    const delay = Math.max(1000, this.lastProbeTime + ServerRailView.PROBE_INTERVAL_MS - Date.now());
+    this.probeTimer = setTimeout(() => {
+      this.probeTimer = null;
+      if (!document.getElementById('server-rail')) return;
       this.lastProbeTime = Date.now();
-      void this.refreshServerRailStatuses();
-    }, 1000);
+      void this.refreshServerRailStatuses().finally(() => this.scheduleStatusRefresh());
+    }, delay);
   }
 
+  /**
+   * Asks every saved server that no session vouches for whether it is up. Each
+   * positive answer counts, not just the first: a background connection that
+   * failed is attempted again after the next probe (AutoEntryService). The
+   * answers are painted in place, never by rebuilding the rail.
+   */
   public async refreshServerRailStatuses(): Promise<void> {
+    if (!document.getElementById('server-rail')) return;
+    const currentUrl = sessionManager.isHome() ? null : sessionManager.getActiveKey();
+    await Promise.all(connectionStore.savedServers.map(async (server) => {
+      const key = ServerRailView.keyOf(server.host, server.port);
+      // The server on screen and the ones kept connected show their own
+      // session; the one being connected to hides its dot behind the spinner (#332).
+      const live = getServerSessionForAddress(server.host, server.port);
+      if (this.connectingKey === key || (live && (live.key === currentUrl || live.client.getStatus() === 'CONNECTED'))) return;
+      const preview = await fetchServerPreview(server.host, server.port);
+      const saved = connectionStore.findSavedServer(server);
+      if (!saved) return;
+      this.probedOnline.set(key, preview !== null);
+      if (!preview) return;
+      appEvents.emit('connection.saved_server_online', saved);
+
+      // Pick up the icon of servers the user never connected to (#312). Only
+      // persist on change, otherwise the resulting re-render loops forever.
+      const absolute = toAbsoluteServerIconUrl(saved.host, saved.port, preview.iconUrl);
+      if (absolute && absolute !== saved.iconUrl) {
+        connectionStore.updateSavedServerIcon(saved.host, saved.port, absolute);
+      }
+    }));
     const railEl = document.getElementById('server-rail');
-    if (!railEl) return;
-    const dots = Array.from(
-      railEl.querySelectorAll('.server-rail-avatar')
-    ) as HTMLElement[];
+    if (railEl) this.applyStatuses(railEl);
+  }
 
-    await Promise.all(
-      dots.map(async (btn) => {
-        const dot = btn.querySelector('.server-rail-status-dot') as HTMLElement | null;
-        if (!dot || dot.getAttribute('data-status') === 'online') return;
-        // Leave the button being connected to alone: its dot is hidden behind the
-        // spinner and rewriting the title would clobber the progress text (#332).
-        if (btn.getAttribute('aria-busy') === 'true') return;
-        const host = btn.getAttribute('data-host');
-        const port = parseInt(btn.getAttribute('data-port') || '0', 10);
-        if (!host || !port) return;
-        const preview = await fetchServerPreview(host, port);
-        const online = preview !== null;
-        dot.setAttribute('data-status', online ? 'online' : 'offline');
-        const baseTitle = btn.getAttribute('title')?.split(' • ')[0] || '';
-        btn.title = `${baseTitle} • ${online ? t('main.statusOnline') : t('main.statusOffline')}`;
-        if (online) {
-          const saved = (connectionStore.savedServers || []).find((s) => s.host === host && s.port === port);
-          if (saved) appEvents.emit('connection.saved_server_online', saved);
-        }
-
-        // Pick up the icon of servers the user never connected to (#312). Only
-        // persist on change, otherwise the resulting re-render loops forever.
-        if (!preview) return;
-        const absolute = toAbsoluteServerIconUrl(host, port, preview.iconUrl);
-        const saved = (connectionStore.savedServers || []).find(
-          (s) => s.host === host && s.port === port
-        );
-        if (saved && absolute && absolute !== saved.iconUrl) {
-          connectionStore.updateSavedServerIcon(host, port, absolute);
-        }
-      })
-    );
+  /**
+   * Paints each server's status dot, and the online/offline note of its title,
+   * in place. A session vouches for the server on screen and the ones kept
+   * connected in the background (#400), not for one merely retrying; the
+   * others show the last probe. Statuses change far more often than the rail,
+   * and rebuilding it for one would drop a drag in progress and close a menu
+   * opened from it.
+   */
+  private applyStatuses(railEl: HTMLElement): void {
+    const currentUrl = sessionManager.isHome() ? null : sessionManager.getActiveKey();
+    for (const button of railEl.querySelectorAll<HTMLElement>('.server-rail-avatar')) {
+      const host = button.dataset.host;
+      const port = Number(button.dataset.port);
+      if (!host || !port) continue;
+      const key = ServerRailView.keyOf(host, port);
+      const live = getServerSessionForAddress(host, port);
+      const vouched = !!live && (live.key === currentUrl || live.client.getStatus() === 'CONNECTED');
+      // A probe older than the session is forgotten: a server that drops starts again from "checking".
+      if (vouched) this.probedOnline.delete(key);
+      const probed = this.probedOnline.get(key);
+      const status = vouched || probed === true ? 'online' : probed === false ? 'offline' : 'checking';
+      const dot = button.querySelector<HTMLElement>('.server-rail-status-dot');
+      if (dot && dot.dataset.status !== status) dot.dataset.status = status;
+      // The button being connected to keeps its progress text as the title (#332).
+      if (button.getAttribute('aria-busy') === 'true') continue;
+      const base = button.dataset.railTitle ?? '';
+      const title = probed === undefined ? base : `${base} • ${t(probed ? 'main.statusOnline' : 'main.statusOffline')}`;
+      if (button.title !== title) button.title = title;
+    }
   }
 
   /** Flags the rail as busy and repaints it, so the click has a visible effect (#332). */
@@ -393,10 +443,6 @@ export class ServerRailView {
     const url = live?.key ?? sessionKeyFor(srv.host, srv.port);
     const isCurrent = url === currentUrl;
     const isConnecting = this.connectingKey === ServerRailView.keyOf(srv.host, srv.port);
-    // Servers kept connected while the user looks elsewhere (#400): they may
-    // be hosting the call or have collected messages meanwhile. A session that
-    // is merely retrying does not count as online.
-    const background = !isCurrent && live?.client.getStatus() === 'CONNECTED' ? live : undefined;
     const hasCall = voiceStore.voiceSessionKey === url;
     const callIcon = serverRailCallIcon(live?.community.snapshot?.events, voiceStore.currentVoiceChannelId);
     // A mention outranks a plain unread, so the row shows the red dot instead
@@ -437,12 +483,13 @@ export class ServerRailView {
           data-port="${srv.port}"
           ${folderId ? `data-folder-id="${escapeHtml(folderId)}"` : ''}
           title="${escapeHtml(title)}"
+          data-rail-title="${escapeHtml(title)}"
           ${isConnecting ? 'data-loading="1" aria-busy="true"' : ''}
           ${busy ? 'disabled' : ''}
           style="padding: 0;"
         >
           ${this.renderServerIcon(iconUrl, initial)}
-          <span class="server-rail-status-dot" data-status="${isCurrent || background ? 'online' : 'checking'}"></span>
+          <span class="server-rail-status-dot" data-status="checking"></span>
           ${muted ? `<span class="server-rail-muted" title="${escapeHtml(t('serverRail.mutedTooltip'))}"><span class="material-symbols-outlined md-12" aria-hidden="true">notifications_off</span></span>` : ''}
           ${badge}
         </button>
@@ -505,7 +552,7 @@ export class ServerRailView {
         const host = btn.getAttribute('data-host');
         const port = parseInt(btn.getAttribute('data-port') || '0', 10);
         if (!host || !port) return;
-        const target = (connectionStore.savedServers || []).find((s) => s.host === host && s.port === port);
+        const target = connectionStore.findSavedServer({ host, port });
         if (target) void this.connectToSavedServer(target);
       });
     });
@@ -627,7 +674,7 @@ export class ServerRailView {
         const port = parseInt(btn.getAttribute('data-port') || '0', 10);
         if (!host || !port) return;
         const folderId = btn.getAttribute('data-folder-id');
-        const server = connectionStore.savedServers.find(item => item.host === host && item.port === port);
+        const server = connectionStore.findSavedServer({ host, port });
         if (!server) return;
         contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, this.getServerContextEntries(server, folderId), btn as HTMLElement);
       });

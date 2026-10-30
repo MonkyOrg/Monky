@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import {
   downloadManagedToolAsset,
   findManagedNodeAsset,
@@ -67,6 +68,13 @@ export interface LocalToolsOptions {
   arch?: string;
 }
 
+export interface LocalToolPreparationOptions {
+  /** The dialog's retry may first remove files a failed attempt had to keep. */
+  retryCleanup?: boolean;
+  /** Recompute every executable digest instead of trusting this run's unchanged fingerprints. */
+  fullVerification?: boolean;
+}
+
 export interface LocalTaskCacheOwner {
   /** An exit code alone does not confirm that native descendants are gone. */
   confirmNativeClosed(): void;
@@ -108,6 +116,7 @@ interface Preparation {
   result: Promise<LocalToolPaths>;
   waiters: Set<symbol>;
   settled: boolean;
+  fullVerification: boolean;
 }
 
 interface CacheOwner {
@@ -257,15 +266,29 @@ export class LocalTools {
     };
   }
 
-  /** Read-only, integrity-checked reuse; never prepares/downloads tools implicitly. */
+  /**
+   * Read-only reuse that never prepares or downloads tools. Like a task, it trusts an unchanged fingerprint
+   * of a digest computed earlier in this run and rehashes the executable once the file changes.
+   */
   async readyExecutable(tool: LocalToolId): Promise<string | null> {
     if (!localToolIdSchema.safeParse(tool).success) throw new LocalExecutionError('invalid_request');
     await this.initialize();
     this.assertAvailable(this.lifetime.signal, this.generation);
     if (this.tools[tool].status === 'installing' || this.tools[tool].status === 'removing') return null;
-    const info = await this.inspect(tool, this.lifetime.signal, true);
+    const info = await this.inspect(tool, this.lifetime.signal);
     this.assertAvailable(this.lifetime.signal, this.generation);
     return info.status === 'ready' ? localToolPath(this.root, 'tools', tool, this.executableName(tool)) : null;
+  }
+
+  /** Platform support only, for checks that do not need the inventory walk or any digest. */
+  async supported(): Promise<boolean> {
+    try {
+      await this.initialize();
+      this.assertOpen();
+      return await localToolExtractionSupport(this.platform, this.arch) !== null;
+    } catch (error) {
+      throw toolError(error, 'storage_failed', this.lifetime.signal);
+    }
   }
 
   async snapshot(): Promise<{ supported: boolean; tools: LocalToolInfo[]; toolsBytes: number; cacheBytes: number }> {
@@ -296,19 +319,22 @@ export class LocalTools {
     }
   }
 
-  async prepare(signal: AbortSignal, retryCleanup = false): Promise<LocalToolPaths> {
+  async prepare(signal: AbortSignal, options: LocalToolPreparationOptions = {}): Promise<LocalToolPaths> {
     const generation = this.generation;
-    if (retryCleanup && this.cleanupFailure) await this.retryFailedCleanup(signal, generation);
+    const fullVerification = options.fullVerification === true;
+    if (options.retryCleanup && this.cleanupFailure) await this.retryFailedCleanup(signal, generation);
     this.assertAvailable(signal, generation);
-    if (this.preparation?.controller.signal.aborted) {
+    // Never join cancelled work, nor let a reuse that trusts fingerprints stand in for a full verification.
+    while (this.preparation && (this.preparation.controller.signal.aborted ||
+        fullVerification && !this.preparation.fullVerification)) {
       await waitWithSignal(joinPreparation(this.preparation), signal);
       this.assertAvailable(signal, generation);
     }
     let preparation = this.preparation;
     if (!preparation) {
       const controller = new AbortController();
-      const result = this.prepareTools(controller, generation);
-      preparation = { controller, result, waiters: new Set(), settled: false };
+      const result = this.prepareTools(controller, generation, fullVerification);
+      preparation = { controller, result, waiters: new Set(), settled: false, fullVerification };
       this.preparation = preparation;
       const current = preparation;
       const finish = (): void => {
@@ -516,21 +542,27 @@ export class LocalTools {
     }
   }
 
-  private async refresh(signal: AbortSignal): Promise<void> {
+  /** Inventory pass over every tool; reports whether the published tool state changed. */
+  private async refresh(signal: AbortSignal, forceHash = false): Promise<boolean> {
     await localToolDirectory(this.toolsDirectory());
     await localToolDirectory(this.cacheDirectory());
+    let changed = false;
     for (const tool of LOCAL_TOOL_IDS) {
       if (this.tools[tool].status === 'installing' || this.tools[tool].status === 'removing') continue;
       const revision = this.revisions[tool];
       try {
-        const info = await this.inspect(tool, signal);
-        if (revision === this.revisions[tool]) this.update(tool, info, false);
+        const info = await this.inspect(tool, signal, forceHash);
+        if (revision === this.revisions[tool]) {
+          changed ||= !isDeepStrictEqual(info, this.tools[tool]);
+          this.update(tool, info, false);
+        }
       } catch (error) {
         // An owned removal/publication can invalidate an older inventory read.
         if (revision === this.revisions[tool]) throw error;
         assertSignal(signal);
       }
     }
+    return changed;
   }
 
   private async inspect(tool: LocalToolId, signal: AbortSignal, forceHash = false): Promise<LocalToolInfo> {
@@ -621,7 +653,7 @@ export class LocalTools {
       suffix.slice(separator + 1) === expected.name;
   }
 
-  private async prepareTools(controller: AbortController, generation: number): Promise<LocalToolPaths> {
+  private async prepareTools(controller: AbortController, generation: number, fullVerification: boolean): Promise<LocalToolPaths> {
     const { signal } = controller;
     const timer = setTimeout(() => controller.abort(new LocalExecutionError('timeout')), PREPARATION_TIMEOUT);
     try {
@@ -632,38 +664,18 @@ export class LocalTools {
       this.assertAvailable(signal, generation);
       const support = this.support;
       if (!support) throw new LocalExecutionError('unsupported_platform');
-      await this.refresh(signal);
+      // One integrity pass before any use. An executable whose lstat fingerprint is unchanged since a full
+      // digest in this run is trusted; that record lives only in memory, so every run hashes each tool once.
+      if (await this.refresh(signal, fullVerification)) this.notify();
       this.assertAvailable(signal, generation);
       if (LOCAL_TOOL_IDS.some((tool) => this.tools[tool].status === 'invalid')) throw new LocalExecutionError('integrity_failed');
-      const implementation = await checkToolExtraction(support, signal);
+      let implementation: 'gnu' | 'bsd' | undefined;
       for (const tool of LOCAL_TOOL_IDS) {
         this.assertAvailable(signal, generation);
-        if (this.tools[tool].status === 'ready') {
-          const expected = this.receipts.get(tool)?.receipt.version;
-          try {
-            let info = await this.inspect(tool, signal, true);
-            if (info.status !== 'ready') throw new LocalExecutionError('integrity_failed');
-            this.assertAvailable(signal, generation);
-            // Integrity is still rehashed on every use. A native version probe
-            // is needed only once per unchanged generation in this process.
-            if (this.verifiedGenerations.get(tool) !== this.receiptGeneration(tool)) {
-              const version = await this.check(tool, this.paths(), signal);
-              this.assertAvailable(signal, generation);
-              info = await this.inspect(tool, signal);
-              if (info.status !== 'ready' || version !== expected) throw new LocalExecutionError('integrity_failed');
-              this.verifiedGenerations.set(tool, this.receiptGeneration(tool));
-            }
-            this.assertAvailable(signal, generation);
-            this.update(tool, info);
-          } catch (error) {
-            if (!signal.aborted) {
-              this.invalid.add(tool);
-              this.verifiedGenerations.delete(tool);
-              this.update(tool, { ...this.tools[tool], status: 'invalid', failure: localFailure(error, 'tool_install_failed'), progress: null });
-            }
-            throw error;
-          }
-        } else {
+        if (this.tools[tool].status === 'ready') await this.verifyGeneration(tool, signal, generation);
+        else {
+          // Only an installation extracts an archive, so reusing ready tools never launches tar.
+          implementation ??= await checkToolExtraction(support, signal);
           await this.install(tool, support, implementation, signal, generation);
         }
       }
@@ -673,6 +685,28 @@ export class LocalTools {
       throw toolError(error, 'tool_install_failed', signal);
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  /** The native version probe runs once per unchanged generation in this process. */
+  private async verifyGeneration(tool: LocalToolId, signal: AbortSignal, generation: number): Promise<void> {
+    try {
+      if (this.verifiedGenerations.get(tool) === this.receiptGeneration(tool)) return;
+      const expected = this.receipts.get(tool)?.receipt.version;
+      const version = await this.check(tool, this.paths(), signal);
+      this.assertAvailable(signal, generation);
+      const info = await this.inspect(tool, signal);
+      if (info.status !== 'ready' || version !== expected) throw new LocalExecutionError('integrity_failed');
+      this.assertAvailable(signal, generation);
+      this.verifiedGenerations.set(tool, this.receiptGeneration(tool));
+      this.update(tool, info);
+    } catch (error) {
+      if (!signal.aborted) {
+        this.invalid.add(tool);
+        this.verifiedGenerations.delete(tool);
+        this.update(tool, { ...this.tools[tool], status: 'invalid', failure: localFailure(error, 'tool_install_failed'), progress: null });
+      }
+      throw error;
     }
   }
 

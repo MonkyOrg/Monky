@@ -1,7 +1,9 @@
-import { getMessageText, MESSAGE_SEARCH_PAGE_SIZE, type AttachmentMeta, type ChannelSummary, type ChatMessage, type MessageSearchPayload,
-  type MessageSearchResultPayload, type UserSummary } from '@monky/shared';
+import { getMessageText, MentionMatcher, MESSAGE_SEARCH_PAGE_SIZE, MessageType, type AttachmentMeta, type ChannelSummary,
+  type ChatMessage, type MessageSearchPayload, type MessageSearchResultPayload, type UserSummary } from '@monky/shared';
 import { getLanguage, t } from '../i18n';
 import { messageSearchEn, messageSearchPtBR } from '../i18n/messageSearch';
+import { appEvents } from '../core/EventBus';
+import type { NetworkClient } from '../core/NetworkClient';
 import '../styles/community.css';
 import './MessageSearch.css';
 import { openCommunityModal } from './CommunityModal';
@@ -19,11 +21,35 @@ export interface MessageSearchOptions {
   currentChannelId(): string | null;
   canRead(): boolean;
   isCurrent(): boolean;
+  /**
+   * What the member may read in these channels, plus their own roles, as a comparable
+   * value (`accessSignature`): shown results only survive while it holds.
+   */
+  access(channelIds: readonly string[]): string;
   search(payload: MessageSearchPayload, signal: AbortSignal): Promise<MessageSearchResultPayload>;
   navigate(channelId: string, messageId: string): void;
   setExpanded(expanded: boolean): void;
-  /** Subscribe to permissions/channel changes, message edits/deletions, disconnect and session changes. */
-  watch(invalidate: () => void): () => void;
+  /** The session's server events: permission and channel changes, message edits and deletions, connection. */
+  events: Pick<NetworkClient, 'onEvent'>;
+}
+
+// Events after which the member may read something else. The server sends the
+// role list whenever anyone logs in, so they only matter when the access changes.
+const ACCESS_EVENTS = new Set([
+  MessageType.CHANNEL_UPDATED, MessageType.CHANNEL_CREATED, MessageType.CHANNEL_DELETED,
+  MessageType.CATEGORIES_UPDATED, MessageType.ROLES_LIST,
+].map(type => `message.${type}`));
+
+/** The message of a CHAT_MESSAGE_UPDATED payload, as far as the results need it. */
+function updatedMessage(data: unknown): ChatMessage | null {
+  if (typeof data !== 'object' || data === null || !('message' in data)) return null;
+  const message: unknown = data.message;
+  return isChatMessage(message) ? message : null;
+}
+
+function isChatMessage(value: unknown): value is ChatMessage {
+  return typeof value === 'object' && value !== null && 'id' in value && typeof value.id === 'string'
+    && 'channelId' in value && typeof value.channelId === 'string';
 }
 
 type Key = keyof typeof messageSearchPtBR;
@@ -49,6 +75,9 @@ export class MessageSearch {
   private readonly suggestions = document.createElement('aside');
   private readonly lifetime = new AbortController();
   private readonly unwatch: () => void;
+  /** Channels whose access the shown state depends on, and that access when it was last checked. */
+  private accessChannels: string[] = [];
+  private access = '';
   private request: AbortController | null = null;
   private generation = 0;
   private cursors: Array<string | undefined> = [undefined];
@@ -149,7 +178,10 @@ export class MessageSearch {
         else this.close();
       }
     }, { signal: this.lifetime.signal });
-    this.unwatch = options.watch(() => this.invalidate());
+    this.recordAccess();
+    const detachEvents = options.events.onEvent((event, data) => this.onServerEvent(event, data));
+    const detachLanguage = appEvents.on('i18n.language_changed', () => this.invalidate());
+    this.unwatch = () => { detachEvents(); detachLanguage(); };
     this.renderLaunchState();
   }
 
@@ -168,6 +200,7 @@ export class MessageSearch {
     if (channelId && this.options.channels().some(channel => channel.id === channelId && isMessageChannel(channel))) {
       this.selected.channelIds.add(channelId);
     }
+    this.recordAccess();
     cancelSurfaceMotion(this.panel);
     this.panel.hidden = true;
     this.panel.replaceChildren();
@@ -200,6 +233,7 @@ export class MessageSearch {
     const visible = this.isOpen();
     this.advanced?.close(true);
     this.close(false);
+    this.recordAccess();
     cancelSurfaceMotion(this.panel);
     cancelSurfaceMotion(this.suggestions);
     this.panel.hidden = true;
@@ -223,6 +257,57 @@ export class MessageSearch {
     cancelSurfaceMotion(this.suggestions);
     this.panel.remove();
     this.suggestions.remove();
+  }
+
+  /**
+   * Results disappear only when they may no longer be shown: the member's access
+   * changed, the connection dropped or a shown message was deleted. Someone
+   * logging in or editing a message elsewhere leaves the search as it is.
+   */
+  private onServerEvent(event: string, data: unknown): void {
+    if (event === 'network.status') {
+      this.invalidate();
+    } else if (event === `message.${MessageType.CHAT_MESSAGE_UPDATED}`) {
+      const message = updatedMessage(data);
+      if (message) this.patchResult(message);
+    } else if (ACCESS_EVENTS.has(event) && this.currentAccess() !== this.access) {
+      this.invalidate();
+    }
+  }
+
+  /** Remembers what the shown state depends on: the channels of its results and filters, and the access to them. */
+  private recordAccess(): void {
+    this.accessChannels = [...new Set([...this.messages.map(message => message.channelId), ...this.selected.channelIds])];
+    this.access = this.currentAccess();
+  }
+
+  private currentAccess(): string {
+    return `${this.options.canRead()}:${this.options.access(this.accessChannels)}`;
+  }
+
+  /** Brings a shown result up to date with its edit, deletion or restoration. */
+  private patchResult(message: ChatMessage): void {
+    const index = this.messages.findIndex(result => result.id === message.id);
+    if (index < 0) return;
+    const shown = this.panel.querySelector<HTMLElement>(`.message-search-result[data-message-id="${CSS.escape(message.id)}"]`);
+    if (message.deletedAt) {
+      // Deleted content never stays on screen; keyboard focus moves to a neighbouring result.
+      const neighbour = shown?.contains(document.activeElement) ? shown.nextElementSibling ?? shown.previousElementSibling : null;
+      this.messages.splice(index, 1);
+      this.total = Math.max(0, this.total - 1);
+      shown?.remove();
+      this.renderSummary();
+      this.renderPagination();
+      if (neighbour instanceof HTMLElement) neighbour.focus({ preventScroll: true });
+      return;
+    }
+    this.messages[index] = message;
+    if (!shown) return;
+    const focused = shown.contains(document.activeElement);
+    const result = this.renderResult(message, new MentionMatcher(this.options.users().map(user => user.nickname)));
+    shown.replaceWith(result);
+    initializeCustomMediaPlayers(result);
+    if (focused) result.focus({ preventScroll: true });
   }
 
   private isOpen(): boolean {
@@ -1266,6 +1351,7 @@ export class MessageSearch {
       const channels = new Set(this.options.channels().filter(isMessageChannel).map(channel => channel.id));
       if (result.messages.some(message => message.deletedAt || !channels.has(message.channelId))) { this.invalidate(); return false; }
       this.messages = result.messages;
+      this.recordAccess();
       this.total = result.total;
       this.page = page;
       this.nextCursor = result.nextCursor;
@@ -1301,58 +1387,67 @@ export class MessageSearch {
 
   private renderResults(): void {
     const results = this.panel.querySelector('.message-search-results');
-    const pagination = this.panel.querySelector('.message-search-pagination');
-    if (!results || !pagination) return;
-    results.replaceChildren();
+    if (!results || !this.panel.querySelector('.message-search-pagination')) return;
+    // One matcher for the page: building it walks every known member.
+    const mentions = new MentionMatcher(this.options.users().map(user => user.nickname));
+    results.replaceChildren(...this.messages.map(message => this.renderResult(message, mentions)));
+    initializeCustomMediaPlayers(results);
+    this.renderSummary();
+    this.renderPagination();
+  }
+
+  private renderSummary(): void {
     this.status(this.messages.length ? '' : text('messageSearch.empty'));
     const count = this.panel.querySelector('.message-search-result-count');
     if (count) count.textContent = this.total === 1
       ? text('messageSearch.resultOne') : text('messageSearch.resultMany').replace('{count}', String(this.total));
-    for (const message of this.messages) {
-      const result = document.createElement('article');
-      result.className = 'message-search-result';
-      result.tabIndex = 0;
-      result.setAttribute('role', 'button');
-      const navigate = () => {
-        if (!this.options.isCurrent() || !this.options.canRead()
-          || !this.options.channels().some(channel => channel.id === message.channelId && isMessageChannel(channel))) {
-          this.invalidate(); return;
-        }
-        this.options.navigate(message.channelId, message.id);
-      };
-      result.addEventListener('click', event => {
-        if (event.target instanceof Element && event.target.closest('a, button, video, audio')) return;
+  }
+
+  private renderResult(message: ChatMessage, mentions: MentionMatcher): HTMLElement {
+    const result = document.createElement('article');
+    result.className = 'message-search-result';
+    result.tabIndex = 0;
+    result.setAttribute('role', 'button');
+    const navigate = () => {
+      if (!this.options.isCurrent() || !this.options.canRead()
+        || !this.options.channels().some(channel => channel.id === message.channelId && isMessageChannel(channel))) {
+        this.invalidate(); return;
+      }
+      this.options.navigate(message.channelId, message.id);
+    };
+    result.addEventListener('click', event => {
+      if (event.target instanceof Element && event.target.closest('a, button, video, audio')) return;
+      navigate();
+    });
+    result.addEventListener('keydown', event => {
+      if ((event.key === 'Enter' || event.key === ' ') && event.target === result) {
+        event.preventDefault();
         navigate();
-      });
-      result.addEventListener('keydown', event => {
-        if ((event.key === 'Enter' || event.key === ' ') && event.target === result) {
-          event.preventDefault();
-          navigate();
-        }
-      });
-      result.dataset.messageId = message.id;
-      result.setAttribute('aria-label', `${text('messageSearch.jump')}: ${message.userNickname}`);
-      const jump = document.createElement('span');
-      jump.className = 'message-search-result-jump';
-      jump.textContent = text('messageSearch.jump');
-      const author = document.createElement('strong');
-      author.textContent = `${message.userNickname} · #${this.options.channels().find(channel => channel.id === message.channelId)?.name ?? ''}`;
-      const time = document.createElement('time');
-      time.dateTime = new Date(message.createdAt).toISOString();
-      time.textContent = new Date(message.createdAt).toLocaleString(getLanguage());
-      const content = document.createElement('div');
-      content.className = 'chat-message-text message-search-result-content';
-      content.innerHTML = renderMarkdown(getMessageText(message, getLanguage()).slice(0, 1200), {
-        interactive: true,
-        knownNicknames: this.options.users().map(user => user.nickname),
-      });
-      content.querySelectorAll('.md-code-copy').forEach(button => button.remove());
-      result.append(jump, author, time, content);
-      const attachments = this.renderResultAttachments(message.attachments, message);
-      if (attachments) result.append(attachments);
-      results.append(result);
-    }
-    initializeCustomMediaPlayers(results);
+      }
+    });
+    result.dataset.messageId = message.id;
+    result.setAttribute('aria-label', `${text('messageSearch.jump')}: ${message.userNickname}`);
+    const jump = document.createElement('span');
+    jump.className = 'message-search-result-jump';
+    jump.textContent = text('messageSearch.jump');
+    const author = document.createElement('strong');
+    author.textContent = `${message.userNickname} · #${this.options.channels().find(channel => channel.id === message.channelId)?.name ?? ''}`;
+    const time = document.createElement('time');
+    time.dateTime = new Date(message.createdAt).toISOString();
+    time.textContent = new Date(message.createdAt).toLocaleString(getLanguage());
+    const content = document.createElement('div');
+    content.className = 'chat-message-text message-search-result-content';
+    content.innerHTML = renderMarkdown(getMessageText(message, getLanguage()).slice(0, 1200), { interactive: true, mentions });
+    content.querySelectorAll('.md-code-copy').forEach(button => button.remove());
+    result.append(jump, author, time, content);
+    const attachments = this.renderResultAttachments(message.attachments, message);
+    if (attachments) result.append(attachments);
+    return result;
+  }
+
+  private renderPagination(): void {
+    const pagination = this.panel.querySelector('.message-search-pagination');
+    if (!pagination) return;
     pagination.replaceChildren();
     const previous = this.button('messageSearch.previous', () => void this.goToPage(this.page - 1), 'message-search-page-nav');
     previous.disabled = this.page === 0;

@@ -5,6 +5,7 @@ import {
   type NativeScreenEvent, type NativeScreenFailure, type NativeScreenSource, type NativeScreenVideoProfile,
   type NativeScreenRpcMethod, type NativeScreenSignalPayload, type QualityProfile, type ScreenShareQuality,
   type NativeScreenEndpointDiagnostics, type NativeScreenPreviewState, type NativeScreenCaptureMode,
+  type NativeScreenAudioPreferences,
 } from '@monky/shared';
 import type { ElectronApi } from '../../../preload/preload';
 import type { NetworkClient } from '../NetworkClient';
@@ -22,6 +23,7 @@ import { BrowserScreenSubscription } from './BrowserScreenSubscription';
 import type { RemoteMediaRouter } from './RemoteMediaRouter';
 import type { ScreenCodecPreference } from '@monky/shared';
 import { acceptScreenEncoding } from '../screenEncoding';
+import { showInfoToast } from '../../views/CopyToast';
 
 /** Why viewers see a frozen picture of a local source: its window is minimized or hidden, or a browser stopped drawing it. */
 export type NativeScreenSourceWarning = 'hidden' | 'covered';
@@ -54,6 +56,10 @@ interface Presentation {
   readonly quality: ScreenShareQuality;
   sinkId: string;
   audioWork?: Promise<void>;
+  // A preference refresh waiting behind the audio change in flight: later refreshes join it.
+  queuedAudio?: Promise<void>;
+  // What the native receiver last accepted; applying the same preferences again sends nothing.
+  appliedAudio?: NativeScreenAudioPreferences;
   readonly presentationId: string;
   readonly video: HTMLVideoElement;
   stream: MediaStream | null;
@@ -147,7 +153,12 @@ export class NativeScreenController {
   private call: Call | null = null;
   private retiring = new Set<Call>();
   private availability: Promise<NativeScreenCapabilities> | null = null;
+  // The output chosen for screen audio. A device that is not connected plays on the system default
+  // instead: Chromium rejects a missing device, which would fail the whole Watch, video included.
   private sinkId = resolveAudioOutput(settingsStore, 'screen');
+  // Connected outputs, or null when they cannot be listed (then the chosen device is used as is).
+  private outputs: ReadonlySet<string> | null = null;
+  private outputFallbackNotified: string | null = null;
   private outputWork: Promise<void> = Promise.resolve();
   private shutdownRequested = false;
 
@@ -334,6 +345,9 @@ export class NativeScreenController {
         if (call.stopping || !call.context.isCurrent()) return;
         void call.ready.then(() => this.syncPreviewPreference(call)).catch(error => this.report(error));
       }));
+      const followOutputs = (): void => { void this.followOutputs(call).catch(error => this.report(error)); };
+      navigator.mediaDevices?.addEventListener('devicechange', followOutputs);
+      call.unbind.push(() => navigator.mediaDevices?.removeEventListener('devicechange', followOutputs));
     }
     const call = this.call;
     try {
@@ -368,8 +382,12 @@ export class NativeScreenController {
       const signal = nativeScreenSignalSchema.parse(value);
       if (signal.channelId !== call.config.channelId || signal.targetSessionId !== call.config.sessionId) return;
       await call.ready;
-      await this.updateRoster(call);
-      this.current(call);
+      // Main applies a roster as soon as it receives it, and this IPC is FIFO: dispatching the latest
+      // roster first is enough. Awaiting the viewers it retires would hold every signal for seconds,
+      // reorder signals across rosters and drop them when a retirement fails.
+      const previousRoster = call.rosterTask;
+      const roster = this.updateRoster(call);
+      if (roster !== previousRoster) void roster.catch(error => this.report(error));
       const entry = call.presentations.get(keyOf(signal.publisherSessionId, signal.shareId));
       if (entry?.browser && entry.source.instanceId === signal.sourceInstanceId) {
         try { await entry.browser.receive(signal); }
@@ -873,11 +891,16 @@ export class NativeScreenController {
       entry.stream = video.srcObject;
       call.context.participants.setRemoteScreenStream(publisherSessionId, shareId, entry.stream, { notify: false });
       this.changed();
+      await this.refreshOutputs();
+      assertWanted(entry);
       entry.requested = true;
-      entry.sinkId = this.sinkId;
+      entry.sinkId = this.screenOutput();
+      // Main applies the Watch's own preferences: an identical later change has nothing to send.
+      const audio = this.audioPreferences(call, entry);
+      entry.appliedAudio = audio;
       const result = await call.api.nativeScreenCommand({
         action: 'watch', callId: call.config.callId, publisherSessionId, shareId, quality,
-        presentationId: entry.presentationId, audio: this.audioPreferences(call, entry),
+        presentationId: entry.presentationId, audio,
       });
       assertWanted(entry);
       if (result.kind !== 'subscription' || result.presentationId !== entry.presentationId)
@@ -959,8 +982,59 @@ export class NativeScreenController {
     };
   }
 
-  private applyAudio(call: Call, entry: Presentation, sinkId?: string): Promise<void> {
+  private async refreshOutputs(): Promise<void> {
+    try {
+      const devices = await navigator.mediaDevices?.enumerateDevices?.() ?? [];
+      const outputs = devices.filter(device => device.kind === 'audiooutput' && device.deviceId).map(device => device.deviceId);
+      // Without media permission Chromium hides device IDs, and no chosen device can be judged absent.
+      this.outputs = outputs.length ? new Set(outputs) : null;
+    } catch (error) {
+      this.outputs = null;
+      clientLog.warn('SCREEN_SHARE', 'Screen audio outputs could not be listed', { error: messageOf(error) });
+    }
+  }
+
+  /** The chosen screen output while it is connected, otherwise the system default (announced once per absence). */
+  private screenOutput(): string {
+    const chosen = this.sinkId;
+    if (!chosen || !this.outputs || this.outputs.has(chosen)) {
+      if (this.outputs?.has(chosen)) this.outputFallbackNotified = null;
+      return chosen;
+    }
+    if (this.outputFallbackNotified !== chosen) {
+      this.outputFallbackNotified = chosen;
+      showInfoToast(t('screenShare.audioOutputFallback'), 8000);
+    }
+    return '';
+  }
+
+  // A device came or went: move native screen audio between the chosen output and the system default,
+  // through the same serialized path as choosing an output.
+  private followOutputs(call: Call): Promise<void> {
     const execute = async (): Promise<void> => {
+      if (call.stopping || this.call !== call || !call.context.isCurrent()) return;
+      await this.refreshOutputs();
+      const entries = [...call.presentations.values()].filter(entry => !entry.stopping && !entry.browser && entry.requested);
+      if (!entries.length) return;
+      const output = this.screenOutput();
+      const results = await Promise.allSettled(entries.filter(entry => entry.sinkId !== output)
+        .map(entry => this.applyAudio(call, entry, output)));
+      const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
+      if (failures.length) throw new AggregateError(failures, 'Screen audio could not follow the connected outputs.');
+    };
+    const work = this.outputWork.then(execute, execute);
+    this.outputWork = work;
+    return work;
+  }
+
+  // A volume slider fires dozens of changes per second and every mute or voice update reaches all
+  // screens: at most one preference refresh waits per presentation, it reads the latest preferences
+  // when it runs, and the native receiver only hears about a real change. An output change runs as
+  // its own request, so a refresh never inherits a rejected device.
+  private applyAudio(call: Call, entry: Presentation, sinkId?: string): Promise<void> {
+    if (sinkId === undefined && entry.queuedAudio) return entry.queuedAudio;
+    const execute = async (): Promise<void> => {
+      if (entry.queuedAudio === work) entry.queuedAudio = undefined;
       if (!entry.requested || entry.stopping || entry.state.state === 'unavailable') return;
       this.current(call);
       const { muted, volume } = this.audioPreferences(call, entry);
@@ -971,13 +1045,18 @@ export class NativeScreenController {
         }
         await entry.browser.setMuted(muted);
       } else {
-        await this.ok(call, { action: 'watch-audio', callId: call.config.callId, publisherSessionId: entry.publisherSessionId,
-          shareId: entry.source.shareId, presentationId: entry.presentationId, muted, volume,
-          ...(sinkId !== undefined ? { sinkId } : {}) });
+        const applied = entry.appliedAudio;
+        if (applied?.muted !== muted || applied.volume !== volume || (sinkId !== undefined && applied.sinkId !== sinkId)) {
+          await this.ok(call, { action: 'watch-audio', callId: call.config.callId, publisherSessionId: entry.publisherSessionId,
+            shareId: entry.source.shareId, presentationId: entry.presentationId, muted, volume,
+            ...(sinkId !== undefined ? { sinkId } : {}) });
+          entry.appliedAudio = { muted, volume, sinkId: sinkId ?? applied?.sinkId ?? entry.sinkId };
+        }
       }
       if (sinkId !== undefined && !entry.stopping) entry.sinkId = sinkId;
     };
-    const work = (entry.audioWork ?? Promise.resolve()).then(execute, execute);
+    const work: Promise<void> = (entry.audioWork ?? Promise.resolve()).then(execute, execute);
+    if (sinkId === undefined) entry.queuedAudio = work;
     entry.audioWork = work;
     const clear = (): void => { if (entry.audioWork === work) entry.audioWork = undefined; };
     void work.then(clear, clear);
@@ -997,13 +1076,18 @@ export class NativeScreenController {
       this.sinkId = sinkId;
       const call = this.call;
       if (!call || call.stopping || !call.context.isCurrent()) return;
-      const apply = (deviceId: string) => Promise.allSettled([...call.presentations.values()]
-        .filter(entry => !entry.stopping).map(entry => this.applyAudio(call, entry, deviceId)));
-      const changed = await apply(sinkId);
+      const current = () => [...call.presentations.values()].filter(entry => !entry.stopping);
+      if (current().some(entry => !entry.browser)) await this.refreshOutputs();
+      const apply = () => {
+        const entries = current();
+        const output = entries.some(entry => !entry.browser) ? this.screenOutput() : this.sinkId;
+        return Promise.allSettled(entries.map(entry => this.applyAudio(call, entry, output)));
+      };
+      const changed = await apply();
       const failures = changed.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
       if (!failures.length) return;
       this.sinkId = previous;
-      const restored = await apply(previous);
+      const restored = await apply();
       failures.push(...restored.flatMap(result => result.status === 'rejected' ? [result.reason] : []));
       throw new AggregateError(failures, 'Screen audio output selection failed; the video subscription was retained.');
     };

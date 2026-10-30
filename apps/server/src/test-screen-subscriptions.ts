@@ -1056,6 +1056,37 @@ test('source withdrawal closes native SFU consumers without closing the voice re
   f.manager.close();
 });
 
+test('voice updates that leave screens alone skip the screen reconciliation, and a withdrawal still revokes at once', async () => {
+  const f = await privateScreenFixture();
+  const native = await f.manager.consume('viewer-a', 'room', f.recv, 'video-one', {});
+  let reconciles = 0;
+  const reconcile = f.server['reconcileScreenAccess'].bind(f.server);
+  f.server['reconcileScreenAccess'] = () => { reconciles++; reconcile(); };
+  f.server['broadcastToChannel'] = async () => {};
+  f.server['syncSfuMicrophoneMute'] = async () => {};
+  const [viewer, , publisher] = f.clients;
+  await f.server['handleVoiceStateUpdate'](viewer, { isMuted: true });
+  await f.server['handleVoiceStateUpdate'](viewer, { isSpeaking: true });
+  await f.server['handleVoiceStateUpdate'](publisher, { isCameraOn: true, isSpeaking: true });
+  assert.equal(reconciles, 0, 'a mute, a speaking flag or a camera leave every screen grant as it was');
+  assert.equal(f.manager['consumers'].has(native.id), true);
+  await f.server['handleVoiceStateUpdate'](publisher, { screenShareIds: ['two'], nativeScreenShares: [] });
+  assert.equal(reconciles, 1);
+  assert.equal(f.manager['consumers'].has(native.id), false, 'the withdrawn screen is revoked by the update itself');
+  f.manager.close();
+});
+
+test('a producer is looked up by id alone and only counts in its own room', async () => {
+  const f = await signalingFixture();
+  assert.equal(f.manager.getProducer('video-one')?.channelId, 'room');
+  assert.equal(f.server['canReceiveProducer'](f.clients[0], 'room', 'mic'), true);
+  assert.equal(f.server['canReceiveProducer'](f.clients[0], 'other-room', 'mic'), false, 'a producer never leaks into another room');
+  Object.defineProperty(f.manager['producers'].get('mic')!.producer, 'closed', { value: true });
+  assert.equal(f.manager.getProducer('mic'), undefined, 'a closed producer is gone');
+  assert.equal(f.server['canReceiveProducer'](f.clients[0], 'room', 'mic'), false);
+  f.manager.close();
+});
+
 test('native SFU transport creation validates and routes purpose while omitted purpose preserves the browser call', async () => {
   const f = await signalingFixture();
   const transports = transportCreationFixture(f.manager);

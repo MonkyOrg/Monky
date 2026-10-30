@@ -85,6 +85,8 @@ async function restoreDirectly(fixture: Fixture, roleId: string): Promise<void> 
 }
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+/** A different image than PNG, with the same valid signature. */
+const pngVariant = (tail: number) => Buffer.concat([Buffer.from(PNG, 'base64'), Buffer.from([tail])]).toString('base64');
 const AUDIO_PREVIEW = { url: 'https://cdn.example.test/effect.mp3', fileName: 'effect.mp3', durationMs: 1200 };
 
 const SETTINGS_DEFINITION = {
@@ -218,8 +220,9 @@ test('miniapp end rejects admin revocation committed before its role broadcast',
   let reads = 0;
   t.mock.method(f.channelService, 'getAccessContext', async (userId: string) => {
     const context = await getAccess(userId);
-    // Sweep and room admission read first; hold the actual END administrator check.
-    if (userId === moderator.id && ++reads === 3) {
+    // Nothing changed access since the screen was created, so END sweeps nothing (BOTS-3).
+    // Room admission reads first; hold the actual END administrator check.
+    if (userId === moderator.id && ++reads === 2) {
       authorizationRead();
       await authorizationGate;
     }
@@ -260,6 +263,35 @@ test('miniapp end rejects admin revocation committed before its role broadcast',
     resumeRoleWrite();
     await Promise.allSettled(mutation ? [ending, mutation] : [ending]);
   }
+});
+
+test('a miniapp ends when the voice grant that kept its creator in the room lapses', { timeout: 15000 }, async (t) => {
+  const f = await createPrivateVoiceFixture(t);
+  await f.owner.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+  const screen = botScreenSchema.parse((await f.bot.peer.request(MessageType.BOT_SCREEN_CREATE, {
+    id: 'presence-game', channelId: f.voiceId, invocationId: f.invocationId,
+    title: 'Presence game', html: '<p>Game</p>', state: {},
+  })).payload);
+  assert.equal(screen.creatorUserId, f.caller.id);
+  await f.owner.peer.wait((message) => message.type === MessageType.BOT_SCREEN_SNAPSHOT && message.payload.id === screen.id);
+  // Without the role the room is private to the creator: only being inside it keeps their access.
+  await f.owner.peer.request(MessageType.ROLE_UNASSIGN, { userId: f.caller.id, roleId: f.role.id });
+  const callerSessionId = text(record(f.caller.auth.payload.currentUser).sessionId);
+  await f.caller.peer.close();
+  await f.owner.peer.wait((message) => message.type === MessageType.VOICE_USER_LEFT && message.payload.sessionId === callerSessionId);
+  // A dropped connection keeps the room for 20 s in case they come back, so the game goes on.
+  const kept = await f.bot.peer.request(MessageType.BOT_SCREEN_LIST, { channelId: f.voiceId });
+  assert.deepEqual(records(kept.payload.screens).map((entry) => entry.instanceId), [screen.instanceId]);
+
+  // What the RECONNECT_GRACE_MS timer runs when they do not come back. Nothing
+  // else changes, so only the grant itself can end the game.
+  f.wsServer['clearVoiceReturn'](callerSessionId);
+  for (const peer of [f.bot.peer, f.owner.peer]) {
+    const removed = await peer.wait((message) =>
+      message.type === MessageType.BOT_SCREEN_REMOVED && message.payload.instanceId === screen.instanceId);
+    assert.equal(botScreenRemovedSchema.parse(removed.payload).reason, 'access_revoked');
+  }
+  assert.deepEqual(records((await f.bot.peer.request(MessageType.BOT_SCREEN_LIST, { channelId: f.voiceId })).payload.screens), []);
 });
 
 test('private invocation voice grants allow only room media, retain rosters and revoke on role loss', { timeout: 30000 }, async (t) => {
@@ -2274,11 +2306,12 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     if (!tooLarge.success) assert.equal(tooLarge.errorCode, ProtocolErrorCode.AVATAR_TOO_LARGE);
     assert.equal((await fixture.botRepo.findById(botId))?.name, 'Actual Bot');
     assert.equal(await fixture.botRepo.count(), 2);
+    // The same image, here without its data URL prefix, keeps its file and URL (BOTS-4).
     const updated = await bot.peer.request(MessageType.BOT_UPDATE_PROFILE, { name: 'Updated Bot', avatarBase64: PNG });
     assert.equal(updated.type, MessageType.BOT_PROFILE_UPDATED);
     const profile = record(updated.payload.bot);
     assert.equal(profile.name, 'Updated Bot');
-    assert.notEqual(profile.avatarUrl, avatarUrl);
+    assert.equal(profile.avatarUrl, avatarUrl);
     await barrier();
     assert.ok(alice.peer.messages.some((m) => m.type === MessageType.USER_UPDATED && record(m.payload.user).nickname === 'Updated Bot'));
     const commandsResponse = await alice.peer.request(MessageType.COMMANDS_LIST);
@@ -2286,14 +2319,28 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     assert.ok(records(commandsResponse.payload.commands).every((c) => c.botName === 'Updated Bot' && c.botAvatarUrl === profile.avatarUrl));
     const surveyCommand = records(commandsResponse.payload.commands).find((command) => command.name === 'survey');
     assert.deepEqual(record(records(record(records(surveyCommand?.options)[0]).choices)[0]).audio, AUDIO_PREVIEW);
-    const filename = text(profile.avatarUrl).split('/').pop();
+    // A different image takes a new file and URL and the old file goes.
+    const replaced = await bot.peer.request(MessageType.BOT_UPDATE_PROFILE, { avatarBase64: pngVariant(1) });
+    assert.equal(replaced.type, MessageType.BOT_PROFILE_UPDATED);
+    const replacedUrl = text(record(replaced.payload.bot).avatarUrl);
+    assert.notEqual(replacedUrl, avatarUrl);
+    const filename = replacedUrl.split('/').pop();
     assert.ok(filename);
     const saved = fixture.avatars.getAvatarFile(filename);
     assert.ok(saved);
-    assert.deepEqual(fs.readFileSync(saved.filePath), Buffer.from(PNG, 'base64'));
+    assert.deepEqual(fs.readFileSync(saved.filePath), Buffer.from(pngVariant(1), 'base64'));
     const oldFilename = avatarUrl.split('/').pop();
     assert.ok(oldFilename);
     assert.equal(fixture.avatars.getAvatarFile(oldFilename), null);
+    // A reconnecting bot announces its unchanged profile: only the bot is answered.
+    await barrier();
+    const quiet = alice.peer.messages.length;
+    const repeated = await bot.peer.request(MessageType.BOT_UPDATE_PROFILE, { name: 'Updated Bot', avatarBase64: pngVariant(1) });
+    assert.equal(repeated.type, MessageType.BOT_PROFILE_UPDATED);
+    assert.equal(record(repeated.payload.bot).avatarUrl, replacedUrl);
+    assert.ok(fixture.avatars.getAvatarFile(filename));
+    await barrier();
+    assert.deepEqual(alice.peer.messages.slice(quiet).filter((m) => m.type !== MessageType.PONG).map((m) => m.type), []);
   });
 
   await t.test('validates an entire registry replacement before removing valid commands', async () => {
@@ -2851,7 +2898,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     assert.ok(before?.avatarPath);
     const failStorage = t.mock.method(fixture.avatars, 'saveAvatar', async () => { throw new Error('Test storage failure'); });
     try {
-      await bot.peer.error(MessageType.BOT_UPDATE_PROFILE, { name: 'Must not persist', avatarBase64: PNG }, ProtocolErrorCode.INTERNAL_ERROR);
+      await bot.peer.error(MessageType.BOT_UPDATE_PROFILE, { name: 'Must not persist', avatarBase64: pngVariant(2) }, ProtocolErrorCode.INTERNAL_ERROR);
       assert.equal((await fixture.botRepo.findById(botId))?.name, before.name);
       assert.equal((await fixture.botRepo.findById(botId))?.avatarPath, before.avatarPath);
       assert.ok(fixture.avatars.getAvatarFile(before.avatarPath));

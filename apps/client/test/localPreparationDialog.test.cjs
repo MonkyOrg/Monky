@@ -65,7 +65,12 @@ if (!process.versions.electron) {
     throw new Error(`Preparation UI timed out: ${description}`);
   };
   const evaluate = (window, code) => window.webContents.executeJavaScript(code, true);
-  const click = (window, id) => evaluate(window, `document.getElementById(${JSON.stringify(id)}).click()`);
+  // A click that settles its own dialog destroys that renderer, which then may never answer the script.
+  const click = (window, id) => new Promise((resolve, reject) => {
+    window.once('closed', resolve);
+    evaluate(window, `document.getElementById(${JSON.stringify(id)}).click()`).then(resolve, reject)
+      .finally(() => window.removeListener('closed', resolve));
+  });
   const phase = (window, expected) => until(
     () => !window.isDestroyed() && evaluate(window, `document.body.dataset.phase === ${JSON.stringify(expected)}`), expected);
   const dialog = async () => {
@@ -98,14 +103,15 @@ if (!process.versions.electron) {
     let preparationCalls = 0;
     const tools = {
       initialize: async () => undefined,
+      supported: async () => true,
       snapshot: async () => ({
         supported: true, tools: structuredClone(inventory.tools.map(tool => tool.info)),
         toolsBytes: inventory.tools.reduce((sum, tool) => sum + tool.info.sizeBytes, 0), cacheBytes: 0,
       }),
       preparationInfo: () => structuredClone(inventory),
-      prepare: async (signal, retryCleanup) => {
+      prepare: async (signal, options = {}) => {
         preparationCalls++;
-        await prepare(signal, retryCleanup);
+        await prepare(signal, options.retryCleanup === true);
         signal.throwIfAborted();
         return { node: 'fixture-node', ytDlp: 'fixture-extractor', ffmpeg: 'fixture-ffmpeg' };
       },

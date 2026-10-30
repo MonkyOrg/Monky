@@ -71,12 +71,21 @@ export class RoleService {
     };
   }
 
-  public async ensureDefaultRolesAssigned(userId: string): Promise<void> {
-    const defaultRoles = await this.roleRepo.getDefaultRoles();
-    for (const role of defaultRoles) {
+  /**
+   * Gives a member the default roles they lack and reports whether any was
+   * given. Runs on every sign-in, so a role already held is left alone: each
+   * write is a role mutation that every connection has to hear about (S-WS-4).
+   */
+  public async ensureDefaultRolesAssigned(userId: string): Promise<boolean> {
+    const held = new Set((await this.roleRepo.listRolesForUser(userId)).map((role) => role.id));
+    let assigned = false;
+    for (const role of await this.roleRepo.getDefaultRoles()) {
+      if (held.has(role.id)) continue;
       if ((role.permissions & Permission.ADMINISTRATOR) !== 0 || await this.isBuiltInAdminRole(role.id)) continue;
       await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(userId, role.id), false);
+      assigned = true;
     }
+    return assigned;
   }
 
   public async assignAdminRole(userId: string): Promise<void> {

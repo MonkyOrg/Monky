@@ -44,6 +44,8 @@ interface CommunityTransport {
 export class CommunityHandler {
   private readonly timer: ReturnType<typeof setInterval>;
   private pending: Promise<void> = Promise.resolve();
+  /** The refresh waiting its turn in the queue, shared by whoever asks before it starts. */
+  private queuedRefresh?: Promise<void>;
   private closed = false;
   private lastAccessVersion: number | null = -1;
   private submissions = new Map<string, number>();
@@ -83,7 +85,20 @@ export class CommunityHandler {
     this.pendingStarts.clear();
   }
 
-  refresh(): Promise<void> { return this.enqueue(() => this.refreshNow()); }
+  /**
+   * Republishes every snapshot. A refresh already queued and not started yet
+   * serves every caller that comes before it starts, since it reads the state
+   * they changed: a burst of votes or role edits costs one round (S-WS-4).
+   */
+  refresh(): Promise<void> {
+    if (this.queuedRefresh) return this.queuedRefresh;
+    const refresh = this.enqueue(() => {
+      this.queuedRefresh = undefined;
+      return this.refreshNow();
+    });
+    this.queuedRefresh = refresh;
+    return refresh;
+  }
 
   handle(session: BotInteractionSession, type: MessageType, payload: unknown, requestId?: string): Promise<void> {
     return this.enqueue(async () => {

@@ -139,6 +139,7 @@ carry a second implementation of capture, quality preferences or codec rules.
 | Screen codec and encoding mode | Quality preferences, probed by `core/screenEncoding.ts` and verified when the native source is admitted |
 | Microphone and camera bitrate/FPS limits and adaptation preference | `webrtc/mediaEncodingPolicy.ts`, used by P2P and SFU |
 | Camera codec preference order | `webrtc/codecPreferences.ts`, with capabilities supplied by each transport |
+| ICE route in use (ping, relay indicator and diagnostics) | `webrtc/rtcStats.ts`, used by P2P and SFU; the call measures once and the stage and the sidebar only display it |
 | Serialized RTP parameter changes | `webrtc/rtpSenderParameters.ts`: overlapping updates do not overwrite each other's transaction |
 | Receiving and associating remote media with the UI | `webrtc/RemoteMediaRouter`, shared by both modes |
 | Native capture/encoding/transport and Main-process ownership | `nativeScreenSharing.ts` and `native/screen-share` |

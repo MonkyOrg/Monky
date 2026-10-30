@@ -55,6 +55,12 @@ export function openCommunityModal(title: string) {
   element.querySelector<HTMLElement>('button')!.focus();
   return {
     element, content, close, signal: abort.signal,
+    /** Renames the dialog: its heading and the name assistive technology announces. */
+    setTitle(text: string) {
+      const heading = element.querySelector<HTMLElement>('.modal-title');
+      if (heading && heading.textContent !== text) heading.textContent = text;
+      element.querySelector('.community-modal')?.setAttribute('aria-label', text);
+    },
     fail(message: string) { if (!abort.signal.aborted) { error.textContent = message; error.hidden = false; } },
     clearError() { error.textContent = ''; error.hidden = true; },
     async run(operation: () => Promise<void>) {

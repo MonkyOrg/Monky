@@ -916,6 +916,15 @@ is enabled. When migrating older settings with multiple destinations, only the
 most recent choice is kept. A short animation accompanies the transition from
 Home to the server, unless reduced motion is enabled.
 
+A background connection that fails is not repeated endlessly. If the server
+turns the sign-in down (wrong saved password, incompatible version or identity
+not accepted), Monky stops trying until you change the password in
+**Edit connection** (right-click the server in the rail), enter the server
+yourself or reopen the app. Other failures, such as an unstable network, a
+server that is still starting or one with no room right now (full, or with
+your identity's device limit reached), are retried at growing intervals of up
+to 10 minutes.
+
 ### Section navigation
 
 In app and server settings, selecting a category expands its section shortcuts

@@ -8,11 +8,18 @@ import { isHexColor } from '../utils/colors';
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
 import { scrollWithin, smoothScrollIntoView } from '../utils/scroll';
+import { animateEnter, hideWithMotion, ownSurface } from '../utils/surfaceMotion';
 
 export class ResourceAudiencePicker {
   private audience: ResourceAudience;
   private open = false;
   private positionOpenPopup: (() => void) | null = null;
+  /**
+   * The open popup is registered as a surface of its trigger, so the modal
+   * around it leaves Escape to the popup instead of closing everything.
+   */
+  private ownedPopup: HTMLElement | null = null;
+  private releaseOwner: (() => void) | null = null;
 
   constructor(
     private readonly server: ServerStore,
@@ -80,6 +87,7 @@ export class ResourceAudiencePicker {
   bind(container: HTMLElement, signal: AbortSignal, onChange: () => void): void {
     let positioningScroll = false;
     let positioningScrollTimer: number | null = null;
+    let placedAt: { top: number; left: number } | null = null;
     const finishPositioningScroll = (cancel = false) => {
       if (positioningScrollTimer !== null) window.clearTimeout(positioningScrollTimer);
       positioningScrollTimer = null;
@@ -112,6 +120,7 @@ export class ResourceAudiencePicker {
       const viewportPadding = 12;
       const gap = 8;
       const triggerBox = trigger.getBoundingClientRect();
+      placedAt = { top: triggerBox.top, left: triggerBox.left };
       const width = Math.min(
         Math.max(triggerBox.width, 280),
         window.innerWidth - viewportPadding * 2,
@@ -163,7 +172,13 @@ export class ResourceAudiencePicker {
       );
       if (!root || !(event.target instanceof Node) || !event.target.contains(root)) return;
       if (!positioningScroll) {
-        closePopup();
+        // Scroll events arrive a frame after the movement, so this one may report a
+        // scroll that ended before the popup opened. Only a scroll that moves the
+        // field away from where the popup was placed dismisses it.
+        const box = root.querySelector<HTMLElement>('[data-audience-toggle]')?.getBoundingClientRect();
+        if (!box || !placedAt || Math.abs(box.top - placedAt.top) >= 1 || Math.abs(box.left - placedAt.left) >= 1) {
+          closePopup();
+        }
         return;
       }
       positionPopup();
@@ -203,6 +218,15 @@ export class ResourceAudiencePicker {
       );
       const modal = container.closest('.community-modal, [role="dialog"]') ?? container;
       if (!popup?.contains(event.target) && modal.contains(event.target)) closePopup();
+    }, { capture: true, signal });
+    // While the popup is open the modal leaves the keyboard to it, Tab included,
+    // so it closes as soon as focus moves past the picker.
+    document.addEventListener('focusin', event => {
+      if (!this.open || !(event.target instanceof Node)) return;
+      const root = container.querySelector<HTMLElement>(
+        `[data-resource-audience="${CSS.escape(this.prefix)}"]`,
+      );
+      if (!root?.contains(event.target)) closePopup();
     }, { capture: true, signal });
     container.addEventListener('change', event => {
       const input = event.target instanceof HTMLInputElement ? event.target : null;
@@ -289,6 +313,7 @@ export class ResourceAudiencePicker {
   }
 
   sync(container: ParentNode): void {
+    if (!this.open) this.releasePopup();
     const root = container.querySelector<HTMLElement>(`[data-resource-audience="${CSS.escape(this.prefix)}"]`);
     if (!root) return;
     const audience = this.audience;
@@ -300,21 +325,30 @@ export class ResourceAudiencePicker {
     const popup = root.querySelector<HTMLElement>('[data-audience-popup]');
     if (popup) {
       if (this.open) {
+        const opening = popup.hidden || popup.hasAttribute('data-ui-closing');
         popup.hidden = false;
         if (typeof popup.showPopover === 'function' && popup.dataset.audiencePopoverOpen !== 'true') {
           popup.showPopover();
           popup.dataset.audiencePopoverOpen = 'true';
         }
+        // A wizard step re-render replaces the popup while it stays open.
+        if (toggle && this.ownedPopup !== popup) {
+          this.releasePopup();
+          this.releaseOwner = ownSurface(popup, toggle);
+          this.ownedPopup = popup;
+        }
+        if (opening) animateEnter(popup, 'popover');
         this.positionOpenPopup?.();
         requestAnimationFrame(() => {
           if (this.open && popup.isConnected) this.positionOpenPopup?.();
         });
-      } else {
-        if (typeof popup.hidePopover === 'function' && popup.dataset.audiencePopoverOpen === 'true') {
-          popup.hidePopover();
+      } else if (!popup.hidden && !popup.hasAttribute('data-ui-closing')) {
+        hideWithMotion(popup, 'popover', () => {
+          if (typeof popup.hidePopover === 'function' && popup.dataset.audiencePopoverOpen === 'true') {
+            popup.hidePopover();
+          }
           delete popup.dataset.audiencePopoverOpen;
-        }
-        popup.hidden = true;
+        });
       }
     }
     if (audience.visibility !== 'private') return;
@@ -350,6 +384,12 @@ export class ResourceAudiencePicker {
     if (status) status.textContent = this.isValid()
       ? t('audience.selected', { count: audience.userIds.length + audience.roleIds.length })
       : t('audience.empty');
+  }
+
+  private releasePopup(): void {
+    this.releaseOwner?.();
+    this.releaseOwner = null;
+    this.ownedPopup = null;
   }
 
   private options(): string {

@@ -6,16 +6,13 @@ const { notifyObserver } = require('./asyncTools.cjs');
 const { randomUUID } = require('node:crypto');
 const {
   getScreenShareProfile, messageReferenceSchema, nativeScreenSignalSchema, nativeScreenSourceSchema,
-  screenShareProfileKey, nativeScreenCaptureStatusSchema,
+  screenShareProfileKey, nativeScreenCaptureStatusSchema, nativeScreenFailureReason,
 } = require('@monky/shared');
 
 // Each A/V peer needs a peer and two publications, in addition to shared sources.
 // Leave room under the engine's 64-resource ceiling for in-flight retirement.
 const MAXIMUM_PROFILE_VIEWERS = 16;
 const cancelled = () => new DOMException('The screen subscription was retired.', 'AbortError');
-const failureReason = error => error?.code === 'ERR_SCREEN_CAPACITY' ? 'capacity-exceeded'
-  : error?.code === 'ERR_RTC_ENCODED_FORMAT' || error?.code === 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED' ? 'unsupported'
-  : String(error?.code).includes('CAPTURE') ? 'capture-failed' : 'connection-failed';
 
 class NativeScreenPublisher {
   constructor({ sessionId, channelId, mode, source, iceServers, createEndpoint, send, onError, onState, onPreview = null }) {
@@ -236,7 +233,7 @@ class NativeScreenPublisher {
     } catch (error) {
       const errors = [error];
       if (this.current(viewer) && error.name !== 'AbortError') {
-        try { await this.signal(viewer, { action: 'closed', reason: failureReason(error) }); }
+        try { await this.signal(viewer, { action: 'closed', reason: nativeScreenFailureReason(error) }); }
         catch (signalError) { if (signalError.name !== 'AbortError') errors.push(signalError); }
       }
       try { await this.retireViewer(viewer); }
@@ -321,7 +318,7 @@ class NativeScreenPublisher {
     }
     const results = await Promise.allSettled(viewers.map(async viewer => {
       try {
-        if (this.current(viewer)) await this.signal(viewer, { action: 'closed', reason: failureReason(error) });
+        if (this.current(viewer)) await this.signal(viewer, { action: 'closed', reason: nativeScreenFailureReason(error) });
       } finally { await this.retireViewer(viewer); }
     }));
     if (pipeline.viewers.size === 0 && !pipeline.closing) await this.retirePipeline(pipeline);

@@ -8,12 +8,12 @@ import {
   type ServerEvent, type ServerEventPublic, type LiveAction, type LiveActionRecord, type LiveActionCreate, type LiveActionUpdate,
   type CommunitySettingsUpdate, type EventInterestedList, type EventInterestedListResult, eventInterestedListSchema,
   type NativeLiveForm, type NativeLiveFormCreate, type NativeLiveFormRecord, type NativeLiveFormResults,
-  type NativeLiveFormResultsRequest, type NativeLiveFormSubmit, type NativePoll,
+  type NativeLiveFormResultsRequest, type NativeLiveFormSubmit, type NativePoll, type ResourceAudience,
 } from '@monky/shared';
 import type { ICommunityRepository } from '../../domain/community';
 import type { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
-import type { ChannelService } from './ChannelService';
-import type { PermissionService } from './PermissionService';
+import type { ChannelAccessScope, ChannelService } from './ChannelService';
+import { audienceAllows, revealsAudience, type PermissionService } from './PermissionService';
 import type { BotSelectorService } from './BotSelectorService';
 import type { NativePollService } from './NativePollService';
 
@@ -65,23 +65,36 @@ export class CommunityService {
     }
   }
 
-  async canViewEvent(userId: string, event: ServerEvent): Promise<boolean> {
-    return await this.permissions.canAccessAudience(userId, event.creatorUserId, event.audience) &&
-      (event.location.kind === 'external' ||
-        await this.channels.canUserAccessChannel(userId, event.location.channelId));
+  /**
+   * Members of a resource's audience. Reads go through the access scope, so a
+   * whole snapshot reads each member and channel once (S-APP-5).
+   */
+  private async inAudience(
+    access: ChannelAccessScope, userId: string, creatorUserId: string, audience: ResourceAudience,
+  ): Promise<boolean> {
+    return userId === creatorUserId || audienceAllows(await access.member(userId), creatorUserId, audience);
   }
 
-  async canViewLiveAction(userId: string, action: LiveActionRecord): Promise<boolean> {
+  private async revealsAudienceTo(access: ChannelAccessScope, userId: string, creatorUserId: string): Promise<boolean> {
+    return userId === creatorUserId || revealsAudience(await access.member(userId), creatorUserId);
+  }
+
+  async canViewEvent(userId: string, event: ServerEvent, access = this.channels.accessScope()): Promise<boolean> {
+    return await this.inAudience(access, userId, event.creatorUserId, event.audience) &&
+      (event.location.kind === 'external' || await access.can(userId, event.location.channelId));
+  }
+
+  async canViewLiveAction(userId: string, action: LiveActionRecord, access = this.channels.accessScope()): Promise<boolean> {
     return this.settings().eventsEnabled && this.botAllowed(action.botId) && action.expiresAt > Date.now() &&
-      (await this.channels.getChannelSummary(action.channelId))?.botCommandsEnabled === true &&
-      await this.channels.canUserAccessChannel(userId, action.channelId, Permission.READ_MESSAGES) &&
-      await this.permissions.canAccessAudience(userId, action.creatorUserId, action.audience);
+      (await access.channel(action.channelId))?.botCommandsEnabled === true &&
+      await access.can(userId, action.channelId, Permission.READ_MESSAGES) &&
+      await this.inAudience(access, userId, action.creatorUserId, action.audience);
   }
 
-  async canViewNativeForm(userId: string, form: NativeLiveFormRecord): Promise<boolean> {
+  async canViewNativeForm(userId: string, form: NativeLiveFormRecord, access = this.channels.accessScope()): Promise<boolean> {
     return this.settings().eventsEnabled &&
-      await this.channels.canUserAccessChannel(userId, form.channelId, Permission.READ_MESSAGES) &&
-      await this.permissions.canAccessAudience(userId, form.creatorUserId, form.audience);
+      await access.can(userId, form.channelId, Permission.READ_MESSAGES) &&
+      await this.inAudience(access, userId, form.creatorUserId, form.audience);
   }
 
   private async canManageAudienceResource(
@@ -97,8 +110,8 @@ export class CommunityService {
         : await this.permissions.checkPermission(userId, permission));
   }
 
-  async publicEvent(event: ServerEvent, userId: string): Promise<ServerEventPublic> {
-    const reveal = await this.permissions.canRevealAudience(userId, event.creatorUserId);
+  async publicEvent(event: ServerEvent, userId: string, access = this.channels.accessScope()): Promise<ServerEventPublic> {
+    const reveal = await this.revealsAudienceTo(access, userId, event.creatorUserId);
     return {
       ...event,
       audience: projectResourceAudience(event.audience, reveal),
@@ -106,8 +119,8 @@ export class CommunityService {
     };
   }
 
-  async publicLiveAction(action: LiveActionRecord, userId: string): Promise<LiveAction> {
-    const reveal = await this.permissions.canRevealAudience(userId, action.creatorUserId);
+  async publicLiveAction(action: LiveActionRecord, userId: string, access = this.channels.accessScope()): Promise<LiveAction> {
+    const reveal = await this.revealsAudienceTo(access, userId, action.creatorUserId);
     return { ...action, audience: projectResourceAudience(action.audience, reveal) };
   }
 
@@ -133,10 +146,12 @@ export class CommunityService {
 
   async snapshot(userId: string, includeEnded = false): Promise<CommunitySnapshot> {
     const settings = this.settings();
+    // One read of the member and of each channel for the whole snapshot (S-APP-5).
+    const access = this.channels.accessScope();
     const events: ServerEventPublic[] = [];
     if (settings.eventsEnabled) {
       for (const event of this.repository.events(includeEnded)) {
-        if (await this.canViewEvent(userId, event)) events.push(await this.publicEvent(event, userId));
+        if (await this.canViewEvent(userId, event, access)) events.push(await this.publicEvent(event, userId, access));
       }
     }
     const polls: NativePoll[] = [];
@@ -144,20 +159,20 @@ export class CommunityService {
     const nativeForms: NativeLiveForm[] = [];
     if (settings.eventsEnabled) {
       for (const action of this.repository.liveActions()) {
-        if (await this.canViewLiveAction(userId, action)) liveActions.push(await this.publicLiveAction(action, userId));
+        if (await this.canViewLiveAction(userId, action, access)) liveActions.push(await this.publicLiveAction(action, userId, access));
       }
       for (const poll of this.polls?.repository.listActiveLiveActions(Date.now()) ?? []) {
-        if (await this.channels.canUserAccessChannel(userId, poll.channelId, Permission.READ_MESSAGES) &&
-            await this.permissions.canAccessAudience(userId, poll.creatorUserId, poll.audience)) {
+        if (await access.can(userId, poll.channelId, Permission.READ_MESSAGES) &&
+            await this.inAudience(access, userId, poll.creatorUserId, poll.audience)) {
           polls.push(this.polls!.publicPoll(
             poll,
             userId,
-            await this.permissions.canRevealAudience(userId, poll.creatorUserId),
+            await this.revealsAudienceTo(access, userId, poll.creatorUserId),
           ));
         }
       }
       for (const form of this.repository.activeNativeForms(Date.now())) {
-        if (await this.canViewNativeForm(userId, form)) nativeForms.push(await this.publicNativeForm(form, userId));
+        if (await this.canViewNativeForm(userId, form, access)) nativeForms.push(await this.publicNativeForm(form, userId, access));
       }
     }
     return { settings, events, liveActions, polls, nativeForms };
@@ -658,8 +673,8 @@ export class CommunityService {
     };
   }
 
-  async publicNativeForm(form: NativeLiveFormRecord, userId: string): Promise<NativeLiveForm> {
-    const reveal = await this.permissions.canRevealAudience(userId, form.creatorUserId);
+  async publicNativeForm(form: NativeLiveFormRecord, userId: string, access = this.channels.accessScope()): Promise<NativeLiveForm> {
+    const reveal = await this.revealsAudienceTo(access, userId, form.creatorUserId);
     return {
       ...form,
       audience: projectResourceAudience(form.audience, reveal),

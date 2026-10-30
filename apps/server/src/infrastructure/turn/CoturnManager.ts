@@ -4,7 +4,7 @@ import fs from 'fs';
 import net from 'net';
 import os from 'os';
 import path from 'path';
-import { ChildProcess, spawn, spawnSync } from 'child_process';
+import { ChildProcess, execFile, spawn, spawnSync } from 'child_process';
 import { IceServerConfig, LIMITS, TurnAvailability, TurnInstallProgressPayload, TurnInstallStage, TurnUnavailableReason } from '@monky/shared';
 import { Logger } from '../logger/Logger';
 import { getPublicIp } from '../discovery/ServerIpScanner';
@@ -61,6 +61,10 @@ const DENIED_PEER_RANGES = [
 /** Package installs cross the network and can be slow on a cold VPS. */
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 const SERVICE_TIMEOUT_MS = 15 * 1000;
+/** How long a probed availability is reused before someone signing in probes again. */
+const AVAILABILITY_TTL_MS = 60 * 1000;
+/** `sudo -n` never prompts, but a host whose name does not resolve makes it wait. */
+const PROBE_TIMEOUT_MS = 5000;
 
 export type TurnInstallFailure =
   | 'unsupported-platform'
@@ -121,6 +125,8 @@ export class CoturnManager {
    * and would otherwise stare at a modal with no progress at all.
    */
   private static installListeners = new Set<TurnInstallProgressListener>();
+  /** The last availability probe, shared by every caller until it expires. */
+  private static availabilityProbe: { at: number; result: Promise<TurnAvailability> } | null = null;
 
   constructor(private dataDir: string) {
     this.configPath = path.join(this.dataDir, 'turnserver.conf');
@@ -178,6 +184,50 @@ export class CoturnManager {
   }
 
   /**
+   * `describeAvailability` for the running server: probed off the event loop
+   * and shared by everyone signing in (S-VOICE-6). The synchronous `which` and
+   * `sudo -n` it replaces cost tens of milliseconds per login, seconds on a host
+   * whose name does not resolve, and froze heartbeats and voice signalling for
+   * everybody during a reconnection wave. An installation or a relay start
+   * probes again at once; a change made by hand on the host shows within
+   * AVAILABILITY_TTL_MS.
+   */
+  public static availability(): Promise<TurnAvailability> {
+    const cached = CoturnManager.availabilityProbe;
+    if (cached && Date.now() - cached.at < AVAILABILITY_TTL_MS) return cached.result;
+    const result = CoturnManager.probeAvailability();
+    CoturnManager.availabilityProbe = { at: Date.now(), result };
+    return result;
+  }
+
+  /** Makes the next caller probe again, after something that may have changed the answer. */
+  public static invalidateAvailability(): void {
+    CoturnManager.availabilityProbe = null;
+  }
+
+  private static async probeAvailability(): Promise<TurnAvailability> {
+    if (!CoturnManager.isSupportedPlatform()) return { supported: false, reason: 'unsupported-platform' };
+    const binary = await CoturnManager.probe('which', ['turnserver']);
+    if (binary.stdout.trim().split('\n')[0]?.trim()) return { supported: true };
+    const elevated = (typeof process.getuid === 'function' && process.getuid() === 0)
+      || (await CoturnManager.probe('sudo', ['-n', 'true'])).ok;
+    return { supported: false, reason: 'not-installed', autoInstallable: elevated };
+  }
+
+  /** Runs a short command without blocking; a missing command is a failure, never a throw. */
+  private static probe(command: string, args: string[]): Promise<{ ok: boolean; stdout: string }> {
+    return new Promise((resolve) => {
+      try {
+        execFile(command, args, { encoding: 'utf8', timeout: PROBE_TIMEOUT_MS }, (error, stdout) => {
+          resolve({ ok: !error, stdout: typeof stdout === 'string' ? stdout : '' });
+        });
+      } catch {
+        resolve({ ok: false, stdout: '' });
+      }
+    });
+  }
+
+  /**
    * How the server can run a privileged command, or null when it cannot.
    *
    * `sudo -n` never prompts: it either works without a password or fails right
@@ -230,6 +280,7 @@ export class CoturnManager {
     const run = CoturnManager.runInstall().finally(() => {
       CoturnManager.installInFlight = null;
       CoturnManager.installListeners.clear();
+      CoturnManager.invalidateAvailability();
     });
     CoturnManager.installInFlight = run;
     return run;
@@ -399,6 +450,9 @@ export class CoturnManager {
   public async start(secret: string): Promise<boolean> {
     if (this.process) return true;
 
+    // Turning the relay on follows a check of the host, which an operator may
+    // have just fixed by hand: what the clients are told is probed again.
+    CoturnManager.invalidateAvailability();
     const binary = CoturnManager.findBinary();
     if (!binary) {
       Logger.warn('NETWORK', `TURN relay not started: ${CoturnManager.getUnavailabilityReason()}`);

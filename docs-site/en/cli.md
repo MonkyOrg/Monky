@@ -675,6 +675,10 @@ Cloud, AWS, etc.).
 monky status    # should show ✔ accessible
 ```
 
+In the `monky status --watch` dashboard, the TURN setting is read again only
+when the database changes (at most every 30 s), and the ports are checked
+every 60 s or as soon as TURN is turned on.
+
 ### Disabling it
 
 ```bash

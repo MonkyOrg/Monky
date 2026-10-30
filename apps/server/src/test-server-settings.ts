@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
+import os from 'node:os';
 import { test } from 'node:test';
 import { WebSocket } from 'ws';
 import { MessageType, ProtocolErrorCode, type ProtocolMessage, type ServerSettingsUpdatedPayload } from '@monky/shared';
@@ -6,6 +8,7 @@ import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
 import { AuthService } from './application/services/AuthService';
 import { BotLocalExecutionService } from './application/services/BotLocalExecutionService';
 import { CoturnManager } from './infrastructure/turn/CoturnManager';
+import { Logger } from './infrastructure/logger/Logger';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
 import type { ServerRecord } from './domain/entities';
 
@@ -266,4 +269,40 @@ test('the TURN relay refuses TCP relays and every internal network, and writes o
   assert.equal(injected.split('\n').some((line) => line.startsWith('external-ip')), false);
   // A mapping only pairs addresses of the same family.
   assert.ok(manager['buildConfig']('secret', '2001:db8::1', '10.0.0.5').split('\n').includes('external-ip=2001:db8::1'));
+});
+
+test('relay availability is probed off the event loop once for every sign-in, and again after an installation or a start (S-VOICE-6)', async (t) => {
+  CoturnManager.invalidateAvailability();
+  t.after(() => CoturnManager.invalidateAvailability());
+  t.mock.method(Logger, 'warn', () => {});
+  t.mock.method(os, 'platform', () => 'linux');
+  // A host without coturn and without sudo, as far as any synchronous probe can tell.
+  const blocking = t.mock.method(childProcess, 'spawnSync', () => ({ status: 1, stdout: '' }));
+  let installed = false;
+  const probes: string[] = [];
+  t.mock.method(childProcess, 'execFile',
+    (command: string, args: string[], _options: unknown, done: (error: Error | null, stdout: string) => void) => {
+      probes.push([command, ...args].join(' '));
+      if (command === 'which') done(installed ? null : new Error('not found'), installed ? '/usr/bin/turnserver\n' : '');
+      else done(null, '');
+    });
+  const lookups = () => probes.filter((probe) => probe === 'which turnserver').length;
+
+  const signIns = await Promise.all([CoturnManager.availability(), CoturnManager.availability(), CoturnManager.availability()]);
+  for (const availability of signIns) {
+    assert.deepEqual(availability, { supported: false, reason: 'not-installed', autoInstallable: true });
+  }
+  assert.equal(lookups(), 1, 'every sign-in shares one probe');
+  assert.equal(blocking.mock.callCount(), 0, 'and none of them waits on a process');
+
+  installed = true;
+  await CoturnManager.ensureInstalled();
+  assert.deepEqual(await CoturnManager.availability(), { supported: true }, 'an installation is told at once');
+  assert.equal(lookups(), 2);
+
+  installed = false;
+  assert.equal(await new CoturnManager(os.tmpdir()).start('secret'), false);
+  assert.deepEqual(await CoturnManager.availability(), { supported: false, reason: 'not-installed', autoInstallable: true },
+    'turning the relay on probes the host again');
+  assert.equal(lookups(), 3);
 });

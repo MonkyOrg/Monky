@@ -153,7 +153,8 @@ async function runRendererSecurity() {
       allowedRoleIds: [], botCommandsEnabled: true }, voiceChannel, forumChannel],
     members: [me, hostileMember, listener], knownMembers: [me, hostileMember, listener],
     roles: [adminRole, hostileRole], userRoles: [{ userId: HOSTILE, roleIds: [HOSTILE] }],
-    ownerId: 'owner', myPermissions: 2147483647,
+    // Only the owner is offered administrator changes (#397); owning it keeps the Admin role id on screen.
+    ownerId: me.id, myPermissions: 2147483647,
   }, me);
   foreground.serverStore.setServerDetails({
     id: 'other', name: 'Other server', createdAt: 1, maxUsers: 10, voiceStates: {}, channels: [], members: [me],

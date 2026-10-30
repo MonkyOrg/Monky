@@ -353,6 +353,10 @@ compartilhar esse filho implicitamente.
 A disponibilidade distingue arquivos, encoder e fonte:
 
 1. `loadCaptureRuntime()` verifica arquivos e hashes, sem abrir a GPU.
+   No app, o Main chama `loadRuntimeAsync()`: as mesmas verificações, RTC incluído,
+   com leitura e hash em fatias, sem travar o processo. O `loadRuntime()` síncrono
+   fica para scripts, empacotamento e testes. Um arquivo citado pelos dois
+   manifestos é verificado uma vez só.
    `captureKinds` declara implementação, **não qualificação de hardware**.
    O Main informa `requiresSelectionProbe: true`; o seletor mostra o preparo
    pendente, sem testar uma fonte arbitrária em segundo plano.
@@ -449,6 +453,11 @@ o PCM e o epoch de saída; apenas a medição do relógio físico fica indispon�
 até existir uma nova âncora válida e não regressiva. Seleções são serializadas;
 uma rejeição é reportada ao seletor e restaura a seleção anterior sem encerrar
 o vídeo. Parar a saída aguarda seleções em andamento antes de fechar o contexto.
+Um dispositivo escolhido que não está conectado não derruba a assistência: as
+telas tocam na saída padrão do sistema, com um aviso, e voltam ao dispositivo
+escolhido quando ele reaparece, pela mesma troca a quente. Perder a saída durante
+a reprodução suspende o contexto; o epoch é mantido por até 5 s enquanto o áudio
+muda para outra saída ou o dispositivo volta sozinho, e só então a saída falha.
 Mute, deafen e volume não recriam a recepção. No palco, mudanças apenas nos
 indicadores dos participantes também preservam os elementos de vídeo e fullscreen.
 

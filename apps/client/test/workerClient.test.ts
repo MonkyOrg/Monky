@@ -87,7 +87,7 @@ function generatedSource(mode: 'complete' | 'recover' | 'blocked'): string {
       });
     });
     sources.YouTubeSource=class extends Original {
-      constructor(paths) {
+      constructor(paths,options) {
         ffmpeg=paths.ffmpeg;
         const filename=path.join(process.cwd(),'generated.ogg');
         let generating, interrupted=false;
@@ -156,7 +156,7 @@ function generatedSource(mode: 'complete' | 'recover' | 'blocked'): string {
           if(signal.aborted) abort();
           return response;
         };
-        super(paths,{capture,captureBytes,request});
+        super(paths,{...options,capture,captureBytes,request});
         fs.writeFileSync('advanced','0');
       }
       async open(track,signal,options) {
@@ -734,6 +734,32 @@ for (const operation of ['youtube.search', 'youtube.resolve', 'youtube.preview']
   });
 }
 
+test('a preview in the private worker reuses the tools Main verified instead of relaunching their checks', async t => {
+  const checks = require.resolve('@monky/bot-sdk/dist/localRuntime/toolChecks');
+  const sources = require.resolve('@monky/bot-sdk/dist/localRuntime/source');
+  const errors = require.resolve('@monky/bot-sdk/dist/localRuntime/errors');
+  const f = await fixture(t, undefined, `
+    const fs=require('node:fs');
+    const sources=require(${JSON.stringify(sources)});
+    const {MediaError}=require(${JSON.stringify(errors)});
+    require(${JSON.stringify(checks)}).checkMediaTools=async()=>{fs.writeFileSync('checked','');};
+    const Original=sources.YouTubeSource;
+    sources.YouTubeSource=class extends Original {
+      resolve=async()=>{fs.writeFileSync('resolved','');throw new MediaError('unavailable','Controlled end after readiness');};
+    };
+  `);
+  const files: string[][] = [];
+  f.setOnRemove(async directory => { files.push(await fs.readdir(directory)); });
+  const task = await createLocalRuntimeTask({
+    id: randomUUID(), paths: f.paths, signal: new AbortController().signal,
+    spec: { operation: 'youtube.preview', url: track.url },
+  }, f.tools, f.logError);
+  await assert.rejects(task.result, { reason: 'provider_unavailable' });
+  await until(() => f.removed.length === 1);
+  assert.ok(files[0]?.includes('resolved'), 'The preview reached its provider request');
+  assert.equal(files[0]?.includes('checked'), false, 'Node, yt-dlp and FFmpeg are not launched again before each preview');
+});
+
 test('private probe rejection preserves the SDK tool code and completes owned-cache release', async t => {
   const checks = require.resolve('@monky/bot-sdk/dist/localRuntime/toolChecks');
   const errors = require.resolve('@monky/bot-sdk/dist/localRuntime/errors');
@@ -1203,6 +1229,7 @@ test('a worker killed mid-stream ends its task instead of pinning the service, L
     permissions: new LocalPermissions(path.join(f.root, 'permissions.json')),
     tools: {
       initialize: () => manager.initialize(),
+      supported: () => manager.supported(),
       snapshot: () => manager.snapshot(),
       prepare: async () => f.paths,
       remove: tool => manager.remove(tool),

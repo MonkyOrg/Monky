@@ -175,12 +175,16 @@ async function runDropdownSmoke() {
   };
   const active = select => document.getElementById(select.getAttribute('aria-activedescendant'));
   const originals = {
-    save: settings.save, preset: settings.qualityPreset, codec: settings.preferredVideoCodec,
+    save: settings.save, preset: settings.qualityPreset,
     profile: { ...settings.customProfile }, microphone: settings.selectedMicrophoneId,
     setPreset: rtc.setQualityPreset, api: window.api,
   };
   window.api = { ...originals.api, nativeScreenCommand: async command => {
     if (command.action === 'cancel-encoding-probe') return { kind: 'ok' };
+    // What Main reports where native capture exists; encoders are verified separately.
+    if (command.action === 'capabilities') return { kind: 'capabilities', capabilities: { capture: false,
+      captureAudio: true, receive: true, requiresSelectionProbe: true, captureKinds: ['window', 'monitor', 'game'],
+      backend: null, reason: null } };
     check(command.action === 'probe-encoding' && !('desktopSourceId' in command),
       'Quality dropdown validation may only probe encoders without capturing a source');
     return { kind: 'encoding', availability: {
@@ -203,6 +207,7 @@ async function runDropdownSmoke() {
   const quality = new QualityTab();
   fixture.innerHTML = quality.renderHtml();
   quality.attachEvents(fixture);
+  quality.activate();
   const preset = fixture.querySelector('#select-preset');
   let inputs = 0;
   let changes = 0;
@@ -416,7 +421,6 @@ async function runDropdownSmoke() {
     service.dispose();
     settings.save = originals.save;
     settings.qualityPreset = originals.preset;
-    settings.preferredVideoCodec = originals.codec;
     settings.customProfile = originals.profile;
     settings.selectedMicrophoneId = originals.microphone;
     rtc.setQualityPreset = originals.setPreset;

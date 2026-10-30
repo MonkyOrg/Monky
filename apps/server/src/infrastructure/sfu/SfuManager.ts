@@ -87,6 +87,9 @@ export interface SfuProducerRecord {
   appData: SfuMediaAppData;
 }
 
+/** What callers outside the manager may read of a producer. */
+export type SfuProducerView = Readonly<Pick<SfuProducerRecord, 'sessionId' | 'channelId' | 'kind' | 'appData'>>;
+
 export interface SfuConsumerRecord {
   consumer: mediasoup.types.Consumer;
   transportId: string;
@@ -853,6 +856,15 @@ export class SfuManager {
     }
 
     return list;
+  }
+
+  /**
+   * One live producer by id, without walking every producer of the server as
+   * `getProducersInChannel` does: access checks run it per consumer (S-VOICE-10).
+   */
+  public getProducer(producerId: string): SfuProducerView | undefined {
+    const record = this.producers.get(producerId);
+    return record && !record.producer.closed ? record : undefined;
   }
 
   public async connectWebRtcTransport(

@@ -64,6 +64,9 @@ const kindOf = value => value.kind ?? 'video';
  * before connect(). A replacement uses a fresh connectionId and larger generation.
  * Pair establishment/leave notification belongs to that controller: retire both
  * ends on authenticated participant departure or a failed-generation notification.
+ * A peer fails, reported with its own scope, on a failed connection, on a native
+ * error of any of its resources, or after staying disconnected for 10 s; the
+ * engine's other peers are untouched.
  * The lexically smaller session grants one offer turn at a time, from either side.
  * A nonleader offerer acknowledges answer application before the leader sends done.
  * Neither "stable" nor an SDP creation result completes a negotiation turn.
@@ -157,6 +160,10 @@ const text = (value, maximum) => typeof value === 'string' && value.length > 0
   && value.length <= maximum && Buffer.byteLength(value, 'utf8') <= maximum && !value.includes('\0');
 const reference = value => text(value, 128);
 const share = value => typeof value === 'string' && /^[A-Za-z0-9_.-]{1,64}$/u.test(value);
+const nativeFault = data => fault(text(data?.code, 128) ? data.code : 'P2P_NATIVE_ERROR',
+  text(data?.message, 4096) ? data.message : 'Native screen operation failed.');
+// The browser receivers' policy: native ICE takes tens of seconds to report failed.
+const DISCONNECTED_GRACE_MS = 10000;
 
 function binding(value) {
   check(text(value.trackId, 256) && (value.mid === null || text(value.mid, 256))
@@ -670,7 +677,7 @@ class NativeP2pBroker {
       receiving: false, receiverSyncScheduled: false, pumpScheduled: false,
       leader: this.localSessionId < remoteSessionId, dirty: false, remoteDirty: false,
       localRequestVersion: 0, remoteRequestVersion: 0, requestOutstanding: false,
-      grantTimer: null,
+      grantTimer: null, disconnectTimer: null,
       sequence: 0, completedTurn: 0, turn: null, lastOfferer: remoteSessionId,
       remoteDescriptionTurn: 0, localDescriptionTurn: 0, cleanupScheduled: false, closePromise: null,
       controller: new AbortController(), mutationVersion: 0, negotiatedMutation: 0, audioRetirements: new Map(),
@@ -1627,7 +1634,10 @@ class NativeP2pBroker {
         this._beginClose(peer);
         this._scheduleCleanup(peer);
       }
-      return false;
+      if (event.type !== 'error') return false;
+      // A late error belongs to this peer's retirement, never to the other peers of the engine.
+      this._report(peer, nativeFault(event.data));
+      return true;
     }
     try {
       if (['peer.trackAdded', 'peer.trackUpdated', 'peer.trackRemoved'].includes(event.type)) {
@@ -1701,11 +1711,12 @@ class NativeP2pBroker {
         peer.nativeState = { ...peer.nativeState, ...event.data };
         if (Object.values(event.data).includes('failed')) {
           this._fail(peer, fault('P2P_NATIVE_FAILED', 'Native screen peer reported a failed state.'));
-        } else this._state(peer);
+        } else {
+          this._superviseConnection(peer);
+          this._state(peer);
+        }
       } else if (event.type === 'error') {
-        const error = fault(text(event.data?.code, 128) ? event.data.code : 'P2P_NATIVE_ERROR',
-          text(event.data?.message, 4096) ? event.data.message : 'Native screen operation failed.');
-        this._fail(peer, error);
+        this._fail(peer, nativeFault(event.data));
       } else return false;
       return true;
     } catch (error) {
@@ -1724,6 +1735,21 @@ class NativeP2pBroker {
     this._scheduleCleanup(peer);
   }
 
+  // A peer that stays disconnected is failed, so its owner reconnects through a new peer.
+  _superviseConnection(peer) {
+    const state = peer.nativeState.connectionState;
+    if (state === 'connected' && peer.disconnectTimer !== null) {
+      this.timers.clearTimeout(peer.disconnectTimer);
+      peer.disconnectTimer = null;
+    }
+    if (state !== 'disconnected' || peer.disconnectTimer !== null) return;
+    peer.disconnectTimer = this.timers.setTimeout(() => {
+      peer.disconnectTimer = null;
+      if (this._live(peer) && peer.nativeState.connectionState !== 'connected')
+        this._fail(peer, fault('P2P_NATIVE_DISCONNECTED', 'Native screen peer did not reconnect.'));
+    }, DISCONNECTED_GRACE_MS);
+  }
+
   _beginClose(peer, failed = false) {
     if (peer.status === 'closed') return;
     peer.status = failed || peer.error ? 'failed' : 'closing';
@@ -1731,6 +1757,8 @@ class NativeP2pBroker {
     if (peer.turn) this.timers.clearTimeout(peer.turn.timer);
     if (peer.grantTimer !== null) this.timers.clearTimeout(peer.grantTimer);
     peer.grantTimer = null;
+    if (peer.disconnectTimer !== null) this.timers.clearTimeout(peer.disconnectTimer);
+    peer.disconnectTimer = null;
     peer.turn = null;
     peer.ice = [];
     peer.pendingMetadata.clear();

@@ -8,7 +8,6 @@ import {
   screenPictureInPicture, type ScreenPictureInPictureRelease, type ScreenPictureInPictureSource,
 } from '../core/ScreenPictureInPicture';
 import { networkClient } from '../core/NetworkClient';
-import { callClient, leaveCurrentCall } from '../core/serverConnection';
 import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
 import { chooseSharesToStop, screenShareChooser, stopChosenShares, type ScreenShareSelection } from './ScreenShareChooser';
 import { getActiveServerStore, serverStore } from '../stores/serverStore';
@@ -21,7 +20,7 @@ import { getAvatarUrl } from '../utils/avatar';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
 import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
 import { renderPresenceTag } from '../utils/presenceTag';
-import { getVoiceControlModeration, isViewingCallServer, toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
+import { getVoiceControlModeration, isViewingCallServer, leaveCall, toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
 import { renderAudioMuteIndicators, renderAudioStateIcon, updateAudioStateIcon } from './AudioStateIcon';
 import { bindStageControlsMotion } from './FooterControlsMotion';
 import { showAlert, showConfirm } from './Dialog';
@@ -35,8 +34,7 @@ import { NativeDecoderDiagnosticsSampler } from '../core/webrtc/nativeDecoderDia
 import { formatVideoTelemetry, serializeVideoTelemetry, VideoTelemetrySnapshot } from './VideoTelemetry';
 import { showCopyToast } from './CopyToast';
 import { t } from '../i18n';
-import { reportCameraError, setLocalCameraState } from '../core/CameraPublication';
-import { isCameraOperationCancelled } from '../utils/cameraEffects';
+import { toggleCamera as toggleCallCamera, turnCameraOff } from '../core/cameraControls';
 import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { BotScreenDock, type BotScreenStage } from './BotScreenDock';
 import { ScreenViewersView } from './ScreenViewersView';
@@ -56,6 +54,19 @@ interface ParticipantStageTile {
   shareId?: string;
 }
 type StageTile = ParticipantStageTile | { kind: 'miniapp'; key: string; screen: BotScreen };
+
+/** Where a card sits: the grid, the focus stack or the strip beside it; each frames the tile differently. */
+type StagePlacement = 'grid' | 'focused' | 'strip';
+
+/**
+ * A tile's card on the stage. It stays in the DOM, with its video, fullscreen and focus,
+ * while the markup it would be rebuilt from is unchanged (#490).
+ */
+interface StageCard {
+  element: HTMLElement;
+  signature: string;
+  dispose: () => void;
+}
 
 /** Tiles address a connection rather than a person: someone may join twice (#309). */
 function sidOf(p: ParticipantViewModel): string {
@@ -108,8 +119,10 @@ export class VoiceStageView {
   /** Zoom/pan state of the focused screen share, reset when focus changes (#271). */
   private focusZoom = { scale: 1, x: 0, y: 0 };
   private focusZoomTileKey: string | null = null;
+  /** The focused screen whose zoom listeners are attached; kept while its card stays on the stage. */
+  private focusZoomBinding: { main: HTMLElement; video: HTMLElement; controller: AbortController } | null = null;
   private suppressCardClickUntil = 0;
-  private pingInterval: any = null;
+  private unbindPing: (() => void) | null = null;
   private telemetryInterval: number | null = null;
   private telemetryEpoch = 0;
   private telemetryRefreshInFlight = false;
@@ -123,16 +136,14 @@ export class VoiceStageView {
   private nextTelemetryEndpoint = 1;
   private telemetryCopyRequest = 0;
   private clearTelemetryToast: (() => void) | null = null;
-  private unbindTelemetryButtons: Array<() => void> = [];
   private videoLoadingListeners = new WeakMap<HTMLVideoElement, () => void>();
   // Caches the current live-banner content so updateControlsUI() only rebuilds
   // it when the broadcast state actually changes, preventing the pulse dot from
   // flickering on frequent voice.state_updated events (#70).
   private broadcastBannerSignature: string | null = null;
-  private participantStructure: string | null = null;
-  private cameraToggleEpoch = 0;
-  private cameraTogglePending = false;
-  private screenViewers: ScreenViewersView[] = [];
+  /** Cards by tile key, inside the layout they were built for. */
+  private readonly stageCards = new Map<string, StageCard>();
+  private stageLayout: 'grid' | 'focused' | null = null;
   private botScreenLayoutObserver: ResizeObserver | null = null;
   /** The call's miniapp tiles are borrowed from the dock while this stage shows their room. */
   private readonly botScreenStage: BotScreenStage = {
@@ -323,7 +334,6 @@ export class VoiceStageView {
     const sessionKey = sessionManager.getActiveKey();
     const retainTelemetry = this.renderedSessionKey === sessionKey && !!this.currentChannelId && !!serverStore.serverDetails;
     this.renderedSessionKey = sessionKey;
-    this.participantStructure = null;
     this.releaseStageVideos(this.container);
     if (this.focusError) this.focusError.textContent = t('stage.fullscreenExitError');
     this.stopPingMonitor();
@@ -650,7 +660,8 @@ export class VoiceStageView {
     if (isLocal) return [...voiceStore.screenShareIds];
     const announced = p.voiceState?.screenShareIds;
     if (announced && announced.length > 0) {
-      const safe = announced.filter((id) => SAFE_SHARE_ID.test(id));
+      // A repeated id would give two tiles one key, and the stage keeps one card per key.
+      const safe = [...new Set(announced.filter((id) => SAFE_SHARE_ID.test(id)))];
       if (safe.length > 0) return safe.slice(0, SCREEN_SHARE_LIMITS.maximum);
     }
     return p.voiceState?.isScreenSharing ? [LEGACY_SHARE_ID] : [];
@@ -833,8 +844,7 @@ export class VoiceStageView {
 
     const participants = participantManager.getInVoiceChannel(this.currentChannelId);
     if (participants.length === 0) {
-      this.participantStructure = null;
-      this.unbindTelemetryControls();
+      this.disposeStageCards();
       this.releaseStageVideos(area);
       area.innerHTML = `
         <div style="flex: 1; display: flex; align-items: center; justify-content: center; color: var(--text-muted);">
@@ -860,94 +870,221 @@ export class VoiceStageView {
       return false;
     });
 
-    let markup: string;
-    if (this.focusedTileKeys.length > 0) {
-      const focusedTiles = this.focusedTileKeys
-        .map((key) => tiles.find((tile) => tile.key === key)!)
-        .filter(Boolean);
-      const otherTiles = tiles.filter((tile) => !this.focusedTileKeys.includes(tile.key));
+    const focusedTiles = this.focusedTileKeys.flatMap((key) => tiles.filter((tile) => tile.key === key));
+    const otherTiles = tiles.filter((tile) => !this.focusedTileKeys.includes(tile.key));
+    const containers = this.stageContainers(area, focusedTiles.length > 0, focusedTiles.length > 1, otherTiles.length > 0);
+    const groups: Array<[HTMLElement | null, StagePlacement, StageTile[]]> = focusedTiles.length > 0
+      ? [[containers.focused, 'focused', focusedTiles], [containers.strip, 'strip', otherTiles]]
+      : [[containers.grid, 'grid', tiles]];
 
-      markup = `
-        <div class="stage-focused-layout">
-          <div class="stage-focused-stack ${focusedTiles.length > 1 ? 'stage-focused-stack--split' : ''}">
-            ${focusedTiles.map((focusedTile) => `
-              <div class="stage-focused-main ${this.isTileSpeaking(focusedTile) ? 'speaking' : ''}" ${this.tileAttributes(focusedTile)}>
-                ${focusedTile.kind === 'miniapp' ? '' : `<div class="stage-focus-hint-badge">
-                  <span class="material-symbols-outlined md-14">zoom_in</span>
-                  <span>${t('stage.focusMode')}</span>
-                </div>`}
-                ${this.renderCardContent(focusedTile, true)}
-              </div>
-            `).join('')}
-          </div>
-
-          ${otherTiles.length > 0 ? `
-            <div class="stage-focused-strip">
-              ${otherTiles.map((tile) => {
-                return `
-                  <div class="stage-mini-card ${tile.kind === 'voice' ? '' : 'stage-mini-card--video'} ${this.isTileSpeaking(tile) ? 'speaking' : ''}" ${this.tileAttributes(tile)} title="${t('stage.focusOn', { name: escapeHtml(tile.kind === 'miniapp' ? tile.screen.title : participantManager.displayName(tile.p)) })}">
-                    ${this.renderCardContent(tile, false, true)}
-                  </div>
-                `;
-              }).join('')}
-            </div>
-          ` : ''}
-        </div>
-      `;
-    } else {
-      markup = `
-        <div class="stage-grid" id="stage-grid">
-          ${tiles.map((tile) => {
-            return `
-              <div class="stage-card ${tile.kind === 'voice' ? '' : 'stage-card--video'} ${this.isTileSpeaking(tile) ? 'speaking' : ''}" ${this.tileAttributes(tile)} title="${t('stage.focusHint')}">
-                ${this.renderCardContent(tile, false, false)}
-              </div>
-            `;
-          }).join('')}
-        </div>
-      `;
+    // Cards are matched by tile key: a join, leave, camera, share or reconnect rebuilds only the
+    // cards it changes, so the others keep their playing video, fullscreen and focus (#490).
+    const wanted = new Set(tiles.map((tile) => tile.key));
+    for (const [key, card] of [...this.stageCards]) {
+      if (!wanted.has(key)) this.removeStageCard(key, card);
     }
-
-    const template = document.createElement('template');
-    template.innerHTML = markup;
-    const badges = new Map<string, string>();
-    for (const badge of template.content.querySelectorAll<HTMLElement>('.stage-badges-overlay')) {
-      const key = badge.closest<HTMLElement>('[data-tile-key]')?.dataset.tileKey;
-      if (key) badges.set(key, badge.innerHTML);
-      badge.innerHTML = '';
-    }
-    for (const telemetry of template.content.querySelectorAll('.telemetry-overlay')) telemetry.textContent = '';
-    for (const card of template.content.querySelectorAll('[data-tile-key]')) {
-      card.className = [...card.classList].filter(name => name !== 'speaking').join(' ');
-    }
-    const structure = template.innerHTML;
     const pipKey = this.pictureInPictureTileKey();
-    // Voice metadata must not detach a playing video or exit its fullscreen card.
-    const sameMedia = tiles.every(tile => {
-      if (tile.kind === 'voice' || tile.kind === 'miniapp' || tile.key === pipKey) return true;
-      const video = area.querySelector<HTMLVideoElement>(`[data-video-tile-key="${CSS.escape(tile.key)}"]`);
-      const stream = tile.kind === 'screen' && sidOf(tile.p) !== currentSessionId
-        && !this.isWatchingScreen(sidOf(tile.p), tile.shareId!) ? null : this.getTileStream(tile, currentSessionId);
-      return video?.srcObject === stream;
-    });
-    if (this.participantStructure === structure && sameMedia) {
-      for (const badge of area.querySelectorAll<HTMLElement>('.stage-badges-overlay')) {
-        const key = badge.closest<HTMLElement>('[data-tile-key]')?.dataset.tileKey;
-        const content = key ? badges.get(key) : undefined;
-        if (content !== undefined && badge.innerHTML !== content) badge.innerHTML = content;
+    const created: Array<{ key: string; card: StageCard }> = [];
+    const placed = groups.map(([parent, placement, group]) => ({
+      parent, cards: group.map((tile) => this.reconcileStageCard(tile, placement, pipKey, currentSessionId, created)),
+    }));
+    // Each registered card goes in once. A key repeated within a render would otherwise also place,
+    // and wire up, the card it replaced, which nothing would ever release.
+    const unplaced = new Set([...this.stageCards.values()].map((card) => card.element));
+    for (const { parent, cards } of placed) {
+      if (!parent) continue;
+      // Only new or reordered cards are inserted: moving an element would take it out of fullscreen.
+      let cursor = parent.firstElementChild;
+      for (const card of cards) {
+        if (!unplaced.delete(card)) continue;
+        if (card === cursor) cursor = cursor.nextElementSibling;
+        else parent.insertBefore(card, cursor);
       }
-      this.updateSpeakingClasses();
-      this.refreshParticipantMedia(tiles, currentSessionId);
-      return;
+      while (cursor) {
+        const stray = cursor;
+        cursor = cursor.nextElementSibling;
+        if (stray instanceof HTMLElement) this.releaseStageVideos(stray);
+        stray.remove();
+      }
     }
-    this.participantStructure = structure;
-    this.unbindTelemetryControls();
-    this.releaseStageVideos(area);
-    area.innerHTML = markup;
+    if (otherTiles.length === 0) containers.strip?.remove();
+    for (const { key, card } of created) {
+      if (this.stageCards.get(key) === card) card.dispose = this.bindStageCard(card.element);
+    }
 
-    // Attach click listeners to cards for focus toggle & right-click for volume adjustment
-    const allCards = area.querySelectorAll('[data-session-id]');
-    allCards.forEach((card) => {
+    this.setupFocusedScreenZoom(area);
+    this.updateSpeakingClasses();
+    this.refreshParticipantMedia(tiles, currentSessionId);
+  }
+
+  /**
+   * The grid, or the focus stack with the strip beside it. They stay while the layout does, so
+   * their cards can stay too; switching between grid and focus reframes every card and starts over.
+   */
+  private stageContainers(area: HTMLElement, focused: boolean, split: boolean, strip: boolean):
+    { grid: HTMLElement | null; focused: HTMLElement | null; strip: HTMLElement | null } {
+    const layout = focused ? 'focused' : 'grid';
+    let root = area.querySelector<HTMLElement>(`:scope > ${focused ? '.stage-focused-layout' : '.stage-grid'}`);
+    let stack = focused ? root?.querySelector<HTMLElement>(':scope > .stage-focused-stack') ?? null : null;
+    if (this.stageLayout !== layout || !root || (focused && !stack)) {
+      this.disposeStageCards();
+      this.releaseStageVideos(area);
+      root = document.createElement('div');
+      if (focused) {
+        root.className = 'stage-focused-layout';
+        stack = document.createElement('div');
+        stack.className = 'stage-focused-stack';
+        root.append(stack);
+      } else {
+        root.className = 'stage-grid';
+        root.id = 'stage-grid';
+      }
+      area.replaceChildren(root);
+      this.stageLayout = layout;
+    }
+    if (!stack) return { grid: root, focused: null, strip: null };
+    stack.classList.toggle('stage-focused-stack--split', split);
+    let stripElement = root.querySelector<HTMLElement>(':scope > .stage-focused-strip');
+    if (strip && !stripElement) {
+      stripElement = document.createElement('div');
+      stripElement.className = 'stage-focused-strip';
+      root.append(stripElement);
+    }
+    return { grid: null, focused: stack, strip: stripElement };
+  }
+
+  /** Keeps a tile's card while nothing it is built from changed; otherwise builds a new one. */
+  private reconcileStageCard(tile: StageTile, placement: StagePlacement, pipKey: string | null,
+    currentSessionId: string | undefined, created: Array<{ key: string; card: StageCard }>): HTMLElement {
+    const fresh = this.buildStageCard(tile, placement);
+    const current = this.stageCards.get(tile.key);
+    if (current && current.signature === fresh.signature && this.showsTileMedia(current.element, tile, pipKey, currentSessionId)) {
+      this.syncStageCard(current.element, fresh.element);
+      return current.element;
+    }
+    if (current) this.removeStageCard(tile.key, current);
+    const card: StageCard = { element: fresh.element, signature: fresh.signature, dispose: () => {} };
+    this.stageCards.set(tile.key, card);
+    created.push({ key: tile.key, card });
+    return card.element;
+  }
+
+  private removeStageCard(key: string, card: StageCard): void {
+    card.dispose();
+    this.releaseStageVideos(card.element);
+    card.element.remove();
+    if (this.stageCards.get(key) === card) this.stageCards.delete(key);
+  }
+
+  /** Voice metadata must not detach a playing video, but a replaced or removed stream must. */
+  private showsTileMedia(card: HTMLElement, tile: StageTile, pipKey: string | null, currentSessionId: string | undefined): boolean {
+    if (tile.kind === 'voice' || tile.kind === 'miniapp' || tile.key === pipKey) return true;
+    const video = card.querySelector<HTMLVideoElement>('video[data-video-tile-key]');
+    const stream = tile.kind === 'screen' && sidOf(tile.p) !== currentSessionId
+      && !this.isWatchingScreen(sidOf(tile.p), tile.shareId!) ? null : this.getTileStream(tile, currentSessionId);
+    return video?.srcObject === stream;
+  }
+
+  private stageCardMarkup(tile: StageTile, placement: StagePlacement): string {
+    const speaking = this.isTileSpeaking(tile) ? 'speaking' : '';
+    if (placement === 'focused') {
+      return `
+        <div class="stage-focused-main ${speaking}" ${this.tileAttributes(tile)}>
+          ${tile.kind === 'miniapp' ? '' : `<div class="stage-focus-hint-badge">
+            <span class="material-symbols-outlined md-14">zoom_in</span>
+            <span>${t('stage.focusMode')}</span>
+          </div>`}
+          ${this.renderCardContent(tile, true)}
+        </div>
+      `;
+    }
+    if (placement === 'strip') {
+      return `
+        <div class="stage-mini-card ${tile.kind === 'voice' ? '' : 'stage-mini-card--video'} ${speaking}" ${this.tileAttributes(tile)} title="${t('stage.focusOn', { name: escapeHtml(tile.kind === 'miniapp' ? tile.screen.title : participantManager.displayName(tile.p)) })}">
+          ${this.renderCardContent(tile, false, true)}
+        </div>
+      `;
+    }
+    return `
+      <div class="stage-card ${tile.kind === 'voice' ? '' : 'stage-card--video'} ${speaking}" ${this.tileAttributes(tile)} title="${t('stage.focusHint')}">
+        ${this.renderCardContent(tile, false, false)}
+      </div>
+    `;
+  }
+
+  /**
+   * Builds a tile's card plus the signature that decides whether its current card can stay. What
+   * the stage updates in place is left out of the signature: badges, speaking, telemetry, the
+   * volume and quality chosen, the preview liveness and the reconnecting notice (#490).
+   */
+  private buildStageCard(tile: StageTile, placement: StagePlacement): { element: HTMLElement; signature: string } {
+    const template = document.createElement('template');
+    template.innerHTML = this.stageCardMarkup(tile, placement);
+    const element = template.content.firstElementChild;
+    const normalized = element?.cloneNode(true);
+    if (!(element instanceof HTMLElement) || !(normalized instanceof HTMLElement)) throw new Error('A stage tile rendered no card.');
+    normalized.className = [...normalized.classList].filter((name) => name !== 'speaking').join(' ');
+    for (const badges of normalized.querySelectorAll('.stage-badges-overlay')) badges.replaceChildren();
+    for (const overlay of normalized.querySelectorAll('.telemetry-overlay')) {
+      overlay.className = 'telemetry-overlay';
+      overlay.textContent = '';
+    }
+    for (const button of normalized.querySelectorAll('.stage-diagnostics-btn')) button.removeAttribute('hidden');
+    for (const slider of normalized.querySelectorAll('.stage-screen-volume-slider')) slider.removeAttribute('value');
+    for (const thumbnail of normalized.querySelectorAll('.stage-native-thumbnail')) thumbnail.removeAttribute('data-live');
+    for (const choice of normalized.querySelectorAll('[data-screen-quality]')) choice.removeAttribute('aria-pressed');
+    normalized.querySelector(':scope > .stage-reconnecting-overlay')?.remove();
+    // Conditional template parts leave different blank text around them; only elements and text count.
+    const walker = document.createTreeWalker(normalized, NodeFilter.SHOW_TEXT);
+    const blanks: Node[] = [];
+    while (walker.nextNode()) if (!walker.currentNode.textContent?.trim()) blanks.push(walker.currentNode);
+    for (const blank of blanks) blank.parentNode?.removeChild(blank);
+    return { element, signature: normalized.outerHTML };
+  }
+
+  /** Brings a kept card up to date without touching its video. */
+  private syncStageCard(card: HTMLElement, fresh: HTMLElement): void {
+    const badges = card.querySelector('.stage-badges-overlay');
+    const freshBadges = fresh.querySelector('.stage-badges-overlay');
+    if (badges && freshBadges && badges.innerHTML !== freshBadges.innerHTML) badges.innerHTML = freshBadges.innerHTML;
+    const notice = card.querySelector<HTMLElement>(':scope > .stage-reconnecting-overlay:not([data-ui-closing])');
+    const freshNotice = fresh.querySelector<HTMLElement>(':scope > .stage-reconnecting-overlay');
+    if (freshNotice && !notice) {
+      card.append(freshNotice);
+      animateEnter(freshNotice, 'notice');
+    } else if (!freshNotice && notice) {
+      removeWithMotion(notice, 'notice');
+    }
+    const slider = card.querySelector<HTMLInputElement>('.stage-screen-volume-slider');
+    const volume = fresh.querySelector('.stage-screen-volume-slider')?.getAttribute('value');
+    if (slider && typeof volume === 'string' && slider.value !== volume && !slider.closest('.dragging')) slider.value = volume;
+    for (const choice of card.querySelectorAll<HTMLElement>('[data-screen-quality]')) {
+      const pressed = fresh.querySelector(`[data-screen-quality="${CSS.escape(choice.dataset.screenQuality ?? '')}"]`)
+        ?.getAttribute('aria-pressed');
+      if (pressed && choice.getAttribute('aria-pressed') !== pressed) choice.setAttribute('aria-pressed', pressed);
+    }
+    this.syncScreenAudioButton(card);
+  }
+
+  /** The mute button follows the share's audio, wherever it was muted (#159). */
+  private syncScreenAudioButton(card: HTMLElement): void {
+    const wrapper = card.querySelector('.stage-volume-wrapper');
+    const button = wrapper?.querySelector<HTMLButtonElement>('.stage-volume-btn');
+    const sessionId = wrapper?.querySelector('.stage-screen-volume-slider')?.getAttribute('data-session-id');
+    if (!wrapper || !button || !sessionId) return;
+    const muted = voiceStore.isScreenAudioMuted(sessionId);
+    const icon = button.querySelector('.material-symbols-outlined');
+    const name = muted ? 'volume_off' : 'volume_up';
+    if (icon && icon.textContent !== name) icon.textContent = name;
+    const title = t(muted ? 'stage.screenAudioMuted' : 'stage.screenAudioVolume');
+    if (button.title !== title) button.title = title;
+    wrapper.classList.toggle('screen-audio-muted', muted);
+  }
+
+  /** Wires one card's controls; the returned function releases what would outlive its DOM. */
+  private bindStageCard(card: HTMLElement): () => void {
+    // Focus toggle on click & right-click for volume adjustment
+    if (card.dataset.sessionId) {
       card.addEventListener('click', (e: Event) => {
         // Don't toggle focus when the click originates from an interactive
         // overlay (volume/fullscreen), nor right after a slider drag whose
@@ -973,11 +1110,10 @@ export class VoiceStageView {
           userContextMenu.open(mouseEvent.clientX, mouseEvent.clientY, participant.user);
         }
       });
-    });
+    }
 
     // Fullscreen buttons on video tiles (#68)
-    const fsButtons = area.querySelectorAll('.stage-fullscreen-btn');
-    fsButtons.forEach((btn) => {
+    card.querySelectorAll('.stage-fullscreen-btn').forEach((btn) => {
       btn.addEventListener('click', (e: Event) => {
         e.stopPropagation();
         const targetId = btn.getAttribute('data-fullscreen-target');
@@ -985,7 +1121,7 @@ export class VoiceStageView {
       });
     });
 
-    area.querySelectorAll<HTMLButtonElement>('.stage-pip-btn').forEach(button => {
+    card.querySelectorAll<HTMLButtonElement>('.stage-pip-btn').forEach(button => {
       button.addEventListener('click', event => {
         event.stopPropagation();
         const targetId = button.dataset.pipTarget;
@@ -993,30 +1129,29 @@ export class VoiceStageView {
       });
     });
 
-    area.querySelectorAll<HTMLButtonElement>('.stage-pip-return-btn').forEach(button => {
+    card.querySelectorAll<HTMLButtonElement>('.stage-pip-return-btn').forEach(button => {
       button.addEventListener('click', event => {
         event.stopPropagation();
         screenPictureInPicture.returnToStage();
       });
     });
 
-    area.querySelectorAll<HTMLButtonElement>('.stage-diagnostics-btn').forEach(button => {
+    const unbindDiagnostics: Array<() => void> = [];
+    card.querySelectorAll<HTMLButtonElement>('.stage-diagnostics-btn').forEach(button => {
       const onCopy = (event: MouseEvent): void => {
         event.stopPropagation();
         const tileKey = button.dataset.diagnosticsKey;
         if (tileKey) void this.copyTelemetry(tileKey, button);
       };
       button.addEventListener('click', onCopy);
-      this.unbindTelemetryButtons.push(() => button.removeEventListener('click', onCopy));
+      unbindDiagnostics.push(() => button.removeEventListener('click', onCopy));
     });
 
-    this.setupFocusedScreenZoom(area);
-    this.screenViewers = [...area.querySelectorAll<HTMLElement>('.stage-viewers')].map(root => new ScreenViewersView(root));
+    const viewers = [...card.querySelectorAll<HTMLElement>('.stage-viewers')].map(root => new ScreenViewersView(root));
 
     // #150: "Assistir transmissão" — opt into a gated remote screen share.
     // Starts video + audio and auto-focuses the broadcaster.
-    const watchBtns = area.querySelectorAll('.stage-watch-btn') as NodeListOf<HTMLButtonElement>;
-    watchBtns.forEach((btn) => {
+    card.querySelectorAll<HTMLButtonElement>('.stage-watch-btn').forEach((btn) => {
       btn.addEventListener('click', (e: Event) => {
         e.stopPropagation();
         const sessionId = btn.getAttribute('data-watch-session');
@@ -1030,8 +1165,7 @@ export class VoiceStageView {
     });
 
     // Stop changes the transport subscription, not just playback or styling.
-    const stopWatchBtns = area.querySelectorAll('.stage-stopwatch-btn') as NodeListOf<HTMLButtonElement>;
-    stopWatchBtns.forEach((btn) => {
+    card.querySelectorAll<HTMLButtonElement>('.stage-stopwatch-btn').forEach((btn) => {
       btn.addEventListener('click', (e: Event) => {
         e.stopPropagation();
         const sessionId = btn.getAttribute('data-stopwatch-session');
@@ -1045,9 +1179,11 @@ export class VoiceStageView {
       });
     });
 
-    area.querySelectorAll<HTMLButtonElement>('.stage-quality-button').forEach(button => {
+    const menus: HTMLElement[] = [];
+    card.querySelectorAll<HTMLButtonElement>('.stage-quality-button').forEach(button => {
       const menu = button.parentElement?.querySelector<HTMLElement>('.stage-quality-menu');
       if (!menu) return;
+      menus.push(menu);
       button.addEventListener('click', event => {
         event.stopPropagation();
         const open = button.getAttribute('aria-expanded') !== 'true';
@@ -1080,8 +1216,7 @@ export class VoiceStageView {
     });
 
     // Screen audio volume sliders (#75)
-    const volSliders = area.querySelectorAll('.stage-screen-volume-slider') as NodeListOf<HTMLInputElement>;
-    volSliders.forEach((slider) => {
+    card.querySelectorAll<HTMLInputElement>('.stage-screen-volume-slider').forEach((slider) => {
       slider.addEventListener('input', () => {
         const sessionId = slider.getAttribute('data-session-id');
         if (!sessionId) return;
@@ -1092,22 +1227,10 @@ export class VoiceStageView {
       });
     });
 
-    // Volume button click → toggle mute screen audio
-    const volButtons = area.querySelectorAll('.stage-volume-btn') as NodeListOf<HTMLButtonElement>;
-    volButtons.forEach((btn) => {
-      // Sync the button icon + popup visibility with the current (possibly
-      // persisted) mute state of the underlying <audio> element on each
-      // render, so a muted share doesn't come back showing "volume_up" (#159).
-      const initWrapper = btn.closest('.stage-volume-wrapper');
-      const initSlider = initWrapper?.querySelector('.stage-screen-volume-slider') as HTMLInputElement | null;
-      const initSessionId = initSlider?.getAttribute('data-session-id');
-      if (initSessionId && voiceStore.isScreenAudioMuted(initSessionId)) {
-        const initIcon = btn.querySelector('.material-symbols-outlined');
-        if (initIcon) initIcon.textContent = 'volume_off';
-        btn.title = t('stage.screenAudioMuted');
-        initWrapper?.classList.add('screen-audio-muted');
-      }
-
+    // Volume button click → toggle mute screen audio. A muted share must not come
+    // back showing "volume_up" (#159).
+    this.syncScreenAudioButton(card);
+    card.querySelectorAll<HTMLButtonElement>('.stage-volume-btn').forEach((btn) => {
       btn.addEventListener('click', (e: Event) => {
         e.stopPropagation();
         const wrapper = btn.closest('.stage-volume-wrapper');
@@ -1130,19 +1253,17 @@ export class VoiceStageView {
       });
     });
 
-    // Volume controls must not toggle card focus (which re-renders and drops
-    // fullscreen). Suppress the card click that follows any control interaction,
-    // and keep the slider popup open + tracking the pointer while dragging, even
-    // when the mouse leaves the small popup area (#75).
-    const controlBars = area.querySelectorAll('.stage-card-controls');
-    controlBars.forEach((bar) => {
+    // Volume controls must not toggle card focus (which changes the layout and
+    // leaves fullscreen). Suppress the card click that follows any control
+    // interaction, and keep the slider popup open + tracking the pointer while
+    // dragging, even when the mouse leaves the small popup area (#75).
+    card.querySelectorAll('.stage-card-controls').forEach((bar) => {
       bar.addEventListener('pointerdown', () => {
         this.suppressCardClickUntil = Date.now() + 800;
       });
     });
 
-    const volWrappers = area.querySelectorAll('.stage-volume-wrapper');
-    volWrappers.forEach((wrapper) => {
+    card.querySelectorAll('.stage-volume-wrapper').forEach((wrapper) => {
       const slider = wrapper.querySelector('.stage-screen-volume-slider') as HTMLInputElement | null;
       if (!slider) return;
       slider.addEventListener('pointerdown', (e: Event) => {
@@ -1158,7 +1279,12 @@ export class VoiceStageView {
       slider.addEventListener('lostpointercapture', endDrag);
     });
 
-    this.refreshParticipantMedia(tiles, currentSessionId);
+    return () => {
+      menus.forEach(cancelSurfaceMotion);
+      viewers.forEach(view => view.destroy());
+      // A discarded copy button must not keep copying, even if something still holds it.
+      unbindDiagnostics.forEach(unbind => unbind());
+    };
   }
 
   private refreshParticipantMedia(tiles: StageTile[], currentSessionId: string | undefined): void {
@@ -1369,18 +1495,18 @@ export class VoiceStageView {
 
   /**
    * Scrolling zooms the focused screen share towards the pointer, dragging
-   * pans the zoomed image and a double-click resets it (#271). Re-attached on
-   * every render because the stage markup is rebuilt from scratch.
+   * pans the zoomed image and a double-click resets it (#271). The listeners
+   * stay on the focused card while it stays on the stage, and move with it.
    */
   private setupFocusedScreenZoom(area: HTMLElement): void {
     // Zoom/pan targets a single pane; with the focus area split in two (#253)
     // there is no unambiguous target, so it stays disabled until one is left.
-    const mains = area.querySelectorAll('.stage-focused-main');
-    const main = (mains.length === 1 ? mains[0] : null) as HTMLElement | null;
-    const video = main?.querySelector(
-      'video.stage-video-element.screen-share:not(.screen-locked)'
-    ) as HTMLElement | null;
+    const mains = area.querySelectorAll<HTMLElement>('.stage-focused-main');
+    const main = mains.length === 1 ? mains[0] : null;
+    const video = main?.querySelector<HTMLElement>('video.stage-video-element.screen-share:not(.screen-locked)') ?? null;
     const tileKey = main?.getAttribute('data-tile-key') ?? null;
+    if (main && video && this.focusZoomBinding?.main === main && this.focusZoomBinding.video === video) return;
+    this.releaseFocusZoom();
 
     if (!main || !video || !tileKey) {
       this.focusZoomTileKey = null;
@@ -1392,6 +1518,9 @@ export class VoiceStageView {
       this.focusZoomTileKey = tileKey;
       this.focusZoom = { scale: 1, x: 0, y: 0 };
     }
+    const controller = new AbortController();
+    const { signal } = controller;
+    this.focusZoomBinding = { main, video, controller };
 
     const clampPan = () => {
       const rect = main.getBoundingClientRect();
@@ -1432,7 +1561,7 @@ export class VoiceStageView {
       this.focusZoom.y = cursorY - anchorY * next;
       clampPan();
       apply();
-    }, { passive: false });
+    }, { passive: false, signal });
 
     let panning = false;
     let panStartX = 0;
@@ -1450,7 +1579,7 @@ export class VoiceStageView {
       panOriginY = this.focusZoom.y;
       main.classList.add('is-panning');
       main.setPointerCapture(e.pointerId);
-    });
+    }, { signal });
 
     main.addEventListener('pointermove', (e: PointerEvent) => {
       if (!panning) return;
@@ -1458,7 +1587,7 @@ export class VoiceStageView {
       this.focusZoom.y = panOriginY + (e.clientY - panStartY);
       clampPan();
       apply();
-    });
+    }, { signal });
 
     const endPan = (e: PointerEvent) => {
       if (!panning) return;
@@ -1469,8 +1598,8 @@ export class VoiceStageView {
       this.suppressCardClickUntil = Date.now() + 200;
     };
 
-    main.addEventListener('pointerup', endPan);
-    main.addEventListener('pointercancel', endPan);
+    main.addEventListener('pointerup', endPan, { signal });
+    main.addEventListener('pointercancel', endPan, { signal });
 
     main.addEventListener('dblclick', (e: MouseEvent) => {
       if (this.focusZoom.scale <= 1) return;
@@ -1479,7 +1608,18 @@ export class VoiceStageView {
       this.focusZoom = { scale: 1, x: 0, y: 0 };
       apply();
       this.suppressCardClickUntil = Date.now() + 200;
-    });
+    }, { signal });
+  }
+
+  private releaseFocusZoom(): void {
+    const binding = this.focusZoomBinding;
+    if (!binding) return;
+    // A pane kept when focus splits in two outlives its zoom: it must not stay cropped without the
+    // gestures that undo it. Rebinding the same screen applies the zoom again.
+    binding.video.style.transform = '';
+    binding.main.classList.remove('is-zoomed', 'is-panning');
+    binding.controller.abort();
+    this.focusZoomBinding = null;
   }
 
   /** Toggles native fullscreen for a stage video tile (#68).
@@ -2145,8 +2285,10 @@ export class VoiceStageView {
 
   private startPingMonitor(): void {
     this.stopPingMonitor();
+    // A stage previewing a call it has not joined shows no ping.
+    if (!this.container.querySelector('#stage-ping-badge')) return;
 
-    const updatePing = async () => {
+    const updatePing = () => {
       const pingBadge = document.getElementById('stage-ping-badge');
       const pingText = document.getElementById('stage-ping-text');
       const tooltipContent = document.getElementById('ping-tooltip-content');
@@ -2181,8 +2323,7 @@ export class VoiceStageView {
         return;
       }
 
-      const avgPing = await webRtcManager.getAverageP2pPing();
-      if (!pingBadge.isConnected || voiceStore.isConnecting || voiceStore.isReconnecting || voiceStore.isIdle) return;
+      const avgPing = webRtcManager.getCallPing();
       const indicator = voiceConnectionIndicator(avgPing, voiceStore.isReconnecting);
 
       if (avgPing !== null) {
@@ -2216,26 +2357,26 @@ export class VoiceStageView {
     };
 
     updatePing();
-    this.pingInterval = setInterval(updatePing, 2000);
+    // The call measures its links once for every view showing the ping (R-VOICEUI-7).
+    this.unbindPing = appEvents.on('voice.ping_updated', updatePing);
   }
 
   private stopPingMonitor(): void {
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval);
-      this.pingInterval = null;
-    }
+    this.unbindPing?.();
+    this.unbindPing = null;
   }
 
   /**
-   * Leaves the current voice call. Public so it can also be triggered from the
-   * sidebar voice-connection row (#60). No confirmation is shown (#59).
+   * The stage's own hang-up button; no confirmation is shown (#59). The sidebar
+   * row, the tray and the taskbar thumbnail use `leaveCall()` directly, never a
+   * stage that may not be on screen.
    */
-  public leaveVoice(): void {
+  private leaveVoice(): void {
     const channelId = voiceStore.currentVoiceChannelId;
     if (!channelId) return;
     this.stopPingMonitor();
     this.stopTelemetryMonitor();
-    leaveCurrentCall();
+    leaveCall();
     this.setChannel(channelId);
   }
 
@@ -2251,59 +2392,15 @@ export class VoiceStageView {
         });
       }
     } else if (voiceStore.isCameraOn) {
-      this.cameraToggleEpoch++;
-      this.cameraTogglePending = false;
-      setLocalCameraState(false);
-      videoService.stopCamera();
-      await webRtcManager.setLocalCameraTrack(null);
+      await turnCameraOff();
     }
     this.updateControlsUI();
     this.renderParticipants();
   }
 
-  /**
-   * Toggles the local camera. Extracted so it can be triggered both from the
-   * stage controls and from the sidebar media bar (#29). Camera and screen
-   * share are independent (#26): toggling the camera never stops an active
-   * screen share. Cleanly reverts state if the camera fails to start (e.g. no
-   * camera plugged in).
-   */
-  public async toggleCamera(): Promise<void> {
-    const epoch = ++this.cameraToggleEpoch;
-    const channelId = voiceStore.currentVoiceChannelId;
-    const sessionKey = voiceStore.voiceSessionKey;
-    const isCurrentCall = () => this.cameraToggleEpoch === epoch && channelId !== null
-      && voiceStore.currentVoiceChannelId === channelId && voiceStore.voiceSessionKey === sessionKey;
-    if (!channelId) return;
-    if (voiceStore.isCameraOn || this.cameraTogglePending) {
-      this.cameraTogglePending = false;
-      setLocalCameraState(false);
-      videoService.stopCamera();
-      try {
-        await webRtcManager.setLocalCameraTrack(null);
-      } catch (error) {
-        reportCameraError(error);
-      }
-    } else {
-      this.cameraTogglePending = true;
-      try {
-        const stream = await videoService.startCamera();
-        const track = stream.getVideoTracks()[0];
-        const isCurrent = () => isCurrentCall() && videoService.getCameraStream() === stream;
-        if (!track || !isCurrent()) throw new DOMException('Camera start was cancelled', 'AbortError');
-        await webRtcManager.setLocalCameraTrack(track, isCurrent);
-        if (isCurrent()) setLocalCameraState(true);
-      } catch (error) {
-        if (isCurrentCall() && !isCameraOperationCancelled(error)) {
-          setLocalCameraState(false);
-          videoService.stopCamera();
-          await webRtcManager.setLocalCameraTrack(null).catch(reportCameraError);
-          reportCameraError(error);
-        }
-      } finally {
-        if (this.cameraToggleEpoch === epoch) this.cameraTogglePending = false;
-      }
-    }
+  /** The stage's camera button: the camera itself belongs to the call (cameraControls). */
+  private async toggleCamera(): Promise<void> {
+    await toggleCallCamera();
     this.updateControlsUI();
     this.renderParticipants();
   }
@@ -2515,17 +2612,20 @@ export class VoiceStageView {
          </div>`;
   }
 
-  private unbindTelemetryControls(): void {
-    this.container.querySelectorAll<HTMLElement>('.stage-quality-menu').forEach(cancelSurfaceMotion);
-    this.screenViewers.forEach(view => view.destroy());
-    this.screenViewers = [];
-    this.unbindTelemetryButtons.forEach(unbind => unbind());
-    this.unbindTelemetryButtons = [];
+  /**
+   * Drops every card's resources and the layout they belong to, so the next render rebuilds the
+   * participant area from scratch. Videos are released by whoever discards their DOM.
+   */
+  private disposeStageCards(): void {
+    for (const card of this.stageCards.values()) card.dispose();
+    this.stageCards.clear();
+    this.stageLayout = null;
+    this.releaseFocusZoom();
   }
 
   private unbindListeners(): void {
     this.botScreenLayoutObserver?.disconnect();
-    this.unbindTelemetryControls();
+    this.disposeStageCards();
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
     this.container.querySelectorAll<HTMLElement>('[data-ui-motion]').forEach(cancelVisibilityMotion);

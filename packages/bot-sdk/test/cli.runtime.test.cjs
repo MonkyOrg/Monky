@@ -1163,6 +1163,41 @@ test('an installed but failing PM2 is not mistaken for a missing dependency', (t
   assert.throws(() => pm2.isPm2Available(context), /pm2 --version failed.*\nPermission denied/);
 });
 
+test('a command remembers only a confirmed PM2, so installing it during start is still detected', (t) => {
+  const f = fixture(t);
+  const context = cliConfig.createCliContext(f.bot, { MONKY_BOT_CLI_HOME: f.state });
+  t.mock.method(processHelpers, 'pm2Command', () => ({ command: 'test-pm2', args: [] }));
+  let installed = false;
+  const version = t.mock.method(processHelpers, 'runCommand', () => installed
+    ? { status: 0, signal: null, stdout: '7.0.4', stderr: '' }
+    : { status: null, signal: null, stdout: '', stderr: '', error: Object.assign(new Error('spawn test-pm2 ENOENT'), { code: 'ENOENT' }) });
+  assert.equal(pm2.isPm2Available(context), false);
+  assert.equal(pm2.isPm2Available(context), false);
+  assert.equal(version.mock.callCount(), 2);
+  installed = true;
+  assert.equal(pm2.isPm2Available(context), true);
+  assert.equal(pm2.isPm2Available(context), true);
+  assert.equal(version.mock.callCount(), 3);
+  assert.equal(pm2.isPm2Available(cliConfig.createCliContext(f.bot, { MONKY_BOT_CLI_HOME: f.state })), true);
+  assert.equal(version.mock.callCount(), 4, 'every command confirms PM2 for itself');
+});
+
+test('start, fresh restart and stop each run pm2 --version once, however many PM2 calls they make', async (t) => {
+  const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
+  const context = cliConfig.createCliContext(f.bot);
+  cliConfig.writeConfig(context, cliConfig.marketplaceConfig(context, { servePort: await unusedPort(t) }));
+  const commands = mockManagedProcess(t, context, () => {}, 'stopped');
+  t.mock.method(readiness, 'confirmRuntimeReady', async () => null);
+  captureLogs(t);
+  for (const args of [['start'], ['restart', '--fresh'], ['stop']]) {
+    commands.length = 0;
+    await runBotCli(f.bot, args);
+    assert.ok(commands.length > 2, `${args.join(' ')} makes several PM2 calls`);
+    assert.equal(commands.filter((command) => command[0] === '--version').length, 1, args.join(' '));
+  }
+});
+
 test('start and restart reject a missing token before consulting or installing PM2', async (t) => {
   const f = fixture(t);
   withEnv(t, { MONKY_BOT_CLI_HOME: f.state, BOT_TOKEN: undefined });

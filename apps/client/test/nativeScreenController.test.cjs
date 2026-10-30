@@ -20,7 +20,7 @@ const filename = path.resolve(__dirname, '..', 'src', 'renderer', 'core', 'webrt
 const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
-const load = vm.runInThisContext(`(function(exports, require, window, document, MediaStream) { ${compiled}\n})`, { filename });
+const load = vm.runInThisContext(`(function(exports, require, window, document, MediaStream, navigator) { ${compiled}\n})`, { filename });
 const managerFilename = path.resolve(__dirname, '..', 'src', 'renderer', 'core', 'WebRtcManager.ts');
 const managerSource = ts.createSourceFile(managerFilename, fs.readFileSync(managerFilename, 'utf8'), ts.ScriptTarget.ES2022, true);
 const managerClass = managerSource.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'WebRtcManager');
@@ -57,6 +57,14 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
   const calls = new Set(), sources = new Map(), sourceIntents = new Map(), watches = new Map();
   const elements = new Map(), attached = new Map(), retired = [], stopped = [], requests = [], replyGates = new Map();
   const browsers = [];
+  const toasts = [], deviceListeners = new Set();
+  // Null models a renderer that cannot list device IDs: every chosen output is used as is.
+  let outputDevices = null;
+  const navigator = { mediaDevices: {
+    async enumerateDevices() { return (outputDevices ?? []).map(deviceId => ({ kind: 'audiooutput', deviceId, label: '', groupId: '' })); },
+    addEventListener(type, listener) { assert.equal(type, 'devicechange'); deviceListeners.add(listener); },
+    removeEventListener(type, listener) { if (type === 'devicechange') deviceListeners.delete(listener); },
+  } };
   let commandHook = async () => {}, attachHook = async () => {}, current = true, connectionId = 'connection-one';
   let diagnosticsRetired = false;
   let status = 'CONNECTED', watching = false, quality = 'source', muted = false, deafened = false, volume = 100, announces = 0;
@@ -206,12 +214,13 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
     '../../utils/qualityProfileLimits': qualityLimits,
     '../../i18n': { t: key => key },
     '../screenEncoding': { acceptScreenEncoding() {} },
+    '../../views/CopyToast': { showInfoToast: message => { toasts.push(message); } },
   };
   const exports = {};
   load(exports, name => {
     assert.ok(Object.hasOwn(dependencies, name), `Unmodeled renderer dependency: ${name}`);
     return dependencies[name];
-  }, { api }, { createElement: () => new Video(), body: { append: element => elements.set(element.id, element) } }, Stream);
+  }, { api }, { createElement: () => new Video(), body: { append: element => elements.set(element.id, element) } }, Stream, navigator);
   const controller = new exports.NativeScreenController(() => visibleContext, async stream => { retired.push(stream); });
   const attachRemote = () => participants.set('publisher', { user: { sessionId: 'publisher', clientId: 'remote-client' },
     voiceState: { channelId: 'room', nativeScreenShares: [remote] }, remoteScreenStreams: new Map() });
@@ -227,10 +236,14 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
     await controller.close();
     assert.equal(calls.size, 0);
     assert.equal(mainListeners.size + networkListeners.size + presentationListeners.size, 0);
+    assert.equal(deviceListeners.size, 0, 'A retired call stops following output devices.');
     assert.equal(elements.size + attached.size, 0);
     assert.equal(appBus.listenerCount('settings.updated'), 0);
   });
   return { controller, local, captures, captureStreams, sources, commands, events, errors, replies, requests, watches, elements, stopped, retired, Stream, browsers,
+    toasts,
+    outputs: list => { outputDevices = list; },
+    devicesChanged: () => { for (const listener of deviceListeners) listener(); },
     settings: dependencies['../../stores/settingsStore'].settingsStore,
     receiver: value => { receiver = value; },
     registerCapture: (stream, capture) => { captures.set(stream.id, capture); captureStreams.set(stream.id, stream); },
@@ -363,7 +376,7 @@ for (const scenario of [
     const f = fixture(t, { capabilities }), exports = {};
     let streams = 0;
     loadStart(exports, { getProfile: () => profile(), registerNativeScreenShare: f.registerCapture },
-      { preferredVideoCodec: 'auto' }, f.nativeScreenProfile, key => key, class extends f.Stream {
+      {}, f.nativeScreenProfile, key => key, class extends f.Stream {
         id = randomUUID();
         constructor() { super(); streams++; }
       });
@@ -397,7 +410,7 @@ for (const captureKind of ['window', 'monitor', 'game']) {
         captureAudio: true, receive: true, backend: null, reason: null,
       } }), exports = {};
       loadStart(exports, { getProfile: () => profile(), registerNativeScreenShare: f.registerCapture },
-        { preferredVideoCodec: 'h264' }, f.nativeScreenProfile, key => key, class extends f.Stream {
+        {}, f.nativeScreenProfile, key => key, class extends f.Stream {
           id = randomUUID();
         });
       const owner = { nativeScreens: f.controller, voiceReconnectSuspended: false };
@@ -473,7 +486,7 @@ for (const failure of [null, 'admission', 'retirement', 'cancelled']) {
       getProfile: () => profile(), registerNativeScreenShare: f.registerCapture,
       getScreenStream: id => f.captureStreams.get(id),
       stopScreenShare: id => { f.captures.delete(id); f.captureStreams.delete(id); },
-    }, { preferredVideoCodec: 'auto' }, f.nativeScreenProfile, key => key, class extends f.Stream { id = randomUUID(); });
+    }, {}, f.nativeScreenProfile, key => key, class extends f.Stream { id = randomUUID(); });
     f.hook(async command => {
       if (failure === 'admission' && command.action === 'source-add') throw new Error('Selected monitor probe failed');
     });
@@ -1188,6 +1201,43 @@ test('presentation-stop acknowledgements carry explicit null rather than undefin
   await f.local();
 });
 
+test('screen signals reach Main in order, without waiting for or being lost with a roster update', async t => {
+  const f = fixture(t), roster = deferred();
+  await f.local();
+  let failRoster = false;
+  f.hook(async command => {
+    if (command.action !== 'participants') return;
+    if (failRoster) throw new Error('Roster retirement failed.');
+    await roster.promise;
+  });
+  const watch = () => ({
+    action: 'watch', fromSessionId: 'publisher', targetSessionId: 'self', publisherSessionId: 'self', channelId: 'room',
+    shareId: input.shareId, sourceInstanceId: randomUUID(), subscriptionId: randomUUID(), quality: 'source', backend: 'native',
+  });
+  const deliver = signal => {
+    for (const listener of f.networkListeners) listener(`message.${shared.MessageType.NATIVE_SCREEN_SIGNAL}`, signal);
+  };
+  const forwarded = () => f.commands.filter(command => command.action === 'signal').map(command => command.signal.subscriptionId);
+  // The viewer joined the call: its roster entry must precede its Watch, whose retirements may take seconds.
+  f.replaceRemote({ ...f.remote });
+  const signals = [watch(), watch()];
+  try {
+    for (const signal of signals) deliver(signal);
+    await tick();
+    assert.deepEqual(forwarded(), signals.map(signal => signal.subscriptionId));
+    const actions = f.commands.map(command => command.action);
+    assert.ok(actions.lastIndexOf('participants') < actions.indexOf('signal'), 'Main receives the roster first.');
+  } finally { roster.resolve(); }
+  failRoster = true;
+  f.replaceRemote({ ...f.remote, instanceId: randomUUID() });
+  const late = watch();
+  deliver(late);
+  await tick();
+  assert.deepEqual(forwarded(), [...signals, late].map(signal => signal.subscriptionId));
+  assert.equal(f.errors.filter(entry => entry[2]?.error === 'Roster retirement failed.').length, 1,
+    'The roster failure is still reported, once.');
+});
+
 test('Watch uses the owned DOM stream and current mute, deafen and per-user volume', async t => {
   const f = fixture(t);
   f.watching(true);
@@ -1270,6 +1320,129 @@ test('mute, deafen, volume and output selection preserve one Watch, video owner 
   }
   assert.equal(f.commands.filter(command => command.action === 'watch').length, 1);
   assert.equal(f.stopped.length + f.retired.length, 0);
+});
+
+test('a dragged volume slider leaves at most one change waiting per screen, which applies the final values', async t => {
+  const f = fixture(t), held = deferred();
+  f.watching(true); await f.controller.sync();
+  let first = true;
+  f.hook(async command => {
+    if (command.action !== 'watch-audio' || !first) return;
+    first = false;
+    await held.promise;
+  });
+  const updates = [];
+  try {
+    for (let volume = 1; volume <= 50; volume++) {
+      f.audio({ volume });
+      updates.push(f.controller.updateAudio());
+      await tick();
+    }
+  } finally { held.resolve(); }
+  await Promise.all(updates);
+  const sent = f.commands.filter(command => command.action === 'watch-audio');
+  assert.deepEqual(sent.map(command => command.volume), [0.01, 0.5]);
+});
+
+test('unchanged audio preferences reach no native receiver, whatever triggers the update', async t => {
+  const f = fixture(t);
+  f.watching(true); await f.controller.sync();
+  for (let index = 0; index < 5; index++) {
+    await f.controller.updateAudio();
+    await f.controller.sync();
+  }
+  assert.equal(f.commands.filter(command => command.action === 'watch-audio').length, 0);
+  f.audio({ muted: true });
+  await f.controller.updateAudio();
+  await f.controller.sync();
+  assert.equal(f.commands.filter(command => command.action === 'watch-audio').length, 1);
+  await f.controller.setOutputDeviceId('headphones');
+  assert.deepEqual(f.commands.filter(command => command.action === 'watch-audio').at(-1),
+    { action: 'watch-audio', callId: f.commands.find(command => command.action === 'watch').callId,
+      publisherSessionId: 'publisher', shareId: f.remote.shareId,
+      presentationId: f.commands.find(command => command.action === 'watch').presentationId,
+      muted: true, volume: 1, sinkId: 'headphones' });
+  await f.controller.updateAudio();
+  assert.equal(f.commands.filter(command => command.action === 'watch-audio').length, 2);
+});
+
+test('a voice update overlapping a rejected output change keeps the screen playing and its audio controllable', async t => {
+  const f = fixture(t), held = deferred();
+  f.watching(true); await f.controller.sync();
+  let first = true;
+  f.hook(async command => {
+    if (command.action !== 'watch-audio') return;
+    if (first) { first = false; await held.promise; }
+    if (command.sinkId === 'speakers') throw new Error('Output unavailable');
+  });
+  f.audio({ volume: 50 });
+  const sliding = f.controller.updateAudio();
+  await tick();
+  const changing = assert.rejects(f.controller.setOutputDeviceId('speakers'), AggregateError);
+  await tick();
+  const syncing = f.controller.sync();
+  await tick();
+  held.resolve();
+  await Promise.all([sliding, changing, syncing]);
+  assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
+  f.audio({ deafened: true });
+  await f.controller.updateAudio();
+  assert.equal(f.commands.filter(command => command.action === 'watch-audio').at(-1).muted, true);
+  assert.equal(f.commands.filter(command => command.action === 'watch').length, 1);
+  assert.equal(f.stopped.length + f.retired.length, 0);
+});
+
+test('a chosen screen output that is not connected plays on the system default instead of failing the Watch', async t => {
+  const f = fixture(t);
+  await f.controller.setOutputDeviceId('usb-headset');
+  f.outputs(['speakers']);
+  f.watching(true); await f.controller.sync();
+  const first = f.commands.find(command => command.action === 'watch');
+  assert.equal(first.audio.sinkId, '');
+  assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
+  assert.deepEqual(f.toasts, ['screenShare.audioOutputFallback']);
+  // Another Watch during the same absence is not announced again.
+  f.replaceRemote({ ...f.remote, instanceId: randomUUID() });
+  f.watching(true); await f.controller.sync();
+  const second = f.commands.findLast(command => command.action === 'watch');
+  assert.notEqual(second.presentationId, first.presentationId);
+  assert.equal(second.audio.sinkId, '');
+  assert.equal(f.toasts.length, 1);
+});
+
+test('screen audio leaves an unplugged output for the default and returns when it is connected again', async t => {
+  const f = fixture(t);
+  await f.controller.setOutputDeviceId('usb-headset');
+  f.outputs(['usb-headset', 'speakers']);
+  f.watching(true); await f.controller.sync();
+  assert.equal(f.commands.find(command => command.action === 'watch').audio.sinkId, 'usb-headset');
+  const owner = [...f.elements.values()][0];
+  const outputs = () => f.commands.filter(command => command.action === 'watch-audio').map(command => command.sinkId);
+  f.outputs(['speakers']); f.devicesChanged(); await settle();
+  assert.deepEqual(outputs(), ['']);
+  assert.deepEqual(f.toasts, ['screenShare.audioOutputFallback']);
+  f.devicesChanged(); await settle();
+  assert.deepEqual(outputs(), [''], 'An unrelated device change moves nothing.');
+  f.outputs(['usb-headset', 'speakers']); f.devicesChanged(); await settle();
+  assert.deepEqual(outputs(), ['', 'usb-headset']);
+  f.outputs(['speakers']); f.devicesChanged(); await settle();
+  assert.deepEqual(outputs(), ['', 'usb-headset', '']);
+  assert.equal(f.toasts.length, 2, 'Each new absence is announced.');
+  assert.equal(f.commands.filter(command => command.action === 'watch').length, 1);
+  assert.equal([...f.elements.values()][0], owner);
+  assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
+  assert.equal(f.stopped.length + f.retired.length, 0);
+});
+
+test('output devices that cannot be listed keep the chosen output, and the default output never falls back', async t => {
+  const f = fixture(t);
+  await f.controller.setOutputDeviceId('usb-headset');
+  f.watching(true); await f.controller.sync();
+  assert.equal(f.commands.find(command => command.action === 'watch').audio.sinkId, 'usb-headset');
+  await f.controller.setOutputDeviceId('');
+  f.outputs(['speakers']); f.devicesChanged(); await settle();
+  assert.deepEqual(f.commands.filter(command => command.action === 'watch-audio').map(command => command.sinkId), ['']);
+  assert.deepEqual(f.toasts, []);
 });
 
 test('rejected output selection preserves video and allows selecting another device without rewatching', async t => {
