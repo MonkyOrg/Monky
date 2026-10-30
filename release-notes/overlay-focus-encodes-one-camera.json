@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "No overlay com \"Foco no orador ativo\", o Monky passa a codificar só a câmera de quem está falando, em vez de todas as câmeras da chamada, e libera CPU durante o jogo.",
+  "en": "With \"Focus on active speaker\" in the overlay, Monky now encodes only the camera of whoever is speaking instead of every camera in the call, freeing CPU while you play."
+}
