@@ -6,6 +6,7 @@ import { webRtcManager } from './WebRtcManager';
 import { voiceStore } from '../stores/voiceStore';
 import { clientLog } from './ClientLogService';
 import { audioProcessor } from './AudioProcessor';
+import { applyLocalAudioState } from './localAudioState';
 import { appEvents } from './EventBus';
 import { t } from '../i18n';
 import { videoService } from './VideoService';
@@ -365,9 +366,7 @@ export async function joinCallOnSession(
         isMuted: voiceStore.isMuted, isDeafened: voiceStore.isDeafened,
       });
     }
-    audioProcessor.setMuted(voiceStore.getEffectiveMuted());
-    audioProcessor.setDeafened(voiceStore.getEffectiveDeafened());
-    webRtcManager.setDeafened(voiceStore.getEffectiveDeafened());
+    applyLocalAudioState();
     webRtcManager.setCurrentSessionId(mySessionId);
 
     let audioTrack: MediaStreamTrack | null = null;

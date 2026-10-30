@@ -1,8 +1,7 @@
 import { MessageType } from '@monky/shared';
 import { voiceStore } from '../stores/voiceStore';
 import { settingsStore } from '../stores/settingsStore';
-import { audioProcessor } from './AudioProcessor';
-import { webRtcManager } from './WebRtcManager';
+import { applyLocalAudioState } from './localAudioState';
 import { leaveCurrentCall } from './serverConnection';
 import { callClient, callServer } from './callScope';
 import { soundEffects } from './SoundEffects';
@@ -61,10 +60,7 @@ export function toggleMicrophoneMute(): void {
   const undeafened = !muted && voiceStore.isDeafened;
   if (undeafened) voiceStore.setDeafened(false);
 
-  // Apply media state after both flags settle, including unmuting while deafened.
-  audioProcessor.setMuted(voiceStore.getEffectiveMuted());
-  audioProcessor.setDeafened(voiceStore.getEffectiveDeafened());
-  if (undeafened) webRtcManager.setDeafened(voiceStore.getEffectiveDeafened());
+  applyLocalAudioState();
   soundEffects.play(muted ? 'mic_mute' : 'mic_unmute');
 
   if (voiceStore.currentVoiceChannelId) {
@@ -78,9 +74,7 @@ export function toggleMicrophoneMute(): void {
 export function toggleAudioDeafen(): void {
   const deafened = !voiceStore.isDeafened;
   voiceStore.setDeafened(deafened);
-  audioProcessor.setDeafened(voiceStore.getEffectiveDeafened());
-  audioProcessor.setMuted(voiceStore.getEffectiveMuted());
-  webRtcManager.setDeafened(voiceStore.getEffectiveDeafened());
+  applyLocalAudioState();
   soundEffects.play(deafened ? 'deafen' : 'undeafen');
 
   if (voiceStore.currentVoiceChannelId) {
