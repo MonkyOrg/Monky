@@ -35,7 +35,7 @@ export interface VoiceEventsHost {
   /** Redraws the server on screen, whose call just ended. */
   render(): void;
   /** Follows a move of the call on screen, showing the destination's stage. */
-  rejoinOnScreen(channelId: string): void;
+  rejoinOnScreen(channelId: string, moveId?: string): void;
 }
 
 /** Brings the microphone, the output and the published tracks in line with the call's moderation. */
@@ -253,10 +253,10 @@ export function bindVoiceEvents(host: VoiceEventsHost): () => void {
       // The server muted the microphone in there; say why before the call follows.
       if (payload.channelId === afkChannelIdOf(serverStore.serverDetails)) showInfoToast(t('afk.movedToast'), 8000);
       if (isForegroundEvent()) {
-        host.rejoinOnScreen(payload.channelId);
+        host.rejoinOnScreen(payload.channelId, payload.moveId);
       } else {
         const origin = currentEventOrigin();
-        if (origin) void rejoinCallOnSession(origin, payload.channelId);
+        if (origin) void rejoinCallOnSession(origin, payload.channelId, undefined, payload.moveId);
       }
     }),
 

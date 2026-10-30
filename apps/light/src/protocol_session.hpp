@@ -178,7 +178,7 @@ private:
   void dispatch(const std::string& type, const Json& payload, const std::string& id, Time now);
   void authenticate(const Json& payload);
   void beginJoin(Time now, bool reconnect);
-  void followMove(std::string room, Time now);
+  void followMove(std::string room, std::optional<std::string> moveId, Time now);
   void acceptAdmission(const Json& payload);
   void updatePolicy(const Json& state, bool acceptManual = false);
   void sendVoiceState();
@@ -203,6 +203,8 @@ private:
   std::optional<Authenticated> auth_;
   std::optional<Admission> admission_;
   std::optional<std::string> desired_;
+  // The server move the next join follows (voice-move-id), consumed by it.
+  std::optional<std::string> followedMove_;
   std::optional<Transition> transition_;
   std::optional<std::string> settingsTransition_;
   std::optional<std::string> consumedTransition_;

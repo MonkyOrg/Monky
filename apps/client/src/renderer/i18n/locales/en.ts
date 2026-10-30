@@ -2048,6 +2048,7 @@ export const en: TranslationMap = {
   'protocolError.nicknameServerOutdated': 'This server doesn\'t accept accents or emoji in nicknames yet. Ask the server\'s admin to update Monky, or use a nickname without them.',
   'protocolError.channelNotFound': 'Channel not found.',
   'protocolError.channelFull': 'This voice channel is full.',
+  'protocolError.voiceMoveSuperseded': 'You were moved again, to another room.',
   'protocolError.messageTooLong': 'Message is too long.',
   'protocolError.rateLimited': 'You are sending messages too fast. Wait a few seconds.',
   'protocolError.authRateLimited': 'Too many connection attempts. Wait a minute and try again.',

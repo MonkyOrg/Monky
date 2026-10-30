@@ -32,6 +32,13 @@ function sidOf(p: ParticipantViewModel): string {
   return p.user.sessionId || p.user.id;
 }
 
+/** The live video a participant could send the overlay, and the slots its screens were given. */
+interface VideoSources {
+  camera: MediaStreamTrack | null;
+  screens: Array<[string, MediaStreamTrack]>;
+  screenSlotIndexes: Record<string, number>;
+}
+
 export class OverlayBridgeService {
   private isOpen = false;
   private isWebRtcReady = false;
@@ -464,12 +471,20 @@ export class OverlayBridgeService {
     const card = getOverlayCardSize(config);
     const fit = config.preserveAspectRatio !== false ? 'contain' : 'cover';
     const pixelRatio = this.overlayPixelRatio ?? window.devicePixelRatio;
-    const assignSlot = (track: MediaStreamTrack): number => {
+    const assignSlot = (track: MediaStreamTrack): number | undefined => {
+      if (nextSlotIndex >= MAX_VIDEO_SLOTS) return undefined;
       const index = nextSlotIndex++;
       this.updateVideoSender(index, track);
       this.applyVideoEncoding(index, overlayFrameRestriction(card, pixelRatio, fit, track.getSettings()));
       return index;
     };
+    const liveVideo = (stream: MediaStream | null | undefined): MediaStreamTrack | null => {
+      const track = stream?.getVideoTracks()[0] ?? null;
+      return track?.readyState === 'live' ? track : null;
+    };
+    // Slots are handed out once the cards are known, so that a card the overlay
+    // will not show costs no encoder.
+    const videoSources = new Map<string, VideoSources>();
     const participantStates: OverlayParticipantState[] = visibleParticipants.map((p) => {
       const isLocal = sidOf(p) === currentSessionId;
       const isCamOn = isLocal
@@ -490,39 +505,30 @@ export class OverlayBridgeService {
         shareIds = ['legacy'];
       }
 
-      let videoSlotIndex: number | undefined;
-      const screenSlotIndexes: Record<string, number> = {};
       const screenCaptureModes: Record<string, NativeScreenCaptureMode> = {};
+      const screenSlotIndexes: Record<string, number> = {};
+      const sources: VideoSources = { camera: null, screens: [], screenSlotIndexes };
+      videoSources.set(sidOf(p), sources);
 
       // No modo minimalista, vídeo é desnecessário
       if (!config.minimalistMode) {
-        // Atribuir slot para Câmera
-        if (isCamOn && nextSlotIndex < MAX_VIDEO_SLOTS) {
-          const stream = isLocal ? videoService.getCameraState().stream : p.remoteStream;
-          const videoTrack = stream?.getVideoTracks()[0] || null;
-          if (videoTrack && videoTrack.readyState === 'live') {
-            videoSlotIndex = assignSlot(videoTrack);
-          }
-        }
+        if (isCamOn) sources.camera = liveVideo(isLocal ? videoService.getCameraState().stream : p.remoteStream);
 
-        // Atribuir slot para Compartilhamento de Telas (se habilitado)
+        // Compartilhamentos de tela (se habilitado)
         if (config.mode === 'cameras-and-screens') {
           for (const shareId of shareIds) {
             if (!isLocal && !voiceStore.isWatchingScreen(sidOf(p), shareId)) continue;
-            if (nextSlotIndex < MAX_VIDEO_SLOTS) {
-              const stream = isLocal
-                ? videoService.getScreenStream(shareId)
-                : (shareId === 'legacy'
-                    ? p.remoteScreenStreams.values().next().value
-                    : p.remoteScreenStreams.get(shareId));
-              const videoTrack = stream?.getVideoTracks()[0] || null;
-              if (videoTrack && videoTrack.readyState === 'live') {
-                screenSlotIndexes[shareId] = assignSlot(videoTrack);
-                const native = isLocal ? !!videoService.getNativeScreenCapture(shareId)
-                  : p.voiceState?.nativeScreenShares?.some(source => source.shareId === shareId) === true;
-                const captureMode = native ? this.captureModeFor?.(sidOf(p), shareId) : 'normal';
-                if (captureMode) screenCaptureModes[shareId] = captureMode;
-              }
+            const videoTrack = liveVideo(isLocal
+              ? videoService.getScreenStream(shareId)
+              : (shareId === 'legacy'
+                  ? p.remoteScreenStreams.values().next().value
+                  : p.remoteScreenStreams.get(shareId)));
+            if (videoTrack) {
+              sources.screens.push([shareId, videoTrack]);
+              const native = isLocal ? !!videoService.getNativeScreenCapture(shareId)
+                : p.voiceState?.nativeScreenShares?.some(source => source.shareId === shareId) === true;
+              const captureMode = native ? this.captureModeFor?.(sidOf(p), shareId) : 'normal';
+              if (captureMode) screenCaptureModes[shareId] = captureMode;
             }
           }
         }
@@ -541,7 +547,6 @@ export class OverlayBridgeService {
         isCameraOn: isCamOn,
         screenShareIds: shareIds,
         isLocal,
-        videoSlotIndex,
         screenSlotIndexes,
         screenCaptureModes,
       };
@@ -553,6 +558,21 @@ export class OverlayBridgeService {
     const currentSpeakerSessionId = speaking?.sessionId
       ?? participantStates.find(p => p.sessionId === this.lastActiveSpeakerSessionId)?.sessionId
       ?? participantStates[0]?.sessionId ?? null;
+
+    // In "focus on the active speaker" the overlay shows only the speaker's card
+    // (OverlayStageView), so only that camera is encoded; the next speaker's
+    // camera takes the same slot (#849).
+    const focusSpeaker = config.mode === 'cameras-only' && config.focusActiveSpeaker && !config.minimalistMode;
+    for (const state of participantStates) {
+      if (focusSpeaker && state.sessionId !== currentSpeakerSessionId) continue;
+      const sources = videoSources.get(state.sessionId);
+      if (!sources) continue;
+      if (sources.camera) state.videoSlotIndex = assignSlot(sources.camera);
+      for (const [shareId, track] of sources.screens) {
+        const slot = assignSlot(track);
+        if (slot !== undefined) sources.screenSlotIndexes[shareId] = slot;
+      }
+    }
 
     // Limpa slots não utilizados trocando de volta para a dummyTrack
     if (this.isWebRtcReady) {

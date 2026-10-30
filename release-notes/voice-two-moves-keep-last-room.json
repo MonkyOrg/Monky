@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Quem é movido duas vezes seguidas de sala de voz, a segunda delas para uma sala que não vê, agora termina nessa última sala em vez de cair da chamada. Vale para o app e para o Monky Light.",
+  "en": "Someone moved between voice rooms twice in a row, the second time into a room they cannot see, now ends up in that last room instead of dropping out of the call. This applies to the app and to Monky Light."
+}

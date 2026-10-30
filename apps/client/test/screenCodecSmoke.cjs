@@ -1103,6 +1103,33 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
         && audio.getRawMicrophoneStream() === liveB && liveB.getTracks().every(track => track.readyState === 'live'),
       'A late rejected admission cannot tear down the newer call');
 
+      // Moved twice before the first join was answered (#841): each join names the move it follows,
+      // and one the server refuses as overtaken leaves no leave behind to end the later call.
+      const { rejoinCallOnSession } = await import('/core/serverConnection.ts');
+      const beforeMoves = messages.length;
+      const firstMove = rejoinCallOnSession(b.key, 'visible-room', undefined, 'move-1');
+      await until(() => pending.length === 1, 'The first move must request admission');
+      const overtaken = pending.shift();
+      check(overtaken.payload.channelId === 'visible-room' && overtaken.payload.moveId === 'move-1',
+        'A join following a move names it');
+      const secondMove = rejoinCallOnSession(b.key, 'hidden-room', undefined, 'move-2');
+      overtaken.reject(new ProtocolRequestError('A movimentação foi substituída por outra.', 'VOICE_MOVE_SUPERSEDED'));
+      await until(() => pending.length === 1, 'The second move must request admission once the first is answered');
+      check(pending[0].payload.channelId === 'hidden-room' && pending[0].payload.moveId === 'move-2',
+        'The later join names the later move');
+      pending.shift().resolve(reply(b, 'hidden-room'));
+      await Promise.all([firstMove, secondMove]);
+      check(!messages.slice(beforeMoves).some(message => message.type === MessageType.VOICE_LEAVE),
+        'An overtaken join the server refused is followed by no leave');
+      check(voice.voiceSessionKey === b.key && voice.currentVoiceChannelId === 'hidden-room'
+        && audio.getRawMicrophoneStream()?.getAudioTracks()[0].readyState === 'live',
+      'The call ends up in the room of the last move');
+      const ordinaryJoin = joinCallOnSession(b.key, 'room');
+      await until(() => pending.length === 1, 'A join of its own must request admission');
+      check(!('moveId' in pending[0].payload), 'A join of its own names no move');
+      pending.shift().resolve(reply(b, 'room'));
+      await ordinaryJoin;
+
       sessionManager.activate(a.key);
       deferCapture = true;
       const lateCaptureJoin = view.handleJoinVoiceChannel('room');

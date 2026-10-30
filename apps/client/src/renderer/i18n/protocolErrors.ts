@@ -36,6 +36,7 @@ const ERROR_KEYS: Record<ProtocolErrorCode, TranslationKey> = {
   [ProtocolErrorCode.TURN_UNAVAILABLE]: 'protocolError.turnUnavailable',
   [ProtocolErrorCode.SFU_UNAVAILABLE]: 'protocolError.sfuUnavailable',
   [ProtocolErrorCode.VOICE_RECONNECT_EXPIRED]: 'voiceReconnect.expired',
+  [ProtocolErrorCode.VOICE_MOVE_SUPERSEDED]: 'protocolError.voiceMoveSuperseded',
   [ProtocolErrorCode.BOT_OFFLINE]: 'protocolError.botOffline',
   [ProtocolErrorCode.BOT_COMMAND_NOT_FOUND]: 'protocolError.botCommandNotFound',
   [ProtocolErrorCode.BOT_INVALID_OPTIONS]: 'protocolError.botInvalidOptions',
