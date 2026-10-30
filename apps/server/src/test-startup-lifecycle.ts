@@ -835,3 +835,26 @@ test('concurrent first requests for a channel share one router, and a creation o
   assert.equal(dying.routers[0].closed, true, 'a router of a dead worker is closed, never registered');
   assert.equal(sfu['routers'].size, 0);
 });
+
+test('a channel deleted while its router is being created leaves no router behind', async (t) => {
+  t.mock.method(Logger, 'info', () => {});
+  const released = deferred();
+  const synthetic = routingWorker(released.promise);
+  t.mock.method(mediasoup, 'createWorker', () => Promise.resolve(synthetic.worker));
+  const sfu = new SfuManager({ announcedIp: '127.0.0.1' });
+  t.after(() => sfu.close());
+  assert.equal(await sfu.init(), true);
+
+  const creating = sfu.getOrCreateRouter('room');
+  sfu.closeChannel('room');
+  released.resolve();
+  await assert.rejects(creating, /channel was closed while its router was being created/);
+  assert.equal(synthetic.routers.length, 1);
+  assert.equal(synthetic.routers[0].closed, true, 'the router created for a deleted channel is closed');
+  assert.equal(sfu['routers'].size, 0, 'and never registered');
+  assert.equal(sfu['routerCreations'].size, 0);
+
+  const recreated = await sfu.getOrCreateRouter('room');
+  assert.equal(recreated.closed, false, 'a later request for the same id starts a fresh creation');
+  assert.equal(sfu['routers'].get('room'), recreated);
+});
