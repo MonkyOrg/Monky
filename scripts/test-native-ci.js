@@ -908,6 +908,7 @@ test('the extracted DOM lane preserves every existing test command and its order
     'npm run test:community --workspace=apps/client',
     'npm run test:pip --workspace=apps/client',
     'npm run test:security --workspace=apps/client',
+    'node apps/client/test/crashRecoverySmoke.cjs',
   ]);
   const scripts = JSON.parse(fs.readFileSync(path.join(root, 'apps', 'client', 'package.json'), 'utf8')).scripts;
   for (const [executable, scriptOrRun, script] of commands) {
