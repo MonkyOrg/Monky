@@ -4,6 +4,7 @@ import https from 'node:https';
 import {
   BOT_REACHABILITY_MAX_RESPONSE_BYTES,
   BOT_REACHABILITY_PATH,
+  botAuthChallenge,
   botReachabilityChallenge,
   botReachabilityNonceSchema,
   botReachabilityProofSchema,
@@ -20,9 +21,10 @@ export interface BotReachabilityIdentity {
 const RUNTIME_IDENTITY = Symbol.for('@monky/bot-sdk/runtime-identity');
 type IdentityHolder = { [RUNTIME_IDENTITY]?: BotReachabilityIdentity };
 
-export function createReachabilityIdentity(publicKeyHex: string, privateKeyPem: string): BotReachabilityIdentity {
-  const privateKey = createPrivateKey(privateKeyPem);
-  const derived = createPublicKey(privateKey).export({ type: 'spki', format: 'der' }).toString('hex');
+export function createReachabilityIdentity(publicKeyHex: string, privateKeyInput: string | KeyObject): BotReachabilityIdentity {
+  const privateKey = typeof privateKeyInput === 'string' ? createPrivateKey(privateKeyInput) : privateKeyInput;
+  const derived = privateKey.type === 'private'
+    ? createPublicKey(privateKey).export({ type: 'spki', format: 'der' }).toString('hex') : '';
   if (privateKey.asymmetricKeyType !== 'ed25519' || derived.toLowerCase() !== publicKeyHex.toLowerCase()) {
     throw new Error('The bot private key does not match its public identity.');
   }
@@ -42,6 +44,11 @@ export function runtimeBotIdentity(): BotReachabilityIdentity | undefined {
 
 export function signReachabilityChallenge(nonce: string, privateKey: KeyObject): string {
   return sign(null, Buffer.from(botReachabilityChallenge(nonce), 'utf8'), privateKey).toString('hex');
+}
+
+/** The answer to a server's AUTH_CHALLENGE (bot-key-proof), bound to the token this connection presents. */
+export function signBotAuthChallenge(nonce: string, botToken: string, privateKey: KeyObject): string {
+  return sign(null, Buffer.from(botAuthChallenge(nonce, botToken), 'utf8'), privateKey).toString('hex');
 }
 
 export function verifyReachabilityProof(nonce: string, signatureHex: string, publicKeyHex: string): boolean {

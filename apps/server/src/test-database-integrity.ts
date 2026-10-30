@@ -651,13 +651,15 @@ test('the integrity migration keeps removed members\' history and bots, narrows 
 
   // The rebuilt tables lost only their references to users.
   const after = schemaShape(db);
-  // Later migrations may add objects of their own; everything that existed must come back unchanged.
+  // Later migrations may add objects and columns of their own; everything that existed must come back unchanged.
   const later = fs.readdirSync(migrations).filter(name => name.endsWith('.sql') && name >= '058')
     .map(name => fs.readFileSync(path.join(migrations, name), 'utf8')).join('\n');
   assert.deepEqual(after.objects.filter(object => before.objects.some(entry => entry.name === object.name) || !later.includes(object.name)),
     before.objects, 'indexes and triggers are recreated as they were');
   for (const [index, table] of before.tables.entries()) {
-    assert.deepEqual(after.tables[index].columns, table.columns, table.table);
+    const columns: Array<{ name: string }> = after.tables[index].columns;
+    assert.deepEqual(columns.filter(column => table.columns.some((entry: { name: string }) => entry.name === column.name) ||
+      !later.includes(column.name)), table.columns, table.table);
     const expected: Array<{ parent: string }> = table.foreignKeys;
     assert.deepEqual(after.tables[index].foreignKeys, expected.filter(foreignKey => foreignKey.parent !== 'users'), table.table);
   }

@@ -1,6 +1,14 @@
 import type { WebSocket } from 'ws';
 import type { ProtocolAgreement, UserSummary } from '@monky/shared';
 
+/** What a bot presented in its AUTH_CONNECT, once validated. */
+export interface BotSignIn {
+  botToken: string;
+  publicKey: string;
+  nickname: string;
+  protocolVersion: number;
+}
+
 /** One WebSocket connection, signed in or not, and what the server keeps about it. */
 export interface ClientSession {
   protocol?: ProtocolAgreement;
@@ -40,6 +48,8 @@ export interface ClientSession {
   botId?: string;
   botPublicKey?: string;
   botSettingsReady?: boolean;
+  /** A bot asked to prove its private key (bot-key-proof): what it signed in with, waiting for the signed challenge. */
+  botKeyChallenge?: { nonce: string; signIn: BotSignIn };
   /**
    * Channels this connection currently knows about (#384). The server filters
    * private channels out before sending, so it has to remember what each client

@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Bots agora provam que têm a chave privada ao entrar no servidor. Depois da primeira prova, um token vazado sozinho não basta para se passar pelo bot, e o bot verdadeiro não é derrubado por quem tentar. Bots antigos continuam entrando como antes.",
+  "en": "Bots now prove they hold their private key when joining a server. After the first proof, a leaked token alone is no longer enough to impersonate the bot, and the real bot is not knocked offline by whoever tries. Older bots keep joining as before."
+}

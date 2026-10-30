@@ -328,7 +328,7 @@ export interface GitHubReleaseSource {
 
 ## `handleReachabilityProbe` {#handlereachabilityprobe}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/reachability.ts#L95)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/reachability.ts#L102)
 
 ```ts
 export function handleReachabilityProbe(request: http.IncomingMessage, response: http.ServerResponse, publicKeyHex?: string): boolean;
