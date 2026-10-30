@@ -10,9 +10,6 @@ import { withButtonLoading } from '../../utils/buttonLoading';
 import { nextIndex } from '../../utils/rovingFocus';
 import { hideWithMotion, positionAnchoredSurface, showWithMotion } from '../../utils/surfaceMotion';
 import { inviteModal } from '../InviteModal';
-import { serverSettingsModal } from '../ServerSettingsModal';
-import { serverMonitorModal } from '../ServerMonitorModal';
-import { serverAuditModal } from '../ServerAuditModal';
 import { recentSoundsModal } from '../RecentSoundsModal';
 import { showErrorToast } from '../CopyToast';
 import { showAlert } from '../Dialog';
@@ -102,18 +99,24 @@ export class ServerHeader {
       }, { signal });
     };
     action('btn-invite-friends', button => withButtonLoading(button, () => inviteModal.open()));
-    action('btn-server-settings', button => withButtonLoading(button, () => serverSettingsModal.open()));
+    // The rare server screens load with their first opening, CSS included (#852).
+    action('btn-server-settings', button => withButtonLoading(button, async () =>
+      (await import('../ServerSettingsModal')).serverSettingsModal.open()));
     action('btn-server-monitor', button => {
       const session = sessionManager.getActive();
-      withButtonLoading(button, () => session
-        ? serverMonitorModal.openRemote(session)
-        : showAlert({ title: t('serverMonitor.title'), message: t('serverMonitor.disconnected'), variant: 'warning' }));
+      withButtonLoading(button, async () => {
+        if (!session) return showAlert({ title: t('serverMonitor.title'), message: t('serverMonitor.disconnected'), variant: 'warning' });
+        const { serverMonitorModal } = await import('../ServerMonitorModal');
+        // The server on screen may have changed while the screen loaded.
+        if (sessionManager.getActive() === session) await serverMonitorModal.openRemote(session);
+      });
     });
     action('btn-server-audit', button => {
       const session = sessionManager.getActive();
       withButtonLoading(button, async () => {
-        if (session) await serverAuditModal.open(session);
-        else showErrorToast(t('serverAudit.disconnected'));
+        if (!session) return showErrorToast(t('serverAudit.disconnected'));
+        const { serverAuditModal } = await import('../ServerAuditModal');
+        if (sessionManager.getActive() === session) await serverAuditModal.open(session);
       });
     });
     action('btn-recent-sounds', button => withButtonLoading(button, () => recentSoundsModal.open()));

@@ -8,7 +8,6 @@ import { settingsStore } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
 import { sessionManager } from './SessionManager';
 import { joinCallOnSession, openServerSession } from './serverConnection';
-import { serverSettingsModal } from '../views/ServerSettingsModal';
 import { addServerModal } from '../views/addServer/AddServerModal';
 import { webRtcManager } from './WebRtcManager';
 import { localExecutionFor } from './LocalExecutionController';
@@ -187,7 +186,7 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
     }
 
     if (config.scenario === 'bot-install') {
-      serverSettingsModal.open('bots');
+      (await import('../views/ServerSettingsModal')).serverSettingsModal.open('bots');
       const input = document.querySelector<HTMLInputElement>('#bot-manifest-url');
       if (!input || !config.bot) throw new Error('Bot installation UI is not available.');
       input.value = config.bot.manifestUrl;
@@ -295,7 +294,7 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
       input.focus();
     }
     if (config.scenario === 'server-settings') {
-      serverSettingsModal.open('general');
+      (await import('../views/ServerSettingsModal')).serverSettingsModal.open('general');
       if (!document.querySelector('.server-settings-modal-card')) throw new Error('The real server-settings UI did not open.');
     }
     if (session.client.getStatus() !== 'CONNECTED') throw new Error('The QA session disconnected during preparation.');

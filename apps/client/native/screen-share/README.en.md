@@ -397,9 +397,10 @@ Preload loads only `@monky/screen-share/renderer` (presentation and audio), and
 only when its window watches the first native screen. Because the window is
 sandboxed, this entry cannot depend on Node modules: it is bundled into the
 preload (`apps/client/scripts/buildPreloads.mjs`) together with the audio
-worklet source. Capture, transport and
-processes stay in Main, behind the main entry; `afterPack` compares both
-entries byte for byte with the packaged copy.
+worklet source. Capture, transport and processes stay in Main, behind the main
+entry, which Main also loads only on first screen use; listing and resolving
+sources uses `@monky/screen-share/target`, which only validates capture targets.
+`afterPack` compares the three entries byte for byte with the packaged copy.
 
 Stopping a source or receiver may return `retired-with-errors` when the original
 owners prove retirement but report a cleanup error. The renderer logs the warning

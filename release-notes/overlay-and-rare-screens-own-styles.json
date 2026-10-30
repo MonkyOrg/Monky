@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "A sobreposição, que fica aberta durante a partida, agora carrega só o próprio visual, não o estilo do app inteiro. As configurações, o monitor e a auditoria do servidor passam a ser carregados ao abrir cada tela pela primeira vez.",
+  "en": "The overlay, which stays open while you play, now loads only its own look instead of the whole app's styles. Server settings, monitor and audit now load the first time you open each screen."
+}

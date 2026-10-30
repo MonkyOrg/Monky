@@ -9,11 +9,11 @@ import {
   type NativeScreenSource, type NativeScreenAudioPreferences, type NativeScreenCaptureKind, type NativeScreenVideoProfile,
   type NativeScreenCaptureMode, type ScreenEncodingAvailability,
 } from '@monky/shared';
-import {
-  loadRuntimeAsync, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription, NativePcmCaptureHub,
-  NativeScreenPreviewBridge, validateCaptureTarget, type NativeScreenRuntime, type NativeScreenAudioOptions,
-  type NativeScreenCaptureTarget, type NativeScreenCaptureCapability,
+import type {
+  NativeScreenPublisher, NativeScreenSubscription, NativePcmCaptureHub, NativeScreenPreviewBridge,
+  NativeScreenRuntime, NativeScreenAudioOptions, NativeScreenCaptureTarget, NativeScreenCaptureCapability,
 } from '@monky/screen-share';
+import { validateCaptureTarget } from '@monky/screen-share/target';
 import * as screenAudio from '@monky/screen-audio';
 import type { ClientLogger } from './clientLogger';
 import { mt } from './i18n';
@@ -25,6 +25,7 @@ import { callContext, NativeScreenDiagnostics } from './nativeScreen/diagnosticL
 import { captureRoot, EncoderDiscovery, SelectedCaptureProbe } from './nativeScreen/encoderDiscovery';
 import { diagnosticId, diagnosticProfile, errorDetails, NativeScreenNotice, rendererFailure } from './nativeScreen/errorDiagnostics';
 import { documentIdentity, RendererBridge } from './nativeScreen/rendererBridge';
+import { screenShareModule } from './nativeScreen/screenShareModule';
 import { isScreenEncoderFailure } from './screenEncodingCache';
 
 type SourceRecord = {
@@ -114,7 +115,7 @@ class NativeScreenSharingService {
       }
       try {
         // Asynchronous, so the first picker or watch does not stall every IPC while the runtime is hashed.
-        this.runtime = await loadRuntimeAsync();
+        this.runtime = await screenShareModule().loadRuntimeAsync();
         this.diagnostics.log('runtime-ready', { requiresSelectionProbe: true, captureAudio: screenAudio.isPacketCaptureSupported() });
         return { capture: false, captureAudio: screenAudio.isPacketCaptureSupported(), receive: true,
           requiresSelectionProbe: true, captureKinds: [...this.runtime.capture.captureKinds], backend: null, reason: null };
@@ -229,7 +230,7 @@ class NativeScreenSharingService {
           sourceInstanceId: command.sourceInstanceId, presentationId: command.presentationId };
         entry.previewMode = null;
         let previousState: string | undefined;
-        entry.preview = new NativeScreenPreviewBridge({
+        entry.preview = new (screenShareModule().NativeScreenPreviewBridge)({
           frame: call.frame, info, createMessageChannel: () => new MessageChannelMain(),
           onState: state => {
             if (state !== previousState) {
@@ -500,6 +501,7 @@ class NativeScreenSharingService {
         : { includeWindowId: target.platform === 'darwin' ? target.windowId : target.hwnd,
           expectedProcessId: target.expectedProcessId,
           ...(target.platform === 'darwin' ? { expectedProcessStartTimeUs: target.expectedProcessStartTimeUs } : {}) };
+      const { NativePcmCaptureHub, NativeScreenPublisher, NativeScreenEndpoint } = screenShareModule();
       const captureHub = command.audio ? new NativePcmCaptureHub(screenAudio, audioSelection, onError) : null;
       let captureTarget = target;
       const publisher = new NativeScreenPublisher({
@@ -667,6 +669,7 @@ class NativeScreenSharingService {
       .find(value => value.shareId === source.shareId))) throw cancelled();
     if (call.subscriptions.size >= 32) throw new Error('Native screen receiver capacity was reached.');
     let previousState: string | undefined;
+    const { NativeScreenSubscription, NativeScreenEndpoint } = screenShareModule();
     const subscription = new NativeScreenSubscription({
       ...call.config, source, publisherSessionId: command.publisherSessionId, quality: command.quality,
       presentationId: command.presentationId, send: signal => this.bridge.send(call, signal),

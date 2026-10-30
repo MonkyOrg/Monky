@@ -1,0 +1,176 @@
+/* Tokens, reset, icons and form defaults shared by every Monky window: the
+   app (theme.css) and the overlay (overlay.css), which loads nothing else of
+   the app's stylesheet (#852). */
+
+/* Qualquer regra de autor com `display` vence o `display: none` que o
+   user-agent da a [hidden], e o app usa `display: flex` em classes genericas
+   como .form-group. Sem esta regra, esconder um elemento pelo atributo `hidden`
+   simplesmente nao funciona onde ele mais e usado (#534). */
+[hidden] {
+  display: none !important;
+}
+
+:root {
+  color-scheme: dark;
+  /* The media viewer covers the app and any modal that opened it; dialogs opened over it go one layer above. */
+  --z-media-viewer: 10050;
+  --motion-modal-duration: 200ms;
+  --motion-popover-duration: 140ms;
+  --motion-panel-duration: 200ms;
+  --motion-view-duration: 200ms;
+  --motion-notice-duration: 140ms;
+  --motion-step-duration: 240ms;
+  --motion-easing: cubic-bezier(0.2, 0, 0, 1);
+  --server-rail-width: 60px;
+  --bg-app: #0b0e14;
+  --bg-sidebar: #11151c;
+  --bg-panel: #161b22;
+  --bg-card: #1c232d;
+  --bg-card-hover: #242c38;
+  --bg-input: #0d1117;
+  --bg-active: #2f3846;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #242c38;
+
+  --accent-primary: #5865f2;
+  --accent-hover: #4752c4;
+  --accent-active: #3c45a5;
+
+  --text-primary: #f0f3f6;
+  --text-secondary: #9da7b3;
+  --text-muted: #656d76;
+  --text-dim: #484f58;
+
+  --border-color: #262c36;
+  --border-focus: #5865f2;
+
+  --success: #23a55a;
+  --success-glow: rgba(35, 165, 90, 0.4);
+  --danger: #f23f43;
+  --danger-hover: #d83a3e;
+  --warning: #f0b232;
+  --info: #5865f2;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+
+  --font-main: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  user-select: none;
+}
+
+[data-ui-closing] { pointer-events: none !important; }
+[data-ui-motion] { animation: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-modal-duration: 0ms;
+    --motion-popover-duration: 0ms;
+    --motion-panel-duration: 0ms;
+    --motion-view-duration: 0ms;
+    --motion-notice-duration: 0ms;
+    --motion-step-duration: 0ms;
+  }
+}
+
+body {
+  font-family: var(--font-main);
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Google Material Symbols Font Setup */
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: 400;
+  font-style: normal;
+  font-size: 20px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-feature-settings: 'liga';
+  -webkit-font-smoothing: antialiased;
+  vertical-align: middle;
+}
+
+.material-symbols-outlined.md-14 { font-size: 14px; }
+.material-symbols-outlined.md-16 { font-size: 16px; }
+.material-symbols-outlined.md-18 { font-size: 18px; }
+.material-symbols-outlined.md-20 { font-size: 20px; }
+.material-symbols-outlined.md-24 { font-size: 24px; }
+.material-symbols-outlined.md-28 { font-size: 28px; }
+.material-symbols-outlined.md-36 { font-size: 36px; }
+
+#app {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100vw;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg-active);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Typography & Inputs */
+input, textarea, button, select {
+  font-family: inherit;
+  font-size: 14px;
+  outline: none;
+  border: none;
+}
+
+input:not([type="range"]):not([type="checkbox"]), textarea, select {
+  user-select: text;
+  background-color: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  transition: border-color 0.15s ease;
+}
+
+input[type="range"] {
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+input:focus, textarea:focus, select:focus {
+  border-color: var(--border-focus);
+}

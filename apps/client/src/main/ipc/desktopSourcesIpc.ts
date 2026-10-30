@@ -6,10 +6,7 @@ import {
   DESKTOP_SOURCES_IPC, desktopSourcePreviewsRequestSchema, desktopSourcesOptionsSchema,
   type DesktopSource, type NativeScreenCaptureKind,
 } from '@monky/shared';
-import {
-  NativeThumbnailCapturer, createMacScreenProvider, loadThumbnailRuntime,
-  type MacScreenProvider, type NativeScreenCaptureTarget,
-} from '@monky/screen-share';
+import type { MacScreenProvider, NativeScreenCaptureTarget, NativeThumbnailCapturer } from '@monky/screen-share';
 import * as screenAudio from '@monky/screen-audio';
 import type { NativeWindowInfo, WindowOwner } from '@monky/screen-audio';
 import type { ClientLogger } from '../clientLogger';
@@ -19,6 +16,7 @@ import { gameWindowIds } from '../gameWindows';
 import { mt } from '../i18n';
 import { NativeDesktopSources, nativeMonitorDesktopSources, nativeWindowIdFromSourceId } from '../nativeWindows';
 import { NativeScreenNotice, rendererFailure } from '../nativeScreen/errorDiagnostics';
+import { screenShareModule } from '../nativeScreen/screenShareModule';
 import type { IpcRegistry } from './registry';
 
 // Icones de app nao mudam enquanto o app roda, e ler o bundle do disco a cada
@@ -223,7 +221,7 @@ export class DesktopSourceCatalog {
   }
 
   private macSources(): MacScreenProvider {
-    return this.macProvider ??= createMacScreenProvider();
+    return this.macProvider ??= screenShareModule().createMacScreenProvider();
   }
 
   /** The overlay: never listed, previewed or captured. */
@@ -326,7 +324,10 @@ export class DesktopSourceCatalog {
         if (source.thumbnailState === 'unavailable') return;
         try {
           if (signal?.aborted) throw new DOMException('Desktop preview was cancelled.', 'AbortError');
-          this.thumbnails ??= new NativeThumbnailCapturer(loadThumbnailRuntime());
+          if (!this.thumbnails) {
+            const { NativeThumbnailCapturer: Capturer, loadThumbnailRuntime } = screenShareModule();
+            this.thumbnails = new Capturer(loadThumbnailRuntime());
+          }
           const kind = source.type === 'screen' ? 'monitor' : 'window';
           const target = nativeSources.resolve(source.id, kind);
           const image = await this.thumbnails.capture(target, { signal });
