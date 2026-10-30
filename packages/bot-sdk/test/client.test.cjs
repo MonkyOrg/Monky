@@ -2099,6 +2099,42 @@ test('autocomplete concurrency stays bounded even when handlers ignore cancellat
   assert.deepEqual(errors, []);
 });
 
+// COMMAND_FINISHED aborts the signal at once, but a handler that ignores it keeps running:
+// it must keep its slot, or cancelling and repeating would pile up unbounded handlers.
+test('command concurrency stays bounded even when handlers ignore the server finishing them', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  const work = [];
+  let immediate = false;
+  bot.command({
+    name: 'hold', description: 'Hold',
+    handler: (ctx) => immediate ? undefined : new Promise((resolve) => { work.push({ ctx, resolve }); }),
+  });
+  t.after(() => { for (const pending of work) pending.resolve(); });
+  bot.connect();
+  await server.next(MessageType.COMMAND_REGISTER);
+  for (let index = 0; index < LIMITS.MAX_BOT_INVOCATIONS; index++) server.invoke(`work-${index}`, 'hold');
+  await sdkBarrier(server);
+  assert.equal(work.length, LIMITS.MAX_BOT_INVOCATIONS);
+  for (let index = 0; index < work.length; index++) {
+    server.send(MessageType.COMMAND_FINISHED, { invocationId: `work-${index}`, channelId: 'channel-one', reason: 'cancelled' });
+  }
+  await sdkBarrier(server);
+  assert.ok(work.every((pending) => pending.ctx.signal.aborted));
+  immediate = true;
+  server.invoke('full', 'hold');
+  assert.deepEqual((await server.next(MessageType.COMMAND_FINISH)).payload, { invocationId: 'full', failed: true });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].message, /Too many active bot commands/);
+  for (const pending of work) pending.resolve();
+  await sdkBarrier(server);
+  server.invoke('released', 'hold');
+  assert.deepEqual((await server.next(MessageType.COMMAND_FINISH)).payload, { invocationId: 'released', failed: false });
+  assert.equal(server.frames.some((frame) => frame.type === MessageType.COMMAND_FINISH), false,
+    'Commands the server finished never report back');
+  assert.equal(errors.length, 1);
+});
+
 test('sound downloads await structured outcomes, remain private and consume one request per invocation', async (t) => {
   const server = await makeServer(t);
   const { bot, errors } = makeBot(t, server);

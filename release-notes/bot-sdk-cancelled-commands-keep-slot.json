@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "SDK de bots: um comando cancelado continua contando no limite de comandos ativos até o handler realmente terminar, então cancelar e repetir não acumula trabalho sem limite no bot.",
+  "en": "Bot SDK: a cancelled command keeps counting toward the active command limit until its handler actually finishes, so cancelling and repeating no longer piles up unbounded work in the bot."
+}
