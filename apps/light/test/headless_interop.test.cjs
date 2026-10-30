@@ -443,8 +443,8 @@ test('two moves inside one round trip, into a room it sees and then one it canno
 });
 
 test('a kick that crosses the join behind a move leaves no membership on the server', { timeout: 45_000 }, async t => {
-  // The server admits that join without looking for the kick it crossed, into
-  // a room the client sees, although the client gave the join up on the kick.
+  // The kick ends the move the join follows, so the server refuses that join
+  // as overtaken (#841) instead of admitting a client that gave it up.
   const fixture = await createServerFixture(t);
   const admin = await fixture.connectHuman('Fixture admin');
   const light = new NativeClient(fixture, { nickname: 'Kicked while moved' });
@@ -459,12 +459,18 @@ test('a kick that crosses the join behind a move leaves no membership on the ser
   const voice = wsServer.voiceSessions;
   const handle = voice.handle;
   const sent = [];
+  const handled = [];
   let release;
   const kicked = new Promise(resolve => { release = resolve; });
   voice.handle = async function (session, type, payload, requestId) {
     if (session.sessionId === auth.sessionId) {
       sent.push(type);
       await kicked;
+      try {
+        return await handle.call(this, session, type, payload, requestId);
+      } finally {
+        handled.push(type);
+      }
     }
     return handle.call(this, session, type, payload, requestId);
   };
@@ -480,9 +486,10 @@ test('a kick that crosses the join behind a move leaves no membership on the ser
     [MessageType.ADMIN_KICK_VOICE]);
   await light.wait('kicked', since);
   release();
-  await until(() => sent.includes(MessageType.VOICE_LEAVE),
-    'The client never left the membership its crossed join was given', 5000);
-  await until(() => room() === undefined, 'The server kept the kicked client in the room its join named', 5000);
+  await until(() => handled.includes(MessageType.VOICE_JOIN), 'The server never answered the crossed join', 5000);
+  assert.equal(room(), undefined, 'The server admitted the join a kick had overtaken');
+  assert.equal(light.events.slice(since).some(event => event.event === 'session-error'), false,
+    'The refusal of the overtaken join reached the interface');
   const state = await light.state();
   assert.equal(state.phase, 'ready');
   assert.equal(state.mediaActive, false);
