@@ -38,8 +38,16 @@ export class ForumService {
     const channel = await this.requireAccess(userId, parsed.data.channelId);
     if (channel.type !== 'FORUM') throw new ForumError('Not a forum.');
     if (!current()) throw new ForumError('Access changed.', ProtocolErrorCode.PERMISSION_DENIED);
-    const rows = this.repository.list(channel.id, parsed.data.query ?? '', parsed.data.sort, parsed.data.offset);
-    return { channelId: channel.id, posts: rows.slice(0, 25), hasMore: rows.length > 25, nextOffset: parsed.data.offset + Math.min(rows.length, 25) };
+    const { query = '', sort, offset, after } = parsed.data;
+    const rows = this.repository.list(channel.id, query, sort, offset, after);
+    const posts = rows.slice(0, 25);
+    const last = posts.at(-1);
+    return {
+      channelId: channel.id, posts, hasMore: rows.length > 25, nextOffset: offset + posts.length,
+      ...(rows.length > 25 && last ? {
+        nextCursor: { pinned: last.pinned, at: sort === 'latest' ? last.updatedAt : last.createdAt, channelId: last.channelId },
+      } : {}),
+    };
   }
 
   async create(userId: string, payload: unknown, current: () => boolean): Promise<ForumPostSaved> {

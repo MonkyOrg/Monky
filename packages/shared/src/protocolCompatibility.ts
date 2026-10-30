@@ -37,9 +37,11 @@ import { PROTOCOL_VERSION } from './constants.js';
 // user-brb: USER_UPDATE_BRB and UserSummary.brb, the "Volto já" status. Older servers drop the auth flag and are never
 // sent the update, and peers without it never receive the field, so they keep seeing the person as online.
 // custom-status: USER_UPDATE_CUSTOM_STATUS and UserSummary.customStatus, the person's own status, negotiated the same way.
+// forum-cursor: FORUM_LIST accepts `after` and FORUM_LIST_RESULT carries `nextCursor`, so a page starts after the last post
+// read instead of at an offset that posts moving meanwhile shift. Older servers reject `after`, so clients keep `offset`.
 export const MIN_CLIENT_PROTOCOL = 35;
 export const MIN_BOT_PROTOCOL = 24;
-export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8', 'voice-user-limit', 'afk-channel', 'bot-storage', 'message-forward', 'user-brb', 'custom-status'] as const;
+export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8', 'voice-user-limit', 'afk-channel', 'bot-storage', 'message-forward', 'user-brb', 'custom-status', 'forum-cursor'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];
 /**
  * What a bot is offered, listed rather than subtracted: a new feature is only

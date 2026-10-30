@@ -1,5 +1,7 @@
-import type { ForumPost, ForumUpdatePost, ChannelSummary } from '@monky/shared';
+import type { ForumCursor, ForumPost, ForumUpdatePost, ChannelSummary } from '@monky/shared';
 import type { IDatabaseDriver } from './SqliteWrapper';
+
+type ForumSort = 'latest' | 'newest' | 'oldest';
 
 interface PostRow extends Omit<ForumPost, 'locked' | 'closed' | 'pinned'> {
   locked: number;
@@ -35,13 +37,24 @@ export class SqliteForumRepository {
     return row ? map(row) : undefined;
   }
 
-  list(forumId: string, query: string, sort: 'latest' | 'newest' | 'oldest', offset: number): ForumPost[] {
-    const order = sort === 'latest' ? 'updatedAt DESC' : sort === 'oldest' ? 'p.created_at ASC' : 'p.created_at DESC';
+  /**
+   * Up to 26 posts in the list's order, from `offset` or, with `after`, from right after that place.
+   * The order always ends in the post id, so every post has one place and a page boundary never splits ties.
+   */
+  list(forumId: string, query: string, sort: ForumSort, offset: number, after?: ForumCursor): ForumPost[] {
+    const key = sort === 'latest' ? 'updatedAt' : 'createdAt';
+    const direction = sort === 'oldest' ? 'ASC' : 'DESC';
+    const later = sort === 'oldest' ? '>' : '<';
+    const cursor = after
+      ? `WHERE pinned < ? OR (pinned = ? AND (${key} ${later} ? OR (${key} = ? AND channelId > ?)))`
+      : '';
+    const pinned = after?.pinned ? 1 : 0;
     const rows: PostRow[] = this.db.prepare(
-      `SELECT ${columns} FROM forum_posts p JOIN channels c ON c.id = p.channel_id
-       WHERE p.forum_id = ? AND c.name LIKE ? ESCAPE '\\'
-       ORDER BY p.pinned DESC, ${order}, p.channel_id LIMIT 26 OFFSET ?`
-    ).all(forumId, `%${query.replace(/[\\%_]/g, '\\$&')}%`, offset);
+      `SELECT * FROM (SELECT ${columns} FROM forum_posts p JOIN channels c ON c.id = p.channel_id
+       WHERE p.forum_id = ? AND c.name LIKE ? ESCAPE '\\') ${cursor}
+       ORDER BY pinned DESC, ${key} ${direction}, channelId LIMIT 26 ${after ? '' : 'OFFSET ?'}`
+    ).all(forumId, `%${query.replace(/[\\%_]/g, '\\$&')}%`,
+      ...(after ? [pinned, pinned, after.at, after.at, after.channelId] : [offset]));
     return rows.map(map);
   }
 

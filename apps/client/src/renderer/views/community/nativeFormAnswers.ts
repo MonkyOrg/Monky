@@ -1,5 +1,6 @@
 import type { NativeLiveForm, NativeLiveFormResults } from '@monky/shared';
 import { t } from '../../i18n';
+import { serverDate } from '../../utils/serverTime';
 
 export type FormResponse = NativeLiveFormResults['responses'][number];
 type FormField = NativeLiveForm['form']['fields'][number];
@@ -98,7 +99,7 @@ export function resultsCsv(form: NativeLiveForm, responses: readonly FormRespons
     [t('liveForm.csvRespondent'), t('liveForm.csvSubmittedAt'), ...fields.map(field => field.label)],
     ...responses.map(entry => [
       entry.user?.nickname ?? '',
-      'updatedAt' in entry.response ? new Date(entry.response.updatedAt).toISOString() : '',
+      'updatedAt' in entry.response ? serverDate(entry.response.updatedAt)?.toISOString() ?? '' : '',
       ...answers(entry),
     ]),
   ];
