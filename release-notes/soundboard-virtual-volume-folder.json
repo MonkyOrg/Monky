@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A pasta de downloads do soundboard funciona em volumes virtuais, como RAM disks do ImDisk e montagens WinFsp ou Dokan, em vez de aparecer como indisponível. Links simbólicos continuam recusados.",
+  "en": "The soundboard downloads folder works on virtual volumes, such as ImDisk RAM disks and WinFsp or Dokan mounts, instead of showing as unavailable. Symbolic links are still refused."
+}

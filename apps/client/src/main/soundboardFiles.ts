@@ -27,18 +27,18 @@ function failure(error: unknown): { status: 'failed'; reason: SoundboardFileFail
 /** Only Main's natively confirmed folder is a write capability, never an arbitrary renderer path. */
 export class SoundboardFiles {
   private busy = false;
-  constructor(private readonly folders: Pick<SoundboardDownloads, 'availability'>, private readonly encoder?: SoundboardEncoder) {}
+  constructor(private readonly folders: Pick<SoundboardDownloads, 'availability' | 'canonical'>, private readonly encoder?: SoundboardEncoder) {}
 
   private async source(input: unknown): Promise<{ folder: string; source: string; fileName: string; stat: Stats }> {
     if (!isRecord(input) || typeof input.folder !== 'string' || !path.isAbsolute(input.folder) ||
         input.folder.length > 4096 || !isSoundFileName(input.fileName)) throw new FileError('invalid_request');
     if (await this.folders.availability(input.folder) !== 'ready') throw new FileError('no_folder');
     const folder = path.resolve(input.folder);
-    if (!samePath(await fs.realpath(folder), folder) || (await fs.lstat(folder)).isSymbolicLink()) throw new FileError('no_folder');
+    if (!samePath(await this.folders.canonical(folder), folder) || (await fs.lstat(folder)).isSymbolicLink()) throw new FileError('no_folder');
     const source = path.join(folder, input.fileName);
     const stat = await fs.lstat(source);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 ||
-        !samePath(await fs.realpath(source), source)) throw new FileError('invalid_request');
+        !samePath(await this.folders.canonical(source), source)) throw new FileError('invalid_request');
     return { folder, source, fileName: input.fileName, stat };
   }
 
