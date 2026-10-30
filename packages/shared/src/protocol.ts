@@ -71,6 +71,8 @@ export enum ProtocolErrorCode {
    */
   SFU_UNAVAILABLE = 'SFU_UNAVAILABLE',
   VOICE_RECONNECT_EXPIRED = 'VOICE_RECONNECT_EXPIRED',
+  /** A join following a move that a later move replaced: the connection stays where the later one put it. */
+  VOICE_MOVE_SUPERSEDED = 'VOICE_MOVE_SUPERSEDED',
 }
 
 export enum MessageType {
@@ -718,6 +720,12 @@ export interface VoiceJoinPayload {
   invocationId?: string;
   /** Bot-only opt-in, requiring the separate receive_voice capability. */
   receiveAudio?: boolean;
+  /**
+   * `voice-move-id`: the ADMIN_MOVE_USER this join follows. The server answers
+   * VOICE_MOVE_SUPERSEDED, leaving the connection where it is, when a later
+   * move replaced it.
+   */
+  moveId?: string;
 }
 
 export interface VoiceModeTransition {
@@ -778,6 +786,8 @@ export interface AdminKickVoicePayload {
 export interface AdminMoveUserPayload {
   targetSessionId: string;
   channelId: string;
+  /** Server -> moved client, `voice-move-id`: repeated in the VOICE_JOIN that follows this move. */
+  moveId?: string;
 }
 
 export interface MemberKickPayload {

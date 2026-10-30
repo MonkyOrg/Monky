@@ -901,11 +901,11 @@ export class MainView {
     return true;
   }
 
-  public async rejoinVoiceChannel(channelId: string): Promise<void> {
+  public async rejoinVoiceChannel(channelId: string, moveId?: string): Promise<void> {
     const sessionKey = voiceStore.voiceSessionKey;
     const session = sessionKey ? sessionManager.get(sessionKey) : undefined;
     if (!session) return;
-    await rejoinCallOnSession(session.key, channelId);
+    await rejoinCallOnSession(session.key, channelId, undefined, moveId);
     if (sessionManager.getActive() !== session || voiceStore.voiceSessionKey !== session.key
       || voiceStore.currentVoiceChannelId !== channelId) return;
     this.viewedVoiceChannelId = channelId;

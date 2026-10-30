@@ -1,5 +1,5 @@
 import type { AuthSuccessPayload, VoiceUserJoinedPayload } from '@monky/shared';
-import { MessageType } from '@monky/shared';
+import { MessageType, ProtocolErrorCode } from '@monky/shared';
 import { ProtocolRequestError, RequestTimeoutError, type NetworkClient } from './NetworkClient';
 import { sessionManager, sessionKeyFor, type ServerSession } from './SessionManager';
 import { webRtcManager } from './WebRtcManager';
@@ -232,11 +232,12 @@ export function suspendCallForNetworkLoss(sessionKey: string): void {
 export async function rejoinCallOnSession(
   sessionKey: string,
   channelId: string,
-  reconnect?: VoiceReconnectAdmission
+  reconnect?: VoiceReconnectAdmission,
+  moveId?: string,
 ): Promise<void> {
   if (!reconnect && voiceStore.voiceSessionKey !== sessionKey) return;
   try {
-    await joinCallOnSession(sessionKey, channelId, reconnect);
+    await joinCallOnSession(sessionKey, channelId, reconnect, moveId);
   } catch (error) {
     if (reconnect) throw error;
     if (error instanceof Error && error.name === 'AbortError') return;
@@ -247,11 +248,13 @@ export async function rejoinCallOnSession(
 /**
  * Initial joins, moves and reconnects share one admission boundary. A requested
  * channel is only an intention until its own correlated response is accepted.
+ * `moveId` is the server move this join follows (`voice-move-id`).
  */
 export async function joinCallOnSession(
   sessionKey: string,
   channelId: string,
-  reconnect?: VoiceReconnectAdmission
+  reconnect?: VoiceReconnectAdmission,
+  moveId?: string,
 ): Promise<void> {
   clientLog.info('CONNECTION', `Requesting voice admission on session ${sessionKey}`, { channelId });
   const session = sessionManager.get(sessionKey);
@@ -314,7 +317,10 @@ export async function joinCallOnSession(
     const admission = (async () => {
       if (preceding) await preceding;
       assertCurrent();
-      const payload = { channelId, isMuted: voiceStore.isMuted || leavingAfk, isDeafened: voiceStore.isDeafened };
+      const payload = {
+        channelId, isMuted: voiceStore.isMuted || leavingAfk, isDeafened: voiceStore.isDeafened,
+        ...(moveId !== undefined && !reconnect ? { moveId } : {}),
+      };
       try {
         const joined = await (reconnect
           ? session.client.sendRequest<VoiceUserJoinedPayload>(MessageType.VOICE_RECONNECT, { ...payload, transitionId: reconnect.transitionId })
@@ -329,7 +335,9 @@ export async function joinCallOnSession(
         return joined;
       } catch (error) {
         if (!isCurrent()) {
-          if (ownsSession()) session.client.send(MessageType.VOICE_LEAVE, { channelId });
+          // A join a later move overtook was refused without moving anyone: there is nothing to leave.
+          const superseded = error instanceof ProtocolRequestError && error.code === ProtocolErrorCode.VOICE_MOVE_SUPERSEDED;
+          if (ownsSession() && !superseded) session.client.send(MessageType.VOICE_LEAVE, { channelId });
           throw cancelled();
         }
         if (error instanceof RequestTimeoutError) {

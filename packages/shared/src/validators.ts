@@ -231,6 +231,7 @@ export const voiceJoinSchema = z.object({
   channelId: messageReferenceSchema,
   isMuted: z.boolean().optional(),
   isDeafened: z.boolean().optional(),
+  moveId: messageReferenceSchema.optional(),
 });
 export const voiceStateUpdateSchema = z.object({
   isMuted: z.boolean().optional(),

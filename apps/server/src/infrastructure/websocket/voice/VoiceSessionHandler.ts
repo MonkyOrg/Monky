@@ -144,9 +144,11 @@ export class VoiceSessionHandler {
    * Where the server last moved each person's connection, by session, until
    * it joins a room by itself or leaves voice. A leave naming the room it was
    * moved out of, while it sits in the other, is either its client following
-   * the move or a hang-up that crossed it (`deferCrossedLeave`).
+   * the move or a hang-up that crossed it (`deferCrossedLeave`). `id` is the
+   * latest move's, which a client following it repeats in its join
+   * (`voice-move-id`): a join naming an earlier one was overtaken by this move.
    */
-  private moves = new Map<string, { from: string; to: string; leave?: NodeJS.Timeout }>();
+  private moves = new Map<string, { from: string; to: string; id: string; leave?: NodeJS.Timeout }>();
 
   constructor(private readonly host: VoiceSessionHost) {}
 
@@ -158,6 +160,15 @@ export class VoiceSessionHandler {
         if (!join.success) {
           this.host.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST,
             session.isBot ? 'Invalid voice join.' : 'Pedido de entrada na chamada inválido.', requestId);
+          return;
+        }
+        // The client is following a move a later one replaced, on its way
+        // here while the server moved the connection again. Joining would pull
+        // it out of where the later move put it, into a room it may not reach.
+        const followed = 'moveId' in join.data ? join.data.moveId : undefined;
+        if (followed !== undefined && (!session.sessionId || this.moves.get(session.sessionId)?.id !== followed)) {
+          this.host.sendError(session.ws, ProtocolErrorCode.VOICE_MOVE_SUPERSEDED,
+            'A movimentação foi substituída por outra.', requestId);
           return;
         }
         this.forgetMove(session.sessionId);
@@ -951,12 +962,13 @@ export class VoiceSessionHandler {
       // A person's client follows the move once told; until then, a leave of
       // theirs naming the old room may be either (`deferCrossedLeave`). A bot
       // stops instead, and its leave ends the call as any other.
+      const moveId = randomUUID();
       if (!target.isBot) {
         const pending = this.moves.get(previous.sessionId);
         // A hang-up already waiting outlives a later move: the same record
         // takes the new rooms, so it still ends the call wherever it is.
-        if (pending?.leave) Object.assign(pending, { from: previous.channelId, to: channelId });
-        else this.moves.set(previous.sessionId, { from: previous.channelId, to: channelId });
+        if (pending?.leave) Object.assign(pending, { from: previous.channelId, to: channelId, id: moveId });
+        else this.moves.set(previous.sessionId, { from: previous.channelId, to: channelId, id: moveId });
       }
       // Resolved once inside: being in a room is what lets someone moved in see it.
       voiceState = await this.applyPermissionMuted(previous.sessionId, await this.resolvePermissionMuted(target, channelId))
@@ -969,7 +981,10 @@ export class VoiceSessionHandler {
       this.sendVoiceNotice(previous.sessionId, {
         type: MessageType.ADMIN_MOVE_USER,
         requestId,
-        payload: { targetSessionId: previous.sessionId, channelId } satisfies AdminMoveUserPayload,
+        payload: {
+          targetSessionId: previous.sessionId, channelId,
+          ...(!target.isBot && target.protocol?.features.includes('voice-move-id') ? { moveId } : {}),
+        } satisfies AdminMoveUserPayload,
       }, requester);
       this.announceVoiceDeparture(previous, { requestId });
     } finally {

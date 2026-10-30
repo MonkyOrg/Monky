@@ -613,7 +613,7 @@ export type ManagedToolRepository = "yt-dlp/yt-dlp" | "yt-dlp/FFmpeg-Builds" | "
 
 ## `MessageType` {#messagetype}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L76)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L78)
 
 ```ts
 export enum MessageType {
@@ -1004,7 +1004,9 @@ export enum ProtocolErrorCode {
      * degrading to P2P (#515).
      */
     SFU_UNAVAILABLE = 'SFU_UNAVAILABLE',
-    VOICE_RECONNECT_EXPIRED = 'VOICE_RECONNECT_EXPIRED'
+    VOICE_RECONNECT_EXPIRED = 'VOICE_RECONNECT_EXPIRED',
+    /** A join following a move that a later move replaced: the connection stays where the later one put it. */
+    VOICE_MOVE_SUPERSEDED = 'VOICE_MOVE_SUPERSEDED'
 }
 ```
 

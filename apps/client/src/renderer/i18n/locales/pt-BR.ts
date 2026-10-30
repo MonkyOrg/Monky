@@ -2010,6 +2010,7 @@ export const ptBR = {
   'protocolError.nicknameServerOutdated': 'Este servidor ainda não aceita acentos nem emojis no nickname. Peça a quem administra o servidor para atualizar o Monky ou use um nickname sem esses caracteres.',
   'protocolError.channelNotFound': 'Canal não encontrado.',
   'protocolError.channelFull': 'Este canal de voz está cheio.',
+  'protocolError.voiceMoveSuperseded': 'Você foi movido de novo para outra sala.',
   'protocolError.messageTooLong': 'Mensagem muito longa.',
   'protocolError.rateLimited': 'Você está enviando mensagens rápido demais. Aguarde alguns segundos.',
   'protocolError.authRateLimited': 'Muitas tentativas de conexão. Aguarde um minuto e tente de novo.',

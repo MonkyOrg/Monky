@@ -407,7 +407,7 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
     const auto room = text(payload, "channelId");
     // A move takes along a call, or the admission on its way to one. One that
     // crossed a leave reaches a client that hung up, and must start no call.
-    if (target == auth_->sessionId && desired_) followMove(room, now);
+    if (target == auth_->sessionId && desired_) followMove(room, optionalText(payload, "moveId"), now);
     return;
   }
   if (type == msg::SERVER_SETTINGS_UPDATED) {
@@ -500,17 +500,23 @@ void ProtocolSession::join(std::string channelId, Time now) {
   if (auth_ && online_) beginJoin(now, false);
 }
 
-void ProtocolSession::followMove(std::string room, Time now) {
+void ProtocolSession::followMove(std::string room, std::optional<std::string> moveId, Time now) {
   if (desired_ == room && (phase_ == SessionPhase::joining || phase_ == SessionPhase::admitted)) return;
   // The server has already moved the membership, so the call follows it with
   // a join alone, as the desktop client does. A leave would name the old room,
   // and one crossing a second move would end the very call the server moved.
   clearCall(cancelled());
   desired_ = std::move(room);
+  // Repeated in the join, so a server that moved us again meanwhile refuses
+  // it rather than pulling us back out of the later room (voice-move-id).
+  followedMove_ = std::move(moveId);
   beginJoin(now, false);
 }
 
 void ProtocolSession::beginJoin(Time now, bool reconnect) {
+  // Only the join sent right after the move follows it; a later one (a retry
+  // after reconnecting, a join of the user's) is a join of its own.
+  auto followedMove = std::exchange(followedMove_, std::nullopt);
   if (!online_ || !auth_ || !desired_) return;
   const auto room = *desired_;
   const auto& channels = auth_->server.at("channels");
@@ -525,6 +531,7 @@ void ProtocolSession::beginJoin(Time now, bool reconnect) {
     return;
   }
   Json payload{{"channelId", room}, {"isMuted", policy_.muted}, {"isDeafened", policy_.deafened}};
+  if (followedMove && !reconnect) payload["moveId"] = std::move(*followedMove);
   if (reconnect) {
     if (!transition_ || transition_->channel != room || now >= transition_->deadline ||
         settingsTransition_ != transition_->id) return;

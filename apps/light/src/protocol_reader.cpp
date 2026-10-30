@@ -89,6 +89,11 @@ std::optional<bool> optionalBoolean(const Json& object, const char* key) {
   return boolean(object, key);
 }
 
+std::optional<std::string> optionalText(const Json& object, const char* key) {
+  if (!object.is_object() || !object.contains(key)) return std::nullopt;
+  return text(object, key);
+}
+
 void number(const Json& object, const char* key) {
   require(field(object, key).is_number(), "Expected number");
 }
