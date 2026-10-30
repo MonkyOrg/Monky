@@ -1,0 +1,24 @@
+# Keeps the actions in .github/workflows current. Third-party actions are pinned
+# to a full commit SHA with their release in a comment (`@<sha> # v1.2.3`), and
+# Dependabot moves both together. scripts/test-native-ci.js enforces the pins.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # A release that has been public for a week has had time to be noticed if it
+    # was published from a compromised account (as tj-actions/changed-files was).
+    cooldown:
+      default-days: 7
+    # A new major is a migration reviewed on its own: the workflow contract
+    # tests name the first-party majors, so a bump of those is done by hand.
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
+    groups:
+      github-actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+      include: scope

@@ -36,6 +36,10 @@ export * from './localExecution/contracts';
 import { handleReachabilityProbe } from './reachability';
 export { handleReachabilityProbe } from './reachability';
 import {
+  MARKETPLACE_SERVER_OPTIONS, MAX_REGISTRATION_BYTES, RegistrationLimiter,
+  isJsonContentType, marketplaceBaseUrl, readRequestBody, replyJson,
+} from './marketplace';
+import {
   LIMITS,
   MessageType,
   PROTOCOL_VERSION,
@@ -1920,6 +1924,72 @@ export class BotClient extends EventEmitter {
     }
   }
 
+  /** `POST /register`: a Monky server hands this bot the token of a new installation. */
+  private async handleRegistration(
+    req: http.IncomingMessage, res: http.ServerResponse, limiter: RegistrationLimiter,
+  ): Promise<void> {
+    const shuttingDown = { error: 'The bot is shutting down.' };
+    if (!isJsonContentType(req.headers['content-type'])) {
+      replyJson(res, 415, { error: 'Registrations must be sent as application/json.' }, { close: true });
+      return;
+    }
+    if (!limiter.allowAttempt(req.socket.remoteAddress)) {
+      replyJson(res, 429, { error: 'Too many registration attempts. Try again later.' }, { close: true, retryAfterSeconds: 60 });
+      return;
+    }
+    const body = await readRequestBody(req, MAX_REGISTRATION_BYTES);
+    if (!body.ok) {
+      if (body.reason === 'too_large') replyJson(res, 413, { error: 'Registration is too large.' }, { close: true });
+      return;
+    }
+    if (this.closing) {
+      replyJson(res, 503, shuttingDown);
+      return;
+    }
+    let raw: unknown;
+    try {
+      raw = JSON.parse(body.text);
+    } catch {
+      replyJson(res, 400, { error: 'Invalid JSON.' });
+      return;
+    }
+    const parsed = botRegistrationSchema.safeParse(raw);
+    if (!parsed.success) {
+      replyJson(res, 400, { error: 'Invalid registration settings.' });
+      return;
+    }
+    const release = limiter.acquire();
+    if (!release) {
+      replyJson(res, 429, { error: 'The bot is busy with other registrations. Try again shortly.' }, { retryAfterSeconds: 10 });
+      return;
+    }
+    const data = parsed.data;
+    const serverId = data.serverId ?? randomUUID();
+    try {
+      if (data.serverUrl) {
+        const url = new URL(data.serverUrl);
+        if (url.hash) throw new Error('The server URL must not contain a fragment.');
+        await this.registerServer({ ...data, serverId, serverUrl: data.serverUrl });
+      }
+      if (this.closing) {
+        replyJson(res, 503, shuttingDown);
+        return;
+      }
+      // The token is the installation's secret; listeners only learn which server it was.
+      this.emit('registered', {
+        serverId, serverName: data.serverName, ...(data.serverUrl ? { serverUrl: data.serverUrl } : {}),
+      });
+      replyJson(res, this.closing ? 503 : 200, this.closing ? shuttingDown : { publicKey: this.options.publicKey });
+    } catch (error) {
+      if (!this.closing) this.reportError(error);
+      replyJson(res, this.closing ? 503 : 502, {
+        error: 'The bot could not complete registration. Check the bot logs and server compatibility.',
+      });
+    } finally {
+      release();
+    }
+  }
+
   /** Expose a manifest and create a separate connection for each registration. */
   serve(opts: ServeOptions): Promise<http.Server> {
     if (this.closing) throw new Error('This bot client has been closed.');
@@ -1927,6 +1997,7 @@ export class BotClient extends EventEmitter {
     const host = opts.host ?? '0.0.0.0';
     const publicHost = opts.publicHost ?? host;
     const urlHost = publicHost.includes(':') && !publicHost.startsWith('[') ? `[${publicHost}]` : publicHost;
+    const publicBase = opts.publicUrl === undefined ? undefined : marketplaceBaseUrl(opts.publicUrl);
     this.profile = botProfileUpdateSchema.parse({
       ...this.profile,
       name: opts.name,
@@ -1940,22 +2011,14 @@ export class BotClient extends EventEmitter {
       description: opts.description,
       icon: opts.icon ?? this.profile.avatarBase64 ?? undefined,
       commands: [...this.commands.values()].map(({ name, description }) => ({ name, description })),
-      registrationUrl: `http://${urlHost}:${listeningPort}/register`,
+      registrationUrl: publicBase ? `${publicBase}/register` : `http://${urlHost}:${listeningPort}/register`,
     });
     getManifest();
+    const limiter = new RegistrationLimiter();
 
-    const server = http.createServer((req, res) => {
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    const server = http.createServer(MARKETPLACE_SERVER_OPTIONS, (req, res) => {
       if (this.closing) {
-        res.writeHead(503, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'The bot is shutting down.' }));
-        return;
-      }
-      if (req.method === 'OPTIONS') {
-        res.writeHead(204);
-        res.end();
+        replyJson(res, 503, { error: 'The bot is shutting down.' });
         return;
       }
       if (handleReachabilityProbe(req, res, this.options.publicKey)) return;
@@ -1966,72 +2029,7 @@ export class BotClient extends EventEmitter {
         return;
       }
       if (req.method === 'POST' && req.url === '/register') {
-        let body = '';
-        let tooLarge = false;
-        req.setEncoding('utf8');
-        req.on('data', (chunk: string) => {
-          if (tooLarge) return;
-          body += chunk;
-          if (Buffer.byteLength(body) > 16 * 1024) {
-            tooLarge = true;
-            res.writeHead(413, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Registration is too large.' }));
-          }
-        });
-        req.on('error', (error) => {
-          if (!this.closing) this.reportError(error);
-        });
-        req.on('end', () => {
-          if (tooLarge) return;
-          if (this.closing) {
-            res.writeHead(503, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'The bot is shutting down.' }));
-            return;
-          }
-          let raw: unknown;
-          try {
-            raw = JSON.parse(body);
-          } catch {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Invalid JSON.' }));
-            return;
-          }
-          const parsed = botRegistrationSchema.safeParse(raw);
-          if (!parsed.success) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Invalid registration settings.' }));
-            return;
-          }
-          const data = parsed.data;
-          const serverId = data.serverId ?? randomUUID();
-          const register = async (): Promise<void> => {
-            if (data.serverUrl) {
-              const url = new URL(data.serverUrl);
-              if (url.hash) throw new Error('The server URL must not contain a fragment.');
-              await this.registerServer({ ...data, serverId, serverUrl: data.serverUrl });
-            }
-            if (this.closing) {
-              res.writeHead(503, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'The bot is shutting down.' }));
-              return;
-            }
-            this.emit('registered', { ...data, serverId });
-            if (this.closing) {
-              res.writeHead(503, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'The bot is shutting down.' }));
-              return;
-            }
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ publicKey: this.options.publicKey }));
-          };
-          void register().catch((error: unknown) => {
-            if (!this.closing) this.reportError(error);
-            if (!res.destroyed && !res.writableEnded) {
-              res.writeHead(this.closing ? 503 : 502, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'The bot could not complete registration. Check the bot logs and server compatibility.' }));
-            }
-          });
-        });
+        void this.handleRegistration(req, res, limiter);
         return;
       }
       res.writeHead(404);
@@ -2080,6 +2078,13 @@ export interface ServeOptions {
   host?: string;
   /** Public hostname/IP, without a scheme or port. */
   publicHost?: string;
+  /**
+   * Public origin announced in the manifest instead of `publicHost` and
+   * `port`, such as `https://bot.example.com` behind a TLS reverse proxy.
+   * Monky servers post the token to `<publicUrl>/register`, so HTTPS keeps it
+   * encrypted on the way. Only an origin: no path, query or fragment.
+   */
+  publicUrl?: string;
 }
 
 export { BOT_CAPABILITIES, BOT_STORAGE_LIMITS, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode } from '@monky/shared';

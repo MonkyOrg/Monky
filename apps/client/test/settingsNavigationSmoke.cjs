@@ -1007,6 +1007,44 @@ async function runSettingsNavigationSmoke() {
     anchor.remove();
   }
 
+  // D4: a sticker folder Main refuses to list is shown as unavailable, never as an empty folder.
+  const [{ stickerService }, { settingsStore: stickerSettings }] = await Promise.all([
+    import('/core/StickerService.ts'), import('/stores/settingsStore.ts'),
+  ]);
+  const savedApi = window.api, savedStickerFolder = stickerSettings.stickersFolderPath;
+  const stickerAnchor = document.createElement('button');
+  document.body.append(stickerAnchor);
+  const stickerPicker = new EmojiPicker({ container: document.body, anchor: stickerAnchor, floating: true,
+    onSelectEmoji() {}, onSelectSticker() {} });
+  try {
+    language.setLanguage('pt-BR');
+    let listing = async () => { throw new Error('This sticker folder was not confirmed on this computer.'); };
+    window.api = { listStickers: folder => listing(folder) };
+    stickerSettings.stickersFolderPath = 'C:\\Figurinhas restauradas';
+    stickerService.reset();
+    await stickerPicker.open();
+    document.querySelector('.emoji-picker:not([data-ui-closing]) [data-picker-tab="stickers"]').click();
+    const stickerBody = () => document.querySelector('.emoji-picker:not([data-ui-closing]) .emoji-picker-body').textContent;
+    await settled(() => !stickerBody().includes(language.t('emojiPicker.loadingStickers')));
+    check(stickerBody().includes(language.t('emojiPicker.folderUnavailableTitle'))
+      && !stickerBody().includes(language.t('emojiPicker.emptyFolderTitle')),
+    'A refused sticker folder is shown as unavailable, not as an empty folder');
+    const reload = document.querySelector('.emoji-picker:not([data-ui-closing]) .emoji-picker-refresh-btn');
+    check(reload && document.querySelector('.emoji-picker:not([data-ui-closing]) .emoji-picker-folder-btn'),
+      'Reload (which may confirm the folder) and choosing another folder stay available');
+    listing = async () => [];
+    reload.click();
+    await settled(() => stickerBody().includes(language.t('emojiPicker.emptyFolderTitle')));
+    check(!stickerBody().includes(language.t('emojiPicker.folderUnavailableTitle')),
+      'A listing that succeeds again clears the unavailable state');
+  } finally {
+    stickerPicker.destroy();
+    stickerAnchor.remove();
+    window.api = savedApi;
+    stickerSettings.stickersFolderPath = savedStickerFolder;
+    stickerService.reset();
+  }
+
   language.setLanguage('pt-BR');
   const appModal = new SettingsModal();
   for (const tab of Object.values(appModal)) {

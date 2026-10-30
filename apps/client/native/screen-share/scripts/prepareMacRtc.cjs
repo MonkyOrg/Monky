@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { root, execute, write, withNetworkRetries } = require('./buildTools.cjs');
+const { pipInstallArguments } = require('./native-rtc/gclientRuntime.cjs');
 const pins = require('./native-rtc/pins.json');
 
 const workspace = path.resolve(root, '..', '..', '..', '..', '.native-screen', 'mac-rtc');
@@ -54,8 +55,7 @@ function prepare({ python = 'python3.11' } = {}) {
     const venv = path.join(workspace, 'python-3.11');
     if (!fs.existsSync(venv)) execute(python, ['-m', 'venv', venv], { env });
     const interpreter = path.join(venv, 'bin', 'python3');
-    execute(interpreter, ['-I', '-m', 'pip', '--isolated', '--disable-pip-version-check',
-      'install', ...pins.bootstrap.gclientRuntime.requirements.map(item => `${item.distribution}==${item.version}`)], { env });
+    execute(interpreter, pipInstallArguments(), { env });
     for (const [name, directory] of [
       ['depot_tools', depot], ['webrtc', path.join(workspace, 'webrtc', 'src')],
     ]) {

@@ -46,6 +46,13 @@ if (!process.versions.electron) {
             response.end('<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="400"><rect width="1000" height="400" fill="#363586"/><circle cx="700" cy="180" r="170" fill="#6965d9"/><path d="M0 400L360 90L670 400" fill="#88b8d4"/></svg>');
             return;
           }
+          // Chat attachments only resolve from the server's own `/attachments/` path.
+          const forumImage = /^\/attachments\/forum-([0-9a-f]{6})\.svg$/.exec(request.url);
+          if (forumImage) {
+            response.setHeader('Content-Type', 'image/svg+xml');
+            response.end(`<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect width="400" height="300" fill="#${forumImage[1]}"/></svg>`);
+            return;
+          }
           if (request.url !== '/__community__') return next();
           response.setHeader('Content-Type', 'text/html');
           response.end(`<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/dropdowns.css">${fonts}</head><body><main id="root"></main></body></html>`);
@@ -2229,6 +2236,14 @@ async function* regression(locale, inviteModule) {
     && root.querySelector('.forum-empty-state')?.textContent.includes('#Forum')
     && !root.querySelector('[data-forum-posts] button'),
   'Empty forums show the centered first-conversation state without example actions');
+  const forumChannel = server.getChannel('forum');
+  forumChannel.name = '<img src=x onerror="window.forumNameExecuted=true">';
+  await forum.load();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  check(root.querySelector('.forum-empty-state p')?.textContent.includes(`#${forumChannel.name}`)
+    && !root.querySelector('.forum-empty-state img') && !window.forumNameExecuted,
+  'A forum name carrying markup stays literal text in the empty state');
+  forumChannel.name = 'Forum';
   forumPosts = [post];
   await forum.load();
   root.querySelector('[data-forum-open]').click();
@@ -2453,9 +2468,7 @@ async function* regression(locale, inviteModule) {
       'Search stays in the forum header instead of covering discussion controls');
     check(mainRoot.querySelector('[name=title]') === draftTitle && draftTitle.value === 'Keep this draft', 'Opening a discussion preserves the inline draft');
     check(calls.some(call => call.type === 'CHAT_LOAD_HISTORY' && call.payload.channelId === 'post'), 'Real discussion requests its own chat history');
-    const forumImage = color => `data:image/svg+xml,${encodeURIComponent(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect width="400" height="300" fill="${color}"/></svg>`,
-    )}`;
+    const forumImage = color => `/attachments/forum-${color.slice(1)}.svg`;
     actualChatStore.setHistory('post', [{
       id: 'forum-media-message', channelId: 'post', userId: 'member', userNickname: 'Audience Member',
       content: 'Carousel topic', createdAt: Date.now(), updatedAt: Date.now(), isSystem: false,

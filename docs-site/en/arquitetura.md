@@ -77,6 +77,14 @@ UI **has no access to Node**. Anything that needs the operating system — picki
 a screen to share, reading the native audio module, touching the tray — goes
 through the `window.api` bridge exposed by the preload.
 
+Three barriers protect that bridge. The Content-Security-Policy in `index.html`
+only runs the app's own scripts, so HTML injected by mistake does not execute;
+a new kind of resource (another iframe, worker or origin) has to be added to
+that policy. No window leaves its own document or opens other windows, except
+Picture-in-Picture and links handed to the browser. And sensitive channels —
+identity, backups, hosted servers, local files — only answer the main window;
+the overlay gets a bridge of its own, with just what it needs to draw the call.
+
 ### The UI uses no framework
 
 Possibly the project's most unusual decision: **the renderer is plain TypeScript
@@ -296,9 +304,10 @@ what.
 
 </div>
 
-Beyond the WebSocket, the server exposes a few HTTP routes: `/health`, `/preview`
-and `/invite-info` (public information for the invite screen), `/avatars/*` and
-the `/attachments` upload/download.
+Beyond the WebSocket, the server exposes a few HTTP routes: `/health`, `/preview`,
+`/invite-info` (addresses for the invite screen, answered only on the server's own
+machine; members get the same over the WebSocket), `/avatars/*` and the
+`/attachments` upload/download.
 
 The default port is **3000**.
 

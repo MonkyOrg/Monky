@@ -1,4 +1,4 @@
-import { escapeHtml } from '../../../utils/html';
+import { escapeHtml, html } from '../../../utils/html';
 import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import { getAvatarUrl } from '../../../utils/avatar';
 import { serverStore } from '../../../stores/serverStore';
@@ -43,7 +43,7 @@ export class ServerGeneralTab {
       <div data-settings-section="server-profile" data-settings-label="${escapeHtml(t('serverSettings.nameLabel'))}" style="padding: 14px; background: var(--bg-card); border-radius: var(--radius-md); margin-bottom: 16px; border: 1px solid var(--border-color);">
         <div style="display: flex; gap: 16px; align-items: center;">
         <button type="button" id="server-icon-wrapper" class="settings-avatar-wrapper" style="border-radius: 12px; width: 64px; height: 64px; padding: 0; border: 0; flex-shrink: 0;" title="${t('serverSettings.iconTitle')}">
-          <img id="server-icon-preview" class="settings-avatar-img" style="border-radius: 10px; width: 64px; height: 64px; object-fit: cover;" src="${iconSrc}" alt="${t('serverSettings.iconAlt')}">
+          ${html`<img id="server-icon-preview" class="settings-avatar-img" style="border-radius: 10px; width: 64px; height: 64px; object-fit: cover;" src="${iconSrc}" alt="${t('serverSettings.iconAlt')}">`}
           <div class="settings-avatar-overlay" style="border-radius: 10px;">
             <span class="material-symbols-outlined md-20">photo_camera</span>
           </div>
@@ -76,8 +76,8 @@ export class ServerGeneralTab {
             <span class="toggle-slider"></span>
           </label>
         </div>
-        <input id="input-message-limit" type="number" min="1" step="1" value="${s.maxMessageLength || LIMITS.MAX_MESSAGE_LENGTH}"
-          ${s.protocol?.features.includes('message-length-setting') && s.maxMessageLength !== 0 ? '' : 'disabled'}>
+        ${html`<input id="input-message-limit" type="number" min="1" step="1" value="${s.maxMessageLength || LIMITS.MAX_MESSAGE_LENGTH}"
+          ${s.protocol?.features.includes('message-length-setting') && s.maxMessageLength !== 0 ? '' : 'disabled'}>`}
         <small>${t(s.protocol?.features.includes('message-length-setting') ? 'serverSettings.messageLimitHint' : 'chat.featureUpdateRequired')}</small>
       </div>
       <div data-settings-section="member-limit" data-settings-label="${escapeHtml(t('serverSettings.memberLimitLabel'))}" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px; margin-bottom: 16px;">
@@ -94,7 +94,7 @@ export class ServerGeneralTab {
 
         <div id="max-users-group" class="form-group" style="margin-top: 12px; margin-bottom: 0;" ${hasLimit ? '' : 'hidden'}>
           <label style="margin-bottom: 4px;">${t('serverSettings.memberLimitValueLabel')}</label>
-          <input id="input-max-users" type="number" min="1" step="1" value="${limitValue}">
+          ${html`<input id="input-max-users" type="number" min="1" step="1" value="${limitValue}">`}
           <div id="server-settings-member-limit-hint" style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
             ${t('serverSettings.memberLimitHint', { count: memberCount })}
           </div>
@@ -126,7 +126,7 @@ export class ServerGeneralTab {
             <div style="font-size: 11px; color: var(--text-muted); line-height: 1.4;">${t('serverSettings.voiceModeSfuDesc')}</div>
           </button>
         </div>
-        <input type="hidden" id="input-server-voice-mode" value="${s.voiceMode || 'p2p'}" />
+        ${html`<input type="hidden" id="input-server-voice-mode" value="${s.voiceMode || 'p2p'}" />`}
 
         ${renderWhatPassesWhereTableHtml()}
         ${renderCapacityEstimatorHtml('general')}
@@ -146,7 +146,7 @@ export class ServerGeneralTab {
           </div>
           <div id="server-settings-channel-count">${t('serverSettings.channelsCount', { count: s.channels.length })}</div>
           <div id="server-settings-member-count">${t('serverSettings.membersCount', { count: memberCount })}</div>
-          <div style="grid-column: span 2; font-size: 11px; color: var(--text-muted); word-break: break-all;"><strong>ID:</strong> ${s.id}</div>
+          ${html`<div style="grid-column: span 2; font-size: 11px; color: var(--text-muted); word-break: break-all;"><strong>ID:</strong> ${s.id}</div>`}
         </div>
       </div>
       </fieldset>

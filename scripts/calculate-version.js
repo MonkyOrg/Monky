@@ -276,6 +276,41 @@ export function promoteBetaTag(betaTag) {
     .trim();
 }
 
+function tagExists(tag, cwd) {
+  try {
+    execFileSync('git', ['rev-parse', '--verify', '--quiet', '--end-of-options', `refs/tags/${tag}^{commit}`],
+      { cwd, stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks the beta tag a manual dispatch asks to promote and returns the stable
+ * version it becomes.
+ *
+ * The tag is typed by hand in the workflow form and then becomes the release
+ * checkout ref and, through the version, part of file names, commands and the
+ * published tag. So it has to be exactly the name of an existing beta tag:
+ * a typo (a missing `v`, a stray space) or a crafted value stops the run here
+ * instead of failing late in a checkout, or reaching a shell.
+ */
+export function validatePromotionTag(tag, { cwd, exists = (name) => tagExists(name, cwd) } = {}) {
+  const value = typeof tag === 'string' ? tag : '';
+  if (value !== value.trim() || !parseVersionTag(value)?.prerelease) {
+    throw new Error(`Promote an existing beta tag such as v1.8.0-beta, not ${JSON.stringify(tag)}.`);
+  }
+  if (!exists(value)) throw new Error(`There is no tag named ${value} to promote.`);
+  return promoteBetaTag(value);
+}
+
+/**
+ * The versions this script hands to the release: `1.8.0` or `1.8.0-beta`.
+ * They reach tags, file names and commands, so nothing else leaves the script.
+ */
+export const PUBLISHED_VERSION = /^\d+\.\d+\.\d+(?:-beta)?$/;
+
 /**
  * Gets the commits between a tag and HEAD, oldest first, each with the files it
  * changed: `{ hash, message, files: [{ status, path }] }`.
@@ -423,7 +458,12 @@ if (isDirectRun) {
 
   if (promoteTag) {
     // Promotion: republish a validated beta as a clean stable release.
-    version = promoteBetaTag(promoteTag);
+    try {
+      version = validatePromotionTag(promoteTag);
+    } catch (error) {
+      console.error(`::error::${error.message}`);
+      process.exit(1);
+    }
     prevTag = getLatestSemverTag() || '';
     bumpType = 'promote';
     channel = 'stable';
@@ -454,6 +494,13 @@ if (isDirectRun) {
         fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### No release\n\n${reason} CI, scripts, tests and docs do not publish a version.\n`);
       }
     }
+  }
+
+  // GITHUB_OUTPUT is line based: a value that is not exactly a version could add
+  // outputs of its own, so a malformed one stops the release instead.
+  if (!PUBLISHED_VERSION.test(version)) {
+    console.error(`::error::Refusing to release malformed version ${JSON.stringify(version)}.`);
+    process.exit(1);
   }
 
   // Write to GitHub Actions GITHUB_OUTPUT if available

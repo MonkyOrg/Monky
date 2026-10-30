@@ -24,6 +24,12 @@ if (!process.versions.electron) {
   const { app, BrowserWindow } = require('electron');
   app.on('window-all-closed', () => {});
   app.setPath('userData', process.env.MONKY_SEARCH_PROFILE);
+  const searchAttachments = {
+    '/attachments/qa.png': { type: 'image/png', base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB' },
+    '/attachments/qa.webm': { type: 'video/webm', base64: 'GkXfo0AgQoaBAULygQRC84EIQoKEd2VibQ==' },
+    '/attachments/qa.wav': { type: 'audio/wav', base64: 'UklGRg==' },
+    '/attachments/qa.txt': { type: 'text/plain', base64: 'UUE=' },
+  };
   let vite, browser, timeout;
   const finish = async code => {
     clearTimeout(timeout);
@@ -43,6 +49,13 @@ if (!process.versions.electron) {
         name: 'search-fixture',
         configureServer(server) {
           server.middlewares.use((request, response, next) => {
+            // Search results resolve attachments from the server's own `/attachments/` path.
+            const attachment = searchAttachments[request.url];
+            if (attachment) {
+              response.setHeader('Content-Type', attachment.type);
+              response.end(Buffer.from(attachment.base64, 'base64'));
+              return;
+            }
             if (request.url !== '/__search__') return next();
             response.setHeader('Content-Type', 'text/html');
             response.end(`<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css">${fonts}</head><body><main class="main-center-column" style="height:900px"><header id="header" class="server-tools"></header></main></body></html>`);
@@ -124,6 +137,9 @@ async function* regression(language) {
   const { MessageSearch } = await import('/views/MessageSearch.ts');
   const { dateTimeControls } = await import('/core/DateTimeControls.ts');
   const { highlightMessageJump } = await import('/utils/messageJumpHighlight.ts');
+  const { networkClient } = await import('/core/NetworkClient.ts');
+  // The fixture page stands in for the connected server that serves `/attachments/`.
+  networkClient.getHttpBaseUrl = () => location.origin;
   dateTimeControls.init();
   const { setLanguage } = await import('/i18n/index.ts');
   setLanguage(language);
@@ -145,13 +161,13 @@ async function* regression(language) {
   const message = id => ({ id, channelId: 'one', userId: 'alice', userNickname: '<img src=x onerror=alert(1)>',
     content: '<script>window.leaked=true</script> **hello** https://google.com\n```ts\nconst safe = true;\n```',
     createdAt: 1000, isSystem: false, attachments: [
-      { id: 'image', messageId: id, kind: 'image', url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB',
+      { id: 'image', messageId: id, kind: 'image', url: '/attachments/qa.png',
         originalName: 'qa.png', mimeType: 'image/png', sizeBytes: 40, createdAt: 1000 },
-      { id: 'video', messageId: id, kind: 'video', url: 'data:video/webm;base64,GkXfo0AgQoaBAULygQRC84EIQoKEd2VibQ==',
+      { id: 'video', messageId: id, kind: 'video', url: '/attachments/qa.webm',
         originalName: 'qa.webm', mimeType: 'video/webm', sizeBytes: 28, createdAt: 1000 },
-      { id: 'audio', messageId: id, kind: 'file', url: 'data:audio/wav;base64,UklGRg==',
+      { id: 'audio', messageId: id, kind: 'file', url: '/attachments/qa.wav',
         originalName: 'qa.wav', mimeType: 'audio/wav', sizeBytes: 4, createdAt: 1000 },
-      { id: 'file', messageId: id, kind: 'file', url: 'data:text/plain;base64,UUE=',
+      { id: 'file', messageId: id, kind: 'file', url: '/attachments/qa.txt',
         originalName: 'qa.txt', mimeType: 'application/octet-stream', sizeBytes: 2, createdAt: 1000 },
     ] });
   const view = new MessageSearch(document.querySelector('#header'), document.querySelector('main'), {

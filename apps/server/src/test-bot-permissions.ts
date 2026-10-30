@@ -619,6 +619,115 @@ test('install previews bind identity, requests and administrator session before 
   assert.equal(registrations, 1);
 });
 
+test('bot manifests and registration replies are read with a ceiling and never follow redirects', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Bounded owner');
+  const keys = identity();
+  let redirectedHits = 0;
+  let streamedBytes = 0;
+  let registrationReply: 'redirect' | 'oversized' | 'valid' = 'redirect';
+  const server = http.createServer((request, response) => {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const base = `http://127.0.0.1:${address.port}`;
+    const manifest = JSON.stringify({ name: 'Bounded bot', requestedCapabilities: ['commands'], registrationUrl: `${base}/register` });
+    if (request.url === '/elsewhere') {
+      redirectedHits++;
+      request.resume();
+      response.setHeader('Content-Type', 'application/json');
+      response.end(request.method === 'POST' ? JSON.stringify({ publicKey: keys.publicKey }) : manifest);
+    } else if (request.url === '/redirect') {
+      response.writeHead(302, { Location: `${base}/elsewhere` });
+      response.end();
+    } else if (request.url === '/tls-redirect') {
+      // What Caddy answers on http:// by default, with a body to make sure it is not read.
+      response.writeHead(308, { Location: `https://127.0.0.1:${address.port}/elsewhere`, 'Content-Type': 'text/html' });
+      response.end('<a href="https://127.0.0.1/elsewhere">Permanent Redirect</a>');
+    } else if (request.url === '/streamed') {
+      // Far more than any manifest may hold, with no declared length.
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      const chunk = Buffer.alloc(64 * 1024, 0x20);
+      const pump = (): void => {
+        while (!response.destroyed && streamedBytes < 64 * 1024 * 1024) {
+          streamedBytes += chunk.length;
+          if (!response.write(chunk)) {
+            response.once('drain', pump);
+            return;
+          }
+        }
+        response.end();
+      };
+      pump();
+    } else if (request.url === '/declared') {
+      response.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(20 * 1024 * 1024) });
+      response.write('{');
+    } else if (request.url === '/manifest') {
+      response.setHeader('Content-Type', 'application/json');
+      response.end(manifest);
+    } else if (request.url === '/register') {
+      request.resume();
+      if (registrationReply === 'redirect') {
+        // 307 keeps the method and body, so following it would deliver the token elsewhere.
+        response.writeHead(307, { Location: `${base}/elsewhere` });
+        response.end();
+        return;
+      }
+      response.setHeader('Content-Type', 'application/json');
+      response.end(JSON.stringify(registrationReply === 'valid'
+        ? { publicKey: keys.publicKey } : { publicKey: keys.publicKey, padding: 'x'.repeat(8 * 1024) }));
+    } else {
+      response.writeHead(404);
+      response.end();
+    }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise<void>((resolve) => {
+    server.closeAllConnections();
+    server.close(() => resolve());
+  }));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const base = `http://127.0.0.1:${address.port}`;
+
+  for (const target of ['/redirect', '/tls-redirect']) {
+    const redirected = await owner.peer.request(MessageType.BOT_INSTALL_PREVIEW, { manifestUrl: `${base}${target}` });
+    assert.equal(redirected.type, MessageType.SERVER_ERROR, target);
+    assert.equal(redirected.payload.code, ProtocolErrorCode.BAD_REQUEST, target);
+    const message = text(redirected.payload.message);
+    assert.match(message, /redireciona/, `${target}: a redirect is explained as such, not as a connection failure`);
+    assert.doesNotMatch(message, /firewall|porta/, target);
+    assert.doesNotMatch(message, /30[278]|elsewhere|127\.0\.0\.1/, `${target}: neither the status nor the target is echoed`);
+  }
+  assert.equal(redirectedHits, 0, 'The manifest request never follows a redirect');
+  const failedStatus = await owner.peer.request(MessageType.BOT_INSTALL_PREVIEW, { manifestUrl: `${base}/missing` });
+  assert.equal(failedStatus.type, MessageType.SERVER_ERROR);
+  assert.doesNotMatch(text(failedStatus.payload.message), /404|HTTP/, 'The status of an arbitrary URL is only logged');
+
+  await owner.peer.error(MessageType.BOT_INSTALL_PREVIEW, { manifestUrl: `${base}/streamed` }, ProtocolErrorCode.BOT_INVALID_PROFILE);
+  assert.ok(streamedBytes < 32 * 1024 * 1024, `The server stopped reading after ${streamedBytes} bytes`);
+  const started = Date.now();
+  await owner.peer.error(MessageType.BOT_INSTALL_PREVIEW, { manifestUrl: `${base}/declared` }, ProtocolErrorCode.BOT_INVALID_PROFILE);
+  assert.ok(Date.now() - started < 4_000, 'A declared oversized manifest is refused without waiting for it');
+
+  const install = async () => {
+    const preview = await owner.peer.request(MessageType.BOT_INSTALL_PREVIEW, { manifestUrl: `${base}/manifest` });
+    assert.equal(preview.type, MessageType.BOT_INSTALL_PREVIEW_RESULT);
+    return owner.peer.request(MessageType.BOT_INSTALL, { previewId: preview.payload.previewId, grantedCapabilities: ['commands'] });
+  };
+  for (const reply of ['redirect', 'oversized'] as const) {
+    registrationReply = reply;
+    const failed = await install();
+    assert.equal(failed.type, MessageType.SERVER_ERROR, reply);
+    assert.doesNotMatch(text(failed.payload.message), /307|HTTP/);
+    assert.equal(await f.botRepo.count(), 0, `A ${reply} registration reply leaves no bot account`);
+  }
+  assert.equal(redirectedHits, 0, 'The token never follows a redirect');
+  registrationReply = 'valid';
+  assert.equal((await install()).type, MessageType.BOT_INSTALLED);
+});
+
 test('the installed manifest URL reaches only bot managers whose client negotiated it', async (t) => {
   const f = await createFixture();
   t.after(() => f.dispose());

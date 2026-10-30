@@ -202,6 +202,19 @@ async function runTests() {
     }), 5000, 'Teste 4: mensagem de chat');
 
     await withTimeout(new Promise<void>((resolve) => {
+      const joined = (data: RawData) => {
+        const res = JSON.parse(data.toString());
+        if (res.type === MessageType.VOICE_USER_JOINED && res.requestId === 'req-5-join') {
+          ws2.off('message', joined);
+          resolve();
+        }
+      };
+      ws2.on('message', joined);
+      // A sound only reaches the call its author is in.
+      ws2.send(JSON.stringify({ type: MessageType.VOICE_JOIN, requestId: 'req-5-join', payload: { channelId: voiceChannelId } }));
+    }), 5000, 'Teste 5: entrar na chamada');
+
+    await withTimeout(new Promise<void>((resolve) => {
       const soundMsg: ProtocolMessage = {
         type: MessageType.SOUNDBOARD_PLAY,
         requestId: 'req-5',

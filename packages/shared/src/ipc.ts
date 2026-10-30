@@ -253,6 +253,20 @@ export const SOUND_DOWNLOAD_IPC = {
 
 export const SOUND_DOWNLOAD_PROGRESS = 'soundboard:download-progress' satisfies keyof IpcEvents;
 
+/**
+ * Sound and sticker folders the renderer had configured before reading them
+ * required a native confirmation. Only the main window's preload reports them,
+ * once per document; Main adopts them on the first report of a profile only.
+ */
+export interface ConfiguredMediaFolders {
+  soundboard?: string;
+  stickers?: string;
+}
+
+export const MEDIA_FOLDERS_IPC = {
+  adopt: 'media-folders:adopt-configured',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+
 export type AudioPreviewInput = {
   requestId: string;
   fileName?: string;
@@ -971,7 +985,9 @@ export interface IpcInvokeChannels {
 
   // Soundboard
   'soundboard:default-folder': { args: []; returnType: string | null };
-  'soundboard:list-sounds': { args: [folderPath: string]; returnType: SoundboardSoundEntry[] };
+  // userAction: set by the preload during a direct user action; only then may Main ask,
+  // natively, to confirm a configured folder this profile never confirmed (D4).
+  'soundboard:list-sounds': { args: [folderPath: string, userAction?: boolean]; returnType: SoundboardSoundEntry[] };
   'soundboard:read-sound': { args: [filePath: string]; returnType: SoundboardSoundData | null };
   'soundboard:edit-read': { args: [input: SoundboardFileInput]; returnType: SoundboardFileResult<Uint8Array> };
   'soundboard:rename-file': { args: [input: SoundboardRenameInput]; returnType: SoundboardFileResult<SoundboardSavedFile> };
@@ -984,6 +1000,7 @@ export interface IpcInvokeChannels {
   'soundboard:authorize-download': { args: [input: SoundboardDownloadAuthorization]; returnType: SoundboardDownloadPermit };
   'soundboard:download-sound': { args: [input: SoundboardDownloadInput]; returnType: SoundDownloadResult };
   'soundboard:cancel-download': { args: [key: SoundboardDownloadCancellation]; returnType: boolean };
+  'media-folders:adopt-configured': { args: [folders: ConfiguredMediaFolders]; returnType: void };
   'audio-preview:load': { args: [input: AudioPreviewInput]; returnType: AudioPreviewResult };
   'audio-preview:cancel': { args: [input: AudioPreviewCancellation]; returnType: boolean };
   'soundboard:register-shortcuts': { args: [shortcuts: SoundboardShortcutBinding[]]; returnType: boolean };
@@ -1004,7 +1021,7 @@ export interface IpcInvokeChannels {
   'local-preparation-dialog:action': { args: [action: LocalPreparationDialogAction]; returnType: void };
 
   // Figurinhas do chat (#356)
-  'stickers:list': { args: [folderPath: string]; returnType: StickerEntry[] };
+  'stickers:list': { args: [folderPath: string, userAction?: boolean]; returnType: StickerEntry[] };
   'stickers:read': { args: [filePath: string]; returnType: StickerData | null };
   'stickers:save': {
     args: [folderPath: string, fileName: string, bytes: Uint8Array];

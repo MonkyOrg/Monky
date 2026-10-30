@@ -1,11 +1,12 @@
 import jsQR from 'jsqr';
 import QRCode from 'qrcode';
-import type { DmExportMode } from '@monky/shared';
+import { IDENTITY_EXPORT_PREFIX, isSecretEnvelope, type DmExportMode } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
 import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { applyBackup, BACKUP_FILE_EXTENSION, BackupScope, collectBackup, parseBackup, scopesInBackup } from '../utils/backup';
-import { withButtonLoading } from '../utils/buttonLoading';
+import { isButtonLoading, setButtonLoading, withButtonLoading } from '../utils/buttonLoading';
+import { acceptExportPassword, exportPasswordHint } from './exportPassword';
 
 export interface IdentityInfo {
   publicKey: string;
@@ -33,12 +34,14 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
       <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.45; margin-bottom: 12px;">
         ${t('identity.exportIntro')}
       </div>
+      <p class="dialog-option-hint" id="identity-export-compatibility" style="margin: 0 0 12px;">${t('identity.exportCompatibility')}</p>
       <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 10px;">
         ${t('identity.clientIdLabel')} <span style="font-family: var(--font-mono); color: var(--text-primary);">${escapeHtml(currentClientId)}</span>
       </div>
       <div class="form-group">
         <label for="identity-export-password">${t('identity.passwordLabel')}</label>
-        <input id="identity-export-password" type="password" placeholder="${t('identity.passwordPlaceholder')}">
+        <input id="identity-export-password" type="password" placeholder="${t('identity.passwordPlaceholder')}" aria-describedby="identity-export-password-hint">
+        <p class="dialog-option-hint" id="identity-export-password-hint">${exportPasswordHint()}</p>
       </div>
       <div style="display: grid; gap: 10px; margin-bottom: 14px;">
         <div style="font-size: 11px; color: var(--text-muted);">${t('backup.includeLabel')}</div>
@@ -141,8 +144,10 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
     errorBanner.classList.remove('show');
   };
 
+  passwordInput.addEventListener('input', () => passwordInput.removeAttribute('aria-invalid'));
   exportButton.addEventListener('click', async () => {
     clearError();
+    if (!acceptExportPassword(passwordInput)) return;
     exportButton.disabled = true;
     exportButton.textContent = t('identity.exporting');
 
@@ -231,7 +236,7 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
         </div>
         <div class="form-group">
           <label for="identity-import-code">${t('identity.codeLabel')}</label>
-          <textarea id="identity-import-code" placeholder="MONKY-ID:..." style="min-height: 110px; resize: vertical; font-size: 11px; font-family: var(--font-mono);"></textarea>
+          <textarea id="identity-import-code" placeholder="${IDENTITY_EXPORT_PREFIX}..." style="min-height: 110px; resize: vertical; font-size: 11px; font-family: var(--font-mono);"></textarea>
         </div>
         <div class="form-group">
           <label for="identity-import-password">${t('identity.passwordLabel')}</label>
@@ -251,6 +256,9 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
 
     let stream: MediaStream | null = null;
     let scanFrame: number | null = null;
+    // Every start and stop gets a new generation: a camera that only answers after the scan
+    // was stopped or the dialog closed is switched off at once instead of staying on unseen.
+    let scanGeneration = 0;
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d', { willReadFrequently: true });
 
@@ -274,6 +282,8 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
     };
 
     const stopScan = () => {
+      scanGeneration++;
+      setButtonLoading(scanButton, false);
       if (scanFrame !== null) {
         cancelAnimationFrame(scanFrame);
         scanFrame = null;
@@ -309,7 +319,8 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
       const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
       const result = jsQR(imageData.data, imageData.width, imageData.height);
-      if (result?.data?.startsWith('MONKY-ID:')) {
+      // Codes from before #490 (MONKY-ID:) still import, so the scanner accepts both formats.
+      if (result?.data && isSecretEnvelope(result.data, 'identity')) {
         codeInput.value = result.data;
         stopScan();
         clearError();
@@ -320,17 +331,29 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
 
     const startScan = async () => {
       clearError();
+      const generation = ++scanGeneration;
+      // The camera takes a few seconds to answer; a second click must not open another one.
+      setButtonLoading(scanButton, true);
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
+        const camera = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: 'environment' },
           audio: false,
         });
-        video.srcObject = stream;
+        if (generation !== scanGeneration) {
+          camera.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        stream = camera;
+        video.srcObject = camera;
         scanWrap.style.display = 'block';
         scanButton.textContent = t('identity.stopScan');
         scanFrame = requestAnimationFrame(scanLoop);
-      } catch (error: any) {
-        showError(error?.message || t('identity.cameraError'));
+      } catch (error: unknown) {
+        if (generation === scanGeneration) {
+          showError(error instanceof Error && error.message ? error.message : t('identity.cameraError'));
+        }
+      } finally {
+        if (generation === scanGeneration) setButtonLoading(scanButton, false);
       }
     };
 
@@ -374,6 +397,7 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
         stopScan();
         return;
       }
+      if (isButtonLoading(scanButton)) return;
       await startScan();
     });
 

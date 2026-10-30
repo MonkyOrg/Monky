@@ -46,6 +46,7 @@ export class StickersTab {
 
   private folderInfo(): string {
     if (!settingsStore.stickersFolderPath) return t('settings.stickersFormats');
+    if (stickerService.didListingFail()) return t('emojiPicker.folderUnavailableTitle');
     return tCount('emojiPicker.stickersFound', stickerService.getStickers().length);
   }
 

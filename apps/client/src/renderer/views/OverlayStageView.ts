@@ -4,7 +4,7 @@ import type {
   OverlaySyncState,
   OverlayCardSize,
 } from '@monky/shared';
-import { escapeHtml } from '../utils/html';
+import { escapeHtml, html, trustedHtml } from '../utils/html';
 import { t } from '../i18n';
 import { renderAudioMuteIndicators } from './AudioStateIcon';
 import { arrangeOverlayCards, fitOverlayCards } from '../utils/overlayLayout';
@@ -438,46 +438,44 @@ export class OverlayStageView {
   }
 
   private getCardInnerHtml(tile: OverlayTile, hasVideo: boolean, name: string, isSpeaking: boolean): string {
-    const escapedName = escapeHtml(name);
-    return `
-      ${hasVideo ? `
+    return html`
+      ${hasVideo ? html`
         <div class="overlay-video-wrapper">
           <video id="vid-${tile.key}" autoplay playsinline muted></video>
         </div>
-      ` : `
+      ` : html`
         <div class="overlay-avatar-wrapper">
-          ${tile.p.avatarUrl ? `
-            <img src="${tile.p.avatarUrl}" alt="${escapedName}" class="overlay-avatar-img ${isSpeaking ? 'speaking-pulse' : ''}" />
-          ` : `
-            <div class="overlay-avatar-placeholder ${isSpeaking ? 'speaking-pulse' : ''}">${escapedName.charAt(0).toUpperCase()}</div>
+          ${tile.p.avatarUrl ? html`
+            <img src="${tile.p.avatarUrl}" alt="${name}" class="overlay-avatar-img ${isSpeaking ? 'speaking-pulse' : ''}" data-fallback="avatar" />
+          ` : html`
+            <div class="overlay-avatar-placeholder ${isSpeaking ? 'speaking-pulse' : ''}">${(name || '').charAt(0).toUpperCase()}</div>
           `}
         </div>
       `}
 
       <div class="overlay-card-footer">
-        <span class="overlay-user-name">${escapedName}</span>
+        <span class="overlay-user-name">${name}</span>
         <div class="overlay-user-badges">
-          ${this.getBadgesHtml(tile)}
+          ${trustedHtml(this.getBadgesHtml(tile))}
         </div>
       </div>
-    `;
+    `.toString();
   }
 
   private getMinimalistInnerHtml(p: OverlayParticipantState, name: string, isSpeaking: boolean): string {
-    const escapedName = escapeHtml(name);
-    return `
+    return html`
       <div class="overlay-mini-avatar-wrapper">
-        ${p.avatarUrl ? `
-          <img src="${p.avatarUrl}" alt="${escapedName}" class="overlay-mini-avatar ${isSpeaking ? 'speaking-pulse' : ''}" />
-        ` : `
-          <div class="overlay-mini-avatar-placeholder ${isSpeaking ? 'speaking-pulse' : ''}">${escapedName.charAt(0).toUpperCase()}</div>
+        ${p.avatarUrl ? html`
+          <img src="${p.avatarUrl}" alt="${name}" class="overlay-mini-avatar ${isSpeaking ? 'speaking-pulse' : ''}" data-fallback="avatar" />
+        ` : html`
+          <div class="overlay-mini-avatar-placeholder ${isSpeaking ? 'speaking-pulse' : ''}">${(name || '').charAt(0).toUpperCase()}</div>
         `}
       </div>
-      <span class="overlay-mini-name">${escapedName}</span>
+      <span class="overlay-mini-name">${name}</span>
       <div class="overlay-mini-icons">
-        ${this.getMiniIconsHtml(p)}
+        ${trustedHtml(this.getMiniIconsHtml(p))}
       </div>
-    `;
+    `.toString();
   }
 
   private getMiniIconsHtml(p: OverlayParticipantState): string {

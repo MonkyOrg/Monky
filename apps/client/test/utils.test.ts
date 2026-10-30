@@ -4,10 +4,10 @@
  * ícones/tamanhos de anexos e o barramento de eventos (EventBus).
  */
 
-import { escapeHtml } from '../src/renderer/utils/html';
+import { escapeHtml, html, trustedHtml } from '../src/renderer/utils/html';
 import { renderMarkdown } from '../src/renderer/utils/markdown';
-import { formatBytes, fileIconName } from '../src/renderer/utils/attachment';
-import { avatarFileExtension } from '../src/renderer/utils/avatar';
+import { formatBytes, fileIconName, resolveAttachmentUrl } from '../src/renderer/utils/attachment';
+import { avatarFileExtension, DEFAULT_AVATAR_URL, resolveAvatarUrl } from '../src/renderer/utils/avatar';
 import { EventBus } from '../src/renderer/core/EventBus';
 import { normalizeSearchString, matchesSearch } from '../src/renderer/utils/search';
 import { compareVersions, feedUrlForTag, isNewer, pickBestRelease } from '../src/main/updateVersions';
@@ -49,6 +49,46 @@ function runTests() {
       '&lt;script&gt;alert(&quot;xss&quot;) &amp; &#039;test&#039;&lt;/script&gt;',
     'Caracteres perigosos (<, >, &, ", \') são escapados corretamente'
   );
+
+  // Template que escapa por padrão (#490)
+  console.log('\n--- Testando html`` (escape por padrão) ---');
+  assert(html`<img src="${'" onerror="alert(1)" x="'}">`.toString()
+    === '<img src="&quot; onerror=&quot;alert(1)&quot; x=&quot;">', 'Valor em atributo não fecha as aspas');
+  assert(html`<p>${'<img src=x onerror=alert(1)>'}</p>`.toString() === '<p>&lt;img src=x onerror=alert(1)&gt;</p>',
+    'Texto com marcação entra como texto');
+  const listItem = (label: string) => html`<li>${label}</li>`;
+  assert(html`<ul>${['<a>', 'b'].map(listItem)}</ul>`.toString() === '<ul><li>&lt;a&gt;</li><li>b</li></ul>',
+    'Templates aninhados e listas entram como marcação, sem vírgulas');
+  assert(html`${null}${undefined}|${0}|${false}`.toString() === '|0|false', 'null e undefined somem; número e booleano viram texto');
+  assert(html`<b>${trustedHtml('<i>ok</i>')}</b>`.toString() === '<b><i>ok</i></b>', 'trustedHtml mantém marcação já segura');
+  assert(`<div>${html`<b>${'&'}</b>`}</div>` === '<div><b>&amp;</b></div>', 'Dentro de template comum, vira a própria marcação');
+
+  // Endereços vindos do servidor (#490)
+  console.log('\n--- Testando resolveAvatarUrl (#490) ---');
+  const callBase = 'http://call.example:3000';
+  assert(resolveAvatarUrl('/avatars/srv-1f2e.png', callBase) === `${callBase}/avatars/srv-1f2e.png`,
+    'Avatar do servidor resolve contra a base informada (a do servidor da chamada)');
+  assert(resolveAvatarUrl('/avatars/1f2e.png', '') === DEFAULT_AVATAR_URL, 'Sem servidor, caminho relativo vira o avatar padrão');
+  for (const hostile of ['x" onerror="alert(1)', '/avatars/x" onerror="alert(1)', 'https://cdn.example/a"b.png',
+    'http://a"b/x.png', "https://cdn.example/a'b.png", 'javascript:alert(1)', 'file:///C:/Users/x/foto.png',
+    'data:image/png;base64,AA" onerror="x', 'data:text/html;base64,PHA+', '/assets/Logo.png']) {
+    assert(resolveAvatarUrl(hostile, callBase) === DEFAULT_AVATAR_URL, `Recusa ${hostile}`);
+  }
+  assert(resolveAvatarUrl('https://cdn.example/a.png?v=2', callBase) === 'https://cdn.example/a.png?v=2', 'URL web válida passa intacta');
+  assert(resolveAvatarUrl('data:image/png;base64,iVBORw0KGgo=', callBase) === 'data:image/png;base64,iVBORw0KGgo=',
+    'Imagem embutida pelo app passa');
+  assert(resolveAvatarUrl(DEFAULT_AVATAR_URL, callBase) === DEFAULT_AVATAR_URL, 'O próprio avatar padrão (SVG) passa');
+  assert(resolveAvatarUrl(null, callBase) === DEFAULT_AVATAR_URL && resolveAvatarUrl('  ', callBase) === DEFAULT_AVATAR_URL,
+    'Avatar ausente vira o padrão');
+
+  console.log('\n--- Testando resolveAttachmentUrl (#490) ---');
+  assert(resolveAttachmentUrl('/attachments/6f1c-9a.png', callBase) === `${callBase}/attachments/6f1c-9a.png`,
+    'Anexo do servidor resolve contra a base');
+  assert(resolveAttachmentUrl('/attachments/6f1c.png', '') === '', 'Sem conexão não há endereço');
+  for (const hostile of ['x" onerror="alert(1)', '/attachments/a" onerror="b', 'https://evil.example/a.png',
+    'file:///C:/Users/x/segredo.txt', '/attachments/../../segredo', 'data:image/png;base64,AA==', null]) {
+    assert(resolveAttachmentUrl(hostile, callBase) === '', `Anexo recusa ${String(hostile)}`);
+  }
 
   // 2. formatBytes
   console.log('\n--- Testando formatBytes ---');

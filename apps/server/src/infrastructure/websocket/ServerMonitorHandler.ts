@@ -1,5 +1,5 @@
 import {
-  MessageType, Permission, ProtocolErrorCode, serverMonitorGetSchema,
+  LIMITS, MessageType, Permission, ProtocolErrorCode, serverMonitorGetSchema,
   type ProtocolMessage, type ServerErrorPayload, type ServerMonitorSnapshotPayload,
   type UserSummary,
 } from '@monky/shared';
@@ -55,7 +55,7 @@ export class ServerMonitorHandler {
       return;
     }
     const parsed = serverMonitorGetSchema.safeParse(payload);
-    if (!parsed.success || !requestId || requestId.length > 128) {
+    if (!parsed.success || !requestId || requestId.length > LIMITS.MAX_REQUEST_ID_LENGTH) {
       fail(ProtocolErrorCode.BAD_REQUEST, 'Invalid server monitor request.');
       return;
     }

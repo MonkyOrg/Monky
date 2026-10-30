@@ -1,4 +1,4 @@
-import { MessageType, ProtocolErrorCode, type ProtocolMessage, type ServerErrorPayload,
+import { LIMITS, MessageType, ProtocolErrorCode, type ProtocolMessage, type ServerErrorPayload,
   type MessageSearchResultPayload, type UserSummary } from '@monky/shared';
 import type { WebSocket } from 'ws';
 import { MessageSearchError, type MessageSearchService } from '../../application/services/MessageSearchService';
@@ -35,7 +35,7 @@ export class MessageSearchHandler {
     if (!current()) return;
     if (!user || !sessionId) { fail(ProtocolErrorCode.UNAUTHORIZED, 'Authenticate before searching.'); return; }
     if (session.isBot || user.isBot) { fail(ProtocolErrorCode.PERMISSION_DENIED, 'Bots cannot search messages.'); return; }
-    if (!requestId || requestId.length > 128) { fail(ProtocolErrorCode.MESSAGE_SEARCH_INVALID, 'Invalid search request.'); return; }
+    if (!requestId || requestId.length > LIMITS.MAX_REQUEST_ID_LENGTH) { fail(ProtocolErrorCode.MESSAGE_SEARCH_INVALID, 'Invalid search request.'); return; }
     if (this.pending.has(session) || Date.now() - (this.lastRequest.get(session) ?? 0) < 250) {
       fail(ProtocolErrorCode.RATE_LIMITED, 'Wait before searching again.'); return;
     }

@@ -38,6 +38,7 @@ ${color('COMANDOS', ANSI.bold)}
   config                        Exibe a configuração atual
   config language [pt-BR|en-US]  Consulta ou altera o idioma em Configuração
   config set <k> <v>             Ajusta mode, botName, botDir, serverUrl, botToken, tokenEnv, servePort, publicHost
+  config set publicUrl <URL|clear> URL https:// do proxy com TLS anunciada no manifest; clear remove
   config env [set NOME|unset NOME] Variáveis declaradas pelo bot (salvas no perfil)
   config update-source          Consulta a origem de atualização deste perfil
   config update-source github <URL> [--asset-name <nome.tgz>] [--token-env <VAR>]
@@ -60,7 +61,7 @@ ${color('OPÇÕES GLOBAIS', ANSI.bold)}
 
 ${color('SETUP NÃO INTERATIVO', ANSI.bold)}
   ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--port <id>=<porta>]... [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
-  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-ou-domínio> [--serve-port 7780] [--port <id>=<porta>]... [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
+  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-ou-domínio> [--serve-port 7780] [--public-url https://<domínio>] [--port <id>=<porta>]... [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
 
 ${color('ORIGEM DAS ATUALIZAÇÕES', ANSI.bold)}
   O padrão vem de monkyBot.releases ou monkyBot.updateSource no package.json.
@@ -85,6 +86,7 @@ ${color('COMMANDS', ANSI.bold)}
   config                        Show the current configuration
   config language [pt-BR|en-US]  Show or change language in Configuration
   config set <k> <v>             Set mode, botName, botDir, serverUrl, botToken, tokenEnv, servePort, publicHost
+  config set publicUrl <URL|clear> TLS proxy https:// URL announced in the manifest; clear removes it
   config env [set NAME|unset NAME] Bot-declared variables (saved in the profile)
   config update-source          Show the update source for this profile
   config update-source github <URL> [--asset-name <name.tgz>] [--token-env <VAR>]
@@ -107,7 +109,7 @@ ${color('GLOBAL OPTIONS', ANSI.bold)}
 
 ${color('NON-INTERACTIVE SETUP', ANSI.bold)}
   ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--port <id>=<port>]... [--name "My Bot"] [--bot-dir <directory>] [--yes]
-  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-or-domain> [--serve-port 7780] [--port <id>=<port>]... [--name "My Bot"] [--bot-dir <directory>] [--yes]
+  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-or-domain> [--serve-port 7780] [--public-url https://<domain>] [--port <id>=<port>]... [--name "My Bot"] [--bot-dir <directory>] [--yes]
 
 ${color('UPDATE SOURCE', ANSI.bold)}
   Defaults come from monkyBot.releases or monkyBot.updateSource in package.json.

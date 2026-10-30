@@ -9,6 +9,7 @@ const { createRequire } = require('node:module');
 const { test } = require('node:test');
 const tools = require('../scripts/windowsToolchain.cjs');
 const pins = require('../scripts/native-rtc/pins.json');
+const { pipInstallArguments } = require('../scripts/native-rtc/gclientRuntime.cjs');
 
 function put(filename, contents = 'device-free fixture') {
   fs.mkdirSync(path.dirname(filename), { recursive: true });
@@ -342,6 +343,10 @@ test('preparation preserves the selected installation and SDK through bootstrap,
   });
   await module.prepare({ python: f.python, jobs: 2, vswhere: f.vswhere });
   assert.equal(writes.length, 1);
+  const interpreter = path.join(f.root, '.native-screen', 'python', 'Scripts', 'python.exe');
+  const pip = calls.find(call => call.exe === interpreter);
+  assert.deepEqual(pip.args, pipInstallArguments(), 'The venv is provisioned only from the hash-pinned wheels.');
+  assert.ok(calls.indexOf(pip) === calls.findIndex(call => call.args?.includes('venv')) + 1);
   const bootstrap = calls.find(call => call.args?.includes('fetch'));
   assert.ok(bootstrap.args.includes(`--vs-install=${f.vs}`));
   assert.ok(bootstrap.args.includes(`--sdk-root=${f.sdk}`));
@@ -352,6 +357,24 @@ test('preparation preserves the selected installation and SDK through bootstrap,
     assert.equal(config.vsInstall, f.vs); assert.equal(config.sdkRoot, f.sdk); assert.equal(config.vswhere, f.vswhere);
     assert.equal(config.python, path.join(f.root, '.native-screen', 'python', 'Scripts', 'python.exe'));
   }
+});
+
+test('a venv whose pinned wheels fail to install is removed, so the next preparation provisions it again', async t => {
+  const f = fixture(t), selected = f.resolve(), calls = [], removed = [];
+  const env = tools.msvcEnvironment(selected, f.env, f.vcvars);
+  const module = script('prepare.cjs', {
+    'node:fs': { existsSync: () => false, mkdirSync() {}, rmSync: (...args) => removed.push(args) },
+    './buildTools.cjs': { root: path.join(f.root, 'apps', 'client', 'native', 'screen-share'), execute(exe, args) {
+      calls.push(args);
+      if (args.includes('pip')) throw new Error('python.exe exited 1: THESE PACKAGES DO NOT MATCH THE HASHES');
+    } },
+    './windowsToolchain.cjs': { ...tools, resolveWindowsToolchain: () => selected, msvcEnvironment: () => env },
+    './fetchObs.cjs': { cache: path.join(f.root, '.native-screen'), fetchObs: () => assert.fail('Nothing is fetched.') },
+  });
+  await assert.rejects(async () => module.prepare({ python: f.python }), /DO NOT MATCH THE HASHES/u);
+  assert.deepEqual(JSON.parse(JSON.stringify(removed)),
+    [[path.join(f.root, '.native-screen', 'python'), { recursive: true, force: true }]]);
+  assert.equal(calls.length, 2, 'The bootstrap never runs without its gclient runtime.');
 });
 
 test('screen-audio uses installed Electron/local node-gyp and exact MSBuild properties inside the owned job', t => {

@@ -1,8 +1,6 @@
 import path from 'path';
 import { Permission } from '@monky/shared';
 
-export const EXPORT_PREFIX = 'MONKY-ID:';
-export const PBKDF2_ITERATIONS = 210_000;
 export const DEFAULT_DATA_INPUT = './data';
 export const DEFAULT_DATA_DIR = path.resolve(process.cwd(), 'data');
 export const DEFAULT_OWNER_NICKNAME = 'Owner';

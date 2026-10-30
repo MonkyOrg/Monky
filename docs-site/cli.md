@@ -181,10 +181,18 @@ Após a escolha inicial de idioma, quando necessária, o comando pergunta:
 
 1. **Onde guardar os dados** — sugere `./data`, mas você pode informar qualquer
    caminho. Se já houver um servidor na pasta escolhida, ele pede outra.
-2. **Código de identidade do dono** (`MONKY-ID:...`) — exporte pelo app Monky em
+2. **Código de identidade do dono** (`MONKY-ID2:...`) — exporte pelo app Monky em
    *Configurações → Meu Perfil → Identidade*. Trate o backup e a senha como
    credenciais: use-os somente em uma máquina de administração confiável.
-3. **Senha da identidade** — a que você definiu ao exportar.
+   Códigos que começam com `MONKY-ID2:` precisam de um CLI atualizado; um CLI
+   anterior a eles responde "Código de identidade inválido". Se o CLI já estava
+   instalado, rode `monky update` antes do `monky create` (ou
+   `monky update --beta`, se o app estiver no canal beta). Códigos `MONKY-ID:`,
+   exportados por versões anteriores do app, continuam aceitos.
+3. **Senha da identidade** — a que você definiu ao exportar. O código e a senha
+   são conferidos antes de qualquer dado ser gravado: uma senha errada não deixa
+   um servidor pela metade. Se o comando avisar que o código veio de uma versão
+   mais nova do Monky, atualize o CLI com `monky update` e rode de novo.
 4. **Nome do servidor**
 5. **Porta do servidor** (padrão: `3000`)
 6. **Senha do servidor** — deixe vazio para um servidor aberto.
@@ -220,7 +228,7 @@ monky create --data /srv/monky-amigos
 
 # Não interativo, exceto a senha da identidade
 monky create --data /srv/monky-amigos \
-  --identity "MONKY-ID:..." \
+  --identity "MONKY-ID2:..." \
   --name "Servidor dos Amigos" --port 3000 --password "senhaDoServidor"
 ```
 

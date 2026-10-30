@@ -95,6 +95,9 @@ test('the trusted dialog discloses each fixed tool and escapes request identitie
     assert.match(html, /&lt;img src=x/);
     for (const name of ['Node.js', 'yt-dlp', 'FFmpeg']) assert.ok(html.includes(name));
     assert.ok(html.includes(language === 'en' ? 'Converts audio' : 'Converte o áudio'));
+    // The audio reaches the bot over a direct connection, which exposes the IP address (LOCALEXEC-5).
+    assert.ok(html.includes(mt('localExecution.youtubeAudio')));
+    assert.match(mt('localExecution.youtubeAudio'), language === 'en' ? /direct connection.*IP address/ : /conexão direta.*endereço IP/);
     assert.match(html, /512 MB/);
     assert.match(html, /role="radiogroup"/);
     assert.match(html, /prefers-reduced-motion/);

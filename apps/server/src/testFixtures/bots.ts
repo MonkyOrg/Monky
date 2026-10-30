@@ -192,7 +192,8 @@ export async function createFixture(options: {
   );
   const permissions = new PermissionService(serverRepo, roleRepo);
   const roleService = new RoleService(roleRepo, userRepo, permissions);
-  const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissions, botPermissions, userRepo, channelRepo.categories);
+  const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissions, botPermissions, userRepo,
+    channelRepo.categories, attachmentService);
   const pollService = new NativePollService(new SqliteNativePollRepository(db), {
     consume: (refs, userId, channelId) => communityService.consumeImageAssets(refs, userId, channelId)
       .map(url => url.split('/').pop()!),

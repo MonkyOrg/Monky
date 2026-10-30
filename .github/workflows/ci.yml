@@ -180,7 +180,7 @@ jobs:
           npm run build --workspace=apps/server
           npm run test:bots --workspace=apps/server
           npm run test:community --workspace=apps/server
-          node --test apps/server/dist/test-online-preview.js apps/server/dist/test-voice.js apps/server/dist/test-voice-afk.js apps/server/dist/test-voice-mode.js apps/server/dist/test-screen-subscriptions.js apps/server/dist/test-server-settings.js apps/server/dist/test-startup-lifecycle.js apps/server/dist/test-game-activity.js apps/server/dist/test-game-share-request.js
+          node --test apps/server/dist/test-online-preview.js apps/server/dist/test-voice.js apps/server/dist/test-voice-afk.js apps/server/dist/test-voice-mode.js apps/server/dist/test-screen-subscriptions.js apps/server/dist/test-server-settings.js apps/server/dist/test-startup-lifecycle.js apps/server/dist/test-game-activity.js apps/server/dist/test-game-share-request.js apps/server/dist/test-ws-hardening.js apps/server/dist/test-cli-identity.js
           # libuiohook initializes X11 even when the tests inject a passive mock.
           xvfb-run -a npm run test --workspace=apps/client
           npm exec -- tsc -p apps/client/tsconfig.electron.json
@@ -353,7 +353,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Setup MSVC (Windows)
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           vsversion: '2022'
           toolset: '14.44'
@@ -600,7 +600,7 @@ jobs:
           python-version: '3.11'
 
       - name: Setup MSVC (Windows)
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           vsversion: '2022'
           toolset: '14.44'
@@ -749,8 +749,8 @@ jobs:
       - name: Package win (dir, no publish)
         working-directory: apps/client
         run: npx --no-install electron-builder --win --dir --publish never
+        # No GitHub token, exactly like the release: electron-builder needs none to package.
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           npm_config_node_gyp: ${{ env.NODE_GYP_PATH }}
 
       - name: Exercise shortcut capture and worker recovery
@@ -863,11 +863,10 @@ jobs:
 
       # Packaging check only (unpacked --dir, no publish), on a real macos-15
       # runner, catching native and packaging regressions without a release.
+      # No GitHub token, exactly like the release: electron-builder needs none to package.
       - name: Package mac (dir, no publish)
         working-directory: apps/client
         run: npx --no-install electron-builder --mac --dir --publish never
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Exercise shortcut capture and worker recovery
         shell: bash

@@ -43,6 +43,14 @@ function originOf(host: string, port: number): string | null {
   }
 }
 
+function configuredOrigin(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
 function valueOf(resolved: ResolvedVariable[], name: string | undefined): ResolvedVariable | undefined {
   return name === undefined ? undefined : resolved.find((entry) => entry.variable.name === name);
 }
@@ -67,7 +75,9 @@ export function effectivePorts(
       id: MANIFEST_PORT_ID, description: MANIFEST_DESCRIPTION, protocol: 'tcp', exposure: 'public', when: 'always',
       modes: ['marketplace'], port: servePort,
       bindHost: typeof serveHost === 'string' && serveHost ? serveHost : '0.0.0.0',
-      publicOrigin: config?.mode === 'marketplace' ? originOf(config.publicHost, servePort) : null,
+      // Behind a TLS proxy the bot is reached, and its reachability proven, at the configured origin.
+      publicOrigin: config?.mode !== 'marketplace' ? null
+        : config.publicUrl ? configuredOrigin(config.publicUrl) : originOf(config.publicHost, servePort),
     });
   }
   for (const declared of requirements.ports) {

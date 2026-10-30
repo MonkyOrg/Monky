@@ -74,3 +74,4 @@ export { createMessageContentSchema } from './validators.js';
 export * from './soundboardEditing';
 export * from './recentSounds.js';
 export * from './directMessages.js';
+export * from './secretEnvelope.js';

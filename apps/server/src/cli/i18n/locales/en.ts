@@ -27,6 +27,7 @@ export const en: CliTranslationMap = {
   'identity.wrongPassword': 'Wrong password or corrupted identity.',
   'identity.invalidDecrypted': 'Invalid decrypted identity.',
   'identity.keyMismatch': 'The decrypted identity does not match the provided public key.',
+  'identity.unsupportedVersion': 'This code was created by a newer version of Monky. Update the CLI with "monky update" and try again.',
 
   // ── Online Users ───────────────────────────────────────────────────────
   'online.one': '1 person connected',
@@ -69,7 +70,7 @@ export const en: CliTranslationMap = {
   'create.askMemberLimit': 'Do you want to limit the number of server members?',
   'create.memberLimit': 'Member limit',
   'create.invalidLimit': 'Enter a number greater than zero.',
-  'create.identityCode': 'Owner identity code (MONKY-ID:...)',
+  'create.identityCode': 'Owner identity code (MONKY-ID2:...)',
   'create.identityPassword': 'Identity password: ',
   'create.serverName': 'Server name',
   'create.defaultServerName': 'Friends Server',

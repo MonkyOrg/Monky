@@ -545,8 +545,12 @@ test('bot SFU metadata is truthful and media requires admitted, owned voice tran
   await bot.peer.error(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: voiceId, direction: 'send' }, ProtocolErrorCode.BAD_REQUEST);
   await bot.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId });
   await bot.peer.error(MessageType.SFU_CONNECT_WEBRTC_TRANSPORT, {
-    channelId: voiceId, transportId: 'foreign-transport', dtlsParameters: {},
+    channelId: voiceId, transportId: 'foreign-transport',
+    dtlsParameters: { role: 'client', fingerprints: [{ algorithm: 'sha-256', value: 'AB:CD' }] },
   }, ProtocolErrorCode.PERMISSION_DENIED);
+  await bot.peer.error(MessageType.SFU_CONNECT_WEBRTC_TRANSPORT, {
+    channelId: voiceId, transportId: 'foreign-transport', dtlsParameters: {},
+  }, ProtocolErrorCode.BAD_REQUEST);
   await bot.peer.error(MessageType.SFU_CONSUME, { channelId: voiceId }, ProtocolErrorCode.BAD_REQUEST);
   await bot.peer.error(MessageType.SFU_CONSUME, {
     channelId: voiceId, transportId: 'foreign-transport', producerId: 'foreign-producer', rtpCapabilities: {},
@@ -2916,7 +2920,8 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       const rejected = await owner.peer.request(MessageType.BOT_INSTALL, await previewInstall());
       assert.equal(rejected.type, MessageType.SERVER_ERROR);
       assert.equal(rejected.payload.code, ProtocolErrorCode.BAD_REQUEST);
-      assert.match(text(rejected.payload.message), /registro.*502/);
+      assert.match(text(rejected.payload.message), /recusou o registro/);
+      assert.doesNotMatch(text(rejected.payload.message), /502/, 'The HTTP status of the registration URL stays in the log');
       assert.equal(await fixture.botRepo.count(), count, 'a rejected registration must not leave an offline account behind');
       registrationStatus = 200;
       registrationKey = 'invalid-key';

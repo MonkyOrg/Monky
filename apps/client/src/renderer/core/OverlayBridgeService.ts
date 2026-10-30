@@ -12,7 +12,8 @@ import { settingsStore } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
 import { isParticipantSpeaking } from '../utils/voiceConnection';
 import { videoService } from './VideoService';
-import { getAvatarUrl } from '../utils/avatar';
+import { resolveAvatarUrl } from '../utils/avatar';
+import { networkClient } from './NetworkClient';
 import { applyVideoCodecPreferences } from './webrtc/codecPreferences';
 
 const MAX_VIDEO_SLOTS = 8;
@@ -386,6 +387,8 @@ export class OverlayBridgeService {
     const call = voiceStore.voiceSessionKey ? sessionManager.get(voiceStore.voiceSessionKey) : undefined;
     const callStore = voiceStore.voiceSessionKey ? call?.serverStore : serverStore;
     const callParticipants = voiceStore.voiceSessionKey ? call?.participants : participantManager;
+    // Avatar paths belong to the call's server, not to the one on screen.
+    const callBaseUrl = (voiceStore.voiceSessionKey ? call?.client : networkClient)?.getHttpBaseUrl() ?? '';
     if (!channelId || !callStore?.serverDetails || !callParticipants) return;
 
     const channel = callStore.serverDetails.channels.find((c) => c.id === channelId);
@@ -471,7 +474,7 @@ export class OverlayBridgeService {
         sessionId: sidOf(p),
         userId: p.user.id,
         displayName: callParticipants.displayName(p),
-        avatarUrl: getAvatarUrl(p.user.avatarUrl),
+        avatarUrl: resolveAvatarUrl(p.user.avatarUrl, callBaseUrl),
         isSpeaking,
         isMuted,
         isDeafened,

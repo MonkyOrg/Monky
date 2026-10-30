@@ -53,11 +53,9 @@ export async function getUniqueNickname(ctx: CliContext, preferred?: string, exc
 
 export async function applyBootstrap(
   ctx: CliContext,
-  identityCode: string,
-  identityPassword: string,
+  identity: DecryptedIdentity,
   nicknameOverride: string
 ): Promise<void> {
-  const identity = decryptIdentityExport(identityCode, identityPassword);
   const publicKey = normalizePublicKeyHex(identity.publicKey);
   const server = await ctx.serverRepo.getServer();
   if (!server) {
@@ -228,8 +226,10 @@ export async function createCommand(globalArgs: GlobalArgs, args: string[]): Pro
     return;
   }
 
+  // A wrong password or an unreadable code fails before any server data exists.
+  const identity = await decryptIdentityExport(identityCode, identityPassword);
   await withContext(dataDir, async (ctx) => {
-    await applyBootstrap(ctx, identityCode, identityPassword, DEFAULT_OWNER_NICKNAME);
+    await applyBootstrap(ctx, identity, DEFAULT_OWNER_NICKNAME);
     await setConfig(ctx, 'name', serverName);
     await setConfig(ctx, 'password', serverPassword);
     await setConfig(ctx, 'maxUsers', String(maxUsers));

@@ -30,10 +30,13 @@ sendo reconhecido nos servidores. Veja os cuidados em
 [Primeiros passos](/primeiros-passos#guarde-um-backup-da-identidade).
 
 **Servidores e configurações** exporta um `.monkybackup` protegido pela senha
-que você escolher. Selecione o que deseja incluir/restaurar; esses dados
+que você escolher, com a mesma regra de senha da exportação da identidade.
+Selecione o que deseja incluir/restaurar; esses dados
 também podem acompanhar a exportação da identidade. A lista de servidores
 pode conter senhas e não é gravada em texto aberto nesse backup.
-Sem a senha escolhida, não há recuperação do arquivo.
+Sem a senha escolhida, não há recuperação do arquivo. Arquivos de versões
+anteriores continuam abrindo; os novos só abrem no Monky atualizado, e uma
+versão anterior responde "Arquivo de backup inválido".
 
 Ao exportar a identidade, marque **Amigos** para levar sua lista de amizades e,
 opcionalmente, **Histórico das conversas** para levar as mensagens diretas.
@@ -475,6 +478,11 @@ Você pode trocar essa pasta em **Configurações → Soundboard**; uma pasta j�
 escolhida não é substituída. Para figurinhas, escolha uma pasta na aba
 correspondente. As bibliotecas são locais, não pastas do servidor.
 Configurar uma pasta não envia todos os seus arquivos.
+O Monky só lê sons e figurinhas de pastas escolhidas neste computador. Uma
+pasta que chegou de outro jeito, como ao restaurar um backup, é confirmada uma
+vez: o Monky pergunta quando você abre o soundboard ou as figurinhas. Se você
+recusar, **Tentar novamente** (no soundboard) ou o botão de recarregar a pasta
+(nas figurinhas) pergunta de novo; você também pode escolher outra pasta.
 Consulte [Soundboard e figurinhas no uso diário](/usando-o-app#soundboard)
 para formatos, envio e permissões.
 

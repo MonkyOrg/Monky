@@ -31,10 +31,11 @@ export interface FinalizeUploadResult {
 const PENDING_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 /**
- * Owns the chat-attachment lifecycle (#11): issuing short-lived upload tokens,
+ * Owns the chat-attachment lifecycle (#11): issuing single-use upload tokens,
  * finalizing streamed uploads (classify → enforce limits → FIFO-evict → persist),
- * linking uploads to their message, reporting storage usage, and reconciling
- * orphaned files. The binary never lives in the DB — only metadata does.
+ * linking uploads to their message, reporting storage usage, removing the files
+ * of deleted messages and channels, and reconciling orphaned files. The binary
+ * never lives in the DB — only metadata does.
  */
 export class AttachmentService {
   private tokens: Map<string, UploadToken> = new Map();
@@ -78,16 +79,17 @@ export class AttachmentService {
     return { token, expiresAt };
   }
 
-  /** Validates a token and returns its binding, or null if invalid/expired. */
+  /**
+   * Spends a token and returns its binding, or null if invalid/expired. Each
+   * token authorizes one upload: the client asks for one per file, and a
+   * reusable token allowed unlimited uploads until it expired (S-WS-11).
+   */
   public consumeUploadToken(token: string | undefined | null): { userId: string; channelId: string } | null {
     if (!token) return null;
     const entry = this.tokens.get(token);
     if (!entry) return null;
-    if (entry.expiresAt < Date.now()) {
-      this.tokens.delete(token);
-      return null;
-    }
-    // Token stays valid until expiry so a single message may upload several files.
+    this.tokens.delete(token);
+    if (entry.expiresAt < Date.now()) return null;
     return { userId: entry.userId, channelId: entry.channelId };
   }
 
@@ -272,26 +274,72 @@ export class AttachmentService {
     };
   }
 
+  // --- Removal -------------------------------------------------------------
+
+  /**
+   * Removes the files of messages whose deletion can no longer be undone.
+   * Within the undo window nothing changes, so a restored message gets its
+   * files back; past it, a file left on disk stayed reachable by its URL and
+   * kept counting against the storage budget (S-APP-6).
+   */
+  public async purgeForMessages(messageIds: string[]): Promise<void> {
+    if (messageIds.length === 0) return;
+    await this.remove(await this.attachmentRepo.listByMessageIds(messageIds));
+  }
+
+  /**
+   * Lists what a channel about to be deleted holds — the topics of a forum
+   * included — and returns the step that removes it once the deletion went
+   * through. Listed first because a database cascade may take the rows along
+   * with the channel. The step never throws: the channel is gone by then, and
+   * the next reconciliation collects whatever it could not remove (S-APP-6).
+   */
+  public async prepareChannelDeletion(channelId: string): Promise<() => Promise<void>> {
+    const records = await this.attachmentRepo.listByChannelWithTopics(channelId);
+    return async () => {
+      try {
+        await this.remove(records);
+      } catch (error) {
+        Logger.error('ATTACHMENT', 'Could not remove the files of a deleted channel; the next start removes them.', error);
+      }
+    };
+  }
+
+  /** Rows first: a file that a failure leaves behind is then collected by the next reconciliation. */
+  private async remove(records: AttachmentRecord[]): Promise<void> {
+    for (const record of records) {
+      await this.attachmentRepo.deleteById(record.id);
+      this.storage.delete(record.filename);
+    }
+  }
+
   // --- Reconciliation ------------------------------------------------------
 
   /**
-   * Startup housekeeping: hard-delete stale pending uploads (never sent) and remove
-   * on-disk files no longer referenced by any live row.
+   * Startup housekeeping: hard-delete stale pending uploads (never sent), the
+   * attachments nothing can show anymore — from deletions made before their
+   * files were removed explicitly — and on-disk files no longer referenced by
+   * any live row.
    */
   public async reconcile(): Promise<void> {
     try {
       const stale = await this.attachmentRepo.listPendingBefore(Date.now() - PENDING_TTL_MS);
-      for (const p of stale) {
-        this.storage.delete(p.filename);
-        await this.attachmentRepo.deleteById(p.id);
-      }
+      await this.remove(stale);
+      const unreachable = await this.attachmentRepo.listUnreachable(Date.now());
+      await this.remove(unreachable);
 
+      // The disk is listed first: an upload stores its file and its row in one
+      // synchronous step, so a file that lands afterwards is never taken for an orphan.
+      const onDisk = this.storage.listDiskFilenames();
       const active = new Set(await this.attachmentRepo.listActiveFilenames());
-      for (const file of this.storage.listDiskFilenames()) {
+      for (const file of onDisk) {
         if (!active.has(file)) this.storage.delete(file);
       }
       if (stale.length > 0) {
         Logger.info('ATTACHMENT', `Reconciliation removed ${stale.length} stale pending upload(s)`);
+      }
+      if (unreachable.length > 0) {
+        Logger.info('ATTACHMENT', `Reconciliation removed ${unreachable.length} attachment(s) of deleted messages or channels`);
       }
     } catch (err) {
       Logger.warn('ATTACHMENT', `Reconciliation failed: ${(err as Error).message}`);

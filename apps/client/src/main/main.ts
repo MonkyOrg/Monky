@@ -35,11 +35,14 @@ import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, BOT_STOR
 import { ServerInviteInbox, registerServerInviteProtocol } from './serverInvites';
 import { configureVideoPresentation } from './videoPresentation';
 import { handleScreenPictureInPictureOpen } from './screenPictureInPictureWindow';
+import { installWebContentsPolicy } from './webContentsPolicy';
 
 import fs from 'fs';
 
 configureVideoPresentation(app.commandLine, process.platform);
 registerBotScreenScheme();
+// Before any window exists, so none is ever created without the guards.
+installWebContentsPolicy(app);
 
 const developmentQa = loadDevelopmentQa({
   packaged: app.isPackaged,

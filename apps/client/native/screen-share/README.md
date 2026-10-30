@@ -772,6 +772,11 @@ o RTC e a captura de `screen-share` e reúne as licenças; **não compila
 build do `gclient`. Checkouts modificados ou incompletos interrompem a
 preparação; não são resetados ou substituídos silenciosamente.
 
+O venv recebe o httplib2 e o six apenas dos wheels fixados em
+`scripts/native-rtc/pins.json`, no Windows e no macOS (`prepareMacRtc.cjs`):
+o pip recusa um arquivo cujo SHA-256 seja diferente. No Windows, se essa
+instalação falhar, o venv é removido para que a próxima execução o prepare de novo.
+
 Downloads de arquivos compactados têm até três tentativas para falhas
 transitórias de rede/servidor, incluindo conexões abortadas no Windows
 (`ECONNABORTED`), com espera e descarte do arquivo parcial.

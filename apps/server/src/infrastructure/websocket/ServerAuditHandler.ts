@@ -1,5 +1,5 @@
 import {
-  MessageType, Permission, ProtocolErrorCode, serverAuditGetSchema,
+  LIMITS, MessageType, Permission, ProtocolErrorCode, serverAuditGetSchema,
   type ProtocolMessage, type ServerAuditPagePayload, type ServerErrorPayload, type UserSummary,
 } from '@monky/shared';
 import type { WebSocket } from 'ws';
@@ -45,7 +45,7 @@ export class ServerAuditHandler {
       return;
     }
     const parsed = serverAuditGetSchema.safeParse(payload);
-    if (!parsed.success || !requestId || requestId.length > 128) {
+    if (!parsed.success || !requestId || requestId.length > LIMITS.MAX_REQUEST_ID_LENGTH) {
       fail(ProtocolErrorCode.BAD_REQUEST, 'Invalid audit log request.');
       return;
     }

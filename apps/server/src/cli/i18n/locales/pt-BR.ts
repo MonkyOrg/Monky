@@ -27,6 +27,7 @@ export const ptBR = {
   'identity.wrongPassword': 'Senha incorreta ou identidade corrompida.',
   'identity.invalidDecrypted': 'Identidade descriptografada inválida.',
   'identity.keyMismatch': 'A identidade descriptografada não corresponde à chave pública informada.',
+  'identity.unsupportedVersion': 'Este código foi criado por uma versão mais nova do Monky. Atualize o CLI com "monky update" e tente de novo.',
 
   // ── Online Users ───────────────────────────────────────────────────────
   'online.one': '1 pessoa conectada',
@@ -69,7 +70,7 @@ export const ptBR = {
   'create.askMemberLimit': 'Deseja limitar o número de membros do servidor?',
   'create.memberLimit': 'Limite de membros',
   'create.invalidLimit': 'Informe um número maior que zero.',
-  'create.identityCode': 'Código de identidade do dono (MONKY-ID:...)',
+  'create.identityCode': 'Código de identidade do dono (MONKY-ID2:...)',
   'create.identityPassword': 'Senha da identidade: ',
   'create.serverName': 'Nome do servidor',
   'create.defaultServerName': 'Servidor dos Amigos',

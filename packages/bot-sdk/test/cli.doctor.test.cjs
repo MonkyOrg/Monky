@@ -262,7 +262,8 @@ test('readiness accepts only a valid manifest served by this bot for the configu
     response.writeHead(200, headers);
     response.end(JSON.stringify({
       requestedCapabilities: [], name: behavior === 'renamed' ? 'Other Name' : 'Sound Bot',
-      registrationUrl: `http://${behavior === 'wrong-host' ? 'other.example.test' : 'bot.example.test'}:${port}/register`,
+      registrationUrl: behavior === 'proxied' ? 'https://bot.example.test/register'
+        : `http://${behavior === 'wrong-host' ? 'other.example.test' : 'bot.example.test'}:${port}/register`,
     }));
   });
   server.listen(0, '127.0.0.1');
@@ -277,8 +278,40 @@ test('readiness accepts only a valid manifest served by this bot for the configu
   await assert.rejects(readiness.verifyManifest(config, pair.publicKeyHex, '0.0.0.0', 'en'), /another bot identity/);
   behavior = 'wrong-host';
   await assert.rejects(readiness.verifyManifest(config, pair.publicKeyHex, '0.0.0.0', 'en'), /registration URL/);
+
+  // Behind a TLS proxy, start and doctor expect the configured public URL instead of host and port.
+  const proxied = cliConfig.marketplaceConfig(context, {
+    botName: 'Sound Bot', servePort: config.servePort, publicHost: 'bot.example.test', publicUrl: 'https://Bot.Example.test:443/',
+  });
+  assert.equal(proxied.publicUrl, 'https://bot.example.test');
+  behavior = 'proxied';
+  assert.deepEqual(await readiness.verifyManifest(proxied, pair.publicKeyHex, '0.0.0.0', 'en'),
+    { url: 'https://bot.example.test/manifest', nameMatches: true });
+  await assert.rejects(readiness.verifyManifest(config, pair.publicKeyHex, '0.0.0.0', 'en'), /public host and port/);
+  behavior = 'valid';
+  await assert.rejects(readiness.verifyManifest(proxied, pair.publicKeyHex, '0.0.0.0', 'en'), /MONKY_SERVE_PUBLIC_URL/,
+    'An entry that ignores the public URL is named as the cause');
   const closed = cliConfig.marketplaceConfig(context, { servePort: await freePort(), publicHost: 'bot.example.test' });
   await assert.rejects(readiness.waitForManifest(closed, pair.publicKeyHex, '0.0.0.0', 'en', 'sound-bot', 400), /did not become ready/);
+});
+
+test('an SDK bot given the configured public URL passes the readiness check', async (t) => {
+  const f = fixture(t);
+  const context = cliConfig.createCliContext(f.bot, { MONKY_BOT_CLI_HOME: f.state });
+  const pair = keys.loadOrCreateBotKeys(path.join(f.root, 'identity'));
+  const client = new BotClient({ publicKey: pair.publicKeyHex, requestedCapabilities: [] });
+  t.after(() => client.close());
+  const config = cliConfig.marketplaceConfig(context, {
+    botName: 'Sound Bot', servePort: await freePort(), publicHost: 'bot.example.test', publicUrl: 'https://bot.example.test',
+  });
+  const env = require('../dist/cli/runner').createRuntimeEnvironment(config, pair.publicKeyHex, {}).values;
+  // What the documented entry does with the runner environment.
+  await client.serve({
+    name: env.MONKY_BOT_NAME, port: Number(env.MONKY_SERVE_PORT), host: '127.0.0.1',
+    publicHost: env.MONKY_SERVE_PUBLIC_HOST, publicUrl: env.MONKY_SERVE_PUBLIC_URL || undefined,
+  });
+  assert.deepEqual(await readiness.verifyManifest(config, pair.publicKeyHex, '127.0.0.1', 'en'),
+    { url: 'https://bot.example.test/manifest', nameMatches: true });
 });
 
 async function fakeMonkyServer(t, respond) {
@@ -494,4 +527,9 @@ test('requirements lists what to open and configure even before setup', async (t
   const ports = view.effectivePorts(context, cliConfig.marketplaceConfig(context, { servePort: 80, publicHost: 'Bot.Example.test' }), {});
   assert.deepEqual(ports.map((port) => port.publicOrigin), ['http://bot.example.test', 'http://bot.example.test:7781'],
     'origins are canonical, as the server validates them');
+  const proxied = view.effectivePorts(context, cliConfig.marketplaceConfig(context, {
+    servePort: 7780, publicHost: 'bot.example.test', publicUrl: 'https://bot.example.test',
+  }), {});
+  assert.deepEqual(proxied.map((port) => port.publicOrigin), ['https://bot.example.test', 'http://bot.example.test:7781'],
+    'doctor tests the manifest through the TLS proxy, and declared ports through the public host');
 });

@@ -6,6 +6,7 @@ import { cliText } from './locale';
 import { findProcess } from './pm2';
 import { localConnectHost } from './ports';
 import { BOT_PUBLIC_KEY_HEADER } from '../reachability';
+import { marketplaceBaseUrl } from '../marketplace';
 
 const REQUEST_TIMEOUT_MS = 1_500;
 const STARTUP_TIMEOUT_MS = 10_000;
@@ -23,7 +24,8 @@ function errorCode(error: unknown): string {
     typeof error.code === 'string' && /^[A-Z0-9_]{1,40}$/.test(error.code) ? error.code : 'UNKNOWN';
 }
 
-export function manifestUrl(config: Pick<MarketplaceBotConfig, 'publicHost' | 'servePort'>): string {
+export function manifestUrl(config: Pick<MarketplaceBotConfig, 'publicHost' | 'servePort' | 'publicUrl'>): string {
+  if (config.publicUrl) return `${marketplaceBaseUrl(config.publicUrl)}/manifest`;
   const host = config.publicHost.includes(':') && !config.publicHost.startsWith('[') ? `[${config.publicHost}]` : config.publicHost;
   return `http://${host}:${config.servePort}/manifest`;
 }
@@ -115,8 +117,11 @@ export async function verifyManifest(
             return;
           }
           if (registration !== expectedRegistration) {
-            finish(failure('a URL de registro não corresponde ao host público e à porta configurados.',
-              'the registration URL does not match the configured public host and port.'));
+            finish(config.publicUrl
+              ? failure('a URL de registro não corresponde à URL pública configurada; a entrada do bot deve passar MONKY_SERVE_PUBLIC_URL como publicUrl de serve().',
+                'the registration URL does not match the configured public URL; the bot entry must pass MONKY_SERVE_PUBLIC_URL as the serve() publicUrl.')
+              : failure('a URL de registro não corresponde ao host público e à porta configurados.',
+                'the registration URL does not match the configured public host and port.'));
             return;
           }
           finish();

@@ -2,12 +2,13 @@ import { createPrivateKey, createPublicKey, generateKeyPairSync, sign } from 'cr
 import { app, safeStorage } from 'electron';
 import fs from 'fs';
 import path from 'path';
-import { deriveClientIdFromPublicKey, normalizePublicKeyHex } from '@monky/shared';
-import { openEnvelope, sealEnvelope } from './secretEnvelope';
+import {
+  SecretEnvelopeError, deriveClientIdFromPublicKey, normalizePublicKeyHex, openIdentityExport, sealIdentityExport,
+} from '@monky/shared';
+import { secretEnvelopeError } from './secretEnvelope';
 import { DmKeyring } from './dm/dmCrypto';
 
 const IDENTITY_FILE_NAME = 'identity.json';
-const EXPORT_PREFIX = 'MONKY-ID:';
 
 interface StoredIdentityRecord {
   version: 1;
@@ -167,48 +168,45 @@ export function createDmKeyring(): DmKeyring | null {
   return new DmKeyring(identity.publicKey, identity.privateKeyDerBase64);
 }
 
-export function exportIdentity(password: string, extras?: string, dm?: unknown): string {
+/** Seals the identity in the format that `monky create` also reads (#490). */
+export async function exportIdentity(password: string, extras?: string, dm?: unknown): Promise<string> {
   const identity = ensureIdentity();
-  const plaintext = JSON.stringify({
-    version: 1,
-    publicKey: identity.publicKey,
-    privateKeyDerBase64: identity.privateKeyDerBase64,
-    // Saved servers and app settings ride along inside the same encrypted
-    // envelope (#472). The main process never inspects them: the renderer owns
-    // the format and hands over an opaque string.
-    extras: extras && extras.length > 0 ? extras : undefined,
-    dm: dm ?? undefined,
-  });
-
-  return sealEnvelope(plaintext, password, EXPORT_PREFIX);
+  try {
+    return await sealIdentityExport({
+      publicKey: identity.publicKey,
+      privateKeyDerBase64: identity.privateKeyDerBase64,
+      // Saved servers and app settings ride along inside the same encrypted
+      // envelope (#472). The main process never inspects them: the renderer owns
+      // the format and hands over an opaque string.
+      extras: extras && extras.length > 0 ? extras : undefined,
+      dm: dm ?? undefined,
+    }, password);
+  } catch (error) {
+    throw secretEnvelopeError(error, 'identity');
+  }
 }
 
-export function importIdentity(exportedIdentity: string, password: string): AppIdentityImport {
-  const decrypted = openEnvelope(
-    exportedIdentity,
-    password,
-    EXPORT_PREFIX,
-    'Código de identidade inválido.',
-    'Senha incorreta ou identidade corrompida.'
-  );
-
-  let payload: { privateKeyDerBase64: string; extras?: string; dm?: unknown };
+export async function importIdentity(exportedIdentity: string, password: string): Promise<AppIdentityImport> {
+  let identity: LoadedIdentity;
+  let extras: string | undefined;
+  let dm: unknown;
   try {
-    payload = JSON.parse(decrypted);
-  } catch {
-    throw new Error('Identidade descriptografada inválida.');
+    const payload = await openIdentityExport(exportedIdentity, password);
+    extras = payload.extras;
+    dm = payload.dm;
+    try {
+      identity = createIdentityFromPrivateKey(payload.privateKeyDerBase64);
+    } catch {
+      throw new SecretEnvelopeError('invalid_content');
+    }
+  } catch (error) {
+    throw secretEnvelopeError(error, 'identity');
   }
-
-  if (!payload?.privateKeyDerBase64) {
-    throw new Error('Identidade descriptografada inválida.');
-  }
-
-  const identity = createIdentityFromPrivateKey(payload.privateKeyDerBase64);
   persistIdentity(identity);
   return {
     publicKey: identity.publicKey,
     clientId: identity.clientId,
-    extras: typeof payload.extras === 'string' ? payload.extras : undefined,
-    dm: payload.dm,
+    extras,
+    dm,
   };
 }

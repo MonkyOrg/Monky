@@ -246,3 +246,24 @@ test('unexpected asynchronous handler failure sends a correlated error and does 
   assert.equal(f.messages.at(-1)?.type, MessageType.SERVER_SETTINGS_UPDATED);
   assert.equal(f.messages.at(-1)?.requestId, 'retried-write');
 });
+
+test('the TURN relay refuses TCP relays and every internal network, and writes only real addresses', () => {
+  const manager = new CoturnManager('unused-data-dir');
+  const lines = manager['buildConfig']('secret', '198.51.100.20', '10.0.0.5').split('\n');
+  for (const expected of [
+    'no-tcp-relay', 'no-multicast-peers', 'external-ip=198.51.100.20/10.0.0.5',
+    'denied-peer-ip=127.0.0.0-127.255.255.255', 'denied-peer-ip=10.0.0.0-10.255.255.255',
+    // Tailscale's carrier-grade NAT range, and IPv4 written as IPv6 (CVE-2026-27624).
+    'denied-peer-ip=100.64.0.0-100.127.255.255', 'denied-peer-ip=::ffff:0.0.0.0-::ffff:255.255.255.255',
+    'denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', 'denied-peer-ip=2002::-2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+  ]) assert.ok(lines.includes(expected), expected);
+  assert.equal(lines.some((line) => line.startsWith('allowed-peer-ip')), false);
+
+  // An address from an external service that carries a line break never becomes a directive.
+  const injected = manager['buildConfig']('secret', '198.51.100.20\nallowed-peer-ip=10.0.0.1', '10.0.0.5\nno-auth');
+  assert.equal(injected.includes('allowed-peer-ip'), false);
+  assert.equal(injected.includes('no-auth'), false);
+  assert.equal(injected.split('\n').some((line) => line.startsWith('external-ip')), false);
+  // A mapping only pairs addresses of the same family.
+  assert.ok(manager['buildConfig']('secret', '2001:db8::1', '10.0.0.5').split('\n').includes('external-ip=2001:db8::1'));
+});

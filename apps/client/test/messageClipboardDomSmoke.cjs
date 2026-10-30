@@ -70,13 +70,15 @@ if (!process.versions.electron) {
         response.end();
         return;
       }
-      if (!['/authored.png', '/authored.jpg'].includes(request.url)) {
+      // Chat attachments only resolve from the server's own `/attachments/` path.
+      const fixture = request.url.replace(/^\/attachments\//, '/');
+      if (!['/authored.png', '/authored.jpg'].includes(fixture)) {
         response.writeHead(404, { 'Content-Type': 'text/plain' });
         response.end('Image fixture not found');
         return;
       }
-      response.setHeader('Content-Type', request.url.endsWith('.jpg') ? 'image/jpeg' : 'image/png');
-      response.end(request.url.endsWith('.jpg') ? authoredImage.toJPEG(100) : authoredImage.toPNG());
+      response.setHeader('Content-Type', fixture.endsWith('.jpg') ? 'image/jpeg' : 'image/png');
+      response.end(fixture.endsWith('.jpg') ? authoredImage.toJPEG(100) : authoredImage.toPNG());
     });
     await new Promise((resolve, reject) => {
       imageServer.once('error', reject);
@@ -861,6 +863,7 @@ async function installFixture(systemClipboard = false) {
   }, user);
   session.client.getStatus = () => 'CONNECTED';
   session.client.getCurrentServerUrl = () => session.key;
+  session.client.getHttpBaseUrl = () => window.clipboardImageOrigin;
   session.client.ws = { readyState: WebSocket.OPEN, send() {}, close() {} };
   session.client.send = () => {};
   session.client.sendRequest = () => Promise.resolve({ selectors: [] });
@@ -1064,12 +1067,12 @@ async function installFixture(systemClipboard = false) {
     await prepare(locale);
     const message = { channelId: 'chat', userId: user.id, userNickname: user.nickname, createdAt: 1, isSystem: false };
     const photo = { id: 'photo-image', messageId: 'photo', kind: 'image',
-      url: `${window.clipboardImageOrigin}/authored.png`, originalName: 'authored.png',
+      url: '/attachments/authored.png', originalName: 'authored.png',
       mimeType: 'image/png', sizeBytes: 100, createdAt: 1 };
     session.chatStore.setHistory('chat', [
       { ...message, id: 'photo', content: '**Photo caption**', attachments: [photo] },
       { ...message, id: 'jpeg', content: '', attachments: [{
-        ...photo, id: 'jpeg-image', messageId: 'jpeg', url: `${window.clipboardImageOrigin}/authored.jpg`,
+        ...photo, id: 'jpeg-image', messageId: 'jpeg', url: '/attachments/authored.jpg',
         originalName: 'authored.jpg', mimeType: 'image/jpeg',
       }] },
       { ...message, id: 'image-sticker', content: stickerToken('sticker-copy'),

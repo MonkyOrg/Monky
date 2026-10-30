@@ -1,5 +1,5 @@
 import { MessageType, SCREEN_SHARE_LIMITS, getScreenShareQualities, screenShareQualitySchema, type BotScreen, type NativeScreenSource } from '@monky/shared';
-import { escapeHtml } from '../utils/html';
+import { escapeHtml, html, trustedHtml } from '../utils/html';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
 import { appEvents } from '../core/EventBus';
@@ -1683,7 +1683,7 @@ export class VoiceStageView {
               ${isMini ? '' : `<span>${t('stage.pictureInPictureBringBack')}</span>`}
             </button>
           </div>
-        ` : `<video id="${videoId}" data-video-tile-key="${escapeHtml(tile.key)}" class="stage-video-element ${isScreenTile ? 'screen-share' : ''}${isLocked ? ' screen-locked' : ''}" autoplay playsinline muted></video>`}
+        ` : html`<video id="${videoId}" data-video-tile-key="${tile.key}" class="stage-video-element ${isScreenTile ? 'screen-share' : ''}${isLocked ? ' screen-locked' : ''}" autoplay playsinline muted></video>`}
         ${hasVideo && isScreenTile ? `<span class="stage-capture-mode-badge" data-native-screen="${!!(localNative || remoteNative)}"
           role="status" aria-live="polite" aria-atomic="true" hidden></span>` : ''}
         ${localNative ? `<div class="stage-native-thumbnail"${this.isLocalPreviewLive(tile.shareId!) ? ' data-live' : ''}>
@@ -1698,10 +1698,10 @@ export class VoiceStageView {
             </div>
           </div>
         </div>` : ''}
-        ${!isLocked && !localNative && hasVideo ? `
+        ${!isLocked && !localNative && hasVideo ? html`
           <div class="stage-loading-overlay${isMini ? ' stage-loading-overlay--mini' : ''}" id="loading-${videoId}">
             <div class="reconnect-spinner"></div>
-            ${isMini ? '' : `<span>${isScreenTile ? t('stage.loadingScreen') : t('stage.loadingCamera')}</span>`}
+            ${isMini ? '' : html`<span>${isScreenTile ? t('stage.loadingScreen') : t('stage.loadingCamera')}</span>`}
           </div>
         ` : ''}
         ${(hasVideo && !isLocked && !isMini) ? `
@@ -1710,18 +1710,18 @@ export class VoiceStageView {
             data-telemetry-key="${escapeHtml(tile.key)}"
           >${escapeHtml(this.getTelemetryText(tile.key))}</div>
         ` : ''}
-        ${isLocked ? `
+        ${isLocked ? html`
           <div class="stage-watch-overlay${isMini ? ' stage-watch-overlay--mini' : ''}">
-            <button class="stage-watch-btn" data-watch-session="${sidOf(p)}" data-watch-share="${tile.shareId}"${isMini ? ` title="${t('stage.watchBroadcast')}" aria-label="${t('stage.watchBroadcast')}"` : ''}>
+            <button class="stage-watch-btn" data-watch-session="${sidOf(p)}" data-watch-share="${tile.shareId}"${isMini ? html` title="${t('stage.watchBroadcast')}" aria-label="${t('stage.watchBroadcast')}"` : ''}>
               <span class="material-symbols-outlined">smart_display</span>
-              ${isMini ? '' : `<span>${t('stage.watchBroadcast')}</span>`}
+              ${isMini ? '' : html`<span>${t('stage.watchBroadcast')}</span>`}
             </button>
-            ${isMini ? '' : `<div class="stage-watch-caption">${t('stage.watchCaption', { name: escapeHtml(participantManager.displayName(p)) })}</div>`}
+            ${isMini ? '' : html`<div class="stage-watch-caption">${t('stage.watchCaption', { name: participantManager.displayName(p) })}</div>`}
           </div>
-        ` : `
+        ` : html`
           <div class="stage-card-controls">
-            ${isRemoteScreen ? `
-              ${remoteNative && !isMini ? this.renderScreenQuality(remoteNative, sidOf(p)) : ''}
+            ${isRemoteScreen ? html`
+              ${remoteNative && !isMini ? trustedHtml(this.renderScreenQuality(remoteNative, sidOf(p))) : ''}
               <div class="stage-volume-wrapper">
                 <div class="stage-volume-popup">
                   <input type="range" class="stage-screen-volume-slider" data-session-id="${sidOf(p)}" min="0" max="200" value="${settingsStore.getScreenAudioVolume(sidOf(p), p.user.clientId)}" />
@@ -1733,28 +1733,28 @@ export class VoiceStageView {
               <button class="stage-stopwatch-btn" data-stopwatch-session="${sidOf(p)}" data-stopwatch-share="${tile.shareId}" title="${t('stage.stopWatching')}" aria-label="${t('stage.stopWatching')}">
                 <span class="material-symbols-outlined md-18">visibility_off</span>
               </button>
-              ${this.isPictureInPictureAvailable() && hasVideo ? `
+              ${this.isPictureInPictureAvailable() && hasVideo ? html`
                 <button type="button" class="stage-pip-btn" data-pip-target="${videoId}" title="${t('stage.pictureInPicture')}" aria-label="${t('stage.pictureInPicture')}">
                   <span class="material-symbols-outlined md-18">picture_in_picture_alt</span>
                 </button>
               ` : ''}
             ` : ''}
-            ${!isMini && hasVideo ? `
-              <button type="button" class="stage-diagnostics-btn" data-diagnostics-key="${escapeHtml(tile.key)}" ${settingsStore.screenShareTelemetryEnabled ? '' : 'hidden'}
-                title="${escapeHtml(t('stage.telemetryCopy'))}" aria-label="${escapeHtml(t('stage.telemetryCopy'))}">
+            ${!isMini && hasVideo ? html`
+              <button type="button" class="stage-diagnostics-btn" data-diagnostics-key="${tile.key}" ${settingsStore.screenShareTelemetryEnabled ? '' : 'hidden'}
+                title="${t('stage.telemetryCopy')}" aria-label="${t('stage.telemetryCopy')}">
                 <span class="material-symbols-outlined md-18">content_copy</span>
               </button>
             ` : ''}
-            ${hasVideo ? `<button class="stage-fullscreen-btn" data-fullscreen-target="${videoId}" title="${t('stage.fullscreen')}" aria-label="${t('stage.fullscreen')}">
+            ${hasVideo ? html`<button class="stage-fullscreen-btn" data-fullscreen-target="${videoId}" title="${t('stage.fullscreen')}" aria-label="${t('stage.fullscreen')}">
               <span class="material-symbols-outlined md-18">fullscreen</span>
             </button>` : ''}
           </div>
         `}
-      ` : `
+      ` : html`
         <div class="stage-avatar-wrapper">
           <img class="stage-avatar-img" src="${avatarSrc}" data-fallback="avatar">
-          ${!isMini ? `
-            <div class="stage-participant-name">${escapeHtml(participantManager.displayName(p))} ${isLocal ? `(${t('common.you')})` : ''}</div>
+          ${!isMini ? html`
+            <div class="stage-participant-name">${participantManager.displayName(p)} ${isLocal ? `(${t('common.you')})` : ''}</div>
           ` : ''}
         </div>
       `}

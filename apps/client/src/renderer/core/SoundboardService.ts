@@ -8,6 +8,7 @@ import {
 } from '@monky/shared';
 import { appEvents } from './EventBus';
 import { callClient } from './serverConnection';
+import { currentEventOrigin } from './sessionRouting';
 import { sessionManager } from './SessionManager';
 import { ProtocolRequestError } from './NetworkClient';
 import { settingsStore } from '../stores/settingsStore';
@@ -89,8 +90,13 @@ export class SoundboardService {
   }
 
   private setupListeners(): void {
-    // Listen to network events when another user or server sends a soundboard play
+    // A sound relayed by the server hosting this client's call, its own included.
     appEvents.on(`message.${MessageType.SOUNDBOARD_PLAYED}`, (payload: SoundboardPlayedPayload) => {
+      if (!this.isForCurrentCall(payload)) {
+        // Our own request ends quietly when the call changed before its echo.
+        if (payload && typeof payload === 'object') this.incomingPlaybacks.set(payload, Promise.resolve<PlaybackOutcome>('cancelled'));
+        return;
+      }
       const playback = this.handleIncomingSound(payload);
       if (payload && typeof payload === 'object') this.incomingPlaybacks.set(payload, playback);
     });
@@ -302,6 +308,15 @@ export class SoundboardService {
       || [...this.soundRequests].some((request) => request.sent);
     if (hasLocalPlayback) this.broadcastStop();
     this.stopSound();
+  }
+
+  /** Whether this client may hear a relayed sound: it is in that call, on the server hosting it. */
+  private isForCurrentCall(payload: SoundboardPlayedPayload): boolean {
+    const channelId = voiceStore.currentVoiceChannelId;
+    const voiceKey = voiceStore.voiceSessionKey;
+    if (!channelId || !voiceKey || payload?.channelId !== channelId) return false;
+    const origin = currentEventOrigin();
+    return !origin || origin === voiceKey;
   }
 
   /** Whether a playback entry belongs to this client (call user or preview). */

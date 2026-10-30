@@ -542,6 +542,35 @@ async function runDom(fixture) {
       'Call playback resolves once the relayed clip is audible here');
     check(soundboardService.getLoadingSoundPaths().size === 0, 'An audible sound is no longer loading');
     soundboardService.stopSound();
+    // A sound relayed for another call, or by another server, never plays here.
+    const routing = await import('/core/sessionRouting.ts');
+    const strayAudio = await window.api.readSoundboardSound(name('tone.wav').filePath);
+    const stray = (channelId) => ({ channelId, userId: 'stray', userName: 'Stray', soundName: 'tone',
+      audioBase64: strayAudio.base64, mimeType: strayAudio.mimeType });
+    appEvents.emit(`message.${shared.MessageType.SOUNDBOARD_PLAYED}`, stray('another-channel'));
+    routing.setEventOrigin('another-server');
+    try {
+      appEvents.emit(`message.${shared.MessageType.SOUNDBOARD_PLAYED}`, stray('qa-channel'));
+    } finally {
+      routing.setEventOrigin(null);
+    }
+    voiceStore.currentVoiceChannelId = null;
+    voiceStore.voiceSessionKey = null;
+    appEvents.emit(`message.${shared.MessageType.SOUNDBOARD_PLAYED}`, stray('qa-channel'));
+    voiceStore.currentVoiceChannelId = 'qa-channel';
+    voiceStore.voiceSessionKey = 'qa-session';
+    await wait(100);
+    check(!soundboardService.getActivePlaybacks(true).some(entry => entry.userId === 'stray'),
+      'Sounds for another call, another server or no call at all are never played');
+    routing.setEventOrigin('qa-session');
+    try {
+      appEvents.emit(`message.${shared.MessageType.SOUNDBOARD_PLAYED}`, stray('qa-channel'));
+    } finally {
+      routing.setEventOrigin(null);
+    }
+    await until(() => soundboardService.getActivePlaybacks().some(entry => entry.userId === 'stray'),
+      'A sound relayed by the call server for this call still plays');
+    soundboardService.stopSound();
     const incoming = await window.api.readSoundboardSound(name('tone.wav').filePath);
     await soundboardService.handleIncomingSound({ userId: 'self', userName: 'QA', soundName: 'tone', audioBase64: incoming.base64, mimeType: incoming.mimeType });
     await until(() => soundboardService.getActivePlaybacks().some(entry => entry.userId === 'self'), 'Own incoming audio did not play');

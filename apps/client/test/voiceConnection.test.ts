@@ -808,7 +808,7 @@ test('a pending receive operation is monitored even when the sending transport i
   t.mock.timers.tick(15_000);
   assert.equal(failures(), 1);
   engine.leave();
-  finish({ channelId: 'room', id: 'consumer', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', rtpParameters: {}, appData: {} });
+  finish({ channelId: 'room', id: 'consumer', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', rtpParameters: {}, appData: { mediaType: 'mic' } });
   await pending;
   assert.equal(engine['pendingConsumers'].size, 0);
 });
@@ -856,13 +856,13 @@ test('duplicate producer announcements and a leave during consume cannot resurre
   });
   const announcement = {
     channelId: 'room', producerId: 'producer', producerSessionId: 'peer',
-    kind: 'audio' as const, appData: { mediaType: 'mic' },
+    kind: 'audio' as const, appData: { mediaType: 'mic' as const },
   };
   const pending = engine['consumeRemoteProducer'](announcement);
   await engine['consumeRemoteProducer'](announcement);
   assert.equal(requests, 1);
   engine.leave();
-  resolveRequest({ channelId: 'room', id: 'consumer', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', rtpParameters: {}, appData: {} });
+  resolveRequest({ channelId: 'room', id: 'consumer', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', rtpParameters: {}, appData: { mediaType: 'mic' } });
   await pending;
   assert.equal(consumes, 0);
   assert.equal(engine['consumers'].size, 0);

@@ -179,10 +179,18 @@ After the initial language choice, when needed, the command asks:
 
 1. **Where to store the data** — suggests `./data`, but any path works. If the
    chosen folder already holds a server, it asks for another one.
-2. **Owner identity code** (`MONKY-ID:...`) — export it from the Monky app under
+2. **Owner identity code** (`MONKY-ID2:...`) — export it from the Monky app under
    *Settings → My Profile → Identity*. Treat the backup and password as
    credentials: use them only on a trusted administration machine.
-3. **Identity password** — the one you set when exporting.
+   Codes starting with `MONKY-ID2:` need an up-to-date CLI; a CLI from before
+   them answers "Invalid identity code". If the CLI was already installed, run
+   `monky update` before `monky create` (or `monky update --beta` if the app is
+   on the beta channel). `MONKY-ID:` codes, exported by earlier app versions,
+   are still accepted.
+3. **Identity password** — the one you set when exporting. The code and the
+   password are checked before any data is written: a wrong password does not
+   leave a half-created server behind. If the command says the code came from a
+   newer version of Monky, update the CLI with `monky update` and run it again.
 4. **Server name**
 5. **Server port** (default: `3000`)
 6. **Server password** — leave empty for an open server.
@@ -218,7 +226,7 @@ monky create --data /srv/monky-friends
 
 # Non-interactive, except for the identity password
 monky create --data /srv/monky-friends \
-  --identity "MONKY-ID:..." \
+  --identity "MONKY-ID2:..." \
   --name "Friends Server" --port 3000 --password "serverPassword"
 ```
 

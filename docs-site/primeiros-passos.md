@@ -28,6 +28,14 @@ nem sua senha. O código público de identidade é diferente do backup que
 permite usar sua conta em outro dispositivo. Sem o backup, criar outra
 identidade não recupera os acessos da anterior.
 
+A senha precisa ter pelo menos 8 caracteres, e o Monky recusa senhas comuns,
+como `12345678` ou `senha123`: quem conseguir o código pode tentar adivinhá-la
+sem limite de tentativas. Códigos exportados por versões anteriores
+(`MONKY-ID:...`) continuam abrindo. Os códigos novos começam com `MONKY-ID2:` e
+só abrem no Monky atualizado: uma versão anterior do app ou do `monky create`
+responde "Código de identidade inválido". Atualize o app e, no servidor, rode
+`monky update` antes do `monky create`.
+
 ## 2. Escolha como entrar
 
 Após criar a identidade e o perfil, o Monky abre a **Home**. Ela tem o trilho

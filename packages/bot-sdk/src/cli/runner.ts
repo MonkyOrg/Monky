@@ -43,14 +43,17 @@ export function createRuntimeEnvironment(
     values.MONKY_BOT_TOKEN = token;
     return {
       values,
-      clear: ['MONKY_SERVE', 'MONKY_SERVE_PORT', 'MONKY_SERVE_HOST', 'MONKY_SERVE_PUBLIC_HOST', 'MONKY_BOT_REGISTRATION_FILE'],
+      clear: ['MONKY_SERVE', 'MONKY_SERVE_PORT', 'MONKY_SERVE_HOST', 'MONKY_SERVE_PUBLIC_HOST', 'MONKY_SERVE_PUBLIC_URL',
+        'MONKY_BOT_REGISTRATION_FILE'],
     };
   }
   values.MONKY_SERVE = 'true';
   values.MONKY_SERVE_PORT = String(config.servePort);
   values.MONKY_SERVE_PUBLIC_HOST = config.publicHost;
   values.MONKY_BOT_REGISTRATION_FILE = keyPaths(config.botDir).registrationsFile;
-  return { values, clear: ['MONKY_SERVER_URL', 'MONKY_BOT_TOKEN'] };
+  if (config.publicUrl) values.MONKY_SERVE_PUBLIC_URL = config.publicUrl;
+  // Without a configured URL, a stale one from the operator's shell must not reach serve().
+  return { values, clear: ['MONKY_SERVER_URL', 'MONKY_BOT_TOKEN', ...(config.publicUrl ? [] : ['MONKY_SERVE_PUBLIC_URL'])] };
 }
 
 /** Finds the installed bot package; ecosystems written before 37 do not name it. */

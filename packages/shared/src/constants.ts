@@ -82,6 +82,12 @@ export const LIMITS = {
    * são 100 MiB, que qualquer cliente não autenticado podia mandar (#372).
    */
   WS_MAX_PAYLOAD_BYTES: 8 * 1024 * 1024,
+  /**
+   * Teto do `requestId` de qualquer mensagem. O servidor copia o id do autor
+   * para eventos que vão a todos, então um id sem limite multiplicava um frame
+   * de 8 MiB pelo número de conectados. Os clientes usam UUIDs (36 a ~80).
+   */
+  MAX_REQUEST_ID_LENGTH: 128,
   DM_RELAY_MAX_ITEMS: 50,
   DM_RELAY_DATA_MAX_LENGTH: 65_536,
   DM_RELAY_FILE_DATA_MAX_LENGTH: 196_608,

@@ -14,8 +14,10 @@ import { ChannelRecord, VoiceRestrictions } from './domain/entities';
 import type { IVoiceRestrictionRepository } from './domain/repositories';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 import { SqliteVoiceRestrictionRepository } from './infrastructure/database/SqliteVoiceRestrictionRepository';
-import { SfuManager, SfuProducerClosedError } from './infrastructure/sfu/SfuManager';
+import { SfuManager, SfuProducerClosedError, SfuProducerLimitError } from './infrastructure/sfu/SfuManager';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
+import { Logger } from './infrastructure/logger/Logger';
+import { createFixture, record, records as recordList, text } from './testFixtures/bots';
 import './test-screen-subscriptions';
 
 function memoryRestrictions(): IVoiceRestrictionRepository {
@@ -606,16 +608,16 @@ test('permission-muted SFU participants can publish video but not microphone or 
   service.updateVoiceState('self', { screenShareIds: ['share'] });
 
   await server['handleSfuProduce'](session, {
-    channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: {}, appData: { mediaType: 'mic' },
+    channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: { codecs: [] }, appData: { mediaType: 'mic' },
   }, 'mic');
   await server['handleSfuProduce'](session, {
-    channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: {}, appData: { mediaType: 'screen_audio', shareId: 'share' },
+    channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: { codecs: [] }, appData: { mediaType: 'screen_audio', shareId: 'share' },
   }, 'screen-audio');
   await server['handleSfuProduce'](session, {
-    channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: {}, appData: { mediaType: 'camera' },
+    channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: { codecs: [] }, appData: { mediaType: 'camera' },
   }, 'camera');
   await server['handleSfuProduce'](session, {
-    channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: {}, appData: { mediaType: 'screen_video', shareId: 'share' },
+    channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: { codecs: [] }, appData: { mediaType: 'screen_video', shareId: 'share' },
   }, 'screen-video');
 
   assert.equal(messages.find(message => message.requestId === 'mic')?.type, MessageType.SERVER_ERROR);
@@ -641,7 +643,7 @@ test('producer disappearance during worker consume is obsolete work, but transpo
     sfu['producers'].set('producer', {
       producer: { id: 'producer', closed: false, close() {} } as MediasoupTypes.Producer,
       transportId: 'send-peer',
-      sessionId: 'peer', channelId: 'room', kind: 'video', appData: { mediaType: 'screen_video' },
+      sessionId: 'peer', channelId: 'room', kind: 'video', appData: { mediaType: 'screen_video', shareId: 'share' },
     });
 
     const router: Partial<MediasoupTypes.Router> = { canConsume: () => true };
@@ -762,7 +764,7 @@ test('SFU allocations completing after a human reconnect are reaped without touc
           return { id: abandoned.id };
         };
         pending = server['handleSfuProduce'](session, {
-          channelId: 'room', transportId: 'old-transport', kind: 'audio', rtpParameters: {}, appData: { mediaType: 'mic' },
+          channelId: 'room', transportId: 'old-transport', kind: 'audio', rtpParameters: { codecs: [] }, appData: { mediaType: 'mic' },
         }, 'old-request');
       } else {
         await service.joinVoiceChannel('peer', 'peer', 'room');
@@ -804,4 +806,208 @@ test('SFU allocations completing after a human reconnect are reaped without touc
       sfu.close();
     });
   }
+});
+
+test('human voice payloads keep only known fields of the right type, and kicks relay only what the server built', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Voice owner');
+  const member = await f.human('Voice member');
+  const voiceId = text(recordList(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'VOICE')?.id);
+  const memberSession = text(record(member.auth.payload.currentUser).sessionId);
+
+  for (const invalid of [{ channelId: voiceId, isMuted: 'yes' }, { channelId: 7 }, null]) {
+    await member.peer.error(MessageType.VOICE_JOIN, invalid, ProtocolErrorCode.BAD_REQUEST);
+  }
+  const joined = await member.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId, isMuted: false, junk: 'x' });
+  assert.equal(joined.type, MessageType.VOICE_USER_JOINED);
+  assert.equal(Object.hasOwn(record(joined.payload.voiceState), 'junk'), false);
+  assert.equal((await owner.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId })).type, MessageType.VOICE_USER_JOINED);
+
+  for (const invalid of [
+    { isMuted: 'yes' }, { isCameraOn: {} }, { screenShareIds: 'one' }, { screenShareIds: Array(65).fill('a') }, null,
+  ]) {
+    await member.peer.error(MessageType.VOICE_STATE_UPDATE, invalid, ProtocolErrorCode.BAD_REQUEST);
+  }
+  const since = owner.peer.messages.length;
+  member.peer.send(MessageType.VOICE_STATE_UPDATE, { isMuted: true, junk: 'x'.repeat(64 * 1024), connectionHealth: 'failed' });
+  const changed = await owner.peer.wait((message) => message.type === MessageType.VOICE_STATE_CHANGED
+    && record(message.payload.voiceState).sessionId === memberSession, since);
+  const state = record(changed.payload.voiceState);
+  assert.equal(state.isMuted, true);
+  assert.equal(Object.hasOwn(state, 'junk'), false, 'an unknown key never reaches the room');
+  assert.notEqual(state.connectionHealth, 'failed', 'health stays server-observed');
+  assert.equal(Object.hasOwn(f.signalingService.getVoiceState(memberSession) ?? {}, 'junk'), false);
+
+  await owner.peer.error(MessageType.ADMIN_KICK_VOICE, { targetSessionId: 7 }, ProtocolErrorCode.BAD_REQUEST);
+  await owner.peer.error(MessageType.ADMIN_MOVE_USER, { targetSessionId: memberSession }, ProtocolErrorCode.BAD_REQUEST);
+  const kickSince = member.peer.messages.length;
+  const kicked = await owner.peer.request(MessageType.ADMIN_KICK_VOICE, { targetSessionId: memberSession, junk: 'x'.repeat(1024) });
+  assert.equal(kicked.type, MessageType.ADMIN_KICK_VOICE);
+  assert.deepEqual(kicked.payload, { targetSessionId: memberSession });
+  const relayed = await member.peer.wait((message) => message.type === MessageType.ADMIN_KICK_VOICE, kickSince);
+  assert.deepEqual(relayed.payload, { targetSessionId: memberSession }, 'the client payload is never relayed as is');
+});
+
+test('RTC diagnostic reports become one bounded log line, never a forged one, and are rate limited', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const reporter = await f.human('Diagnostics member');
+  const peer = await f.human('Diagnostics peer');
+  const report = {
+    targetSessionId: text(record(peer.auth.payload.currentUser).sessionId),
+    reason: 'ice_restart=2, hard_reconnect=1', iceGatheringState: 'complete', signalingState: 'stable',
+    iceRestartAttempts: 2, hardReconnectAttempts: 1,
+    localCandidate: { type: 'srflx', address: '203.0.113.7', port: 50000, protocol: 'udp' }, remoteCandidate: null,
+  };
+  const lines = () => Logger.getRecent().filter((entry) => entry.message.includes('P2P connection failed: Diagnostics member'));
+  // Queued behind the reports, unlike PING, so it proves they were handled.
+  const settle = () => reporter.peer.request(MessageType.COMMANDS_LIST);
+  const before = lines().length;
+  reporter.peer.send(MessageType.RTC_DIAGNOSTICS_REPORT, report);
+  await settle();
+  assert.equal(lines().length, before + 1);
+  assert.match(lines().at(-1)?.message ?? '', /Diagnostics member → Diagnostics peer/u);
+
+  for (const invalid of [
+    { ...report, reason: 'ok\n[ERROR:SECURITY] forged' },
+    { ...report, iceGatheringState: 'x'.repeat(1024 * 1024) },
+    { ...report, localCandidate: { ...report.localCandidate, port: 70_000 } },
+  ]) reporter.peer.send(MessageType.RTC_DIAGNOSTICS_REPORT, invalid);
+  await settle();
+  assert.equal(lines().length, before + 1, 'an invalid report leaves no log line');
+  assert.equal(reporter.peer.messages.some((message) => message.type === MessageType.SERVER_ERROR), false,
+    'a report is never answered');
+
+  for (let i = 0; i < 10; i++) reporter.peer.send(MessageType.RTC_DIAGNOSTICS_REPORT, report);
+  await settle();
+  assert.equal(lines().length, before + 7, 'ten reports a minute, invalid ones included');
+});
+
+test('SFU media parameters are bounded before mediasoup and real client shapes pass through intact', async () => {
+  const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
+  const sfu = new SfuManager();
+  const service = signaling();
+  server['sfuManager'] = sfu;
+  server['signalingService'] = service;
+  server['closing'] = false;
+  const ws = Object.create(WebSocket.prototype) as WebSocket;
+  Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
+  const session: Parameters<WebSocketServer['handleSfuProduce']>[0] = {
+    ws, sessionId: 'self', isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+    user: { id: 'self', sessionId: 'self', clientId: 'self', nickname: 'Self', status: 'ONLINE', joinedAt: 1 },
+  };
+  server['sessions'] = new Map([[ws, session]]);
+  server['sessionSockets'] = new Map([['self', ws]]);
+  server['isCurrentSession'] = () => true;
+  const messages: Parameters<WebSocketServer['send']>[1][] = [];
+  server['send'] = (_ws, message) => { messages.push(message); };
+  server['broadcast'] = (message) => { messages.push(message); };
+  const produced: unknown[] = [];
+  sfu.produce = async (_sessionId, _channelId, _transportId, _kind, rtpParameters) => {
+    produced.push(rtpParameters);
+    return { id: `producer-${produced.length}` };
+  };
+  const connected: unknown[] = [];
+  sfu.connectWebRtcTransport = async (_transportId, dtlsParameters) => { connected.push(dtlsParameters); };
+  sfu.ownsTransport = () => true;
+  sfu.setMicrophonesMuted = async () => {};
+  await service.joinVoiceChannel('self', 'self', 'room');
+  const reply = (requestId: string) => messages.find((message) => message.requestId === requestId);
+
+  const opus = {
+    mimeType: 'audio/opus', payloadType: 111, clockRate: 48000, channels: 2,
+    parameters: { minptime: 10, useinbandfec: 1, usedtx: 1 }, rtcpFeedback: [{ type: 'transport-cc', parameter: '' }],
+  };
+  const extension = (uri: string, id: number) => ({ uri, id, encrypt: false, parameters: {} });
+  const shapes = {
+    // mediasoup-client (desktop), with the fields its encodings and RTCP may carry.
+    desktopMicrophone: {
+      mid: '0', codecs: [opus], msid: '- 6e1c0bfa',
+      headerExtensions: [extension('urn:ietf:params:rtp-hdrext:sdes:mid', 1),
+        extension('urn:ietf:params:rtp-hdrext:ssrc-audio-level', 10)],
+      encodings: [{ ssrc: 1111, dtx: true }], rtcp: { cname: 'desktop', reducedSize: true },
+    },
+    desktopCamera: {
+      mid: '1',
+      codecs: [{ mimeType: 'video/VP8', payloadType: 96, clockRate: 90000, parameters: {},
+        rtcpFeedback: [{ type: 'nack', parameter: '' }, { type: 'nack', parameter: 'pli' }, { type: 'ccm', parameter: 'fir' }] },
+      { mimeType: 'video/rtx', payloadType: 97, clockRate: 90000, parameters: { apt: 96 }, rtcpFeedback: [] }],
+      headerExtensions: [extension('http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time', 4)],
+      encodings: [{ ssrc: 2222, rtx: { ssrc: 3333 }, maxBitrate: 1_500_000, scaleResolutionDownBy: 1,
+        maxFramerate: 30, priority: 'high', networkPriority: 'high', scalabilityMode: 'L1T3' }],
+      rtcp: { cname: 'desktop', reducedSize: true },
+    },
+    // libmediasoupclient, as used by the native screen engine and Monky Light.
+    nativeScreen: {
+      mid: '0',
+      codecs: [{ mimeType: 'video/H264', payloadType: 125, clockRate: 90000,
+        parameters: { 'packetization-mode': 1, 'profile-level-id': '4d003c', 'level-asymmetry-allowed': 1 },
+        rtcpFeedback: [{ type: 'goog-remb', parameter: '' }, { type: 'transport-cc', parameter: '' }] },
+      { mimeType: 'video/rtx', payloadType: 107, clockRate: 90000, parameters: { apt: 125 }, rtcpFeedback: [] }],
+      headerExtensions: [
+        extension('http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01', 3),
+        extension('http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time', 13)],
+      encodings: [{ ssrc: 4444, rtx: { ssrc: 5555 }, scalabilityMode: 'L1T1' }],
+      rtcp: { cname: 'native', reducedSize: true, mux: true },
+    },
+    // The SDK builds its microphone parameters by hand (OpusPeer.prepareSfu).
+    sdkMicrophone: {
+      codecs: [{ mimeType: 'audio/opus', payloadType: 111, clockRate: 48000, channels: 2,
+        parameters: { useinbandfec: 1, stereo: 1 }, rtcpFeedback: [] }],
+      encodings: [{ ssrc: 6666 }], rtcp: { cname: 'bot', reducedSize: true }, headerExtensions: [],
+    },
+  };
+  for (const [name, rtpParameters] of Object.entries(shapes)) {
+    const video = name === 'desktopCamera' || name === 'nativeScreen';
+    await server['handleSfuProduce'](session, {
+      channelId: 'room', transportId: 'send', kind: video ? 'video' : 'audio', rtpParameters,
+      appData: { mediaType: video ? 'camera' : 'mic' },
+    }, name);
+    assert.equal(reply(name)?.type, MessageType.SFU_PRODUCED, `${name} is accepted`);
+    assert.deepEqual(produced.at(-1), rtpParameters, `${name} reaches mediasoup intact`);
+  }
+
+  const microphone = shapes.desktopMicrophone;
+  for (const [name, rtpParameters] of Object.entries({
+    tooManyCodecs: { ...microphone, codecs: Array(33).fill(opus) },
+    tooManyEncodings: { ...microphone, encodings: Array(17).fill({ ssrc: 1 }) },
+    unknownExtension: { ...microphone, headerExtensions: [extension('urn:example:not-in-mediasoup', 2)] },
+    nestedCodecParameter: { ...microphone, codecs: [{ ...opus, parameters: { nested: { value: 1 } } }] },
+    longCname: { ...microphone, rtcp: { cname: 'x'.repeat(257) } },
+    missingCodecs: {},
+    notAnObject: 'parameters',
+  })) {
+    await server['handleSfuProduce'](session, {
+      channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters, appData: { mediaType: 'mic' },
+    }, name);
+    assert.equal((reply(name)?.payload as ServerErrorPayload | undefined)?.code, ProtocolErrorCode.BAD_REQUEST, name);
+  }
+  assert.equal(produced.length, Object.keys(shapes).length, 'nothing refused reaches mediasoup');
+
+  const fingerprint = { algorithm: 'sha-256', value: 'AB:CD:EF' };
+  await server['handleSfuConnectWebRtcTransport'](session, {
+    channelId: 'room', transportId: 'send', dtlsParameters: { role: 'client', fingerprints: [fingerprint] },
+  }, 'connect');
+  assert.equal(reply('connect')?.type, MessageType.SFU_WEBRTC_TRANSPORT_CONNECTED);
+  assert.deepEqual(connected, [{ role: 'client', fingerprints: [fingerprint] }]);
+  for (const [name, dtlsParameters] of Object.entries({
+    tooManyFingerprints: { fingerprints: Array(9).fill(fingerprint) },
+    unknownAlgorithm: { fingerprints: [{ ...fingerprint, algorithm: 'md5' }] },
+    unknownRole: { role: 'both', fingerprints: [fingerprint] },
+    longValue: { fingerprints: [{ ...fingerprint, value: 'A'.repeat(257) }] },
+    noFingerprints: {},
+  })) {
+    await server['handleSfuConnectWebRtcTransport'](session, { channelId: 'room', transportId: 'send', dtlsParameters }, name);
+    assert.equal((reply(name)?.payload as ServerErrorPayload | undefined)?.code, ProtocolErrorCode.BAD_REQUEST, name);
+  }
+  assert.equal(connected.length, 1);
+
+  // A second live producer in one slot is a client error, not a server failure.
+  sfu.produce = async () => { throw new SfuProducerLimitError('This session already publishes mic on this transport'); };
+  await server['handleSfuProduce'](session, {
+    channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: shapes.desktopMicrophone, appData: { mediaType: 'mic' },
+  }, 'second-microphone');
+  assert.equal((reply('second-microphone')?.payload as ServerErrorPayload | undefined)?.code, ProtocolErrorCode.BAD_REQUEST);
+  sfu.close();
 });

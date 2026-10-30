@@ -125,6 +125,8 @@ para não registrar o token no histórico do shell.
 No modo Marketplace, o setup pede porta do manifest e IP/domínio público, sem
 token manual. Para automação:
 `setup --non-interactive --mode marketplace --public-host bot.example.com --serve-port 7781`.
+Atrás de um proxy com TLS, acrescente `--public-url https://bot.example.com`
+(veja [HTTPS com proxy reverso](/bots-conexao#https-com-proxy-reverso)).
 O host e a porta precisam ser acessíveis pelos servidores Monky que vão instalar
 o bot. `localhost` só atende servidores na mesma máquina. Declare ambos os modos
 em `monkyBot.modes` para oferecer a escolha.
@@ -149,7 +151,7 @@ não verifica regras de firewall e não reserva a porta até o próximo `start`.
 Depois de `start` e `restart`, o CLI só anuncia sucesso quando o PM2 confirma o
 processo online e, no modo Marketplace, quando `/manifest` responde nesta
 máquina com um manifest válido, a URL de registro do host e da porta
-configurados e a chave pública do bot (cabeçalho `X-Monky-Bot-Public-Key`,
+configurados (ou da URL pública, quando houver) e a chave pública do bot (cabeçalho `X-Monky-Bot-Public-Key`,
 enviado por `bot.serve()`). Só então o estado do PM2 é salvo. Se `start`
 encontrar o processo online com o manifest quebrado, recria apenas o processo
 desse perfil. A verificação acontece nesta máquina: firewall e NAT só se
@@ -159,15 +161,17 @@ Configuração e identidade ficam em `~/.<cliName>`, fora do pacote;
 `MONKY_BOT_CLI_HOME` muda a pasta-base, preservando o subdiretório de cada bot.
 Refazer o setup preserva o diretório de trabalho e a identidade existentes.
 Os aliases `botName`, `botDir`, `serverUrl`, `botToken`, `servePort` e `publicHost`
-de `config set` seguem o MonkyBot; `restart --fresh` recria o processo sem apagar
-o perfil.
+de `config set` seguem o MonkyBot; `config set publicUrl` define a URL pública
+de um proxy com TLS, e `config set publicUrl clear` a remove. `restart --fresh`
+recria o processo sem apagar o perfil.
 
 O CLI gera/reutiliza a identidade e fornece `MONKY_BOT_PUBLIC_KEY`,
 `MONKY_SERVER_URL`, `MONKY_BOT_TOKEN` e `MONKY_BOT_NAME` ao processo. A entrada do
 bot deve consumir essas variáveis. Declare `marketplace` em `modes` somente se
 essa entrada também implementar o fluxo `MONKY_SERVE`/`bot.serve()`. Nesse modo,
-o runner fornece `MONKY_SERVE_PORT`, `MONKY_SERVE_PUBLIC_HOST` e
-`MONKY_BOT_REGISTRATION_FILE`: passe o último como `registrationFile` ao criar
+o runner fornece `MONKY_SERVE_PORT`, `MONKY_SERVE_PUBLIC_HOST`,
+`MONKY_SERVE_PUBLIC_URL` (somente quando configurada; passe-a como `publicUrl` a
+`serve()`) e `MONKY_BOT_REGISTRATION_FILE`: passe o último como `registrationFile` ao criar
 `BotClient` para restaurar vínculos após reiniciar. Preserve a pasta `.keys`
 inteira, pois contém chaves e tokens dos servidores vinculados.
 `validateBotServerUrl`, `validateBotServePort` e `validateBotPublicHost`, exportados

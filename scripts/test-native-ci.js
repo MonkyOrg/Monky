@@ -533,7 +533,8 @@ test('release still generates corresponding sources from the clean version commi
   const build = release.jobs.build;
   const prepare = step(build, 'Build native screen runtime and corresponding sources (Windows)');
   assert.match(prepare.run, /if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/u);
-  assert.match(prepare.run, /npm run pack:native-sources -- --version=\$\{\{ needs\.version\.outputs\.version \}\}/u);
+  assert.match(prepare.run, /npm run pack:native-sources -- --version="\$env:RELEASE_VERSION"$/mu);
+  assert.equal(build.env.RELEASE_VERSION, '${{ needs.version.outputs.version }}');
   assert.ok(build.steps.indexOf(prepare) < build.steps.indexOf(step(build, 'Set build version')));
   const rebind = step(build, 'Bind approved corresponding sources to release (Windows)');
   assert.equal(rebind.if, "needs.version.outputs.reuse_build == 'true' && runner.os == 'Windows'");
@@ -653,7 +654,8 @@ test('CI uploads only inventoried build outputs after testing, namespaced by imm
 });
 
 test('release reuses approved artifacts but always versions, packages, signs and verifies final distributables', () => {
-  assert.equal(release.permissions.actions, 'read');
+  for (const id of ['version', 'build', 'cli'])
+    assert.equal(release.jobs[id].permissions.actions, 'read', `${id} reads the approved CI run and its artifacts.`);
   assert.equal(release.jobs.version.outputs.reuse_build, '${{ steps.ci.outputs.reuse }}');
   const selection = step(release.jobs.version, 'Select approved CI build');
   assert.match(selection.run, /git rev-parse "\$\{CHECKOUT_REF\}\^\{commit\}"/);
@@ -668,8 +670,10 @@ test('release reuses approved artifacts but always versions, packages, signs and
   for (const [job, name] of [[release.jobs.build, 'Restore approved desktop build'], [release.jobs.cli, 'Restore approved CLI build']]) {
     const restore = step(job, name);
     assert.equal(restore.if, "needs.version.outputs.reuse_build == 'true'");
-    assert.match(restore.run, /ci-build-artifact.js restore/);
+    assert.match(restore.run, /ci-build-artifact.js restore (?:cli|\$\{\{ matrix\.platform \}\}) "\$CI_RUN_ID" "\$CI_ARTIFACT_ID"$/u);
     assert.equal(restore.env.GH_TOKEN, '${{ github.token }}');
+    assert.equal(restore.env.CI_RUN_ID, '${{ needs.version.outputs.ci_run_id }}');
+    assert.match(restore.env.CI_ARTIFACT_ID, /^\$\{\{ fromJSON\(needs\.version\.outputs\.ci_artifacts\)/u);
     assert.ok(job.steps.indexOf(restore) > job.steps.indexOf(step(job, 'Install dependencies')));
     assert.ok(job.steps.some(candidate => candidate.uses === 'actions/setup-python@v5'));
   }
@@ -682,7 +686,8 @@ test('release reuses approved artifacts but always versions, packages, signs and
   // A tarball that packs but cannot install cleanly (39.3.7 lacked debug) must never be uploaded.
   const cli = release.jobs.cli.steps;
   const installCheck = step(release.jobs.cli, 'Exercise isolated CLI installation');
-  assert.match(installCheck.run, /test-cli-package\.js "release\/monky-cli-\$\{\{ needs\.version\.outputs\.version \}\}\.tgz"/);
+  assert.match(installCheck.run, /test-cli-package\.js "release\/monky-cli-\$RELEASE_VERSION\.tgz"/);
+  assert.equal(release.jobs.cli.env.RELEASE_VERSION, '${{ needs.version.outputs.version }}');
   assert.match(installCheck.if, /^steps\.pack\.outputs\.packed == 'true'/);
   assert.ok(cli.indexOf(installCheck) > cli.indexOf(step(release.jobs.cli, 'Pack CLI')));
   assert.ok(cli.indexOf(installCheck) < cli.indexOf(step(release.jobs.cli, 'Upload CLI artifact')));
@@ -733,6 +738,138 @@ test('release signs only the macOS build with the macOS certificate and warns wh
   }
 });
 
+test('release grants nothing by default: only the publishing job writes, and only signing jobs read secrets', () => {
+  assert.deepEqual(release.permissions, {}, 'Each release job declares the least it needs.');
+  assert.deepEqual(Object.fromEntries(Object.entries(release.jobs).map(([id, job]) => [id, job.permissions])), {
+    version: { contents: 'read', actions: 'read' },
+    build: { contents: 'read', actions: 'read' },
+    cli: { contents: 'read', actions: 'read' },
+    release: { contents: 'write', 'id-token': 'write' },
+  }, 'Dependency install scripts and packagers run where the token can only read.');
+  // build signs the macOS app and release signs the checksums with Cosign's OIDC identity: both run
+  // in the environment that holds the signing secrets and admits only main.
+  assert.deepEqual(Object.entries(release.jobs).filter(([, job]) => job.environment).map(([id, job]) => [id, job.environment]),
+    [['build', 'release'], ['release', 'release']]);
+  for (const [id, job] of Object.entries(release.jobs)) {
+    const secrets = [...JSON.stringify(job).matchAll(/secrets\.(\w+)/gu)].map(([, name]) => name)
+      .filter(name => name !== 'GITHUB_TOKEN');
+    assert.ok(secrets.length === 0 || job.environment === 'release', `${id} reads ${secrets} outside the release environment`);
+    for (const checkout of job.steps.filter(candidate => candidate.uses?.startsWith('actions/checkout@')))
+      assert.equal(checkout.with?.['persist-credentials'], false, `${id} must not leave its token in .git/config`);
+  }
+  assert.match(JSON.stringify(release.jobs.build), /secrets\.MAC_CSC_LINK/u);
+});
+
+test('electron-builder packages without a GitHub token, in CI exactly as in the release', () => {
+  // With --publish never, electron-builder only reads a token to create a publisher, which it never does.
+  for (const [job, name] of [[release.jobs.build, 'Build ${{ matrix.platform }} distributables'],
+    [ci.jobs['package-win'], 'Package win (dir, no publish)'], [ci.jobs['package-mac'], 'Package mac (dir, no publish)']]) {
+    const packaging = step(job, name);
+    assert.match(packaging.run, /npx --no-install electron-builder --(?:win|mac|\$\{\{ matrix\.platform \}\}) (?:--dir )?--publish never/u, name);
+    for (const env of [packaging.env, job.env])
+      assert.doesNotMatch(JSON.stringify(env ?? {}), /GH_TOKEN|GITHUB_TOKEN|github\.token/u, name);
+  }
+  assert.equal(ci.env, undefined);
+  assert.equal(release.env, undefined);
+});
+
+test('release scripts take the dispatch input and job outputs only from the environment', t => {
+  // `${{ }}` inside `run:` is pasted into the script before it runs, so a value such as the typed
+  // promotion tag would execute as code. Only the static matrix values may be expanded there.
+  for (const [id, job] of Object.entries(release.jobs)) {
+    for (const candidate of job.steps.filter(entry => entry.run)) {
+      const expanded = [...candidate.run.matchAll(/\$\{\{\s*(.*?)\s*\}\}/gu)].map(([, expression]) => expression);
+      assert.deepEqual(expanded.filter(expression => !/^matrix\.\w+$/u.test(expression)), [], `${id}: ${candidate.name}`);
+    }
+  }
+  for (const id of ['build', 'cli', 'release'])
+    assert.equal(release.jobs[id].env.RELEASE_VERSION, '${{ needs.version.outputs.version }}', id);
+  const version = release.jobs.version;
+  const calculate = step(version, 'Calculate Semantic Version');
+  assert.equal(calculate.env.PROMOTE_TAG, '${{ github.event.inputs.promote_tag }}');
+  assert.equal(calculate.run, 'node scripts/calculate-version.js');
+  const resolve = step(version, 'Resolve checkout ref');
+  assert.deepEqual(resolve.env, { PROMOTE_TAG: '${{ github.event.inputs.promote_tag }}', HEAD_SHA: '${{ github.sha }}' });
+  for (const later of [resolve, step(version, 'Select approved CI build')])
+    assert.ok(version.steps.indexOf(calculate) < version.steps.indexOf(later), 'The typed tag is validated before any use.');
+
+  const bash = process.platform === 'win32'
+    ? path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'bin', 'bash.exe') : 'bash';
+  const cwd = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'monky-release-env-'));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  const output = path.join(cwd, 'output');
+  const run = (script, env) => {
+    fs.writeFileSync(output, '');
+    const result = spawnSync(bash, ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script],
+      { cwd, encoding: 'utf8', env: { ...process.env, GITHUB_OUTPUT: output, ...env } });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    return fs.readFileSync(output, 'utf8');
+  };
+  const sha = 'a'.repeat(40);
+  assert.equal(run(resolve.run, { PROMOTE_TAG: '', HEAD_SHA: sha }), `checkout_ref=${sha}\n`);
+  assert.equal(run(resolve.run, { PROMOTE_TAG: 'v1.8.0-beta', HEAD_SHA: sha }), 'checkout_ref=v1.8.0-beta\n');
+  run(resolve.run, { PROMOTE_TAG: 'v1.8.0-beta$(touch injected)`touch injected`', HEAD_SHA: sha });
+  assert.equal(fs.existsSync(path.join(cwd, 'injected')), false, 'The input is data, never code.');
+
+  const manifest = path.join(cwd, 'apps', 'client', 'package.json');
+  fs.mkdirSync(path.dirname(manifest), { recursive: true });
+  const setVersion = step(release.jobs.build, 'Set build version');
+  assert.equal(setVersion.shell, 'bash');
+  for (const value of ['40.7.14-beta', "1.0.0';require('fs').writeFileSync('injected','');'"]) {
+    fs.writeFileSync(manifest, `${JSON.stringify({ name: '@monky/client', version: '1.0.0', main: 'x.js' }, null, 2)}\n`);
+    run(setVersion.run, { RELEASE_VERSION: value });
+    assert.equal(fs.readFileSync(manifest, 'utf8'),
+      `${JSON.stringify({ name: '@monky/client', version: value, main: 'x.js' }, null, 2)}\n`);
+    assert.equal(fs.existsSync(path.join(cwd, 'injected')), false, 'The version is data, never code.');
+  }
+});
+
+test('third-party actions run from one full commit SHA per action, noted with the release it is', () => {
+  // GitHub's own actions/* follow their major tags; any other action could be moved by its owner.
+  const directory = path.join(root, '.github', 'workflows');
+  const pinned = new Map(), parsed = new Set();
+  for (const name of fs.readdirSync(directory).filter(file => /\.ya?ml$/u.test(file))) {
+    const text = fs.readFileSync(path.join(directory, name), 'utf8');
+    for (const job of Object.values(load(text).jobs))
+      for (const reference of [job.uses, ...(job.steps ?? []).map(entry => entry.uses)])
+        if (reference && !reference.startsWith('./') && !reference.startsWith('actions/')) parsed.add(reference);
+    for (const [, reference, note] of text.matchAll(/^[ \t]*(?:-[ \t]+)?uses:[ \t]*([^\s#]+)(?:[ \t]+#[ \t]*(.*?))?[ \t]*\r?$/gmu)) {
+      if (reference.startsWith('./') || reference.startsWith('actions/')) continue;
+      const [action, commit] = reference.split('@');
+      assert.match(commit ?? '', /^[0-9a-f]{40}$/u, `${name}: ${reference} must be pinned to a full commit SHA`);
+      assert.match(note ?? '', /^v\d+\.\d+\.\d+$/u, `${name}: ${reference} must note the release it pins`);
+      assert.equal(pinned.get(action) ?? `${commit} ${note}`, `${commit} ${note}`, `${action} is the same commit everywhere`);
+      pinned.set(action, `${commit} ${note}`);
+    }
+  }
+  assert.ok(pinned.size > 0);
+  assert.deepEqual([...parsed].map(reference => reference.split('@')[0]).sort(), [...pinned.keys()].sort(),
+    'Every third-party action the workflows run was checked.');
+  const dependabot = load(fs.readFileSync(path.join(root, '.github', 'dependabot.yml'), 'utf8'));
+  assert.equal(dependabot.version, 2);
+  const actions = dependabot.updates.find(update => update['package-ecosystem'] === 'github-actions');
+  assert.equal(actions?.directory, '/', 'Dependabot moves each pinned SHA and its noted release together.');
+  assert.ok(actions.cooldown['default-days'] >= 3, 'A just-published release is not adopted at once.');
+  assert.deepEqual(actions.ignore, [{ 'dependency-name': '*', 'update-types': ['version-update:semver-major'] }],
+    'Majors are migrations reviewed on their own; these contract tests name the first-party majors.');
+});
+
+test('the published Cosign check accepts only the release workflow that runs on main', () => {
+  const identity = '--certificate-identity "https://github.com/MonkyOrg/Monky/.github/workflows/release.yml@refs/heads/main"';
+  const issuer = '--certificate-oidc-issuer "https://token.actions.githubusercontent.com"';
+  const pages = ['verificar-releases.md', path.join('en', 'verificar-releases.md')]
+    .map(page => fs.readFileSync(path.join(root, 'docs-site', page), 'utf8'));
+  for (const text of [step(release.jobs.release, 'Create GitHub Release').with.body, ...pages]) {
+    assert.ok(text.includes(identity) && text.includes(issuer));
+    assert.doesNotMatch(text, /certificate-identity-regexp/u, 'A prefix also matches other workflows and repositories.');
+  }
+  // That identity is the job_workflow_ref of the job that signs: release.yml, run from main only.
+  assert.match(step(release.jobs.release, 'Sign checksums with Cosign (keyless)').run, /^cosign sign-blob /u);
+  assert.deepEqual(release.on.push.branches, ['main']);
+  assert.match(step(release.jobs.version, 'Require merged-main release flow').run, /"\$RELEASE_REF" != "refs\/heads\/main"/u);
+});
+
 test('the extracted DOM lane preserves every existing test command and its ordering', () => {
   assert.deepEqual(commands.map(command => command.join(' ')), [
     'npm run test:bots:ui --workspace=apps/client',
@@ -770,6 +907,7 @@ test('the extracted DOM lane preserves every existing test command and its order
     'npm run test:soundboard --workspace=apps/client',
     'npm run test:community --workspace=apps/client',
     'npm run test:pip --workspace=apps/client',
+    'npm run test:security --workspace=apps/client',
   ]);
   const scripts = JSON.parse(fs.readFileSync(path.join(root, 'apps', 'client', 'package.json'), 'utf8')).scripts;
   for (const [executable, scriptOrRun, script] of commands) {

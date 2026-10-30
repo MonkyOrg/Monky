@@ -31,6 +31,7 @@ import {
   validateBotName,
   validateBotToken,
   validatePublicHost,
+  validatePublicUrl,
   validateServerUrl,
   validateServePort,
   validateTokenEnv,
@@ -46,7 +47,7 @@ type NonInteractiveSetupInput = {
   botDir?: string;
 } & (
   | { mode: 'manual'; serverUrl: string; tokenEnv: string }
-  | { mode: 'marketplace'; servePort: number; publicHost: string }
+  | { mode: 'marketplace'; servePort: number; publicHost: string; publicUrl?: string }
 );
 
 const SETUP_CANCELLED_MESSAGE = 'Setup cancelado; a configuração não foi alterada.';
@@ -102,6 +103,7 @@ function parseNonInteractiveSetup(args: string[]): { input: NonInteractiveSetupI
   let tokenEnv: string | undefined;
   let servePort: number | undefined;
   let publicHost: string | undefined;
+  let publicUrl: string | undefined;
   let botName: string | undefined;
   let botDir: string | undefined;
   const ports = new Map<string, string>();
@@ -109,7 +111,8 @@ function parseNonInteractiveSetup(args: string[]): { input: NonInteractiveSetupI
     const argument = args[index];
     if (argument === '--non-interactive') continue;
     if (argument === '--yes' || argument === '-y') continue;
-    if (['--mode', '--server-url', '--token-env', '--serve-port', '--public-host', '--name', '--bot-dir', '--port'].includes(argument)) {
+    if (['--mode', '--server-url', '--token-env', '--serve-port', '--public-host', '--public-url', '--name', '--bot-dir', '--port']
+      .includes(argument)) {
       const value = args[++index];
       if (!value || value.startsWith('--')) throw new CliError(`${argument} requer um valor.`, `${argument} requires a value.`);
       if (argument === '--mode') {
@@ -120,6 +123,7 @@ function parseNonInteractiveSetup(args: string[]): { input: NonInteractiveSetupI
       else if (argument === '--token-env') tokenEnv = validateTokenEnv(value);
       else if (argument === '--serve-port') servePort = validateServePort(value);
       else if (argument === '--public-host') publicHost = validatePublicHost(value);
+      else if (argument === '--public-url') publicUrl = validatePublicUrl(value);
       else if (argument === '--name') botName = validateBotName(value);
       else if (argument === '--port') {
         const match = /^([a-z][a-z0-9-]{0,31})=(.+)$/.exec(value);
@@ -134,8 +138,9 @@ function parseNonInteractiveSetup(args: string[]): { input: NonInteractiveSetupI
   }
   const common = { ...(botName ? { botName } : {}), ...(botDir ? { botDir } : {}) };
   if (mode === 'manual') {
-    if (servePort !== undefined || publicHost !== undefined) throw new CliError('Opções de manifest exigem --mode marketplace.',
-      'Manifest options require --mode marketplace.');
+    if (servePort !== undefined || publicHost !== undefined || publicUrl !== undefined) {
+      throw new CliError('Opções de manifest exigem --mode marketplace.', 'Manifest options require --mode marketplace.');
+    }
     if (!serverUrl) throw new CliError('setup --non-interactive requer --server-url <ws://...>.',
       'setup --non-interactive requires --server-url <ws://...>.');
     return { input: { ...common, mode, serverUrl, tokenEnv: tokenEnv ?? DEFAULT_TOKEN_ENV }, ports };
@@ -144,7 +149,10 @@ function parseNonInteractiveSetup(args: string[]): { input: NonInteractiveSetupI
     'Server and token options require --mode manual.');
   if (!publicHost) throw new CliError('setup --non-interactive --mode marketplace requer --public-host <domínio-ou-IP>.',
     'setup --non-interactive --mode marketplace requires --public-host <hostname-or-IP>.');
-  return { input: { ...common, mode, servePort: servePort ?? DEFAULT_MARKETPLACE_PORT, publicHost }, ports };
+  return {
+    input: { ...common, mode, servePort: servePort ?? DEFAULT_MARKETPLACE_PORT, publicHost, ...(publicUrl ? { publicUrl } : {}) },
+    ports,
+  };
 }
 
 /** A declared port whose value this setup sets (and saves in the profile). */
@@ -478,7 +486,13 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
         console.log(color(text('Host local: somente servidores na mesma máquina conseguirão acessar.',
           'Local host: only servers on this machine will be able to connect.'), ANSI.yellow));
       }
-      config = marketplaceConfig(context, { botDir, botName: current.botName, servePort, publicHost });
+      // A TLS proxy URL is an advanced choice made with config set; redoing setup must not drop it.
+      const publicUrl = existing?.mode === 'marketplace' ? existing.publicUrl : undefined;
+      if (publicUrl) {
+        console.log(text(`URL pública mantida: ${publicUrl}. Para alterar, use "${context.cliName} config set publicUrl".`,
+          `Public URL kept: ${publicUrl}. To change it, use "${context.cliName} config set publicUrl".`));
+      }
+      config = marketplaceConfig(context, { botDir, botName: current.botName, servePort, publicHost, publicUrl });
     }
     const declaredChoices = await askDeclaredPorts(context, ask, portStates, manifestPort(config), publicKey, portUses);
     config = { ...config, botName: await validatedPrompt(context.locale, ask, text(`Nome do bot [${current.botName}]: `, `Bot name [${current.botName}]: `),

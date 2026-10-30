@@ -51,7 +51,7 @@ if (!process.versions.electron) {
         name: 'message-selection-fixture',
         configureServer(server) {
           server.middlewares.use((request, response, next) => {
-            if (request.url?.startsWith('/__selection_media__/')) {
+            if (request.url?.startsWith('/attachments/')) {
               response.setHeader('Content-Type', 'image/png');
               response.end(media);
               return;
@@ -170,7 +170,7 @@ async function runSmoke(window) {
     value = await state();
     const [zip] = value.batchDownloads;
     check(zip.mode === 'zip' && sameIds(zip.files.map(file => file.fileName), ['gallery-1.png', 'gallery-2.png'])
-      && zip.files.every(file => file.url.endsWith(`/__selection_media__/${file.fileName}`)) && zip.archiveName.includes('chat')
+      && zip.files.every(file => file.url.endsWith(`/attachments/${file.fileName}`)) && zip.archiveName.includes('chat')
       && value.singleDownloads.length === 0,
     `The ZIP choice sends both carousel files to window.api.downloadFiles: ${JSON.stringify(value)}`);
     await fixture('clickCarouselDownload(1)');
@@ -523,6 +523,8 @@ async function installFixture() {
   let refuseNextSend = false;
   session.client.getStatus = () => 'CONNECTED';
   session.client.getCurrentServerUrl = () => session.key;
+  // The fixture page stands in for the connected server that serves `/attachments/`.
+  session.client.getHttpBaseUrl = () => location.origin;
   session.client.ws = { readyState: WebSocket.OPEN, send() {}, close() {} };
   session.client.send = () => {};
   session.client.sendRequest = (type, payload) => {
@@ -587,7 +589,7 @@ async function installFixture() {
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   };
   const feed = () => find('#chat-messages-feed');
-  const media = name => `${location.origin}/__selection_media__/${name}`;
+  const media = name => `/attachments/${name}`;
   const image = (messageId, name) => ({ id: `${messageId}-${name.replace(/[^A-Za-z0-9-]/g, '')}`, messageId, kind: 'image', url: media(name), originalName: name,
     mimeType: 'image/png', sizeBytes: 100, createdAt: 1 });
   const openDialog = () => document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card');

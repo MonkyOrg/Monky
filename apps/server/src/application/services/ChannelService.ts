@@ -37,6 +37,7 @@ import { ChannelRecord } from '../../domain/entities';
 import { ICategoryRepository, IChannelRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
 import { PermissionService } from './PermissionService';
 import { BotPermissionService } from './BotPermissionService';
+import type { AttachmentService } from './AttachmentService';
 
 /** Everything needed to decide what a member may see, resolved once per call. */
 export interface ChannelAccessContext {
@@ -58,6 +59,8 @@ export class ChannelService {
     private botPermissions: BotPermissionService,
     private userRepo: IUserRepository,
     private categoryRepo?: ICategoryRepository,
+    /** Files posted in a channel go with it; the database cascades are not relied upon (S-APP-6). */
+    private attachments?: Pick<AttachmentService, 'prepareChannelDeletion'>,
   ) {}
 
   public setVoicePresence(provider: (userId: string, channelId: string) => boolean): void {
@@ -459,8 +462,15 @@ export class ChannelService {
       };
     }
 
-    await this.channelRepo.delete(channelId);
+    await this.removeChannel(channelId);
     return { success: true };
+  }
+
+  /** Deletes the channel row together with every file posted in it, forum topics included. */
+  private async removeChannel(channelId: string): Promise<void> {
+    const removeAttachments = await this.attachments?.prepareChannelDeletion(channelId);
+    await this.channelRepo.delete(channelId);
+    await removeAttachments?.();
   }
 
   /** The AFK voice channel, when the server has one and it still exists. */
@@ -483,7 +493,7 @@ export class ChannelService {
   public async removeAfkChannel(): Promise<string | null> {
     const id = await this.getAfkChannelId();
     await this.serverRepo.updateServer({ afkChannelId: null });
-    if (id) await this.channelRepo.delete(id);
+    if (id) await this.removeChannel(id);
     return id;
   }
 

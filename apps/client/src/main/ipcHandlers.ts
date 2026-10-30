@@ -1,14 +1,12 @@
 import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, powerMonitor, screen, shell, systemPreferences } from 'electron';
 import { execFile } from 'child_process';
 import fs from 'fs';
-import http from 'http';
-import https from 'https';
 import net from 'net';
 import path from 'path';
 import { LanDiscovery } from './lanDiscovery';
 import { globalInputHook } from './globalInputHookProcess';
 import {
-  AUDIO_PREVIEW_IPC, LIMITS, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS,
+  AUDIO_PREVIEW_IPC, LIMITS, MEDIA_FOLDERS_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS,
   DESKTOP_SOURCES_IPC, desktopSourcesOptionsSchema, desktopSourcePreviewsRequestSchema, trayVoiceStatusSchema,
   type AudioPreviewResult, type SoundDownloadResult, type SoundboardDownloadPermit, type SoundboardDownloadAvailability,
 } from '@monky/shared';
@@ -17,6 +15,9 @@ import { SoundboardFiles } from './soundboardFiles';
 import { setupSoundboardFilesIpc } from './soundboardFilesIpc';
 import { setupEditorCommands } from './editorCommands';
 import { createSoundboardEncoder } from './soundboardEncoder';
+import { MediaFolderAccess, type MediaFolderPurpose } from './mediaFolders';
+import { downloadToFile, sanitizeDownloadFileName, suggestedDownloadName } from './attachmentDownload';
+import { isMainFrameSender, mainFrameHandle } from './ipcSender';
 import type { LocalTools } from './localExecution/LocalTools';
 import { AudioPreviews } from './audioPreviews';
 import { createLocalExecutionService } from './localExecution/createService';
@@ -30,7 +31,7 @@ import { DesktopSourcePreviews } from './desktopSourcePreviews';
 import type { NativeWindowInfo, NativeMonitorInfo, NativeWindowState } from '@monky/screen-audio';
 import { deleteIdentity, exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
 import { exportDirectMessages, importDirectMessages, resetDirectMessages, setupDmIpc, wipeDirectMessages, writeDmAttachment } from './dm/dmIpc';
-import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';
+import { openBackup, sealBackup } from './secretEnvelope';
 import { HostServerOptions, ServerManager } from './serverManager';
 import { mt, setMainLanguage } from './i18n';
 import { setupEventCalendarIpc } from './serverEventCalendarIpc';
@@ -50,89 +51,6 @@ import {
   IN_SERVER_MIN_HEIGHT,
   IN_SERVER_MIN_WIDTH,
 } from './windowSizing';
-
-function sanitizeDownloadFileName(fileName: string): string {
-  const baseName = path.basename((fileName || '').trim()) || 'download';
-  const sanitized = baseName.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim();
-  return sanitized || 'download';
-}
-
-async function downloadToFile(url: string, destPath: string): Promise<void> {
-  const tempPath = `${destPath}.downloading`;
-  return await new Promise((resolve, reject) => {
-    const requestDownload = (currentUrl: string, redirects: number): void => {
-      if (redirects > 5) {
-        reject(new Error('Too many redirects'));
-        return;
-      }
-
-      const transport = currentUrl.startsWith('https:') ? https : http;
-      const request = transport.get(currentUrl, { headers: { 'User-Agent': 'Monky-App' } }, (response) => {
-        const status = response.statusCode ?? 0;
-        if (status >= 300 && status < 400) {
-          const locationHeader = response.headers.location;
-          const location = Array.isArray(locationHeader) ? locationHeader[0] : locationHeader;
-          response.resume();
-          if (!location) {
-            reject(new Error(`HTTP ${status}`));
-            return;
-          }
-          requestDownload(new URL(location, currentUrl).toString(), redirects + 1);
-          return;
-        }
-
-        if (status !== 200) {
-          response.resume();
-          reject(new Error(`HTTP ${status}`));
-          return;
-        }
-
-        const file = fs.createWriteStream(tempPath);
-        let settled = false;
-        const fail = (err: Error) => {
-          if (settled) return;
-          settled = true;
-          file.destroy();
-          fs.unlink(tempPath, () => reject(err));
-        };
-
-        response.on('aborted', () => fail(new Error('Download aborted')));
-        response.on('error', fail);
-        file.on('error', fail);
-        file.on('finish', () => {
-          if (settled) return;
-          file.close(async (closeErr) => {
-            if (closeErr) {
-              fail(closeErr);
-              return;
-            }
-            try {
-              try {
-                await fs.promises.rm(destPath, { force: true });
-                await fs.promises.rename(tempPath, destPath);
-              } catch {
-                // Fallback para cross-device ou locks temporários do Windows
-                await fs.promises.copyFile(tempPath, destPath);
-                await fs.promises.unlink(tempPath).catch(() => {});
-              }
-              settled = true;
-              resolve();
-            } catch (err: any) {
-              fail(err instanceof Error ? err : new Error(String(err)));
-            }
-          });
-        });
-        response.pipe(file);
-      });
-      request.setTimeout(30000, () => {
-        request.destroy(new Error('Download timeout'));
-      });
-      request.on('error', reject);
-    };
-
-    requestDownload(url, 0);
-  });
-}
 
 /** Extensões que a soundboard aceita, na listagem e na leitura de um som. */
 const SOUNDBOARD_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.webm']);
@@ -395,8 +313,45 @@ export function setupIpcHandlers(
       return nativeSources.resolve(sourceId, kind);
     }, options?.clientLogger,
   );
-  const ownsSoundDownload = (event: Electron.IpcMainInvokeEvent): boolean =>
-    event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame;
+  const ownsSoundDownload = (event: Electron.IpcMainInvokeEvent): boolean => isMainFrameSender(mainWindow, event);
+  // Privileged channels below answer only the main window's top frame (E-MAIN-1).
+  const handleFromMainFrame = mainFrameHandle(ipcMain, mainWindow);
+  // Sound and sticker folders may be read only once confirmed natively (D4).
+  const mediaFolders = new MediaFolderAccess(path.join(app.getPath('userData'), 'media-folders.json'));
+  const allowMediaFolder = async (purpose: MediaFolderPurpose, folder: unknown): Promise<void> => {
+    try {
+      await mediaFolders.allow(purpose, folder);
+    } catch (error: unknown) {
+      console.warn(`[MediaFolders] Could not remember the confirmed ${purpose} folder:`, error);
+    }
+  };
+  // A folder in the settings that this profile never confirmed (restored from a
+  // backup, or chosen in another version) is offered natively instead of
+  // staying blocked, and only when the person opens it themselves.
+  const askToReadMediaFolder = (purpose: MediaFolderPurpose) => async (folder: string): Promise<boolean> => {
+    if (mainWindow.isDestroyed()) return false;
+    const stickers = purpose === 'stickers';
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'question',
+      title: mt(stickers ? 'dialog.confirmStickersReadTitle' : 'dialog.confirmSoundsReadTitle'),
+      message: mt(stickers ? 'dialog.confirmStickersReadMessage' : 'dialog.confirmSoundsReadMessage'),
+      detail: mt('dialog.confirmMediaFolderDetail', { folder }),
+      buttons: [mt('dialog.allowMediaFolder'), mt('dialog.notNowMediaFolder')],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    });
+    return response === 0 && !mainWindow.isDestroyed();
+  };
+  const requestMediaFolder = (purpose: MediaFolderPurpose, folder: string, userAction: unknown) =>
+    mediaFolders.requestFolder(purpose, folder, userAction === true ? askToReadMediaFolder(purpose) : undefined);
+  handleFromMainFrame(MEDIA_FOLDERS_IPC.adopt, async (_event, folders: unknown): Promise<void> => {
+    try {
+      await mediaFolders.adoptConfigured(folders);
+    } catch (error: unknown) {
+      console.warn('[MediaFolders] Could not keep the folders configured before confirmation was required:', error);
+    }
+  });
   const soundboardEncoder = createSoundboardEncoder(async () => {
     try { return await soundboardTools?.readyExecutable('ffmpeg') ?? null; }
     catch (error: unknown) {
@@ -416,19 +371,24 @@ export function setupIpcHandlers(
   const disposeDirectMessages = setupDmIpc(mainWindow, sanitizeDownloadFileName);
   ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, async (event): Promise<string | null> => {
     if (!ownsSoundDownload(event)) throw new Error(mt('error.defaultSoundboardFolder'));
+    let folder: string | null;
     try {
-      return await soundDownloads.getDefaultFolder();
+      folder = await soundDownloads.getDefaultFolder();
     } catch (error: unknown) {
       console.warn('[Soundboard] Could not initialize the default sound folder:', error);
       throw new Error(mt('error.defaultSoundboardFolder'));
     }
+    // Main created or confirmed this folder itself.
+    if (folder) await allowMediaFolder('soundboard', folder);
+    return folder;
   });
   ipcMain.handle(SOUND_DOWNLOAD_IPC.availability, async (event, folder: unknown): Promise<SoundboardDownloadAvailability> =>
     ownsSoundDownload(event) ? soundDownloads.availability(folder) : 'unavailable');
   ipcMain.handle(SOUND_DOWNLOAD_IPC.confirmFolder, async (event, folder: unknown): Promise<boolean> => {
     if (!ownsSoundDownload(event)) return false;
+    let confirmed: boolean;
     try {
-      return await soundDownloads.confirmConfiguredFolder(folder, async (canonical) => {
+      confirmed = await soundDownloads.confirmConfiguredFolder(folder, async (canonical) => {
         if (mainWindow.isDestroyed() || !ownsSoundDownload(event)) return false;
         const result = await dialog.showMessageBox(mainWindow, {
           type: 'question',
@@ -446,6 +406,8 @@ export function setupIpcHandlers(
       console.warn('[Soundboard] Could not authorize downloads in the configured folder:', error);
       throw new Error(mt('error.confirmSoundboardFolder'));
     }
+    if (confirmed) await allowMediaFolder('soundboard', folder);
+    return confirmed;
   });
   ipcMain.handle(SOUND_DOWNLOAD_IPC.authorize, async (event, input: unknown): Promise<SoundboardDownloadPermit> =>
     ownsSoundDownload(event) ? soundDownloads.authorize(event.sender.id, input) : { status: 'failed', reason: 'invalid_request' });
@@ -544,19 +506,19 @@ export function setupIpcHandlers(
     }
   });
 
-  ipcMain.handle('identity:has', async () => hasIdentity());
-  ipcMain.handle('identity:get', async () => getIdentity(true));
-  ipcMain.handle('identity:get-client-id', async () => getClientId());
-  ipcMain.handle('identity:sign-challenge', async (_event, nonceHex: string) => signChallenge(nonceHex));
-  ipcMain.handle('identity:export', async (_event, password: string, extras?: string, dmMode?: unknown) =>
+  handleFromMainFrame('identity:has', async () => hasIdentity());
+  handleFromMainFrame('identity:get', async () => getIdentity(true));
+  handleFromMainFrame('identity:get-client-id', async () => getClientId());
+  handleFromMainFrame('identity:sign-challenge', async (_event, nonceHex: string) => signChallenge(nonceHex));
+  handleFromMainFrame('identity:export', async (_event, password: string, extras?: string, dmMode?: unknown) =>
     exportIdentity(
       password,
       typeof extras === 'string' ? extras : undefined,
       exportDirectMessages(dmMode === 'friends' || dmMode === 'history' ? dmMode : 'none'),
     )
   );
-  ipcMain.handle('identity:import', async (_event, exportedIdentity: string, password: string) => {
-    const { dm, ...imported } = importIdentity(exportedIdentity, password);
+  handleFromMainFrame('identity:import', async (_event, exportedIdentity: string, password: string) => {
+    const { dm, ...imported } = await importIdentity(exportedIdentity, password);
     resetDirectMessages();
     importDirectMessages(dm);
     return imported;
@@ -567,10 +529,7 @@ export function setupIpcHandlers(
   // the identity-bound localStorage; relaunching gives a clean process that
   // lands on the create/import screen.
   let loggingOut = false;
-  ipcMain.handle('identity:logout', async (event) => {
-    if (mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
-      return { success: false, error: 'Forbidden' };
-    }
+  handleFromMainFrame('identity:logout', async () => {
     if (loggingOut) return { success: true };
     loggingOut = true;
     try {
@@ -596,36 +555,30 @@ export function setupIpcHandlers(
   //
   // The backup carries the passwords of saved servers, so it gets the very same
   // protection as the identity export instead of landing on disk as plain JSON.
-  ipcMain.handle('backup:encrypt', async (_event, contents: string, password: string) => {
+  handleFromMainFrame('backup:encrypt', async (_event, contents: string, password: string) => {
     if (typeof contents !== 'string' || !contents) {
       return { success: false, error: 'Conteúdo de backup inválido.' };
     }
     try {
-      return { success: true, payload: sealEnvelope(contents, password, BACKUP_ENVELOPE_PREFIX) };
+      return { success: true, payload: await sealBackup(contents, password) };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
     }
   });
 
-  ipcMain.handle('backup:decrypt', async (_event, payload: string, password: string) => {
+  handleFromMainFrame('backup:decrypt', async (_event, payload: string, password: string) => {
     if (typeof payload !== 'string' || !payload) {
       return { success: false, error: 'Arquivo de backup inválido.' };
     }
     try {
-      const contents = openEnvelope(
-        payload,
-        password,
-        BACKUP_ENVELOPE_PREFIX,
-        'Arquivo de backup inválido.',
-        'Senha incorreta ou backup corrompido.'
-      );
+      const contents = await openBackup(payload, password);
       return { success: true, contents };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
     }
   });
 
-  ipcMain.handle('backup:save-file', async (_event, contents: string, suggestedName: string) => {
+  handleFromMainFrame('backup:save-file', async (_event, contents: string, suggestedName: string) => {
     if (typeof contents !== 'string' || !contents) {
       return { success: false, error: 'Conteúdo de backup inválido.' };
     }
@@ -644,7 +597,7 @@ export function setupIpcHandlers(
     }
   });
 
-  ipcMain.handle('backup:open-file', async () => {
+  handleFromMainFrame('backup:open-file', async () => {
     try {
       const result = await dialog.showOpenDialog(mainWindow, {
         title: mt('dialog.openBackup'),
@@ -660,46 +613,46 @@ export function setupIpcHandlers(
   });
 
   // Local Server Management
-  ipcMain.handle('server-host:start', async (_, options: HostServerOptions) => {
+  handleFromMainFrame('server-host:start', async (_, options: HostServerOptions) => {
     return await serverManager.startServer(options);
   });
 
   const hostedPort = (port: unknown): port is number =>
     typeof port === 'number' && Number.isInteger(port) && port >= LIMITS.MIN_PORT && port <= LIMITS.MAX_PORT;
 
-  ipcMain.handle('server-host:stop', async (_, port: unknown) => {
+  handleFromMainFrame('server-host:stop', async (_, port: unknown) => {
     if (!hostedPort(port)) return { success: false };
     await serverManager.stopServer(port);
     return { success: true };
   });
 
-  ipcMain.handle('server-host:status', async () => {
+  handleFromMainFrame('server-host:status', async () => {
     return serverManager.getStatus();
   });
 
-  ipcMain.handle('server-host:logs', async (_, port: unknown) => {
+  handleFromMainFrame('server-host:logs', async (_, port: unknown) => {
     return hostedPort(port) ? serverManager.getLogs(port) : [];
   });
 
-  ipcMain.handle('server-host:clear-logs', async (_, port: unknown) => {
+  handleFromMainFrame('server-host:clear-logs', async (_, port: unknown) => {
     if (hostedPort(port)) serverManager.clearLogs(port);
   });
 
-  ipcMain.handle('server-host:stats', async (_, port: unknown) => {
+  handleFromMainFrame('server-host:stats', async (_, port: unknown) => {
     return hostedPort(port) ? serverManager.getStats(port) : null;
   });
 
   // Removing a server from "Meus Servidores" has to take its data with it (#364).
-  ipcMain.handle('server-host:delete-data', async (_, serverId: string) => {
+  handleFromMainFrame('server-host:delete-data', async (_, serverId: string) => {
     if (typeof serverId !== 'string') return { success: false };
     return serverManager.deleteServerData(serverId);
   });
 
-  ipcMain.handle('lan:start', async () => {
+  handleFromMainFrame('lan:start', async () => {
     await lanDiscovery.start();
   });
 
-  ipcMain.handle('lan:stop', async () => {
+  handleFromMainFrame('lan:stop', async () => {
     await lanDiscovery.stop();
   });
 
@@ -921,7 +874,7 @@ export function setupIpcHandlers(
   });
 
   // Custom sound file selection (#7)
-  ipcMain.handle('dialog:select-sound-file', async () => {
+  handleFromMainFrame('dialog:select-sound-file', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
       title: mt('dialog.selectSoundFile'),
       filters: [
@@ -949,19 +902,26 @@ export function setupIpcHandlers(
     if (result.canceled || result.filePaths.length === 0) {
       return null;
     }
+    let confirmed: string | null;
     try {
-      return await soundDownloads.confirmFolder(result.filePaths[0]);
+      confirmed = await soundDownloads.confirmFolder(result.filePaths[0]);
     } catch (error) {
       console.warn('[Soundboard] Could not persist the confirmed folder:', error);
       throw new Error(mt('error.confirmSoundboardFolder'));
     }
+    if (confirmed) await allowMediaFolder('soundboard', confirmed);
+    return confirmed;
   });
 
   // Soundboard List Sounds
-  ipcMain.handle('soundboard:list-sounds', async (_, folderPath: string) => {
+  handleFromMainFrame('soundboard:list-sounds', async (_, folderPath: string, userAction: unknown) => {
     if (!folderPath || typeof folderPath !== 'string') {
       return [];
     }
+    // The renderer shows remote content: only a folder confirmed natively is listed (D4).
+    const access = await requestMediaFolder('soundboard', folderPath, userAction);
+    if (access.status === 'missing') return [];
+    if (access.status !== 'allowed') throw new Error('This sound folder was not confirmed on this computer.');
     try {
       const folderStat = await fs.promises.stat(folderPath).catch(() => null);
       if (!folderStat || !folderStat.isDirectory()) {
@@ -996,7 +956,7 @@ export function setupIpcHandlers(
   });
 
   // Soundboard Read Sound
-  ipcMain.handle('soundboard:read-sound', async (_, filePath: string) => {
+  handleFromMainFrame('soundboard:read-sound', async (_, filePath: string) => {
     if (!filePath || typeof filePath !== 'string') {
       return null;
     }
@@ -1005,15 +965,18 @@ export function setupIpcHandlers(
     if (!SOUNDBOARD_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
       return null;
     }
+    // ...e o arquivo precisa estar numa pasta confirmada pelo diálogo do sistema (D4).
+    const soundFile = await mediaFolders.resolveFile('soundboard', filePath);
+    if (!soundFile) return null;
     try {
-      const stat = await fs.promises.stat(filePath).catch(() => null);
+      const stat = await fs.promises.stat(soundFile).catch(() => null);
       if (!stat || !stat.isFile()) {
         return null;
       }
       if (stat.size > LIMITS.MAX_SOUNDBOARD_FILE_SIZE) {
         throw new Error(mt('error.audioFileTooLarge'));
       }
-      const buffer = await fs.promises.readFile(filePath);
+      const buffer = await fs.promises.readFile(soundFile);
       const ext = path.extname(filePath).toLowerCase();
       let mime = 'audio/mpeg';
       if (ext === '.wav') mime = 'audio/wav';
@@ -1030,7 +993,7 @@ export function setupIpcHandlers(
         dataUrl: `data:${mime};base64,${buffer.toString('base64')}`,
         sizeBytes: stat.size,
       };
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.warn('Error reading sound file:', e);
       return null;
     }
@@ -1060,8 +1023,8 @@ export function setupIpcHandlers(
    * Folders the user confirmed through the dialog below. `stickers:save` is the
    * only channel here that writes to disk, so it refuses any folder outside this
    * set: the renderer handles untrusted remote chat content and must not be able
-   * to name an arbitrary write target. Listing and reading stay path-based, like
-   * the pre-existing soundboard channels, because they cannot modify anything.
+   * to name an arbitrary write target. Listing and reading follow the same rule
+   * through `mediaFolders` (D4), which also keeps folders configured before it.
    *
    * It is persisted so the confirmation survives a restart — otherwise the first
    * save of every session would pop a folder dialog for no reason the user can
@@ -1092,7 +1055,7 @@ export function setupIpcHandlers(
     }
   };
 
-  ipcMain.handle('dialog:select-stickers-folder', async () => {
+  handleFromMainFrame('dialog:select-stickers-folder', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
       title: mt('dialog.selectStickersFolder'),
       properties: ['openDirectory'],
@@ -1102,13 +1065,17 @@ export function setupIpcHandlers(
       return null;
     }
     confirmStickerFolder(result.filePaths[0]);
+    await allowMediaFolder('stickers', result.filePaths[0]);
     return result.filePaths[0];
   });
 
-  ipcMain.handle('stickers:list', async (_, folderPath: string) => {
+  handleFromMainFrame('stickers:list', async (_, folderPath: string, userAction: unknown) => {
     if (!folderPath || typeof folderPath !== 'string') {
       return [];
     }
+    const access = await requestMediaFolder('stickers', folderPath, userAction);
+    if (access.status === 'missing') return [];
+    if (access.status !== 'allowed') throw new Error('This sticker folder was not confirmed on this computer.');
     try {
       const folderStat = await fs.promises.stat(folderPath).catch(() => null);
       if (!folderStat || !folderStat.isDirectory()) {
@@ -1148,20 +1115,22 @@ export function setupIpcHandlers(
     }
   });
 
-  ipcMain.handle('stickers:read', async (_, filePath: string) => {
+  handleFromMainFrame('stickers:read', async (_, filePath: string) => {
     if (!filePath || typeof filePath !== 'string') {
       return null;
     }
-    // Only ever hand image bytes back to the renderer, whatever path it asks for.
+    // Only ever hand image bytes back to the renderer, and only from a confirmed folder.
     const ext = path.extname(filePath).toLowerCase();
     const mimeType = STICKER_MIME_TYPES[ext];
     if (!mimeType) return null;
+    const stickerFile = await mediaFolders.resolveFile('stickers', filePath);
+    if (!stickerFile) return null;
     try {
-      const stat = await fs.promises.stat(filePath).catch(() => null);
+      const stat = await fs.promises.stat(stickerFile).catch(() => null);
       if (!stat || !stat.isFile() || stat.size > MAX_STICKER_BYTES) {
         return null;
       }
-      const buffer = await fs.promises.readFile(filePath);
+      const buffer = await fs.promises.readFile(stickerFile);
       return {
         fileName: path.basename(filePath),
         mimeType,
@@ -1175,7 +1144,7 @@ export function setupIpcHandlers(
   });
 
   // Saves a sticker somebody else sent into the user's own folder (#356 QA).
-  ipcMain.handle('stickers:save', async (_, folderPath: string, fileName: string, bytes: Uint8Array) => {
+  handleFromMainFrame('stickers:save', async (_, folderPath: string, fileName: string, bytes: Uint8Array) => {
     if (!folderPath || typeof folderPath !== 'string') {
       return { ok: false, reason: 'no-folder' as const };
     }
@@ -1418,23 +1387,22 @@ export function setupIpcHandlers(
   });
 
   // Auto-start with OS (#245)
-  ipcMain.handle('app:get-auto-start', () => {
+  handleFromMainFrame('app:get-auto-start', () => {
     return app.getLoginItemSettings().openAtLogin;
   });
 
-  ipcMain.handle('app:set-auto-start', (_, enabled: boolean) => {
-    app.setLoginItemSettings({ openAtLogin: enabled });
+  handleFromMainFrame('app:set-auto-start', (_, enabled: unknown) => {
+    if (typeof enabled === 'boolean') app.setLoginItemSettings({ openAtLogin: enabled });
   });
 
-  ipcMain.handle('app:download-file', async (_, url: string, fileName: string) => {
+  handleFromMainFrame('app:download-file', async (_, url: string, fileName: unknown) => {
     try {
       const parsedUrl = new URL(url);
       if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
         return { success: false, error: 'Invalid URL' };
       }
 
-      const fallbackName = sanitizeDownloadFileName(decodeURIComponent(path.basename(parsedUrl.pathname) || 'download'));
-      const suggestedName = sanitizeDownloadFileName(fileName || fallbackName);
+      const suggestedName = suggestedDownloadName(parsedUrl, fileName);
       const saveResult = await dialog.showSaveDialog(mainWindow, {
         defaultPath: path.join(app.getPath('downloads'), suggestedName),
       });
@@ -1453,7 +1421,7 @@ export function setupIpcHandlers(
     }
   });
 
-  ipcMain.handle('app:save-csv-file', async (_, content: string, fileName: string) => {
+  handleFromMainFrame('app:save-csv-file', async (_, content: string, fileName: string) => {
     try {
       if (typeof content !== 'string' || Buffer.byteLength(content, 'utf8') > 128 * 1024 * 1024) {
         return { success: false, error: 'Invalid CSV content' };

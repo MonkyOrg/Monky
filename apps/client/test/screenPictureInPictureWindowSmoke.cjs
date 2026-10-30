@@ -30,6 +30,8 @@ if (!process.versions.electron) {
   app.setPath('userData', process.env.MONKY_PIP_TEST_PROFILE);
   app.disableHardwareAcceleration();
   app.on('window-all-closed', () => {});
+  // As in main.ts: every WebContents, the PiP popup included, starts with the default guards.
+  require(path.join(root, 'dist-electron', 'main', 'webContentsPolicy.js')).installWebContentsPolicy(app);
   let mainWindow, other, deadline;
   // The runner's real cursor is outside the test's control, so the PiP reads this one.
   let pipCursor = { x: -100000, y: -100000 };

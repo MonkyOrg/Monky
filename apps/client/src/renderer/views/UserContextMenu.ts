@@ -1,5 +1,5 @@
 import { AdminDeafenUserPayload, AdminMuteUserPayload, AdminVoiceRestrictionsGetPayload, MessageType, normalizePublicKeyHex, Permission, UserSummary, voiceRestrictionsUpdatedSchema } from '@monky/shared';
-import { escapeHtml } from '../utils/html';
+import { escapeHtml, html, trustedHtml } from '../utils/html';
 import { activityIconSrc } from '../utils/activityIcon';
 import { avatarFileExtension, getAvatarUrl } from '../utils/avatar';
 import { renderRoleOption } from '../utils/roleOption';
@@ -80,16 +80,17 @@ export class UserContextMenu {
 
     this.menuEl = document.createElement('div');
     this.menuEl.className = 'user-context-menu';
+    const avatarImg = html`<img class="context-menu-avatar" src="${avatarSrc}" alt="" data-fallback="avatar">`;
     this.menuEl.innerHTML = `
       <div class="context-menu-header">
         ${hasAvatar ? `
           <button type="button" id="ctx-view-avatar" class="context-menu-avatar-button" title="${t('userMenu.viewAvatar')}" aria-label="${t('userMenu.viewAvatar')}">
-            <img class="context-menu-avatar" src="${avatarSrc}" alt="" data-fallback="avatar">
+            ${avatarImg}
             <span class="context-menu-avatar-overlay">
               <span class="material-symbols-outlined md-18">visibility</span>
             </span>
           </button>
-        ` : `<img class="context-menu-avatar" src="${avatarSrc}" alt="" data-fallback="avatar">`}
+        ` : avatarImg}
         <div class="context-menu-user-info">
           <span class="context-menu-nickname">${escapeHtml(user.nickname)}</span>
           <span class="context-menu-subtext">${t('userMenu.audioSettings')}</span>
@@ -184,10 +185,10 @@ export class UserContextMenu {
               </span>
             </button>
             <div class="ctx-submenu">
-              ${voiceChannels.map((channel) => `
+              ${voiceChannels.map((channel) => html`
                 <button type="button" class="ctx-submenu-item" data-action="move-user" data-channel-id="${channel.id}">
                   <span class="material-symbols-outlined md-16">volume_up</span>
-                  <span>${escapeHtml(channel.name)}</span>
+                  <span>${channel.name}</span>
                 </button>
               `).join('')}
             </div>
@@ -203,15 +204,15 @@ export class UserContextMenu {
               </span>
             </button>
             <div class="ctx-submenu">
-              ${manageableRoles.map((role) => `
+              ${manageableRoles.map((role) => html`
                 <button type="button" class="ctx-submenu-item" data-action="toggle-role" data-role-id="${role.id}">
-                  ${renderRoleOption(role, roleIds.has(role.id))}
+                  ${trustedHtml(renderRoleOption(role, roleIds.has(role.id)))}
                 </button>
               `).join('')}
             </div>
           </div>
         ` : ''}
-        ${canManageAdmin ? `
+        ${canManageAdmin ? html`
           <button type="button" class="btn btn-secondary" data-action="toggle-admin" data-role-id="${adminRole?.id}">
             <span style="display: inline-flex; align-items: center; gap: 8px; width: 100%;">
               <span class="material-symbols-outlined md-16">${isTargetAdmin ? 'remove_moderator' : 'shield_person'}</span>

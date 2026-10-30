@@ -23,8 +23,14 @@ import { BotRecord } from '../../domain/entities';
 import { IBotRepository, IServerRepository } from '../../domain/repositories';
 import { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
 import { Logger } from '../../infrastructure/logger/Logger';
+import { ResponseTooLargeError, readJsonWithLimit } from '../../infrastructure/network/boundedResponse';
 import { BotPermissionService } from './BotPermissionService';
 import type { BotStorageService } from './BotStorageService';
+
+/** The icon alone may take ~6.7 MB once LIMITS.MAX_AVATAR_SIZE is base64-encoded. */
+const MAX_MANIFEST_BYTES = Math.ceil(LIMITS.MAX_AVATAR_SIZE * 4 / 3) + 1024 * 1024;
+/** The bot only confirms its public key. */
+const MAX_REGISTRATION_RESPONSE_BYTES = 4 * 1024;
 
 type BotFailure = {
   success: false;
@@ -300,15 +306,31 @@ export class BotService {
   private async fetchManifest(manifestUrl: string): Promise<{ success: true; manifest: BotManifest } | BotFailure> {
     let rawManifest: unknown;
     try {
-      // Lets a bot declare capabilities this server understands while older servers keep installing it.
-      const res = await fetch(manifestUrl, { signal: AbortSignal.timeout(10_000), headers: {
-        [BOT_MANIFEST_FEATURES_HEADER]: createProtocolOffer('bot').features.join(','),
-      } });
-      if (!res.ok) {
-        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: `O bot não respondeu corretamente (HTTP ${res.status}). Verifique se a URL está correta e o bot está em execução.` };
+      const res = await fetch(manifestUrl, {
+        // Following a redirect could take the request to any host, including this server's own network.
+        redirect: 'manual',
+        signal: AbortSignal.timeout(10_000),
+        // Lets a bot declare capabilities this server understands while older servers keep installing it.
+        headers: { [BOT_MANIFEST_FEATURES_HEADER]: createProtocolOffer('bot').features.join(',') },
+      });
+      if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+        // A TLS proxy commonly answers http:// with a redirect to https://. Neither the
+        // target nor the status is echoed, so the reply cannot map someone else's network.
+        Logger.warn('BOT', `The bot manifest answered with a redirect (HTTP ${res.status}).`);
+        await res.body?.cancel().catch(() => undefined);
+        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'A URL do manifest redireciona para outro endereço. Informe o endereço final do manifest (por exemplo, com https://).' };
       }
-      rawManifest = await res.json();
-    } catch {
+      if (!res.ok) {
+        // The status stays in the log: echoing it would let bot managers probe internal URLs.
+        Logger.warn('BOT', `The bot manifest answered HTTP ${res.status}.`);
+        await res.body?.cancel().catch(() => undefined);
+        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'O bot não respondeu corretamente. Verifique se a URL está correta e o bot está em execução.' };
+      }
+      rawManifest = await readJsonWithLimit(res, MAX_MANIFEST_BYTES);
+    } catch (error) {
+      if (error instanceof ResponseTooLargeError) {
+        return { success: false, errorCode: ProtocolErrorCode.BOT_INVALID_PROFILE, errorMessage: 'O manifest do bot passa do tamanho permitido. Verifique a URL e a foto do bot.' };
+      }
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Não foi possível conectar ao bot. Verifique se a URL está acessível e a porta está aberta no firewall.' };
     }
 
@@ -431,10 +453,12 @@ export class BotService {
           serverName,
           ...(serverWsUrl ? { serverUrl: serverWsUrl } : {}),
         }),
+        // Following a redirect would hand the token to whatever host it names.
+        redirect: 'error',
         signal: AbortSignal.timeout(10_000),
       });
       if (regRes.ok) {
-        const regBody: unknown = await regRes.json();
+        const regBody = await readJsonWithLimit(regRes, MAX_REGISTRATION_RESPONSE_BYTES);
         if (
           regBody !== null && typeof regBody === 'object' && 'publicKey' in regBody &&
           typeof regBody.publicKey === 'string' && /^[a-fA-F0-9]{64,128}$/.test(regBody.publicKey)
@@ -442,7 +466,9 @@ export class BotService {
           publicKey = regBody.publicKey;
         }
       } else {
-        registrationError = `O bot recusou o registro (HTTP ${regRes.status}). Verifique os logs do bot e se as versões do bot e do servidor são compatíveis.`;
+        Logger.warn('BOT', `The bot registration answered HTTP ${regRes.status}.`);
+        await regRes.body?.cancel().catch(() => undefined);
+        registrationError = 'O bot recusou o registro. Verifique os logs do bot e se as versões do bot e do servidor são compatíveis.';
       }
     } catch (error) {
       registrationError = 'Não foi possível concluir o registro no bot. Verifique a conexão, a porta e os logs do bot.';

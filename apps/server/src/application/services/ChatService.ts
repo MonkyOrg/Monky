@@ -602,6 +602,8 @@ export class ChatService {
     const now = Date.now();
     const messageIds = await this.messageRepo.listExpiredDeletionMessageIds(now);
     this.polls?.deleteForMessages(messageIds);
+    // Before the purge below stops listing them, so a failure is retried on the next sweep.
+    await this.attachmentService.purgeForMessages(messageIds);
     await this.messageRepo.purgeExpiredDeletions(now);
   }
 

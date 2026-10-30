@@ -4,6 +4,7 @@ import { applyBackup, BACKUP_FILE_EXTENSION, BackupScope, collectBackup, parseBa
 import { withButtonLoading } from '../utils/buttonLoading';
 import { recordProfileChange } from '../core/profileSync';
 import { showAlert, showConfirm } from './Dialog';
+import { acceptExportPassword, exportPasswordHint } from './exportPassword';
 
 /**
  * Standalone backup of saved servers and app settings (#472), separate from the
@@ -25,6 +26,8 @@ function buildScopeDialog(params: {
   intro: string;
   actionLabel: string;
   passwordHint: string;
+  /** Exporting sets a new password, which must pass the shared policy (#490). */
+  createsPassword: boolean;
 }): Promise<ScopeDialogResult | null> {
   return new Promise((resolve) => {
     const scopes: BackupScope[] = ['servers', 'settings'];
@@ -63,7 +66,9 @@ function buildScopeDialog(params: {
         </div>
         <div class="form-group">
           <label for="backup-dialog-password">${t('backup.passwordLabel')}</label>
-          <input id="backup-dialog-password" type="password" placeholder="${params.passwordHint}">
+          <input id="backup-dialog-password" type="password" placeholder="${params.passwordHint}"${
+            params.createsPassword ? ' aria-describedby="backup-dialog-password-hint"' : ''}>
+          ${params.createsPassword ? `<p class="dialog-option-hint" id="backup-dialog-password-hint">${exportPasswordHint()}</p>` : ''}
         </div>
         <div style="display: flex; gap: 8px; justify-content: flex-end;">
           <button type="button" class="btn btn-secondary" data-action="cancel">${t('common.cancel')}</button>
@@ -98,7 +103,9 @@ function buildScopeDialog(params: {
         showError(t('backup.pickAtLeastOne'));
         return;
       }
-      if (!passwordInput.value.trim()) {
+      if (params.createsPassword) {
+        if (!acceptExportPassword(passwordInput)) return;
+      } else if (!passwordInput.value.trim()) {
         showError(t('backup.passwordRequired'));
         return;
       }
@@ -117,6 +124,7 @@ function buildScopeDialog(params: {
       element.addEventListener('click', () => settle(null));
     });
     backdrop.querySelector('[data-action="confirm"]')?.addEventListener('click', confirm);
+    passwordInput.addEventListener('input', () => passwordInput.removeAttribute('aria-invalid'));
     passwordInput.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
@@ -141,6 +149,7 @@ export async function showBackupExportDialog(trigger?: HTMLElement): Promise<voi
     intro: t('backup.exportIntro'),
     actionLabel: t('backup.exportAction'),
     passwordHint: t('backup.passwordPlaceholder'),
+    createsPassword: true,
   });
   if (!choice) return;
 
@@ -179,6 +188,7 @@ export async function showBackupImportDialog(trigger?: HTMLElement): Promise<Bac
     intro: t('backup.importIntro'),
     actionLabel: t('backup.importAction'),
     passwordHint: t('backup.passwordUnlockPlaceholder'),
+    createsPassword: false,
   });
   if (!choice) return null;
 

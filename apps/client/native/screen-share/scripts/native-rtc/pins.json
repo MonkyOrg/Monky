@@ -72,6 +72,21 @@
       "source": "https://chromium.googlesource.com/chromium/tools/depot_tools/+/d85491b0a1dcb82dd8e124a876ecd7e3d50dc5e8/.vpython3",
       "scope": "selected external imports for gclient config/sync; not the full presubmit/test-tool wheel set"
     },
+    "gclientWheels": {
+      "scope": "Exact PyPI wheels of gclientRuntime.requirements. pip installs only these files, with --require-hashes and --no-deps, and refuses one whose SHA-256 differs. They pin the bytes of the versions gclientRuntime already names, so they stay outside it and the pin hash of prepared RTC workspaces does not change.",
+      "files": [
+        {
+          "distribution": "httplib2",
+          "url": "https://files.pythonhosted.org/packages/60/55/3902b9f33ad9c15abf447ad91b86ef2d0835a1ae78530f1410c115cf8fe3/httplib2-0.13.1-py3-none-any.whl",
+          "sha256": "cf6f9d5876d796539ec922a2c9b9a7cad9bfd90f04badcdc3bcfa537168052c3"
+        },
+        {
+          "distribution": "six",
+          "url": "https://files.pythonhosted.org/packages/c8/0a/b6723e1bc4c516cb687841499455a8505b44607ab535be01091c0f24f079/six-1.10.0-py2.py3-none-any.whl",
+          "sha256": "0ff78c403d9bccf5a425a6d31a12aa6b47f1c21ca4dc2573a7e2f32a97335eb1"
+        }
+      ]
+    },
     "dependencyEntriesSource": "https://chromium.googlesource.com/chromium/tools/depot_tools/+/d85491b0a1dcb82dd8e124a876ecd7e3d50dc5e8/gclient.py",
     "dependencyEntriesFormat": "Git: path -> URL; CIPD: path:package -> service/package@version; GCS: path:object -> gs://bucket/object"
   },

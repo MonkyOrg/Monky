@@ -526,6 +526,14 @@ input:focus, textarea:focus, select:focus {
   letter-spacing: 0.5px;
 }
 
+.form-group input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.form-group .dialog-option-hint {
+  margin: 0;
+}
+
 .form-row {
   display: flex;
   gap: 12px;

@@ -1,48 +1,49 @@
 import os from 'os';
 import { PUBLIC_IP_INTERFACE_NAME, ServerNetworkInterface } from '@monky/shared';
 
-let cachedPublicIp: string | null = null;
-let lastPublicIpFetch = 0;
 const PUBLIC_IP_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+/** After every provider failed: an offline host would otherwise wait for them on each invite. */
+const PUBLIC_IP_RETRY_MS = 60 * 1000;
+const PUBLIC_IP_PROVIDERS = [
+  'https://api.ipify.org?format=json',
+  'https://api4.my-ip.io/v2/ip.json',
+];
+
+let cachedPublicIp: string | null = null;
+let nextPublicIpLookup = 0;
+let publicIpLookup: Promise<string | null> | null = null;
 
 /**
  * Attempts to retrieve the public IP of the server host.
- * Caches the result to avoid redundant network calls.
+ * Caches the result to avoid redundant network calls; concurrent callers share
+ * one lookup, and a failed one is not repeated for a minute (S-WS-11).
  */
 export async function getPublicIp(): Promise<string | null> {
-  const now = Date.now();
-  if (cachedPublicIp && now - lastPublicIpFetch < PUBLIC_IP_CACHE_TTL_MS) {
-    return cachedPublicIp;
-  }
+  if (Date.now() < nextPublicIpLookup) return cachedPublicIp;
+  publicIpLookup ??= lookUpPublicIp()
+    .then((ip) => {
+      if (ip) cachedPublicIp = ip;
+      nextPublicIpLookup = Date.now() + (ip ? PUBLIC_IP_CACHE_TTL_MS : PUBLIC_IP_RETRY_MS);
+      return cachedPublicIp;
+    })
+    .finally(() => { publicIpLookup = null; });
+  return publicIpLookup;
+}
 
-  const providers = [
-    'https://api.ipify.org?format=json',
-    'https://api4.my-ip.io/v2/ip.json',
-  ];
-
-  for (const url of providers) {
+async function lookUpPublicIp(): Promise<string | null> {
+  for (const url of PUBLIC_IP_PROVIDERS) {
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3500);
-
-      const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeoutId);
-
-      if (res.ok) {
-        const data: any = await res.json();
-        const ip = data.ip || data.ipAddress;
-        if (ip && typeof ip === 'string' && ip.length >= 7) {
-          cachedPublicIp = ip;
-          lastPublicIpFetch = now;
-          return ip;
-        }
-      }
+      const res = await fetch(url, { signal: AbortSignal.timeout(3500) });
+      if (!res.ok) continue;
+      const data: unknown = await res.json();
+      if (!data || typeof data !== 'object') continue;
+      const ip = 'ip' in data && data.ip ? data.ip : 'ipAddress' in data ? data.ipAddress : undefined;
+      if (typeof ip === 'string' && ip.length >= 7) return ip;
     } catch {
       // Try next provider
     }
   }
-
-  return cachedPublicIp;
+  return null;
 }
 
 /**

@@ -90,7 +90,8 @@ export class OverlayManager {
       backgroundColor: '#00000000',
       show: false,
       webPreferences: {
-        preload: path.join(__dirname, '../preload/preload.js'),
+        // A dedicated preload: the overlay only draws the call (E-MAIN-1).
+        preload: path.join(__dirname, '../preload/overlayPreload.js'),
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: false,

@@ -1,7 +1,7 @@
 import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, getCommandPresentation, getMessageText,
   hasEveryoneMention, messageBlocksContent, messageBlocksInput, parseFencedMessageBlocks } from '@monky/shared';
 import type { AttachmentMeta, BotLocale, ChatMessageUpdatedPayload, ChatSendPayload, CommandPresentation, MessageReply, NativePoll, ResolvedMessageBlock, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
-import { escapeHtml } from '../utils/html';
+import { escapeHtml, html } from '../utils/html';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 import { animateEnter, cancelSurfaceMotion } from '../utils/surfaceMotion';
 import { renderLoadingSkeleton } from '../utils/loadingSkeleton';
@@ -645,8 +645,10 @@ export class ChatView {
     const replyBlocks = !!this.server.serverDetails?.protocol?.features.includes('chat-blocks');
     const me = this.server.currentUser?.id;
     const canModerate = this.server.hasPermission(Permission.MANAGE_SERVER);
-    const files: DownloadableFile[] = messages.flatMap((message) => (message.attachments ?? []).flatMap((attachment) =>
-      attachment.url && !attachment.evicted ? [{ url: getAttachmentUrl(attachment.url), fileName: attachment.originalName }] : []));
+    const files: DownloadableFile[] = messages.flatMap((message) => (message.attachments ?? []).flatMap((attachment) => {
+      const url = attachment.evicted ? '' : getAttachmentUrl(attachment.url);
+      return url ? [{ url, fileName: attachment.originalName }] : [];
+    }));
     return [
       {
         id: 'reply', icon: 'reply', label: t('chat.replyMessage'),
@@ -695,10 +697,10 @@ export class ChatView {
     const items: ForwardItem[] = messages.map((message) => ({
       content: message.content,
       attachments: (message.attachments ?? []).flatMap((attachment) => {
-        const url = attachment.url;
-        return url && !attachment.evicted ? [{
+        const url = attachment.evicted ? '' : getAttachmentUrl(attachment.url);
+        return url ? [{
           name: attachment.originalName, mime: attachment.mimeType, size: attachment.sizeBytes,
-          load: () => fetchAttachment(getAttachmentUrl(url)),
+          load: () => fetchAttachment(url),
         }] : [];
       }),
       sourceMessageId: message.id,
@@ -1602,27 +1604,19 @@ export class ChatView {
    */
   private renderStickers(stickers: AttachmentMeta[]): string {
     if (stickers.length === 0) return '';
-    const items = stickers
-      .map((a) => {
-        const name = escapeHtml(a.originalName);
-        if (!a.url) {
-          return `
-            <div class="chat-sticker chat-sticker--evicted" title="${t('chat.attachmentEvicted')}">
-              <span class="material-symbols-outlined md-24">hide_source</span>
-            </div>
-          `;
-        }
-        return `
+    const items = stickers.map((a) => a.url ? html`
           <div class="chat-sticker-wrap">
-            <img class="chat-sticker" src="${getAttachmentUrl(a.url)}" alt="${name}" title="${name}" loading="lazy">
-            <button type="button" class="chat-sticker-save" data-sticker-url="${escapeHtml(a.url)}" data-sticker-name="${name}" title="${t('chat.saveSticker')}" aria-label="${t('chat.saveSticker')}">
+            <img class="chat-sticker" src="${getAttachmentUrl(a.url)}" alt="${a.originalName}" title="${a.originalName}" loading="lazy">
+            <button type="button" class="chat-sticker-save" data-sticker-url="${a.url}" data-sticker-name="${a.originalName}" title="${t('chat.saveSticker')}" aria-label="${t('chat.saveSticker')}">
               <span class="material-symbols-outlined md-14">bookmark_add</span>
             </button>
           </div>
-        `;
-      })
-      .join('');
-    return `<div class="chat-stickers">${items}</div>`;
+        ` : html`
+          <div class="chat-sticker chat-sticker--evicted" title="${t('chat.attachmentEvicted')}">
+            <span class="material-symbols-outlined md-24">hide_source</span>
+          </div>
+        `);
+    return html`<div class="chat-stickers">${items}</div>`.toString();
   }
 
   /** Renders the attachment grid below a message body (#11). */
@@ -1658,25 +1652,24 @@ export class ChatView {
   private renderAttachment(a: AttachmentMeta, message?: ChatMessage): string {
     // FIFO eviction removed the binary: show a placeholder instead of a broken link.
     if (!a.url) {
-      return `
-        <div class="attachment-evicted" title="${escapeHtml(a.originalName)}">
+      return html`
+        <div class="attachment-evicted" title="${a.originalName}">
           <span class="material-symbols-outlined md-18">hide_source</span>
           <span>${t('chat.attachmentEvicted')}</span>
         </div>
-      `;
+      `.toString();
     }
 
+    // Empty unless it is one of the server's own `/attachments/` paths.
     const src = getAttachmentUrl(a.url);
-    const name = escapeHtml(a.originalName);
-    const senderName = escapeHtml(message?.userNickname || '');
-    const sentAt = escapeHtml(message ? this.formatDateTime(message.createdAt) : '');
-    const lightboxMeta = `
-      data-lightbox-sender="${senderName}"
-      data-lightbox-timestamp="${sentAt}"
+    const name = a.originalName;
+    const lightboxMeta = html`
+      data-lightbox-sender="${message?.userNickname || ''}"
+      data-lightbox-timestamp="${message ? this.formatDateTime(message.createdAt) : ''}"
     `;
-    const inlineActions = `
+    const inlineActions = html`
       <div class="chat-inline-media-actions">
-        ${a.kind === 'image' ? `<button
+        ${a.kind === 'image' ? html`<button
           type="button"
           class="chat-attachment-action chat-attachment-copy"
           title="${t('chat.copyImage')}"
@@ -1704,7 +1697,7 @@ export class ChatView {
     `;
 
     if (a.kind === 'image') {
-      return `
+      return html`
         <div
           class="chat-inline-media chat-inline-media--image"
           data-lightbox-kind="image"
@@ -1715,11 +1708,11 @@ export class ChatView {
           <img class="chat-attachment-image" src="${src}" alt="${name}" title="${name}" loading="lazy">
           ${inlineActions}
         </div>
-      `;
+      `.toString();
     }
 
     if (a.kind === 'video') {
-      return `
+      return html`
         <div
           class="chat-attachment-video-wrap chat-inline-media chat-inline-media--video"
           data-lightbox-kind="video"
@@ -1732,11 +1725,11 @@ export class ChatView {
             ${inlineActions}
           </div>
         </div>
-      `;
+      `.toString();
     }
 
     if (a.mimeType.startsWith('audio/')) {
-      return `
+      return html`
         <div class="chat-audio-player">
           <audio class="chat-attachment-audio" preload="metadata" src="${src}"></audio>
           <div class="chat-audio-meta">
@@ -1757,10 +1750,10 @@ export class ChatView {
             </button>
           </div>
         </div>
-      `;
+      `.toString();
     }
 
-    return `
+    return html`
       <button
         type="button"
         class="chat-attachment-file"
@@ -1775,7 +1768,7 @@ export class ChatView {
         </span>
         <span class="material-symbols-outlined md-20 af-dl">download</span>
       </button>
-    `;
+    `.toString();
   }
 
   private bindMediaInteractions(feed: HTMLElement): void {
@@ -1843,6 +1836,10 @@ export class ChatView {
    */
   private async saveSticker(url: string, fileName: string): Promise<void> {
     const attachmentUrl = getAttachmentUrl(url);
+    if (!attachmentUrl) {
+      void showAlert({ message: t('chat.stickerSaveFailed'), variant: 'danger' });
+      return;
+    }
     let result = await stickerService.saveFromUrl(attachmentUrl, fileName);
 
     // `no-folder` covers both "never picked one" and "the main process has not
@@ -2873,20 +2870,20 @@ export class ChatView {
       .map((candidate, i) => {
         const active = i === this.mentionActiveIndex ? 'active' : '';
         if (candidate.kind === 'everyone') {
-          return `
+          return html`
             <div class="mention-item ${active}" data-mention-index="${i}">
               <span class="material-symbols-outlined md-18 mention-everyone-icon">campaign</span>
-              <span class="mention-nick">@${escapeHtml(candidate.token)}</span>
-              <span class="mention-everyone-hint">${escapeHtml(t('chat.everyoneMentionHint'))}</span>
+              <span class="mention-nick">@${candidate.token}</span>
+              <span class="mention-everyone-hint">${t('chat.everyoneMentionHint')}</span>
             </div>
           `;
         }
         const u = candidate.user;
         const online = u.status !== 'DISCONNECTED';
-        return `
+        return html`
           <div class="mention-item ${active}" data-mention-index="${i}">
             <img class="mention-avatar" src="${getAvatarUrl(u.avatarUrl)}" data-fallback="avatar">
-            <span class="mention-nick">${escapeHtml(u.nickname)}</span>
+            <span class="mention-nick">${u.nickname}</span>
             <span class="mention-status-dot ${online ? 'online' : 'offline'}"></span>
           </div>
         `;

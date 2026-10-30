@@ -2,6 +2,12 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
+  <!-- Scripts come only from the app itself (E-MAIN-3): markup that slips past
+       escaping cannot run inline handlers, javascript: URLs or injected scripts.
+       blob: is for the AudioWorklets built at runtime and 'wasm-unsafe-eval' for
+       noise suppression. Servers live on arbitrary hosts, so their images, media
+       and connections may use any http(s) or ws(s) address. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' blob: 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http: https:; media-src 'self' data: blob: http: https:; connect-src 'self' ws: wss: http: https: data: blob:; font-src 'self' data:; worker-src 'self' blob:; frame-src https://open.spotify.com monky-miniapp:; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Monky</title>
   <link rel="icon" type="image/png" href="./assets/Logo.png">

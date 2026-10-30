@@ -128,11 +128,14 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
     }
 
     if (config.scenario === 'connected' && !config.smoke) {
-      session.client.send(MessageType.SOUNDBOARD_PLAY, {
-        channelId: voice.id, soundName: 'QA Bell', mimeType: 'audio/wav', audioBase64: qaToneBase64(660),
+      // Outside a call the real client plays a sound locally and keeps it with
+      // RECENT_SOUND_RECORD: the server relays SOUNDBOARD_PLAY only to the call
+      // its author is in.
+      session.client.send(MessageType.RECENT_SOUND_RECORD, {
+        soundName: 'QA Bell', mimeType: 'audio/wav', audioBase64: qaToneBase64(660),
       });
-      session.client.send(MessageType.SOUNDBOARD_PLAY, {
-        channelId: voice.id, soundName: 'QA Chime', mimeType: 'audio/wav', audioBase64: qaToneBase64(880),
+      session.client.send(MessageType.RECENT_SOUND_RECORD, {
+        soundName: 'QA Chime', mimeType: 'audio/wav', audioBase64: qaToneBase64(880),
       });
       const recent = recentSoundsListSchema.parse(await session.client.sendRequest<unknown>(
         MessageType.RECENT_SOUNDS_LIST, {},

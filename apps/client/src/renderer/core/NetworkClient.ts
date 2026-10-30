@@ -664,7 +664,10 @@ export class NetworkClient {
     const connectionId = this.connectionId;
     this.setStatus('RECONNECTING');
     if (this.manualDisconnect || this.connectionId !== connectionId) return;
-    const delay = RECONNECT_DELAYS_MS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)];
+    const step = RECONNECT_DELAYS_MS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)];
+    // A restarting server drops every client in the same instant. Drawn around
+    // each step, their retries arrive spread out instead of all at once.
+    const delay = Math.round(step * (0.5 + Math.random()));
     this.reconnectAttempt++;
 
     this.emitScoped('network.reconnecting', { attempt: this.reconnectAttempt, delay });

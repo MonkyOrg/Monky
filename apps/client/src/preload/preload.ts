@@ -10,7 +10,7 @@ import type {
   BotDeviceStorageResponse, BotDeviceStorageScope,
 } from '@monky/shared';
 import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenEventSchema } from '@monky/shared';
-import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
+import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, MEDIA_FOLDERS_IPC, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC, type ConfiguredMediaFolders } from '@monky/shared';
 import { DM_EVENT, DM_IPC, type DmApi, type DmEvent, type DmExportMode } from '@monky/shared';
 import type {
   ActionShortcutBinding,
@@ -291,6 +291,32 @@ export interface ElectronApi {
 }
 
 const preparedQa = process.argv.includes('--monky-prepared-qa');
+
+/**
+ * Sound and sticker folders configured before reading them required the system
+ * dialog keep working (D4). This runs before any page script, so the folders
+ * come from what the user saved, not from remote content; Main adopts only the
+ * first report of each profile and ignores the rest.
+ */
+function reportConfiguredMediaFolders(): void {
+  let saved: string | null;
+  try { saved = window.localStorage.getItem('monky_settings'); }
+  catch { return; } // Documents without storage (data: URLs) are not the application.
+  let settings: unknown = null;
+  try { settings = saved ? JSON.parse(saved) : null; }
+  catch { /* Unreadable settings hold no folder; the report still closes the adoption. */ }
+  const folder = (key: 'soundboardFolderPath' | 'stickersFolderPath'): string | undefined => {
+    if (typeof settings !== 'object' || settings === null || !(key in settings)) return undefined;
+    const value: unknown = Reflect.get(settings, key);
+    return typeof value === 'string' && value ? value : undefined;
+  };
+  const folders: ConfiguredMediaFolders = { soundboard: folder('soundboardFolderPath'), stickers: folder('stickersFolderPath') };
+  void ipcRenderer.invoke(MEDIA_FOLDERS_IPC.adopt, folders).catch((error: unknown) => {
+    console.warn('[MediaFolders] Could not report the configured sound and sticker folders:', error);
+  });
+}
+reportConfiguredMediaFolders();
+
 let nativePresentation: NativeScreenPresentationController | null = null;
 let nativeAudio: ReturnType<typeof registerNativeAudioPortReceiver> | null = null;
 let nativeAudioWorkletUrl: string | null = null;
@@ -458,7 +484,9 @@ const api: ElectronApi = {
   selectSoundFile: () => ipcRenderer.invoke('dialog:select-sound-file'),
   selectSoundboardFolder: () => ipcRenderer.invoke('dialog:select-soundboard-folder'),
   getDefaultSoundboardFolder: () => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.defaultFolder),
-  listSoundboardSounds: (folderPath) => ipcRenderer.invoke('soundboard:list-sounds', folderPath),
+  // Only a direct user action (opening the soundboard or the stickers, Retry) may
+  // raise Main's native confirmation of a folder not chosen on this computer (D4).
+  listSoundboardSounds: (folderPath) => ipcRenderer.invoke('soundboard:list-sounds', folderPath, navigator.userActivation.isActive),
   readSoundboardSound: (filePath) => ipcRenderer.invoke('soundboard:read-sound', filePath),
   readSoundboardEdit: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.read, input),
   openSoundboardEditor: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.open, input),
@@ -501,7 +529,7 @@ const api: ElectronApi = {
     return () => ipcRenderer.removeListener(SOUND_DOWNLOAD_PROGRESS, listener);
   },
   selectStickersFolder: () => ipcRenderer.invoke('dialog:select-stickers-folder'),
-  listStickers: (folderPath) => ipcRenderer.invoke('stickers:list', folderPath),
+  listStickers: (folderPath) => ipcRenderer.invoke('stickers:list', folderPath, navigator.userActivation.isActive),
   readSticker: (filePath) => ipcRenderer.invoke('stickers:read', filePath),
   saveSticker: (folderPath, fileName, bytes) => ipcRenderer.invoke('stickers:save', folderPath, fileName, bytes),
   registerSoundboardShortcuts: (shortcuts) => ipcRenderer.invoke(SHORTCUT_IPC.registerSoundboard, shortcuts),

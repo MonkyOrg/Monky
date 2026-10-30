@@ -1100,21 +1100,156 @@ test('marketplace manifest and registration carry the profile and serve real HTT
   assert.equal(manifest.name, 'Photo Bot');
   assert.equal(manifest.icon, avatar);
   assert.equal(manifest.registrationUrl, `${base}/register`);
+  const registered = once(bot, 'registered');
   const registration = await fetch(manifest.registrationUrl, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ serverId: 'marketplace', serverName: 'Server', serverUrl: wsServer.url, token: 'token' }),
   });
   assert.equal(registration.status, 200);
+  assert.deepEqual((await registered)[0], { serverId: 'marketplace', serverName: 'Server', serverUrl: wsServer.url },
+    'The registered event never exposes the installation token');
   assert.equal((await wsServer.next(MessageType.AUTH_CONNECT)).payload.nickname, 'Photo Bot');
   await wsServer.next(MessageType.COMMAND_REGISTER);
   const profile = await wsServer.next(MessageType.BOT_UPDATE_PROFILE);
   assert.equal(profile.payload.name, 'Photo Bot');
   assert.equal(profile.payload.avatarBase64, avatar);
   const invalid = await fetch(manifest.registrationUrl, {
-    method: 'POST', body: JSON.stringify({ serverName: 'Bad', token: 'token', serverUrl: 'file:///etc/passwd' }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ serverName: 'Bad', token: 'token', serverUrl: 'file:///etc/passwd' }),
   });
   assert.equal(invalid.status, 400);
   assert.deepEqual(errors, []);
+});
+
+function rawRequest(port, { method = 'POST', path: target = '/register', headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const request = http.request({ hostname: '127.0.0.1', port, path: target, method, headers });
+    request.once('response', (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.once('end', () => resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks).toString('utf8') }));
+    });
+    request.once('error', reject);
+    request.end(body);
+  });
+}
+
+test('the marketplace listener only accepts JSON registrations, without CORS and within a size limit', { timeout: 10000 }, async (t) => {
+  const wsServer = await makeServer(t);
+  const { bot, errors } = makeBot(t, wsServer);
+  let registrations = 0;
+  bot.on('registered', () => registrations++);
+  const listener = await bot.serve({ name: 'Guarded Bot', port: 0, host: '127.0.0.1' });
+  const port = listener.address().port;
+  const registration = JSON.stringify({ serverId: 'guarded', serverName: 'Server', serverUrl: wsServer.url, token: 'token' });
+
+  const manifest = await rawRequest(port, { method: 'GET', path: '/manifest' });
+  assert.equal(manifest.status, 200);
+  assert.equal(manifest.headers['access-control-allow-origin'], undefined, 'No web page may read the manifest through CORS');
+  const preflight = await rawRequest(port, {
+    method: 'OPTIONS', headers: { Origin: 'https://attacker.example', 'Access-Control-Request-Method': 'POST' },
+  });
+  assert.notEqual(preflight.status, 204);
+  assert.equal(preflight.headers['access-control-allow-origin'], undefined);
+
+  // A "simple" cross-origin request a browser sends without asking first.
+  const simple = await rawRequest(port, { headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: registration });
+  assert.equal(simple.status, 415);
+  const formEncoded = await rawRequest(port, { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: registration });
+  assert.equal(formEncoded.status, 415);
+  assert.equal(registrations, 0);
+  assert.equal(bot.serverCount, 0);
+
+  const declared = http.request({
+    hostname: '127.0.0.1', port, path: '/register', method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': String(1024 * 1024) },
+  });
+  declared.on('error', () => {});
+  declared.flushHeaders();
+  const [declaredResponse] = await once(declared, 'response');
+  declaredResponse.resume();
+  assert.equal(declaredResponse.statusCode, 413, 'A declared oversized body is refused before it is sent');
+  assert.equal(declaredResponse.headers.connection, 'close');
+  declared.destroy();
+
+  // A streamed body is cut off once it passes the limit: the server stops reading and closes the connection.
+  const streamed = http.request({
+    hostname: '127.0.0.1', port, path: '/register', method: 'POST', headers: { 'Content-Type': 'application/json' },
+  });
+  streamed.on('error', () => {});
+  const streamedResponse = once(streamed, 'response');
+  const [socket] = await once(streamed, 'socket');
+  const socketClosed = once(socket, 'close');
+  const writer = setInterval(() => {
+    if (!streamed.destroyed) streamed.write('x'.repeat(8 * 1024));
+  }, 5);
+  t.after(() => clearInterval(writer));
+  const [response] = await streamedResponse;
+  response.resume();
+  assert.equal(response.statusCode, 413);
+  assert.equal(response.headers.connection, 'close');
+  await socketClosed;
+  clearInterval(writer);
+
+  const accepted = await rawRequest(port, { headers: { 'Content-Type': 'application/json; charset=utf-8' }, body: registration });
+  assert.equal(accepted.status, 200);
+  assert.equal(registrations, 1);
+  assert.deepEqual(errors, []);
+});
+
+test('registrations are limited per address and in flight', { timeout: 10000 }, async (t) => {
+  const wsServer = await makeServer(t, { authenticate: () => {} });
+  const { bot } = makeBot(t, wsServer);
+  const listener = await bot.serve({ name: 'Limited Bot', port: 0, host: '127.0.0.1' });
+  const pending = Array.from({ length: 4 }, (_, index) => registerAt(listener, {
+    serverId: `pending-${index}`, serverName: 'Server', serverUrl: wsServer.url, token: `token-${index}`,
+  }));
+  await Promise.all(Array.from({ length: 4 }, () => wsServer.next(MessageType.AUTH_CONNECT)));
+  const busy = await registerAt(listener, { serverId: 'fifth', serverName: 'Server', serverUrl: wsServer.url, token: 'token-5' });
+  assert.equal(busy.status, 429, 'Only four registrations authenticate at the same time');
+  assert.ok(Number(busy.headers.get('retry-after')) > 0);
+  for (let attempt = 6; attempt <= 10; attempt++) {
+    assert.equal((await registerAt(listener, { serverName: 'Missing token' })).status, 400);
+  }
+  const limited = await registerAt(listener, { serverId: 'eleventh', serverName: 'Server', serverUrl: wsServer.url, token: 'token-11' });
+  assert.equal(limited.status, 429, 'One address gets ten registration attempts per minute');
+  await bot.close();
+  assert.deepEqual((await Promise.all(pending)).map((response) => response.status), [503, 503, 503, 503]);
+});
+
+test('the registration limiter forgets old attempts and groups IPv6 hosts by /64', () => {
+  const { RegistrationLimiter } = require('../dist/marketplace.js');
+  const limiter = new RegistrationLimiter();
+  const start = 1_000_000;
+  for (let attempt = 0; attempt < 10; attempt++) assert.equal(limiter.allowAttempt('203.0.113.7', start + attempt), true);
+  assert.equal(limiter.allowAttempt('::ffff:203.0.113.7', start + 20), false, 'IPv4-mapped addresses share the IPv4 budget');
+  assert.equal(limiter.allowAttempt('203.0.113.8', start + 20), true);
+  assert.equal(limiter.allowAttempt('203.0.113.7', start + 60_000), true, 'Attempts older than a minute no longer count');
+  for (let attempt = 0; attempt < 10; attempt++) {
+    assert.equal(limiter.allowAttempt(`2001:db8:1:2::${attempt + 1}`, start), true);
+  }
+  assert.equal(limiter.allowAttempt('2001:db8:1:2:ffff:ffff:ffff:ffff', start), false, 'Rotating inside one /64 does not reset the budget');
+  assert.equal(limiter.allowAttempt('2001:db8:1:3::1', start), true);
+  const releases = Array.from({ length: 4 }, () => limiter.acquire());
+  assert.ok(releases.every(Boolean));
+  assert.equal(limiter.acquire(), undefined);
+  releases[0]();
+  releases[0]();
+  assert.equal(typeof limiter.acquire(), 'function', 'A release frees exactly one slot');
+  assert.equal(limiter.acquire(), undefined);
+});
+
+test('publicUrl announces the registration behind a TLS proxy and rejects ambiguous URLs', async (t) => {
+  const { bot } = makeBot(t, { url: 'ws://127.0.0.1:1' });
+  for (const publicUrl of ['ftp://bot.example.test', 'https://user:secret@bot.example.test', 'https://bot.example.test/?a=1',
+    'https://bot.example.test/?', 'https://bot.example.test/#top', 'https://bot.example.test/monky', 'bot.example.test']) {
+    assert.throws(() => bot.serve({ name: 'Proxy Bot', port: 0, host: '127.0.0.1', publicUrl }), /publicUrl/, publicUrl);
+  }
+  const listener = await bot.serve({
+    name: 'Proxy Bot', port: 0, host: '127.0.0.1', publicHost: 'ignored.example.test', publicUrl: 'https://Bot.Example.test:443/',
+  });
+  const manifest = await (await fetch(`http://127.0.0.1:${listener.address().port}/manifest`)).json();
+  assert.equal(manifest.registrationUrl, 'https://bot.example.test/register');
 });
 
 test('marketplace registrations survive a bot restart without being added again', { timeout: 10000 }, async (t) => {

@@ -37,6 +37,15 @@ import { applyMediaEncodingPolicy, getMediaEncodingPolicy, type OutboundMediaKin
 import { updateRtpSenderParameters } from './rtpSenderParameters';
 import { t } from '../../i18n';
 
+/** Replies carry mediasoup structures as `unknown`; this engine reads them with mediasoup-client's types. */
+type RouterCapabilitiesResponse = Omit<SfuRouterRtpCapabilitiesPayload, 'rtpCapabilities'> & {
+  rtpCapabilities: mediasoupTypes.RtpCapabilities;
+};
+type TransportCreatedResponse = Omit<SfuWebRtcTransportCreatedPayload, 'transportOptions'> & {
+  transportOptions: mediasoupTypes.TransportOptions;
+};
+type ConsumedResponse = Omit<SfuConsumedPayload, 'rtpParameters'> & { rtpParameters: mediasoupTypes.RtpParameters };
+
 export interface SfuConsumerTrackEvent {
   producerSessionId: string;
   kind: 'audio' | 'video';
@@ -157,7 +166,7 @@ export class SfuClientEngine {
       clientLog.info('SFU', `Joining SFU room for channel ${channelId}`);
 
       // 1. Get router RTP capabilities
-      const routerCapsResp = await client.sendRequest<SfuRouterRtpCapabilitiesPayload>(
+      const routerCapsResp = await client.sendRequest<RouterCapabilitiesResponse>(
         MessageType.SFU_GET_ROUTER_RTP_CAPABILITIES,
         { channelId } satisfies SfuGetRouterRtpCapabilitiesPayload,
         undefined,
@@ -184,7 +193,7 @@ export class SfuClientEngine {
 
       // 3. Create send transport
       console.log(`[SFU Client] Requesting createSendTransport from server...`);
-      const sendCreated = await client.sendRequest<SfuWebRtcTransportCreatedPayload>(
+      const sendCreated = await client.sendRequest<TransportCreatedResponse>(
         MessageType.SFU_CREATE_WEBRTC_TRANSPORT,
         { channelId, direction: 'send' } satisfies SfuCreateWebRtcTransportPayload,
         undefined,
@@ -194,7 +203,7 @@ export class SfuClientEngine {
 
       this.logTransportCandidates('send', sendCreated.transportOptions);
 
-      this.sendTransport = this.device.createSendTransport(sendCreated.transportOptions as any);
+      this.sendTransport = this.device.createSendTransport(sendCreated.transportOptions);
       const sendTransport = this.sendTransport;
 
       sendTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
@@ -261,7 +270,7 @@ export class SfuClientEngine {
 
       // 4. Create recv transport
       console.log(`[SFU Client] Requesting createRecvTransport from server...`);
-      const recvCreated = await client.sendRequest<SfuWebRtcTransportCreatedPayload>(
+      const recvCreated = await client.sendRequest<TransportCreatedResponse>(
         MessageType.SFU_CREATE_WEBRTC_TRANSPORT,
         { channelId, direction: 'recv' } satisfies SfuCreateWebRtcTransportPayload,
         undefined,
@@ -271,7 +280,7 @@ export class SfuClientEngine {
 
       this.logTransportCandidates('recv', recvCreated.transportOptions);
 
-      this.recvTransport = this.device.createRecvTransport(recvCreated.transportOptions as any);
+      this.recvTransport = this.device.createRecvTransport(recvCreated.transportOptions);
       const recvTransport = this.recvTransport;
 
       recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
@@ -751,6 +760,7 @@ export class SfuClientEngine {
       return;
     }
     const { producerId, producerSessionId, kind, appData } = producerData;
+    const shareId = 'shareId' in appData ? appData.shareId : undefined;
 
     // Do not consume our own producers
     const mySessionId = this.getMySessionId();
@@ -783,7 +793,7 @@ export class SfuClientEngine {
       console.log(`[SFU Client] Consuming remote producer ${producerId} (${kind}, mediaType: ${appData?.mediaType}) from session ${producerSessionId}...`);
       clientLog.info('SFU', `Consuming producer ${producerId} (${kind}) from session ${producerSessionId}`);
 
-      const consumed = await client.sendRequest<SfuConsumedPayload | SfuProducerClosedPayload>(
+      const consumed = await client.sendRequest<ConsumedResponse | SfuProducerClosedPayload>(
         MessageType.SFU_CONSUME,
         {
           channelId,
@@ -823,7 +833,7 @@ export class SfuClientEngine {
       this.consumerMeta.set(producerId, {
         producerSessionId,
         mediaType: appData.mediaType,
-        shareId: appData.shareId,
+        shareId,
         consumerId: consumer.id,
       });
 
@@ -849,7 +859,7 @@ export class SfuClientEngine {
         track: consumer.track,
         consumerId: consumer.id,
         producerId,
-        shareId: appData.shareId,
+        shareId,
         rtpReceiver: consumer.rtpReceiver,
       });
       // Server screen consumers are born paused: a cancelled setup has never

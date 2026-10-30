@@ -13,7 +13,6 @@ import {
   AdminMuteUserPayload,
   AuthConnectPayload,
   AuthChallengePayload,
-  AuthChallengeResponsePayload,
   AuthFailedPayload,
   AuthSuccessPayload,
   ChannelCreatePayload,
@@ -111,14 +110,11 @@ import {
   VoiceRosterParticipant,
   VoiceParticipantState,
   WebRtcSignalPayload,
-  RtcDiagnosticsReportPayload,
   SfuGetRouterRtpCapabilitiesPayload,
   SfuRouterRtpCapabilitiesPayload,
   SfuCreateWebRtcTransportPayload,
   SfuWebRtcTransportCreatedPayload,
-  SfuConnectWebRtcTransportPayload,
   SfuCloseWebRtcTransportPayload,
-  SfuProducePayload,
   SfuProducedPayload,
   SfuConsumePayload,
   SfuConsumedPayload,
@@ -139,6 +135,11 @@ import {
   botSettingsUpdateSchema,
   commandRegisterSchema,
   voiceReconnectSchema,
+  voiceJoinSchema,
+  voiceStateUpdateSchema,
+  adminKickVoiceSchema,
+  adminMoveUserSchema,
+  rtcDiagnosticsReportSchema,
   adminVoiceRestrictionsGetSchema,
   adminMuteUserSchema,
   adminDeafenUserSchema,
@@ -171,6 +172,8 @@ import {
   sfuConsumerClosedSchema,
   sfuConsumerSetPausedSchema,
   sfuConsumeSchema,
+  sfuConnectWebRtcTransportSchema,
+  sfuProduceSchema,
   sfuMediaAppDataSchema,
   isBotVoiceSignalAllowed,
   isReceivingBotVoice,
@@ -226,12 +229,13 @@ import { IServerRepository } from '../../domain/repositories';
 import type { NativePollRecord } from '../../domain/entities';
 import { scanServerNetworkInterfaces } from '../discovery/ServerIpScanner';
 import { CoturnManager } from '../turn/CoturnManager';
-import { describeSfuPortProblem, SfuManager, SfuProducerClosedError } from '../sfu/SfuManager';
+import { describeSfuPortProblem, SfuManager, SfuProducerClosedError, SfuProducerLimitError } from '../sfu/SfuManager';
 import { checkSfuPreflight, formatSfuPreflightForLog } from '../sfu/SfuPreflight';
 import { Logger } from '../logger/Logger';
 import { RateLimiter } from '../security/RateLimiter';
 import { describeFailure, ServerResourceScope } from '../lifecycle/ServerResourceScope';
 import { BotInteractionHandler, BotInteractionSession } from './BotInteractionHandler';
+import { clientAddress, DISCARDABLE_MESSAGES, MESSAGE_BUDGETS, WS_FLOW_LIMITS, type WsFlowLimits } from './flowControl';
 import { botVoiceJoinSchema, botVoiceChannelSchema, botVoiceSignalSchema } from '@monky/shared';
 import { userUpdateActivitySchema, userUpdateBrbSchema, userUpdateCustomStatusSchema, type CustomStatus } from '@monky/shared';
 
@@ -268,6 +272,10 @@ interface ClientSession {
   retiredProducerIds?: Set<string>;
   isAlive: boolean;
   ip: string;
+  /** Closes the connection if it is still anonymous when it fires. */
+  authDeadline?: NodeJS.Timeout;
+  /** Counted among the anonymous connections until it authenticates or leaves. */
+  countedAnonymous?: boolean;
   /** True when this session was replaced by a newer connection of the same device. */
   replaced?: boolean;
   /** True when the client explicitly logged out (graceful disconnect). */
@@ -323,6 +331,12 @@ export class WebSocketServer {
   private sessionSockets: Map<string, WebSocket> = new Map();
   /** Pending "user left" timers for sessions that dropped and may still reconnect. */
   private reconnectTimers: Map<string, NodeJS.Timeout> = new Map();
+  /** Connections that have not authenticated yet, oldest first: each holds a descriptor and costs nothing to open. */
+  private readonly anonymousSessions = new Set<ClientSession>();
+  /** How many of them each client address holds. */
+  private readonly anonymousPerAddress = new Map<string, number>();
+  /** Process-wide, like the constants it holds: a test lowers it for one case. */
+  private static flowLimits: WsFlowLimits = WS_FLOW_LIMITS;
   private heartbeatTimer?: NodeJS.Timeout;
   private closing = false;
   private readonly shutdownResources = new ServerResourceScope();
@@ -765,6 +779,24 @@ export class WebSocketServer {
     });
     this.wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
       const ip = req.socket.remoteAddress || 'unknown';
+      const address = clientAddress(ip);
+      if (address !== undefined &&
+          (this.anonymousPerAddress.get(address) ?? 0) >= WebSocketServer.flowLimits.PREAUTH_MAX_SOCKETS_PER_ADDRESS) {
+        // Dropped at once: a close handshake would keep the descriptor for up
+        // to 30 s from a peer that never answers it, and the client retries
+        // either way.
+        ws.on('error', () => {});
+        ws.terminate();
+        return;
+      }
+      // A full server drops its oldest waiting connection, not the newest:
+      // sockets held open only to fill it cannot keep out someone who
+      // authenticates in a moment.
+      const [oldest] = this.anonymousSessions;
+      if (oldest && this.anonymousSessions.size >= WebSocketServer.flowLimits.PREAUTH_MAX_SOCKETS) {
+        this.settleAnonymous(oldest);
+        oldest.ws.terminate();
+      }
       Logger.info('NETWORK', `New connection established from ${ip}`);
 
       const session: ClientSession = {
@@ -772,9 +804,16 @@ export class WebSocketServer {
         messageQueue: Promise.resolve(),
         isAlive: true,
         ip,
+        countedAnonymous: true,
         requestHost: WebSocketServer.parseRequestHostname(req.headers.host),
         requestServerUrl: WebSocketServer.parseRequestServerUrl(req),
       };
+      this.anonymousSessions.add(session);
+      if (address !== undefined) this.anonymousPerAddress.set(address, (this.anonymousPerAddress.get(address) ?? 0) + 1);
+      session.authDeadline = setTimeout(() => {
+        if (!session.user && ws.readyState === WebSocket.OPEN) ws.close(1008, 'Authentication timeout');
+      }, WebSocketServer.flowLimits.AUTH_TIMEOUT_MS);
+      session.authDeadline.unref?.();
       this.sessions.set(ws, session);
 
       ws.on('pong', () => {
@@ -797,6 +836,12 @@ export class WebSocketServer {
   }
 
   private receiveMessage(session: ClientSession, data: Buffer): void {
+    // Before authentication only small frames are legitimate: a large one is
+    // refused before it costs a parse.
+    if (!session.user && data.length > WebSocketServer.flowLimits.PREAUTH_MAX_FRAME_BYTES) {
+      session.ws.close(1009, 'Message too big');
+      return;
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(data.toString('utf8'));
@@ -811,6 +856,12 @@ export class WebSocketServer {
     }
     const type = Object.values(MessageType).find((value) => value === parsed.type);
     const requestId = 'requestId' in parsed ? parsed.requestId : undefined;
+    // The id is copied into events every other connection receives, so an
+    // unbounded one multiplied a single frame by the audience. Not echoed back.
+    if (typeof requestId === 'string' && requestId.length > LIMITS.MAX_REQUEST_ID_LENGTH) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Mensagem malformada');
+      return;
+    }
     if (!type || (requestId !== undefined && typeof requestId !== 'string')) {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Mensagem malformada',
         typeof requestId === 'string' ? requestId : undefined);
@@ -885,7 +936,7 @@ export class WebSocketServer {
     }
 
     if (type === MessageType.AUTH_CHALLENGE_RESPONSE) {
-      await this.handleAuthChallengeResponse(session, payload as AuthChallengeResponsePayload, requestId);
+      await this.handleAuthChallengeResponse(session, payload, requestId);
       return;
     }
 
@@ -924,6 +975,8 @@ export class WebSocketServer {
         return;
       }
     }
+
+    if (!this.withinMessageBudget(session, type, requestId)) return;
 
     switch (type) {
       case MessageType.CHAT_REACTION_ADD:
@@ -1145,16 +1198,19 @@ export class WebSocketServer {
         await this.handleRoleUnassign(session, payload as RoleAssignPayload, requestId);
         break;
 
-      case MessageType.VOICE_JOIN:
-        if (session.isBot && !botVoiceJoinSchema.safeParse(payload).success) {
-          this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Invalid voice join.', requestId);
+      case MessageType.VOICE_JOIN: {
+        const join = session.isBot ? botVoiceJoinSchema.safeParse(payload) : voiceJoinSchema.safeParse(payload);
+        if (!join.success) {
+          this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST,
+            session.isBot ? 'Invalid voice join.' : 'Pedido de entrada na chamada inválido.', requestId);
           return;
         }
         this.voiceReconnectGrants?.delete(session);
-        await this.handleVoiceJoin(session, payload as VoiceJoinPayload, requestId);
+        await this.handleVoiceJoin(session, join.data, requestId);
         if (session.sessionId) this.clearVoiceReturn(session.sessionId);
         void this.syncVoicePresenceVisibility();
         break;
+      }
 
       case MessageType.VOICE_RECONNECT: {
         const parsed = voiceReconnectSchema.safeParse(payload);
@@ -1178,7 +1234,7 @@ export class WebSocketServer {
         break;
 
       case MessageType.VOICE_STATE_UPDATE:
-        await this.handleVoiceStateUpdate(session, payload as VoiceStateUpdatePayload, requestId);
+        await this.handleVoiceStateUpdate(session, payload, requestId);
         break;
 
       case MessageType.VOICE_AFK:
@@ -1197,7 +1253,7 @@ export class WebSocketServer {
         break;
 
       case MessageType.RTC_DIAGNOSTICS_REPORT:
-        this.handleRtcDiagnosticsReport(session, payload as RtcDiagnosticsReportPayload);
+        this.handleRtcDiagnosticsReport(session, payload);
         break;
 
       case MessageType.SFU_GET_ROUTER_RTP_CAPABILITIES:
@@ -1212,12 +1268,12 @@ export class WebSocketServer {
 
       case MessageType.SFU_CONNECT_WEBRTC_TRANSPORT:
         if (!(await this.requireSfuMode(session, requestId))) return;
-        await this.handleSfuConnectWebRtcTransport(session, payload as SfuConnectWebRtcTransportPayload, requestId);
+        await this.handleSfuConnectWebRtcTransport(session, payload, requestId);
         break;
 
       case MessageType.SFU_PRODUCE:
         if (!(await this.requireSfuMode(session, requestId))) return;
-        await this.handleSfuProduce(session, payload as SfuProducePayload, requestId);
+        await this.handleSfuProduce(session, payload, requestId);
         break;
 
       case MessageType.SFU_CONSUME:
@@ -1292,30 +1348,42 @@ export class WebSocketServer {
         await this.handleAdminGetVoiceRestrictions(session, payload, requestId);
         break;
 
-      case MessageType.ADMIN_KICK_VOICE:
+      case MessageType.ADMIN_KICK_VOICE: {
         if (!(await this.requirePermission(session, Permission.KICK_MEMBERS, requestId))) return;
-        this.clearVoiceReturn((payload as AdminKickVoicePayload).targetSessionId);
-        {
-          const reconnecting = [...this.voiceReconnectGrants.entries()]
-            .find(([grantSession]) => grantSession.sessionId === (payload as AdminKickVoicePayload).targetSessionId);
-          if (this.cancelVoiceReconnect((payload as AdminKickVoicePayload).targetSessionId)
-            && !this.signalingService.getVoiceState((payload as AdminKickVoicePayload).targetSessionId)) {
-            this.broadcast({ type: MessageType.ADMIN_KICK_VOICE, requestId, payload });
-            const [kicked, grant] = reconnecting ?? [];
-            if (this.audit && kicked?.user) {
-              this.recordAudit(session, 'voice.disconnect', {
-                target: auditRef.member(kicked.user), related: { from: await this.auditChannel(grant?.channelId) },
-              });
-            }
-            break;
-          }
+        const kick = adminKickVoiceSchema.safeParse(payload);
+        if (!kick.success) {
+          this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Pedido de desconexão da chamada inválido.', requestId);
+          return;
         }
-        await this.handleAdminKickVoice(session, payload as AdminKickVoicePayload, requestId);
+        const { targetSessionId } = kick.data;
+        this.clearVoiceReturn(targetSessionId);
+        const reconnecting = [...this.voiceReconnectGrants.entries()]
+          .find(([grantSession]) => grantSession.sessionId === targetSessionId);
+        if (this.cancelVoiceReconnect(targetSessionId) && !this.signalingService.getVoiceState(targetSessionId)) {
+          this.broadcast({
+            type: MessageType.ADMIN_KICK_VOICE, requestId, payload: { targetSessionId } satisfies AdminKickVoicePayload,
+          });
+          const [kicked, grant] = reconnecting ?? [];
+          if (this.audit && kicked?.user) {
+            this.recordAudit(session, 'voice.disconnect', {
+              target: auditRef.member(kicked.user), related: { from: await this.auditChannel(grant?.channelId) },
+            });
+          }
+          break;
+        }
+        await this.handleAdminKickVoice(session, kick.data, requestId);
         break;
+      }
 
-      case MessageType.ADMIN_MOVE_USER:
-        await this.handleAdminMoveUser(session, payload as AdminMoveUserPayload, requestId);
+      case MessageType.ADMIN_MOVE_USER: {
+        const move = adminMoveUserSchema.safeParse(payload);
+        if (!move.success) {
+          this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Pedido para mover da chamada inválido.', requestId);
+          return;
+        }
+        await this.handleAdminMoveUser(session, move.data, requestId);
         break;
+      }
 
       case MessageType.MEMBER_KICK:
         if (!(await this.requirePermission(session, Permission.KICK_MEMBERS, requestId))) return;
@@ -1556,10 +1624,16 @@ export class WebSocketServer {
 
   private async handleAuthChallengeResponse(
     session: ClientSession,
-    payload: AuthChallengeResponsePayload,
+    payload: unknown,
     requestId?: string
   ): Promise<void> {
-    const result = await this.authService.verifyChallengeResponse(session.ws, payload.signature);
+    // A malformed answer is the client's mistake, not a server failure to log with a stack.
+    const signature = payload !== null && typeof payload === 'object' && 'signature' in payload ? payload.signature : undefined;
+    if (typeof signature !== 'string') {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Resposta de autenticação inválida.', requestId);
+      return;
+    }
+    const result = await this.authService.verifyChallengeResponse(session.ws, signature);
     if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
 
     if (!result.success || !result.user || !result.serverDetails) {
@@ -1584,6 +1658,7 @@ export class WebSocketServer {
     }
 
     session.user = result.user;
+    this.settleAnonymous(session);
     const sessionId = result.user.sessionId!;
     session.sessionId = sessionId;
     session.invisible = result.appearOffline === true;
@@ -1909,6 +1984,7 @@ export class WebSocketServer {
     };
 
     session.user = botUser;
+    this.settleAnonymous(session);
     session.sessionId = sessionId;
     session.isBot = true;
     session.botId = botRecord.id;
@@ -4130,7 +4206,7 @@ export class WebSocketServer {
     payload: SoundboardPlayPayload,
     requestId?: string
   ): Promise<void> {
-    if (!session.user) return;
+    if (!session.user || !session.sessionId) return;
 
     // Check if soundboard is allowed on the server
     const server = await this.serverRepo.getServer();
@@ -4150,6 +4226,12 @@ export class WebSocketServer {
 
     if (!payload?.channelId) {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Dados de som inválidos', requestId);
+      return;
+    }
+    // A sound belongs to the call its author is in. Naming any other channel,
+    // a text one included, used to reach everyone online when nobody was there.
+    if (this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Entre na chamada deste canal para tocar sons.', requestId);
       return;
     }
     // The AFK room silences everyone inside it, the Soundboard included.
@@ -4181,25 +4263,16 @@ export class WebSocketServer {
       mimeType: audio.mimeType,
     };
 
-    // Broadcast SOUNDBOARD_PLAYED to participants in this channel
-    const participants = this.signalingService.getParticipantsInChannel(payload.channelId);
-    if (participants.length > 0) {
-      for (const p of participants) {
-        const sock = this.sessionSockets.get(p.sessionId);
-        if (sock && sock.readyState === WebSocket.OPEN) {
-          this.send(sock, {
-            type: MessageType.SOUNDBOARD_PLAYED,
-            requestId,
-            payload: broadcastPayload,
-          });
-        }
+    // Only the participants of that call hear it, the author included.
+    for (const p of this.signalingService.getParticipantsInChannel(payload.channelId)) {
+      const sock = this.sessionSockets.get(p.sessionId);
+      if (sock && sock.readyState === WebSocket.OPEN) {
+        this.send(sock, {
+          type: MessageType.SOUNDBOARD_PLAYED,
+          requestId,
+          payload: broadcastPayload,
+        });
       }
-    } else {
-      this.broadcast({
-        type: MessageType.SOUNDBOARD_PLAYED,
-        requestId,
-        payload: broadcastPayload,
-      });
     }
 
     Logger.info('SOUNDBOARD', `User ${session.user.nickname} played sound "${audio.soundName}" in channel ${payload.channelId}`);
@@ -4577,29 +4650,36 @@ export class WebSocketServer {
 
   private async handleVoiceStateUpdate(
     session: ClientSession,
-    payload: VoiceStateUpdatePayload,
+    value: unknown,
     requestId?: string
   ): Promise<void> {
     const sessionId = session.sessionId;
     if (!session.user || !sessionId) return;
 
     const current = this.signalingService.getVoiceState(sessionId);
-    if (session.isBot && (!current || !botVoiceStateUpdateSchema.safeParse(payload).success ||
+    if (session.isBot && (!current || !botVoiceStateUpdateSchema.safeParse(value).success ||
         (!this.isCurrentBotOperation(session, 'publish_voice') && !this.isCurrentBotOperation(session, 'receive_voice')))) {
       this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bot voice state update is not permitted.', requestId);
       return;
     }
-    const effectivePayload: VoiceStateUpdatePayload = { ...payload };
-    if (payload?.nativeScreenShares !== undefined) {
-      const parsed = nativeScreenSourcesSchema.safeParse(payload.nativeScreenShares);
-      const shareIds = payload.isScreenSharing === false ? [] : (payload.screenShareIds ?? current?.screenShareIds ?? []);
-      if (!parsed.success || !Array.isArray(shareIds)
-        || parsed.data.some(source => !shareIds.includes(source.shareId))
-        || (session.isBot && parsed.data.length > 0)) {
+    // The state is replayed to the whole room and to every login that sees it:
+    // only known fields of the right type may land there.
+    const parsed = voiceStateUpdateSchema.safeParse(value);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Atualização do estado de voz inválida.', requestId);
+      return;
+    }
+    const { nativeScreenShares, ...fields } = parsed.data;
+    const effectivePayload: VoiceStateUpdatePayload = { ...fields };
+    if (nativeScreenShares !== undefined) {
+      const sources = nativeScreenSourcesSchema.safeParse(nativeScreenShares);
+      const shareIds = fields.isScreenSharing === false ? [] : (fields.screenShareIds ?? current?.screenShareIds ?? []);
+      if (!sources.success || sources.data.some(source => !shareIds.includes(source.shareId))
+        || (session.isBot && sources.data.length > 0)) {
         this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Descritores de transmissão inválidos.', requestId);
         return;
       }
-      effectivePayload.nativeScreenShares = parsed.data;
+      effectivePayload.nativeScreenShares = sources.data;
     }
     if (current?.serverMuted || current?.permissionMuted || (session.isBot && !this.isCurrentBotOperation(session, 'publish_voice'))) {
       effectivePayload.isSpeaking = false;
@@ -4944,9 +5024,10 @@ export class WebSocketServer {
           rtpCapabilities,
         } satisfies SfuRouterRtpCapabilitiesPayload,
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(`[SFU Server:WS] Error getting router capabilities for ${session.user.nickname}:`, err);
-      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, err?.message || 'Erro ao obter capacidades do roteador SFU', requestId);
+      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR,
+        err instanceof Error && err.message ? err.message : 'Erro ao obter capacidades do roteador SFU', requestId);
     }
   }
 
@@ -5052,20 +5133,27 @@ export class WebSocketServer {
           transportOptions,
         } satisfies SfuWebRtcTransportCreatedPayload,
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(`[SFU Server:WS] Error creating transport for ${session.user.nickname}:`, err);
-      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, err?.message || 'Erro ao criar transporte SFU', requestId);
+      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR,
+        err instanceof Error && err.message ? err.message : 'Erro ao criar transporte SFU', requestId);
     }
   }
 
   private async handleSfuConnectWebRtcTransport(
     session: ClientSession,
-    payload: SfuConnectWebRtcTransportPayload,
+    value: unknown,
     requestId?: string
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
+    const parsed = sfuConnectWebRtcTransportSchema.safeParse(value);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Pedido de conexão de transporte inválido.', requestId);
+      return;
+    }
+    const payload = parsed.data;
     if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId, payload.transportId))) return;
-    if (!this.requireSfuVoiceSession(session, payload?.channelId, requestId)) return;
+    if (!this.requireSfuVoiceSession(session, payload.channelId, requestId)) return;
     if (!this.sfuManager.ownsTransport(session.sessionId, payload.channelId, payload.transportId)) {
       this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Transporte não pertence a esta sessão.', requestId);
       return;
@@ -5081,28 +5169,35 @@ export class WebSocketServer {
           transportId: payload.transportId,
         },
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(`[SFU Server:WS] Error connecting transport ${payload.transportId} for ${session.user.nickname}:`, err);
-      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, err?.message || 'Erro ao conectar transporte SFU', requestId);
+      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR,
+        err instanceof Error && err.message ? err.message : 'Erro ao conectar transporte SFU', requestId);
     }
   }
 
   private async handleSfuProduce(
     session: ClientSession,
-    payload: SfuProducePayload,
+    value: unknown,
     requestId?: string
   ): Promise<void> {
     const sessionId = session.sessionId;
     if (!session.user || !sessionId) return;
+    const parsed = sfuProduceSchema.safeParse(value);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Pedido de produção de mídia inválido.', requestId);
+      return;
+    }
+    const payload = parsed.data;
     if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId, payload.transportId, 'send'))) return;
-    if (!this.requireSfuVoiceSession(session, payload?.channelId, requestId)) return;
+    if (!this.requireSfuVoiceSession(session, payload.channelId, requestId)) return;
+    const appData = sfuMediaAppDataSchema.safeParse(payload.appData);
     const voiceRestrictions = session.isBot ? this.signalingService.getVoiceRestrictions(session.user.id) : undefined;
-    if (session.isBot && (payload.kind !== 'audio' || payload.appData?.mediaType !== 'mic' ||
+    if (session.isBot && (payload.kind !== 'audio' || !appData.success || appData.data.mediaType !== 'mic' ||
         voiceRestrictions?.serverMuted || voiceRestrictions?.serverDeafened)) {
       this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bot microphone is not permitted.', requestId);
       return;
     }
-    const appData = sfuMediaAppDataSchema.safeParse(payload.appData);
     if (!appData.success || payload.kind !== (
       appData.data.mediaType === 'mic' || appData.data.mediaType === 'screen_audio' ? 'audio' : 'video')) {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Tipo ou origem da mídia inválidos.', requestId);
@@ -5130,7 +5225,7 @@ export class WebSocketServer {
       return;
     }
     try {
-      console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) producing ${payload.kind} (${payload.appData?.mediaType}) in channel ${payload.channelId}`);
+      console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) producing ${payload.kind} (${appData.data.mediaType}) in channel ${payload.channelId}`);
       const { id } = await this.sfuManager.produce(
         sessionId,
         payload.channelId,
@@ -5171,7 +5266,7 @@ export class WebSocketServer {
         if (p.sessionId === session.sessionId) continue;
         const recipient = this.findSessionById(p.sessionId);
         if (recipient?.isBot && (!this.isCurrentBotVoiceReceiver(recipient, payload.channelId) ||
-            session.isBot || payload.kind !== 'audio' || payload.appData?.mediaType !== 'mic')) continue;
+            session.isBot || payload.kind !== 'audio' || appData.data.mediaType !== 'mic')) continue;
         const sock = this.sessionSockets.get(p.sessionId);
         if (sock && sock.readyState === WebSocket.OPEN) {
           this.send(sock, {
@@ -5180,9 +5275,15 @@ export class WebSocketServer {
           });
         }
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
+      if (err instanceof SfuProducerLimitError) {
+        this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST,
+          'Esta mídia já está sendo transmitida. Encerre a anterior antes de iniciar outra.', requestId);
+        return;
+      }
       console.error(`[SFU Server:WS] Error producing for ${session.user.nickname}:`, err);
-      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, err?.message || 'Erro ao produzir mídia no SFU', requestId);
+      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR,
+        err instanceof Error && err.message ? err.message : 'Erro ao produzir mídia no SFU', requestId);
     }
   }
 
@@ -5466,17 +5567,19 @@ export class WebSocketServer {
     }
   }
 
-  private handleRtcDiagnosticsReport(
-    session: ClientSession,
-    payload: RtcDiagnosticsReportPayload
-  ): void {
+  private handleRtcDiagnosticsReport(session: ClientSession, value: unknown): void {
     if (!session.user || !session.sessionId) return;
+    // A report only ever becomes one log line, so anything that would not be a
+    // short printable one is dropped unanswered, like an excess of reports.
+    const parsed = rtcDiagnosticsReportSchema.safeParse(value);
+    if (!parsed.success) return;
+    const payload = parsed.data;
 
     const targetSession = this.findSessionById(payload.targetSessionId);
     const fromName = session.user.nickname;
     const toName = targetSession?.user?.nickname ?? payload.targetSessionId;
 
-    const fmtCandidate = (c: RtcDiagnosticsReportPayload['localCandidate']): string => {
+    const fmtCandidate = (c: typeof payload.localCandidate): string => {
       if (!c) return 'none';
       const addr = c.address ? `${c.address}:${c.port ?? '?'}` : 'unknown';
       return `${c.type} ${addr} (${c.protocol ?? '?'})`;
@@ -6001,7 +6104,10 @@ export class WebSocketServer {
     // the SFU has to be reaped from here (#527).
     this.closeSfuSession(previous.sessionId, previous.channelId);
 
-    this.broadcast({ type: MessageType.ADMIN_KICK_VOICE, requestId, payload });
+    this.broadcast({
+      type: MessageType.ADMIN_KICK_VOICE, requestId,
+      payload: { targetSessionId: previous.sessionId } satisfies AdminKickVoicePayload,
+    });
     this.broadcast({
       type: MessageType.VOICE_USER_LEFT,
       requestId,
@@ -6235,6 +6341,7 @@ export class WebSocketServer {
   }
 
   private handleDisconnect(session: ClientSession): void {
+    this.settleAnonymous(session);
     session.botVoiceJoinAttempt = undefined;
     session.botVoiceGrant = undefined;
     this.voiceReconnectGrants?.delete(session);
@@ -6423,15 +6530,50 @@ export class WebSocketServer {
     }, LIMITS.HEARTBEAT_INTERVAL_MS);
   }
 
+  /** The connection authenticated or is gone: it stops counting as anonymous. */
+  private settleAnonymous(session: ClientSession): void {
+    clearTimeout(session.authDeadline);
+    session.authDeadline = undefined;
+    if (!session.countedAnonymous) return;
+    session.countedAnonymous = false;
+    this.anonymousSessions.delete(session);
+    const address = clientAddress(session.ip);
+    if (address === undefined) return;
+    const remaining = (this.anonymousPerAddress.get(address) ?? 1) - 1;
+    if (remaining > 0) this.anonymousPerAddress.set(address, remaining);
+    else this.anonymousPerAddress.delete(address);
+  }
+
   public send(ws: WebSocket, message: ProtocolMessage): void {
     const session = this.sessions.get(ws);
     if (ws.readyState === WebSocket.OPEN && (!session || this.canDeliverBotEvent(session, message))) {
+      // A recipient that stopped reading would make the server hold everything
+      // sent to it in memory. It is dropped instead, and resynchronizes when it
+      // reconnects; a late sound is simply skipped before that point.
+      if (ws.bufferedAmount > WebSocketServer.flowLimits.OUTBOUND_MAX_BYTES) {
+        Logger.warn('NETWORK', `Closing a connection that stopped reading: ${session?.user?.nickname ?? session?.ip ?? 'unknown'}`);
+        ws.terminate();
+        return;
+      }
+      if (DISCARDABLE_MESSAGES.has(message.type) && ws.bufferedAmount > WebSocketServer.flowLimits.OUTBOUND_DISCARDABLE_BYTES) return;
       const projected = session?.user ? this.projectScreenMessage(session, message) : message;
       if (!projected) return;
       const polls = session && !session.protocol?.features.includes('poll-voters') ? projectLegacyPolls(projected) : projected;
       ws.send(JSON.stringify(session && !session.protocol?.features.includes('message-forward')
         ? projectLegacyForwards(polls) : polls));
     }
+  }
+
+  /** Per-person budget of the expensive messages listed in MESSAGE_BUDGETS. */
+  private withinMessageBudget(session: ClientSession, type: MessageType, requestId?: string): boolean {
+    const budget = MESSAGE_BUDGETS.get(type);
+    if (!budget || !session.user) return true;
+    if (this.rateLimiter.checkLimit(`message:${type}:${session.user.id}`, budget.max, budget.windowMs)) return true;
+    if (!budget.silent) {
+      this.sendError(session.ws, ProtocolErrorCode.RATE_LIMITED,
+        'Muitas solicitações em pouco tempo. Aguarde um momento.', requestId);
+    }
+    return false;
   }
 
   private canDeliverBotEvent(session: ClientSession, message: ProtocolMessage): boolean {
@@ -7001,6 +7143,7 @@ export class WebSocketServer {
         this.voiceReconnectGrants.clear();
         for (const grant of this.voiceReturnGrants.values()) clearTimeout(grant.timer);
         this.voiceReturnGrants.clear();
+        for (const session of this.sessions.values()) this.settleAnonymous(session);
         if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
         this.heartbeatTimer = undefined;
         for (const timer of this.reconnectTimers.values()) clearTimeout(timer);

@@ -9,7 +9,7 @@ import { MessageType, ProtocolErrorCode, SCREEN_SHARE_LIMITS, nativeScreenSignal
   type VoiceStateChangedPayload } from '@monky/shared';
 import { SignalingService } from './application/services/SignalingService';
 import type { ChannelRecord } from './domain/entities';
-import { SfuManager, SfuProducerClosedError } from './infrastructure/sfu/SfuManager';
+import { SfuManager, SfuProducerClosedError, SfuProducerLimitError } from './infrastructure/sfu/SfuManager';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
 
 function gate() {
@@ -28,17 +28,17 @@ function sfuFixture() {
   let sequence = 0;
   const router: Partial<SfuTypes.Router> = { canConsume: () => true };
   manager['getOrCreateRouter'] = async () => router as SfuTypes.Router;
-  for (const [producerId, mediaType, kind, shareId] of [
-    ['video-one', 'screen_video', 'video', 'one'],
-    ['video-two', 'screen_video', 'video', 'two'],
-    ['system-audio', 'screen_audio', 'audio', 'default'],
-    ['mic', 'mic', 'audio', undefined],
-    ['camera', 'camera', 'video', undefined],
+  for (const [producerId, kind, appData] of [
+    ['video-one', 'video', { mediaType: 'screen_video', shareId: 'one' }],
+    ['video-two', 'video', { mediaType: 'screen_video', shareId: 'two' }],
+    ['system-audio', 'audio', { mediaType: 'screen_audio', shareId: 'default' }],
+    ['mic', 'audio', { mediaType: 'mic' }],
+    ['camera', 'video', { mediaType: 'camera' }],
   ] as const) {
     const producer: Partial<SfuTypes.Producer> = { id: producerId, closed: false, close() {} };
     manager['producers'].set(producerId, {
       producer: producer as SfuTypes.Producer, transportId: 'send-publisher', sessionId: 'publisher', channelId: 'room', kind,
-      appData: { mediaType, ...(shareId ? { shareId } : {}) },
+      appData,
     });
   }
   const addReceiver = (sessionId: string, purpose: RtcTransportPurpose = 'call') => {
@@ -313,6 +313,49 @@ test('native SFU dedicated screen transports reject mic/camera before worker I/O
   f.manager.close();
 });
 
+test('a session keeps at most one live producer per slot of a transport, and a bounded total', async () => {
+  const f = sfuFixture();
+  const call = f.addSender('publisher');
+  // The fixture already publishes this session's microphone, camera and screen "one" here.
+  for (const appData of [{ mediaType: 'mic' }, { mediaType: 'camera' }, { mediaType: 'screen_video', shareId: 'one' }] as const) {
+    await assert.rejects(f.manager.produce('publisher', 'room', call, appData.mediaType === 'mic' ? 'audio' : 'video',
+      { codecs: [] }, appData), SfuProducerLimitError);
+  }
+  assert.equal(f.produced.length, 0, 'refused before worker I/O');
+  // Switching devices closes the old producer first, which frees its slot.
+  f.manager.closeProducer('mic');
+  await f.manager.produce('publisher', 'room', call, 'audio', { codecs: [] }, { mediaType: 'mic' });
+  await f.manager.produce('viewer-a', 'room', f.addSender('viewer-a'), 'audio', { codecs: [] }, { mediaType: 'mic' });
+  const rendition = f.addSender('publisher', 'screen', 'rendition-1');
+  await f.manager.produce('publisher', 'room', rendition, 'video', { codecs: [] }, { mediaType: 'screen_video', shareId: 'one' });
+
+  // A duplicate racing the first one is caught once the worker answers, and closed.
+  const started = gate(), release = gate();
+  f.delayCreate(async () => { started.release(); await release.promise; });
+  const first = f.manager.produce('publisher', 'room', rendition, 'audio', { codecs: [] }, { mediaType: 'screen_audio', shareId: 'one' });
+  const duplicate = f.manager.produce('publisher', 'room', rendition, 'audio', { codecs: [] }, { mediaType: 'screen_audio', shareId: 'one' });
+  await started.promise;
+  release.release();
+  await first;
+  await assert.rejects(duplicate, SfuProducerLimitError);
+  assert.equal(f.produced.at(-1)?.closed, true);
+  f.delayCreate(async () => {});
+
+  const live = () => [...f.manager['producers'].values()]
+    .filter(record => record.sessionId === 'publisher' && record.channelId === 'room').length;
+  let refused = false;
+  for (let share = 0; share < 100 && !refused; share++) {
+    await f.manager.produce('publisher', 'room', call, 'video', { codecs: [] },
+      { mediaType: 'screen_video', shareId: `share-${share}` }).catch((error: unknown) => {
+      assert.ok(error instanceof SfuProducerLimitError);
+      refused = true;
+    });
+  }
+  assert.equal(refused, true);
+  assert.equal(live(), 2 + SCREEN_SHARE_LIMITS.maximum * 4 * 2, 'one microphone, one camera and every rendition of every screen');
+  f.manager.close();
+});
+
 for (const replaced of ['call', 'screen'] as const) {
   test(`native SFU pending screen production survives only replacement of the other purpose (${replaced})`, async () => {
     const f = sfuFixture();
@@ -491,6 +534,8 @@ test('native SFU producer pause controls are limited to owned screen media', asy
   const screen = f.addSender('publisher', 'screen'), call = f.addSender('publisher');
   const video = await f.manager.produce('publisher', 'room', screen, 'video', { codecs: [] },
     { mediaType: 'screen_video', shareId: 'one' });
+  // Like a real client, the fixture's camera is closed before another is made.
+  f.manager.closeProducer('camera');
   const camera = await f.manager.produce('publisher', 'room', call, 'video', { codecs: [] }, { mediaType: 'camera' });
   await assert.rejects(f.manager.setProducerPaused('other', 'room', video.id, true), /owned screen/u);
   await assert.rejects(f.manager.setProducerPaused('publisher', 'other-room', video.id, true), /owned screen/u);
@@ -1391,6 +1436,8 @@ test('native SFU publications match their announced profile and exact engine tra
   await f.server['handleMessage'](publisher, { type: MessageType.SFU_PRODUCE, payload });
   assert.equal(f.produced.length, 1);
   assert.equal(f.sent.filter(value => value.type === MessageType.SFU_NEW_PRODUCER).length, 2);
+  // The engine closes a rendition's producer before publishing that rendition again.
+  f.manager.closeProducer(f.produced[0].id);
   const starting = gate(), resume = gate();
   f.delayCreate(async () => { starting.release(); await resume.promise; });
   const opening = f.server['handleMessage'](publisher, { type: MessageType.SFU_PRODUCE, payload });

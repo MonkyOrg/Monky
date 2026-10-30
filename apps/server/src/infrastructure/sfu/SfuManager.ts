@@ -4,7 +4,7 @@ import dgram from 'dgram';
 import * as mediasoup from 'mediasoup';
 import type { RouterRtpCodecCapability, TransportListenInfo } from 'mediasoup/node/lib/types.js';
 import { LIMITS, SCREEN_SHARE_LIMITS, aggregateTransportHealth, VoiceConnectionHealth, type RtcTransportPurpose,
-  sfuCreateWebRtcTransportSchema, nativeScreenRenditionSchema } from '@monky/shared';
+  type SfuMediaAppData, sfuCreateWebRtcTransportSchema, nativeScreenRenditionSchema } from '@monky/shared';
 import { getPublicIp } from '../discovery/ServerIpScanner';
 import { describeFailure } from '../lifecycle/ServerResourceScope';
 
@@ -83,7 +83,7 @@ export interface SfuProducerRecord {
   sessionId: string;
   channelId: string;
   kind: 'audio' | 'video';
-  appData: Record<string, any>;
+  appData: SfuMediaAppData;
 }
 
 export interface SfuConsumerRecord {
@@ -157,7 +157,32 @@ export class SfuProducerClosedError extends Error {
   }
 }
 
-function isScreenMedia(appData: Record<string, unknown>): boolean {
+/** Publishing more than a session may, which no client does on its own. */
+export class SfuProducerLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SfuProducerLimitError';
+  }
+}
+
+/**
+ * What one session may publish at once in a call: a microphone, a camera and,
+ * for each screen, a video and an audio per rendition. Every producer is
+ * announced to the room and auto-consumed, so this bounds what one client
+ * makes everyone else receive.
+ */
+const MAX_PRODUCERS_PER_SESSION = 2 + SCREEN_SHARE_LIMITS.maximum * 4 * 2;
+
+/**
+ * Clients swap devices with replaceTrack and close a producer before making its
+ * successor, so a second live one in the same slot of a transport is never
+ * legitimate. Each native rendition has a transport of its own.
+ */
+function producerSlot(transportId: string, appData: SfuMediaAppData): string {
+  return 'shareId' in appData ? `${transportId}:${appData.mediaType}:${appData.shareId}` : `${transportId}:${appData.mediaType}`;
+}
+
+function isScreenMedia(appData: SfuMediaAppData): boolean {
   return appData.mediaType === 'screen_video' || appData.mediaType === 'screen_audio';
 }
 
@@ -708,13 +733,13 @@ export class SfuManager {
     producerId: string;
     producerSessionId: string;
     kind: 'audio' | 'video';
-    appData: Record<string, any>;
+    appData: SfuMediaAppData;
   }> {
     const list: Array<{
       producerId: string;
       producerSessionId: string;
       kind: 'audio' | 'video';
-      appData: Record<string, any>;
+      appData: SfuMediaAppData;
     }> = [];
 
     for (const [producerId, p] of this.producers.entries()) {
@@ -750,7 +775,7 @@ export class SfuManager {
     transportId: string,
     kind: 'audio' | 'video',
     rtpParameters: mediasoup.types.RtpParameters,
-    appData: Record<string, unknown> = {},
+    appData: SfuMediaAppData,
     paused = false
   ): Promise<{ id: string }> {
     const record = this.transports.get(transportId);
@@ -763,13 +788,14 @@ export class SfuManager {
     if (record.purpose === 'screen' && !isScreenMedia(appData)) {
       throw new Error('Screen transport only accepts screen video and screen audio');
     }
-    if (appData.nativeScreen !== undefined) {
+    if ('nativeScreen' in appData && appData.nativeScreen !== undefined) {
       const nativeScreen = nativeScreenRenditionSchema.parse(appData.nativeScreen);
       if (record.purpose !== 'screen' || record.screenSessionId !== nativeScreen.pipelineId || !isScreenMedia(appData)) {
         throw new Error('Native screen media must belong to its own rendition transport');
       }
     }
 
+    this.assertProducerFits(sessionId, channelId, transportId, appData);
     const producer = await record.transport.produce({
       kind,
       rtpParameters,
@@ -779,6 +805,12 @@ export class SfuManager {
     if (this.transports.get(transportId) !== record || record.transport.closed) {
       producer.close();
       throw new Error('Producer transport was closed during setup');
+    }
+    try {
+      this.assertProducerFits(sessionId, channelId, transportId, appData);
+    } catch (error) {
+      producer.close();
+      throw error;
     }
 
     console.log(`[SFU Server] Producer created ${producer.id} (${kind}, mediaType: ${appData?.mediaType || 'unknown'}) on transport ${transportId} for session ${sessionId}`);
@@ -805,6 +837,20 @@ export class SfuManager {
     return { id: producer.id };
   }
 
+  /** Refuses a producer beyond what one session may publish; see MAX_PRODUCERS_PER_SESSION. */
+  private assertProducerFits(sessionId: string, channelId: string, transportId: string, appData: SfuMediaAppData): void {
+    const slot = producerSlot(transportId, appData);
+    let live = 0;
+    for (const record of this.producers.values()) {
+      if (record.sessionId !== sessionId || record.channelId !== channelId || record.producer.closed) continue;
+      if (producerSlot(record.transportId, record.appData) === slot) {
+        throw new SfuProducerLimitError(`This session already publishes ${appData.mediaType} on this transport`);
+      }
+      live++;
+    }
+    if (live >= MAX_PRODUCERS_PER_SESSION) throw new SfuProducerLimitError('Too many producers for this voice session');
+  }
+
   public async consume(
     sessionId: string,
     channelId: string,
@@ -817,7 +863,7 @@ export class SfuManager {
     kind: 'audio' | 'video';
     rtpParameters: mediasoup.types.RtpParameters;
     producerSessionId: string;
-    appData: Record<string, any>;
+    appData: SfuMediaAppData;
   }> {
     const transportRecord = this.transports.get(transportId);
     if (!transportRecord) {

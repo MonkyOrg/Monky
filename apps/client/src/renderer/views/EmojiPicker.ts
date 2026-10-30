@@ -564,11 +564,9 @@ export class EmojiPicker {
     if (all.length === 0) {
       body.innerHTML = this.stickersLoading
         ? this.renderEmptyState('hourglass_top', t('emojiPicker.loadingStickers'), '')
-        : this.renderEmptyState(
-            'image_not_supported',
-            t('emojiPicker.emptyFolderTitle'),
-            t('emojiPicker.emptyFolderDesc')
-          );
+        : stickerService.didListingFail()
+          ? this.renderEmptyState('folder_off', t('emojiPicker.folderUnavailableTitle'), t('emojiPicker.folderUnavailableDesc'))
+          : this.renderEmptyState('image_not_supported', t('emojiPicker.emptyFolderTitle'), t('emojiPicker.emptyFolderDesc'));
     } else if (visible.length === 0) {
       body.innerHTML = this.renderEmptyState('search_off', t('emojiPicker.noResults'), '');
     } else {

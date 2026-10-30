@@ -146,6 +146,7 @@ export async function configurationMenu(context: CliContext): Promise<void> {
         ] : [
           choice(context, 'publicHost', 'IP ou domínio público', 'Public IP or domain'),
           choice(context, 'servePort', 'Porta do manifest', 'Manifest port'),
+          choice(context, 'publicUrl', 'URL pública HTTPS do proxy (clear remove)', 'Public HTTPS proxy URL (clear removes it)'),
         ]),
         choice(context, 'back', 'Voltar', 'Back'),
       ];

@@ -11,6 +11,7 @@ import {
   validateBotName,
   validateBotToken,
   validatePublicHost,
+  validatePublicUrl,
   validateServerUrl,
   validateServePort,
   validateTokenEnv,
@@ -145,6 +146,8 @@ function parseLogsOptions(args: string[]): { lines: number; follow: boolean } {
 }
 
 function applyConfigChange(context: CliContext, config: BotConfig, key: string, value: string): BotConfig {
+  // Changing another marketplace field keeps the public URL; leaving marketplace mode drops it.
+  const publicUrl = config.mode === 'marketplace' ? config.publicUrl : undefined;
   if (key === 'mode') {
     if (value === 'manual') {
       return manualConfig(context, config.mode === 'manual' ? config : {
@@ -158,6 +161,7 @@ function applyConfigChange(context: CliContext, config: BotConfig, key: string, 
         botDir: config.botDir,
         servePort: config.mode === 'marketplace' ? config.servePort : DEFAULT_MARKETPLACE_PORT,
         publicHost: config.mode === 'marketplace' ? config.publicHost : 'localhost',
+        publicUrl,
       });
     }
     throw new CliError('mode deve ser "manual" ou "marketplace".', 'mode must be "manual" or "marketplace".');
@@ -200,6 +204,7 @@ function applyConfigChange(context: CliContext, config: BotConfig, key: string, 
       botDir: config.botDir,
       servePort: validateServePort(value),
       publicHost: config.mode === 'marketplace' ? config.publicHost : 'localhost',
+      publicUrl,
     });
   }
   if (key === 'public-host') {
@@ -208,6 +213,21 @@ function applyConfigChange(context: CliContext, config: BotConfig, key: string, 
       botDir: config.botDir,
       servePort: config.mode === 'marketplace' ? config.servePort : DEFAULT_MARKETPLACE_PORT,
       publicHost: validatePublicHost(value),
+      publicUrl,
+    });
+  }
+  if (key === 'public-url') {
+    if (value === 'clear') {
+      if (config.mode !== 'marketplace') return config;
+      const { publicUrl: _removed, ...withoutPublicUrl } = config;
+      return withoutPublicUrl;
+    }
+    return marketplaceConfig(context, {
+      botName: config.botName,
+      botDir: config.botDir,
+      servePort: config.mode === 'marketplace' ? config.servePort : DEFAULT_MARKETPLACE_PORT,
+      publicHost: config.mode === 'marketplace' ? config.publicHost : 'localhost',
+      publicUrl: validatePublicUrl(value),
     });
   }
   throw new CliError('Chave de configuração desconhecida.', 'Unknown config key.');
@@ -222,6 +242,7 @@ function normalizedConfigKey(key: string): string {
     tokenEnv: 'token-env',
     servePort: 'serve-port',
     publicHost: 'public-host',
+    publicUrl: 'public-url',
   };
   return aliases[key] ?? key;
 }
@@ -411,8 +432,8 @@ export async function configCommand(context: CliContext, args: string[]): Promis
   const key = normalizedConfigKey(args[1] ?? '');
   const value = args.slice(2).join(' ').trim();
   if (!key || !value) {
-    throw new CliError(`Uso: ${context.cliName} config set <mode|botName|botDir|serverUrl|botToken|tokenEnv|servePort|publicHost> <valor>`,
-      `Usage: ${context.cliName} config set <mode|botName|botDir|serverUrl|botToken|tokenEnv|servePort|publicHost> <value>`);
+    throw new CliError(`Uso: ${context.cliName} config set <mode|botName|botDir|serverUrl|botToken|tokenEnv|servePort|publicHost|publicUrl> <valor>`,
+      `Usage: ${context.cliName} config set <mode|botName|botDir|serverUrl|botToken|tokenEnv|servePort|publicHost|publicUrl> <value>`);
   }
   const next = applyConfigChange(context, config, key, value);
   if (next.mode === 'marketplace' &&

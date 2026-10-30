@@ -195,6 +195,13 @@ export interface IAttachmentRepository {
   deleteById(id: string): Promise<void>;
   /** All on-disk filenames still referenced by non-evicted rows (reconciliation). */
   listActiveFilenames(): Promise<string[]>;
+  /** Everything posted in a channel and, for a forum, in its topics. */
+  listByChannelWithTopics(channelId: string): Promise<AttachmentRecord[]>;
+  /**
+   * Rows nothing can show anymore: their channel (or a topic's forum) is gone,
+   * or their message is gone or deleted beyond its undo window at `now`.
+   */
+  listUnreachable(now: number): Promise<AttachmentRecord[]>;
 }
 
 export interface IRoleRepository {

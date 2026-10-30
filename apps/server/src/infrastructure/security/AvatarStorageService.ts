@@ -108,7 +108,9 @@ export class AvatarStorageService {
 
   /**
    * Resolves an avatar filename to an on-disk file for the HTTP handler,
-   * guarding against path traversal. Returns null if the file does not exist.
+   * guarding against path traversal. Returns null unless it is a regular file:
+   * `/avatars/.` named the folder itself, and serving it crashed the server
+   * (S-WS-1).
    */
   public getAvatarFile(filename: string): { filePath: string; mimeType: string } | null {
     if (!filename) return null;
@@ -119,7 +121,7 @@ export class AvatarStorageService {
     if (!resolved.startsWith(path.resolve(this.avatarsDir))) {
       return null;
     }
-    if (!fs.existsSync(filePath)) {
+    if (!isRegularFile(filePath)) {
       return null;
     }
 
@@ -159,5 +161,13 @@ export class AvatarStorageService {
     for (const filename of fs.readdirSync(this.avatarsDir)) {
       if (filename.startsWith(prefix)) this.deleteAvatar(filename);
     }
+  }
+}
+
+function isRegularFile(filePath: string): boolean {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
   }
 }

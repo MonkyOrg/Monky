@@ -886,6 +886,26 @@ export class SqliteAttachmentRepository implements IAttachmentRepository {
       .all() as { filename: string }[];
     return rows.map((r) => r.filename);
   }
+
+  async listByChannelWithTopics(channelId: string): Promise<AttachmentRecord[]> {
+    const rows = this.db
+      .prepare(`${SqliteAttachmentRepository.SELECT}
+        WHERE channel_id = ? OR channel_id IN (SELECT id FROM channels WHERE forum_parent_id = ?)`)
+      .all(channelId, channelId) as SqliteAttachmentRow[];
+    return rows.map((r) => this.map(r));
+  }
+
+  async listUnreachable(now: number): Promise<AttachmentRecord[]> {
+    const rows = this.db
+      .prepare(`${SqliteAttachmentRepository.SELECT}
+        WHERE NOT EXISTS (SELECT 1 FROM channels c WHERE c.id = message_attachments.channel_id
+            AND (c.forum_parent_id IS NULL OR EXISTS (SELECT 1 FROM channels f WHERE f.id = c.forum_parent_id)))
+          OR (message_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = message_attachments.message_id
+            AND (m.deleted_at IS NULL
+              OR EXISTS (SELECT 1 FROM message_deletion_backups b WHERE b.message_id = m.id AND b.expires_at > ?))))`)
+      .all(now) as SqliteAttachmentRow[];
+    return rows.map((r) => this.map(r));
+  }
 }
 
 interface SqliteRoleRow {

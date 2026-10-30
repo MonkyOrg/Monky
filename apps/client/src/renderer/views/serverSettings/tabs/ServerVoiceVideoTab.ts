@@ -1,6 +1,6 @@
 import { serverStore } from '../../../stores/serverStore';
 import { t, tCount } from '../../../i18n';
-import { escapeHtml } from '../../../utils/html';
+import { escapeHtml, html } from '../../../utils/html';
 import { afkChannelIdOf } from '../../../utils/voiceRooms';
 import { AFK_TIMEOUT_OPTIONS_SECONDS, LIMITS } from '@monky/shared';
 
@@ -98,10 +98,10 @@ export class ServerVoiceVideoTab {
         </div>
         <label for="input-recent-sounds-limit" style="display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 12px; font-size: 12px; color: var(--text-secondary);">
           <span>${t('serverSettings.recentSoundsLimit')}</span>
-          <input id="input-recent-sounds-limit" class="input-field" type="number"
+          ${html`<input id="input-recent-sounds-limit" class="input-field" type="number"
             min="${LIMITS.RECENT_SOUND_CACHE_MIN_LIMIT}" max="${LIMITS.RECENT_SOUND_CACHE_MAX_LIMIT}" step="1"
             value="${s.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT}"
-            style="width: 84px;" ${s.allowSoundboard === false || !s.recentSoundCacheEnabled ? 'disabled' : ''}>
+            style="width: 84px;" ${s.allowSoundboard === false || !s.recentSoundCacheEnabled ? 'disabled' : ''}>`}
         </label>
         <div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">${t('serverSettings.recentSoundsClearHint')}</div>
       </div>` : ''}

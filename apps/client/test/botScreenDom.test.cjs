@@ -186,6 +186,14 @@ if (!process.versions.electron) {
               response.end('<!doctype html><script>window.receivedBridge=false;addEventListener("message",event=>{if(event.ports.length)window.receivedBridge=true;});</script><p>Independent web page</p>');
               return;
             }
+            if (request.url === '/__slow') {
+              // Holds the miniapp's load event while its own script navigates away.
+              setTimeout(() => {
+                response.setHeader('Content-Type', 'image/gif');
+                response.end(Buffer.from('R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=', 'base64'));
+              }, 1500);
+              return;
+            }
             if (request.url.startsWith('/__leak')) {
               leaks++;
               response.setHeader('Access-Control-Allow-Origin', '*');
@@ -1186,6 +1194,32 @@ if (!process.versions.electron) {
     assert.equal(await run(aliceWindow, 'document.querySelector(".chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label")?.textContent'),
       'O miniapp "Hooks" foi encerrado.', 'A view open in the background still learns it ended');
     await waitUntil(() => frames(aliceWindow).length === 0, 'the ended document is released', 3000);
+
+    // A document that navigates before its own load makes the parent's first load the destination's:
+    // the bridge port is only ever offered to the miniapp's origin.
+    const raceOrigin = `http://localhost:${http.address().port}`;
+    const raceConsent = JSON.stringify({ policyVersion: BOT_SCREEN_PERMISSION_POLICY_VERSION,
+      serverKey: 'fixture', botId: 'bot', screenId: 'race', instanceId: 'race-instance' });
+    const raceHtml = JSON.stringify(`<img src="${raceOrigin}/__slow"><script>location.href = ${JSON.stringify(`${raceOrigin}/__destination`)};</script>`);
+    await run(aliceWindow, `(async () => {
+      const { BotScreenFrame } = await import('/views/BotScreenFrame.ts');
+      const screen = { id: 'race', instanceId: 'race-instance', creatorUserId: 'alice', botId: 'bot', channelId: 'voice',
+        title: 'Race', revision: 0, createdAt: 1, state: {}, html: ${raceHtml} };
+      window.raceFrame = new BotScreenFrame(screen, { id: 'alice', nickname: 'alice', locale: 'en' }, ${raceConsent},
+        () => {}, error => { window.raceError = String(error); });
+      document.body.append(window.raceFrame.element);
+    })()`);
+    let raced;
+    await waitFor(() => {
+      raced = aliceWindow.webContents.mainFrame.frames.find(frame => frameUrl(frame) === `${raceOrigin}/__destination`);
+      return !!raced;
+    }, 'a miniapp that navigates before its load');
+    await waitFor(async () => await run(aliceWindow, 'window.raceFrame.connected === true'), 'the bridge offered on the first load');
+    await sleep(300);
+    assert.equal(await raced.executeJavaScript('window.receivedBridge'), false,
+      'A page reached before the miniapp loaded never receives the bridge port');
+    assert.equal(await run(aliceWindow, 'window.raceError ?? null'), null);
+    await run(aliceWindow, 'window.raceFrame.destroy()');
 
     for (const window of windows) {
       assert.deepEqual(await run(window, 'window.screenFixture.errors'), [], 'No unhandled renderer lifecycle errors');

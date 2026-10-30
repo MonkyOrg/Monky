@@ -30,10 +30,12 @@ recognized on servers. See the precautions in
 [Getting started](/en/primeiros-passos#keep-an-identity-backup).
 
 **Servers and settings** exports a `.monkybackup` protected by your chosen
-password. Select what to include/restore; this data can also accompany an
+password, which follows the same rule as the identity export. Select what to
+include/restore; this data can also accompany an
 identity export. Saved servers can include passwords and are not written
 in plain text in this backup. Without the chosen password, the file cannot
-be recovered.
+be recovered. Files from earlier versions still open; new ones only open in an
+updated Monky, and an earlier version reports them as an invalid backup file.
 
 When exporting the identity, check **Friends** to bring your friend list and,
 optionally, **Conversation history** to bring your direct messages. Under
@@ -466,7 +468,11 @@ The soundboard automatically creates a default folder in your local Monky
 profile. You can change it under **Settings → Soundboard**; an existing folder
 selection is never replaced. For stickers, choose a folder in the corresponding
 tab. These are local libraries, not server folders. Configuring a folder does
-not upload all its files. See
+not upload all its files. Monky only reads sounds and stickers from folders
+chosen on this computer. A folder that arrived another way, such as by
+restoring a backup, is confirmed once: Monky asks when you open the soundboard
+or the stickers. If you decline, **Try again** (soundboard) or the reload-folder
+button (stickers) asks again; you can also choose another folder. See
 [Everyday Soundboard and sticker use](/en/usando-o-app#soundboard) for formats,
 sending and permissions.
 

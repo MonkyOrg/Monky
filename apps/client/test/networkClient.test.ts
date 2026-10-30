@@ -10,6 +10,8 @@ const identity = { clientId: 'fixture-client', publicKey: 'fixture-public-key' }
 
 function fixture(context: TestContext) {
   context.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 100_000 });
+  // The middle of the reconnect spread, so each retry lands exactly on its step.
+  const random = context.mock.method(Math, 'random', () => 0.5);
   const sockets: Socket[] = [];
   class Socket {
     static readonly OPEN = 1;
@@ -86,7 +88,7 @@ function fixture(context: TestContext) {
     await pending;
     statuses.length = 0;
   };
-  return { client, browser, Socket, sockets, statuses, lastSocket, connect, connected };
+  return { client, browser, Socket, sockets, statuses, lastSocket, connect, connected, random };
 }
 
 test('initial connection failure rejects without creating an automatic reconnect loop', async context => {
@@ -214,6 +216,30 @@ test('failed TCP and authentication attempts keep retrying until the server reco
   assert.equal(f.client['reconnectAttempt'], 0);
   assert.equal(f.statuses.includes('DISCONNECTED'), false);
   assert.equal(f.statuses.includes('CONNECTING'), false);
+});
+
+test('clients a restarting server drops together come back spread around each step of the ladder', async context => {
+  const f = fixture(context);
+  await f.connected();
+  const delays: number[] = [];
+  const off = appEvents.on<{ attempt: number; delay: number }>('network.reconnecting', ({ delay }) => { delays.push(delay); });
+  context.after(off);
+
+  f.random.mock.mockImplementation(() => 0);
+  f.lastSocket().drop();
+  context.mock.timers.tick(499);
+  assert.equal(f.sockets.length, 1);
+  context.mock.timers.tick(1);
+  assert.equal(f.sockets.length, 2, 'the earliest retry comes at half the first step');
+
+  f.random.mock.mockImplementation(() => 0.999);
+  f.lastSocket().drop();
+  await setImmediate();
+  context.mock.timers.tick(2997);
+  assert.equal(f.sockets.length, 2);
+  context.mock.timers.tick(1);
+  assert.equal(f.sockets.length, 3, 'the latest at one and a half of the next one');
+  assert.deepEqual(delays, [500, 2998]);
 });
 
 test('dial and authentication timeouts both advance the reconnect ladder', async context => {

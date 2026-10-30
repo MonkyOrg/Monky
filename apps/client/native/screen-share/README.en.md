@@ -752,6 +752,11 @@ build `screen-audio`**. It does not use experimental directories or execute
 `gclient` build hooks. Modified or incomplete source checkouts stop preparation;
 they are not silently reset or replaced.
 
+The venv gets httplib2 and six only from the wheels pinned in
+`scripts/native-rtc/pins.json`, on Windows and on macOS (`prepareMacRtc.cjs`):
+pip refuses a file whose SHA-256 differs. On Windows, if that install fails,
+the venv is removed so the next run provisions it again.
+
 Archive downloads allow up to three attempts for transient network/server
 failures, including aborted Windows connections (`ECONNABORTED`), with backoff
 and partial-file cleanup. Every completed attempt must

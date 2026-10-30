@@ -1,14 +1,14 @@
 import { EVERYONE_ROLE_ID, Permission, MessageType, type Role, type RoleUpdatePayload, type RolesListPayload } from '@monky/shared';
 import { serverStore } from '../../../stores/serverStore';
 import { getAvatarUrl } from '../../../utils/avatar';
-import { escapeHtml } from '../../../utils/html';
+import { escapeHtml, html } from '../../../utils/html';
 import { enterModal, exitModal, handlesModalKey } from '../../../utils/modalSurface';
 import { removeOwnedSurfaces } from '../../../utils/surfaceMotion';
 import { t } from '../../../i18n';
 import type { ServerSettingsContext } from '../ServerSettingsContext';
 import { filterServerMembers, ServerMembersTab } from './ServerMembersTab';
 import { ColorPicker } from '../../ColorPicker';
-import { COLOR_PRESETS } from '../../../utils/colors';
+import { COLOR_PRESETS, isHexColor } from '../../../utils/colors';
 import { ContextMenu } from '../../ContextMenu';
 import { showConfirm } from '../../Dialog';
 import { showSuccessToast } from '../../CopyToast';
@@ -144,18 +144,18 @@ export class ServerRolesTab {
       <td style="text-align: right;"><button type="button" class="role-actions-trigger" data-role-menu="${EVERYONE_ROLE_ID}"
         aria-label="${escapeHtml(t('roles.roleActions', { name: t('roles.everyone') }))}" aria-haspopup="menu" aria-expanded="false">
         <span class="material-symbols-outlined md-18" aria-hidden="true">more_horiz</span></button></td></tr>`;
-    return everyone + roles.map((role) => `
+    return everyone + roles.map((role) => html`
       <tr class="role-table-row" data-role-id="${role.id}" draggable="true">
         <td><div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
           <span class="material-symbols-outlined md-16" title="${t('roles.dragReorderHint')}" style="color: var(--text-muted); cursor: grab;">drag_indicator</span>
-          <span style="width: 12px; height: 12px; border-radius: 50%; background: ${role.color || 'var(--text-muted)'}; flex-shrink: 0;"></span>
-          <span style="font-size: 13px; font-weight: 600;">${escapeHtml(role.name)}</span>
-          ${role.isDefault ? `<span class="member-badge-you">${t('roles.autoBadge')}</span>` : ''}
+          <span style="width: 12px; height: 12px; border-radius: 50%; background: ${isHexColor(role.color) ? role.color : 'var(--text-muted)'}; flex-shrink: 0;"></span>
+          <span style="font-size: 13px; font-weight: 600;">${role.name}</span>
+          ${role.isDefault ? html`<span class="member-badge-you">${t('roles.autoBadge')}</span>` : ''}
         </div></td>
-        <td style="font-size: 12px;">${escapeHtml(this.describeRolePermissions(role))}</td>
+        <td style="font-size: 12px;">${this.describeRolePermissions(role)}</td>
         <td class="role-member-count" data-role-count="${role.id}">${members.filter((member) => serverStore.getUserRoleIds(member.id).includes(role.id)).length}</td>
         <td style="text-align: right;"><button type="button" class="role-actions-trigger" data-role-menu="${role.id}"
-          title="${t('common.moreOptions')}" aria-label="${escapeHtml(t('roles.roleActions', { name: role.name }))}" aria-haspopup="menu" aria-expanded="false">
+          title="${t('common.moreOptions')}" aria-label="${t('roles.roleActions', { name: role.name })}" aria-haspopup="menu" aria-expanded="false">
           <span class="material-symbols-outlined md-18" aria-hidden="true">more_horiz</span>
         </button></td>
       </tr>`).join('');
@@ -263,23 +263,23 @@ export class ServerRolesTab {
           <tbody>
             ${members.map((member) => {
               const offline = member.status === 'DISCONNECTED';
-              return `
-                <tr class="role-member-row" data-member-name="${escapeHtml(member.nickname)}">
+              return html`
+                <tr class="role-member-row" data-member-name="${member.nickname}">
                   <td>
                     <div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
-                      <img src="${getAvatarUrl(member.avatarUrl)}" alt="${escapeHtml(member.nickname)}" data-fallback="avatar" style="width: 34px; height: 34px; border-radius: 50%; object-fit: cover; border: 1px solid var(--border-color); flex-shrink: 0; ${offline ? 'opacity: 0.5;' : ''}">
+                      <img src="${getAvatarUrl(member.avatarUrl)}" alt="${member.nickname}" data-fallback="avatar" style="width: 34px; height: 34px; border-radius: 50%; object-fit: cover; border: 1px solid var(--border-color); flex-shrink: 0; ${offline ? 'opacity: 0.5;' : ''}">
                       <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0;">
-                        <span style="font-size: 13px; font-weight: 600; color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(member.nickname)}</span>
-                        ${member.id === serverStore.currentUser?.id ? `<span class="member-badge-you">${t('common.you')}</span>` : ''}
-                        ${member.id === serverStore.ownerId ? `<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
-                        ${offline ? `<span class="member-badge-offline">${t('roles.offlineBadge')}</span>` : ''}
+                        <span style="font-size: 13px; font-weight: 600; color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis;">${member.nickname}</span>
+                        ${member.id === serverStore.currentUser?.id ? html`<span class="member-badge-you">${t('common.you')}</span>` : ''}
+                        ${member.id === serverStore.ownerId ? html`<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
+                        ${offline ? html`<span class="member-badge-offline">${t('roles.offlineBadge')}</span>` : ''}
                       </div>
                     </div>
                   </td>
                   <td class="role-member-action-cell">
                     <button type="button" class="btn ${adding ? 'btn-secondary' : 'btn-danger'} role-member-action"
                       data-role-member-action="${adding ? 'add' : 'remove'}" data-user-id="${member.id}" data-role-id="${roleId}"
-                      aria-label="${escapeHtml(t(adding ? 'roles.addMemberLabel' : 'roles.removeMemberLabel', { name: member.nickname }))}">
+                      aria-label="${t(adding ? 'roles.addMemberLabel' : 'roles.removeMemberLabel', { name: member.nickname })}">
                       ${t(adding ? 'roles.addMember' : 'roles.removeMember')}
                     </button>
                   </td>
@@ -542,7 +542,7 @@ export class ServerRolesTab {
         this.colorPicker.cleanup();
         this.editor = null;
         this.dirtyName = false;
-        return this.root?.querySelector<HTMLElement>(role ? `[data-role-menu="${role.id}"]` : '#btn-role-create-new');
+        return this.root?.querySelector<HTMLElement>(role ? `[data-role-menu="${CSS.escape(role.id)}"]` : '#btn-role-create-new');
       });
     const root = this.editor.element;
     root.dataset.roleEditor = '';

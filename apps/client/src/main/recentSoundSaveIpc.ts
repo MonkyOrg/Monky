@@ -2,6 +2,7 @@ import { app, dialog, ipcMain, type BrowserWindow } from 'electron';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { LIMITS, type IpcInvokeChannels } from '@monky/shared';
+import { isMainFrameSender } from './ipcSender';
 
 const CHANNEL = 'app:save-recent-sound' satisfies keyof IpcInvokeChannels;
 
@@ -9,7 +10,9 @@ export function setupRecentSoundSaveIpc(
   mainWindow: BrowserWindow,
   sanitizeFileName: (name: string) => string,
 ): () => void {
-  ipcMain.handle(CHANNEL, async (_, input: IpcInvokeChannels[typeof CHANNEL]['args'][0]) => {
+  ipcMain.handle(CHANNEL, async (event, input: IpcInvokeChannels[typeof CHANNEL]['args'][0]) => {
+    // Writes a file to disk, so only the main window may ask (E-MAIN-1).
+    if (!isMainFrameSender(mainWindow, event)) return { success: false, error: 'Unavailable sender' };
     try {
       const extensions: Record<string, string> = {
         'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'audio/ogg': 'ogg',

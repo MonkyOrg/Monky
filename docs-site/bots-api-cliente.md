@@ -445,7 +445,7 @@ export interface CommandDefinition {
 
 ## `ServeOptions` {#serveoptions}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L2074)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L2072)
 
 ```ts
 export interface ServeOptions {
@@ -457,5 +457,12 @@ export interface ServeOptions {
     host?: string;
     /** Public hostname/IP, without a scheme or port. */
     publicHost?: string;
+    /**
+     * Public origin announced in the manifest instead of `publicHost` and
+     * `port`, such as `https://bot.example.com` behind a TLS reverse proxy.
+     * Monky servers post the token to `<publicUrl>/register`, so HTTPS keeps it
+     * encrypted on the way. Only an origin: no path, query or fragment.
+     */
+    publicUrl?: string;
 }
 ```

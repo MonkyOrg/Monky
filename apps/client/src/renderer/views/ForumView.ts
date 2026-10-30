@@ -2,7 +2,7 @@ import { LIMITS, MessageType, Permission, type AttachmentMeta, type ForumListRes
 import type { NetworkClient } from '../core/NetworkClient';
 import { accessSignature, type ServerStore } from '../stores/serverStore';
 import { t, getLanguage } from '../i18n';
-import { escapeHtml } from '../utils/html';
+import { escapeHtml, html } from '../utils/html';
 import { openCommunityModal } from './CommunityModal';
 import { attachInputEmojiPicker } from '../utils/inputEmojiPicker';
 import { uploadAttachment, type UploadHandle } from '../core/AttachmentUploader';
@@ -19,6 +19,11 @@ interface ForumAttachmentSelection {
   file: File;
   kind: 'media' | 'file';
   previewUrl?: string;
+}
+
+/** A count or limit the server reported, or 0 when it is not a whole, non-negative number. */
+function wholeNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
 export class ForumView {
@@ -205,27 +210,33 @@ export class ForumView {
       ? new Map([...container.querySelectorAll<HTMLElement>('[data-forum-id]')]
         .map(row => [row.dataset.forumId, row.getBoundingClientRect()] as const))
       : new Map<string | undefined, DOMRect>();
-    container.innerHTML = this.posts.length ? this.posts.map(post =>
-      `<article class="forum-post-row" data-forum-id="${escapeHtml(post.channelId)}">
+    container.innerHTML = this.posts.length ? this.posts.map(post => {
+      // Everything here comes from the server: counters only ever render as whole numbers, the rest as text.
+      const replies = wholeNumber(post.replyCount);
+      const reactions = wholeNumber(post.reactionCount);
+      const author = this.server.knownMembers.get(post.authorId)?.nickname;
+      return html`<article class="forum-post-row" data-forum-id="${post.channelId}">
         <button type="button" class="forum-post-open" data-forum-open>
           <span class="forum-post-summary">
-          ${this.server.knownMembers.get(post.authorId)?.nickname ? `<small class="forum-post-author">${escapeHtml(this.server.knownMembers.get(post.authorId)!.nickname)}</small>` : ''}
-          <h3>${post.pinned ? `<span class="material-symbols-outlined md-16" aria-label="${t('forum.pinned')}">keep</span>` : ''}${escapeHtml(post.title)}</h3>
-          <p>${escapeHtml(post.preview)}</p><small class="forum-post-stats">
-            <span title="${escapeHtml(t('forum.replies', { count: post.replyCount }))}"><span class="material-symbols-outlined md-16">chat_bubble</span>${post.replyCount}</span>
-            <span title="${escapeHtml(t('forum.reactions', { count: post.reactionCount ?? 0 }))}"><span class="material-symbols-outlined md-16">add_reaction</span>${post.reactionCount ?? 0}</span>
-            <time datetime="${new Date(post.updatedAt).toISOString()}">${escapeHtml(new Date(post.updatedAt).toLocaleString(getLanguage()))}</time>
-            ${post.locked ? `<span class="forum-post-state"><span class="material-symbols-outlined md-14">lock</span>${t('forum.locked')}</span>` : ''}
-            ${post.closed ? `<span class="forum-post-state"><span class="material-symbols-outlined md-14">check_circle</span>${t('forum.closed')}</span>` : ''}</small></span>
-          ${post.thumbnailUrl ? `<img class="forum-post-thumbnail" src="${escapeHtml(this.client.getHttpBaseUrl() + post.thumbnailUrl)}" alt="">` : ''}
+          ${author ? html`<small class="forum-post-author">${author}</small>` : ''}
+          <h3>${post.pinned ? html`<span class="material-symbols-outlined md-16" aria-label="${t('forum.pinned')}">keep</span>` : ''}${post.title}</h3>
+          <p>${post.preview}</p><small class="forum-post-stats">
+            <span title="${t('forum.replies', { count: replies })}"><span class="material-symbols-outlined md-16">chat_bubble</span>${replies}</span>
+            <span title="${t('forum.reactions', { count: reactions })}"><span class="material-symbols-outlined md-16">add_reaction</span>${reactions}</span>
+            <time datetime="${new Date(post.updatedAt).toISOString()}">${new Date(post.updatedAt).toLocaleString(getLanguage())}</time>
+            ${post.locked ? html`<span class="forum-post-state"><span class="material-symbols-outlined md-14">lock</span>${t('forum.locked')}</span>` : ''}
+            ${post.closed ? html`<span class="forum-post-state"><span class="material-symbols-outlined md-14">check_circle</span>${t('forum.closed')}</span>` : ''}</small></span>
+          ${post.thumbnailUrl ? html`<img class="forum-post-thumbnail" src="${this.client.getHttpBaseUrl() + post.thumbnailUrl}" alt="">` : ''}
         </button>
         <button type="button" class="forum-post-menu" data-forum-menu aria-label="${t('common.moreOptions')}"><span class="material-symbols-outlined md-18">more_horiz</span></button>
-        </article>`).join('') : this.query
+        </article>`;
+    }).join('') : this.query
       ? `<div class="forum-empty-state forum-empty-state--search"><span class="material-symbols-outlined">search_off</span><p>${t('forum.noResults')}</p></div>`
-      : `<div class="forum-empty-state"><span class="material-symbols-outlined forum-empty-icon">forum</span>
+      // The channel name comes from whoever may manage channels, so it only ever lands as text.
+      : html`<div class="forum-empty-state"><span class="material-symbols-outlined forum-empty-icon">forum</span>
           <strong>${t('forum.emptyTitle')}</strong>
           <p>${t('forum.emptyDescription', { channel: this.server.getChannel(this.channelId)?.name ?? t('forum.title') })}</p>
-        </div>`;
+        </div>`.toString();
     if (reorderMotion) {
       const rows = [...container.querySelectorAll<HTMLElement>('[data-forum-id]')];
       for (const [index, row] of rows.entries()) {
@@ -401,10 +412,12 @@ export class ForumView {
       for (const upload of uploads) upload.cancel();
       for (const attachment of selected) if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
     }, { once: true });
+    // The server's limit only reaches the attribute as a whole number, as in ChatComposer.
+    const messageLimit = wholeNumber(this.server.serverDetails?.maxMessageLength);
     modal.content.innerHTML = `<form>
       <div class="forum-composer-title"><input class="input-field" aria-label="${t('forum.postTitle')}" placeholder="${t('forum.postTitle')}" name="title" required maxlength="100" value="${escapeHtml(this.query)}">
         <button type="button" class="btn btn-secondary" data-post-close aria-label="${t('common.close')}"><span class="material-symbols-outlined md-20">close</span></button></div>
-      <textarea class="input-field" aria-label="${t('forum.message')}" placeholder="${t('forum.message')}" name="content" required rows="3" ${this.server.serverDetails?.maxMessageLength ? `maxlength="${this.server.serverDetails.maxMessageLength}"` : ''}></textarea>
+      <textarea class="input-field" aria-label="${t('forum.message')}" placeholder="${t('forum.message')}" name="content" required rows="3" ${messageLimit > 0 ? `maxlength="${messageLimit}"` : ''}></textarea>
       ${this.server.hasPermission(Permission.ATTACH_FILES, this.channelId) ? `
         <input type="file" data-post-media-input aria-label="${t('forum.addMedia')}" accept="image/*,video/*" multiple hidden>
         <input type="file" data-post-file-input aria-label="${t('forum.addFiles')}" multiple hidden>

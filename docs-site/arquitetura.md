@@ -77,6 +77,15 @@ interface **não tem acesso ao Node**. Tudo que precisa do sistema operacional �
 escolher uma tela para compartilhar, ler o módulo nativo de áudio, mexer na
 bandeja — passa pela ponte `window.api` exposta pelo preload.
 
+Três barreiras protegem essa ponte. A Content-Security-Policy do `index.html`
+só executa scripts do próprio app, então um HTML injetado por engano não roda;
+um recurso de tipo novo (outro iframe, worker ou origem) precisa entrar nessa
+política. Nenhuma janela sai do próprio documento nem abre outras janelas, com
+exceção do Picture-in-Picture e dos links enviados ao navegador. E os canais
+sensíveis — identidade, backups, servidores hospedados, arquivos locais — só
+respondem à janela principal; o overlay recebe uma ponte própria, apenas com o
+que precisa para desenhar a chamada.
+
 ### A interface não usa framework
 
 Talvez a decisão mais incomum do projeto: **o renderer é TypeScript e DOM puro**.
@@ -298,9 +307,10 @@ depende do quê.
 
 </div>
 
-Além do WebSocket, o servidor expõe algumas rotas HTTP: `/health`, `/preview` e
-`/invite-info` (informações públicas para a tela de convite), `/avatars/*` e o
-upload/download de `/attachments`.
+Além do WebSocket, o servidor expõe algumas rotas HTTP: `/health`, `/preview`,
+`/invite-info` (endereços para a tela de convite, respondida só no próprio
+computador do servidor; os membros recebem o mesmo pelo WebSocket), `/avatars/*`
+e o upload/download de `/attachments`.
 
 A porta padrão é a **3000**.
 

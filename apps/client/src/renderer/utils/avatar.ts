@@ -4,17 +4,31 @@ const DEFAULT_AVATAR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0
 
 export const DEFAULT_AVATAR_URL = `data:image/svg+xml;base64,${btoa(DEFAULT_AVATAR_SVG)}`;
 
+/** Avatar files a server stores: `/avatars/<prefix><uuid>.<ext>`. */
+const SERVER_AVATAR_PATH = /^\/avatars\/[A-Za-z0-9._-]+$/;
+/** Pictures the app inlines: cropped PNGs, DM thumbnails and SVG placeholders. */
+const INLINE_AVATAR = /^data:image\/(?:png|jpe?g|gif|webp|svg\+xml);base64,[A-Za-z0-9+/]+={0,2}$/;
+/** A web address with a host; quotes, angle brackets and spaces would leave the HTML attribute. */
+const WEB_AVATAR = /^https?:\/\/[^\s"'<>`/?#][^\s"'<>`]*$/i;
+
+/**
+ * Where an avatar is drawn from: a file the server stores (`/avatars/<name>`,
+ * resolved against `baseUrl`), a web address or a picture inlined by the app.
+ * Anything else — a local file, a script address or a value carrying markup —
+ * gives the default silhouette, so a hostile server cannot reach past the
+ * picture even where a template forgot to escape it.
+ */
+export function resolveAvatarUrl(url: string | null | undefined, baseUrl: string): string {
+  const value = typeof url === 'string' ? url.trim() : '';
+  if (INLINE_AVATAR.test(value)) return value;
+  // Relative paths must be resolved against the server that sent them.
+  const candidate = SERVER_AVATAR_PATH.test(value) ? `${baseUrl}${value}` : value;
+  return WEB_AVATAR.test(candidate) ? candidate : DEFAULT_AVATAR_URL;
+}
+
+/** Avatar address for the server on screen; see `resolveAvatarUrl`. */
 export function getAvatarUrl(url?: string | null): string {
-  if (url && url.trim().length > 0) {
-    // Relative avatar paths (served over HTTP by the server) must be resolved
-    // against the connected server's HTTP base URL.
-    if (url.startsWith('/avatars/')) {
-      const base = networkClient.getHttpBaseUrl();
-      return base ? `${base}${url}` : DEFAULT_AVATAR_URL;
-    }
-    return url;
-  }
-  return DEFAULT_AVATAR_URL;
+  return resolveAvatarUrl(url, networkClient.getHttpBaseUrl());
 }
 
 /**
