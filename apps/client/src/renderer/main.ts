@@ -1,3 +1,5 @@
+// First import: marks when the bundle starts running.
+import { markStartup, startupTimings } from './core/startupTiming';
 import {
   AdminKickVoicePayload,
   AdminMoveUserPayload,
@@ -80,7 +82,6 @@ import { installImageFallback } from './utils/imageFallback';
 import { clientLog } from './core/ClientLogService';
 import { startResponsivenessMonitor } from './core/ResponsivenessMonitor';
 import { overlayBridgeService } from './core/OverlayBridgeService';
-import { OverlayStageView } from './views/OverlayStageView';
 import { bindBotChatEvents } from './core/botChatEvents';
 import { bindBotScreenEvents } from './core/botScreenEvents';
 import { bindBotVoiceCommandEvents } from './core/botVoiceCommandEvents';
@@ -173,12 +174,11 @@ class App {
       disposeTooltips();
     }, { once: true });
 
-    const isOverlay = window.location.search.includes('overlay=1');
-    if (isOverlay) {
-      initI18n();
-      new OverlayStageView(this.appContainer).init();
-      return;
-    }
+    // The overlay window loads overlay.html, not this app: microphone, push-to-talk,
+    // cues and soundboard start here, in the main window only (R-MEDIA-3).
+    audioProcessor.init();
+    soundEffects.init();
+    soundboardService.init();
 
     // Routes incoming server events to the right state bundle. It must be in
     // place before any connection exists, otherwise the first events would be
@@ -226,21 +226,28 @@ class App {
   }
 
   private async init(): Promise<void> {
-    // Initialise client logging (#444)
-    await clientLog.init();
-    clientLog.info('APP', 'Renderer process initialising');
-
     initI18n();
 
-    const developmentQa = await window.api?.getDevelopmentQaConfig?.() ?? null;
-    if (developmentQa) await prepareDevelopmentQaProfile(developmentQa);
+    // Startup reads that do not depend on each other run together (R-SHELL-14).
+    // Prepared QA creates its identity first, so the status is read again after it.
+    const readIdentityStatus = (): Promise<AppIdentityStatus> => window.api?.getIdentityStatus
+      ? window.api.getIdentityStatus()
+      : Promise.resolve({ state: 'missing' });
+    // Initialise client logging (#444)
+    let [, developmentQa, identityStatus] = await Promise.all([
+      clientLog.init(),
+      window.api?.getDevelopmentQaConfig?.() ?? Promise.resolve(null),
+      readIdentityStatus(),
+    ]);
+    clientLog.info('APP', 'Renderer process initialising');
+    if (developmentQa) {
+      await prepareDevelopmentQaProfile(developmentQa);
+      identityStatus = await readIdentityStatus();
+    }
 
     // Check the identity BEFORE rendering anything. An identity that exists but
     // could not be opened is never replaced on its own (#490): the onboarding
     // offers to try again, import or explicitly create another one.
-    const identityStatus: AppIdentityStatus = window.api?.getIdentityStatus
-      ? await window.api.getIdentityStatus()
-      : { state: 'missing' };
     connectionStore.hasIdentity = identityStatus.state === 'ready';
 
     if (!connectionStore.hasIdentity) {
@@ -256,6 +263,7 @@ class App {
       const identity = await window.api.getIdentity();
       connectionStore.setIdentity(identity);
     }
+    markStartup('identity');
 
     connectionStore.loadUserProfile();
     if (!hasValidLocalProfile()) {
@@ -271,23 +279,31 @@ class App {
     // Initialize overlay bridge service (#169)
     overlayBridgeService.init((sessionId, shareId) => webRtcManager.getScreenCaptureMode(sessionId, shareId));
 
-    // Friends and DMs need the identity; the transport rides on server
-    // sessions, so it must be listening before auto-entry connects them.
-    await dmStore.init().catch((error: unknown) => {
+    // Friends and DMs need the identity. Their store opens in the main process
+    // (keys and the encrypted history), so Home is drawn without waiting for it
+    // and shows the conversations as soon as they load (R-SHELL-14).
+    const directMessages = dmStore.init().catch((error: unknown) => {
       clientLog.error('DM', 'Direct messages failed to start', { error: error instanceof Error ? error.message : String(error) });
     });
-    this.unbindDm = bindDmNotifications();
-    // Nickname/avatar follow the identity across devices; runs once DMs are up.
-    void initProfileSync().then((off) => { this.unbindProfileSync = off; });
 
     // The product now lands on Home: server connections are opened from the rail
     // or in the background after the shell has painted.
     sessionManager.showHome();
     this.mainView.render();
+    markStartup('home');
 
     // The main UI has now been written to the DOM — let the main process lift
     // the post-update splash once it actually paints (#498).
     this.signalRendererReady();
+
+    // The DM transport rides on server sessions, so it must be listening before
+    // invitations or auto-entry connect them.
+    await directMessages;
+    markStartup('dm');
+    this.unbindDm = bindDmNotifications();
+    // Nickname/avatar follow the identity across devices; runs once DMs are up.
+    void initProfileSync().then((off) => { this.unbindProfileSync = off; });
+
     this.unbindInvites = window.api?.onServerInviteAvailable?.(() => { void this.consumeServerInvites(); }) ?? null;
     const invitations = this.consumeServerInvites();
 
@@ -369,7 +385,9 @@ class App {
     this.rendererReadySignalled = true;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
+        markStartup('painted');
         window.api?.signalRendererReady?.();
+        clientLog.info('APP', 'Renderer startup timing', startupTimings());
       });
     });
   }
@@ -835,10 +853,7 @@ class App {
               settingsStore.brb = brb;
               changed = true;
             }
-            if (changed) {
-              settingsStore.save();
-              appEvents.emit('settings.updated');
-            }
+            if (changed) settingsStore.save();
           });
         }
       }
@@ -1180,6 +1195,8 @@ class App {
     });
   }
 }
+
+markStartup('modules');
 
 // Bootstrap when DOM ready
 document.addEventListener('DOMContentLoaded', () => {

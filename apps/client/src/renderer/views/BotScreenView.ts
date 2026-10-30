@@ -7,7 +7,7 @@ import {
 import { appEvents } from '../core/EventBus';
 import { currentEventOrigin } from '../core/sessionRouting';
 import { getLanguage, t, type TranslationKey } from '../i18n';
-import { settingsStore } from '../stores/settingsStore';
+import { settingsStore, type SaveTiming } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
 import { formatBytes } from '../utils/attachment';
 import { botRequestError } from '../utils/botInputs';
@@ -35,7 +35,7 @@ export class BotScreenView {
   private endButton = document.createElement('button');
   private focus = document.createElement('button');
   private fullscreen = document.createElement('button');
-  private volumeControl = new BotScreenVolumeControl((percent) => this.setVolume(percent), () => {
+  private volumeControl = new BotScreenVolumeControl((percent, timing) => this.setVolume(percent, timing), () => {
     voiceStore.setMiniappMuted(this.screen.botId, !voiceStore.isMiniappMuted(this.screen.botId));
   });
   private notice = document.createElement('p');
@@ -135,6 +135,10 @@ export class BotScreenView {
       appEvents.on('session.voice_context_updated', () => this.localize()),
       // Another tile of the same bot, or another window, may have changed the saved volume.
       appEvents.on('settings.updated', () => this.syncVolume()),
+      // Another tile of the same bot is moving the volume right now.
+      appEvents.on<{ botId: string }>('miniapp_volume.changed', ({ botId }) => {
+        if (botId === this.screen.botId) this.syncVolume();
+      }),
       appEvents.on('voice.miniapp_mute_changed', () => this.syncVolume()),
       appEvents.on(`message.${MessageType.BOT_STORAGE_LEVEL}`, (payload: unknown) => {
         const parsed = botStorageLevelEventSchema.safeParse(payload);
@@ -429,9 +433,9 @@ export class BotScreenView {
     this.frame?.setVolume(this.outputVolume());
   }
 
-  private setVolume(percent: number): void {
+  private setVolume(percent: number, timing: SaveTiming): void {
     try {
-      settingsStore.setMiniappVolume(this.screen.botId, percent);
+      settingsStore.setMiniappVolume(this.screen.botId, percent, timing);
     } catch (error: unknown) {
       // The new level still applies to this session; it just won't be remembered.
       console.warn('[Bot screens] Could not save the miniapp volume.', error);

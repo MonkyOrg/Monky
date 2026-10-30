@@ -254,7 +254,8 @@ export class VoiceVideoTab {
       this.unbindInputMode.push(() => card?.removeEventListener('click', selectMode));
     }
 
-    // PTT Release Delay Slider
+    // PTT Release Delay Slider: read when the key is released, so assigning it
+    // applies at once; it is saved where the slider stops.
     const sliderPttDelay = container.querySelector<HTMLInputElement>('#slider-ptt-delay');
     const pttDelayValue = container.querySelector<HTMLElement>('#ptt-delay-value');
     sliderPttDelay?.addEventListener('input', () => {
@@ -262,8 +263,9 @@ export class VoiceVideoTab {
       sliderPttDelay.style.setProperty('--slider-progress', `${(Math.min(2000, Math.max(0, val)) / 2000) * 100}%`);
       if (pttDelayValue) pttDelayValue.textContent = `${val} ms`;
       settingsStore.pttReleaseDelay = val;
-      settingsStore.save();
+      settingsStore.saveSoon();
     });
+    sliderPttDelay?.addEventListener('change', () => settingsStore.save());
 
     // PTT Sound Cue Checkbox
     const checkboxPttSound = container.querySelector<HTMLInputElement>('#checkbox-ptt-sound');
@@ -433,10 +435,11 @@ export class VoiceVideoTab {
       const val = parseInt(sliderVad.value, 10);
       sliderVad.style.setProperty('--slider-progress', `${(Math.min(160, Math.max(0, val)) / 160) * 100}%`);
       settingsStore.vadSensitivity = val;
-      settingsStore.save();
+      settingsStore.saveSoon();
       audioProcessor.setVadThreshold(val);
       this.updateVadThresholdLine(container, val);
     });
+    sliderVad?.addEventListener('change', () => settingsStore.save());
 
     btnRefreshDevices?.addEventListener('click', async () => {
       await this.refreshDevices(container);

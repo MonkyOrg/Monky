@@ -1,8 +1,8 @@
 'use strict';
 // E-MAIN-1 and E-MAIN-3 in a real Electron: the navigation and window policy every
-// WebContents receives, the overlay's minimal preload, the main-frame IPC guard, the
-// preload's one-time folder report (D4) and the renderer Content-Security-Policy,
-// both in the built bundle (file://) and through the Vite dev server.
+// WebContents receives, the overlay's minimal preload and own page (R-MEDIA-3), the
+// main-frame IPC guard, the preload's one-time folder report (D4) and the renderer
+// Content-Security-Policy, both in the built bundle (file://) and through the Vite dev server.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -38,7 +38,7 @@ async function run() {
   require(built('main/botScreenDocuments.js')).registerBotScreenScheme();
   const { installWebContentsPolicy } = require(built('main/webContentsPolicy.js'));
   let disposePolicy = installWebContentsPolicy(app);
-  const { MEDIA_FOLDERS_IPC } = require('@monky/shared');
+  const { MEDIA_FOLDERS_IPC, SHORTCUT_IPC } = require('@monky/shared');
   const { mainFrameHandle } = require(built('main/ipcSender.js'));
   // The packaged native helper is not built in DOM lanes; the overlay only needs its window to resize.
   require('@monky/screen-audio').setWindowResizeAspect = () => {};
@@ -188,8 +188,22 @@ async function run() {
     ipcMain.handle('overlay:layout-cards', (event, layout) => manager.layoutCards(event.sender.id, layout));
     ipcMain.handle('overlay:close', () => ({ success: manager.close() }));
     ipcMain.handle('overlay:send-signal', () => undefined);
+    // Opening the overlay starts none of the app's services: no sound library, cues or global input (R-MEDIA-3).
+    const appServiceCalls = [];
+    for (const channel of ['soundboard:list-sounds', 'soundboard:default-folder', ...Object.values(SHORTCUT_IPC)]) {
+      ipcMain.handle(channel, event => { appServiceCalls.push({ channel, sender: event.sender.id }); return null; });
+    }
+    const overlayRequests = [];
     const overlayErrors = [];
-    const created = new Promise(resolve => app.once('browser-window-created', (_event, window) => resolve(window)));
+    const created = new Promise(resolve => app.once('browser-window-created', (_event, window) => {
+      // Attached before the page loads, to see every file it asks for.
+      window.webContents.debugger.attach('1.3');
+      window.webContents.debugger.on('message', (_message, method, params) => {
+        if (method === 'Network.requestWillBeSent') overlayRequests.push(params.request.url);
+      });
+      void window.webContents.debugger.sendCommand('Network.enable');
+      resolve(window);
+    }));
     manager.open({ mode: 'cameras-only', layout: 'horizontal', position: 'bottom-right', cardOpacity: 0.85,
       focusActiveSpeaker: false, preserveAspectRatio: true });
     overlay = await created;
@@ -200,6 +214,14 @@ async function run() {
     await until(() => !overlay.isDestroyed() && !overlay.webContents.isLoading(), 'overlay load');
     manager.sendSyncState({ config: manager.getConfig(), channelName: 'Security fixture', participants: [] });
     await until(() => overlay.webContents.executeJavaScript('!!document.querySelector(".overlay-stage-root")'), 'overlay UI');
+    await delay(500);
+    overlay.webContents.debugger.detach();
+    const appEntry = /<script type="module"[^>]* src="\.\/assets\/([^"]+\.js)"/.exec(fs.readFileSync(path.join(client, 'dist', 'index.html'), 'utf8'))?.[1];
+    const files = overlayRequests.filter(url => url.startsWith('file:')).map(url => decodeURIComponent(new URL(url).pathname).split('/').pop());
+    check(new URL(overlay.webContents.getURL()).pathname.endsWith('/dist/overlay.html'), 'The overlay loads its own page.');
+    check(appEntry && files.length > 1 && !files.includes(appEntry) && !files.some(name => /\.(wav|mp3)$/i.test(name)),
+      `The overlay loads neither the app bundle (${appEntry}) nor its sounds: ${files.join(', ')}`);
+    check(appServiceCalls.length === 0, `The overlay starts no app service: ${JSON.stringify(appServiceCalls)}`);
     const overlayApi = await overlay.webContents.executeJavaScript('Object.keys(window.api).sort().join(",")');
     check(overlayApi === ['closeOverlay', 'layoutOverlayCards', 'onOverlayConfigUpdated', 'onOverlayHoverChanged',
       'onOverlayResizeStateChanged', 'onOverlaySignalReceived', 'onOverlaySyncStateReceived', 'sendOverlaySignal'].join(','),
@@ -217,6 +239,8 @@ async function run() {
     check(!hits.get('/overlay-drop'), `A link dropped on the overlay is not opened (${dropped}).`);
     check(overlayViolations.length === 0, `The overlay loads without CSP violations: ${overlayViolations.join('\n')}`);
     check(overlayErrors.length === 0, `The overlay renders without errors: ${overlayErrors.join('\n')}`);
+    const overlayBlocked = await overlay.webContents.executeJavaScript(`(${exerciseInjections.toString()})(${JSON.stringify({ origin })})`);
+    for (const [injection, result] of Object.entries(overlayBlocked)) check(result === true, `overlay: ${injection} must be blocked: ${result}`);
     manager.close();
 
     // --- Vite dev server (npm run dev): the same policy must not break HMR or the app. ---
@@ -238,6 +262,19 @@ async function run() {
     await until(() => dev.webContents.executeJavaScript('document.getElementById("app").childElementCount > 0'), 'dev renderer UI', 60_000);
     await until(() => hmrConnected, 'Vite HMR connection');
     check(devViolations.length === 0, `The dev server renderer loads without CSP violations: ${devViolations.join('\n')}`);
+    // npm run dev opens the overlay from the dev server too: its page must run and reload there.
+    const devOverlay = track(new BrowserWindow({ show: false, width: 400, height: 240, webPreferences: {
+      preload: built('preload/overlayPreload.js'), contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false,
+    } }));
+    const devOverlayViolations = observe('vite overlay', devOverlay.webContents);
+    let overlayHmr = false;
+    devOverlay.webContents.on('console-message', event => {
+      if (/\[vite\] connected/.test(event.message)) overlayHmr = true;
+    });
+    await devOverlay.loadURL(`http://127.0.0.1:${address.port}/overlay.html`);
+    await until(() => devOverlay.webContents.executeJavaScript('!!document.querySelector(".overlay-stage-root")'), 'dev overlay UI', 60_000);
+    await until(() => overlayHmr, 'Vite HMR connection in the overlay');
+    check(devOverlayViolations.length === 0, `The dev server overlay loads without CSP violations: ${devOverlayViolations.join('\n')}`);
     console.log(`Electron security: ${checks} checks passed (policy, overlay preload, IPC guard, folder report and confirmation, CSP built and dev; ${dropped}).`);
     await finish(0);
   } catch (error) {

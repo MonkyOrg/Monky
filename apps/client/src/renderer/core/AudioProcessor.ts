@@ -1,5 +1,5 @@
 import { appEvents } from './EventBus';
-import { settingsStore } from '../stores/settingsStore';
+import { settingsChanged, settingsStore, type SettingsUpdate } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
 import { soundEffects } from './SoundEffects';
 import { clientLog } from './ClientLogService';
@@ -35,8 +35,15 @@ export class AudioProcessor {
   private deviceSwitchTask: Promise<void> | null = null;
   private graphReady = false;
   private microphonePublicationPending = false;
+  private initialized = false;
 
-  constructor() {
+  /**
+   * Starts push-to-talk and the microphone gate's listeners. Importing the
+   * module has no side effects: only the main window calls this (R-MEDIA-3).
+   */
+  public init(): void {
+    if (this.initialized) return;
+    this.initialized = true;
     this.initPtt();
   }
 
@@ -318,7 +325,9 @@ export class AudioProcessor {
       this.unbindPttEvents.push(unbind);
     }
 
-    const unbindSettings = appEvents.on('settings.updated', () => {
+    const unbindSettings = appEvents.on<SettingsUpdate | undefined>('settings.updated', (update) => {
+      // Only the input mode and the key reach the global hook: a volume slider or a mute must not.
+      if (!settingsChanged(update, 'inputMode', 'pttKey')) return;
       this.syncPttConfig();
       this.applyTrackEnabled();
     });
@@ -783,6 +792,7 @@ export class AudioProcessor {
     }
     this.unbindPttEvents.forEach((unbind) => unbind());
     this.unbindPttEvents = [];
+    this.initialized = false;
   }
 }
 

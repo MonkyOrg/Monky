@@ -200,7 +200,6 @@ export class SessionManager {
       if (customChanged) this.setCustomStatus(null);
     }
     if (visibilityChanged) this.setAppearOffline(appearOffline);
-    appEvents.emit('settings.updated');
   }
 
   /** Saves the custom status and makes it the current choice; null deletes it. */
@@ -211,13 +210,11 @@ export class SessionManager {
       settingsStore.customStatusActive = false;
       settingsStore.save();
       if (wasActive) this.setCustomStatus(null);
-      appEvents.emit('settings.updated');
       return;
     }
     if (wasActive) {
       settingsStore.save();
       this.setCustomStatus(customStatus);
-      appEvents.emit('settings.updated');
     } else {
       this.setPresenceStatus('custom');
     }

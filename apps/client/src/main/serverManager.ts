@@ -1,7 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { app, BrowserWindow } from 'electron';
-import { MonkyServer, readStoredUpdateInventory, type ServerConfig } from '@monky/server';
+import type { MonkyServer, ServerConfig } from '@monky/server';
 import { LIMITS, type HostedUpdateServer, type HostServerOptions, type HostServerStatus, type IpcEvents, type LogEntry, type ServerStats } from '@monky/shared';
 import { mt, type MainTranslationKey } from './i18n';
 import { isSafeServerId, migrateLegacyServerData, serverDataDirFor } from './serverDataDir';
@@ -11,6 +11,18 @@ export type { HostServerOptions };
 
 function errorMessage(error: unknown, fallback: MainTranslationKey): string {
   return error instanceof Error && error.message ? error.message : mt(fallback);
+}
+
+let serverModule: typeof import('@monky/server') | null = null;
+
+/**
+ * The hosted server (mediasoup, sql.js, ws: hundreds of files) loads the first
+ * time it is needed instead of delaying every launch, since most people never
+ * host one (E-MAIN-7). A failed load is retried on the next use.
+ */
+async function loadServerModule(): Promise<typeof import('@monky/server')> {
+  serverModule ??= await import('@monky/server');
+  return serverModule;
 }
 
 export class ServerManager {
@@ -73,6 +85,7 @@ export class ServerManager {
       maxUsers: options.maxUsers,
       voiceMode: options.voiceMode,
     };
+    const { MonkyServer } = await loadServerModule();
     return MonkyServer.create(config);
   }
 
@@ -215,7 +228,8 @@ export class ServerManager {
         const live = active.get(serverId);
         const inventory = live
           ? live.getUpdateInventory()
-          : await readStoredUpdateInventory(path.join(serverId === null ? base : serverDataDirFor(base, serverId), 'server.db'));
+          : await (await loadServerModule()).readStoredUpdateInventory(
+            path.join(serverId === null ? base : serverDataDirFor(base, serverId), 'server.db'));
         if (inventory.bots.length) servers.push({ serverId, ...inventory });
       }
       signal?.throwIfAborted();

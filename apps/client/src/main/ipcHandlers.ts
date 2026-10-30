@@ -41,7 +41,7 @@ import { setupFileBatchDownloadIpc } from './fileBatchDownloadIpc';
 import { fetchLinkPreview } from './linkPreview';
 import { TrayManager } from './trayManager';
 import type { TaskbarCallControls } from './taskbarCallControls';
-import type { DesktopSource, IpcInvokeChannels, OverlayBounds, OverlayConfig, OverlaySignalPayload, OverlaySyncState } from '@monky/shared';
+import type { DesktopSource, IpcInvokeChannels, OverlayBounds, OverlayConfig, OverlaySyncState } from '@monky/shared';
 import { OverlayManager } from './overlayManager';
 import { SteamPresence } from './steamPresence';
 import { gameWindowIds } from './gameWindows';
@@ -466,7 +466,7 @@ export function setupIpcHandlers(
     return overlayManager.layoutCards(event.sender.id, layout);
   });
 
-  ipcMain.handle('overlay:send-signal', (_event, payload: OverlaySignalPayload) => {
+  ipcMain.handle('overlay:send-signal', (_event, payload: unknown) => {
     overlayManager.sendSignal(payload);
   });
 
@@ -1193,16 +1193,18 @@ export function setupIpcHandlers(
   // of Electron globalShortcut. globalShortcut.register() consumes the key on
   // Windows, so a single-key bind like "Q" was swallowed and never reached the
   // focused game (#571). uiohook only observes input, so the key passes through.
-  ipcMain.handle(SHORTCUT_IPC.registerSoundboard, (_, shortcuts: unknown) => {
+  // Only the main window's top frame configures them, push-to-talk included:
+  // nothing else may replace its global input (R-MEDIA-3).
+  handleFromMainFrame(SHORTCUT_IPC.registerSoundboard, (_, shortcuts: unknown) => {
     return globalInputHook.setSoundboardHotkeys(shortcuts);
   });
 
   // Action Global Shortcuts Registration (#252)
-  ipcMain.handle(SHORTCUT_IPC.registerActions, (_, shortcuts: unknown) => {
+  handleFromMainFrame(SHORTCUT_IPC.registerActions, (_, shortcuts: unknown) => {
     return globalInputHook.setActionHotkeys(shortcuts);
   });
 
-  ipcMain.handle(SHORTCUT_IPC.setCapture, (_, active: unknown) => {
+  handleFromMainFrame(SHORTCUT_IPC.setCapture, (_, active: unknown) => {
     return globalInputHook.setShortcutCapture(active);
   });
 
@@ -1219,15 +1221,15 @@ export function setupIpcHandlers(
   });
 
   // Push to Talk (PTT) (#186)
-  ipcMain.handle(SHORTCUT_IPC.setPttConfig, (_, config: unknown) => {
+  handleFromMainFrame(SHORTCUT_IPC.setPttConfig, (_, config: unknown) => {
     return globalInputHook.setPttConfig(config);
   });
 
-  ipcMain.handle(SHORTCUT_IPC.startPttCapture, () => {
+  handleFromMainFrame(SHORTCUT_IPC.startPttCapture, () => {
     return globalInputHook.startCapture();
   });
 
-  ipcMain.handle(SHORTCUT_IPC.stopPttCapture, () => {
+  handleFromMainFrame(SHORTCUT_IPC.stopPttCapture, () => {
     return globalInputHook.stopCapture();
   });
 

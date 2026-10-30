@@ -16,6 +16,11 @@ declare global {
     readonly sinkId: string | { type: 'none' };
     setSinkId?(sinkId: string): Promise<void>;
   }
+
+  // Chromium caps an encoding's resolution (RTCResolutionRestriction) before our DOM typings.
+  interface RTCRtpEncodingParameters {
+    scaleResolutionDownTo?: { maxWidth: number; maxHeight: number };
+  }
 }
 
 declare module '*.mp3' {

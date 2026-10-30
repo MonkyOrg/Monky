@@ -93,6 +93,7 @@ if (!process.versions.electron) {
     if (overlayWindowOnly) {
       const { runOverlayWindowSmoke, runOverlayConfigPositionSmoke } = require('./overlayWindowSmoke.cjs');
       const { runOverlayParticipantSmoke } = require('./overlayParticipantSmoke.cjs');
+      const { runOverlayLinkSmoke } = require('./overlayLinkSmoke.cjs');
       let checks = 0;
       for (const [width, height] of [[600, 400], [340, 240]]) {
         window.setContentSize(width, height);
@@ -110,7 +111,8 @@ if (!process.versions.electron) {
             (await window.webContents.capturePage()).toPNG());
         }
       }
-      console.log(`Overlay window: ${checks} checks passed, frame/resize/drag/controls, no media capture`);
+      checks += await evaluate(`(${runOverlayLinkSmoke.toString()})()`);
+      console.log(`Overlay window: ${checks} checks passed, frame/resize/drag/controls, video link negotiation and frame cap`);
       await finish(0);
       return;
     }

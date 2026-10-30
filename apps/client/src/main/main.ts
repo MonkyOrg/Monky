@@ -1,4 +1,5 @@
 import { setMainStdioLogger } from './mainStdio';
+import { markStartup, reportStartupWhenPainted } from './startupTiming';
 import { app, BrowserWindow, dialog, ipcMain, IpcMainEvent, Menu, screen, session, shell } from 'electron';
 import path from 'path';
 import { setupIpcHandlers } from './ipcHandlers';
@@ -39,6 +40,7 @@ import { installWebContentsPolicy } from './webContentsPolicy';
 
 import fs from 'fs';
 
+markStartup('modules');
 configureVideoPresentation(app.commandLine, process.platform);
 registerBotScreenScheme();
 // Before any window exists, so none is ever created without the guards.
@@ -403,13 +405,14 @@ function createWindow(deferShow = false): void {
       contextIsolation: true,
       nodeIntegration: false,
       nodeIntegrationInSubFrames: false,
-      sandbox: false, // needed for custom desktopCapturer / preload access
+      sandbox: false, // The preload requires Node modules: the shared contracts and the native screen renderer.
       webSecurity: true,
       backgroundThrottling: false, // Keep audio and WebRTC processing smoothly when minimized/hidden
       offscreen: developmentQa?.smoke === true,
       additionalArguments: developmentQa ? ['--monky-prepared-qa'] : [],
     },
   });
+  markStartup('window');
 
   if (showNow && openMaximized) {
     mainWindow.maximize();
@@ -453,6 +456,7 @@ function createWindow(deferShow = false): void {
   });
   bindRendererDiagnostics(mainWindow.webContents, clientLogger);
   bindPerformanceDiagnostics(mainWindow, clientLogger);
+  reportStartupWhenPainted(mainWindow, clientLogger);
 
   localExecution = setupIpcHandlers(mainWindow, serverManager, trayManager, {
     setMinimizeToTray: (enabled: boolean) => {
@@ -591,6 +595,7 @@ if (!gotTheLock) {
   });
 
   app.whenReady().then(() => {
+    markStartup('ready');
     registerServerInviteProtocol(app);
     initializeMainLanguage(app.getPath('userData'), app.getPreferredSystemLanguages());
     getCrashRecovery();

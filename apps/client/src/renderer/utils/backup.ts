@@ -66,6 +66,8 @@ export function collectBackup(scopes: BackupScope[]): MonkyBackup {
   }
 
   if (scopes.includes('settings')) {
+    // A slider save still waiting would otherwise be missing from the backup.
+    settingsStore.flush();
     backup.settings = {
       settings: readJson('monky_settings') ?? {},
       nickname: localStorage.getItem('monky_nickname') || '',

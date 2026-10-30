@@ -401,6 +401,11 @@ essa trilha antes do decoder fecha o writer enquanto ainda há frames chegando.
 O proprietário bloqueia novos frames, encerra o decoder e drena o writer antes
 de parar a trilha; timeout mantém os recursos retidos para nova tentativa.
 
+O preload carrega só `@monky/screen-share/renderer` (apresentação e áudio), e
+apenas quando a janela assiste a primeira tela nativa. Captura, transporte e
+processos ficam no Main, na entrada principal; o `afterPack` compara as duas
+entradas byte a byte com a cópia empacotada.
+
 Parar uma fonte ou recepção pode retornar `retired-with-errors` quando os
 proprietários originais comprovam o encerramento, mas reportam um erro de limpeza.
 O renderer registra o aviso e libera somente o estado daquela instância, permitindo

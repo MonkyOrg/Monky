@@ -41,6 +41,134 @@ export type ScreenShareReceiver = 'native' | 'chromium';
 
 const CHAT_SOUND_MODES: ChatSoundMode[] = ['inherit', 'all', 'mentions', 'none'];
 const MAX_BOT_PREFERENCE_SCOPES = 256;
+const STORAGE_KEY = 'monky_settings';
+/** How long a grouped save waits after the last change before writing. */
+const SAVE_DELAY_MS = 300;
+
+/** Everything `save()` writes, in the order it is stored. */
+function savedSettings(store: SettingsStore) {
+  return {
+    qualityPreset: store.qualityPreset,
+    screenEncodingMode: store.screenEncodingMode,
+    screenEncodingStrategy: store.screenEncodingStrategy,
+    preferredScreenCodec: store.preferredScreenCodec,
+    vadSensitivity: store.vadSensitivity,
+    selectedMicrophoneId: store.selectedMicrophoneId,
+    selectedSpeakerId: store.selectedSpeakerId,
+    advancedAudioOutputs: store.advancedAudioOutputs,
+    audioOutputDevices: store.audioOutputDevices,
+    selectedCameraId: store.selectedCameraId,
+    maxUploadKbps: store.maxUploadKbps,
+    maxDownloadKbps: store.maxDownloadKbps,
+    userVolumes: store.userVolumes,
+    noiseSuppressionEnabled: store.noiseSuppressionEnabled,
+    noiseSuppressionMode: store.noiseSuppressionMode,
+    lastNoiseSuppressionMode: store.lastNoiseSuppressionMode,
+    inputMode: store.inputMode,
+    pttKey: store.pttKey,
+    pttReleaseDelay: store.pttReleaseDelay,
+    pttSoundCue: store.pttSoundCue,
+    isMuted: store.isMuted,
+    isDeafened: store.isDeafened,
+    soundboardFolderPath: store.soundboardFolderPath,
+    botDownloadConfirmationExceptions: store.botDownloadConfirmationExceptions,
+    botUserPreferences: store.botUserPreferences,
+    botLocalePreferences: store.botLocalePreferences,
+    soundboardVolume: store.soundboardVolume,
+    soundboardMuted: store.soundboardMuted,
+    soundboardLimiterEnabled: store.soundboardLimiterEnabled,
+    soundboardLoudnessLimit: store.soundboardLoudnessLimit,
+    stickersFolderPath: store.stickersFolderPath,
+    screenAudioVolumes: store.screenAudioVolumes,
+    miniappVolumes: store.miniappVolumes,
+    screenShareTelemetryEnabled: store.screenShareTelemetryEnabled,
+    screenShareReceiver: store.getScreenShareReceiver(),
+    screenSharePreviewPauseWhenUnfocused: store.screenSharePreviewPauseWhenUnfocused,
+    screenShareAutoPictureInPicture: store.screenShareAutoPictureInPicture,
+    screenShareTelemetryPosition: store.screenShareTelemetryPosition,
+    screenShareTelemetryMode: store.screenShareTelemetryMode,
+    customProfile: store.customProfile,
+    customSounds: store.customSounds,
+    soundboardShortcuts: store.soundboardShortcuts,
+    soundboardViewMode: store.soundboardViewMode,
+    keybindShortcuts: store.keybindShortcuts,
+    chatMessageSoundEnabled: store.chatMessageSoundEnabled,
+    chatMessageSoundMentionsOnly: store.chatMessageSoundMentionsOnly,
+    updateBetaChannel: store.updateBetaChannel,
+    minimizeToTrayOnClose: store.minimizeToTrayOnClose,
+    askShutdownOnLastLeave: store.askShutdownOnLastLeave,
+    appearOffline: store.appearOffline,
+    brb: store.brb,
+    customStatus: store.customStatus,
+    customStatusActive: store.customStatusActive,
+    shareGameActivity: store.shareGameActivity,
+    suggestGameShare: store.suggestGameShare,
+    chatSoundServerOverrides: store.chatSoundServerOverrides,
+    chatSoundChannelOverrides: store.chatSoundChannelOverrides,
+    onboardingCompleted: store.onboardingCompleted,
+    autoEntryServerKeys: store.autoEntryServerKeys,
+    autoConnectServers: store.autoConnectServers,
+    overlayMode: store.overlayMode,
+    overlayLayout: store.overlayLayout,
+    overlayPosition: store.overlayPosition,
+    overlayCardOpacity: store.overlayCardOpacity,
+    overlayFocusActiveSpeaker: store.overlayFocusActiveSpeaker,
+    overlayAutoOpenOnLeaveStage: store.overlayAutoOpenOnLeaveStage,
+    overlayMinimalistMode: store.overlayMinimalistMode,
+    overlayHideSelf: store.overlayHideSelf,
+    overlayHideStagePreviews: store.overlayHideStagePreviews,
+    overlayHideInactiveParticipants: store.overlayHideInactiveParticipants,
+    overlayPreserveAspectRatio: store.overlayPreserveAspectRatio,
+    overlayCardSize: store.overlayCardSize,
+    overlayMinimalistCardSize: store.overlayMinimalistCardSize,
+    overlaySavedBounds: store.overlaySavedBounds,
+  };
+}
+
+/** A saved setting: `settings.updated` names the ones whose value changed. */
+export type SettingsKey = keyof ReturnType<typeof savedSettings>;
+
+/** Payload of `settings.updated`. */
+export interface SettingsUpdate {
+  readonly keys: readonly SettingsKey[];
+}
+
+/**
+ * Whether a `settings.updated` concerns any of these settings. An event
+ * without keys did not come from the store and may concern any of them.
+ */
+export function settingsChanged(update: SettingsUpdate | undefined, ...keys: SettingsKey[]): boolean {
+  return !update || keys.some(key => update.keys.includes(key));
+}
+
+/** `'soon'` groups the writes of a value still moving, such as a dragged slider. */
+export type SaveTiming = 'now' | 'soon';
+
+/** Each field serialized on its own, so the fields that changed can be told apart. */
+function serializeFields<T extends object>(fields: T): Map<keyof T, string | undefined> {
+  const serialized = new Map<keyof T, string | undefined>();
+  for (const key in fields) serialized.set(key, JSON.stringify(fields[key]));
+  return serialized;
+}
+
+/** The entries of `parsed` that are settings; any other key it holds is left out. */
+function settingsIn<T extends object>(settings: T, parsed: Record<string, unknown>): Partial<Record<keyof T, unknown>> {
+  const found: Partial<Record<keyof T, unknown>> = {};
+  for (const key in settings) if (Object.hasOwn(parsed, key)) found[key] = parsed[key];
+  return found;
+}
+
+/** The same text `JSON.stringify` gives for the object the fields came from. */
+function joinFields(fields: ReadonlyMap<string, string | undefined>): string {
+  const members: string[] = [];
+  for (const [key, json] of fields) if (json !== undefined) members.push(`${JSON.stringify(key)}:${json}`);
+  return `{${members.join(',')}}`;
+}
+
+/** What storage holds now; an unreadable storage holds nothing worth keeping. */
+function storedSettings(): string | null {
+  try { return localStorage.getItem(STORAGE_KEY); } catch { return null; }
+}
 
 function restoreBotLocalePreferences(value: unknown): Record<string, BotLocale> {
   if (value === undefined) return {};
@@ -168,11 +296,16 @@ export class SettingsStore {
   public overlayMinimalistCardSize: OverlayConfig['minimalistCardSize'] | null = null;
   public overlaySavedBounds: OverlayBounds | null = null;
 
+  /** Each saved setting as last written or read: `save()` writes and announces only what differs. */
+  private saved = new Map<SettingsKey, string | undefined>();
+  private pendingSave: ReturnType<typeof setTimeout> | null = null;
+
   constructor() {
     this.load(false);
   }
 
   public load(notify = true): void {
+    this.cancelPendingSave();
     this.screenEncodingMode = 'hardware';
     this.screenEncodingStrategy = 'automatic';
     this.preferredScreenCodec = 'h264';
@@ -187,13 +320,16 @@ export class SettingsStore {
     this.overlayHideInactiveParticipants = false;
     if (typeof localStorage === 'undefined') return;
     try {
-      const raw = localStorage.getItem('monky_settings');
+      const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
           throw new TypeError('Saved settings must be an object');
         }
-        Object.assign(this, parsed);
+        // Only the settings are read back. The text may hold other keys, left by an
+        // older version or brought by an imported backup, and those must not replace
+        // the store's own state or methods, such as what `save()` compares against.
+        Object.assign(this, settingsIn(savedSettings(this), parsed));
         this.qualityPreset = restoreQualityPreset(parsed.qualityPreset);
         this.screenEncodingMode = parsed.screenEncodingMode === 'software' ? 'software' : 'hardware';
         this.preferredScreenCodec = parsed.preferredScreenCodec === 'av1' ? 'av1' : 'h264';
@@ -407,7 +543,10 @@ export class SettingsStore {
       console.warn('[Settings] Could not load settings; bot downloads require confirmation:', error);
       return;
     }
-    if (notify) appEvents.emit('settings.updated');
+    // What was read is what the next save compares against: reading writes nothing back.
+    const { fields, keys } = this.diff();
+    this.saved = fields;
+    if (notify && keys.length) appEvents.emit('settings.updated', { keys } satisfies SettingsUpdate);
   }
 
   public getOverlayConfig(): OverlayConfig {
@@ -552,11 +691,12 @@ export class SettingsStore {
     return this.readVolume(this.userVolumes, sessionId, legacyClientId);
   }
 
-  public setUserVolume(sessionId: string, volume: number): void {
+  /** Applies at once; a slider still moving passes `'soon'` and saves when released. */
+  public setUserVolume(sessionId: string, volume: number, timing: SaveTiming = 'now'): void {
     if (!sessionId) return;
     const clamped = Math.max(0, Math.min(200, Math.round(volume)));
     this.userVolumes[sessionId] = clamped;
-    this.save();
+    this.persist(timing);
     appEvents.emit('user_volume.changed', { sessionId, volume: clamped });
   }
 
@@ -565,11 +705,12 @@ export class SettingsStore {
     return this.readVolume(this.screenAudioVolumes, sessionId, legacyClientId);
   }
 
-  public setScreenAudioVolume(sessionId: string, volume: number): void {
+  /** Applies at once; a slider still moving passes `'soon'` and saves when released. */
+  public setScreenAudioVolume(sessionId: string, volume: number, timing: SaveTiming = 'now'): void {
     if (!sessionId) return;
     const clamped = Math.max(0, Math.min(200, Math.round(volume)));
     this.screenAudioVolumes[sessionId] = clamped;
-    this.save();
+    this.persist(timing);
     appEvents.emit('screen_audio_volume.changed', { sessionId, volume: clamped });
   }
 
@@ -579,13 +720,15 @@ export class SettingsStore {
     return this.readVolume(this.miniappVolumes, botId);
   }
 
-  public setMiniappVolume(botId: string, volume: number): void {
+  /** Applies at once to every tile of the bot; a slider still moving passes `'soon'` and saves when released. */
+  public setMiniappVolume(botId: string, volume: number, timing: SaveTiming = 'now'): void {
     if (!botId) return;
     const clamped = Math.max(0, Math.min(200, Math.round(volume)));
     const entries = Object.entries(this.miniappVolumes).filter(([id]) => id !== botId);
     if (clamped !== 100) entries.push([botId, clamped]);
     this.miniappVolumes = Object.fromEntries(entries.slice(-MAX_BOT_PREFERENCE_SCOPES));
-    this.save();
+    this.persist(timing);
+    appEvents.emit('miniapp_volume.changed', { botId, volume: clamped });
   }
 
   /** Keep only valid { id: ChatSoundMode } entries, dropping 'inherit'/garbage (#153). */
@@ -736,90 +879,69 @@ export class SettingsStore {
     }
   }
 
+  /**
+   * Writes the settings and announces, in `settings.updated`, the ones whose value
+   * changed since they were last written or read; nothing changed, nothing is
+   * announced. Also writes whatever `saveSoon()` left waiting.
+   */
   public save(): void {
+    this.cancelPendingSave();
+    let keys: SettingsKey[];
     try {
       this.limitCustomProfile();
-      localStorage.setItem('monky_settings', JSON.stringify({
-        qualityPreset: this.qualityPreset,
-        screenEncodingMode: this.screenEncodingMode,
-        screenEncodingStrategy: this.screenEncodingStrategy,
-        preferredScreenCodec: this.preferredScreenCodec,
-        vadSensitivity: this.vadSensitivity,
-        selectedMicrophoneId: this.selectedMicrophoneId,
-        selectedSpeakerId: this.selectedSpeakerId,
-        advancedAudioOutputs: this.advancedAudioOutputs,
-        audioOutputDevices: this.audioOutputDevices,
-        selectedCameraId: this.selectedCameraId,
-        maxUploadKbps: this.maxUploadKbps,
-        maxDownloadKbps: this.maxDownloadKbps,
-        userVolumes: this.userVolumes,
-        noiseSuppressionEnabled: this.noiseSuppressionEnabled,
-        noiseSuppressionMode: this.noiseSuppressionMode,
-        lastNoiseSuppressionMode: this.lastNoiseSuppressionMode,
-        inputMode: this.inputMode,
-        pttKey: this.pttKey,
-        pttReleaseDelay: this.pttReleaseDelay,
-        pttSoundCue: this.pttSoundCue,
-        isMuted: this.isMuted,
-        isDeafened: this.isDeafened,
-        soundboardFolderPath: this.soundboardFolderPath,
-        botDownloadConfirmationExceptions: this.botDownloadConfirmationExceptions,
-        botUserPreferences: this.botUserPreferences,
-        botLocalePreferences: this.botLocalePreferences,
-        soundboardVolume: this.soundboardVolume,
-        soundboardMuted: this.soundboardMuted,
-        soundboardLimiterEnabled: this.soundboardLimiterEnabled,
-        soundboardLoudnessLimit: this.soundboardLoudnessLimit,
-        stickersFolderPath: this.stickersFolderPath,
-        screenAudioVolumes: this.screenAudioVolumes,
-        miniappVolumes: this.miniappVolumes,
-        screenShareTelemetryEnabled: this.screenShareTelemetryEnabled,
-        screenShareReceiver: this.getScreenShareReceiver(),
-        screenSharePreviewPauseWhenUnfocused: this.screenSharePreviewPauseWhenUnfocused,
-        screenShareAutoPictureInPicture: this.screenShareAutoPictureInPicture,
-        screenShareTelemetryPosition: this.screenShareTelemetryPosition,
-        screenShareTelemetryMode: this.screenShareTelemetryMode,
-        customProfile: this.customProfile,
-        customSounds: this.customSounds,
-        soundboardShortcuts: this.soundboardShortcuts,
-        soundboardViewMode: this.soundboardViewMode,
-        keybindShortcuts: this.keybindShortcuts,
-        chatMessageSoundEnabled: this.chatMessageSoundEnabled,
-        chatMessageSoundMentionsOnly: this.chatMessageSoundMentionsOnly,
-        updateBetaChannel: this.updateBetaChannel,
-        minimizeToTrayOnClose: this.minimizeToTrayOnClose,
-        askShutdownOnLastLeave: this.askShutdownOnLastLeave,
-        appearOffline: this.appearOffline,
-        brb: this.brb,
-        customStatus: this.customStatus,
-        customStatusActive: this.customStatusActive,
-        shareGameActivity: this.shareGameActivity,
-        suggestGameShare: this.suggestGameShare,
-        chatSoundServerOverrides: this.chatSoundServerOverrides,
-        chatSoundChannelOverrides: this.chatSoundChannelOverrides,
-        onboardingCompleted: this.onboardingCompleted,
-        autoEntryServerKeys: this.autoEntryServerKeys,
-        autoConnectServers: this.autoConnectServers,
-        overlayMode: this.overlayMode,
-        overlayLayout: this.overlayLayout,
-        overlayPosition: this.overlayPosition,
-        overlayCardOpacity: this.overlayCardOpacity,
-        overlayFocusActiveSpeaker: this.overlayFocusActiveSpeaker,
-        overlayAutoOpenOnLeaveStage: this.overlayAutoOpenOnLeaveStage,
-        overlayMinimalistMode: this.overlayMinimalistMode,
-        overlayHideSelf: this.overlayHideSelf,
-        overlayHideStagePreviews: this.overlayHideStagePreviews,
-        overlayHideInactiveParticipants: this.overlayHideInactiveParticipants,
-        overlayPreserveAspectRatio: this.overlayPreserveAspectRatio,
-        overlayCardSize: this.overlayCardSize,
-        overlayMinimalistCardSize: this.overlayMinimalistCardSize,
-        overlaySavedBounds: this.overlaySavedBounds,
-      }));
-      appEvents.emit('settings.updated');
+      const changed = this.diff();
+      keys = changed.keys;
+      const json = joinFields(changed.fields);
+      // Only a different text is written: an unchanged save costs no write,
+      // while what storage holds from older versions is still rewritten.
+      if (storedSettings() !== json) localStorage.setItem(STORAGE_KEY, json);
+      this.saved = changed.fields;
     } catch (error) {
       console.error('[SettingsStore] Could not save settings:', error);
       throw error;
     }
+    if (keys.length) appEvents.emit('settings.updated', { keys } satisfies SettingsUpdate);
+  }
+
+  /**
+   * Saves after a short pause, for a value still moving: a dragged slider changes
+   * the same setting dozens of times a second, and only where it stops needs
+   * writing and announcing. `save()`, leaving the page and quitting the app
+   * write it sooner.
+   */
+  public saveSoon(): void {
+    this.cancelPendingSave();
+    this.pendingSave = setTimeout(() => {
+      this.pendingSave = null;
+      this.flushSave();
+    }, SAVE_DELAY_MS);
+  }
+
+  /** Writes a save `saveSoon()` left waiting, if any. */
+  public flush(): void {
+    if (this.pendingSave !== null) this.flushSave();
+  }
+
+  private flushSave(): void {
+    // A failure is already logged by save(); the values stay in memory and the next save writes them.
+    try { this.save(); } catch { /* reported by save() */ }
+  }
+
+  private cancelPendingSave(): void {
+    if (this.pendingSave === null) return;
+    clearTimeout(this.pendingSave);
+    this.pendingSave = null;
+  }
+
+  private persist(timing: SaveTiming): void {
+    if (timing === 'soon') this.saveSoon();
+    else this.save();
+  }
+
+  /** The saved settings as they are now, and the ones that differ from what was last written or read. */
+  private diff(): { fields: Map<SettingsKey, string | undefined>; keys: SettingsKey[] } {
+    const fields = serializeFields(savedSettings(this));
+    return { fields, keys: [...fields.keys()].filter(key => fields.get(key) !== this.saved.get(key)) };
   }
 }
 
@@ -829,8 +951,12 @@ export const settingsStore = new SettingsStore();
 // consumers that can still be initializing their imports.
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', (event) => {
-    if (event.key !== 'monky_settings' && event.key !== null) return;
+    if (event.key !== STORAGE_KEY && event.key !== null) return;
     if (event.storageArea !== localStorage) return;
     settingsStore.load();
   });
+  // A grouped save still waiting is written before the page goes away, and as
+  // soon as the app starts quitting, before its window is torn down.
+  window.addEventListener('pagehide', () => settingsStore.flush());
+  window.api?.onAppBeforeQuit?.(() => settingsStore.flush());
 }

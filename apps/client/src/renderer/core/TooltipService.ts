@@ -38,21 +38,28 @@ export function initTooltips(doc: Document = document): () => void {
   let pointerTarget: Element | null = null;
   let focusTarget: Element | null = null;
   let anchor: Element | null = null;
+  /** The element the anchor's `data-tooltip-source` named at the last refresh. */
+  let anchorSource: Element | null = null;
   let keyboard = false;
   let dismissed = false;
   let timer: number | undefined;
+  let frame: number | undefined;
   let disposed = false;
   let shown = false;
 
   const sourceTitle = (element: Element): string | null =>
     suppressed.get(element)?.value ?? (suppressed.has(element) ? null : element.getAttribute('title'));
 
+  function sourceOf(element: Element): Element | null {
+    const sourceId = element.getAttribute('data-tooltip-source');
+    return sourceId === null ? null : doc.getElementById(sourceId);
+  }
+
   function textFor(element: Element): string {
     const explicitText = element.getAttribute('data-tooltip');
     if (explicitText !== null) return explicitText;
-    const sourceId = element.getAttribute('data-tooltip-source');
-    if (sourceId === null) return sourceTitle(element) ?? '';
-    const source = doc.getElementById(sourceId);
+    if (!element.hasAttribute('data-tooltip-source')) return sourceTitle(element) ?? '';
+    const source = sourceOf(element);
     if (!source) return '';
     const walker = doc.createTreeWalker(source, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
       acceptNode: (node) => node instanceof Element && node.matches('script, style')
@@ -203,6 +210,9 @@ export function initTooltips(doc: Document = document): () => void {
 
   function refresh(): void {
     if (disposed) return;
+    // Whatever a mutation scheduled is done now.
+    if (frame !== undefined) win!.cancelAnimationFrame(frame);
+    frame = undefined;
     if (!pointerTarget?.isConnected) pointerTarget = null;
     if (!focusTarget?.isConnected) focusTarget = null;
     syncSuppression();
@@ -221,12 +231,29 @@ export function initTooltips(doc: Document = document): () => void {
         position();
       }
     }
+    anchorSource = anchor && sourceOf(anchor);
     if (next && !dismissed && !shown && keyboard && focusTarget) {
       win!.clearTimeout(timer);
       show();
     } else if (next && !dismissed && !shown && timer === undefined) {
       timer = win!.setTimeout(show, HOVER_DELAY);
     }
+  }
+
+  /**
+   * Whether a batch of DOM changes can affect the tooltip: it touched the anchor,
+   * the element under the pointer or the keyboard focus, one of their ancestors,
+   * something inside the anchor, or the element its text comes from.
+   */
+  function concernsTooltip(records: MutationRecord[]): boolean {
+    const watched = [anchor, pointerTarget, keyboard ? focusTarget : null, anchorSource];
+    if (watched.some((element) => element && !element.isConnected)) return true;
+    const chains = new Set<Node>();
+    for (const element of watched) {
+      for (let node: Node | null = element; node && !chains.has(node); node = node.parentNode) chains.add(node);
+    }
+    return records.some(({ target }) => target !== tooltip && !tooltip.contains(target)
+      && (chains.has(target) || !!anchor?.contains(target) || !!anchorSource?.contains(target)));
   }
 
   function onPointerOver(event: PointerEvent): void {
@@ -280,8 +307,15 @@ export function initTooltips(doc: Document = document): () => void {
     refresh();
   }
 
+  // A meter redrawn every frame or a busy chat elsewhere leaves the tooltip alone;
+  // changes that can affect it are looked at once per frame, where reading layout
+  // costs the least (R-SHELL-15).
   const observer = new MutationObserver((records) => {
-    if (records.some((record) => record.target !== tooltip && !tooltip.contains(record.target))) refresh();
+    if (frame !== undefined || !concernsTooltip(records)) return;
+    frame = win.requestAnimationFrame(() => {
+      frame = undefined;
+      refresh();
+    });
   });
   observer.observe(doc.body, {
     subtree: true,
@@ -305,6 +339,8 @@ export function initTooltips(doc: Document = document): () => void {
     if (disposed) return;
     disposed = true;
     observer.disconnect();
+    if (frame !== undefined) win.cancelAnimationFrame(frame);
+    frame = undefined;
     hide();
     cancelSurfaceMotion(tooltip);
     for (const [element, state] of suppressed) restore(element, state);

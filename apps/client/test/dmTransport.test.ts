@@ -13,10 +13,12 @@ import {
   type DmDispatch,
   type DmRelayItem,
   type DmResult,
+  type DmSnapshot,
   type UserSummary,
 } from '@monky/shared';
 import { DmTransport } from '../src/renderer/core/DmTransport';
 import { sessionManager, type ServerSession } from '../src/renderer/core/SessionManager';
+import { DmStore } from '../src/renderer/stores/dmStore';
 
 function newIdentity(): string {
   const { publicKey } = generateKeyPairSync('ed25519');
@@ -201,4 +203,37 @@ test('requests for every device of a friend go through every server the friend i
   const through = (data: string) => sessions.filter((session) => sent.get(session.key)?.includes(data)).map((session) => session.key);
   assert.deepEqual(through('pedido'), [sessions[0].key, sessions[1].key], 'Each server the friend is on gets the request once');
   assert.equal(through('mensagem').length, 1, 'Anything else still goes through one of them');
+});
+
+test('the DM store reports loading until its first snapshot lands or fails, so Home tells "opening" from "empty" (R-SHELL-14)', async (context) => {
+  const previous: unknown = Reflect.get(globalThis, 'window');
+  context.after(async () => { Reflect.set(globalThis, 'window', previous); await sessionManager.removeAll(); });
+  const open = (snapshot: DmApi['snapshot']) => {
+    Reflect.set(globalThis, 'window', { api: { dm: fakeApi({ snapshot }) } });
+    const store = new DmStore();
+    context.after(() => store.dispose());
+    let changes = 0;
+    store.bus.on('changed', () => { changes += 1; });
+    return { store, changes: () => changes };
+  };
+
+  let answer: (result: DmResult<DmSnapshot>) => void = () => undefined;
+  const pending = open(() => new Promise((resolve) => { answer = resolve; }));
+  assert.equal(pending.store.loading, false, 'Nothing loads before init');
+  const started = pending.store.init();
+  assert.equal(pending.store.loading, true, 'Home is drawn while the store opens in the main process');
+  answer({ ok: true, value: { me: null, peers: [], conversations: [], settings: { maxFileBytes: DM_DEFAULT_MAX_FILE_BYTES } } });
+  await started;
+  assert.equal(pending.store.loading, false);
+  assert.equal(pending.changes(), 1, 'One redraw when the snapshot lands');
+
+  const refused = open(async () => ({ ok: false, error: { code: 'unavailable', message: 'No identity', details: {} } }));
+  await refused.store.init();
+  assert.equal(refused.store.loading, false, 'A refused snapshot leaves Home on its empty state, not on placeholders');
+  assert.equal(refused.changes(), 1);
+
+  const broken = open(async () => { throw new Error('Synthetic IPC failure'); });
+  await assert.rejects(broken.store.init(), /Synthetic IPC failure/);
+  assert.equal(broken.store.loading, false, 'A failed snapshot never strands the placeholders');
+  assert.equal(broken.changes(), 1);
 });

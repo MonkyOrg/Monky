@@ -60,12 +60,19 @@ export class SoundEffectManager {
   // Handle for the repeating reconnection cue (#553): a window.setInterval id
   // while a voice call is reconnecting, or null when it is not.
   private reconnectLoopTimer: number | null = null;
+  private loaded = false;
 
-  constructor() {
-    this.loadAll();
+  /**
+   * Preloads every cue so the first one plays at once. Importing the module
+   * has no side effects: only the main window calls this (R-MEDIA-3), and a
+   * cue played before it loads them on demand.
+   */
+  public init(): void {
+    if (!this.loaded) this.loadAll();
   }
 
   public loadAll(): void {
+    this.loaded = true;
     const customSounds = settingsStore.customSounds || {};
     for (const key of SOUND_EFFECT_TYPES) this.reloadSound(key, customSounds[key]);
   }
@@ -299,6 +306,7 @@ export class SoundEffectManager {
 
   public play(key: SoundEffectType): void {
     try {
+      this.init();
       const audio = this.audioMap[key];
       if (audio) {
         const request = (this.playRequests[key] ?? 0) + 1;

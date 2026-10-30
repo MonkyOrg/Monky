@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
-import type { OverlayConfig, OverlaySyncState } from '@monky/shared';
+import type { OverlayConfig, OverlaySignal, OverlaySyncState } from '@monky/shared';
 import type { ElectronApi } from './preload';
 
 /**
@@ -22,7 +22,7 @@ const api: OverlayWindowApi = {
     return () => { ipcRenderer.removeListener('overlay:config-updated', listener); };
   },
   onOverlaySignalReceived: (cb) => {
-    const listener = (_e: IpcRendererEvent, signal: string) => cb(signal);
+    const listener = (_e: IpcRendererEvent, signal: OverlaySignal) => cb(signal);
     ipcRenderer.on('overlay:signal-received', listener);
     return () => { ipcRenderer.removeListener('overlay:signal-received', listener); };
   },

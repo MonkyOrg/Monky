@@ -1,18 +1,17 @@
 import { BrowserWindow, screen } from 'electron';
 import { setWindowResizeAspect } from '@monky/screen-audio';
 import path from 'path';
-import { pathToFileURL } from 'url';
 import {
   OVERLAY_DEFAULT_WIDTH,
   OVERLAY_DEFAULT_HEIGHT,
   getOverlayCardSize,
+  overlaySignalPayloadSchema,
 } from '@monky/shared';
 import type {
   OverlayBounds,
   OverlayCardLayout,
   OverlayConfig,
   OverlayPosition,
-  OverlaySignalPayload,
   OverlaySyncState,
 } from '@monky/shared';
 
@@ -105,16 +104,11 @@ export class OverlayManager {
     this.overlayWindow.setAlwaysOnTop(true, 'screen-saver');
     this.overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
-    if (process.env.VITE_DEV_SERVER_URL) {
-      const devUrl = new URL(process.env.VITE_DEV_SERVER_URL);
-      devUrl.searchParams.set('overlay', '1');
-      this.overlayWindow.loadURL(devUrl.toString());
-    } else {
-      const distHtmlPath = path.join(__dirname, '../../dist/index.html');
-      const fileUrl = pathToFileURL(distHtmlPath);
-      fileUrl.searchParams.set('overlay', '1');
-      this.overlayWindow.loadURL(fileUrl.toString());
-    }
+    // Its own page (overlay.html): the overlay never loads the app (R-MEDIA-3).
+    const loaded = process.env.VITE_DEV_SERVER_URL
+      ? this.overlayWindow.loadURL(new URL('overlay.html', process.env.VITE_DEV_SERVER_URL).toString())
+      : this.overlayWindow.loadFile(path.join(__dirname, '../../dist/overlay.html'));
+    loaded.catch((error: unknown) => console.warn('[Overlay] Could not load the overlay page:', error));
 
     this.overlayWindow.once('ready-to-show', () => {
       if (this.overlayWindow === openedWindow && !openedWindow.isDestroyed()) {
@@ -334,15 +328,13 @@ export class OverlayManager {
     return { ...this.currentConfig.bounds };
   }
 
-  public sendSignal(payload: OverlaySignalPayload): void {
-    if (payload.target === 'overlay') {
-      if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
-        this.overlayWindow.webContents.send('overlay:signal-received', payload.signal);
-      }
-    } else if (payload.target === 'main') {
-      if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-        this.mainWindow.webContents.send('overlay:signal-received', payload.signal);
-      }
+  /** Relays the video link negotiation between the main window and the overlay (R-MEDIA-2). */
+  public sendSignal(input: unknown): void {
+    const payload = overlaySignalPayloadSchema.safeParse(input);
+    if (!payload.success) throw new Error('Invalid overlay signal.');
+    const window = payload.data.target === 'overlay' ? this.overlayWindow : this.mainWindow;
+    if (window && !window.isDestroyed()) {
+      window.webContents.send('overlay:signal-received', payload.data.signal);
     }
   }
 

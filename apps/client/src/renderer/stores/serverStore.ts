@@ -166,6 +166,11 @@ export class ServerStore {
     } catch { return false; }
   }
 
+  /**
+   * Only the sidebar shows which categories are collapsed, and it applies the
+   * change itself: the rest of the app has nothing to redraw, nor anything to
+   * ask the server for, when one folds (R-SHELL-11).
+   */
   public toggleCategoryCollapsed(categoryId: string): void {
     const key = this.categoryCollapseKey();
     if (!key) return;
@@ -178,7 +183,6 @@ export class ServerStore {
     } catch {
       clientLog.warn('SERVER_HOST', 'Could not persist category collapse state');
     }
-    this.bus.emit('server.updated');
   }
 
   public removeChannel(channelId: string): void {

@@ -23,6 +23,11 @@ export default defineConfig({
     target: 'esnext',
     chunkSizeWarningLimit: 1000,
     rollupOptions: {
+      // The overlay window has its own page and loads none of the app (R-MEDIA-3).
+      input: {
+        index: path.resolve(__dirname, 'src/renderer/index.html'),
+        overlay: path.resolve(__dirname, 'src/renderer/overlay.html'),
+      },
       output: {
         // Extensionless licenses must not acquire a trailing dot on Windows.
         assetFileNames: 'assets/[name]-[hash][extname]',

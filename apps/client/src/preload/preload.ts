@@ -1,8 +1,6 @@
 import { contextBridge, ipcRenderer, sharedTexture } from 'electron';
 import { readFileSync } from 'node:fs';
-import {
-  createNativeScreenPresentation, registerNativeAudioPortReceiver, type NativeScreenPresentationController,
-} from '@monky/screen-share';
+import type { NativeScreenPresentationController } from '@monky/screen-share/renderer';
 import * as nativeAudioProtocol from '@monky/shared';
 import { BOT_SCREEN_DOCUMENT_IPC, BOT_STORAGE_CHANGED, BOT_STORAGE_IPC, SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, DESKTOP_SOURCES_IPC, EVENT_CALENDAR_IPC, HOSTING_SKILL_IPC, FILE_BATCH_DOWNLOAD_IPC, type BotScreenDocumentConsent, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
 import type {
@@ -53,6 +51,7 @@ import type {
   LogEntry,
   OverlayBounds,
   OverlayConfig,
+  OverlaySignal,
   OverlaySignalPayload,
   OverlaySyncState,
   PttConfig,
@@ -274,7 +273,7 @@ export interface ElectronApi {
   sendOverlaySyncState: (state: OverlaySyncState) => Promise<void>;
   onOverlayStateChanged: (cb: (isOpen: boolean) => void) => () => void;
   onOverlayConfigUpdated: (cb: (config: OverlayConfig) => void) => () => void;
-  onOverlaySignalReceived: (cb: (signal: string) => void) => () => void;
+  onOverlaySignalReceived: (cb: (signal: OverlaySignal) => void) => () => void;
   onOverlaySyncStateReceived: (cb: (state: OverlaySyncState) => void) => () => void;
   onOverlayCloseRequested: (cb: () => void) => () => void;
   onOverlayHoverChanged: (cb: (hovered: boolean, point?: { x: number; y: number }) => void) => () => void;
@@ -317,15 +316,26 @@ function reportConfiguredMediaFolders(): void {
 }
 reportConfiguredMediaFolders();
 
+type NativeScreenRenderer = typeof import('@monky/screen-share/renderer');
+let nativeScreenRenderer: NativeScreenRenderer | null = null;
+/**
+ * Only the presentation and audio half of the native runtime, loaded with the
+ * first native screen this window watches instead of with every window (E-MAIN-8).
+ */
+function screenRenderer(): NativeScreenRenderer {
+  const loaded: NativeScreenRenderer = nativeScreenRenderer ?? require('@monky/screen-share/renderer');
+  nativeScreenRenderer = loaded;
+  return loaded;
+}
 let nativePresentation: NativeScreenPresentationController | null = null;
-let nativeAudio: ReturnType<typeof registerNativeAudioPortReceiver> | null = null;
+let nativeAudio: ReturnType<NativeScreenRenderer['registerNativeAudioPortReceiver']> | null = null;
 let nativeAudioWorkletUrl: string | null = null;
 function prepareNativeAudio(): void {
   if (nativeAudio) return;
   const code = readFileSync(require.resolve('@monky/screen-share/runtime/nativePcmPlayout.worklet.js'), 'utf8');
   const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
   try {
-    nativeAudio = registerNativeAudioPortReceiver(ipcRenderer, nativeAudioProtocol, {
+    nativeAudio = screenRenderer().registerNativeAudioPortReceiver(ipcRenderer, nativeAudioProtocol, {
       workletUrl: url, onError: error => console.error('[NativeScreen] Audio output failed:', error),
     });
     nativeAudioWorkletUrl = url;
@@ -333,7 +343,7 @@ function prepareNativeAudio(): void {
 }
 const nativePresentationErrors = new Set<(value: { presentationId: string | null; message: string }) => void>();
 function presentationController(): NativeScreenPresentationController {
-  if (!nativePresentation) nativePresentation = createNativeScreenPresentation(sharedTexture, document, (presentationId, error) => {
+  if (!nativePresentation) nativePresentation = screenRenderer().createNativeScreenPresentation(sharedTexture, document, (presentationId, error) => {
     console.error('[NativeScreen] Presentation failed:', error);
     for (const callback of nativePresentationErrors) {
       try { callback({ presentationId, message: error.message }); }
@@ -705,7 +715,7 @@ const api: ElectronApi = {
     };
   },
   onOverlaySignalReceived: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, signal: string) => cb(signal);
+    const listener = (_e: Electron.IpcRendererEvent, signal: OverlaySignal) => cb(signal);
     ipcRenderer.on('overlay:signal-received', listener);
     return () => {
       ipcRenderer.removeListener('overlay:signal-received', listener);
@@ -749,6 +759,9 @@ const api: ElectronApi = {
 };
 
 contextBridge.exposeInMainWorld('api', api);
+
+// The renderer reports when the preload finished, on the page's timeline (#490).
+performance.mark('monky:preload');
 
 declare global {
   interface Window {

@@ -310,13 +310,16 @@ export class SoundboardTab {
     this.setPickingFolder(this.pickingFolder);
     void this.refreshFolderDownloadState(container);
 
+    // Every step is heard at once; the volume is saved where the slider stops.
     sliderVol?.addEventListener('input', () => {
       const val = parseInt(sliderVol.value, 10);
       sliderVol.style.setProperty('--slider-progress', `${val}%`);
       if (volVal) volVal.textContent = `${val}%`;
       settingsStore.soundboardVolume = val;
-      settingsStore.save();
+      soundboardService.applyVolume();
+      settingsStore.saveSoon();
     });
+    sliderVol?.addEventListener('change', () => settingsStore.save());
 
     checkboxMute?.addEventListener('change', () => {
       settingsStore.soundboardMuted = checkboxMute.checked;

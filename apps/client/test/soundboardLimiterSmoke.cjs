@@ -255,6 +255,8 @@ async function runSmoke(fixture) {
     import('/stores/settingsStore.ts'), import('/core/SoundboardService.ts'), import('/views/settings/tabs/SoundboardTab.ts'),
     import('/core/EventBus.ts'), import('/i18n/index.ts'), import('/stores/serverStore.ts'),
   ]);
+  // Importing has no side effects (R-MEDIA-3): the main window starts the library like this.
+  soundboardService.init();
   const workletUrl = new URL('/audio/soundboardLimiter.worklet.js', window.location.href).href;
   const tab = new SoundboardTab();
   const root = document.getElementById('fixture');

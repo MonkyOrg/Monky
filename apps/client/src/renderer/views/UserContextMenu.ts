@@ -3,7 +3,7 @@ import { escapeHtml, html, trustedHtml } from '../utils/html';
 import { activityIconSrc } from '../utils/activityIcon';
 import { avatarFileExtension, getAvatarUrl } from '../utils/avatar';
 import { renderRoleOption } from '../utils/roleOption';
-import { settingsStore } from '../stores/settingsStore';
+import { settingsStore, type SaveTiming } from '../stores/settingsStore';
 import { getActiveServerStore, serverStore } from '../stores/serverStore';
 import { connectionStore } from '../stores/connectionStore';
 import { voiceStore } from '../stores/voiceStore';
@@ -305,7 +305,7 @@ export class UserContextMenu {
     else if (volume === 200) this.menuEl.querySelector('#ctx-vol-200')?.classList.add('active');
   }
 
-  private applyVolume(user: UserSummary, volume: number): void {
+  private applyVolume(user: UserSummary, volume: number, timing: SaveTiming = 'now'): void {
     const clamped = Math.max(0, Math.min(200, Math.round(volume)));
     const badge = this.menuEl?.querySelector('#ctx-volume-badge');
     const icon = this.menuEl?.querySelector('#ctx-volume-icon');
@@ -321,7 +321,7 @@ export class UserContextMenu {
     this.updateActiveQuickButton(clamped);
 
     const sessionId = this.resolveVolumeTarget(user);
-    settingsStore.setUserVolume(sessionId, clamped);
+    settingsStore.setUserVolume(sessionId, clamped, timing);
     webRtcManager.setPeerVolume(sessionId, clamped);
   }
 
@@ -567,7 +567,9 @@ export class UserContextMenu {
     }
 
     const slider = this.menuEl.querySelector('#ctx-volume-slider') as HTMLInputElement | null;
-    slider?.addEventListener('input', () => this.applyVolume(user, parseInt(slider.value, 10)));
+    // Every step is heard at once; the volume is saved where the slider stops.
+    slider?.addEventListener('input', () => this.applyVolume(user, parseInt(slider.value, 10), 'soon'));
+    slider?.addEventListener('change', () => settingsStore.save());
     const avatarButton = this.menuEl.querySelector<HTMLButtonElement>('#ctx-view-avatar');
     avatarButton?.addEventListener('click', () => {
       const url = getAvatarUrl(user.avatarUrl);

@@ -13,7 +13,8 @@ import {
   MANAGED_TOOL_MAX_DOWNLOAD,
   type ManagedToolAsset,
   type ManagedToolRepository,
-} from '@monky/bot-sdk';
+  // Only the downloader: the SDK entry would load the whole bot client into Main at startup.
+} from '@monky/bot-sdk/dist/managedTools';
 import {
   LOCAL_CAPABILITY_TOOLS,
   LOCAL_TOOL_IDS,

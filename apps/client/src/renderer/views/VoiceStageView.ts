@@ -1215,7 +1215,8 @@ export class VoiceStageView {
       });
     });
 
-    // Screen audio volume sliders (#75)
+    // Screen audio volume sliders (#75): every step is heard at once, and the
+    // volume is saved where the slider stops.
     card.querySelectorAll<HTMLInputElement>('.stage-screen-volume-slider').forEach((slider) => {
       slider.addEventListener('input', () => {
         const sessionId = slider.getAttribute('data-session-id');
@@ -1223,8 +1224,9 @@ export class VoiceStageView {
         const vol = parseInt(slider.value, 10);
         // Persisted per device, not per person (#363): the same person sharing
         // from two machines gets one slider each.
-        settingsStore.setScreenAudioVolume(sessionId, vol);
+        settingsStore.setScreenAudioVolume(sessionId, vol, 'soon');
       });
+      slider.addEventListener('change', () => settingsStore.save());
     });
 
     // Volume button click → toggle mute screen audio. A muted share must not come

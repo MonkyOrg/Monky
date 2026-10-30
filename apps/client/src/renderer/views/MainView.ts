@@ -1,7 +1,7 @@
 import { MessageType, Permission, ProtocolErrorCode, UserSummary, type ChannelDeletedPayload, type ChannelSummary, type ServerSettingsUpdatedPayload } from '@monky/shared';
 import { categoryModal } from './CategoryModal';
 import './channelCategories.css';
-import { escapeHtml } from '../utils/html';
+import { escapeHtml, html, trustedHtml } from '../utils/html';
 import { activityIconSrc } from '../utils/activityIcon';
 import { animateEnter, cancelSurfaceMotion, hideWithMotion, positionAnchoredSurface, showWithMotion } from '../utils/surfaceMotion';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
@@ -11,7 +11,7 @@ import { networkClient, ProtocolRequestError } from '../core/NetworkClient';
 import { currentPresenceStatus, publishedCustomStatus, sessionManager, type PresenceStatus } from '../core/SessionManager';
 import { isForegroundEvent } from '../core/sessionRouting';
 import { callClient, isVoiceAdmissionPending, joinCallOnSession, leaveCurrentCall, rejoinCallOnSession, showHome } from '../core/serverConnection';
-import { participantManager } from '../core/ParticipantManager';
+import { participantManager, type ParticipantViewModel } from '../core/ParticipantManager';
 import { accessSignature, serverStore } from '../stores/serverStore';
 import { voiceStore } from '../stores/voiceStore';
 import { chatStore } from '../stores/chatStore';
@@ -49,7 +49,9 @@ import { setButtonLoading, withButtonLoading } from '../utils/buttonLoading';
 import { checkServerOnline } from '../utils/serverStatus';
 import { warnIfMoveBlocked } from '../utils/channelAccess';
 import { afkChannelIdOf, renderVoiceUserLimitBadge, voiceUserLimitOf } from '../utils/voiceRooms';
-import { renderChannelIcon, showChannelIconLoading } from './channelIcon';
+import { renderChannelIcon } from './channelIcon';
+import { renderKeyedList, type KeyedItem } from '../utils/keyedList';
+import { preserveViewState } from '../utils/preserveViewState';
 import { captureHostedServerLeaveState, promptShutdownAfterLeave } from '../utils/hostedServer';
 import { userContextMenu } from './UserContextMenu';
 import { soundboardModal } from './SoundboardModal';
@@ -75,6 +77,15 @@ import type { MessageSearchResultPayload } from '@monky/shared';
 
 /** A loose channel or a category, the two kinds of entries at the sidebar root. */
 type ChannelTreeTarget = { kind: 'channel' | 'category'; id: string };
+
+/** Where a dragged channel would land, and what shows it. */
+type ChannelDrop = {
+  categoryId: string | null;
+  target: ChannelTreeTarget | null;
+  after: boolean;
+  targetRow: HTMLElement | null;
+  dropzone: HTMLElement | null;
+};
 
 /** Role tags in the narrow member sidebar before the rest collapse into "+N". */
 const SIDEBAR_ROLE_TAGS = 2;
@@ -129,6 +140,14 @@ export class MainView {
   // Measures the floating user card so the server rail can reserve room for it
   // (#473).
   private userCardObserver: ResizeObserver | null = null;
+  /** Delegated listeners of the sidebar lists, by list element: each list binds them once. */
+  private readonly listEvents = new Map<HTMLElement, AbortController>();
+  /** The handle whose next click ends a reorder drag, and is swallowed. */
+  private dragEndClick: Element | null = null;
+  /** The channel or category being dragged to reorder the tree. */
+  private draggedTreeEntry: ChannelTreeTarget | null = null;
+  /** The voice room shown with a spinner while it is joined (#48). */
+  private joiningVoiceChannelId: string | null = null;
 
   public setActiveContentView(view: 'chat' | 'stage'): void {
     const changed = this.activeContentView !== view;
@@ -1467,677 +1486,642 @@ export class MainView {
     }, 500);
   }
 
+  /**
+   * The channel tree. Rows are reconciled by key: a voice, presence or unread
+   * event rebuilds only the rows whose markup changed, so focus, an opened
+   * menu's button and a drag in progress survive it, and the list's events are
+   * delegated once instead of being bound again on every row (R-SHELL-11).
+   */
   private renderChannels(): void {
-    if (!serverStore.serverDetails) return;
-
-    const textListEl = document.createElement('div');
-    const voiceListEl = document.createElement('div');
+    const details = serverStore.serverDetails;
+    const categoryList = this.container.querySelector<HTMLElement>('#channel-categories-list');
+    if (!details || !categoryList) return;
+    this.delegateOnce(categoryList, signal => this.bindChannelListEvents(categoryList, signal));
     const canManageChannels = serverStore.hasPermission(Permission.MANAGE_CHANNELS);
+    const canMoveMembers = serverStore.hasPermission(Permission.MOVE_MEMBERS);
     const permissionsResolved = this.arePermissionsResolved();
+    const afkChannelId = afkChannelIdOf(details);
+    const activeForumId = serverStore.getChannel(serverStore.activeTextChannelId ?? '')?.forumId;
+    const rows = new Map<string, KeyedItem>();
+    for (const channel of details.channels) {
+      if ((channel.type === 'TEXT' || channel.type === 'FORUM') && !channel.forumId) {
+        const active = (channel.id === serverStore.activeTextChannelId || channel.id === activeForumId) && this.activeContentView === 'chat';
+        rows.set(channel.id, this.textChannelRow(channel, active, canManageChannels));
+      } else if (channel.type === 'VOICE') {
+        rows.set(channel.id, this.voiceChannelRow(channel, {
+          canManage: canManageChannels, canMove: canMoveMembers, permissionsResolved,
+          afk: channel.id === afkChannelId, userLimit: voiceUserLimitOf(details, channel),
+        }));
+      }
+    }
 
-    const textChannels = serverStore.serverDetails.channels.filter((c) => (c.type === 'TEXT' || c.type === 'FORUM') && !c.forumId);
-    const voiceChannels = serverStore.serverDetails.channels.filter((c) => c.type === 'VOICE');
-    const afkChannelId = afkChannelIdOf(serverStore.serverDetails);
+    const categories = details.categories ?? [];
+    const channelsById = new Map(details.channels.map((channel) => [channel.id, channel]));
+    const treeOrder = serverStore.hasChannelTreeOrder;
+    // The root interleaves categories with runs of loose channels. Older
+    // servers keep every loose channel in one group above the categories,
+    // which stays mounted even when empty so channels can be dropped there.
+    const groups: Array<{ id: string; name: string; channels: ChannelSummary[] }> = treeOrder ? [] : [
+      { id: '', name: t('categories.uncategorized'), channels: [] },
+    ];
+    for (const item of serverStore.getChannelTreeRoot()) {
+      if (item.kind === 'category') {
+        const category = categories.find((entry) => entry.id === item.id);
+        if (category) {
+          groups.push({ id: category.id, name: category.name, channels: details.channels
+            .filter((channel) => channel.categoryId === category.id) });
+        }
+        continue;
+      }
+      const channel = channelsById.get(item.id);
+      if (!channel) continue;
+      const run = treeOrder ? groups.at(-1) : groups[0];
+      if (run && !run.id) run.channels.push(channel);
+      else groups.push({ id: '', name: t('categories.uncategorized'), channels: [channel] });
+    }
+    // While a channel is dragged, the space before a category with no loose
+    // channel above it, and the end of the list, become slots outside every
+    // category. Elsewhere the loose channels themselves mark the position.
+    const placesAtRoot = treeOrder && canManageChannels;
+    const items: KeyedItem[] = [];
+    let looseRuns = 0;
+    groups.forEach((group, index) => {
+      const previous = groups[index - 1];
+      if (placesAtRoot && group.id && (!previous || previous.id)) items.push(this.rootGap(group.id));
+      items.push({
+        key: group.id ? `category:${group.id}` : `loose:${looseRuns++}`,
+        // Collapsing is applied in place (applyCategoryCollapse): the markup stays the same either way.
+        html: html`<section class="channel-category${group.id ? '' : ' channel-category--uncategorized'}${group.channels.length ? '' : ' channel-category--empty'}" data-category-id="${group.id}">
+          ${group.id ? html`<div class="category-title${canManageChannels ? ' category-reorder-handle' : ''}" data-category-dropzone="${group.id}">
+            <button class="category-collapse-btn" data-collapse-category="${group.id}" aria-expanded="true">
+              <span class="material-symbols-outlined md-16">expand_more</span>
+              <span>${group.name}</span>
+            </button>
+            ${canManageChannels ? html`<button class="category-add-btn" data-add-category="${group.id}" title="${t('categories.addChannel')}">
+              <span class="material-symbols-outlined md-14">add</span></button>` : ''}
+          </div>` : canManageChannels && !treeOrder ? html`<div class="category-uncategorized-dropzone" data-category-dropzone="">
+            <span class="material-symbols-outlined md-16">drive_file_move</span>
+            <span>${group.name}</span>
+          </div>` : ''}
+          <div class="category-channels" data-category-channels="${group.id}"></div>
+        </section>`,
+        list: { selector: ':scope > .category-channels', items: group.channels.flatMap((channel) => rows.get(channel.id) ?? []) },
+      });
+    });
+    if (placesAtRoot) items.push(this.rootGap(''));
 
-    if (textListEl) {
-      textListEl.innerHTML = textChannels.map((c) => `
-        <div class="channel-item ${(c.id === serverStore.activeTextChannelId || c.id === serverStore.getChannel(serverStore.activeTextChannelId ?? '')?.forumId) && this.activeContentView === 'chat' ? 'active' : ''}" data-channel-id="${c.id}" data-channel-type="${c.type}">
-          ${renderChannelIcon(c.type === 'FORUM' ? 'FORUM' : 'TEXT', { isPrivate: c.isPrivate, color: 'var(--text-muted)' })}
-          <span class="channel-name">${escapeHtml(c.name)}</span>
-          ${chatStore.hasMention(c.id)
-            ? `<span class="channel-mention-badge" title="${t('main.mentionBadge')}">@</span>`
-            : chatStore.hasUnread(c.id)
-              ? `<span class="channel-unread-dot" title="${t('main.unreadBadge')}"></span>`
-              : ''}
-          <button class="channel-menu-btn" data-menu-channel="${c.id}" title="${t('common.moreOptions')}">
+    preserveViewState(categoryList, () => renderKeyedList(categoryList, items), {
+      scroller: null,
+      itemKeys: ['data-session-id', 'data-channel-id', 'data-category-id'],
+      fallback: () => categoryList.closest<HTMLElement>('.channels-list-container'),
+    });
+    this.applyCategoryCollapse(categoryList);
+    this.updateParticipantSpeaking();
+    this.markDraggedTreeEntry(categoryList);
+  }
+
+  private textChannelRow(channel: ChannelSummary, active: boolean, canManage: boolean): KeyedItem {
+    const badge = chatStore.hasMention(channel.id)
+      ? html`<span class="channel-mention-badge" title="${t('main.mentionBadge')}">@</span>`
+      : chatStore.hasUnread(channel.id) ? html`<span class="channel-unread-dot" title="${t('main.unreadBadge')}"></span>` : '';
+    return {
+      key: channel.id,
+      // A row is dragged to reorder it; it has no title of its own to lose to the hint.
+      html: html`
+        <div class="channel-item${canManage ? ' channel-reorder-handle' : ''} ${active ? 'active' : ''}" data-channel-id="${channel.id}" data-channel-type="${channel.type}"${canManage ? html` title="${t('main.channelReorderHint')}"` : ''}>
+          ${trustedHtml(renderChannelIcon(channel.type === 'FORUM' ? 'FORUM' : 'TEXT', { isPrivate: channel.isPrivate, color: 'var(--text-muted)' }))}
+          <span class="channel-name">${channel.name}</span>
+          ${badge}
+          <button class="channel-menu-btn" data-menu-channel="${channel.id}" title="${t('common.moreOptions')}">
             <span class="material-symbols-outlined md-16">more_vert</span>
           </button>
-        </div>
-      `).join('');
+        </div>`,
+    };
+  }
+
+  /** A voice room: its header and its participants are reconciled apart, so people coming and going keep the header's focus. */
+  private voiceChannelRow(channel: ChannelSummary, room: {
+    canManage: boolean; canMove: boolean; permissionsResolved: boolean; afk: boolean; userLimit: number | null;
+  }): KeyedItem {
+    const inVoice = participantManager.getInVoiceChannel(channel.id);
+    const isActive = isViewingCallServer() && channel.id === voiceStore.currentVoiceChannelId;
+    const isViewing = this.activeContentView === 'stage' &&
+      this.viewedVoiceSessionKey === sessionManager.getActiveKey() &&
+      this.viewedVoiceChannelId === channel.id;
+    const showRestrictedIcon = room.permissionsResolved && !serverStore.hasPermission(Permission.VIEW_CHANNEL, channel.id);
+    const isRestricted = showRestrictedIcon && !isActive;
+    const hasMention = chatStore.hasMention(channel.id);
+    const hasUnread = chatStore.hasUnread(channel.id);
+    const joining = this.joiningVoiceChannelId === channel.id;
+    const header: KeyedItem = {
+      key: 'header',
+      html: html`
+        <div class="channel-item${room.canManage ? ' channel-reorder-handle' : ''} ${isViewing ? 'active' : ''} ${isRestricted ? 'restricted' : ''}${joining ? ' joining' : ''}" data-channel-id="${channel.id}" data-channel-type="VOICE"${room.afk ? trustedHtml(' data-afk-channel') : ''}${room.canManage ? html` title="${t('main.channelReorderHint')}"` : ''}>
+          ${trustedHtml(renderChannelIcon('VOICE', { isPrivate: channel.isPrivate, afk: room.afk, color: isActive ? 'var(--success)' : 'var(--text-muted)', loading: joining }))}
+          <span class="channel-name">${channel.name}</span>
+          ${showRestrictedIcon ? html`<span class="material-symbols-outlined md-16 channel-restricted-icon" title="${t('main.voiceChannelRestricted')}">lock</span>` : ''}
+          <span class="voice-channel-trailing">
+            ${room.userLimit !== null ? trustedHtml(renderVoiceUserLimitBadge(inVoice.length, room.userLimit)) : ''}
+            <span class="voice-channel-actions">
+              ${serverStore.hasPermission(Permission.READ_MESSAGES, channel.id) ? html`<button type="button" class="voice-chat-btn ${hasMention ? 'has-mention' : hasUnread ? 'has-unread' : ''}"
+                data-voice-chat-channel="${channel.id}" title="${t('voiceChat.open')}" aria-label="${t('voiceChat.open')}">
+                <span class="material-symbols-outlined md-16" aria-hidden="true">chat_bubble</span>
+              </button>` : ''}
+              <button class="channel-menu-btn" data-menu-channel="${channel.id}" title="${t('common.moreOptions')}">
+                <span class="material-symbols-outlined md-16">more_vert</span>
+              </button>
+            </span>
+          </span>
+        </div>`,
+    };
+    const parts: KeyedItem[] = [header];
+    if (inVoice.length) {
+      parts.push({
+        key: 'participants',
+        html: '<div class="voice-participants-sublist"></div>',
+        list: { items: inVoice.map((participant) => this.voiceParticipantRow(participant, room.canMove)) },
+      });
     }
+    return {
+      key: channel.id,
+      html: html`<div class="voice-channel-group" data-channel-id="${channel.id}" style="display: flex; flex-direction: column;"></div>`,
+      list: { items: parts },
+    };
+  }
 
-    if (voiceListEl) {
-      voiceListEl.innerHTML = voiceChannels.map((c) => {
-        const inVoice = participantManager.getInVoiceChannel(c.id);
-        const isActive = isViewingCallServer() && c.id === voiceStore.currentVoiceChannelId;
-        const isViewing = this.activeContentView === 'stage' &&
-          this.viewedVoiceSessionKey === sessionManager.getActiveKey() &&
-          this.viewedVoiceChannelId === c.id;
-        const showRestrictedIcon = permissionsResolved && !serverStore.hasPermission(Permission.VIEW_CHANNEL, c.id);
-        const isRestricted = showRestrictedIcon && !isActive;
-        const hasMention = chatStore.hasMention(c.id);
-        const hasUnread = chatStore.hasUnread(c.id);
-        const isAfk = c.id === afkChannelId;
-        const userLimit = voiceUserLimitOf(serverStore.serverDetails, c);
+  /** Someone in a voice room. Speaking is applied in place (updateParticipantSpeaking): it is not part of the markup. */
+  private voiceParticipantRow(p: ParticipantViewModel, canMove: boolean): KeyedItem {
+    const sessionId = p.user.sessionId || p.user.id;
+    const isLocal = serverStore.isMySession(p.user.sessionId);
+    const isLocalCall = isLocal && isViewingCallServer() && !!voiceStore.currentVoiceChannelId;
+    const isServerDeafened = isLocalCall ? voiceStore.serverDeafened : (p.voiceState?.serverDeafened ?? false);
+    const isServerMuted = isLocalCall ? voiceStore.serverMuted : (p.voiceState?.serverMuted ?? false);
+    const isPermissionMuted = isLocalCall ? voiceStore.permissionMuted : (p.voiceState?.permissionMuted ?? false);
+    const isSelfDeafened = isLocalCall ? voiceStore.isDeafened : (p.voiceState?.isDeafened ?? false);
+    const isSelfMuted = isLocalCall ? voiceStore.isMuted : (p.voiceState?.isMuted ?? false);
+    const avatar = getAvatarUrl(p.user.avatarUrl);
+    const displayName = participantManager.displayName(p);
+    const isSfu = serverStore.serverDetails?.voiceMode === 'sfu';
+    const { isPeerFailed, isConnecting, isRelayed } = participantConnectionIndicators(p, isSfu, isLocal);
+    const activity = p.user.activity;
+    const activityIcon = activity ? activityIconSrc(activity.iconBase64) : null;
+    const watchLabel = t('main.watchLiveAria', { name: displayName });
+    return {
+      key: sessionId,
+      html: html`
+        <div id="voice-mini-user-${sessionId}" class="voice-participant-mini" data-session-id="${sessionId}"${canMove ? trustedHtml(' draggable="true"') : ''} title="${displayName} (${t(isLocal ? 'common.you' : 'main.rightClickVolumeShort')})">
+          <img class="voice-mini-avatar" src="${avatar}" data-fallback="avatar">
+          <span class="voice-mini-name">${displayName}</span>
+          ${trustedHtml(renderPresenceTag(p.user))}
+          ${isPeerFailed ? html`<span class="material-symbols-outlined md-14 voice-mini-icon peer-failed" title="${isSfu ? t('main.sfuConnectionFailed') : peerFailureTooltip('main.peerConnectionFailed')}">link_off</span>` : ''}
+          ${isConnecting ? html`<span class="material-symbols-outlined md-14 voice-mini-icon peer-connecting" title="${t(isSfu ? 'main.sfuConnecting' : 'main.peerConnecting')}">sync</span>` : ''}
+          ${isRelayed ? html`<span class="material-symbols-outlined md-14 voice-mini-icon relayed" title="${t('main.peerRelayed')}">swap_horiz</span>` : ''}
+          ${trustedHtml(renderAudioMuteIndicators({ ...p.voiceState, isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened, permissionMuted: isPermissionMuted }))}
+          ${p.voiceState?.isScreenSharing ? (isLocal
+            ? html`<span class="material-symbols-outlined md-14 voice-mini-icon live" title="${t('main.sharingScreen')}">screen_share</span>`
+            : html`<button type="button" class="voice-mini-icon live voice-mini-watch" data-watch-live="${sessionId}"
+                title="${watchLabel}" aria-label="${watchLabel}">
+                <span class="material-symbols-outlined md-14" aria-hidden="true">screen_share</span>
+              </button>`) : ''}
+          ${p.voiceState?.isCameraOn ? html`<span class="material-symbols-outlined md-14 voice-mini-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
+          ${activity ? (activityIcon
+            ? html`<img class="voice-mini-art" src="${activityIcon}" alt="" title="${t('main.playingGame', { game: activity.name })}">`
+            : html`<span class="material-symbols-outlined md-18 voice-mini-icon" title="${t('main.playingGame', { game: activity.name })}">sports_esports</span>`) : ''}
+        </div>`,
+    };
+  }
 
-        return `
-          <div class="voice-channel-group" data-channel-id="${c.id}" style="display: flex; flex-direction: column;">
-            <div class="channel-item ${isViewing ? 'active' : ''} ${isRestricted ? 'restricted' : ''}" data-channel-id="${c.id}" data-channel-type="VOICE"${isAfk ? ' data-afk-channel' : ''}>
-              ${renderChannelIcon('VOICE', { isPrivate: c.isPrivate, afk: isAfk, color: isActive ? 'var(--success)' : 'var(--text-muted)' })}
-              <span class="channel-name">${escapeHtml(c.name)}</span>
-              ${showRestrictedIcon ? `<span class="material-symbols-outlined md-16 channel-restricted-icon" title="${t('main.voiceChannelRestricted')}">lock</span>` : ''}
-              <span class="voice-channel-trailing">
-                ${userLimit !== null ? renderVoiceUserLimitBadge(inVoice.length, userLimit) : ''}
-                <span class="voice-channel-actions">
-                  ${serverStore.hasPermission(Permission.READ_MESSAGES, c.id) ? `<button type="button" class="voice-chat-btn ${hasMention ? 'has-mention' : hasUnread ? 'has-unread' : ''}"
-                    data-voice-chat-channel="${c.id}" title="${t('voiceChat.open')}" aria-label="${t('voiceChat.open')}">
-                    <span class="material-symbols-outlined md-16" aria-hidden="true">chat_bubble</span>
-                  </button>` : ''}
-                  <button class="channel-menu-btn" data-menu-channel="${c.id}" title="${t('common.moreOptions')}">
-                    <span class="material-symbols-outlined md-16">more_vert</span>
-                  </button>
-                </span>
-              </span>
-            </div>
-
-            ${inVoice.length > 0 ? `
-              <div class="voice-participants-sublist">
-                ${inVoice.map((p) => {
-                  const sessionId = p.user.sessionId || p.user.id;
-                  const isLocal = serverStore.isMySession(p.user.sessionId);
-                  const isLocalCall = isLocal && isViewingCallServer() && !!voiceStore.currentVoiceChannelId;
-                  const isSpeaking = isParticipantSpeaking(p);
-                  const isServerDeafened = isLocalCall ? voiceStore.serverDeafened : (p.voiceState?.serverDeafened ?? false);
-                  const isServerMuted = isLocalCall ? voiceStore.serverMuted : (p.voiceState?.serverMuted ?? false);
-                  const isPermissionMuted = isLocalCall ? voiceStore.permissionMuted : (p.voiceState?.permissionMuted ?? false);
-                  const isSelfDeafened = isLocalCall ? voiceStore.isDeafened : (p.voiceState?.isDeafened ?? false);
-                  const isSelfMuted = isLocalCall ? voiceStore.isMuted : (p.voiceState?.isMuted ?? false);
-                  const avatar = getAvatarUrl(p.user.avatarUrl);
-                  const displayName = participantManager.displayName(p);
-                  const isSfu = serverStore.serverDetails?.voiceMode === 'sfu';
-                  const { isPeerFailed, isConnecting, isRelayed } = participantConnectionIndicators(p, isSfu, isLocal);
-
-                  return `
-                    <div id="voice-mini-user-${sessionId}" class="voice-participant-mini ${isSpeaking ? 'speaking' : ''}" data-session-id="${sessionId}" title="${escapeHtml(displayName)} (${t(isLocal ? 'common.you' : 'main.rightClickVolumeShort')})">
-                      <img class="voice-mini-avatar" src="${avatar}" data-fallback="avatar">
-                      <span class="voice-mini-name">${escapeHtml(displayName)}</span>
-                      ${renderPresenceTag(p.user)}
-                      ${isPeerFailed ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-failed" title="${isSfu ? t('main.sfuConnectionFailed') : peerFailureTooltip('main.peerConnectionFailed')}">link_off</span>` : ''}
-                      ${isConnecting ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-connecting" title="${t(isSfu ? 'main.sfuConnecting' : 'main.peerConnecting')}">sync</span>` : ''}
-                      ${isRelayed ? `<span class="material-symbols-outlined md-14 voice-mini-icon relayed" title="${t('main.peerRelayed')}">swap_horiz</span>` : ''}
-                      ${renderAudioMuteIndicators({ ...p.voiceState, isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened, permissionMuted: isPermissionMuted })}
-                      ${p.voiceState?.isScreenSharing ? (isLocal
-                        ? `<span class="material-symbols-outlined md-14 voice-mini-icon live" title="${t('main.sharingScreen')}">screen_share</span>`
-                        : `<button type="button" class="voice-mini-icon live voice-mini-watch" data-watch-live="${escapeHtml(sessionId)}"
-                            title="${escapeHtml(t('main.watchLiveAria', { name: displayName }))}"
-                            aria-label="${escapeHtml(t('main.watchLiveAria', { name: displayName }))}">
-                            <span class="material-symbols-outlined md-14" aria-hidden="true">screen_share</span>
-                          </button>`) : ''}
-                      ${p.voiceState?.isCameraOn ? `<span class="material-symbols-outlined md-14 voice-mini-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
-                      ${p.user.activity ? (activityIconSrc(p.user.activity.iconBase64)
-                        ? `<img class="voice-mini-art" src="${activityIconSrc(p.user.activity.iconBase64)}" alt="" title="${escapeHtml(t('main.playingGame', { game: p.user.activity.name }))}">`
-                        : `<span class="material-symbols-outlined md-18 voice-mini-icon" title="${escapeHtml(t('main.playingGame', { game: p.user.activity.name }))}">sports_esports</span>`) : ''}
-                    </div>
-                  `;
-                }).join('')}
-              </div>
-            ` : ''}
-          </div>
-        `;
-      }).join('');
-    }
-
-    const categoryList = this.container.querySelector<HTMLElement>('#channel-categories-list');
-    if (categoryList) {
-      const rows = new Map<string, string>();
-      for (const row of [...textListEl.children, ...voiceListEl.children]) {
-        const id = row.getAttribute('data-channel-id');
-        if (id) rows.set(id, row.outerHTML);
-      }
-      const categories = serverStore.serverDetails.categories ?? [];
-      const channelsById = new Map(serverStore.serverDetails.channels.map((channel) => [channel.id, channel]));
-      const treeOrder = serverStore.hasChannelTreeOrder;
-      // The root interleaves categories with runs of loose channels. Older
-      // servers keep every loose channel in one group above the categories,
-      // which stays mounted even when empty so channels can be dropped there.
-      const groups: Array<{ id: string; name: string; channels: ChannelSummary[] }> = treeOrder ? [] : [
-        { id: '', name: t('categories.uncategorized'), channels: [] },
-      ];
-      for (const item of serverStore.getChannelTreeRoot()) {
-        if (item.kind === 'category') {
-          const category = categories.find((entry) => entry.id === item.id);
-          if (category) {
-            groups.push({ id: category.id, name: category.name, channels: serverStore.serverDetails.channels
-              .filter((channel) => channel.categoryId === category.id) });
-          }
-          continue;
-        }
-        const channel = channelsById.get(item.id);
-        if (!channel) continue;
-        const run = treeOrder ? groups.at(-1) : groups[0];
-        if (run && !run.id) run.channels.push(channel);
-        else groups.push({ id: '', name: t('categories.uncategorized'), channels: [channel] });
-      }
-      // While a channel is dragged, the space before a category with no loose
-      // channel above it, and the end of the list, become slots outside every
-      // category. Elsewhere the loose channels themselves mark the position.
-      const placesAtRoot = treeOrder && canManageChannels;
-      const rootGap = (beforeCategoryId: string) => `<div class="channel-tree-gap${beforeCategoryId ? '' : ' channel-tree-end-dropzone'}" data-root-gap="${escapeHtml(beforeCategoryId)}" aria-hidden="true">
+  private rootGap(beforeCategoryId: string): KeyedItem {
+    return {
+      key: `gap:${beforeCategoryId}`,
+      html: html`<div class="channel-tree-gap${beforeCategoryId ? '' : ' channel-tree-end-dropzone'}" data-root-gap="${beforeCategoryId}" aria-hidden="true">
             <span class="channel-tree-gap-label">
               <span class="material-symbols-outlined md-16">drive_file_move</span>
-              <span>${escapeHtml(t('categories.uncategorized'))}</span>
+              <span>${t('categories.uncategorized')}</span>
             </span>
-          </div>`;
-      categoryList.innerHTML = groups.map((group, index) => {
-        const canManage = canManageChannels;
-        const channels = group.channels;
-        const collapsed = !!group.id && serverStore.isCategoryCollapsed(group.id);
-        const previous = groups[index - 1];
-        const gap = placesAtRoot && group.id && (!previous || previous.id) ? rootGap(group.id) : '';
-        return `${gap}<section class="channel-category${group.id ? '' : ' channel-category--uncategorized'}${channels.length ? '' : ' channel-category--empty'}" data-category-id="${escapeHtml(group.id)}">
-          ${group.id ? `<div class="category-title" data-category-dropzone="${escapeHtml(group.id)}">
-            <button class="category-collapse-btn" data-collapse-category="${escapeHtml(group.id)}" aria-expanded="${!collapsed}">
-              <span class="material-symbols-outlined md-16">${collapsed ? 'chevron_right' : 'expand_more'}</span>
-              <span>${escapeHtml(group.name)}</span>
-            </button>
-            ${canManage ? `<button class="category-add-btn" data-add-category="${escapeHtml(group.id)}" title="${t('categories.addChannel')}">
-              <span class="material-symbols-outlined md-14">add</span></button>` : ''}
-          </div>` : canManage && !treeOrder ? `<div class="category-uncategorized-dropzone" data-category-dropzone="">
-            <span class="material-symbols-outlined md-16">drive_file_move</span>
-            <span>${escapeHtml(group.name)}</span>
-          </div>` : ''}
-          <div class="category-channels" data-category-channels="${escapeHtml(group.id)}" ${collapsed ? 'hidden' : ''}>
-            ${channels.map((channel) => rows.get(channel.id) ?? '').join('')}
-          </div>
-        </section>`;
-      }).join('') + (placesAtRoot ? rootGap('') : '');
-      categoryList.querySelectorAll<HTMLButtonElement>('[data-collapse-category]').forEach((button) => {
-        button.addEventListener('click', () => {
-          const id = button.dataset.collapseCategory ?? '';
-          serverStore.toggleCategoryCollapsed(id);
-          this.container.querySelectorAll<HTMLButtonElement>('[data-collapse-category]').forEach((next) => {
-            if (next.dataset.collapseCategory === id) next.focus();
-          });
-        });
-      });
-      categoryList.querySelectorAll<HTMLButtonElement>('[data-add-category]').forEach((button) => {
-        button.addEventListener('click', () => createChannelModal.open('TEXT', button.dataset.addCategory || null));
-      });
-      categoryList.querySelectorAll<HTMLElement>('.channel-category').forEach((section) => {
-        section.querySelector('.category-title')?.addEventListener('contextmenu', (event) => {
-          event.preventDefault();
-          if (!section.dataset.categoryId) return;
-          const mouse = event as MouseEvent;
-          this.openCategoryMenu(section.dataset.categoryId, mouse.clientX, mouse.clientY);
-        });
-      });
+          </div>`,
+    };
+  }
+
+  /** Collapsed categories are applied in place, so toggling one rebuilds nothing. */
+  private applyCategoryCollapse(list: HTMLElement): void {
+    for (const button of list.querySelectorAll<HTMLButtonElement>('[data-collapse-category]')) {
+      const collapsed = serverStore.isCategoryCollapsed(button.dataset.collapseCategory ?? '');
+      const expanded = String(!collapsed);
+      if (button.getAttribute('aria-expanded') !== expanded) button.setAttribute('aria-expanded', expanded);
+      const icon = button.querySelector('.material-symbols-outlined');
+      const glyph = collapsed ? 'chevron_right' : 'expand_more';
+      if (icon && icon.textContent !== glyph) icon.textContent = glyph;
+      const channels = button.closest('.channel-category')?.querySelector<HTMLElement>(':scope > .category-channels');
+      if (channels && channels.hidden !== collapsed) channels.hidden = collapsed;
     }
+  }
 
-    // Attach right-click context menu listeners to voice mini participant items
-    this.container.querySelectorAll('.voice-participant-mini').forEach((miniEl) => {
-      miniEl.addEventListener('contextmenu', (e: Event) => {
-        const mouseEvent = e as MouseEvent;
-        mouseEvent.preventDefault();
-        const sessionId = miniEl.getAttribute('data-session-id');
-        if (!sessionId) return;
-        const participant = participantManager.get(sessionId);
-        if (participant?.user) {
-          userContextMenu.open(mouseEvent.clientX, mouseEvent.clientY, participant.user);
-        }
-      });
+  /** A row rebuilt while it is being dragged goes on showing it. */
+  private markDraggedTreeEntry(list: HTMLElement): void {
+    const dragged = this.draggedTreeEntry;
+    if (!dragged) return;
+    const id = CSS.escape(dragged.id);
+    if (dragged.kind === 'channel') list.querySelector(`[data-category-channels] > [data-channel-id="${id}"]`)?.classList.add('channel-dragging');
+    else list.querySelector(`.channel-category[data-category-id="${id}"]`)?.classList.add('category-dragging');
+  }
 
-      // Drag-and-drop users between voice channels (#248)
-      const sourceId = participantManager.get(miniEl.getAttribute('data-session-id') ?? '')?.voiceState?.channelId;
-      if (sourceId && serverStore.hasPermission(Permission.MOVE_MEMBERS)) {
-        const el = miniEl as HTMLElement;
-        el.draggable = true;
-        el.addEventListener('dragstart', (e: Event) => {
-          const de = e as DragEvent;
-          const sessionId = el.getAttribute('data-session-id');
-          if (sessionId) {
-            de.dataTransfer?.setData('text/monky-session-id', sessionId);
-            de.dataTransfer!.effectAllowed = 'move';
-            el.classList.add('dragging');
-          }
-        });
-        el.addEventListener('dragend', () => { el.classList.remove('dragging'); });
+  /** Binds a list's delegated events the first time it is drawn; its rows then come and go freely. */
+  private delegateOnce(list: HTMLElement, bind: (signal: AbortSignal) => void): void {
+    if (this.listEvents.has(list)) return;
+    const controller = new AbortController();
+    this.listEvents.set(list, controller);
+    bind(controller.signal);
+  }
+
+  private bindChannelListEvents(list: HTMLElement, signal: AbortSignal): void {
+    const target = (event: Event): Element | null => event.target instanceof Element ? event.target : null;
+    // The click that ends a reorder drag belongs to the drag, not to the row it started on.
+    list.addEventListener('click', event => {
+      if (!this.dragEndClick || !(event.target instanceof Node) || !this.dragEndClick.contains(event.target)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      this.dragEndClick = null;
+    }, { capture: true, signal });
+    list.addEventListener('click', event => {
+      const element = target(event);
+      const collapse = element?.closest<HTMLButtonElement>('[data-collapse-category]');
+      if (collapse) {
+        serverStore.toggleCategoryCollapsed(collapse.dataset.collapseCategory ?? '');
+        this.applyCategoryCollapse(list);
+        return;
       }
-    });
-
-    // Someone else's share icon opens their broadcast, after asking.
-    this.container.querySelectorAll<HTMLButtonElement>('.voice-participant-mini [data-watch-live]').forEach((button) => {
-      button.addEventListener('click', (event) => {
+      const add = element?.closest<HTMLButtonElement>('[data-add-category]');
+      if (add) {
+        createChannelModal.open('TEXT', add.dataset.addCategory || null);
+        return;
+      }
+      // Someone else's share icon opens their broadcast, after asking.
+      const watch = element?.closest<HTMLButtonElement>('[data-watch-live]');
+      if (watch) {
         event.stopPropagation();
-        if (button.dataset.watchLive) void this.watchLive(button.dataset.watchLive);
+        if (watch.dataset.watchLive) void this.watchLive(watch.dataset.watchLive);
+        return;
+      }
+      const chat = element?.closest<HTMLButtonElement>('[data-voice-chat-channel]');
+      if (chat) {
+        event.stopPropagation();
+        if (chat.dataset.voiceChatChannel) this.openVoiceChannelChat(chat.dataset.voiceChatChannel);
+        return;
+      }
+      // "More options" (#151): the same menu as right-clicking the channel.
+      const menu = element?.closest<HTMLButtonElement>('.channel-menu-btn[data-menu-channel]');
+      if (menu) {
+        event.stopPropagation();
+        const rect = menu.getBoundingClientRect();
+        if (menu.dataset.menuChannel) this.openChannelMenu(menu.dataset.menuChannel, rect.left, rect.bottom + 4);
+        return;
+      }
+      const item = element?.closest<HTMLElement>('.channel-item[data-channel-id]');
+      if (item) void this.selectChannelItem(item);
+    }, { signal });
+    list.addEventListener('contextmenu', event => {
+      const element = target(event);
+      const participant = element?.closest<HTMLElement>('.voice-participant-mini[data-session-id]');
+      if (participant) {
+        event.preventDefault();
+        const user = participantManager.get(participant.dataset.sessionId ?? '')?.user;
+        if (user) userContextMenu.open(event.clientX, event.clientY, user);
+        return;
+      }
+      const title = element?.closest<HTMLElement>('.category-title');
+      if (title) {
+        event.preventDefault();
+        const categoryId = title.closest<HTMLElement>('.channel-category')?.dataset.categoryId;
+        if (categoryId) this.openCategoryMenu(categoryId, event.clientX, event.clientY);
+        return;
+      }
+      // Right-clicking a channel opens the same options menu as the ⋮ button (#151).
+      const item = element?.closest<HTMLElement>('.channel-item[data-channel-id]');
+      if (item?.dataset.channelId) {
+        event.preventDefault();
+        this.openChannelMenu(item.dataset.channelId, event.clientX, event.clientY);
+      }
+    }, { signal });
+    list.addEventListener('mousedown', event => {
+      if (event.button !== 0 || !serverStore.hasPermission(Permission.MANAGE_CHANNELS)) return;
+      const element = target(event);
+      const handle = element?.closest<HTMLElement>('.channel-item.channel-reorder-handle[data-channel-id]');
+      if (handle) {
+        if (!element?.closest('button')) this.beginChannelReorder(handle, event, list);
+        return;
+      }
+      const title = element?.closest<HTMLElement>('.category-title.category-reorder-handle');
+      if (title && !element?.closest('.category-add-btn')) this.beginCategoryReorder(title, event, list);
+    }, { signal });
+    // Dragging people between voice rooms (#248). The AFK room is no destination:
+    // nobody is brought there by hand (#357).
+    list.addEventListener('dragstart', event => {
+      const participant = target(event)?.closest<HTMLElement>('.voice-participant-mini[draggable="true"]');
+      const sessionId = participant?.dataset.sessionId;
+      if (!participant || !sessionId || !event.dataTransfer) return;
+      event.dataTransfer.setData('text/monky-session-id', sessionId);
+      event.dataTransfer.effectAllowed = 'move';
+      participant.classList.add('dragging');
+    }, { signal });
+    list.addEventListener('dragend', event => {
+      target(event)?.closest('.voice-participant-mini')?.classList.remove('dragging');
+    }, { signal });
+    // Files held over a text channel switch to it, so they can be dropped in its chat.
+    const fileOver = (event: DragEvent): boolean => {
+      const item = target(event)?.closest<HTMLElement>('.channel-item[data-channel-type="TEXT"][data-channel-id]');
+      if (!item?.dataset.channelId || !this.isFileDrag(event)) return false;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+      this.scheduleTextChannelAutoSwitch(item, item.dataset.channelId);
+      return true;
+    };
+    list.addEventListener('dragenter', fileOver, { signal });
+    list.addEventListener('dragover', event => {
+      if (fileOver(event)) return;
+      const room = this.voiceDropTarget(target(event));
+      if (!room || !event.dataTransfer?.types.includes('text/monky-session-id')) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      room.classList.add('drop-target');
+    }, { signal });
+    list.addEventListener('dragleave', event => {
+      const element = target(event);
+      const next = event.relatedTarget instanceof Node ? event.relatedTarget : null;
+      const item = element?.closest<HTMLElement>('.channel-item[data-channel-type="TEXT"][data-channel-id]');
+      if (item && this.isFileDrag(event) && !(next && item.contains(next))
+        && this.textChannelDragHoverId === item.dataset.channelId) this.clearTextChannelDragHover();
+      const room = element?.closest<HTMLElement>('.voice-channel-group');
+      if (room && !(next && room.contains(next))) room.classList.remove('drop-target');
+    }, { signal });
+    list.addEventListener('drop', event => {
+      const element = target(event);
+      if (element?.closest('.channel-item[data-channel-type="TEXT"]')) this.clearTextChannelDragHover();
+      const room = this.voiceDropTarget(element);
+      if (!room) return;
+      event.preventDefault();
+      room.classList.remove('drop-target');
+      const sessionId = event.dataTransfer?.getData('text/monky-session-id');
+      if (sessionId && room.dataset.channelId) this.moveParticipant(sessionId, room.dataset.channelId);
+    }, { signal });
+  }
+
+  /** The voice room under a dragged person, when people may be moved there. */
+  private voiceDropTarget(element: Element | null): HTMLElement | null {
+    const room = element?.closest<HTMLElement>('.voice-channel-group[data-channel-id]');
+    if (!room || !serverStore.hasPermission(Permission.MOVE_MEMBERS)) return null;
+    return room.dataset.channelId === afkChannelIdOf(serverStore.serverDetails) ? null : room;
+  }
+
+  private moveParticipant(sessionId: string, channelId: string): void {
+    const participant = participantManager.get(sessionId);
+    const sourceId = participant?.voiceState?.channelId;
+    if (sourceId === channelId || !sourceId || !serverStore.hasPermission(Permission.MOVE_MEMBERS)) return;
+    const targetUser = participant?.user;
+    if (targetUser && warnIfMoveBlocked(targetUser.id, targetUser.nickname, channelId)) return;
+    void networkClient.sendRequest(MessageType.ADMIN_MOVE_USER, { targetSessionId: sessionId, channelId }).catch((err: unknown) => {
+      void showAlert({
+        title: t('common.error'),
+        message: err instanceof Error && err.message ? err.message : t('userMenu.actionFailed'),
+        variant: 'danger',
       });
     });
+  }
 
-    // Voice channel drop targets for user drag-and-drop (#248, #357). The AFK
-    // room is not one: nobody is brought there by hand.
-    if (serverStore.hasPermission(Permission.MOVE_MEMBERS)) {
-      this.container.querySelectorAll('.voice-channel-group').forEach((item) => {
-        const el = item as HTMLElement;
-        if (!el.dataset.channelId || el.dataset.channelId === afkChannelId) return;
-        el.addEventListener('dragover', (e: Event) => {
-          const de = e as DragEvent;
-          if (de.dataTransfer?.types.includes('text/monky-session-id')) {
-            de.preventDefault();
-            de.dataTransfer!.dropEffect = 'move';
-            el.classList.add('drop-target');
-          }
-        });
-        el.addEventListener('dragleave', (e: Event) => {
-          const de = e as DragEvent;
-          const next = de.relatedTarget as Node | null;
-          if (next && el.contains(next)) return;
-          el.classList.remove('drop-target');
-        });
-        el.addEventListener('drop', (e: Event) => {
-          const de = e as DragEvent;
-          de.preventDefault();
-          el.classList.remove('drop-target');
-          const sessionId = de.dataTransfer?.getData('text/monky-session-id');
-          const channelId = el.getAttribute('data-channel-id');
-          if (sessionId && channelId) {
-            const currentParticipant = participantManager.get(sessionId);
-            if (currentParticipant?.voiceState?.channelId !== channelId) {
-              const sourceId = currentParticipant?.voiceState?.channelId;
-              if (!sourceId || !serverStore.hasPermission(Permission.MOVE_MEMBERS)) return;
-              const targetUser = currentParticipant?.user;
-              if (targetUser && warnIfMoveBlocked(targetUser.id, targetUser.nickname, channelId)) return;
-              void networkClient.sendRequest(MessageType.ADMIN_MOVE_USER, {
-                targetSessionId: sessionId,
-                channelId,
-              }).catch((err: unknown) => {
-                void showAlert({
-                  title: t('common.error'),
-                  message: (err as Error)?.message || t('userMenu.actionFailed'),
-                  variant: 'danger',
-                });
-              });
-            }
-          }
-        });
-      });
+  /** A click on a channel row: a text channel opens; a voice room is joined and its stage shown. */
+  private async selectChannelItem(item: HTMLElement): Promise<void> {
+    const channelId = item.dataset.channelId;
+    const type = item.dataset.channelType;
+    if (!channelId) return;
+    if (type === 'TEXT' || type === 'FORUM') {
+      this.activateTextChannel(channelId);
+      return;
     }
+    if (type !== 'VOICE') return;
+    // Nobody enters the AFK room on purpose; whoever is already in it just opens its stage.
+    if (item.hasAttribute('data-afk-channel') && !(channelId === voiceStore.currentVoiceChannelId
+      && voiceStore.voiceSessionKey === sessionManager.getActiveKey())) {
+      showInfoToast(t('afk.joinBlocked'), 5000);
+      return;
+    }
+    if (channelId !== voiceStore.currentVoiceChannelId && this.arePermissionsResolved() && !serverStore.hasPermission(Permission.VIEW_CHANNEL, channelId)) {
+      item.classList.add('restricted-feedback');
+      window.setTimeout(() => item.classList.remove('restricted-feedback'), 600);
+      this.showVoicePermissionDenied();
+      return;
+    }
+    // The room shows a spinner while the voice join happens (#48).
+    this.joiningVoiceChannelId = channelId;
+    this.renderChannels();
+    const sessionKey = sessionManager.getActiveKey();
+    try {
+      if (!await this.handleJoinVoiceChannel(channelId)) return;
+      if (voiceStore.currentVoiceChannelId !== channelId || voiceStore.voiceSessionKey !== sessionKey
+        || sessionManager.getActiveKey() !== sessionKey) return;
+      this.viewedVoiceChannelId = channelId;
+      this.viewedVoiceSessionKey = sessionKey;
+      this.setActiveContentView('stage');
+      this.voiceStageView?.setChannel(channelId);
+      this.updateScreenShareNotice();
+    } finally {
+      if (this.joiningVoiceChannelId === channelId) this.joiningVoiceChannelId = null;
+      this.renderChannels();
+    }
+  }
 
-    // Attach click listeners to channel items
-    this.container.querySelectorAll('.channel-item').forEach((item) => {
-      item.addEventListener('click', async (e) => {
-        if ((e.target as HTMLElement).closest('.channel-menu-btn, .voice-chat-btn')) return;
-        const channelId = item.getAttribute('data-channel-id')!;
-        const type = item.getAttribute('data-channel-type')!;
-
-        if (type === 'TEXT' || type === 'FORUM') {
-          this.activateTextChannel(channelId);
-        } else if (type === 'VOICE') {
-          // Nobody enters the AFK room on purpose; whoever is already in it just opens its stage.
-          if (item.hasAttribute('data-afk-channel') && !(channelId === voiceStore.currentVoiceChannelId
-            && voiceStore.voiceSessionKey === sessionManager.getActiveKey())) {
-            showInfoToast(t('afk.joinBlocked'), 5000);
-            return;
-          }
-          if (channelId !== voiceStore.currentVoiceChannelId && this.arePermissionsResolved() && !serverStore.hasPermission(Permission.VIEW_CHANNEL, channelId)) {
-            item.classList.add('restricted-feedback');
-            window.setTimeout(() => item.classList.remove('restricted-feedback'), 600);
-            this.showVoicePermissionDenied();
-            return;
-          }
-          // Show a loading spinner on the channel while the voice join happens (#48).
-          const iconEl = item.querySelector<HTMLElement>('.channel-icon');
-          if (iconEl) showChannelIconLoading(iconEl);
-          item.classList.add('joining');
-          const sessionKey = sessionManager.getActiveKey();
-          try {
-            if (!await this.handleJoinVoiceChannel(channelId)) return;
-            if (voiceStore.currentVoiceChannelId !== channelId || voiceStore.voiceSessionKey !== sessionKey
-              || sessionManager.getActiveKey() !== sessionKey) return;
-            this.viewedVoiceChannelId = channelId;
-            this.viewedVoiceSessionKey = sessionKey;
-            this.setActiveContentView('stage');
-            this.voiceStageView?.setChannel(channelId);
-            this.updateScreenShareNotice();
-          } finally {
-            this.renderChannels();
-          }
-        }
-      });
-    });
-
-    this.container.querySelectorAll<HTMLButtonElement>('[data-voice-chat-channel]').forEach((button) => {
-      button.addEventListener('click', event => {
-        event.stopPropagation();
-        const channelId = button.dataset.voiceChatChannel;
-        if (channelId) this.openVoiceChannelChat(channelId);
-      });
-    });
-
-    this.container.querySelectorAll('.channel-item[data-channel-type="TEXT"]').forEach((item) => {
-      const el = item as HTMLElement;
-      const channelId = el.getAttribute('data-channel-id');
-      if (!channelId) return;
-
-      const handleDragHover = (e: Event) => {
-        const dragEvent = e as DragEvent;
-        if (!this.isFileDrag(dragEvent)) return;
-        dragEvent.preventDefault();
-        if (dragEvent.dataTransfer) dragEvent.dataTransfer.dropEffect = 'copy';
-        this.scheduleTextChannelAutoSwitch(el, channelId);
-      };
-
-      el.addEventListener('dragenter', handleDragHover);
-      el.addEventListener('dragover', handleDragHover);
-      el.addEventListener('dragleave', (e) => {
-        const dragEvent = e as DragEvent;
-        if (!this.isFileDrag(dragEvent)) return;
-        const nextTarget = dragEvent.relatedTarget as Node | null;
-        if (nextTarget && el.contains(nextTarget)) return;
-        if (this.textChannelDragHoverId === channelId) {
-          this.clearTextChannelDragHover();
-        }
-      });
-      el.addEventListener('drop', () => this.clearTextChannelDragHover());
-    });
-
-    // Right-clicking a channel opens the same options menu as the ⋮ button (#151).
-    this.container.querySelectorAll('.channel-item').forEach((item) => {
-      item.addEventListener('contextmenu', (e) => {
-        const mouseEvent = e as MouseEvent;
-        mouseEvent.preventDefault();
-        const channelId = item.getAttribute('data-channel-id');
-        if (!channelId) return;
-        this.openChannelMenu(channelId, mouseEvent.clientX, mouseEvent.clientY);
-      });
-    });
-
-    // Attach "more options" menu listeners (#151). Delete now lives inside a
-    // dropdown so more per-channel actions can be added later, and the same menu
-    // is also reachable by right-clicking the channel above.
-    this.container.querySelectorAll('.channel-menu-btn').forEach((btn) => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const channelId = btn.getAttribute('data-menu-channel');
-        if (!channelId) return;
-        const rect = (btn as HTMLElement).getBoundingClientRect();
-        this.openChannelMenu(channelId, rect.left, rect.bottom + 4);
-      });
-    });
-
-    this.setupChannelReorder();
-    this.setupCategoryReorder();
+  /**
+   * Follows a press on a sidebar reorder handle: past 6 px it becomes a drag,
+   * releasing drops it, and losing the window or the sidebar cancels it.
+   */
+  private followReorderPointer(start: MouseEvent, list: HTMLElement, handle: HTMLElement, drag: {
+    begin: () => void;
+    move: (event: MouseEvent) => void;
+    end: (drop: MouseEvent | null) => void;
+  }): void {
+    const pointer = new AbortController();
+    let active = false;
+    const finish = (drop: MouseEvent | null) => {
+      if (pointer.signal.aborted) return;
+      pointer.abort();
+      if (!active) return;
+      this.dragEndClick = handle;
+      window.setTimeout(() => { if (this.dragEndClick === handle) this.dragEndClick = null; }, 0);
+      drag.end(drop);
+    };
+    window.addEventListener('mousemove', event => {
+      if (!active && Math.hypot(event.clientX - start.clientX, event.clientY - start.clientY) < 6) return;
+      if (!active) {
+        active = true;
+        drag.begin();
+      }
+      event.preventDefault();
+      drag.move(event);
+    }, { signal: pointer.signal });
+    window.addEventListener('mouseup', event => finish(event), { signal: pointer.signal });
+    window.addEventListener('blur', () => finish(null), { signal: pointer.signal });
+    this.listEvents.get(list)?.signal.addEventListener('abort', () => finish(null), { signal: pointer.signal });
   }
 
   /**
    * Channels are reordered by a pointer drag, so it mixes categories without
-   * interfering with the native voice-member or attachment drags.
+   * interfering with the native voice-member or attachment drags. A voice room
+   * and its participants live in a wrapper: the direct child of the list moves.
    */
-  private setupChannelReorder(): void {
-    if (!serverStore.hasPermission(Permission.MANAGE_CHANNELS)) return;
-
-    const categoryList = this.container.querySelector<HTMLElement>('#channel-categories-list');
-    const lists = Array.from(this.container.querySelectorAll<HTMLElement>('[data-category-channels]'));
-    const treeOrder = serverStore.hasChannelTreeOrder;
-    const clearDropTargets = () => {
-      categoryList?.classList.remove('channel-reorder-active');
-      this.container.querySelectorAll('.channel-category-drop-target').forEach((element) => {
-        element.classList.remove('channel-category-drop-target');
-      });
-      this.container.querySelectorAll('.channel-drop-before, .channel-drop-after').forEach((element) => {
-        element.classList.remove('channel-drop-before', 'channel-drop-after');
-      });
-    };
-    const pointerDropTarget = (clientX: number, clientY: number) => {
-      const element = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
-      const targetHandle = element?.closest<HTMLElement>('.channel-item[data-channel-id]');
-      const targetList = targetHandle?.closest<HTMLElement>('[data-category-channels]');
-      if (targetHandle && targetList) {
-        let targetRow = targetHandle;
-        while (targetRow.parentElement && targetRow.parentElement !== targetList) targetRow = targetRow.parentElement;
-        const rect = targetRow.getBoundingClientRect();
-        const targetId = targetHandle.dataset.channelId;
-        return {
-          categoryId: targetList.dataset.categoryChannels || null,
-          target: targetId ? { kind: 'channel' as const, id: targetId } : null,
-          after: clientY > rect.top + rect.height / 2,
-          targetRow,
-          dropzone: null as HTMLElement | null,
-        };
-      }
-      // A slot outside every category: right above its category, or the end.
-      const gap = element?.closest<HTMLElement>('[data-root-gap]');
-      if (gap) {
-        const beforeCategoryId = gap.dataset.rootGap;
-        return {
-          categoryId: null,
-          target: beforeCategoryId ? { kind: 'category' as const, id: beforeCategoryId } : null,
-          after: false,
-          targetRow: null as HTMLElement | null,
-          dropzone: gap,
-        };
-      }
-      const dropzone = element?.closest<HTMLElement>('[data-category-dropzone]');
-      if (dropzone) {
-        return {
-          categoryId: dropzone.dataset.categoryDropzone || null,
-          target: null,
-          after: true,
-          targetRow: null as HTMLElement | null,
-          dropzone,
-        };
-      }
-      const list = element?.closest<HTMLElement>('[data-category-channels]');
-      if (!list) return null;
-      // Over a row but off its handle (a voice channel's participants), or over
-      // a gap: place next to that row, or after the list's last channel. A
-      // root group is one of several, so its end is not the end of the root.
-      const rows = Array.from(list.children) as HTMLElement[];
-      const row = rows.find((candidate) => candidate.contains(element)) ??
-        (treeOrder && !list.dataset.categoryChannels ? rows.at(-1) : undefined);
-      const rowHandle = row?.matches('.channel-item[data-channel-id]') ? row : row?.querySelector<HTMLElement>('.channel-item[data-channel-id]');
-      const rowId = rowHandle?.dataset.channelId;
-      if (row && rowId) {
-        const rect = row.getBoundingClientRect();
-        const after = !rows.some((candidate) => candidate.contains(element)) || clientY > rect.top + rect.height / 2;
-        return {
-          categoryId: list.dataset.categoryChannels || null,
-          target: { kind: 'channel' as const, id: rowId },
-          after,
-          targetRow: row,
-          dropzone: null as HTMLElement | null,
-        };
-      }
-      return {
-        categoryId: list.dataset.categoryChannels || null,
-        target: null,
-        after: true,
-        targetRow: null as HTMLElement | null,
-        dropzone: null as HTMLElement | null,
-      };
-    };
-    const showPointerDropTarget = (target: ReturnType<typeof pointerDropTarget>) => {
-      clearDropTargets();
-      categoryList?.classList.add('channel-reorder-active');
-      if (!target) return;
-      target.dropzone?.classList.add('channel-category-drop-target');
-      target.targetRow?.classList.add(target.after ? 'channel-drop-after' : 'channel-drop-before');
-    };
-
-    for (const listEl of lists) {
-      // A voice channel and its participants live in a wrapper; a text channel
-      // is the item itself. Dragging and dropping act on whichever is the direct
-      // child of the list, so the participants travel with their channel.
-      const rows = Array.from(listEl.children) as HTMLElement[];
-
-      for (const row of rows) {
-        const handle = (row.matches('.channel-item') ? row : row.querySelector('.channel-item')) as HTMLElement | null;
-        if (!handle) continue;
-        const channelId = handle.getAttribute('data-channel-id');
-        if (!channelId || !serverStore.hasPermission(Permission.MANAGE_CHANNELS)) continue;
-
-        handle.classList.add('channel-reorder-handle');
-        // Dragging is invisible without a hint, and the row has no title of its
-        // own to lose.
-        if (!handle.title) handle.title = t('main.channelReorderHint');
-
-        let pointer: { startX: number; startY: number; active: boolean } | null = null;
-        let suppressClick = false;
-        handle.addEventListener('click', event => {
-          if (!suppressClick) return;
-          event.preventDefault();
-          event.stopImmediatePropagation();
-          suppressClick = false;
-        }, true);
-        const movePointer = (event: MouseEvent) => {
-          if (!pointer) return;
-          if (!pointer.active &&
-              Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) < 6) return;
-          if (!pointer.active) {
-            pointer.active = true;
-            row.classList.add('channel-dragging');
-            categoryList?.classList.add('channel-reorder-active');
-          }
-          event.preventDefault();
-          showPointerDropTarget(pointerDropTarget(event.clientX, event.clientY));
-        };
-        const finishPointer = (event: MouseEvent, commit: boolean) => {
-          if (!pointer) return;
-          const wasActive = pointer.active;
-          const target = wasActive ? pointerDropTarget(event.clientX, event.clientY) : null;
-          pointer = null;
-          window.removeEventListener('mousemove', movePointer);
-          window.removeEventListener('mouseup', stopPointer);
-          window.removeEventListener('blur', cancelPointer);
-          row.classList.remove('channel-dragging');
-          clearDropTargets();
-          if (!wasActive) return;
-          suppressClick = true;
-          window.setTimeout(() => { suppressClick = false; }, 0);
-          if (commit && target && target.target?.id !== channelId) {
-            void this.commitChannelOrder(
-              target.categoryId,
-              channelId,
-              target.target,
-              target.after
-            );
-          }
-        };
-        const stopPointer = (event: MouseEvent) => finishPointer(event, true);
-        const cancelPointer = () => {
-          if (!pointer) return;
-          finishPointer(new MouseEvent('mouseup', {
-            clientX: pointer.startX,
-            clientY: pointer.startY,
-          }), false);
-        };
-        handle.addEventListener('mousedown', event => {
-          if (event.button !== 0 || (event.target as Element | null)?.closest('button')) return;
-          pointer = { startX: event.clientX, startY: event.clientY, active: false };
-          window.addEventListener('mousemove', movePointer);
-          window.addEventListener('mouseup', stopPointer);
-          window.addEventListener('blur', cancelPointer);
-        });
-      }
-    }
+  private beginChannelReorder(handle: HTMLElement, start: MouseEvent, list: HTMLElement): void {
+    const channelId = handle.dataset.channelId;
+    if (!channelId) return;
+    this.followReorderPointer(start, list, handle, {
+      begin: () => {
+        this.draggedTreeEntry = { kind: 'channel', id: channelId };
+        this.markDraggedTreeEntry(list);
+        list.classList.add('channel-reorder-active');
+      },
+      move: event => this.showChannelDropTarget(list, this.channelDropTarget(event.clientX, event.clientY)),
+      end: drop => {
+        // Measured before the drop surfaces fold away and move what is under the pointer.
+        const target = drop && this.channelDropTarget(drop.clientX, drop.clientY);
+        this.draggedTreeEntry = null;
+        list.querySelectorAll('.channel-dragging').forEach((element) => element.classList.remove('channel-dragging'));
+        this.clearChannelDropTargets(list);
+        if (target && target.target?.id !== channelId) {
+          void this.commitChannelOrder(target.categoryId, channelId, target.target, target.after);
+        }
+      },
+    });
   }
 
-  private setupCategoryReorder(): void {
-    if (!serverStore.hasPermission(Permission.MANAGE_CHANNELS)) return;
-    const categoryList = this.container.querySelector<HTMLElement>('#channel-categories-list');
-    if (!categoryList) return;
-    const sections = Array.from(categoryList.querySelectorAll<HTMLElement>(
-      '.channel-category[data-category-id]:not(.channel-category--uncategorized)'
-    ));
-    const treeOrder = serverStore.hasChannelTreeOrder;
-    const clearIndicators = () => {
-      sections.forEach(section => section.classList.remove('category-drop-before', 'category-drop-after'));
-      categoryList.querySelectorAll('.channel-drop-before, .channel-drop-after, .channel-category-drop-target').forEach(element => {
-        element.classList.remove('channel-drop-before', 'channel-drop-after', 'channel-category-drop-target');
-      });
-    };
-    const clear = () => {
-      categoryList.classList.remove('category-reorder-active');
-      sections.forEach(section => section.classList.remove('category-dragging'));
-      clearIndicators();
-    };
-    // Where a category would land. Older servers only order categories among
-    // themselves; with a shared root, loose channels and the end are targets too.
-    const pointerTarget = (clientX: number, clientY: number): {
-      target: { kind: 'channel' | 'category'; id: string } | null; after: boolean; indicator: HTMLElement; indicatorClass: string;
-    } | null => {
-      const element = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
-      const title = element?.closest<HTMLElement>('.category-title[data-category-dropzone]');
-      const section = (title ?? (treeOrder ? element : null))
-        ?.closest<HTMLElement>('.channel-category[data-category-id]:not(.channel-category--uncategorized)');
-      const categoryId = section?.dataset.categoryId;
-      if (section && categoryId) {
-        const after = title ? clientY > title.getBoundingClientRect().top + title.getBoundingClientRect().height / 2 : true;
-        return { target: { kind: 'category', id: categoryId }, after, indicator: section,
-          indicatorClass: after ? 'category-drop-after' : 'category-drop-before' };
-      }
-      if (!treeOrder || !element) return null;
-      const handle = element.closest<HTMLElement>('.channel-item[data-channel-id]');
-      const list = handle?.closest<HTMLElement>('[data-category-channels=""]');
-      if (handle?.dataset.channelId && list) {
-        let row = handle;
-        while (row.parentElement && row.parentElement !== list) row = row.parentElement;
-        const rect = row.getBoundingClientRect();
-        const after = clientY > rect.top + rect.height / 2;
-        return { target: { kind: 'channel', id: handle.dataset.channelId }, after, indicator: row,
-          indicatorClass: after ? 'channel-drop-after' : 'channel-drop-before' };
-      }
-      const end = element.closest<HTMLElement>('.channel-tree-end-dropzone');
-      return end ? { target: null, after: true, indicator: end, indicatorClass: 'channel-category-drop-target' } : null;
-    };
+  private clearChannelDropTargets(list: HTMLElement): void {
+    list.classList.remove('channel-reorder-active');
+    list.querySelectorAll('.channel-category-drop-target').forEach((element) => {
+      element.classList.remove('channel-category-drop-target');
+    });
+    list.querySelectorAll('.channel-drop-before, .channel-drop-after').forEach((element) => {
+      element.classList.remove('channel-drop-before', 'channel-drop-after');
+    });
+  }
 
-    for (const section of sections) {
-      const categoryId = section.dataset.categoryId;
-      const title = section.querySelector<HTMLElement>(':scope > .category-title');
-      if (!categoryId || !title) continue;
-      title.classList.add('category-reorder-handle');
-      let pointer: { startX: number; startY: number; active: boolean } | null = null;
-      let suppressClick = false;
-      title.addEventListener('click', event => {
-        if (!suppressClick) return;
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        suppressClick = false;
-      }, true);
-      const movePointer = (event: MouseEvent) => {
-        if (!pointer) return;
-        if (!pointer.active &&
-            Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) < 6) return;
-        if (!pointer.active) {
-          pointer.active = true;
-          section.classList.add('category-dragging');
-          categoryList.classList.add('category-reorder-active');
-        }
-        event.preventDefault();
-        clearIndicators();
-        const target = pointerTarget(event.clientX, event.clientY);
-        target?.indicator.classList.add(target.indicatorClass);
+  private showChannelDropTarget(list: HTMLElement, target: ChannelDrop | null): void {
+    this.clearChannelDropTargets(list);
+    list.classList.add('channel-reorder-active');
+    if (!target) return;
+    target.dropzone?.classList.add('channel-category-drop-target');
+    target.targetRow?.classList.add(target.after ? 'channel-drop-after' : 'channel-drop-before');
+  }
+
+  /** Where a dragged channel would land, aimed through what is under the pointer. */
+  private channelDropTarget(clientX: number, clientY: number): ChannelDrop | null {
+    const element = document.elementFromPoint(clientX, clientY);
+    const targetHandle = element?.closest<HTMLElement>('.channel-item[data-channel-id]');
+    const targetList = targetHandle?.closest<HTMLElement>('[data-category-channels]');
+    if (targetHandle && targetList) {
+      let targetRow = targetHandle;
+      while (targetRow.parentElement && targetRow.parentElement !== targetList) targetRow = targetRow.parentElement;
+      const rect = targetRow.getBoundingClientRect();
+      const targetId = targetHandle.dataset.channelId;
+      return {
+        categoryId: targetList.dataset.categoryChannels || null,
+        target: targetId ? { kind: 'channel', id: targetId } : null,
+        after: clientY > rect.top + rect.height / 2,
+        targetRow,
+        dropzone: null,
       };
-      const finishPointer = (event: MouseEvent, commit: boolean) => {
-        if (!pointer) return;
-        const wasActive = pointer.active;
-        const target = wasActive ? pointerTarget(event.clientX, event.clientY) : null;
-        pointer = null;
-        window.removeEventListener('mousemove', movePointer);
-        window.removeEventListener('mouseup', stopPointer);
-        window.removeEventListener('blur', cancelPointer);
-        clear();
-        if (!wasActive) return;
-        suppressClick = true;
-        window.setTimeout(() => { suppressClick = false; }, 0);
-        if (commit && target && target.target?.id !== categoryId) {
-          this.commitCategoryOrder(categoryId, target.target, target.after);
-        }
-      };
-      const stopPointer = (event: MouseEvent) => finishPointer(event, true);
-      const cancelPointer = () => {
-        if (!pointer) return;
-        finishPointer(new MouseEvent('mouseup', {
-          clientX: pointer.startX,
-          clientY: pointer.startY,
-        }), false);
-      };
-      title.addEventListener('mousedown', event => {
-        if (event.button !== 0 || (event.target as Element | null)?.closest('.category-add-btn')) return;
-        pointer = { startX: event.clientX, startY: event.clientY, active: false };
-        window.addEventListener('mousemove', movePointer);
-        window.addEventListener('mouseup', stopPointer);
-        window.addEventListener('blur', cancelPointer);
-      });
     }
+    // A slot outside every category: right above its category, or the end.
+    const gap = element?.closest<HTMLElement>('[data-root-gap]');
+    if (gap) {
+      const beforeCategoryId = gap.dataset.rootGap;
+      return {
+        categoryId: null,
+        target: beforeCategoryId ? { kind: 'category', id: beforeCategoryId } : null,
+        after: false,
+        targetRow: null,
+        dropzone: gap,
+      };
+    }
+    const dropzone = element?.closest<HTMLElement>('[data-category-dropzone]');
+    if (dropzone) {
+      return { categoryId: dropzone.dataset.categoryDropzone || null, target: null, after: true, targetRow: null, dropzone };
+    }
+    const list = element?.closest<HTMLElement>('[data-category-channels]');
+    if (!element || !list) return null;
+    // Over a row but off its handle (a voice channel's participants), or over
+    // a gap: place next to that row, or after the list's last channel. A
+    // root group is one of several, so its end is not the end of the root.
+    const rows = Array.from(list.children).filter((child): child is HTMLElement => child instanceof HTMLElement);
+    const row = rows.find((candidate) => candidate.contains(element)) ??
+      (serverStore.hasChannelTreeOrder && !list.dataset.categoryChannels ? rows.at(-1) : undefined);
+    const rowHandle = row?.matches('.channel-item[data-channel-id]') ? row : row?.querySelector<HTMLElement>('.channel-item[data-channel-id]');
+    const rowId = rowHandle?.dataset.channelId;
+    if (row && rowId) {
+      const rect = row.getBoundingClientRect();
+      const after = !rows.some((candidate) => candidate.contains(element)) || clientY > rect.top + rect.height / 2;
+      return { categoryId: list.dataset.categoryChannels || null, target: { kind: 'channel', id: rowId }, after, targetRow: row, dropzone: null };
+    }
+    return { categoryId: list.dataset.categoryChannels || null, target: null, after: true, targetRow: null, dropzone: null };
+  }
+
+  /** Categories are reordered the same way, by dragging their title. */
+  private beginCategoryReorder(title: HTMLElement, start: MouseEvent, list: HTMLElement): void {
+    const categoryId = title.closest<HTMLElement>('.channel-category[data-category-id]')?.dataset.categoryId;
+    if (!categoryId) return;
+    const clearIndicators = () => {
+      list.querySelectorAll('.category-drop-before, .category-drop-after, .channel-drop-before, .channel-drop-after, .channel-category-drop-target')
+        .forEach((element) => element.classList.remove('category-drop-before', 'category-drop-after', 'channel-drop-before',
+          'channel-drop-after', 'channel-category-drop-target'));
+    };
+    this.followReorderPointer(start, list, title, {
+      begin: () => {
+        this.draggedTreeEntry = { kind: 'category', id: categoryId };
+        this.markDraggedTreeEntry(list);
+        list.classList.add('category-reorder-active');
+      },
+      move: event => {
+        clearIndicators();
+        const target = this.categoryDropTarget(event.clientX, event.clientY);
+        target?.indicator.classList.add(target.indicatorClass);
+      },
+      end: drop => {
+        const target = drop && this.categoryDropTarget(drop.clientX, drop.clientY);
+        this.draggedTreeEntry = null;
+        list.classList.remove('category-reorder-active');
+        list.querySelectorAll('.category-dragging').forEach((element) => element.classList.remove('category-dragging'));
+        clearIndicators();
+        if (target && target.target?.id !== categoryId) this.commitCategoryOrder(categoryId, target.target, target.after);
+      },
+    });
+  }
+
+  /**
+   * Where a dragged category would land. Older servers only order categories among
+   * themselves; with a shared root, loose channels and the end are targets too.
+   */
+  private categoryDropTarget(clientX: number, clientY: number): {
+    target: ChannelTreeTarget | null; after: boolean; indicator: HTMLElement; indicatorClass: string;
+  } | null {
+    const treeOrder = serverStore.hasChannelTreeOrder;
+    const element = document.elementFromPoint(clientX, clientY);
+    const title = element?.closest<HTMLElement>('.category-title[data-category-dropzone]');
+    const section = (title ?? (treeOrder ? element : null))
+      ?.closest<HTMLElement>('.channel-category[data-category-id]:not(.channel-category--uncategorized)');
+    const categoryId = section?.dataset.categoryId;
+    if (section && categoryId) {
+      const after = title ? clientY > title.getBoundingClientRect().top + title.getBoundingClientRect().height / 2 : true;
+      return { target: { kind: 'category', id: categoryId }, after, indicator: section,
+        indicatorClass: after ? 'category-drop-after' : 'category-drop-before' };
+    }
+    if (!treeOrder || !element) return null;
+    const handle = element.closest<HTMLElement>('.channel-item[data-channel-id]');
+    const list = handle?.closest<HTMLElement>('[data-category-channels=""]');
+    if (handle?.dataset.channelId && list) {
+      let row = handle;
+      while (row.parentElement && row.parentElement !== list) row = row.parentElement;
+      const rect = row.getBoundingClientRect();
+      const after = clientY > rect.top + rect.height / 2;
+      return { target: { kind: 'channel', id: handle.dataset.channelId }, after, indicator: row,
+        indicatorClass: after ? 'channel-drop-after' : 'channel-drop-before' };
+    }
+    const end = element.closest<HTMLElement>('.channel-tree-end-dropzone');
+    return end ? { target: null, after: true, indicator: end, indicatorClass: 'channel-category-drop-target' } : null;
   }
 
   /** The sidebar root with one entry moved next to `target`, or to the end without one. */
@@ -2512,6 +2496,7 @@ export class MainView {
     this.refreshServerMonitorVisibility();
   }
 
+  /** The member list, reconciled by member like the channel tree (R-SHELL-11). */
   private renderMembers(): void {
     if (!serverStore.serverDetails) return;
 
@@ -2531,11 +2516,18 @@ export class MainView {
     );
 
     if (countEl) {
-      countEl.innerText = t('main.membersCount', { count: allMembers.length });
+      const count = t('main.membersCount', { count: allMembers.length });
+      if (countEl.textContent !== count) countEl.textContent = count;
     }
 
+    // With public badges off, a role tag is only rendered for members who hold
+    // that same role — except for admins, who moderate the server and therefore
+    // always see every badge (#530).
+    const badgesArePublic = serverStore.serverDetails.showRoleBadgesToEveryone !== false;
+    const canSeeAllBadges = badgesArePublic || serverStore.hasPermission(Permission.ADMINISTRATOR);
+    const myRoleIds = canSeeAllBadges ? [] : serverStore.getUserRoleIds(serverStore.currentUser?.id || '');
     const liveMembers = new Set<string>();
-    const renderMemberItem = (m: UserSummary, isOffline: boolean): string => {
+    const renderMemberItem = (m: UserSummary, isOffline: boolean): KeyedItem => {
       const isLocal = m.id === serverStore.currentUser?.id;
       const isLocalCall = isLocal && isViewingCallServer() && !!voiceStore.currentVoiceChannelId;
       const vm = participantManager.getByUserId(m.id);
@@ -2555,7 +2547,7 @@ export class MainView {
 
       const isLive = !effectiveOffline && !!voiceState?.isScreenSharing;
       if (isLive) liveMembers.add(m.id);
-      const livePulseStyle = isLive ? ` style="animation-delay: ${this.livePulse.delay(m.id)}"` : '';
+      const livePulseStyle = isLive ? html` style="animation-delay: ${this.livePulse.delay(m.id)}"` : '';
       const isBrb = !effectiveOffline && !m.invisible && m.brb === true;
       const customStatus = effectiveOffline ? null : visibleCustomStatus(m);
       const statusClass = m.invisible ? 'invisible' : (isReconnecting ? 'reconnecting' : (isBrb ? 'brb' : customStatus ? 'custom'
@@ -2564,87 +2556,77 @@ export class MainView {
         ? t('main.reconnecting')
         : (isBrb ? t('main.statusBrb') : customStatus?.text ?? (inVoice ? t('main.inVoiceChannel')
           : (effectiveOffline ? t('main.statusOffline') : t('main.statusOnline'))));
+      const userRoles = serverStore
+        .getUserRoles(m.id)
+        .filter((r) => !r.isDefault && (canSeeAllBadges || myRoleIds.includes(r.id)));
+      const watchLabel = t('main.watchLiveAria', { name: m.nickname });
 
-      return `
-        <div class="member-item ${effectiveOffline ? 'member-offline' : ''} ${isReconnecting ? 'reconnecting' : ''}" data-user-id="${m.id}" title="${escapeHtml(m.nickname)} ${isLocal ? `(${t('common.you')})` : `(${t('main.rightClickVolume')})`}">
+      return {
+        key: `member:${m.id}`,
+        html: html`
+        <div class="member-item ${effectiveOffline ? 'member-offline' : ''} ${isReconnecting ? 'reconnecting' : ''}" data-user-id="${m.id}" title="${m.nickname} (${t(isLocal ? 'common.you' : 'main.rightClickVolume')})">
           <div class="member-avatar-wrapper">
             <img class="member-avatar-img" src="${avatar}" data-fallback="avatar">
-            <span class="status-indicator ${statusClass}"${customStatus && statusClass === 'custom' ? ` style="${customStatusDotStyle(customStatus)}"` : ''} role="img" aria-label="${escapeHtml(statusText)}"></span>
+            <span class="status-indicator ${statusClass}"${customStatus && statusClass === 'custom' ? html` style="${customStatusDotStyle(customStatus)}"` : ''} role="img" aria-label="${statusText}"></span>
           </div>
           <div class="member-info">
             <div class="member-name-row">
-              <span class="member-name">${escapeHtml(m.nickname)}</span>
-              ${effectiveOffline ? '' : renderPresenceTag(m)}
-              ${isLocal ? `<span class="member-badge-you">${t('common.you')}</span>` : ''}
-              ${m.id === serverStore.ownerId ? `<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
-              ${m.isBot ? `<span class="member-badge-bot" title="Bot">BOT</span>` : ''}
-              ${isReconnecting ? `<span class="member-reconnecting-badge" title="${t('main.reconnectingTitle')}"><span class="material-symbols-outlined md-14 spin">sync</span></span>` : ''}
+              <span class="member-name">${m.nickname}</span>
+              ${effectiveOffline ? '' : trustedHtml(renderPresenceTag(m))}
+              ${isLocal ? html`<span class="member-badge-you">${t('common.you')}</span>` : ''}
+              ${m.id === serverStore.ownerId ? html`<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
+              ${m.isBot ? html`<span class="member-badge-bot" title="Bot">BOT</span>` : ''}
+              ${isReconnecting ? html`<span class="member-reconnecting-badge" title="${t('main.reconnectingTitle')}"><span class="material-symbols-outlined md-14 spin">sync</span></span>` : ''}
               ${isLive ? (isLocal || !vm
-                ? `<span class="member-live-badge"${livePulseStyle} title="${t('main.sharingScreen')}">LIVE</span>`
-                : `<button type="button" class="member-live-badge"${livePulseStyle} data-watch-live="${escapeHtml(vm.user.sessionId || vm.user.id)}"
-                    title="${escapeHtml(t('main.watchLiveAria', { name: m.nickname }))}"
-                    aria-label="${escapeHtml(t('main.watchLiveAria', { name: m.nickname }))}">LIVE</button>`) : ''}
-              ${(!effectiveOffline && voiceState?.isCameraOn) ? `<span class="material-symbols-outlined md-14 member-cam-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
-              ${renderAudioMuteIndicators({ ...voiceState, isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened, permissionMuted: isPermissionMuted }, { showMicrophone: inVoice || isServerMuted || isPermissionMuted })}
+                ? html`<span class="member-live-badge"${livePulseStyle} title="${t('main.sharingScreen')}">LIVE</span>`
+                : html`<button type="button" class="member-live-badge"${livePulseStyle} data-watch-live="${vm.user.sessionId || vm.user.id}"
+                    title="${watchLabel}" aria-label="${watchLabel}">LIVE</button>`) : ''}
+              ${(!effectiveOffline && voiceState?.isCameraOn) ? html`<span class="material-symbols-outlined md-14 member-cam-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
+              ${trustedHtml(renderAudioMuteIndicators({ ...voiceState, isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened, permissionMuted: isPermissionMuted }, { showMicrophone: inVoice || isServerMuted || isPermissionMuted }))}
             </div>
-            ${(() => {
-              // With public badges off, a role tag is only rendered for members
-              // who hold that same role — except for admins, who moderate the
-              // server and therefore always see every badge (#530).
-              const badgesArePublic = serverStore.serverDetails?.showRoleBadgesToEveryone !== false;
-              const canSeeAllBadges = badgesArePublic || serverStore.hasPermission(Permission.ADMINISTRATOR);
-              const myRoleIds = canSeeAllBadges ? [] : serverStore.getUserRoleIds(serverStore.currentUser?.id || '');
-              const userRoles = serverStore
-                .getUserRoles(m.id)
-                .filter((r) => !r.isDefault && (canSeeAllBadges || myRoleIds.includes(r.id)));
-              return renderRoleTags(userRoles, SIDEBAR_ROLE_TAGS);
-            })()}
-            <span class="member-subtext"${customStatus?.text ? ` title="${escapeHtml(customStatus.text)}"` : ''}>${escapeHtml(statusText)}</span>
+            ${trustedHtml(renderRoleTags(userRoles, SIDEBAR_ROLE_TAGS))}
+            <span class="member-subtext"${customStatus?.text ? html` title="${customStatus.text}"` : ''}>${statusText}</span>
           </div>
-        </div>
-      `;
+        </div>`,
+      };
     };
 
     if (listEl) {
-      const sections: string[] = [];
-
+      this.delegateOnce(listEl, signal => this.bindMemberListEvents(listEl, signal));
+      const items: KeyedItem[] = [];
       if (onlineMembers.length > 0) {
-        sections.push(`
-          <div class="member-section-header">${t('main.membersOnline')} — ${onlineMembers.length}</div>
-          ${onlineMembers.map((m) => renderMemberItem(m, false)).join('')}
-        `);
+        items.push({ key: 'online', html: html`<div class="member-section-header">${t('main.membersOnline')} — ${onlineMembers.length}</div>` });
+        for (const member of onlineMembers) items.push(renderMemberItem(member, false));
       }
-
       if (offlineMembers.length > 0) {
-        sections.push(`
-          <div class="member-section-header">${t('main.membersOffline')} — ${offlineMembers.length}</div>
-          ${offlineMembers.map((m) => renderMemberItem(m, true)).join('')}
-        `);
+        items.push({ key: 'offline', html: html`<div class="member-section-header">${t('main.membersOffline')} — ${offlineMembers.length}</div>` });
+        for (const member of offlineMembers) items.push(renderMemberItem(member, true));
       }
-
-      listEl.innerHTML = sections.join('');
+      preserveViewState(listEl, () => renderKeyedList(listEl, items), {
+        scroller: null,
+        itemKeys: ['data-user-id'],
+        fallback: () => listEl,
+      });
       this.livePulse.retain(liveMembers);
-
-      // Attach contextmenu listeners to member items
-      listEl.querySelectorAll('.member-item').forEach((item) => {
-        item.addEventListener('contextmenu', (e: Event) => {
-          const mouseEvent = e as MouseEvent;
-          mouseEvent.preventDefault();
-          const userId = item.getAttribute('data-user-id');
-          if (!userId) return;
-          const member = serverStore.knownMembers.get(userId) ?? serverStore.serverDetails?.members.find((u) => u.id === userId);
-          if (member) {
-            userContextMenu.open(mouseEvent.clientX, mouseEvent.clientY, member);
-          }
-        });
-      });
-      listEl.querySelectorAll<HTMLButtonElement>('[data-watch-live]').forEach((button) => {
-        button.addEventListener('click', (event) => {
-          event.stopPropagation();
-          if (button.dataset.watchLive) void this.watchLive(button.dataset.watchLive);
-        });
-      });
     }
+  }
+
+  private bindMemberListEvents(list: HTMLElement, signal: AbortSignal): void {
+    list.addEventListener('contextmenu', (event) => {
+      const item = event.target instanceof Element ? event.target.closest<HTMLElement>('.member-item[data-user-id]') : null;
+      if (!item) return;
+      event.preventDefault();
+      const userId = item.dataset.userId;
+      if (!userId) return;
+      const member = serverStore.knownMembers.get(userId) ?? serverStore.serverDetails?.members.find((u) => u.id === userId);
+      if (member) userContextMenu.open(event.clientX, event.clientY, member);
+    }, { signal });
+    list.addEventListener('click', (event) => {
+      const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-watch-live]') : null;
+      if (!button) return;
+      event.stopPropagation();
+      if (button.dataset.watchLive) void this.watchLive(button.dataset.watchLive);
+    }, { signal });
   }
 
   private refreshServerMonitorVisibility(): void {
@@ -3163,6 +3145,8 @@ export class MainView {
     if (stage) cancelSurfaceMotion(stage);
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
+    for (const controller of this.listEvents.values()) controller.abort();
+    this.listEvents.clear();
   }
 
   public destroy(): void {

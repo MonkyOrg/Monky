@@ -157,7 +157,7 @@ function detachPackagedHardLinks(directory) {
  * TypeScript (electron-builder always drops *.d.ts).
  */
 function runtimeSourceFiles() {
-  return ['index.cjs', ...regularFiles(path.join(root, 'runtime')).map(file => path.join('runtime', file))]
+  return ['index.cjs', 'renderer.cjs', ...regularFiles(path.join(root, 'runtime')).map(file => path.join('runtime', file))]
     .filter(relative => !/\.d\.[cm]?ts$/.test(relative));
 }
 

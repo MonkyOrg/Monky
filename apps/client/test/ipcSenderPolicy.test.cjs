@@ -46,7 +46,7 @@ test('privileged handlers run only for the main window top frame', async () => {
   assert.deepEqual(calls, ['abc'], 'Rejected senders never reach the handler');
 });
 
-test('identity, backup, hosting, media files, downloads and auto-start are wired through the guard', () => {
+test('identity, backup, hosting, media files, downloads, auto-start and global input are wired through the guard', () => {
   const filename = path.join(main, 'ipcHandlers.ts');
   const source = ts.createSourceFile(filename, fs.readFileSync(filename, 'utf8'), ts.ScriptTarget.Latest, true);
   const registrations = new Map();
@@ -78,6 +78,9 @@ test('identity, backup, hosting, media files, downloads and auto-start are wired
     'stickers:list', 'stickers:read', 'stickers:save', 'dialog:select-stickers-folder',
     'app:download-file', 'app:save-csv-file', 'app:get-auto-start', 'app:set-auto-start',
     'MEDIA_FOLDERS_IPC.adopt',
+    // Shortcuts and push-to-talk: the overlay or a frame must not replace the main window's global input (R-MEDIA-3).
+    'SHORTCUT_IPC.registerSoundboard', 'SHORTCUT_IPC.registerActions', 'SHORTCUT_IPC.setCapture',
+    'SHORTCUT_IPC.setPttConfig', 'SHORTCUT_IPC.startPttCapture', 'SHORTCUT_IPC.stopPttCapture',
   ];
   for (const channel of sensitive) {
     assert.equal(registrations.get(channel), 'handleFromMainFrame', `${channel} must only answer the main window`);

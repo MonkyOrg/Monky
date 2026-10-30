@@ -1,8 +1,12 @@
 const CONTROLS = 'button, input, select, textarea, a[href], [tabindex]';
 
 export interface PreserveViewStateOptions {
-  /** Element whose scroll offset survives the render; the container itself by default. */
-  scroller?: string;
+  /**
+   * Element whose scroll offset survives the render; the container itself by
+   * default. `null` keeps no offset: a render by key leaves it alone, and reading
+   * it would lay the page out in the middle of the update.
+   */
+  scroller?: string | null;
   /**
    * Attributes naming the item a control belongs to (a card, a question). Such a
    * control is only looked for inside that same item, so a list that gained, lost
@@ -86,7 +90,8 @@ function restoreFocus(container: HTMLElement, focused: FocusedControl, fallback?
  * Restoring the exact offset is instantaneous on purpose — nothing moved.
  */
 export function preserveViewState(container: HTMLElement, render: () => void, options: PreserveViewStateOptions = {}): void {
-  const scroller = () => options.scroller ? container.querySelector<HTMLElement>(options.scroller) : container;
+  const scroller = () => options.scroller === null ? null
+    : options.scroller ? container.querySelector<HTMLElement>(options.scroller) : container;
   const scrollTop = scroller()?.scrollTop ?? 0;
   const focused = captureFocus(container, options.itemKeys ?? [], options.origin);
   render();

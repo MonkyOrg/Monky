@@ -75,11 +75,20 @@ export class DmStore {
   private offEvent: (() => void) | null = null;
   private presenceTimer: ReturnType<typeof setInterval> | null = null;
   private presenceSignature = '';
+  private firstSnapshotPending = false;
   /** Conversation currently on screen (marks read, silences notifications). */
   activePeer: string | null = null;
 
   get available(): boolean {
     return this.api !== null;
+  }
+
+  /**
+   * True from init() until the first snapshot arrives or fails: Home is drawn
+   * before the store opens, and an empty list then means "still loading".
+   */
+  get loading(): boolean {
+    return this.firstSnapshotPending;
   }
 
   get snapshot(): DmSnapshot {
@@ -90,9 +99,17 @@ export class DmStore {
     const api = (window as unknown as { api?: { dm?: DmApi } }).api?.dm;
     if (!api || this.api) return;
     this.api = api;
+    this.firstSnapshotPending = true;
     this.transport = new DmTransport(api);
     this.offEvent = api.onEvent((event) => this.onEvent(event));
-    await this.reload();
+    try {
+      await this.reload();
+    } finally {
+      if (this.firstSnapshotPending) {
+        this.firstSnapshotPending = false;
+        this.bus.emit('changed');
+      }
+    }
     this.transport.start();
     // Presence comes from the servers, not from the main process.
     this.presenceTimer = setInterval(() => this.checkPresence(), 2_000);
@@ -360,6 +377,7 @@ export class DmStore {
   }
 
   private applySnapshot(snapshot: DmSnapshot): void {
+    this.firstSnapshotPending = false;
     this.snapshotValue = snapshot;
     const friends = snapshot.peers.filter((peer) => peer.relation === 'friend' && !peer.blocked).map((peer) => peer.publicKey);
     const known = snapshot.peers.map((peer) => peer.publicKey);

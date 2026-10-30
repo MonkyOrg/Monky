@@ -31,7 +31,8 @@ function fixture(platform = process.platform) {
     setAspectRatio(ratio, extraSize) { this.aspects.push({ ratio, extraSize }); }
     setMinimumSize(width, height) { this.minimumSize = { width, height }; }
     showInactive() {}
-    loadURL() {}
+    loadURL(url) { this.page = url; return Promise.resolve(); }
+    loadFile(file) { this.page = file; return Promise.resolve(); }
     isDestroyed() { return this.destroyed; }
     getBounds() { return { ...this.bounds }; }
     getMediaSourceId() { return `window:${this.webContents.id}:0`; }
@@ -85,6 +86,22 @@ function fixture(platform = process.platform) {
     for (const timer of [...timers]) { timers.delete(timer); timer(); }
   } };
 }
+
+test('the overlay loads its own page, never the app, built or from the dev server', t => {
+  const built = fixture();
+  t.after(() => built.manager.close());
+  assert.match(built.windows[0].page.replace(/\\/g, '/'), /\/dist\/overlay\.html$/);
+  const previous = process.env.VITE_DEV_SERVER_URL;
+  process.env.VITE_DEV_SERVER_URL = 'http://localhost:5173/';
+  try {
+    const dev = fixture();
+    t.after(() => dev.manager.close());
+    assert.equal(dev.windows[0].page, 'http://localhost:5173/overlay.html');
+  } finally {
+    if (previous === undefined) delete process.env.VITE_DEV_SERVER_URL;
+    else process.env.VITE_DEV_SERVER_URL = previous;
+  }
+});
 
 test('manual movement and resize preserve exact bounds through all unrelated option updates', t => {
   const f = fixture();

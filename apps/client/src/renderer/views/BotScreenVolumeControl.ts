@@ -1,4 +1,5 @@
 import { t } from '../i18n';
+import type { SaveTiming } from '../stores/settingsStore';
 
 /**
  * A miniapp tile's volume, built exactly like a screen share's: a mute button in
@@ -15,7 +16,7 @@ export class BotScreenVolumeControl {
   private percent: number | null = null;
   private muted = false;
 
-  constructor(onVolume: (percent: number) => void, onToggleMute: () => void) {
+  constructor(onVolume: (percent: number, timing: SaveTiming) => void, onToggleMute: () => void) {
     this.element.className = 'stage-card-controls';
     this.wrapper.className = 'stage-volume-wrapper';
     this.wrapper.dataset.botScreenVolume = '';
@@ -38,7 +39,9 @@ export class BotScreenVolumeControl {
     // Controls must not reach the tile, whose click toggles focus.
     this.element.addEventListener('click', (event) => event.stopPropagation());
     this.button.addEventListener('click', () => onToggleMute());
-    this.slider.addEventListener('input', () => onVolume(this.slider.valueAsNumber));
+    // Every step is heard at once; the volume is saved where the slider stops.
+    this.slider.addEventListener('input', () => onVolume(this.slider.valueAsNumber, 'soon'));
+    this.slider.addEventListener('change', () => onVolume(this.slider.valueAsNumber, 'now'));
     // Keep the slider open and tracking the pointer while dragging, as on screen shares (#75).
     this.slider.addEventListener('pointerdown', (event) => {
       this.wrapper.classList.add('dragging');

@@ -1,6 +1,7 @@
 import { t } from '../../i18n';
 import { getAvatarUrl } from '../../utils/avatar';
 import { escapeHtml } from '../../utils/html';
+import { renderLoadingSkeleton } from '../../utils/loadingSkeleton';
 
 export interface DirectMessagePreview {
   id: string;
@@ -15,9 +16,15 @@ export class HomeSidebar {
   private conversations: DirectMessagePreview[] = [];
   private selectedId: string | null = null;
   private pendingCount = 0;
+  private loading = false;
 
   public setConversations(conversations: DirectMessagePreview[]): void {
     this.conversations = [...conversations];
+  }
+
+  /** While direct messages load, an empty list is not "no conversations" yet. */
+  public setLoading(loading: boolean): void {
+    this.loading = loading;
   }
 
   /** `null` selects the Friends entry. */
@@ -41,7 +48,8 @@ export class HomeSidebar {
         <section class="home-dm-section" aria-labelledby="home-dm-heading">
           <div class="home-section-heading" id="home-dm-heading">${t('home.directMessages')}</div>
           <div id="home-dm-list" class="home-dm-list" role="list">
-            ${this.conversations.length ? this.conversations.map((conversation) => this.renderItem(conversation)).join('') : `
+            ${this.conversations.length ? this.conversations.map((conversation) => this.renderItem(conversation)).join('') : this.loading
+              ? renderLoadingSkeleton('lines', 3) : `
               <div class="home-dm-empty" role="status">
                 <span class="material-symbols-outlined md-20" aria-hidden="true">chat_bubble</span>
                 <span>${t('home.dmEmpty')}</span>

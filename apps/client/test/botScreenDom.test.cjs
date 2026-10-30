@@ -456,6 +456,8 @@ if (!process.versions.electron) {
       const slider = document.querySelector(${JSON.stringify(secondSlider)});
       slider.value = "50";
       slider.dispatchEvent(new Event("input", { bubbles: true }));
+      // Released where it stopped: the slider saves there (R-VOICEUI-8).
+      slider.dispatchEvent(new Event("change", { bubbles: true }));
     })()`);
     for (const frame of [alice, second]) {
       await waitFor(async () => (await frame.executeJavaScript(probeVolume))[1] === 0.4, 'saved level reaches every view of the bot');

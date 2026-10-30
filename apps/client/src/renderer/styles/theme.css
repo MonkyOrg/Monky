@@ -1382,6 +1382,11 @@ input:focus, textarea:focus, select:focus {
   line-height: 1.4;
 }
 
+/* Direct messages still opening: placeholder rows instead of the empty notice. */
+.home-dm-list .loading-skeleton {
+  padding: 8px 12px;
+}
+
 .home-main-content {
   position: relative;
   min-height: 0;
@@ -2292,6 +2297,8 @@ input:focus, textarea:focus, select:focus {
 .channels-list-container {
   flex: 1;
   overflow-y: auto;
+  /* Rows are updated in place (R-SHELL-11): the offset stays put, as when the list was redrawn whole, with no scroll event to close an open menu. */
+  overflow-anchor: none;
   min-height: 0;
   padding: 12px 8px;
   display: flex;
@@ -10070,6 +10077,8 @@ input:focus, textarea:focus, select:focus {
 .members-list {
   flex: 1;
   overflow-y: auto;
+  /* Rows are updated in place (R-SHELL-11): the offset stays put, as when the list was redrawn whole, with no scroll event to close an open menu. */
+  overflow-anchor: none;
   padding: 12px 8px;
   display: flex;
   flex-direction: column;

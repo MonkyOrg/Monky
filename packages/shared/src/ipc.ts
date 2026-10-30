@@ -720,10 +720,33 @@ export interface OverlaySyncState {
   config: OverlayConfig;
 }
 
-export interface OverlaySignalPayload {
-  target: 'main' | 'overlay';
-  signal: string; // JSON com Offer/Answer/Candidate
-}
+const overlaySessionSchema = z.string().regex(/^[A-Za-z0-9-]{1,64}$/);
+const overlaySdpSchema = z.string().min(1).max(262_144);
+
+/**
+ * Negotiation of the local video link between the main window (offerer) and
+ * the overlay (answerer). Every message names the main window's connection:
+ * the overlay builds one connection per `session` and both sides drop what
+ * belongs to a connection already replaced. `hello` asks an overlay that is
+ * already running to negotiate a new connection; `ready` answers it, or, with
+ * `session: null`, is the first word of an overlay that just started. `scale`
+ * is the overlay's own pixel ratio, which sizes the video it is sent: the
+ * overlay may sit on a display with another scale than the main window (R-MEDIA-2).
+ */
+export const overlaySignalSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('hello'), session: overlaySessionSchema }).strict(),
+  z.object({ kind: z.literal('ready'), session: overlaySessionSchema.nullable() }).strict(),
+  z.object({ kind: z.literal('offer'), session: overlaySessionSchema, sdp: overlaySdpSchema }).strict(),
+  z.object({ kind: z.literal('answer'), session: overlaySessionSchema, sdp: overlaySdpSchema }).strict(),
+  z.object({ kind: z.literal('scale'), session: overlaySessionSchema, pixelRatio: z.number().finite().min(0.25).max(8) }).strict(),
+]);
+export type OverlaySignal = z.infer<typeof overlaySignalSchema>;
+
+export const overlaySignalPayloadSchema = z.object({
+  target: z.enum(['main', 'overlay']),
+  signal: overlaySignalSchema,
+}).strict();
+export type OverlaySignalPayload = z.infer<typeof overlaySignalPayloadSchema>;
 
 export interface NativeScreenAudioOutputConfig {
   epoch: number;
@@ -1134,7 +1157,7 @@ export interface IpcEvents {
   'overlay:config-updated': [config: OverlayConfig];
   'overlay:hover-changed': [hovered: boolean, point?: { x: number; y: number }];
   'overlay:resize-state-changed': [resizing: boolean];
-  'overlay:signal-received': [signal: string];
+  'overlay:signal-received': [signal: OverlaySignal];
   'overlay:sync-state-received': [state: OverlaySyncState];
   'overlay:close-requested': [];
 }

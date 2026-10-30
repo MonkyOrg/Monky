@@ -253,6 +253,8 @@ async function runDom(fixture) {
     import('/i18n/index.ts'), import('/core/SoundboardLibrary.ts'), import('/stores/voiceStore.ts'),
     import('/stores/serverStore.ts'), import('/core/SessionManager.ts'), import(fixture.sharedUrl),
   ]);
+  // Importing has no side effects (R-MEDIA-3): the main window starts the call's sounds like this.
+  soundboardService.init();
   setLanguage(fixture.language);
   settingsStore.soundboardFolderPath = fixture.folder;
   settingsStore.soundboardMuted = false;

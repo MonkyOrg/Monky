@@ -65,6 +65,21 @@ if (!process.versions.electron) {
 }
 
 async function runLiveAudioDeviceSmoke() {
+  // Importing the audio services starts nothing (R-MEDIA-3): no push-to-talk, cue preloads or
+  // sound library until the main window calls init(). Spies go in before the first import.
+  const started = [];
+  const previousApi = window.api, OriginalAudio = window.Audio, addWindowListener = window.addEventListener;
+  const spy = name => () => {
+    started.push(name);
+    return name.startsWith('on') ? () => {} : Promise.resolve(name === 'getDefaultSoundboardFolder' ? null : []);
+  };
+  window.api = Object.fromEntries(['setPttConfig', 'onPttStateChanged', 'getDefaultSoundboardFolder', 'listSoundboardSounds',
+    'registerSoundboardShortcuts', 'onSoundboardShortcutTriggered'].map(name => [name, spy(name)]));
+  window.Audio = class extends OriginalAudio { constructor(...args) { super(...args); started.push('Audio'); } };
+  window.addEventListener = function (type, ...rest) {
+    if (['keydown', 'keyup', 'mousedown', 'mouseup'].includes(type)) started.push(`window:${type}`);
+    return addWindowListener.call(this, type, ...rest);
+  };
   const [{ applyAudioDevice }, devices, { audioProcessor: audio }, { voiceStore: voice },
     { settingsStore: settings }, { webRtcManager: rtc }, { soundEffects: effects },
     { soundboardService: soundboard }] = await Promise.all([
@@ -74,6 +89,23 @@ async function runLiveAudioDeviceSmoke() {
   ]);
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  check(started.length === 0, `Importing the audio services starts nothing: ${started.join(', ')}`);
+  for (let round = 0; round < 2; round++) {
+    audio.init();
+    effects.init();
+    soundboard.init();
+  }
+  for (let i = 0; i < 100 && soundboard.getLoadStatus() === 'loading'; i++) await new Promise(resolve => setTimeout(resolve, 10));
+  const count = name => started.filter(entry => entry === name).length;
+  check(count('onPttStateChanged') === 1 && count('setPttConfig') === 1
+    && ['keydown', 'keyup', 'mousedown', 'mouseup'].every(type => count(`window:${type}`) === 1),
+  `init() starts push-to-talk once: ${started.join(', ')}`);
+  check(count('Audio') >= 6, 'init() preloads the cues');
+  check(count('onSoundboardShortcutTriggered') === 1 && count('getDefaultSoundboardFolder') + count('listSoundboardSounds') === 1,
+    `init() starts the sound library once: ${started.join(', ')}`);
+  window.api = previousApi;
+  window.Audio = OriginalAudio;
+  window.addEventListener = addWindowListener;
   const reject = async (promise, name, message) => {
     let error;
     try { await promise; } catch (reason) { error = reason; }

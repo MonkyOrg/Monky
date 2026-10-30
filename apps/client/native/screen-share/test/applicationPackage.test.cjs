@@ -8,7 +8,7 @@ const { test } = require('node:test');
 const { Platform } = require('app-builder-lib');
 const { FileMatcher, getNodeModuleFileMatcher } = require('app-builder-lib/out/fileMatcher');
 const { computeNodeModuleFileSets } = require('app-builder-lib/out/util/appFileCopier');
-const { root: nativeRoot, regularFiles } = require('../scripts/buildTools.cjs');
+const { root: nativeRoot } = require('../scripts/buildTools.cjs');
 const {
   RENDERER_ONLY_PACKAGES, requiredApplicationFiles, runtimeSourceFiles, verifyApplicationContents, verifyPackagedRuntimeSources,
 } = require('../scripts/checkPackage.cjs');
@@ -85,7 +85,7 @@ test('build.files keeps every runtime file and the notices of the packages it pr
     'node_modules/@fontsource/inter/package.json', 'node_modules/@fontsource/inter/LICENSE',
     'node_modules/@fontsource/inter/files/inter-latin-400-normal.woff2', 'node_modules/@fontsource/inter/files/inter-latin-700-normal.woff2',
     'node_modules/@fontsource/jetbrains-mono/files/jetbrains-mono-latin-400-normal.woff2',
-    'node_modules/@monky/screen-share/index.cjs',
+    'node_modules/@monky/screen-share/index.cjs', 'node_modules/@monky/screen-share/renderer.cjs',
   ]) assert.equal(copiesDependency(relative), true, relative);
   const application = new FileMatcher(path.resolve(os.tmpdir(), 'monky-app'), '/out', value => value, build.files).createFilter();
   const file = { isDirectory: () => false };
@@ -97,7 +97,7 @@ test('build.files keeps every runtime file and the notices of the packages it pr
 
 test('every runtime file afterPack compares survives build.files in both workspace layouts', () => {
   const compared = runtimeSourceFiles().map(relative => relative.split(path.sep).join('/'));
-  assert.ok(compared.includes('index.cjs') && compared.includes('runtime/mac/index.cjs'));
+  assert.ok(compared.includes('index.cjs') && compared.includes('renderer.cjs') && compared.includes('runtime/mac/index.cjs'));
   for (const layout of ['native/screen-share', 'node_modules/@monky/screen-share'])
     for (const relative of compared)
       assert.equal(copiesDependency(`${layout}/${relative}`), true, `afterPack compares ${relative}, but build.files drops it`);
@@ -106,7 +106,7 @@ test('every runtime file afterPack compares survives build.files in both workspa
 test('afterPack accepts the runtime the real packager copies for Windows and macOS', async t => {
   const directory = temporary(t, 'monky-packaged-runtime-');
   const app = path.join(directory, 'apps', 'client');
-  const files = ['package.json', 'index.cjs', ...regularFiles(path.join(nativeRoot, 'runtime')).map(file => path.join('runtime', file))];
+  const files = ['package.json', ...runtimeSourceFiles()];
   const modules = [
     { name: '@monky/screen-share', dir: path.join(app, 'native', 'screen-share') },
     { name: '@monky/screen-share', dir: path.join(directory, 'node_modules', '@monky', 'screen-share') },

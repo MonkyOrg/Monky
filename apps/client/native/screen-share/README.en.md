@@ -385,6 +385,11 @@ before the decoder closes the writer while frames are still arriving.
 Its owner blocks new frames, closes the decoder and drains the writer before
 stopping the track; a timeout retains resources for a subsequent retry.
 
+Preload loads only `@monky/screen-share/renderer` (presentation and audio), and
+only when its window watches the first native screen. Capture, transport and
+processes stay in Main, behind the main entry; `afterPack` compares both
+entries byte for byte with the packaged copy.
+
 Stopping a source or receiver may return `retired-with-errors` when the original
 owners prove retirement but report a cleanup error. The renderer logs the warning
 and releases only that instance's state, allowing a fresh share or Watch in the

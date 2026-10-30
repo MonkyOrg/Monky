@@ -26,6 +26,7 @@ async function runCustomSoundsSmoke(base64) {
     settingsStore.customSounds = Object.fromEntries(SOUND_EFFECT_TYPES.map(key => [key, source]));
     settingsStore.save();
     manager = new SoundEffectManager();
+    manager.init();
     manager.playTone = rising => synthetic.push(rising ? 'screen_share_start' : 'screen_share_stop');
     manager.playChatCue = () => synthetic.push('chat_message');
     manager.playPttCue = active => synthetic.push(active ? 'ptt_press' : 'ptt_release');

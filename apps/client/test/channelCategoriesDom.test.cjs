@@ -457,6 +457,8 @@ if (!process.versions.electron) {
       if (JSON.stringify(adjacentLayout) !== JSON.stringify(['gap:', 'category:voice|text', 'gap:', 'destination:', ':loose|tail', 'end:'])) {
         throw new Error('Adjacent categories did not get a slot between them: ' + JSON.stringify(adjacentLayout));
       }
+      // Slots the tree kept from the drag fold back with their transition: measure them once at rest (R-SHELL-11).
+      await browser.webContents.executeJavaScript('Promise.allSettled(document.getAnimations().map(animation => animation.finished))');
       const restingSlots = await browser.webContents.executeJavaScript(`[...document.querySelectorAll('[data-root-gap]')]
         .map(slot => slot.getBoundingClientRect().height + ':' + getComputedStyle(slot.querySelector('.channel-tree-gap-label')).opacity)`);
       if (JSON.stringify(restingSlots) !== JSON.stringify(['0:0', '16:0', '0:0'])) {

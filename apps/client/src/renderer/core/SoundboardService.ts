@@ -83,10 +83,17 @@ export class SoundboardService {
     this.intensity = value;
     appEvents.emit('soundboard.intensity', value);
   });
+  private initialized = false;
 
-  constructor() {
+  /**
+   * Plays the call's sounds and loads the library. Importing the module has no
+   * side effects: only the main window calls this (R-MEDIA-3).
+   */
+  public init(): void {
+    if (this.initialized) return;
+    this.initialized = true;
     this.setupListeners();
-    this.loadSounds();
+    void this.loadSounds();
   }
 
   private setupListeners(): void {
@@ -655,6 +662,11 @@ export class SoundboardService {
       return 0;
     }
     return Math.max(0, Math.min(1, settingsStore.soundboardVolume / 100));
+  }
+
+  /** Applies the volume in the settings to what is playing, before it is saved (a slider still moving). */
+  public applyVolume(): void {
+    this.audioOutput.setVolume(this.getEffectiveVolume());
   }
 
   private beginPlayback(userId: string, soundName?: string): PendingSoundPlayback {

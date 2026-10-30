@@ -738,13 +738,16 @@ export class SoundboardModal {
       }
     });
 
+    // Every step is heard at once; the volume is saved where the slider stops.
     sliderVol?.addEventListener('input', () => {
       const val = parseInt(sliderVol.value, 10);
       if (volLabel) volLabel.textContent = `${val}%`;
       sliderVol.style.setProperty('--slider-progress', `${val}%`);
       settingsStore.soundboardVolume = val;
-      settingsStore.save();
+      soundboardService.applyVolume();
+      settingsStore.saveSoon();
     });
+    sliderVol?.addEventListener('change', () => settingsStore.save());
   }
 
   private attachSoundClickEvents(): void {

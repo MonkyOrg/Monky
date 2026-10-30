@@ -22,7 +22,9 @@ const GITHUB_REPO = 'MonkyOrg/Monky';
 type CheckResult = UpdateCheckResult;
 
 // electron-updater is loaded lazily (only on Windows/Linux) so that a missing
-// or broken package never prevents the app itself from starting.
+// or broken package never prevents the app itself from starting. It also loads
+// only when a download or install needs it: its ~150 files used to be read
+// before the main window could start loading its page (#490).
 interface UpdaterLogger {
   info: (message: unknown) => void;
   warn: (message: unknown) => void;
@@ -42,6 +44,8 @@ type AutoUpdater = {
 };
 
 let autoUpdater: AutoUpdater | null = null;
+/** Settings and listeners setupUpdater applies to electron-updater once it loads. */
+let configureAutoUpdater: ((updater: AutoUpdater) => void) | null = null;
 
 interface UpdateOperation {
   id: string;
@@ -80,7 +84,9 @@ function loadAutoUpdater(): AutoUpdater | null {
   if (autoUpdater) return autoUpdater;
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    autoUpdater = require('electron-updater').autoUpdater as AutoUpdater;
+    const updater = require('electron-updater').autoUpdater as AutoUpdater;
+    configureAutoUpdater?.(updater);
+    autoUpdater = updater;
     return autoUpdater;
   } catch (e) {
     console.error('electron-updater indisponível:', msg(e));
@@ -300,8 +306,7 @@ export function setupUpdater(
   const isMac = process.platform === 'darwin';
 
   if (!isMac) {
-    const updater = loadAutoUpdater();
-    if (updater) {
+    configureAutoUpdater = (updater) => {
       updater.autoDownload = false;
       updater.autoInstallOnAppQuit = false;
       // Route electron-updater's own internal logging into update-flow.log. Its
@@ -377,7 +382,7 @@ export function setupUpdater(
         updateLog('electron-updater error event', { error: msg(err) });
         mainWindow.webContents.send('updater:error', msg(err));
       });
-    }
+    };
   }
 
   ipcMain.handle(UPDATER_IPC.setChannel, async (_e, allowBeta: unknown): Promise<CheckResult> => {

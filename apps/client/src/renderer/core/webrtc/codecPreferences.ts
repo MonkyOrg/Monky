@@ -88,3 +88,26 @@ export function applyVideoCodecPreferences(pc: RTCPeerConnection): void {
     }
   }
 }
+
+/**
+ * Puts one codec first on every local video sender, the rest of the encodable
+ * list following as a fallback. For a link where the encoder, not bandwidth,
+ * is the cost: the overlay's loopback measured cheapest with VP8 (R-MEDIA-2).
+ */
+export function preferVideoCodec(pc: RTCPeerConnection, mimeType: string): void {
+  const target = mimeType.toLowerCase();
+  const codecs = compatibleSendingVideoCodecs();
+  const ordered = [
+    ...codecs.filter((codec) => codec.mimeType.toLowerCase() === target),
+    ...codecs.filter((codec) => codec.mimeType.toLowerCase() !== target),
+  ];
+  if (!ordered.length) return;
+  for (const transceiver of pc.getTransceivers()) {
+    if (transceiver.sender.track?.kind !== 'video') continue;
+    try {
+      transceiver.setCodecPreferences(ordered);
+    } catch {
+      // A preference is best-effort: the default order still negotiates.
+    }
+  }
+}

@@ -244,6 +244,8 @@ async function runTooltipSmoke() {
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
   const wait = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
+  // DOM changes around the tooltip are looked at once per frame (R-SHELL-15).
+  const frame = () => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
   const root = document.createElement('div');
   root.style.cssText = 'position:fixed;left:90px;top:100px;width:400px;height:150px';
   root.innerHTML = `<div id="tip-parent" title="Parent">
@@ -313,6 +315,36 @@ async function runTooltipSmoke() {
     over(icon);
     await wait(180);
     check(tip().textContent === button.title, 'Transitions between nested siblings must switch labels');
+    {
+      // An element elsewhere redrawn every frame, such as a level meter, leaves the
+      // shown tooltip alone; changes on its ancestry reach it once per frame (R-SHELL-15).
+      const meter = document.createElement('div');
+      document.body.append(meter);
+      await frame();
+      let anchorReads = 0;
+      const measure = Element.prototype.getBoundingClientRect;
+      Element.prototype.getBoundingClientRect = function () {
+        if (this === button) anchorReads++;
+        return measure.call(this);
+      };
+      try {
+        for (let index = 0; index < 20; index++) {
+          meter.style.width = `${index}px`;
+          meter.textContent = String(index);
+          await frame();
+        }
+        check(anchorReads === 0 && !tip().hidden, `Unrelated redraws must not measure the tooltip again (${anchorReads} reads)`);
+        parent.style.paddingLeft = '1px';
+        parent.style.paddingLeft = '2px';
+        await frame();
+        check(anchorReads > 0 && anchorReads <= 2 && !tip().hidden, `A change on the anchor's ancestry is followed once per frame (${anchorReads} reads)`);
+      } finally {
+        Element.prototype.getBoundingClientRect = measure;
+        meter.remove();
+        parent.style.paddingLeft = '';
+        await frame();
+      }
+    }
     out(icon);
     over(root.querySelector('#tip-empty i'));
     await wait(180);
@@ -328,7 +360,7 @@ async function runTooltipSmoke() {
     await wait(180);
     check(tip().textContent === 'Custom source', 'Explicit data-tooltip source must be supported');
     data.dataset.tooltip = 'Updated custom source';
-    await wait();
+    await frame();
     check(tip().textContent === 'Updated custom source', 'data-tooltip updates must refresh');
     out(data);
     const ping = document.createElement('div');
@@ -344,13 +376,13 @@ async function runTooltipSmoke() {
     const pingSource = ping.querySelector('#tooltip-ping-source');
     check(getComputedStyle(pingSource).display === 'none', 'Tooltip source must remain hidden, not duplicate on hover');
     pingSource.innerHTML = '<b>SFU latency:</b> 58 ms<br>Centralized connection';
-    await wait();
+    await frame();
     check(tip().textContent === 'SFU latency: 58 ms\nCentralized connection', 'Existing periodic ping innerHTML updates must refresh active tooltip');
     pingSource.firstElementChild.firstChild.data = 'Updated latency:';
-    await wait();
+    await frame();
     check(tip().textContent.startsWith('Updated latency:'), 'Character-data updates must refresh referenced sources');
     pingSource.id = 'tooltip-ping-moved';
-    await wait();
+    await frame();
     check(closed(), 'Renaming a referenced source must hide stale content');
     ping.dataset.tooltipSource = 'tooltip-ping-moved';
     await wait(180);
@@ -383,7 +415,7 @@ async function runTooltipSmoke() {
     over(icon);
     await wait(180);
     root.hidden = true;
-    await wait();
+    await frame();
     check(closed(), 'Hiding an ancestor must dismiss the tooltip');
     root.hidden = false;
     out(icon);
@@ -401,7 +433,7 @@ async function runTooltipSmoke() {
     await wait();
     check(tip().getBoundingClientRect().bottom <= innerHeight - 7, 'Very long text must remain bounded');
     menu.remove();
-    await wait();
+    await frame();
     check(closed() && menuItem.getAttribute('title') === menuItem.title, 'Unmounted menus must hide and restore titles');
     over(icon);
     await wait(180);

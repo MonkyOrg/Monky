@@ -12,6 +12,7 @@ function fixture(compatibility, options = {}) {
   const actions = [];
   const sent = [];
   let metadataCalls = 0;
+  let updaterLoads = 0;
   let fetchSignal;
   const request = async (_url, init) => {
     fetchSignal = init.signal;
@@ -76,6 +77,7 @@ function fixture(compatibility, options = {}) {
     vm.runInNewContext(code, {
       module, exports: module.exports, __dirname: main, __filename: filename,
       require(id) {
+        if (id === 'electron-updater') updaterLoads++;
         if (dependencies.has(id)) return dependencies.get(id);
         if (id === './updateVersions') return load('updateVersions');
         assert.ok(['fs', 'https', 'path'].includes(id), `Unexpected dependency ${id}`);
@@ -90,7 +92,8 @@ function fixture(compatibility, options = {}) {
   };
   load('updater').setupUpdater({ webContents: { send: (...args) => sent.push(args) } },
     options.inventory ?? (async () => []));
-  return { handlers, actions, events, sent, updater, metadataCalls: () => metadataCalls, fetchSignal: () => fetchSignal };
+  return { handlers, actions, events, sent, updater, metadataCalls: () => metadataCalls, fetchSignal: () => fetchSignal,
+    updaterLoads: () => updaterLoads };
 }
 
 test('desktop detection does not fetch bot metadata or warn remote-only users', async () => {
@@ -216,6 +219,22 @@ test('downloaded event is the irreversible boundary and cannot be cancelled or i
   await f.handlers.get(shared.UPDATER_IPC.download)(null, '18.0.0-beta', 'download-a');
   assert.equal((await f.handlers.get(shared.UPDATER_IPC.cancel)(null, 'download-a')).cancelled, false);
   assert.equal((await f.handlers.get(shared.UPDATER_IPC.install)()).ok, false);
+  assert.equal(f.sent.filter(([channel]) => channel === 'updater:downloaded').length, 1);
+});
+
+test('electron-updater loads with the first download, already configured, never just to open Monky (#490)', async () => {
+  const f = fixture(manifest, { download: async (_token, events) => events.get('update-downloaded')({ version: '18.0.0-beta' }) });
+  f.updater.autoDownload = true;
+  f.updater.autoInstallOnAppQuit = true;
+  assert.equal(f.updaterLoads(), 0, 'opening the window does not read electron-updater');
+  await f.handlers.get(shared.UPDATER_IPC.check)();
+  assert.equal(f.updaterLoads(), 0, 'checking asks GitHub directly');
+  assert.equal((await f.handlers.get(shared.UPDATER_IPC.download)(null, '18.0.0-beta', 'download-a')).ok, true);
+  assert.ok(f.updaterLoads() > 0, 'the download loads it');
+  assert.equal(f.updater.autoDownload, false, 'configured before it is used');
+  assert.equal(f.updater.autoInstallOnAppQuit, false);
+  assert.ok(f.updater.logger, 'its log goes to the update log');
+  assert.deepEqual([...f.events.keys()].sort(), ['download-progress', 'error', 'update-downloaded']);
   assert.equal(f.sent.filter(([channel]) => channel === 'updater:downloaded').length, 1);
 });
 
