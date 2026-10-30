@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A lista de posts do fórum não some mais quando um servidor envia a data de um post com defeito: só esse post fica de fora. Com servidores atualizados, rolar a lista também não pula mais um post quando outro é apagado ou muda de lugar enquanto você lê.",
+  "en": "The forum's post list no longer disappears when a server sends a broken post date: only that post is left out. With updated servers, scrolling the list also no longer skips a post when another is deleted or moves while you read."
+}

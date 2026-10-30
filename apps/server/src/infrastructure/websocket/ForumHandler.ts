@@ -31,9 +31,11 @@ export class ForumHandler {
         throw new ForumError('Too many forum requests.', ProtocolErrorCode.RATE_LIMITED);
       }
       if (type === MessageType.FORUM_LIST) {
-        const result = await this.service.list(session.user.id, payload, current);
+        const { nextCursor, ...result } = await this.service.list(session.user.id, payload, current);
         if (!current()) throw new ForumError('Access changed.', ProtocolErrorCode.PERMISSION_DENIED);
-        this.transport.send(session, { type: MessageType.FORUM_LIST_RESULT, payload: result, requestId });
+        // Peers that never negotiated the cursor never receive it.
+        const cursor = nextCursor && session.protocol?.features.includes('forum-cursor') ? { nextCursor } : {};
+        this.transport.send(session, { type: MessageType.FORUM_LIST_RESULT, payload: { ...result, ...cursor }, requestId });
         return;
       }
       const result = type === MessageType.FORUM_CREATE_POST

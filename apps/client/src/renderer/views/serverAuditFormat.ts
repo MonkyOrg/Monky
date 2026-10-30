@@ -6,6 +6,7 @@ import {
 import { getLanguage, t, type TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { formatBytes } from '../utils/attachment';
+import { serverDate } from '../utils/serverTime';
 
 export const AUDIT_CATEGORY_ICONS: Record<ServerAuditCategory, string> = {
   channels: 'tag',
@@ -197,7 +198,8 @@ export function auditCategory(action: string): ServerAuditCategory | null {
 }
 
 export function formatAuditTime(timestamp: number): string {
-  return new Intl.DateTimeFormat(getLanguage(), { dateStyle: 'short', timeStyle: 'short' }).format(timestamp);
+  const date = serverDate(timestamp);
+  return date ? new Intl.DateTimeFormat(getLanguage(), { dateStyle: 'short', timeStyle: 'short' }).format(date) : '—';
 }
 
 function formatListItem(field: string, item: string): string {

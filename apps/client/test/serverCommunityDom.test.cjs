@@ -794,9 +794,18 @@ async function* regression(locale, inviteModule) {
           : payload.sort === 'newest'
             ? right.createdAt - left.createdAt
             : right.updatedAt - left.updatedAt));
-        const offset = payload.offset ?? 0;
+        // With a cursor, the page starts right after that place in the order, as the server does.
+        const key = payload.sort === 'latest' ? 'updatedAt' : 'createdAt';
+        const later = (entry, after) => entry.pinned !== after.pinned ? entry.pinned < after.pinned
+          : entry[key] !== after.at ? (payload.sort === 'oldest' ? entry[key] > after.at : entry[key] < after.at)
+            : entry.channelId > after.channelId;
+        const start = payload.after ? posts.findIndex(entry => later(entry, payload.after)) : payload.offset ?? 0;
+        const offset = start < 0 ? posts.length : start;
         const page = posts.slice(offset, offset + 25);
-        return { channelId: 'forum', posts: page, hasMore: offset + page.length < posts.length, nextOffset: offset + page.length };
+        const hasMore = offset + page.length < posts.length;
+        const last = page.at(-1);
+        return { channelId: 'forum', posts: page, hasMore, nextOffset: offset + page.length,
+          ...(hasMore ? { nextCursor: { pinned: last.pinned, at: last[key], channelId: last.channelId } } : {}) };
       }
       if (type === 'FORUM_CREATE_POST') return { post: { ...post, channelId: payload.id, title: payload.title } };
       if (type === 'CHAT_REQUEST_UPLOAD_TOKEN') return { token: 'forum-token' };
@@ -3002,6 +3011,21 @@ async function* regression(locale, inviteModule) {
   check(root.querySelector('.forum-post-stats').textContent.includes(t('forum.locked'))
     && root.querySelector('.forum-post-stats').textContent.includes(t('forum.closed')),
   'Thread cards distinguish administrative locks from author closures');
+  // #828: a post whose time a Date cannot hold is left out; the others still show.
+  forumPosts = [
+    { ...post, channelId: 'bad-text', updatedAt: 'yesterday' },
+    { ...post, channelId: 'bad-nan', updatedAt: Number.NaN },
+    { ...post, channelId: 'bad-range', updatedAt: 1e20 },
+    { ...post, channelId: 'valid-time', title: 'Valid time' },
+  ];
+  await forum.load();
+  const validTime = () => root.querySelector('[data-forum-id="valid-time"] time');
+  check([...root.querySelectorAll('[data-forum-id]')].map(row => row.dataset.forumId).join() === 'valid-time'
+    && validTime()?.dateTime === new Date(now).toISOString(),
+  'Posts with an invalid time are left out of the forum list instead of breaking it');
+  emit('message.FORUM_POST_SAVED', { post: { ...forumPosts[3], title: 'Out of range', updatedAt: -1e20 } });
+  check(root.querySelector('[data-forum-id="valid-time"] h3')?.textContent === 'Valid time' && validTime(),
+    'A saved post with a time out of range leaves its card as it was');
   forumPosts = Array.from({ length: 60 }, (_, index) => ({
     ...post,
     channelId: `lazy-post-${index}`,
@@ -3297,6 +3321,26 @@ async function* regression(locale, inviteModule) {
     forumSort.value = 'oldest';
     forumSort.dispatchEvent(new Event('change', { bubbles: true }));
     toastWatch.disconnect();
+  }
+  // #847: with forum-cursor, the next page starts right after the last thread read, so threads
+  // read that left the list before their events arrived take none of the following ones with them.
+  if (locale === 'pt-BR') {
+    const features = server.serverDetails.protocol.features;
+    features.push('forum-cursor');
+    forumPosts = Array.from({ length: 60 }, (_, index) => ({ ...post, channelId: `c${String(index).padStart(2, '0')}`,
+      title: `Cursor ${index}`, createdAt: now + index, updatedAt: now + index }));
+    forumScroller.scrollTop = 0;
+    await forum.load();
+    await flush();
+    forumPosts = forumPosts.filter(entry => entry.channelId !== 'c03' && entry.channelId !== 'c07');
+    const beforeCursor = forumRequests().length;
+    forumScroller.scrollTop = forumScroller.scrollHeight;
+    await until(() => rowCount() === 50);
+    const cursorPage = forumRequests()[beforeCursor].payload;
+    const expected = Array.from({ length: 50 }, (_, index) => `c${String(index).padStart(2, '0')}`).join();
+    check(cursorPage.after?.channelId === 'c24' && !('offset' in cursorPage) && threadIds() === expected,
+      `The next page is asked for after the last thread read and skips none: ${JSON.stringify(cursorPage)} ${threadIds()}`);
+    features.splice(features.indexOf('forum-cursor'), 1);
   }
   forumPosts = [];
   await forum.load();

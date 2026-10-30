@@ -6,6 +6,7 @@ import {
 import { t, type TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { renderLoadingSkeleton } from '../utils/loadingSkeleton';
+import { serverTimeHtml } from '../utils/serverTime';
 import { openModal, type ModalShell } from '../utils/modalShell';
 import { animateEnter } from '../utils/surfaceMotion';
 import { RequestTimeoutError } from '../core/NetworkClient';
@@ -55,7 +56,7 @@ export function auditEntryHtml(entry: ServerAuditEntry): string {
         ${related ? `<div class="server-audit-related">${related}</div>` : ''}
         ${formatted.changes.length ? `<ul class="server-audit-changes">${formatted.changes
           .map((change) => `<li class="server-audit-change">${changeHtml(change)}</li>`).join('')}</ul>` : ''}
-        <time class="server-audit-time" datetime="${new Date(entry.createdAt).toISOString()}">${escapeHtml(formatAuditTime(entry.createdAt))}</time>
+        ${serverTimeHtml(entry.createdAt, date => formatAuditTime(date.getTime()), 'server-audit-time')}
       </div>
     </li>
   `;

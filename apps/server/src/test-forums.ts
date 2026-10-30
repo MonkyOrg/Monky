@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
-import { MessageType, Permission, ProtocolErrorCode } from '@monky/shared';
-import { createFixture, record, records, text } from './testFixtures/bots';
+import { MIN_CLIENT_PROTOCOL, MessageType, Permission, PROTOCOL_VERSION, ProtocolErrorCode, createProtocolOffer } from '@monky/shared';
+import { createFixture, identity, record, records, text } from './testFixtures/bots';
 import { ForumError } from './application/services/ForumService';
+import { SqliteForumRepository } from './infrastructure/database/SqliteForumRepository';
 
 async function setup(t: test.TestContext) {
   const f = await createFixture();
@@ -201,4 +202,66 @@ test('editing a topic resends that channel alone; new topics reach the others as
   const third = await post('Third topic');
   assert.deepEqual((await sent(since, MessageType.CHANNEL_CREATED)).map(channel => channel.id), [third]);
   assert.deepEqual(await sent(since, MessageType.CHANNEL_UPDATED), []);
+});
+
+/** A post written straight to the database at `at`, past the message rate limit. */
+async function seedPost(f: Awaited<ReturnType<typeof setup>>, title: string, at: number): Promise<string> {
+  const id = randomUUID();
+  const forum = await f.channelService.getChannelSummary(f.forum.id);
+  assert.ok(forum);
+  new SqliteForumRepository(f.database.getDb()).create(id, forum, f.member.id, title, at);
+  await f.messageRepo.create({ id: randomUUID(), channelId: id, userId: f.member.id, content: title, createdAt: at });
+  return id;
+}
+
+test('a page read by cursor starts right after the last post read, however the list moved meanwhile', async t => {
+  const f = await setup(t);
+  const list = (payload: Record<string, unknown>) => f.forumService.list(f.member.id, { channelId: f.forum.id, ...payload }, () => true);
+  const ids = (posts: { channelId: string }[]) => posts.map(post => post.channelId);
+  for (const sort of ['latest', 'newest', 'oldest'] as const) {
+    const base = Date.now();
+    for (let index = 0; index < 30; index++) await seedPost(f, `${sort} ${index}`, base + index * 10);
+    const first = await list({ sort });
+    assert.equal(first.posts.length, 25);
+    assert.ok(first.hasMore && first.nextCursor);
+    const rest = ids((await list({ sort, offset: 25 })).posts);
+    // The order changes before the next page is read: posts read leave the list, another is
+    // pinned out of it, one gets a reply and a new post arrives.
+    const read = ids(first.posts);
+    await f.forumService.delete(f.member.id, { channelId: read[3] }, () => true);
+    await f.forumService.delete(f.member.id, { channelId: read[5] }, () => true);
+    await f.forumService.update(f.owner.id, { channelId: read[24], pinned: true }, () => true);
+    await f.messageRepo.create({ id: randomUUID(), channelId: read[10], userId: f.member.id, content: 'bump', createdAt: base + 1_000 });
+    const added = await seedPost(f, `${sort} new`, base + 2_000);
+    const byOffset = ids((await list({ sort, offset: 25 })).posts);
+    assert.notDeepEqual(byOffset, rest, `${sort}: the offset now points at another post`);
+    const second = await list({ sort, after: first.nextCursor });
+    // Oldest first, the new post belongs after every post read and arrives with this page.
+    assert.deepEqual(ids(second.posts), sort === 'oldest' ? [...rest, added] : rest,
+      `${sort}: the cursor neither skips nor repeats a post`);
+    assert.equal(second.hasMore, false);
+    assert.equal(second.nextCursor, undefined);
+    while ((await list({ sort })).posts.length) {
+      for (const post of (await list({ sort })).posts) await f.forumService.delete(f.owner.id, { channelId: post.channelId }, () => true);
+    }
+  }
+  await assert.rejects(list({ after: { pinned: false, at: 1e20, channelId: 'x' } }), ForumError);
+});
+
+test('only peers that negotiated forum-cursor receive it', async t => {
+  const f = await setup(t);
+  const legacy = await f.human('Legacy forum reader', identity(), randomUUID(), false, PROTOCOL_VERSION, {
+    minimumVersion: MIN_CLIENT_PROTOCOL,
+    features: createProtocolOffer('client').features.filter(feature => feature !== 'forum-cursor'),
+  });
+  const base = Date.now();
+  for (let index = 0; index < 26; index++) await seedPost(f, `Post ${index}`, base + index);
+  const current = await f.member.peer.request(MessageType.FORUM_LIST, { channelId: f.forum.id });
+  const cursor = record(current.payload.nextCursor);
+  assert.equal(typeof cursor.channelId, 'string');
+  const next = await f.member.peer.request(MessageType.FORUM_LIST, { channelId: f.forum.id, after: cursor });
+  assert.equal(records(next.payload.posts).length, 1);
+  const old = await legacy.peer.request(MessageType.FORUM_LIST, { channelId: f.forum.id });
+  assert.equal(old.payload.hasMore, true);
+  assert.equal('nextCursor' in old.payload, false);
 });
