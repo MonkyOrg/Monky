@@ -40,6 +40,8 @@ interface RouteChecks<P> {
   readonly unordered?: boolean;
   /** When this server or the peer's app cannot serve it. FEATURE_REQUIRES_UPDATE unless `code` says otherwise. */
   readonly unavailable?: { when(session: ClientSession): boolean; code?: ProtocolErrorCode; message: string };
+  /** A service this server may run without; its absence is answered with `featureUnavailableCode`. */
+  readonly service?: { available(): boolean; legacyCode?: ProtocolErrorCode; message: string };
   readonly schema?: RouteSchema<P>;
   /** A permission held on the server. */
   readonly permission?: Permission;
@@ -70,6 +72,17 @@ export function route(definition: MemberRoute & { schema?: undefined }): Route;
 export function route(definition: AnonymousRoute): Route;
 export function route(definition: Route): Route {
   return definition;
+}
+
+/**
+ * The code for "this server does not offer the feature" (#839): FEATURE_UNAVAILABLE for an app that
+ * announces `feature-unavailable`, otherwise the code that route has always answered, so an older app
+ * keeps reacting as before. FEATURE_REQUIRES_UPDATE stays for "your app or this server is too old".
+ */
+export function featureUnavailableCode(
+  session: ClientSession, legacyCode: ProtocolErrorCode = ProtocolErrorCode.FEATURE_REQUIRES_UPDATE,
+): ProtocolErrorCode {
+  return session.protocol?.features.includes('feature-unavailable') ? ProtocolErrorCode.FEATURE_UNAVAILABLE : legacyCode;
 }
 
 /** The channel a request names, as sent; Authorizer.authorizeChannel refuses anything that is not one. */
@@ -166,6 +179,10 @@ export class MessageRouter {
   ): Promise<void> {
     if (route.unavailable?.when(session)) {
       this.refuse(session, route.unavailable.code ?? ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, route.unavailable.message, requestId);
+      return;
+    }
+    if (route.service && !route.service.available()) {
+      this.refuse(session, featureUnavailableCode(session, route.service.legacyCode), route.service.message, requestId);
       return;
     }
     const parsed = route.schema ? route.schema.type.safeParse(payload) : { success: true as const, data: payload };

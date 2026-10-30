@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { realpath as pathWalkingRealpath } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { promisify } from 'node:util';
+import { canonicalPath, type Realpath } from './canonicalDirectory';
 import { isRecord } from './ipc/guards';
 
 export type MediaFolderPurpose = 'soundboard' | 'stickers';
@@ -20,8 +19,6 @@ export type MediaFolderCheck =
 /** Asks the person, natively, whether a folder they did not choose on this computer may be read. */
 export type ConfirmMediaFolder = (folder: string) => Promise<boolean>;
 
-type Realpath = (target: string) => Promise<string>;
-
 interface MediaFolderState {
   adopted: boolean;
   soundboard: string[];
@@ -32,7 +29,6 @@ const PURPOSES: readonly MediaFolderPurpose[] = ['soundboard', 'stickers'];
 /** Each folder keeps its chosen and canonical paths; a few recent ones let the user switch back without a dialog. */
 const MAX_ENTRIES = 16;
 const MAX_FILE_BYTES = 64 * 1024;
-const walkLinks: Realpath = promisify(pathWalkingRealpath);
 
 function samePath(left: string, right: string): boolean {
   return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
@@ -182,21 +178,9 @@ export class MediaFolderAccess {
     return prompt;
   }
 
-  /**
-   * Canonical path of what exists at `target`, or null when nothing does.
-   *
-   * The native realpath asks Windows for the final path of an open handle,
-   * which some virtual volumes cannot answer (ImDisk RAM disks, WinFsp or Dokan
-   * mounts fail with EISDIR) even though listing and reading them work. Node's
-   * path-walking realpath, which resolves each link with readlink, gives the
-   * same answer there, so those folders work instead of looking empty.
-   */
-  private async canonical(target: string): Promise<string | null> {
-    try {
-      return await this.nativeRealpath(target);
-    } catch {
-      return await walkLinks(target).catch(() => null);
-    }
+  /** Canonical path of what exists at `target`, or null when nothing does; works on virtual volumes too. */
+  private canonical(target: string): Promise<string | null> {
+    return canonicalPath(target, this.nativeRealpath).catch(() => null);
   }
 
   /** Reads wait for adoptions and confirmations already requested, never for later ones. */

@@ -10,11 +10,11 @@ import {
   type VoiceUserLeftPayload,
 } from '@monky/shared';
 import { appEvents } from './EventBus';
-import { audioProcessor } from './AudioProcessor';
 import { callClient, eventOwnsCall } from './callScope';
 import { clientLog } from './ClientLogService';
 import { networkClient, type ConnectionStatus } from './NetworkClient';
 import { participantManager } from './ParticipantManager';
+import { applyLocalAudioState } from './localAudioState';
 import { leaveCurrentCall, rejoinCallOnSession, suspendCallForNetworkLoss } from './serverConnection';
 import { stopLocalScreenShares } from './screenShareControls';
 import { currentEventOrigin, emitOutsideRouting, isForegroundEvent } from './sessionRouting';
@@ -40,9 +40,7 @@ export interface VoiceEventsHost {
 
 /** Brings the microphone, the output and the published tracks in line with the call's moderation. */
 function syncLocalVoiceMedia(): void {
-  audioProcessor.setMuted(voiceStore.getEffectiveMuted());
-  audioProcessor.setDeafened(voiceStore.getEffectiveDeafened());
-  webRtcManager.setDeafened(voiceStore.getEffectiveDeafened());
+  applyLocalAudioState();
   void webRtcManager.syncMicrophonePublication().catch((error: unknown) => {
     clientLog.warn('AUDIO', 'Could not publish the microphone after Speak was allowed', { error: String(error) });
   });

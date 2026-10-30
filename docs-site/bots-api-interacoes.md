@@ -2432,7 +2432,7 @@ export interface CommandPresentation {
 
 ## `CommandResponsePayload` {#commandresponsepayload}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1354)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1361)
 
 ```ts
 export interface CommandResponsePayload {

@@ -2062,6 +2062,7 @@ export const en: TranslationMap = {
     'This server runs an older version of Monky. Ask whoever hosts it to update the server.',
   'protocolError.dmRelayDisabled': 'Direct messages through this server are disabled.',
   'protocolError.internalError': 'Internal server error.',
+  'protocolError.featureUnavailable': 'This server does not offer this feature.',
   'protocolError.unauthorized': 'You are not authenticated on this server.',
   'protocolError.permissionDenied': 'You do not have permission to perform this action.',
   'protocolError.badRequest': 'Invalid request.',

@@ -25,6 +25,7 @@ const FAILURE_KEYS: Record<ServerAuditFailure, TranslationKey> = {
   disconnected: 'serverAudit.disconnected',
   serverChanged: 'serverAudit.serverChanged',
   updateRequired: 'serverAudit.updateRequired',
+  unavailable: 'serverAudit.unavailable',
   invalidResponse: 'serverAudit.invalidResponse',
 };
 

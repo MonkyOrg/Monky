@@ -10,6 +10,7 @@ import {
   type SoundboardDownloadInput, type SoundboardDownloadProgress, type SoundDownloadResult,
 } from '@monky/shared';
 import { SoundboardDownloads, SoundDownloadError, soundDownloadUrl, type SoundDownloadTransport } from '../src/main/soundboardDownload';
+import { SoundboardFiles } from '../src/main/soundboardFiles';
 import { isPublicAddress } from '../src/main/net/addressPolicy';
 import { isSoundAudio, isSoundFileName } from '../src/main/soundAudioValidation';
 import { AudioPreviews } from '../src/main/audioPreviews';
@@ -147,6 +148,57 @@ test('a previously selected folder alias resolves to the confirmed directory wit
   await fs.mkdir(other);
   await fs.symlink(other, alias, process.platform === 'win32' ? 'junction' : 'dir');
   assert.equal(await restored.availability(alias), 'confirmation_required');
+});
+
+test('a virtual volume whose native realpath fails with EISDIR keeps folder confirmation, downloads and files working', async (context) => {
+  const f = await fixture(context);
+  const volume = await fs.realpath(f.root);
+  let failures = 0;
+  // ImDisk, WinFsp and Dokan volumes: GetFinalPathNameByHandleW fails, although listing and reading work.
+  const nativeRealpath = async (target: string): Promise<string> => {
+    const relative = path.relative(volume, path.resolve(target));
+    if (relative.startsWith('..') || path.isAbsolute(relative)) return fs.realpath(target);
+    failures++;
+    throw Object.assign(new Error(`EISDIR: illegal operation on a directory, realpath '${target}'`), { code: 'EISDIR' });
+  };
+  const config = path.join(f.root, 'soundboard-folder.json');
+  const manager = new SoundboardDownloads(config, f.transport, nativeRealpath);
+  context.after(() => manager.cancelOwner(1));
+  const folder = path.join(volume, 'sounds');
+  assert.equal(await manager.confirmFolder(f.folder), folder);
+  assert.equal(await manager.availability(f.folder), 'ready');
+  const permit = await manager.authorize(1, {
+    connectionId: 'volume', invocationId: 'command', configuredFolder: f.folder, expiresAt: Date.now() + 60_000,
+  });
+  assert.equal(permit.status, 'authorized');
+  if (permit.status !== 'authorized') throw new Error('Missing permit');
+  assert.deepEqual(await manager.download(1, {
+    connectionId: 'volume', invocationId: 'command', downloadId: 'download', token: permit.token,
+    url: 'https://audio.example/sound.mp3', fileName: 'sound.mp3', title: 'An authored sound', expiresAt: Date.now() + 60_000,
+  }, () => {}), { status: 'downloaded' });
+  assert.deepEqual(await fs.readFile(path.join(folder, 'sound.mp3')), mp3(true));
+  const files = new SoundboardFiles(manager);
+  const read = await files.read({ folder, fileName: 'sound.mp3' });
+  assert.equal(read.status, 'ok', 'the soundboard reads and edits files on the volume');
+
+  const fresh = path.join(f.root, 'fresh-profile');
+  await fs.mkdir(fresh);
+  const created = new SoundboardDownloads(path.join(fresh, 'soundboard-folder.json'), f.transport, nativeRealpath);
+  assert.equal(await created.getDefaultFolder(), path.join(volume, 'fresh-profile', 'soundboard'),
+    'a profile on the volume prepares its own folder');
+
+  const alias = path.join(f.root, 'folder-alias');
+  const other = path.join(f.root, 'different-folder');
+  await fs.mkdir(other);
+  await fs.symlink(other, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.equal(await manager.availability(alias), 'confirmation_required', 'links are still resolved and compared');
+  const linkedProfile = path.join(f.root, 'linked-profile');
+  await fs.mkdir(linkedProfile);
+  await fs.symlink(other, path.join(linkedProfile, 'soundboard'), process.platform === 'win32' ? 'junction' : 'dir');
+  const redirected = new SoundboardDownloads(path.join(linkedProfile, 'soundboard-folder.json'), f.transport, nativeRealpath);
+  await assert.rejects(redirected.getDefaultFolder(), (error: unknown) =>
+    error instanceof SoundDownloadError && error.reason === 'write_failed', 'a linked managed folder is still refused');
+  assert.ok(failures > 0, 'the fixture exercised the failing native realpath');
 });
 
 test('reselecting the identical saved folder repairs legacy authorization without changing the directory or its permissions', async (context) => {

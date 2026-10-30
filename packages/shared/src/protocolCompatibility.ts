@@ -46,14 +46,14 @@ import { PROTOCOL_VERSION } from './constants.js';
 // read instead of at an offset that posts moving meanwhile shift. Older servers reject `after`, so clients keep `offset`.
 export const MIN_CLIENT_PROTOCOL = 35;
 export const MIN_BOT_PROTOCOL = 24;
-export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8', 'voice-user-limit', 'afk-channel', 'bot-storage', 'message-forward', 'user-brb', 'custom-status', 'bot-key-proof', 'voice-move-id', 'forum-cursor'] as const;
+export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8', 'voice-user-limit', 'afk-channel', 'bot-storage', 'message-forward', 'user-brb', 'custom-status', 'bot-key-proof', 'voice-move-id', 'forum-cursor', 'feature-unavailable'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];
 /**
  * What a bot is offered, listed rather than subtracted: a new feature is only
  * for people until someone decides a bot needs it too.
  */
 export const BOT_PROTOCOL_FEATURES = [
-  'message-length-setting', 'server-community', 'local-youtube-playlist', 'bot-storage', 'bot-key-proof',
+  'message-length-setting', 'server-community', 'local-youtube-playlist', 'bot-storage', 'bot-key-proof', 'feature-unavailable',
 ] as const satisfies readonly ProtocolFeature[];
 export const protocolOfferSchema = z.object({
   minimumVersion: z.number().int().positive(),

@@ -2024,6 +2024,7 @@ export const ptBR = {
     'Este servidor usa uma versão mais antiga do Monky. Peça para quem hospeda atualizar o servidor.',
   'protocolError.dmRelayDisabled': 'Mensagens diretas por este servidor estão desativadas.',
   'protocolError.internalError': 'Erro interno do servidor.',
+  'protocolError.featureUnavailable': 'Este servidor não oferece este recurso.',
   'protocolError.unauthorized': 'Você não está autenticado neste servidor.',
   'protocolError.permissionDenied': 'Você não tem permissão para executar esta ação.',
   'protocolError.badRequest': 'Requisição inválida.',

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Pedidos malformados ao apagar canais e cargos ou mudar apelido, avatar e configurações são recusados como inválidos, sem erro interno no servidor. Quando o servidor não oferece um recurso, o Monky avisa isso em vez de pedir uma atualização.",
+  "en": "Malformed requests to delete channels and roles or change a nickname, avatar and settings are refused as invalid, without an internal server error. When the server does not offer a feature, Monky says so instead of asking for an update."
+}
