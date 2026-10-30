@@ -173,6 +173,9 @@ if (!process.versions.electron) {
           const late = await evaluate(`window.fixture.growAfterReveal(${JSON.stringify(view)})`);
           await check(late.grown.length === 2 && late.distance <= 1 && late.lastVisible && late.following,
             `${label}: the composer growing after the reveal came to rest, twice in its moment, keeps the newest message in view (${JSON.stringify(late)})`);
+          const followed = await evaluate(`window.fixture.growAfterFollowEnd(${JSON.stringify(view)})`);
+          await check(followed.grew && followed.distance <= 1 && followed.lastVisible && followed.following,
+            `${label}: following the end right after the reveal keeps it, so the composer growing then leaves the newest message in view (${JSON.stringify(followed)})`);
 
           // While a scroll to the end is on its way, the reader also scrolls up in
           // ways the feed's own events never see: keys with the focus on the body,
@@ -768,6 +771,33 @@ async function setupFixture() {
         }
         await rested;
         return { grown, ...(await settle(view)) };
+      } finally {
+        composer.style.paddingBottom = '';
+        await settle(view);
+      }
+    },
+    // The conversation opens and, right after the reveal, the bot command composer
+    // mounts and keeps the feed at the end the ordinary way (`followEnd`), as
+    // `ChatCommands.onComposerChanged` does. The composer then grows within the
+    // moment of the reveal: the newest message must not end up behind it (#840).
+    growAfterFollowEnd: async (view) => {
+      const target = views[view];
+      const element = target.feed();
+      const list = target.list();
+      const composer = element.parentElement.querySelector(':scope > .chat-input-container');
+      const base = parseFloat(getComputedStyle(composer).paddingBottom) || 0;
+      element.scrollTo({ top: 0, behavior: 'instant' });
+      await frames();
+      try {
+        list.scrollToEnd({ reveal: true });
+        const moment = list.revealingUntil;
+        list.followEnd();
+        await new Promise(requestAnimationFrame);
+        if (performance.now() >= moment) {
+          throw new Error(`${view}: the moment of the reveal was over before the composer grew: the runner was too slow to build this case`);
+        }
+        composer.style.paddingBottom = `${base + 40}px`;
+        return { grew: true, ...(await settle(view)) };
       } finally {
         composer.style.paddingBottom = '';
         await settle(view);

@@ -329,11 +329,15 @@ export class MessageFeed {
    * history) moves only the last stretch, whatever the history length, and
    * keeps up for a moment with a viewport that shrinks under it.
    */
-  public scrollToEnd({ reveal = false }: { reveal?: boolean } = {}): void {
+  public scrollToEnd({ reveal = false, keepReveal = false }: { reveal?: boolean; keepReveal?: boolean } = {}): void {
     this.following = true;
     // Only the bounded reveal is followed, and briefly: other scrolls, including
-    // one already at the end, are not in flight.
-    this.revealingUntil = reveal && !this.atEnd() ? performance.now() + REVEAL_FOLLOW_MS : 0;
+    // one already at the end, are not in flight. Something under or in the feed
+    // settling as the conversation opens (the command composer, its bot cards)
+    // keeps the reveal's moment instead: the composer may still grow, and the
+    // newest message must not end up behind it (#840).
+    if (reveal) this.revealingUntil = this.atEnd() ? 0 : performance.now() + REVEAL_FOLLOW_MS;
+    else if (!keepReveal) this.revealingUntil = 0;
     this.pinToEnd(reveal);
     // The feed height can still settle right after the markup changed. Only an
     // end that moved is pinned again: pinning the same end once more in the next
@@ -344,6 +348,11 @@ export class MessageFeed {
         this.pinToEnd(reveal);
       }
     });
+  }
+
+  /** Keeps the newest message in view while the reader follows it, without ending a reveal (#840). */
+  public followEnd(): void {
+    if (this.followsEnd()) this.scrollToEnd({ keepReveal: true });
   }
 
   /**
